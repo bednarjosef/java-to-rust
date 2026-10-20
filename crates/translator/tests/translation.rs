@@ -593,3 +593,14 @@ fn a_local_that_no_later_statement_changes_is_not_mut() {
     assert_contains(&rust, &["let p = P::new(1);"]);
     assert_lacks(&rust, &["let mut p"]);
 }
+
+#[test]
+fn a_method_without_parameters_has_a_return_range() {
+    let rust = translate(
+        "class A {
+            static int seven() { return 7; }
+            public static void main(String[] a) { int t = seven() * 400000000; System.out.println(t); }
+        }",
+    );
+    assert_contains(&rust, &["seven().wrapping_mul(400000000)"]);
+}

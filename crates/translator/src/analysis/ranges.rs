@@ -242,11 +242,13 @@ impl<'a> Analysis<'a> {
                 }
             }
         }
-        // A method is analyzed again when its parameter ranges or a callee's return range grew.
-        let mut dirty: Vec<bool> = (0..n).map(|m| is_root[m] || !live[m]).collect();
-        for m in (0..n).filter(|&m| dirty[m]) {
+        for m in (0..n).filter(|&m| is_root[m] || !live[m]) {
             self.full_params(m);
         }
+        // Every method is analyzed once, so that a callee whose parameters never change (one
+        // without parameters) still has a return range; then again when its parameter ranges or
+        // a callee's return range grew.
+        let mut dirty = vec![true; n];
         // How often each method's summary grew; recursion can grow it a step at a time.
         let mut growth = vec![0; n];
         while let Some(m) = (0..n).find(|&m| dirty[m]) {
