@@ -203,10 +203,11 @@ fn validate(class: &Class, facts: &Facts) -> Result<(), Error> {
     // knows `name()`, `ordinal()` and `toString()`, and `Object`'s methods.
     for e in (0..class.types.len()).filter(|&e| class.types[e].kind == TypeKind::Enum) {
         for (m, method) in class.methods.iter().enumerate() {
-            // `Object`'s `equals` and `hashCode` are the constant's identity.
+            // `Object`'s `equals` and `hashCode` are the constant's identity, and `Comparable`'s
+            // `compareTo` compares the ordinals.
             let builtin = matches!(method.name.as_str(), "name" | "ordinal" | "toString")
                 && method.params.is_empty()
-                || class.types[method.class].name == OBJECT;
+                || matches!(class.types[method.class].name.as_str(), OBJECT | COMPARABLE);
             if method.is_abstract
                 && class.hierarchy.is_subtype(e, method.class)
                 && class.hierarchy.implementation(m, e).is_none()

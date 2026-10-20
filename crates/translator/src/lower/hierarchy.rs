@@ -10,10 +10,8 @@ impl<'t> Lowering<'t> {
     pub(super) fn superclass(&self, t: usize) -> Result<Option<usize>, Error> {
         let node = self.types[t].node;
         let Some(clause) = node.get("extendsClause") else { return Ok(None) };
-        let name = clause.java_type();
-        if name.contains('<') {
-            return unsupported(clause, "generic classes");
-        }
+        // A generic superclass is its erasure.
+        let name = clause.java_type().split('<').next().unwrap_or_default();
         match self.type_index(name) {
             Some(s) if self.types[s].node.kind() == "CLASS" => Ok(Some(s)),
             Some(_) => unsupported(clause, &format!("extending `{name}`")),
@@ -33,12 +31,7 @@ impl<'t> Lowering<'t> {
             let name = clause.java_type();
             let raw = name.split('<').next().unwrap_or(name);
             match self.type_index(raw) {
-                Some(i) if self.types[i].node.kind() == "INTERFACE" => {
-                    if name.contains('<') {
-                        return unsupported(clause, "generic classes");
-                    }
-                    out.push(i)
-                }
+                Some(i) if self.types[i].node.kind() == "INTERFACE" => out.push(i),
                 None if raw == "java.lang.Comparable" => {}
                 _ => return unsupported(clause, &format!("implementing `{raw}`")),
             }
@@ -108,10 +101,11 @@ impl<'t> Lowering<'t> {
 
     /// The types of the parameters of method `index`.
     pub(super) fn param_types(&self, index: usize) -> Result<Vec<Type>, Error> {
+        let owner = self.methods[index].owner;
         self.methods[index]
             .node
             .list("parameters")
-            .map(|p| self.ty(p, p.symbol().map_or("", |s| s.ty)))
+            .map(|p| self.declared_type(p, p.symbol().map_or("", |s| s.ty), owner, Some(index)))
             .collect()
     }
 
@@ -119,6 +113,15 @@ impl<'t> Lowering<'t> {
     pub(super) fn convert_args(&self, index: Option<usize>, args: Vec<Expr>) -> Result<Vec<Expr>, Error> {
         let Some(index) = index else { return Ok(args) };
         let types = self.param_types(index)?;
+        // Arrays do not convert: a `String[]` is not an `Object[]` in the translation.
+        if let Some(arg) = args.iter().zip(&types).find_map(|(a, &ty)| {
+            (matches!(a.ty, Type::Array(_)) && matches!(ty, Type::Array(_)) && a.ty != ty).then_some(a)
+        }) {
+            return error(
+                arg.pos,
+                "an array passed as an array of a type variable not supported yet".to_string(),
+            );
+        }
         Ok(args
             .into_iter()
             .zip(types.into_iter().chain(std::iter::repeat(Type::Void)))
@@ -132,8 +135,8 @@ impl<'t> Lowering<'t> {
         // An enum that implements an interface is converted to it too, and any value but null
         // to `Object`.
         let differs = match (e.ty, to) {
-            (_, Type::Class(b)) if b == OBJECT => {
-                !matches!(e.ty, Type::Null | Type::Void) && !Self::is_object(e.ty)
+            (_, Type::Class(b)) if b == OBJECT || b == COMPARABLE => {
+                !matches!(e.ty, Type::Null | Type::Void) && e.ty != to
             }
             (Type::Class(a) | Type::Enum(a), Type::Class(b)) => a != b,
             _ => false,

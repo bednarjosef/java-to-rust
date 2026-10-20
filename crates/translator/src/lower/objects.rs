@@ -36,6 +36,8 @@ impl<'t> Lowering<'t> {
         Lowering {
             next_id: Cell::new(0),
             current: Cell::new(0),
+            method_ctx: Cell::new(None),
+            scope: Cell::new(None),
             in_ctor: Cell::new(false),
             ret: Cell::new(Type::Void),
             types: Vec::new(),
@@ -50,9 +52,6 @@ impl<'t> Lowering<'t> {
     pub(super) fn declare_type(&mut self, node: Node<'t>, outer: Option<&str>) -> Result<(), Error> {
         if !matches!(node.kind(), "CLASS" | "ENUM" | "INTERFACE") {
             return unsupported(node, &kind_words(node.kind()));
-        }
-        if node.list("typeParameters").next().is_some() {
-            return unsupported(node, "generic classes");
         }
         let simple = node.str("simpleName");
         let name = match outer {

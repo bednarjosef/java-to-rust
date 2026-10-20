@@ -1,6 +1,7 @@
 //! Rust names for Java methods and locals: snake case, overload suffixes, keywords.
 
 use super::*;
+use std::collections::BTreeSet;
 
 pub(super) const RUST_KEYWORDS: &[&str] = &[
     "as", "async", "await", "box", "crate", "dyn", "fn", "gen", "impl", "in", "let", "loop", "macro",
@@ -108,6 +109,23 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
             for p in &m.params {
                 base = format!("{base}_{}", name_part(p.ty));
             }
+            // A method that a bridge of its class calls takes the same parameters as the bridge
+            // (`Integer next()` beside the bridge `Object next()`): its return type tells it apart.
+            let same_params = |o: &Method| {
+                o.params.len() == m.params.len() && o.params.iter().zip(&m.params).all(|(a, b)| a.ty == b.ty)
+            };
+            if instance
+                && class.methods.iter().enumerate().any(|(o, other)| {
+                    o != i
+                        && other.class == m.class
+                        && other.name == m.name
+                        && h.group_id(o) != h.group_id(i)
+                        && !other.is_static
+                        && same_params(other)
+                })
+            {
+                base = format!("{base}_{}", name_part(m.ret));
+            }
         }
         names.push(if m.is_ctor {
             base
@@ -116,7 +134,18 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
             let module = module_used.entry(class.types[m.class].package.as_str()).or_default();
             unique_in(base, &mut used[m.class], module)
         } else {
-            let name = unique(base, &mut used[root]);
+            // The group's name is taken in the class tree of each of its methods.
+            let roots: BTreeSet<usize> =
+                h.group(i).into_iter().map(|o| h.root(class.methods[o].class)).collect();
+            let mut name = base.clone();
+            let mut n = 2;
+            while roots.iter().chain([&root]).any(|&r| used[r].contains(&name)) {
+                name = format!("{base}_{n}");
+                n += 1;
+            }
+            for &r in roots.iter().chain([&root]) {
+                used[r].insert(name.clone());
+            }
             group_names.insert(h.group_id(i), name.clone());
             name
         });

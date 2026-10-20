@@ -223,8 +223,8 @@ impl Census {
                 continue;
             }
             let mut scan = Scan { file: &origin.file, features: header.clone(), calls: BTreeSet::new() };
-            if kind == "METHOD" && !member["typeParameters"].as_array().is_none_or(Vec::is_empty) {
-                scan.feature("generic methods", member);
+            if kind == "METHOD" && intersects(member) {
+                scan.feature("intersection types", member);
             }
             if kind == "BLOCK" && member["static"].as_bool() != Some(true) {
                 scan.feature("initializer blocks", member);
@@ -290,8 +290,9 @@ impl Census {
                     "BINDING_PATTERN" | "RECORD_PATTERN" => scan.feature("patterns", node),
                     _ => {}
                 }
+                // The program's generic types are erased; one from elsewhere is not translated.
                 // javac names an anonymous class `<anonymous Sink>`: that is not a generic type.
-                if ty.contains('<') && !ty.starts_with('<') {
+                if ty.contains('<') && !ty.starts_with('<') && !self.erases(ty) {
                     scan.feature("generic types", node);
                 }
                 if matches!(kind, "METHOD_INVOCATION" | "NEW_CLASS") {
@@ -336,9 +337,21 @@ impl Census {
     /// them, a string or a box.
     fn narrows(&self, value: &str, target: &str) -> bool {
         let boxes = ["Boolean", "Byte", "Character", "Double", "Float", "Integer", "Long", "Short", "String"];
+        let (value, target) = (raw(value), raw(target));
         let held = target.strip_prefix("java.lang.").is_some_and(|name| boxes.contains(&name));
-        (self.declared.contains(value) || value == "java.lang.Object") && self.declared.contains(target)
+        // A cast to a type variable (`(T) items[i]`) is a cast to its erasure.
+        let variable = !target.contains('.') && !self.declared.contains(target.trim_end_matches("[]"));
+        let declared = |t: &str| self.declared.contains(t.trim_end_matches("[]"));
+        (declared(&value) || value.starts_with("java.lang.Object")) && (declared(&target) || variable)
             || value == "java.lang.Object" && held
+    }
+
+    /// Whether a parameterized type translates: one of the program's generic types, erased, or
+    /// `Comparable`.
+    fn erases(&self, ty: &str) -> bool {
+        let raw = raw(ty);
+        let raw = raw.trim_end_matches("[]");
+        self.declared.contains(raw) || raw == "java.lang.Comparable"
     }
 
     /// The pieces of one part of the code.
@@ -557,13 +570,11 @@ fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String
         "RECORD" => _ = features.insert("records"),
         _ => {}
     }
-    // The program's own interfaces translate; a generic one is a generic class, and one from
-    // elsewhere is not translated.
+    // The program's own interfaces translate, generic ones erased, and so does `Comparable`; one
+    // from elsewhere is not translated.
     for clause in decl["implementsClause"].as_array().into_iter().flatten() {
-        let interface = text(clause, "javaType");
-        if interface.contains('<') {
-            features.insert("generic classes");
-        } else if !declared.contains(interface) {
+        let interface = raw(text(clause, "javaType"));
+        if !declared.contains(&interface) && interface != "java.lang.Comparable" {
             features.insert("implementing interfaces outside the sources");
         }
     }
@@ -574,8 +585,8 @@ fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String
             features.insert("extending classes outside the sources");
         }
     }
-    if !decl["typeParameters"].as_array().is_none_or(Vec::is_empty) {
-        features.insert("generic classes");
+    if intersects(decl) {
+        features.insert("intersection types");
     }
     let in_class = outer.is_some_and(|o| matches!(text(o, "kind"), "CLASS" | "ENUM" | "RECORD"));
     if kind == "CLASS" && in_class && !has_flag(decl, "STATIC") {
@@ -585,6 +596,23 @@ fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String
         features.insert("enum constants with bodies");
     }
     features
+}
+
+/// Whether a declaration has a type variable with more than one bound (`T extends A & B`).
+fn intersects(decl: &Value) -> bool {
+    decl["typeParameters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|p| p["bounds"].as_array().is_some_and(|b| b.len() > 1))
+}
+
+/// A type without its type arguments: `Box<java.lang.Integer>[]` is `Box[]`.
+fn raw(ty: &str) -> String {
+    match (ty.find('<'), ty.rfind('>')) {
+        (Some(open), Some(close)) if open > 0 => format!("{}{}", &ty[..open], &ty[close + 1..]),
+        _ => ty.to_string(),
+    }
 }
 
 fn is_primitive(ty: &str) -> bool {

@@ -54,7 +54,7 @@ pub fn lower_program<'t>(
     let mut methods: Vec<Method> = (0..lowering.methods.len())
         .map(|m| lowering.method(m).map_err(|e| (Some(unit_of[lowering.methods[m].owner]), e)))
         .collect::<Result<_, _>>()?;
-    lowering.object_methods(&mut methods);
+    lowering.object_methods(&mut methods).map_err(|e| (None, e))?;
     lowering.finish_types(&mut types, &mut methods).map_err(|(t, e)| (Some(unit_of[t]), e))?;
     lowering.object_types(&mut types);
     let hierarchy = Hierarchy::new(&types, &methods);

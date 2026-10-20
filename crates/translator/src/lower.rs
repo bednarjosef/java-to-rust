@@ -6,6 +6,7 @@
 mod code_point;
 mod enum_nulls;
 mod enums;
+mod generics;
 mod hierarchy;
 mod object;
 mod objects;
@@ -48,7 +49,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
     let mut methods: Vec<Method> =
         (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
-    lowering.object_methods(&mut methods);
+    lowering.object_methods(&mut methods)?;
     lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
     lowering.object_types(&mut types);
     let hierarchy = Hierarchy::new(&types, &methods);
@@ -148,6 +149,11 @@ struct Lowering<'t> {
     next_id: Cell<ExprId>,
     /// Index of the class whose members are being lowered: `this` and unqualified names refer to it.
     current: Cell<usize>,
+    /// The method being lowered, whose type variables are in scope.
+    method_ctx: Cell<Option<usize>>,
+    /// The class and method whose type variables a declared type is read in, when that is not
+    /// the code being lowered (see `generics::declared_type`).
+    scope: Cell<Option<(usize, Option<usize>)>>,
     /// Whether the method being lowered is a constructor, which cannot `return` early.
     in_ctor: Cell<bool>,
     /// The return type of the method being lowered, which a returned value is converted to.
@@ -183,13 +189,17 @@ impl<'t> Lowering<'t> {
     }
 
     fn method(&self, index: usize) -> Result<Method, Error> {
+        let outer = self.method_ctx.replace(Some(index));
+        let method = self.method_in_scope(index);
+        self.method_ctx.set(outer);
+        method
+    }
+
+    fn method_in_scope(&self, index: usize) -> Result<Method, Error> {
         let info = &self.methods[index];
         let node = info.node;
         self.current.set(info.owner);
         self.in_ctor.set(node.str("name") == "<init>");
-        if node.list("typeParameters").next().is_some() {
-            return unsupported(node, "generic methods");
-        }
         let is_ctor = node.str("name") == "<init>";
         let is_static = node.has_flag("STATIC");
         let name = node.str("name").to_string();
@@ -271,6 +281,8 @@ impl<'t> Lowering<'t> {
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
             "float" => Ok(Type::Float),
+            // A type variable hides a class of the same name.
+            _ if let Some(erased) = self.type_variable(node, name) => erased,
             _ if self.enum_index(name).is_some() => Ok(Type::enum_type(name)),
             _ if self.type_index(name).is_some() => Ok(Type::class(name)),
             "<nulltype>" => Ok(Type::Null),
@@ -280,6 +292,10 @@ impl<'t> Lowering<'t> {
             }
             _ if name.ends_with("[]") => Ok(Type::array(self.ty(node, &name[..name.len() - 2])?)),
             "java.lang.Object" if self.object.is_some() => Ok(Type::class(OBJECT)),
+            "java.lang.Comparable" if self.object.is_some_and(|at| at.comparable.is_some()) => {
+                Ok(Type::class(COMPARABLE))
+            }
+            _ if let Some(erased) = self.erased(node, name) => erased,
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
             "java.lang.Object" => unsupported(node, "Object"),
             _ => unsupported(node, &format!("type `{name}`")),
@@ -410,13 +426,19 @@ impl<'t> Lowering<'t> {
                     prefix: kind.starts_with("PREFIX"),
                 }
             }
-            "ASSIGNMENT" => ExprKind::Assign {
-                op: None,
-                target: self.target(node.child("variable")?)?,
-                value: Box::new(
-                    self.convert(self.expr(node.child("expression")?)?, self.ty(node, node.java_type())?),
-                ),
-            },
+            "ASSIGNMENT" => {
+                // A field of a type variable holds its erasure.
+                let variable = node.child("variable")?;
+                let to = match self.field_type(variable)? {
+                    Some(declared) => declared,
+                    None => self.ty(node, node.java_type())?,
+                };
+                ExprKind::Assign {
+                    op: None,
+                    target: self.target(variable)?,
+                    value: Box::new(self.convert(self.expr(node.child("expression")?)?, to)),
+                }
+            }
             kind if kind.ends_with("_ASSIGNMENT") => {
                 let op = binary_op(node, kind.trim_end_matches("_ASSIGNMENT"))?;
                 let value = self.expr(node.child("expression")?)?;
@@ -493,6 +515,12 @@ impl<'t> Lowering<'t> {
             ExprKind::Builtin(Builtin::Print, _) if node.kind() == "METHOD_INVOCATION" => Type::Void,
             _ => self.ty(node, node.java_type())?,
         };
+        let kind = match node.kind() {
+            "METHOD_INVOCATION" | "IDENTIFIER" | "MEMBER_SELECT" | "ARRAY_ACCESS" => {
+                self.erased_use(node, kind, ty)?
+            }
+            _ => kind,
+        };
         let id = self.next_id.get();
         self.next_id.set(id + 1);
         Ok(Expr { kind, pos: node.pos(), ty, id })
@@ -549,6 +577,9 @@ impl<'t> Lowering<'t> {
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
         if symbol.owner == "java.lang.Object" && self.object.is_some() {
             return self.object_call(node, &symbol, receiver, args);
+        }
+        if symbol.owner == "java.lang.Comparable" && symbol.name == "compareTo" {
+            return self.comparable_call(node, receiver, args);
         }
         if symbol.name == "equals"
             && !symbol.is_static
