@@ -1,10 +1,11 @@
 //! Java's `char`, an unsigned 16-bit UTF-16 code unit (`u16`): printing, `String.charAt` and
 //! the `Character` methods.
 //!
-//! The `Character` methods are exact for Latin-1 (`\u0000` to `ÿ`). Beyond it they use
-//! Rust's Unicode tables, which agree with Java's except that `isDigit` accepts every numeric
-//! character and `isLetter` every alphabetic one.
+//! The `Character` methods agree with Java's for every code unit. Java's digit, letter, numeric
+//! value and uppercase tables differ from Rust's, so they come from `character_tables.rs`, which
+//! is generated from the JDK; the case and alphabetic tests are Rust's, which agree with Java's.
 
+use super::character_tables::{DIGITS, FRACTIONS, LETTERS, NUMERIC_OFFSETS, UPPER_CASE_EXCEPTIONS};
 use super::{string_length, throw};
 use std::fmt;
 
@@ -46,14 +47,33 @@ pub(super) fn scalar(c: u16) -> Option<char> {
     char::from_u32(c as u32)
 }
 
-/// Java's `Character.isDigit(char)`.
+/// Whether `c` lies in one of the inclusive `ranges`, which are sorted and do not overlap.
+fn in_ranges(ranges: &[(u16, u16)], c: u16) -> bool {
+    let i = ranges.partition_point(|&(_, last)| last < c);
+    ranges.get(i).is_some_and(|&(first, _)| first <= c)
+}
+
+/// Java's `Character.isDigit(char)`: the Unicode category Nd.
 pub fn is_digit(c: u16) -> bool {
-    if c < 0x100 { (0x30..=0x39).contains(&c) } else { scalar(c).is_some_and(char::is_numeric) }
+    in_ranges(DIGITS, c)
 }
 
 /// Java's `Character.isLetter(char)`.
 pub fn is_letter(c: u16) -> bool {
-    scalar(c).is_some_and(char::is_alphabetic)
+    in_ranges(LETTERS, c)
+}
+
+/// Java's `Character.getNumericValue(char)`: the value, -2 for a fraction, and -1 for a character
+/// with none.
+pub(super) fn numeric_value(c: u16) -> i32 {
+    if in_ranges(FRACTIONS, c) {
+        return -2;
+    }
+    let i = NUMERIC_OFFSETS.partition_point(|&(_, last, _)| last < c);
+    match NUMERIC_OFFSETS.get(i) {
+        Some(&(first, _, offset)) if first <= c => i32::from(c) + offset,
+        _ => -1,
+    }
 }
 
 /// Java's `Character.isUpperCase(char)`.
@@ -79,6 +99,10 @@ pub fn is_java_whitespace(cp: u32) -> bool {
 /// Java's `Character.toUpperCase(char)`: the simple case mapping, so a character whose upper
 /// case is several characters (`ß`) stays as it is.
 pub fn to_upper_case(c: u16) -> u16 {
+    // Rust's full mapping of these is several characters, which the rule below leaves alone.
+    if let Ok(i) = UPPER_CASE_EXCEPTIONS.binary_search_by_key(&c, |&(from, _)| from) {
+        return UPPER_CASE_EXCEPTIONS[i].1;
+    }
     scalar(c).map_or(c, |ch| single(ch.to_uppercase()).unwrap_or(c))
 }
 
@@ -134,5 +158,20 @@ mod tests {
         assert_eq!(to_lower_case(unit('À')), unit('à'));
         assert_eq!(to_lower_case(0x130), unit('i'));
         assert_eq!(to_upper_case(0xD800), 0xD800);
+    }
+
+    #[test]
+    fn character_tables_match_java_beyond_latin1() {
+        // Values from the JDK's sweep (tools/character-check).
+        assert!(is_digit(0x663) && !is_letter(0x663));
+        assert!(!is_digit(0xB2) && !is_letter(0x2160) && is_letter(0xAA));
+        assert_eq!((numeric_value(0x663), numeric_value(0x2160)), (3, 1));
+        assert_eq!((numeric_value(0xB2), numeric_value(0xBD), numeric_value(0x300)), (2, -2, -1));
+        assert_eq!(crate::digit(0x663, 4), 3);
+        assert_eq!(crate::digit(0x663, 3), -1);
+        assert_eq!(crate::digit(0xFF21, 16), 10);
+        assert_eq!(to_upper_case(0x1F80), 0x1F88);
+        assert_eq!(to_upper_case(0x1F81), 0x1F89);
+        assert_eq!(to_upper_case(0x1FF3), 0x1FFC);
     }
 }

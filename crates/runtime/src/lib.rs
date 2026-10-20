@@ -14,6 +14,7 @@ mod boxed;
 mod builder;
 mod character;
 mod character_classes;
+mod character_tables;
 mod exact;
 pub mod fdlibm;
 mod float;
