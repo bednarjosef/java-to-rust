@@ -32,19 +32,21 @@ program is reported as one of:
 
 ## Current results
 
-Recorded on branch `target-programs`:
+Recorded on main at be90ea9, before the object model, exceptions, records and lambdas:
 
 | Mode | Summary |
 |---|---|
 | single-file (`targets/run.sh`) | 0 PASS, 0 WRONG OUTPUT, 0 DOES NOT COMPILE, 28 REJECTED, 28 programs |
 | whole-program with a JDK `java.base` root (`targets/run.sh JDK_ROOT`) | 0 PASS, 0 WRONG OUTPUT, 0 DOES NOT COMPILE, 28 REJECTED, 28 programs |
 
-Whole-program mode rejects programs at their first import with javac's
-`file should be on source path, or on patch path for module`. The `java.base` root contains
-`module-info.java`, and the programs in `targets/` are outside that root. The translator's javac
-call (`crates/translator/src/javac.rs`) does not handle a root like this; I did not diagnose it
-further, since crates are read-only for this worker. Single-file mode gets past javac and stops at
-the first unsupported construct, listed below.
+In whole-program mode each program is given as a source directory of its own (javac rejects a
+listed file next to a module's source root). The first blocker there:
+
+| First blocker (whole-program) | Programs |
+|---|---|
+| a program interface, class tree or generic class | 17 |
+| a record | 4 |
+| a JDK interface (`java.io.Serializable` from collections, `java.util.List`) | 7 |
 
 First blocker per program in single-file mode (the translator's own message):
 
