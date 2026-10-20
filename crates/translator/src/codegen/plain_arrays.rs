@@ -369,11 +369,17 @@ impl<'a> Gen<'a> {
             return format!("{}({reference}, {i}, {v})", self.runtime(helper));
         }
         let (mut lets, place) = self.bound_rows(&path);
-        let slot = self.fresh_name(&["index", "slot", "at"]);
-        let value = self.fresh_name(&["value", "item", "new"]);
         let i = self.value(index, Type::Int).text;
+        // A variable or literal index that the value leaves alone needs no binding of its own.
+        let slot = if path.rows.is_empty() && simple_index(index) && in_order {
+            i
+        } else {
+            let slot = self.fresh_name(&["index", "slot", "at"]);
+            lets.push(format!("let {slot} = {i};"));
+            slot.to_string()
+        };
+        let value = self.fresh_name(&["value", "item", "new"]);
         let v = self.assigned_element(rhs, ty);
-        lets.push(format!("let {slot} = {i};"));
         lets.push(format!("let {value} = {v};"));
         let reference = self.bound_ref(&path, &place, true);
         format!("{{ {} {}({reference}, {slot}, {value}) }}", lets.join(" "), self.runtime("put"))
