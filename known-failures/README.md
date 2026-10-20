@@ -5,12 +5,23 @@ Minimal programs that the translator gets wrong, though the feature is in the su
 pass. Java's output is what `java File.java` prints. When a failure is fixed, move its file into
 `corpus/features/` with the fixed behaviour.
 
+- `ArrayCloneInts.java`: `a.clone()` on an `int[]`. Java prints `1 9`; the translator rejects it
+  with "method `Array.clone` not supported yet". Arrays are in the supported subset.
+- `ArrayStoreFromMethodCall.java`: `memory[slot] = pop();` in a method of a nested class, where
+  `pop` changes a field of the same object. Java prints `1`; rustc fails with E0502 "cannot
+  borrow `*self` as mutable because it is also borrowed as immutable" (the generated
+  `java::set(&self.memory, slot, self.pop())` borrows `self` twice). Storing the value in a local
+  first avoids it.
 - `ArraysEqualsInts.java`: `Arrays.equals` on an `int[]`. Java prints `true`; the translator
   rejects it with "`Arrays.equals` on this array not supported yet". Arrays given to
   `java.util.Arrays` are part of the supported subset.
 - `ArraysSortStrings.java`: `Arrays.sort` on a `String[]`. Java prints `[apple, fig, pear] 3`; the
   translator rejects it with "`Arrays.sort` on this array not supported yet". (`Arrays.sort` on an
   `int[]` translates.)
+- `CharacterIsLetterOrDigit.java`: `Character.isLetterOrDigit('a')`. Java prints `true`; the
+  translator rejects it with "method `Character.isLetterOrDigit` not supported yet" (the
+  `Character` tests are in the supported subset). `Character.isWhitespace` is rejected the same
+  way, from the same match in `lower/primitives.rs`.
 - `CompoundThroughNullableField.java`: `h.box.v += 10` where `h.box` is a field that may be null,
   in a class whose fields are assigned after construction. Java prints `true`; rustc fails with
   E0716 "temporary value dropped while borrowed".
@@ -42,6 +53,11 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
 - `SwitchOnEnum.java`: `switch (op)` on an enum with `case ADD:` labels. Java prints `sub`; the
   translator rejects it with "a switch on this type not supported yet" (switches on `int`,
   `char`, `String` and `ordinal()` translate).
+- `StringArrayElementEqualsLoopVar.java`: `seen[k].equals(w)` in a loop over a `String[]` with
+  `w` the for-each variable, where `seen` is `new String[3]` and `k < distinct` with `distinct` a
+  mutable local. Java prints `distinct 0`; rustc fails with E0716 "temporary value dropped while
+  borrowed" at the `equals` (the `as_deref` borrow of the element outlives its temporary). With a
+  literal argument, or a literal bound, it translates.
 - `StringArrayFieldInitializer.java`: `String[] items = new String[2];` as a field initializer of
   a class. Java prints `pen null 1`; rustc fails with E0308 "mismatched types" (the generated
   `filled(2, None)` gives `Option`s where `String` is expected). The same array assigned in a
