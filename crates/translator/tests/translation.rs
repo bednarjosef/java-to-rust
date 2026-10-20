@@ -176,13 +176,17 @@ fn arrays_seen_through_two_names_are_shared() {
     );
     assert_contains(
         &rust,
-        &["let a: java::Array<i32> = java::filled(3, 0);", "let b: java::Array<i32> = a.clone();", "java::set(&b, 0, 5);"],
+        &[
+            "let a: java::Array<i32> = java::filled(3, 0);",
+            "let b: java::Array<i32> = a.clone();",
+            "java::set(&b, 0, 5);",
+        ],
     );
     assert_lacks(&rust, &["Vec<i32>"]);
 }
 
 #[test]
-fn arrays_passed_to_methods_are_shared() {
+fn arrays_passed_to_methods_are_borrowed() {
     let rust = translate(
         "class A {
             static void fill(int[] v) { v[0] = 1; }
@@ -193,6 +197,31 @@ fn arrays_passed_to_methods_are_shared() {
             }
         }",
     );
-    assert_contains(&rust, &["fn fill(v: java::Array<i32>)", "let a: java::Array<i32> = java::filled(3, 0);"]);
-    assert_lacks(&rust, &["Vec<i32>"]);
+    assert_contains(
+        &rust,
+        &["fn fill(v: &mut [i32])", "fill(&mut a);", "let mut a: Vec<i32> = java::new_vec(3, 0);"],
+    );
+    assert_lacks(&rust, &["java::Array"]);
+}
+
+#[test]
+fn arrays_passed_twice_in_one_call_are_shared() {
+    let rust = translate(
+        "class A {
+            static void two(int[] x, int[] y) { x[0] = y[0]; }
+            public static void main(String[] args) {
+                int[] a = new int[2];
+                two(a, a);
+                System.out.println(a[0]);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn two(x: java::Array<i32>, y: java::Array<i32>)",
+            "let a: java::Array<i32> = java::filled(2, 0);",
+        ],
+    );
+    assert_lacks(&rust, &["Vec<i32>", "&mut ["]);
 }

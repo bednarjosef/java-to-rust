@@ -34,6 +34,12 @@ pub struct Facts {
     pub plain_arrays: HashMap<(usize, String), bool>,
     /// `a[i]` expressions that a counting loop over the plain array `a` proves in bounds.
     pub in_bounds: HashSet<ExprId>,
+    /// Array parameters, as (method, parameter) indexes, that are plain at every call: `&[T]`, or
+    /// `&mut [T]` when the flag says the elements are written.
+    pub borrowed_arrays: HashMap<(usize, usize), bool>,
+    /// Counting loops over a plain array whose body only reads `a[i]`, keyed by the loop
+    /// condition: the reads that can become elements of `for x in a.iter()`.
+    pub element_loops: HashMap<ExprId, Vec<ExprId>>,
 }
 
 pub fn analyze(class: &Class) -> Facts {

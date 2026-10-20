@@ -325,10 +325,16 @@ impl<'a> Gen<'a> {
         let params: Vec<String> = m
             .params
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(i, p)| {
                 let mutable = if assigns_any(&m.body, &p.name) { "mut " } else { "" };
-                let ty =
-                    if self.borrowed.contains(&p.name) { "&str".to_string() } else { self.ty_name(p.ty) };
+                let ty = if self.borrowed.contains(&p.name) {
+                    "&str".to_string()
+                } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {
+                    self.borrowed_ty(p.ty, written)
+                } else {
+                    self.ty_name(p.ty)
+                };
                 format!("{mutable}{}: {ty}", self.local(&p.name))
             })
             .collect();
@@ -841,6 +847,8 @@ impl<'a> Gen<'a> {
                     .map(|(i, (a, p))| {
                         if self.facts.borrowed_params.contains(&(index, i)) {
                             self.str_ref(a)
+                        } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {
+                            self.borrowed_arg(a, written)
                         } else {
                             self.value(a, p.ty).text
                         }

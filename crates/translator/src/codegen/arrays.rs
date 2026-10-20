@@ -30,6 +30,37 @@ impl<'a> Gen<'a> {
         Some((name, self.local(name)))
     }
 
+    /// The type of an array parameter that the aliasing analysis borrows: a slice.
+    pub(super) fn borrowed_ty(&mut self, ty: Type, written: bool) -> String {
+        let Type::Array(elem) = ty else { unreachable!("only arrays are borrowed") };
+        let elem = self.ty_name(*elem);
+        if written { format!("&mut [{elem}]") } else { format!("&[{elem}]") }
+    }
+
+    /// The argument for a borrowed array parameter: a borrow of the caller's plain array.
+    pub(super) fn borrowed_arg(&mut self, e: &'a Expr, written: bool) -> String {
+        let ExprKind::Var(name) = &e.kind else { unreachable!("borrowed arguments are names") };
+        let local = self.local(name);
+        if self.is_borrowed(&local) {
+            return local;
+        }
+        let mutably = if written { "mut " } else { "" };
+        format!("&{mutably}{local}")
+    }
+
+    /// Whether the Rust name `a` is a borrowed array parameter of the current method: already a
+    /// slice reference, so it is passed on as it is.
+    fn is_borrowed(&self, a: &str) -> bool {
+        self.class.methods[self.method].params.iter().enumerate().any(|(j, p)| {
+            self.facts.borrowed_arrays.contains_key(&(self.method, j)) && self.local(&p.name) == a
+        })
+    }
+
+    /// The `&mut` argument for the plain array `a`.
+    pub(super) fn mut_ref(&self, a: &str) -> String {
+        if self.is_borrowed(a) { a.to_string() } else { format!("&mut {a}") }
+    }
+
     /// `e` as a borrowed array handle, for the runtime helpers that take `&Array`.
     fn handle(&mut self, e: &'a Expr) -> String {
         match &e.kind {
@@ -148,12 +179,13 @@ impl<'a> Gen<'a> {
             return format!("{a}[{i} as usize] = {v}");
         }
         let put = self.runtime("put");
+        let mr = self.mut_ref(&a);
         if !mentions(index, name) && !mentions(rhs, name) {
-            return format!("{put}(&mut {a}, {i}, {v})");
+            return format!("{put}({mr}, {i}, {v})");
         }
         let slot = self.fresh_name(&["index", "slot", "at"]);
         let value = self.fresh_name(&["value", "item", "new"]);
-        format!("{{ let {slot} = {i}; let {value} = {v}; {put}(&mut {a}, {slot}, {value}) }}")
+        format!("{{ let {slot} = {i}; let {value} = {v}; {put}({mr}, {slot}, {value}) }}")
     }
 
     /// `a[i] op= v`, as a call of `update`, which reads the old element before it evaluates `v`.
@@ -173,8 +205,9 @@ impl<'a> Gen<'a> {
             let value = self.fresh_name(&["value", "item", "new"]);
             let new = self.element_update(op, ty, rhs, id, old);
             let (at, put) = (self.runtime("at"), self.runtime("put"));
+            let mr = self.mut_ref(&a);
             return format!(
-                "{{ let {slot} = {i}; let {old} = {at}(&{a}, {slot}); let {value} = {new}; {put}(&mut {a}, {slot}, {value}) }}"
+                "{{ let {slot} = {i}; let {old} = {at}(&{a}, {slot}); let {value} = {new}; {put}({mr}, {slot}, {value}) }}"
             );
         }
         let handle = self.handle(array);
@@ -200,13 +233,14 @@ impl<'a> Gen<'a> {
             let old = self.fresh_name(&["old", "previous", "before"]);
             let new = self.step_value(ty, increment, id, old);
             let (at, put) = (self.runtime("at"), self.runtime("put"));
+            let mr = self.mut_ref(&a);
             if prefix {
                 return format!(
-                    "{{ let {slot} = {i}; let {old} = {at}(&{a}, {slot}); {put}(&mut {a}, {slot}, {new}) }}"
+                    "{{ let {slot} = {i}; let {old} = {at}(&{a}, {slot}); {put}({mr}, {slot}, {new}) }}"
                 );
             }
             return format!(
-                "{{ let {slot} = {i}; let {old} = {at}(&{a}, {slot}); {put}(&mut {a}, {slot}, {new}); {old} }}"
+                "{{ let {slot} = {i}; let {old} = {at}(&{a}, {slot}); {put}({mr}, {slot}, {new}); {old} }}"
             );
         }
         let handle = self.handle(array);
