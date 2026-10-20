@@ -360,11 +360,19 @@ impl<'a> Gen<'a> {
 }
 
 /// Whether evaluating `e` can do something observable: a call, an assignment, `++` or `--`.
-fn has_effects(e: &Expr) -> bool {
+pub(super) fn has_effects(e: &Expr) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| {
-        found |= matches!(x.kind, ExprKind::Call { .. } | ExprKind::Assign { .. } | ExprKind::IncDec { .. })
-            || matches!(x.kind, ExprKind::Builtin(Builtin::Print | Builtin::Println | Builtin::Exit, _))
+        found |=
+            matches!(
+                x.kind,
+                ExprKind::Call { .. }
+                    | ExprKind::MethodCall { .. }
+                    | ExprKind::New { .. }
+                    | ExprKind::ThisCall { .. }
+                    | ExprKind::Assign { .. }
+                    | ExprKind::IncDec { .. }
+            ) || matches!(x.kind, ExprKind::Builtin(Builtin::Print | Builtin::Println | Builtin::Exit, _))
     });
     found
 }

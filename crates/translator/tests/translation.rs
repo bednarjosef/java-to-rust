@@ -268,7 +268,7 @@ fn unaliased_arrays_are_vecs_indexed_in_bounds() {
     assert_contains(
         &rust,
         &[
-            "let mut squares: Vec<i32> = java::new_vec(5, 0);",
+            "let mut squares: Vec<i32> = vec![0; 5];",
             "squares[i as usize] = i.wrapping_mul(i);",
             "for x in squares.iter().cloned() {",
         ],
@@ -309,10 +309,7 @@ fn arrays_passed_to_methods_are_borrowed() {
             }
         }",
     );
-    assert_contains(
-        &rust,
-        &["fn fill(v: &mut [i32])", "fill(&mut a);", "let mut a: Vec<i32> = java::new_vec(3, 0);"],
-    );
+    assert_contains(&rust, &["fn fill(v: &mut [i32])", "fill(&mut a);", "let mut a: Vec<i32> = vec![0; 3];"]);
     assert_lacks(&rust, &["java::Array"]);
 }
 
@@ -364,7 +361,7 @@ fn element_loops_that_write_or_use_the_index_stay_indexed() {
             System.out.println(s);
         } }",
     );
-    assert_contains(&rust, &["while i < a.len() as i32 {"]);
+    assert_contains(&rust, &["for i in 0..a.len() as i32 {"]);
     assert_lacks(&rust, &["a.iter().cloned()"]);
 }
 
@@ -735,4 +732,65 @@ fn floats_are_f32_and_print_like_java() {
             "java::max_f32(f, 2.0)",
         ],
     );
+}
+
+#[test]
+fn shared_arrays_are_lent_to_slice_parameters() {
+    let rust = translate(
+        "class A {
+            static int sum(int[] v) { int s = 0; for (int x : v) s += x; return s; }
+            static void bump(int[] v) { v[0] += 1; }
+            public static void main(String[] args) {
+                int[] a = {1, 2};
+                int[] b = a;
+                bump(a);
+                System.out.println(sum(a) + sum(b));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn sum(v: &[i32]) -> i32",
+            "fn bump(v: &mut [i32])",
+            "bump(&mut a.borrow_mut());",
+            "sum(&b.borrow())",
+        ],
+    );
+}
+
+#[test]
+fn constant_indexes_of_arrays_of_known_length_are_in_bounds() {
+    let rust = translate(
+        "class A { public static void main(String[] args) {
+            double[] d = {1.5, 2.5};
+            d[0] *= 2;
+            d[1]++;
+            int[] q = new int[4];
+            int i = 0;
+            q[i++] = i;
+            System.out.println(d[0] + d[1] + q[0]);
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &["d[0] *= 2.0;", "d[1] += 1.0;", "java::put(&mut q, { let old = i; i += 1; old }, i);"],
+    );
+}
+
+#[test]
+fn a_last_use_moves_instead_of_cloning() {
+    let rust = translate(
+        "class A {
+            static int[] make(int n) { int[] made = new int[n]; made[0] = n; return made; }
+            static String twice(String s) { String t = s + s; return t; }
+            public static void main(String[] args) {
+                int[] a = make(3);
+                int[] b = a;
+                System.out.println(b[0] + twice(\"x\"));
+            }
+        }",
+    );
+    assert_contains(&rust, &["    made\n", "let b: java::Array<i32> = a;"]);
+    assert_lacks(&rust, &["made.clone()", "a.clone()"]);
 }

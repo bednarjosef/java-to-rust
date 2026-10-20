@@ -5,10 +5,11 @@
 //! `new` or an initializer). Returning it, copying it to another variable or giving it to
 //! `java.util.Arrays` makes it shared.
 //!
-//! A parameter is borrowed, as `&[T]` or `&mut [T]` when its elements are written, when every
-//! call of its method passes a plain array, and no array is passed twice in one call. Passing a
-//! plain array to a borrowed parameter keeps it plain; passing it to any other parameter makes it
-//! shared.
+//! A parameter is borrowed, as `&[T]` or `&mut [T]` when its elements are written, when its
+//! method uses it only through its elements and every call can lend it an array: a plain array
+//! (`&v`), or a shared one (`&a.borrow()`) when nothing else can reach that array while the call
+//! runs. Passing a plain array to a borrowed parameter keeps it plain; passing it to any other
+//! parameter makes it shared.
 //!
 //! A counting loop `for (int i = 0; i < a.length; i++)` over a plain array, whose body neither
 //! assigns `i` nor `a`, keeps `i` in bounds, so `a[i]` in its body needs no check. When the body
@@ -20,7 +21,14 @@ use std::collections::{HashMap, HashSet};
 
 pub(super) fn analyze(class: &Class, facts: &mut Facts) {
     let scans: Vec<Scan> = class.methods.iter().map(scan).collect();
-    let (plain, borrowed) = solve(&scans);
+    // A shared array lent to a call is borrowed from its cell until the call returns; a field
+    // holding an array would be another way to reach that cell meanwhile.
+    let lend_shared = class
+        .types
+        .iter()
+        .flat_map(|t| t.fields.iter().chain(&t.statics))
+        .all(|f| !matches!(f.ty, Type::Array(_)));
+    let (plain, borrowed) = solve(class, &scans, lend_shared);
     let written = written_names(class, &scans, &borrowed);
     for (m, method) in class.methods.iter().enumerate() {
         let names: HashMap<String, bool> =
@@ -35,6 +43,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
                 }
             });
         }
+        constant_indexes(method, &plain[m], facts);
         for (name, written) in names {
             facts.plain_arrays.insert((m, name), written);
         }
@@ -53,16 +62,54 @@ struct Scan {
     candidates: HashSet<String>,
     /// Array parameters, as (index, name).
     params: Vec<(usize, String)>,
+    /// Every array local and parameter, plain or not.
+    arrays: HashSet<String>,
     /// Arrays with an element assigned in this method.
     written: HashSet<String>,
     /// The calls made in this method.
     calls: Vec<Call>,
 }
 
-/// A call and the variable each argument names (`None` for an argument that names no variable).
+/// A call and what each argument is.
 struct Call {
     callee: usize,
-    args: Vec<Option<String>>,
+    args: Vec<Arg>,
+}
+
+struct Arg {
+    /// The variable the argument is, if it is one.
+    name: Option<String>,
+    array: bool,
+    /// The variables the argument mentions.
+    mentions: HashSet<String>,
+    /// Whether evaluating the argument may run code that reaches an array: a call, an assignment
+    /// or a `java.util.Arrays` method.
+    effects: bool,
+}
+
+impl Arg {
+    fn of(e: &Expr) -> Arg {
+        let mut mentions = HashSet::new();
+        let mut effects = false;
+        visit_expr(e, &mut |x| match &x.kind {
+            ExprKind::Var(v) => {
+                mentions.insert(v.clone());
+            }
+            ExprKind::Call { .. }
+            | ExprKind::MethodCall { .. }
+            | ExprKind::New { .. }
+            | ExprKind::ThisCall { .. }
+            | ExprKind::Assign { .. }
+            | ExprKind::IncDec { .. }
+            | ExprKind::Builtin(Builtin::ArraysFill | Builtin::ArraysSort, _) => effects = true,
+            _ => {}
+        });
+        let name = match &e.kind {
+            ExprKind::Var(v) => Some(v.clone()),
+            _ => None,
+        };
+        Arg { name, array: matches!(e.ty, Type::Array(_)), mentions, effects }
+    }
 }
 
 fn scan(method: &Method) -> Scan {
@@ -108,9 +155,12 @@ fn scan(method: &Method) -> Scan {
         .map(|(_, name)| name.clone())
         .chain(uses.escaped.iter().cloned())
         .collect();
-    let candidates =
-        arrays.into_iter().filter(|name| declared.get(name) == Some(&1) && !bad.contains(name)).collect();
-    Scan { candidates, params, written: uses.written, calls: uses.calls }
+    let candidates = arrays
+        .iter()
+        .filter(|name| declared.get(*name) == Some(&1) && !bad.contains(*name))
+        .cloned()
+        .collect();
+    Scan { candidates, params, arrays, written: uses.written, calls: uses.calls }
 }
 
 /// What the uses of variables in one method are, collected before any of them is judged.
@@ -146,17 +196,10 @@ impl Uses {
             | ExprKind::MethodCall { args, resolved: Some(callee), .. }
             | ExprKind::New { args, ctor: Some(callee), .. }
             | ExprKind::ThisCall { args, resolved: Some(callee) } => {
-                let names = args
-                    .iter()
-                    .map(|a| match &a.kind {
-                        ExprKind::Var(name) => {
-                            self.good.insert(a.id);
-                            Some(name.clone())
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                self.calls.push(Call { callee: *callee, args: names });
+                for a in args.iter().filter(|a| matches!(a.kind, ExprKind::Var(_))) {
+                    self.good.insert(a.id);
+                }
+                self.calls.push(Call { callee: *callee, args: args.iter().map(Arg::of).collect() });
             }
             _ => {}
         }
@@ -178,9 +221,14 @@ fn is_fresh(e: &Expr) -> bool {
 
 /// Decides which arrays are plain and which parameters are borrowed. Both only shrink: a plain
 /// array passed to a parameter that is not borrowed escapes, and a parameter is borrowed only
-/// while every call of its method passes a distinct plain array. A parameter that is not borrowed
-/// is shared. Returns the plain names of each method and the borrowed (method, parameter) pairs.
-fn solve(scans: &[Scan]) -> (Vec<HashSet<String>>, HashSet<(usize, usize)>) {
+/// while it is plain in its method and every call of the method can lend it an array (see
+/// `lends`). A parameter that is not borrowed is shared. Returns the plain names of each method
+/// and the borrowed (method, parameter) pairs.
+fn solve(
+    class: &Class,
+    scans: &[Scan],
+    lend_shared: bool,
+) -> (Vec<HashSet<String>>, HashSet<(usize, usize)>) {
     let mut plain: Vec<HashSet<String>> = scans.iter().map(|s| s.candidates.clone()).collect();
     let called: HashSet<usize> = scans.iter().flat_map(|s| s.calls.iter().map(|c| c.callee)).collect();
     let mut borrowed: HashSet<(usize, usize)> = scans
@@ -193,10 +241,10 @@ fn solve(scans: &[Scan]) -> (Vec<HashSet<String>>, HashSet<(usize, usize)>) {
         let mut changed = false;
         for (m, scan) in scans.iter().enumerate() {
             for call in &scan.calls {
-                for (i, arg) in call.args.iter().enumerate() {
-                    let distinct = call.args.iter().filter(|a| *a == arg).count() == 1;
-                    let plain_arg = matches!(arg, Some(name) if distinct && plain[m].contains(name));
-                    if !plain_arg && borrowed.remove(&(call.callee, i)) {
+                for i in 0..call.args.len() {
+                    let lent = Lending { class, scans, plain: &plain, borrowed: &borrowed, lend_shared };
+                    if borrowed.contains(&(call.callee, i)) && !lent.lends(m, call, i) {
+                        borrowed.remove(&(call.callee, i));
                         changed = true;
                     }
                 }
@@ -205,7 +253,7 @@ fn solve(scans: &[Scan]) -> (Vec<HashSet<String>>, HashSet<(usize, usize)>) {
         for (m, scan) in scans.iter().enumerate() {
             for call in &scan.calls {
                 for (i, arg) in call.args.iter().enumerate() {
-                    if let Some(name) = arg
+                    if let Some(name) = &arg.name
                         && !borrowed.contains(&(call.callee, i))
                         && plain[m].remove(name)
                     {
@@ -231,6 +279,56 @@ fn solve(scans: &[Scan]) -> (Vec<HashSet<String>>, HashSet<(usize, usize)>) {
     }
 }
 
+/// The state of `solve` that decides whether a call can lend an argument to a borrowed parameter.
+struct Lending<'s> {
+    class: &'s Class,
+    scans: &'s [Scan],
+    plain: &'s [HashSet<String>],
+    borrowed: &'s HashSet<(usize, usize)>,
+    lend_shared: bool,
+}
+
+impl Lending<'_> {
+    /// Whether argument `i` of `call`, made in method `m`, can be lent to its borrowed parameter.
+    /// No other argument may see the array while it is lent mutably; while it is lent to be read,
+    /// other arguments may read it, or lend it again to be read. A shared array is lent by borrowing its cell, which
+    /// panics if anything else borrows that cell mutably meanwhile: then no other argument may run
+    /// code that could, and if the parameter is written, no other argument may be a shared array.
+    fn lends(&self, m: usize, call: &Call, i: usize) -> bool {
+        let Some(name) = &call.args[i].name else { return false };
+        let writes = self.writes(call.callee, i);
+        let others = || call.args.iter().enumerate().filter(move |(j, _)| *j != i);
+        for (j, other) in others() {
+            let same = other.name.as_ref() == Some(name);
+            let lent_again = !self.writes(call.callee, j) && self.borrowed.contains(&(call.callee, j));
+            if other.mentions.contains(name) && (writes || other.effects || (same && !lent_again)) {
+                return false;
+            }
+        }
+        if self.plain[m].contains(name) {
+            return true;
+        }
+        if !self.lend_shared || !self.scans[m].arrays.contains(name) {
+            return false;
+        }
+        others().all(|(j, other)| {
+            let shared_array = other.array && !other.name.as_ref().is_some_and(|n| self.plain[m].contains(n));
+            let read_only_pair =
+                !writes && !self.writes(call.callee, j) && self.borrowed.contains(&(call.callee, j));
+            !other.effects && (!shared_array || read_only_pair)
+        })
+    }
+
+    /// Whether method `callee` may write the elements of its parameter `i`: it writes them, or
+    /// passes the array on to another call.
+    fn writes(&self, callee: usize, i: usize) -> bool {
+        let Some(param) = self.class.methods[callee].params.get(i) else { return true };
+        let scan = &self.scans[callee];
+        scan.written.contains(&param.name)
+            || scan.calls.iter().any(|c| c.args.iter().any(|a| a.mentions.contains(&param.name)))
+    }
+}
+
 /// The arrays whose elements are written: the ones written in their method, and any argument
 /// passed to a borrowed parameter that is written, which must then be borrowed mutably.
 fn written_names(class: &Class, scans: &[Scan], borrowed: &HashSet<(usize, usize)>) -> Vec<HashSet<String>> {
@@ -240,7 +338,7 @@ fn written_names(class: &Class, scans: &[Scan], borrowed: &HashSet<(usize, usize
         for (m, scan) in scans.iter().enumerate() {
             for call in &scan.calls {
                 for (i, arg) in call.args.iter().enumerate() {
-                    let Some(name) = arg else { continue };
+                    let Some(name) = &arg.name else { continue };
                     let param = &class.methods[call.callee].params[i].name;
                     let param_written = written[call.callee].contains(param);
                     if param_written && borrowed.contains(&(call.callee, i)) {
@@ -303,6 +401,56 @@ fn in_bounds(array: &str, index: &str, body: &Stmt, facts: &mut Facts) {
         },
         &mut |_| {},
     );
+}
+
+/// Marks the indexings of plain arrays of a known length whose index the range analysis keeps in
+/// bounds, such as `a[0]` of `int[] a = {1, 2}` or `a[i]` after `if (i < 3)` on `new int[3]`.
+fn constant_indexes(method: &Method, plain: &HashSet<String>, facts: &mut Facts) {
+    let mut lengths: HashMap<String, i64> = HashMap::new();
+    for stmt in &method.body {
+        visit_stmt(stmt, &mut |_| {}, &mut |s| {
+            if let Stmt::Local { name, init: Some(init), .. } = s
+                && plain.contains(name)
+            {
+                let length = match &init.kind {
+                    ExprKind::NewArray(sizes) => match sizes.as_slice() {
+                        [Expr { kind: ExprKind::Int(n), .. }] => Some(*n as i64),
+                        _ => None,
+                    },
+                    ExprKind::ArrayLit(items) => Some(items.len() as i64),
+                    _ => None,
+                };
+                if let Some(length) = length {
+                    lengths.insert(name.clone(), length);
+                }
+            }
+        });
+    }
+    let mut proven = Vec::new();
+    for stmt in &method.body {
+        visit_stmt(
+            stmt,
+            &mut |e| {
+                visit_expr(e, &mut |x| {
+                    let array = match &x.kind {
+                        ExprKind::Index(array, _)
+                        | ExprKind::Assign { target: Place::Index(array, _), .. }
+                        | ExprKind::IncDec { target: Place::Index(array, _), .. } => array,
+                        _ => return,
+                    };
+                    let ExprKind::Var(name) = &array.kind else { return };
+                    if let (Some(&length), Some(&(lo, hi))) =
+                        (lengths.get(name), facts.index_ranges.get(&x.id))
+                        && (lo > hi || (lo >= 0 && hi < length))
+                    {
+                        proven.push(x.id);
+                    }
+                })
+            },
+            &mut |_| {},
+        );
+    }
+    facts.in_bounds.extend(proven);
 }
 
 /// The reads `a[i]` in the body of a counting loop, when the body uses `a` only to read its

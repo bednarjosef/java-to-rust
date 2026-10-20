@@ -16,6 +16,7 @@
 
 mod arrays;
 mod indexing;
+mod moves;
 mod nullness;
 mod objects;
 mod owned;
@@ -31,6 +32,12 @@ pub struct Facts {
     /// Integer `+`, `-`, `*`, negation, `++`, `--`, compound assignments and `Math.abs` that
     /// never overflow.
     pub no_overflow: HashSet<ExprId>,
+    /// The values that the index of each array indexing or element assignment takes, from the
+    /// range analysis: (lowest, highest), empty when `lowest > highest`.
+    pub index_ranges: HashMap<ExprId, (i64, i64)>,
+    /// Reads of string, array and object variables that are last uses: the value is moved, not
+    /// cloned (see `moves`).
+    pub moves: HashSet<ExprId>,
     /// Integer `/`, `%` and their compound assignments whose divisor is never zero and that never
     /// compute `MIN / -1`.
     pub safe_division: HashSet<ExprId>,
@@ -77,6 +84,7 @@ pub fn analyze(class: &Class) -> Facts {
     facts.mutating = owned.mutating;
     arrays::analyze(class, &mut facts);
     indexing::analyze(class, &mut facts);
+    moves::analyze(class, &mut facts);
     facts
 }
 

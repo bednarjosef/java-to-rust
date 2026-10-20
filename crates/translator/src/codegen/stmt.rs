@@ -315,11 +315,11 @@ impl<'a> Gen<'a> {
                 self.line(&format!("{text};"));
             }
             ExprKind::Assign { op: Some(op), target: Place::Index(array, index), value } => {
-                let text = self.index_update(*op, array, index, e.ty, value, e.id);
+                let text = self.index_update(*op, array, index, e.ty, value, e.id, false);
                 self.line(&format!("{text};"));
             }
             ExprKind::IncDec { target: Place::Index(array, index), increment, prefix } => {
-                let text = self.index_step(array, index, e.ty, *increment, *prefix, e.id);
+                let text = self.index_step(array, index, e.ty, *increment, *prefix, e.id, false);
                 self.line(&format!("{text};"));
             }
             _ => {

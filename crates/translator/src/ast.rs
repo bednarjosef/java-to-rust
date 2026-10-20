@@ -461,7 +461,8 @@ pub fn stable(e: &Expr, loop_var: &str, body: &Stmt) -> bool {
         ExprKind::Var(v) => v != loop_var && !assigns_stmt(body, v),
         // Strings are immutable, so the length of a variable that is not assigned is stable.
         ExprKind::Builtin(Builtin::StringLength, args) => stable(&args[0], loop_var, body),
-        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) => stable(x, loop_var, body),
+        // An array's length never changes, so it is stable while the variable is.
+        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::Length(x) => stable(x, loop_var, body),
         ExprKind::Binary(_, l, r) => stable(l, loop_var, body) && stable(r, loop_var, body),
         _ => false,
     }

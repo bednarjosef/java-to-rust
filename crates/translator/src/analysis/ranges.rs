@@ -29,6 +29,8 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
         if unsound.is_empty() {
             facts.no_overflow.extend(a.visited.difference(&a.overflow));
             facts.safe_division.extend(a.visited.difference(&a.risky_division));
+            let clamp = |v: i128| v.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+            facts.index_ranges.extend(a.indexes.iter().map(|(&id, v)| (id, (clamp(v.lo), clamp(v.hi)))));
             return;
         }
         no_square_narrowing.extend(unsound);
@@ -184,6 +186,8 @@ struct Analysis<'a> {
     record: bool,
     visited: HashSet<ExprId>,
     overflow: HashSet<ExprId>,
+    /// The values each array index takes, keyed by the indexing or element assignment.
+    indexes: HashMap<ExprId, Interval>,
     risky_division: HashSet<ExprId>,
     loops: Vec<Flow>,
     /// Upper bounds of counters inside counting loops: (variable, bound).
@@ -213,6 +217,7 @@ impl<'a> Analysis<'a> {
             record: false,
             visited: HashSet::new(),
             overflow: HashSet::new(),
+            indexes: HashMap::new(),
             risky_division: HashSet::new(),
             loops: Vec::new(),
             budgets: Vec::new(),
@@ -320,6 +325,14 @@ impl<'a> Analysis<'a> {
     fn visit(&mut self, id: ExprId) {
         if self.record {
             self.visited.insert(id);
+        }
+    }
+
+    /// Records that the indexing or element assignment `id` used an index in `i`.
+    fn indexed(&mut self, id: ExprId, i: Interval) {
+        if self.record {
+            let seen = self.indexes.entry(id).or_insert(EMPTY);
+            *seen = seen.join(i);
         }
     }
 
@@ -760,7 +773,8 @@ impl<'a> Analysis<'a> {
             }
             ExprKind::Index(array, index) => {
                 self.expr(array, env);
-                self.expr(index, env);
+                let i = self.expr(index, env);
+                self.indexed(e.id, i);
                 if ty.is_integral() { Interval::full(ty) } else { other }
             }
             ExprKind::Length(array) => {
@@ -769,13 +783,15 @@ impl<'a> Analysis<'a> {
             }
             ExprKind::Assign { target: Place::Index(array, index), value, .. } => {
                 self.expr(array, env);
-                self.expr(index, env);
+                let i = self.expr(index, env);
+                self.indexed(e.id, i);
                 self.expr(value, env);
                 if ty.is_integral() { Interval::full(ty) } else { other }
             }
             ExprKind::IncDec { target: Place::Index(array, index), .. } => {
                 self.expr(array, env);
-                self.expr(index, env);
+                let i = self.expr(index, env);
+                self.indexed(e.id, i);
                 if ty.is_integral() { Interval::full(ty) } else { other }
             }
             // Fields and statics are not locals, so their values carry no range.

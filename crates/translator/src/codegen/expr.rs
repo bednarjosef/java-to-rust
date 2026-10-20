@@ -19,6 +19,41 @@ pub(super) fn in_shift_range(e: &Expr, ty: Type) -> bool {
 
 impl<'a> Gen<'a> {
     /// `target = value` or `target op= value` as a Rust statement, without the semicolon.
+    /// The Rust compound assignment operator (`+=`) that does what Java's `x op= value` does on a
+    /// variable of type `ty`, if there is one: no promotion to a wider type, and no overflow,
+    /// division by zero or shift out of range to handle.
+    pub(super) fn in_place_op(&self, op: BinOp, ty: Type, value: &Expr, id: ExprId) -> Option<&'static str> {
+        let symbol = match op {
+            BinOp::Add => "+=",
+            BinOp::Sub => "-=",
+            BinOp::Mul => "*=",
+            BinOp::Div => "/=",
+            BinOp::Rem => "%=",
+            BinOp::BitAnd => "&=",
+            BinOp::BitOr => "|=",
+            BinOp::BitXor => "^=",
+            BinOp::Shl => "<<=",
+            _ => ">>=",
+        };
+        let result = crate::types::binary_type(op, ty, value.ty).expect("checked");
+        let simple = match op {
+            // Floating arithmetic has no traps; a float is computed as a double when the other
+            // operand is one, so only an operation in the variable's own type is in place.
+            _ if ty.is_floating() => {
+                result == ty && !op.is_shift() && !matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            }
+            BinOp::Add | BinOp::Sub | BinOp::Mul => result == ty && self.no_overflow(id),
+            BinOp::Div | BinOp::Rem => result == ty && self.safe_division(id, value),
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                ty == Type::Boolean || (ty.is_integral() && crate::types::promote(ty, value.ty) == ty)
+            }
+            // Shifting by a constant in range cannot overflow.
+            BinOp::Shl | BinOp::Shr => ty.is_integral() && in_shift_range(value, ty),
+            _ => false,
+        };
+        simple.then_some(symbol)
+    }
+
     pub(super) fn assignment(
         &mut self,
         op: Option<BinOp>,
@@ -42,37 +77,11 @@ impl<'a> Gen<'a> {
         if let Some(text) = self.primitive_assignment(op, &name, ty, value, id) {
             return text;
         }
-        let compound = |op: BinOp| match op {
-            BinOp::Add => "+=",
-            BinOp::Sub => "-=",
-            BinOp::Mul => "*=",
-            BinOp::Div => "/=",
-            BinOp::Rem => "%=",
-            BinOp::BitAnd => "&=",
-            BinOp::BitOr => "|=",
-            BinOp::BitXor => "^=",
-            BinOp::Shl => "<<=",
-            _ => ">>=",
-        };
-        let result = crate::types::binary_type(op, ty, value.ty).expect("checked");
-        let simple = match op {
-            // Double arithmetic has no traps, and the result is already a double.
-            _ if ty == Type::Double => {
-                !op.is_shift() && !matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
-            }
-            BinOp::Add | BinOp::Sub | BinOp::Mul => result == ty && self.no_overflow(id),
-            BinOp::Div | BinOp::Rem => result == ty && self.safe_division(id, value),
-            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
-                ty == Type::Boolean || (ty.is_integral() && crate::types::promote(ty, value.ty) == ty)
-            }
-            // Shifting by a constant in range cannot overflow.
-            BinOp::Shl | BinOp::Shr => ty.is_integral() && in_shift_range(value, ty),
-            _ => false,
-        };
-        if simple {
+        if let Some(symbol) = self.in_place_op(op, ty, value, id) {
             let v = self.value(value, if op.is_shift() { value.ty } else { ty });
-            return format!("{name} {} {}", compound(op), v.text);
+            return format!("{name} {symbol} {}", v.text);
         }
+        let result = crate::types::binary_type(op, ty, value.ty).expect("checked");
         // Java's compound assignment casts the result back to the variable's type.
         let current = Code::atom(name.clone());
         let right = self.operand(value);
@@ -189,7 +198,9 @@ impl<'a> Gen<'a> {
                 let rust = self.local(name);
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
-                    ty if needs_clone(ty) => Code::atom(format!("{rust}.clone()")),
+                    ty if needs_clone(ty) && !self.facts.moves.contains(&e.id) => {
+                        Code::atom(format!("{rust}.clone()"))
+                    }
                     _ => Code::atom(rust),
                 }
             }
@@ -244,10 +255,10 @@ impl<'a> Gen<'a> {
                 Code::atom(self.index_set(e.id, array, index, e.ty, value, true))
             }
             ExprKind::Assign { op: Some(op), target: Place::Index(array, index), value } => {
-                Code::atom(self.index_update(*op, array, index, e.ty, value, e.id))
+                Code::atom(self.index_update(*op, array, index, e.ty, value, e.id, true))
             }
             ExprKind::IncDec { target: Place::Index(array, index), increment, prefix } => {
-                Code::atom(self.index_step(array, index, e.ty, *increment, *prefix, e.id))
+                Code::atom(self.index_step(array, index, e.ty, *increment, *prefix, e.id, true))
             }
             ExprKind::Assign { op, target: target @ (Place::Field { .. } | Place::Static { .. }), value } => {
                 let how = match op {

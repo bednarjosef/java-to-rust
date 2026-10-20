@@ -20,3 +20,10 @@ pub fn put<T: Clone>(a: &mut [T], i: i32, v: T) -> T {
     a[k] = v.clone();
     v
 }
+
+/// `a[i] op= v`, `a[i]++` and the like, as statements: the index is checked and the old element
+/// read before `f` computes the new one from it, as Java does.
+pub fn modify<T: Clone>(a: &mut [T], i: i32, f: impl FnOnce(T) -> T) {
+    let k = position(a.len(), i);
+    a[k] = f(a[k].clone());
+}

@@ -38,15 +38,20 @@ impl<'a> Gen<'a> {
         if written { format!("&mut [{elem}]") } else { format!("&[{elem}]") }
     }
 
-    /// The argument for a borrowed array parameter: a borrow of the caller's plain array.
+    /// The argument for a borrowed array parameter: a borrow of the caller's plain array, or of
+    /// the contents of a shared one for the length of the call.
     pub(super) fn borrowed_arg(&mut self, e: &'a Expr, written: bool) -> String {
         let ExprKind::Var(name) = &e.kind else { unreachable!("borrowed arguments are names") };
         let local = self.local(name);
         if self.is_borrowed(&local) {
             return local;
         }
-        let mutably = if written { "mut " } else { "" };
-        format!("&{mutably}{local}")
+        match (self.plain(name).is_some(), written) {
+            (true, true) => format!("&mut {local}"),
+            (true, false) => format!("&{local}"),
+            (false, true) => format!("&mut {local}.borrow_mut()"),
+            (false, false) => format!("&{local}.borrow()"),
+        }
     }
 
     /// Whether the Rust name `a` is a borrowed array parameter of the current method: already a
@@ -55,6 +60,19 @@ impl<'a> Gen<'a> {
         self.class.methods[self.method].params.iter().enumerate().any(|(j, p)| {
             self.facts.borrowed_arrays.contains_key(&(self.method, j)) && self.local(&p.name) == a
         })
+    }
+
+    /// The `&` argument for the plain array `a`.
+    fn slice_ref(&self, a: &str) -> String {
+        if self.is_borrowed(a) { a.to_string() } else { format!("&{a}") }
+    }
+
+    /// An index known to be in bounds, as a `usize`.
+    fn position(&mut self, index: &'a Expr) -> String {
+        match index.kind {
+            ExprKind::Int(n) => n.to_string(),
+            _ => format!("{} as usize", self.value(index, Type::Int).at(AS)),
+        }
     }
 
     /// The `&mut` argument for the plain array `a`.
@@ -80,8 +98,14 @@ impl<'a> Gen<'a> {
         let text = match &init.kind {
             ExprKind::NewArray(sizes) => {
                 let [size] = sizes.as_slice() else { unreachable!("analysis keeps one-dimensional arrays") };
-                let n = self.value(size, Type::Int).text;
-                format!("{}({n}, {})", self.runtime("new_vec"), zero_value(elem))
+                match size.kind {
+                    // A size that is not negative needs no check.
+                    ExprKind::Int(n) if n >= 0 => format!("vec![{}; {n}]", zero_value(elem)),
+                    _ => {
+                        let n = self.value(size, Type::Int).text;
+                        format!("{}({n}, {})", self.runtime("new_vec"), zero_value(elem))
+                    }
+                }
             }
             ExprKind::ArrayLit(items) => {
                 let items: Vec<String> = items.iter().map(|item| self.value(item, elem).text).collect();
@@ -98,11 +122,12 @@ impl<'a> Gen<'a> {
             return Code::atom(item.clone());
         }
         if let Some((_, a)) = self.plain_of(array) {
-            let i = self.value(index, Type::Int).text;
             if self.facts.in_bounds.contains(&id) {
-                return Code::atom(read_in_bounds(&a, &format!("{i} as usize"), element(array.ty)));
+                let k = self.position(index);
+                return Code::atom(read_in_bounds(&a, &k, element(array.ty)));
             }
-            return Code::atom(format!("{}(&{a}, {i})", self.runtime("at")));
+            let i = self.value(index, Type::Int).text;
+            return Code::atom(format!("{}({}, {i})", self.runtime("at"), self.slice_ref(&a)));
         }
         let handle = self.handle(array);
         let i = self.value(index, Type::Int).text;
@@ -177,11 +202,13 @@ impl<'a> Gen<'a> {
         rhs: &'a Expr,
         used: bool,
     ) -> String {
+        if !used && self.facts.in_bounds.contains(&id) && rust_order_is_same(index, Some(rhs)) {
+            let k = self.position(index);
+            let v = self.value(rhs, ty).text;
+            return format!("{a}[{k}] = {v}");
+        }
         let i = self.value(index, Type::Int).text;
         let v = self.value(rhs, ty).text;
-        if !used && self.facts.in_bounds.contains(&id) {
-            return format!("{a}[{i} as usize] = {v}");
-        }
         let put = self.runtime("put");
         let mr = self.mut_ref(a);
         if !mentions(index, name) && !mentions(rhs, name) {
@@ -193,6 +220,9 @@ impl<'a> Gen<'a> {
     }
 
     /// `a[i] op= v`, as a call of `update`, which reads the old element before it evaluates `v`.
+    /// As a statement (`used` false) on a plain array, it is `a[i] op= v` where the index is in
+    /// bounds, and `java::modify` otherwise.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn index_update(
         &mut self,
         op: BinOp,
@@ -201,7 +231,29 @@ impl<'a> Gen<'a> {
         ty: Type,
         rhs: &'a Expr,
         id: ExprId,
+        used: bool,
     ) -> String {
+        if let Some((name, a)) = self.plain_of(array)
+            && !used
+            && !mentions(rhs, name)
+        {
+            if self.facts.in_bounds.contains(&id)
+                && simple_index(index)
+                && rust_order_is_same(index, Some(rhs))
+            {
+                let k = self.position(index);
+                let slot = format!("{a}[{k}]");
+                if let Some(text) = self.compound_in_place(op, ty, rhs, id, &slot) {
+                    return text;
+                }
+                let new = self.element_update(op, ty, rhs, id, &slot);
+                return format!("{slot} = {new}");
+            }
+            let i = self.value(index, Type::Int).text;
+            let old = self.fresh_name(&["old", "previous", "before"]);
+            let new = self.element_update(op, ty, rhs, id, old);
+            return format!("{}({}, {i}, |{old}| {new})", self.runtime("modify"), self.mut_ref(&a));
+        }
         if let Some((_, a)) = self.plain_of(array) {
             let i = self.value(index, Type::Int).text;
             let slot = self.fresh_name(&["index", "slot", "at"]);
@@ -221,7 +273,9 @@ impl<'a> Gen<'a> {
         format!("{}({handle}, {i}, |{old}| {new})", self.runtime("update"))
     }
 
-    /// `a[i]++`, `--a[i]` and the like.
+    /// `a[i]++`, `--a[i]` and the like. As a statement (`used` false) on a plain array, it is
+    /// `a[i] += 1` or a `wrapping_add` where the index is in bounds, and `java::modify` otherwise.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn index_step(
         &mut self,
         array: &'a Expr,
@@ -230,7 +284,28 @@ impl<'a> Gen<'a> {
         increment: bool,
         prefix: bool,
         id: ExprId,
+        used: bool,
     ) -> String {
+        if let Some((_, a)) = self.plain_of(array)
+            && !used
+        {
+            if self.facts.in_bounds.contains(&id) && simple_index(index) {
+                let k = self.position(index);
+                let slot = format!("{a}[{k}]");
+                let sign = if increment { "+" } else { "-" };
+                if ty.is_floating() {
+                    return format!("{slot} {sign}= 1.0");
+                }
+                if self.no_overflow(id) {
+                    return format!("{slot} {sign}= 1");
+                }
+                return format!("{slot} = {}", self.step_value(ty, increment, id, &slot));
+            }
+            let i = self.value(index, Type::Int).text;
+            let old = self.fresh_name(&["old", "previous", "before"]);
+            let new = self.step_value(ty, increment, id, old);
+            return format!("{}({}, {i}, |{old}| {new})", self.runtime("modify"), self.mut_ref(&a));
+        }
         if let Some((_, a)) = self.plain_of(array) {
             let i = self.value(index, Type::Int).text;
             let slot = self.fresh_name(&["index", "slot", "at"]);
@@ -255,10 +330,27 @@ impl<'a> Gen<'a> {
         format!("{}({handle}, {i}, |{old}| {new})", self.runtime(helper))
     }
 
+    /// `slot op= rhs` where Rust's compound assignment does what Java's does.
+    fn compound_in_place(
+        &mut self,
+        op: BinOp,
+        ty: Type,
+        rhs: &'a Expr,
+        id: ExprId,
+        slot: &str,
+    ) -> Option<String> {
+        if ty == Type::String {
+            return None;
+        }
+        let symbol = self.in_place_op(op, ty, rhs, id)?;
+        let v = self.value(rhs, if op.is_shift() { rhs.ty } else { ty });
+        Some(format!("{slot} {symbol} {}", v.text))
+    }
+
     /// The element after `++` or `--`, written in terms of the old element `old`.
     fn step_value(&self, ty: Type, increment: bool, id: ExprId, old: &str) -> String {
         let sign = if increment { "+" } else { "-" };
-        if ty == Type::Double {
+        if ty.is_floating() {
             format!("{old} {sign} 1.0")
         } else if self.no_overflow(id) {
             format!("{old} {sign} 1")
@@ -319,7 +411,9 @@ impl<'a> Gen<'a> {
                 let slot = self.fresh_name(&["index", "slot", "at"]);
                 let element = read_in_bounds(&a, slot, element(array.ty));
                 self.line(&format!("for {slot} in 0..{a}.len() {{"));
+                self.indent += 1;
                 self.line(&format!("let {mutable}{var} = {element};"));
+                self.indent -= 1;
             } else {
                 self.line(&format!("for {mutable}{var} in {a}.iter().cloned() {{"));
             }
@@ -375,6 +469,28 @@ pub(super) fn name_part(ty: Type) -> String {
         Type::Class(name) => struct_name(name).to_lowercase(),
         _ => rust_type(ty).to_lowercase(),
     }
+}
+
+/// Whether `a[index] = rhs` and `a[index] op= rhs` can be Rust assignments, which evaluate `rhs`
+/// before the index where Java evaluates the index first: the index has no effects, and `rhs`
+/// assigns no variable that the index reads.
+fn rust_order_is_same(index: &Expr, rhs: Option<&Expr>) -> bool {
+    if super::null::has_effects(index) {
+        return false;
+    }
+    let Some(rhs) = rhs else { return true };
+    let mut same = true;
+    visit_expr(index, &mut |x| {
+        if let ExprKind::Var(v) = &x.kind {
+            same &= !assigns(rhs, v);
+        }
+    });
+    same
+}
+
+/// Whether an index is cheap and pure enough to be written twice, as in `a[i] = a[i] + 1`.
+fn simple_index(index: &Expr) -> bool {
+    matches!(index.kind, ExprKind::Int(_) | ExprKind::Var(_))
 }
 
 /// `a[i]` of a plain array for an index that is in bounds, where `index` is already a `usize`. A
