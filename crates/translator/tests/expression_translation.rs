@@ -119,8 +119,8 @@ fn an_index_that_reads_the_array_is_bound_before_the_array_is_borrowed() {
             }
         }",
     );
-    assert_contains(&rust, &["let index = java::floor_mod(", "java::modify(&mut w, index, |old|"]);
-    assert_lacks(&rust, &["java::modify(&mut w, java::floor_mod("]);
+    assert_contains(&rust, &["let index = java::floor_mod(", "java::put(&mut w, index, "]);
+    assert_lacks(&rust, &["java::modify(&mut w, java::floor_mod(", "java::put(&mut w, java::floor_mod("]);
 }
 
 #[test]
