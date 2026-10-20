@@ -1,0 +1,11 @@
+[package]
+name = "java-to-rust"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Translates Java source code into Rust source code"
+
+[dependencies]
+tree-sitter = "0.25"
+tree-sitter-java = "0.23"
+java-runtime = { path = "../runtime" }

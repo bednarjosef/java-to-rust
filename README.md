@@ -66,3 +66,26 @@ program shows what a change improved or broke.
 Level 1 end to end for a subset of Java: classes, interfaces, inheritance, generics, the common
 collections, strings and exceptions; no reflection and no threads. Done when the feature corpus
 translates, compiles and matches Java's output.
+
+## Current state
+
+A first end-to-end pipeline for a small subset: one class of static methods with `int`, `long`,
+`double`, `boolean` and `String` locals, arithmetic, `if`, `while`, `do`, `for`, `break`,
+`continue`, the conditional operator, overloading, `System.out.print`/`println`, `System.exit`,
+a few `Math` methods and `String.length`/`equals`. Anything else is rejected with an error that
+names the construct and its position.
+
+The pieces: [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) parses the source
+(`crates/translator/src/parse.rs`), the checker gives every expression its Java type and resolves
+overloads (`check.rs`), and the generator writes Rust (`codegen.rs`) that uses the runtime crate
+(`crates/runtime`) for what Rust lacks: Java's double printing, integer division that throws, and
+`Math.max`/`min` on NaN.
+
+```
+cargo run -p java-to-rust -- Program.java                 # print the Rust translation
+cargo run -p java-to-rust -- Program.java --crate out/    # write a Cargo project
+cargo test                                                # needs a JDK: runs corpus/ on both
+```
+
+The corpus test runs every program in `corpus/` with `java`, translates and builds it, and
+compares standard output and exit code.
