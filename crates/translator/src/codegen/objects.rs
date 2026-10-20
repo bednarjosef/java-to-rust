@@ -180,6 +180,13 @@ impl<'a> Gen<'a> {
             .map(|(i, (a, p))| {
                 if self.facts.borrowed_params.contains(&(index, i)) {
                     self.str_ref(a)
+                } else if self.guarded && matches!(a.kind, ExprKind::Field { .. }) {
+                    // A lone `{ x }` argument draws rustc's unused_braces lint; a `let` keeps the
+                    // scope of the `Ref` short while the call runs.
+                    let outer = std::mem::replace(&mut self.guarded, false);
+                    let read = self.value(a, p.ty).text;
+                    self.guarded = outer;
+                    format!("{{ let value = {read}; value }}")
                 } else {
                     self.value(a, p.ty).text
                 }

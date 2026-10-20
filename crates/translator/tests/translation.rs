@@ -154,3 +154,16 @@ fn field_reads_are_braced_only_beside_a_mutable_borrow() {
     assert_contains(&rust, &["println!(\"{}\", p.borrow().x);", "this.borrow_mut().y = { this.borrow().x }"]);
     assert_lacks(&rust, &["{ p.borrow()"]);
 }
+
+#[test]
+fn field_read_arguments_beside_a_call_bind_in_a_let() {
+    let rust = translate(
+        "class P { int x; }
+        class A {
+            static int f(int v) { return v + 1; }
+            public static void main(String[] a) { P p = new P(); System.out.println(f(p.x)); }
+        }",
+    );
+    assert_contains(&rust, &["f({ let value = p.borrow().x; value })"]);
+    assert_lacks(&rust, &["f({ p.borrow()"]);
+}
