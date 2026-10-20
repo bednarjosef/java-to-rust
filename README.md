@@ -134,6 +134,17 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   or given to `java.util.Arrays` stay shared for now. Arrays of strings, objects or arrays hold
   `Option`s when some array of that element type may hold null (`new String[n]`,
   `new int[n][]`, or a stored value that may be null), and plain values otherwise.
+- `java.util.Arrays` on arrays of primitives and strings (`lower/java_arrays.rs`,
+  `codegen/java_arrays.rs`, `runtime/src/java_arrays.rs`): `equals` and `hashCode` (Java's exact
+  formula, bit equality for floats, null arrays and null elements), `sort` for every primitive
+  type and `String` (Java's order: `-0.0` before `0.0`, NaN last, UTF-16 order for strings), whole
+  or by range with Java's range checks, `fill` by range, `copyOfRange` on primitives,
+  `binarySearch` in both forms (`-(insertion point) - 1` when absent), and `deepToString` on
+  arrays of primitive or `String` rows. `a.clone()` is a shallow copy; rows of a 2-D array are
+  shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`.
+  `==` on arrays is identity (`Rc::ptr_eq`, or `java::same` where either may be null). Not yet:
+  `copyOf` and `copyOfRange` on `String` arrays (the padding would need nulls that the
+  nullness analysis does not see), `equals(null, b)`, `asList` and `stream`.
 - Objects follow the same pattern (`analysis/objects.rs`, `analysis/owned.rs`, `analysis/borrowing.rs`). The faithful
   form of an object is `Rc<RefCell<C>>`, because Java references are shared and mutable. A class
   whose objects never change after construction is shared as `Rc<C>`. A class whose objects are
