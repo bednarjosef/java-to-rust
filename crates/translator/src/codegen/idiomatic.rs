@@ -34,20 +34,28 @@ impl<'a> Gen<'a> {
         if !matches!(ty, Type::Int | Type::Long | Type::Double | Type::Float | Type::Boolean) {
             return None;
         }
-        if matches!(op, BinOp::Shl | BinOp::Shr) && matches!(ty, Type::Int | Type::Long) {
-            // Java masks a literal count to the width of the type, as `shift` does, so the masked
-            // count is always in range for Rust's shift assignment.
-            let bits = if ty == Type::Long { 64 } else { 32 };
-            let count = match r.kind {
-                ExprKind::Int(n) => i64::from(n),
-                ExprKind::Long(n) => n,
-                _ => return None,
-            };
-            let symbol = if *op == BinOp::Shl { "<<=" } else { ">>=" };
-            return Some(format!("{name} {symbol} {}", count & (bits - 1)));
+        if let Some(text) = literal_shift(*op, name, ty, r) {
+            return Some(text);
         }
         let symbol = self.in_place_op(*op, ty, r, value.id)?;
         let v = self.value(r, if op.is_shift() { r.ty } else { ty });
         Some(format!("{name} {symbol} {}", v.text))
     }
+}
+
+/// `place <<= n` or `place >>= n` for a literal count `n` on an `int` or `long`. Java masks the
+/// count to the width of the type, and the masked count is what is written, so it is always in
+/// range for Rust's shift assignment.
+pub(super) fn literal_shift(op: BinOp, place: &str, ty: Type, count: &Expr) -> Option<String> {
+    if !matches!(op, BinOp::Shl | BinOp::Shr) || !matches!(ty, Type::Int | Type::Long) {
+        return None;
+    }
+    let bits = if ty == Type::Long { 64 } else { 32 };
+    let count = match count.kind {
+        ExprKind::Int(n) => i64::from(n),
+        ExprKind::Long(n) => n,
+        _ => return None,
+    };
+    let symbol = if op == BinOp::Shl { "<<=" } else { ">>=" };
+    Some(format!("{place} {symbol} {}", count & (bits - 1)))
 }

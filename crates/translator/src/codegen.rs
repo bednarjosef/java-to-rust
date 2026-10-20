@@ -31,7 +31,7 @@ mod unsigned;
 
 use code::*;
 use expr::Operand;
-use idiomatic::bool_test;
+use idiomatic::{bool_test, literal_shift};
 use names::*;
 use null::is_null_test;
 use primitives::*;

@@ -57,5 +57,17 @@ public class IdiomaticSelfUpdates {
         bits = bits | 8;
         bits = bits ^ 1;
         System.out.println(bits);
+
+        // Compound shifts with literal counts: Java masks the count to the width of the type.
+        int packed = 3;
+        packed <<= 33;
+        System.out.println(packed);
+        packed >>= -1;
+        System.out.println(packed);
+        long wide = 1;
+        wide <<= 65;
+        System.out.println(wide);
+        wide >>= 63;
+        System.out.println(wide);
     }
 }

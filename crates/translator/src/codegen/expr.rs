@@ -110,6 +110,9 @@ impl<'a> Gen<'a> {
         if let Some(text) = self.primitive_assignment(op, place, ty, value, id) {
             return text;
         }
+        if let Some(text) = literal_shift(op, place, ty, value) {
+            return text;
+        }
         if let Some(symbol) = self.in_place_op(op, ty, value, id) {
             let v = self.value(value, if op.is_shift() { value.ty } else { ty });
             return format!("{place} {symbol} {}", v.text);
