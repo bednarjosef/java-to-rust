@@ -211,6 +211,42 @@ impl<'t> Lowering<'t> {
 }
 
 /// Whether `value` is the `null` literal written where an enum of type `ty` is expected.
+/// Whether the instance field `name` of class `index` is set before any read: every constructor
+/// begins with `this.name = value`, where `value` does not read the field, and no initializer of
+/// the class reads it. Then the field is never `null` where Java could see it.
+fn set_before_use(class: &Class, index: usize, name: &str) -> bool {
+    let reads = |e: &Expr| {
+        let mut read = false;
+        visit_expr(e, &mut |x| {
+            read |= matches!(&x.kind, ExprKind::Field { name: n, .. } if n == name);
+        });
+        read
+    };
+    let decl = &class.types[index];
+    if decl.fields.iter().filter_map(|f| f.init.as_ref()).any(|init| {
+        let mut mentioned = false;
+        visit_expr(init, &mut |x| mentioned |= matches!(&x.kind, ExprKind::Var(n) if n == name));
+        mentioned || reads(init)
+    }) {
+        return false;
+    }
+    let ctors: Vec<&Method> = class.methods.iter().filter(|m| m.class == index && m.is_ctor).collect();
+    !ctors.is_empty()
+        && ctors.iter().all(|m| {
+            matches!(
+                m.body.first(),
+                Some(Stmt::Expr(Expr {
+                    kind: ExprKind::Assign {
+                        op: None,
+                        target: Place::Field { object, name: n },
+                        value,
+                    },
+                    ..
+                })) if matches!(object.kind, ExprKind::This) && n == name && !reads(value)
+            )
+        })
+}
+
 fn null_for(value: &Expr, ty: Type) -> bool {
     matches!(value.kind, ExprKind::Null) && matches!(ty, Type::Enum(_))
 }
@@ -240,8 +276,9 @@ fn null_enum_in(e: &Expr, class: &Class) -> bool {
     }
 }
 
-/// Rejects `null` where an enum value is expected, and enum-typed fields that have no initializer
-/// (Java gives them `null`). A `null` enum would need a representation that a Rust enum lacks.
+/// Rejects `null` where an enum value is expected. Java gives an enum-typed field `null` until it
+/// is set, so an instance field without an initializer is allowed only when every constructor
+/// sets it first (see `set_before_use`), and a static field must have an initializer.
 pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
     let found: Cell<Option<Pos>> = Cell::new(None);
     let record = |pos: Pos| {
@@ -249,13 +286,21 @@ pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
             found.set(Some(pos));
         }
     };
-    for ty in &class.types {
-        for f in ty.fields.iter().chain(&ty.statics) {
+    for (t, decl) in class.types.iter().enumerate() {
+        for f in decl.fields.iter().chain(&decl.statics) {
             if let Some(init) = &f.init {
                 if null_for(init, f.ty) {
                     record(init.pos);
                 }
             }
+        }
+        for f in decl.fields.iter().filter(|f| f.init.is_none() && matches!(f.ty, Type::Enum(_))) {
+            if !set_before_use(class, t, &f.name) {
+                record(f.pos);
+            }
+        }
+        for f in decl.statics.iter().filter(|f| f.init.is_none() && matches!(f.ty, Type::Enum(_))) {
+            record(f.pos);
         }
     }
     for m in &class.methods {

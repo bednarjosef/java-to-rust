@@ -3,6 +3,24 @@ enum Color { RED, GREEN, BLUE }
 public class Enums {
     static Color favourite = Color.GREEN;
 
+    static class Paint {
+        private final Color color;
+        private final int coats;
+
+        Paint(Color color, int coats) {
+            this.color = color;
+            this.coats = coats;
+        }
+
+        Color color() {
+            return color;
+        }
+
+        String label() {
+            return color + " x" + coats;
+        }
+    }
+
     static Color next(Color c) {
         return Color.values()[(c.ordinal() + 1) % Color.values().length];
     }
@@ -34,6 +52,8 @@ public class Enums {
         System.out.println(Color.GREEN.compareTo(Color.GREEN));
         System.out.println(describe(Color.BLUE, 2));
         System.out.println(parse("GREEN") == favourite);
+        Paint paint = new Paint(Color.BLUE, 2);
+        System.out.println(paint.color() + " " + paint.label());
         System.out.println(Color.values().length);
         for (Color each : Color.values()) {
             System.out.print(each + "=" + each.ordinal() + " ");

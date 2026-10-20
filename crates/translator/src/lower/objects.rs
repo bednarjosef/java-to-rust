@@ -130,9 +130,6 @@ impl<'t> Lowering<'t> {
         if init.is_none() && ty == Type::String {
             return unsupported(node, "null");
         }
-        if init.is_none() && matches!(ty, Type::Enum(_)) {
-            return unsupported(node, "null enums");
-        }
         let constant = Self::is_constant(node);
         let init = if constant {
             let text = node.symbol().and_then(|s| s.constant).unwrap_or_default();

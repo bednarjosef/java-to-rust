@@ -847,3 +847,35 @@ fn an_enum_with_a_field_that_is_not_final_is_rejected() {
     .expect_err("a mutable enum field is rejected");
     assert!(error.to_string().contains("enum fields that are not final"), "{error}");
 }
+
+#[test]
+fn an_enum_field_set_first_by_every_constructor_needs_no_initializer() {
+    let rust = translate(
+        "public class A {
+            enum Color { RED, BLUE }
+            static class Paint {
+                private final Color color;
+                Paint(Color color) { this.color = color; }
+                Color color() { return color; }
+            }
+            public static void main(String[] args) { System.out.println(new Paint(Color.BLUE).color()); }
+        }",
+    );
+    assert_contains(&rust, &["color: A_Color::Red", "this.color = value;"]);
+}
+
+#[test]
+fn an_enum_field_that_a_constructor_reads_before_setting_it_is_rejected() {
+    let error = java_to_rust::translate(
+        "public class A {
+            enum Color { RED, BLUE }
+            static class Paint {
+                private Color color;
+                Paint(Color color) { System.out.println(this.color); this.color = color; }
+            }
+            public static void main(String[] args) { new Paint(Color.BLUE); }
+        }",
+    )
+    .expect_err("a field read before it is set is null");
+    assert!(error.to_string().contains("null enums not supported yet"), "{error}");
+}
