@@ -7,7 +7,7 @@ public class UnaryOperatorOnLiteral {
     static long sLong = 1234567890123L;
 
     public static void main(String[] args) {
-        sInt >>>= ~9223372036854775807L;
+        sInt >>>= ~9223372036854775806L;
         System.out.println(sInt);
         long sum = (~9223372036854775807L) + sLong;
         System.out.println(sum);
