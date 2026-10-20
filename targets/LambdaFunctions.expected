@@ -1,0 +1,24 @@
+andThen: 13
+compose: 16
+identity: same
+'' both=false either=true
+'tea' both=true either=false
+'espresso' both=false either=true
+2^10 = 1024
+maxBy: 17
+lengths: [5, 4, 0, 5, 2]
+shouted: [ALPHA!, BETA!, !, GAMMA!, PI!]
+parsed sum: 23
+after removeIf and replaceAll: [ALPHA, BETA, GAMMA, PI]
+ALPHA
+BETA
+GAMMA
+PI
+consumed value
+again 5
+applyTwice: 81
+captured offset: 201
+counter: 7 8 9
+built 4
+bonus: {ann=5, bo=0, cy=5}
+ann now 95, bo now 72

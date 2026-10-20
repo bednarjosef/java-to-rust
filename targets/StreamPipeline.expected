@@ -1,0 +1,21 @@
+big products: [apple, pear, fig]
+total revenue: 208
+best sale: east
+sales per region: {east=2, north=3, south=2, west=1}
+units per product: {apple=40, fig=12, pear=12, plum=0}
+big revenue: [east/apple, east/fig]
+small revenue: [north/apple, south/pear, north/pear, south/plum, north/fig, west/apple]
+joined: [apple, fig, fig, pear]
+regions: 4 contains west: true
+max price per product: {apple=3, fig=5, pear=4, plum=6}
+1 4 9 16 25 
+even sum: 90
+average: 5.0
+empty average: false
+powers of three above 10: 3
+reduce product: 42
+any units zero: true
+all prices positive: true
+first east: apple
+flat: [10, 20, 30, 40, 50, 60]
+boxed squares: [0, 1, 4, 9]

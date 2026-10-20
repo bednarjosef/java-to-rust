@@ -1,0 +1,23 @@
+ok: Transaction[kind=SHIP, sku=A-100, amount=15]
+  log size now 1
+stock problem for B-200 (2 missing): sku B-200 is short by 2
+  log size now 1
+ok: Transaction[kind=RECEIVE, sku=C-300, amount=120]
+  log size now 2
+ok: Transaction[kind=ADJUST, sku=B-200, amount=8]
+  log size now 3
+ok: Transaction[kind=SHIP, sku=C-300, amount=20]
+  log size now 4
+lookup failed: unknown sku: Z-999
+  log size now 4
+failures: 2
+title       |   price|  qty
+Doohickey   |        |  100
+Gadget      |        |    8
+Widget      |        |   25
+A-100 Widget          $2.50 x  25 =     $62.50
+B-200 Gadget         $12.99 x   8 =    $103.92
+C-300 Doohickey       $0.75 x 100 =     $75.00
+total value: $241.42
+find A-100 present: true
+find Q-1 title: <none>
