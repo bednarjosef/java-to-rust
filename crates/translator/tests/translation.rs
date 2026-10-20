@@ -1359,3 +1359,221 @@ fn an_enum_field_that_a_constructor_reads_before_setting_it_is_rejected() {
     .expect_err("a field read before it is set is null");
     assert!(error.to_string().contains("null enums not supported yet"), "{error}");
 }
+
+#[test]
+fn switch_without_fall_through_is_a_match_on_int_char_and_string() {
+    let rust = translate(
+        "class A {
+            static String day(int d) {
+                switch (d) {
+                    case 1: return \"Mon\";
+                    case 6: case 7: return \"weekend\";
+                    default: return \"midweek\";
+                }
+            }
+            static int weight(char c) {
+                switch (c) {
+                    case 'a', 'e' -> { return 1; }
+                    default -> { return 0; }
+                }
+            }
+            static void report(String kind) {
+                switch (kind) {
+                    case \"log\" -> System.out.println(\"log\");
+                    default -> System.out.println(\"other\");
+                }
+            }
+            public static void main(String[] a) {
+                String s = \"x\";
+                switch (s) {
+                    case \"x\": System.out.println(1); break;
+                    default: System.out.println(2);
+                }
+                String missing = null;
+                switch (missing) {
+                    case \"x\" -> System.out.println(3);
+                    default -> System.out.println(4);
+                }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "match d {",
+            "6 | 7 => {",
+            "_ => {",
+            "match c {",
+            "97 | 101 => {",
+            "match kind {",
+            "\"log\" => {",
+            "match s.as_str() {",
+            "match java::non_null(missing.as_deref()) {",
+        ],
+    );
+    assert_lacks(&rust, &["'sw", "let mut case"]);
+}
+
+#[test]
+fn arrow_switch_expression_is_a_match_that_yields_a_value() {
+    let rust = translate(
+        "class A {
+            static int code(short s) {
+                int r = switch (s) {
+                    case 100 -> 1;
+                    case -4 -> { int t = s * 3; yield t; }
+                    default -> 0;
+                };
+                return r;
+            }
+            public static void main(String[] a) {
+                System.out.println(code((short) 100));
+            }
+        }",
+    );
+    assert_contains(&rust, &["let r = {", "match s {", "100 => {", "-4 => {", "let t = s as i32 * 3;"]);
+    assert_lacks(&rust, &["'sw"]);
+}
+
+#[test]
+fn switch_expression_that_yields_from_inside_an_if_is_a_labeled_block() {
+    let rust = translate(
+        "class A {
+            static String size(byte b) {
+                return switch (b) {
+                    case 0 -> \"zero\";
+                    default -> {
+                        if (b > 0) {
+                            yield \"big\";
+                        }
+                        yield \"negative\";
+                    }
+                };
+            }
+            public static void main(String[] a) {
+                System.out.println(size((byte) 9));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["'sw1: {", "break 'sw1 String::from(\"big\");", "break 'sw1 String::from(\"negative\");"],
+    );
+    assert_lacks(&rust, &["loop {"]);
+}
+
+#[test]
+fn fall_through_runs_a_state_machine_over_the_case_index() {
+    let rust = translate(
+        "class A {
+            static int run(int n) {
+                int x = 0;
+                switch (n) {
+                    case 1:
+                        x += 1;
+                    case 2:
+                        x += 2;
+                        break;
+                    default:
+                        x = 9;
+                }
+                return x;
+            }
+            public static void main(String[] a) {
+                System.out.println(run(1));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["let mut case: usize = match n {", "1 => 0,", "loop {", "match case {", "case = 1;"],
+    );
+}
+
+#[test]
+fn labeled_loops_and_blocks_are_named_by_their_jumps() {
+    let rust = translate(
+        "class A {
+            public static void main(String[] a) {
+                int found = 0;
+                search:
+                for (int i = 0; i < 6; i++) {
+                    for (int j = 0; j < 6; j++) {
+                        if (i * j == 12) {
+                            found = i;
+                            break search;
+                        }
+                    }
+                }
+                int pairs = 0;
+                outer:
+                for (int i = 0; i < 5; i++) {
+                    for (int j = 0; j < 5; j++) {
+                        if (j > i) {
+                            continue outer;
+                        }
+                        pairs++;
+                    }
+                }
+                int n = 0;
+                scan:
+                while (n < 100) {
+                    n += 7;
+                    if (n % 5 == 0) {
+                        break scan;
+                    }
+                }
+                int stage = 0;
+                block: {
+                    stage = 1;
+                    if (stage == 1) {
+                        break block;
+                    }
+                    stage = 2;
+                }
+                System.out.println(found + pairs + n + stage);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "'search: for i in 0..6 {",
+            "break 'search;",
+            "'outer: for i in 0..5 {",
+            "continue 'outer;",
+            "'block: {",
+            "break 'block;",
+        ],
+    );
+    // A `break` directly in the innermost loop needs no label, so `scan` is dropped.
+    assert_contains(&rust, &["while n < 100 {"]);
+    assert_lacks(&rust, &["'scan"]);
+}
+
+#[test]
+fn break_in_a_switch_inside_a_loop_leaves_the_switch_only() {
+    let rust = translate(
+        "class A {
+            public static void main(String[] a) {
+                int total = 0;
+                for (int i = 0; i < 4; i++) {
+                    switch (i) {
+                        case 1:
+                            if (i == 1) {
+                                break;
+                            }
+                            total += 5;
+                            break;
+                        default:
+                            total += i;
+                    }
+                    total += 10;
+                }
+                System.out.println(total);
+            }
+        }",
+    );
+    assert_contains(&rust, &["'sw1: {", "break 'sw1;"]);
+    assert_lacks(&rust, &["break;"]);
+}

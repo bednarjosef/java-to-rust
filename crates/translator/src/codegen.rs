@@ -17,12 +17,14 @@ mod primitives;
 mod statics;
 mod stmt;
 mod strings;
+mod switch;
 
 use code::*;
 use expr::Operand;
 use names::*;
 use null::is_null_test;
 use primitives::*;
+use switch::{Frame, Kind};
 
 mod arrays;
 mod modules;
@@ -56,7 +58,9 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         elements: HashMap::new(),
         out: String::new(),
         indent: 0,
-        loops: Vec::new(),
+        frames: Vec::new(),
+        pending: None,
+        labels: 0,
         ret: Type::Void,
         uses_runtime: false,
     };
@@ -151,7 +155,12 @@ struct Gen<'a> {
     elements: HashMap<ExprId, String>,
     out: String,
     indent: usize,
-    loops: Vec<Loop<'a>>,
+    /// The statements that Java can break out of or continue, innermost last (see `switch.rs`).
+    frames: Vec<Frame<'a>>,
+    /// The Java label of the statement whose frame opens next.
+    pending: Option<String>,
+    /// How many Rust labels have been made for statements without a Java label.
+    labels: usize,
     /// The return type of the current method.
     ret: Type,
     uses_runtime: bool,

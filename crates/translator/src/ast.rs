@@ -231,6 +231,36 @@ pub enum Stmt {
     Break,
     Continue,
     Block(Vec<Stmt>),
+    /// A `switch` statement on an integer, `char` or `String` selector.
+    Switch {
+        selector: Expr,
+        cases: Vec<Case>,
+    },
+    /// `label: body`: a loop or a block that `break label` or `continue label` names.
+    Labeled {
+        label: String,
+        body: Box<Stmt>,
+    },
+    /// `break label;`, leaving the labeled statement.
+    BreakLabel(String),
+    /// `continue label;`, continuing the labeled loop.
+    ContinueLabel(String),
+    /// `yield value;`, the value of the innermost switch expression.
+    Yield(Expr),
+}
+
+/// One `case` group of a switch: the labels that select it and its statements. A group falls
+/// through into the next one unless its statements end by leaving (`break`, `return`, ...). An
+/// arrow case ends with a `Break`, so it never falls through.
+pub struct Case {
+    pub labels: Vec<CaseLabel>,
+    pub body: Vec<Stmt>,
+}
+
+pub enum CaseLabel {
+    /// A constant of the selector's type.
+    Value(Expr),
+    Default,
 }
 
 /// Identifies an expression, for facts that analyses attach to it.
@@ -324,6 +354,11 @@ pub enum ExprKind {
     EnumConstant {
         class: usize,
         ordinal: usize,
+    },
+    /// A `switch` expression; its value is the `yield` (or arrow expression) that runs.
+    Switch {
+        selector: Box<Expr>,
+        cases: Vec<Case>,
     },
 }
 
@@ -578,7 +613,24 @@ pub fn visit_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn
             visit_stmt(body, on_expr, on_stmt);
         }
         Stmt::Block(stmts) => stmts.iter().for_each(|s| visit_stmt(s, on_expr, on_stmt)),
-        Stmt::Return(None, _) | Stmt::Break | Stmt::Continue => {}
+        Stmt::Switch { selector, cases } => {
+            on_expr(selector);
+            for case in cases {
+                for label in &case.labels {
+                    if let CaseLabel::Value(e) = label {
+                        on_expr(e);
+                    }
+                }
+                case.body.iter().for_each(|s| visit_stmt(s, on_expr, on_stmt));
+            }
+        }
+        Stmt::Labeled { body, .. } => visit_stmt(body, on_expr, on_stmt),
+        Stmt::Yield(e) => on_expr(e),
+        Stmt::Return(None, _)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::BreakLabel(_)
+        | Stmt::ContinueLabel(_) => {}
     }
 }
 
@@ -613,6 +665,19 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }
         | ExprKind::ThisCall { args, .. } => args.iter().for_each(|a| visit_expr(a, f)),
+        ExprKind::Switch { selector, cases } => {
+            visit_expr(selector, f);
+            for case in cases {
+                for label in &case.labels {
+                    if let CaseLabel::Value(e) = label {
+                        visit_expr(e, f);
+                    }
+                }
+                for stmt in &case.body {
+                    visit_stmt(stmt, &mut |e| visit_expr(e, f), &mut |_| {});
+                }
+            }
+        }
         _ => {}
     }
 }

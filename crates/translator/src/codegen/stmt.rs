@@ -2,16 +2,12 @@
 
 use super::*;
 
-/// Whether a loop body contains a `continue` of that loop (not of a nested loop).
+/// Whether a loop body contains a `continue`, labeled or not. This is conservative: a `continue`
+/// of a nested loop does not need the loop's steps, but counting it costs only a plainer frame.
 pub(super) fn has_continue(body: &Stmt) -> bool {
-    match body {
-        Stmt::Continue => true,
-        Stmt::Block(stmts) => stmts.iter().any(has_continue),
-        Stmt::If { then, otherwise, .. } => {
-            has_continue(then) || otherwise.as_deref().is_some_and(has_continue)
-        }
-        _ => false,
-    }
+    let mut found = false;
+    visit_stmt(body, &mut |_| {}, &mut |s| found |= matches!(s, Stmt::Continue | Stmt::ContinueLabel(_)));
+    found
 }
 
 impl<'a> Gen<'a> {
@@ -122,20 +118,13 @@ impl<'a> Gen<'a> {
                 let code = self.returned(value);
                 self.line(&format!("return {};", code.text));
             }
-            Stmt::Break => self.line("break;"),
-            Stmt::Continue => match self.loops.last().copied() {
-                Some(Loop::For(update)) => {
-                    for u in update {
-                        self.effect(u);
-                    }
-                    self.line("continue;");
-                }
-                Some(Loop::DoWhile(cond)) => {
-                    self.exit_unless(cond);
-                    self.line("continue;");
-                }
-                _ => self.line("continue;"),
-            },
+            Stmt::Break => self.plain_jump(false),
+            Stmt::Continue => self.plain_jump(true),
+            Stmt::Switch { selector, cases } => self.switch_form(selector, cases, None),
+            Stmt::Labeled { label, body } => self.labeled(label, body),
+            Stmt::BreakLabel(label) => self.labeled_jump(label, false),
+            Stmt::ContinueLabel(label) => self.labeled_jump(label, true),
+            Stmt::Yield(value) => self.yield_value(value),
             Stmt::Block(stmts) => {
                 self.line("{");
                 self.indent += 1;
@@ -178,15 +167,16 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
+    /// The body of a loop whose header was just written: the loop is a frame around it.
     pub(super) fn loop_body(&mut self, kind: Loop<'a>, body: &'a Stmt, update: &'a [Expr]) {
-        self.loops.push(kind);
+        self.open(Kind::Loop(kind));
         self.nested(body);
         self.indent += 1;
         for u in update {
             self.effect(u);
         }
         self.indent -= 1;
-        self.loops.pop();
+        self.close();
     }
 
     pub(super) fn for_loop(

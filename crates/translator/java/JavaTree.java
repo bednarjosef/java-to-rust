@@ -156,7 +156,7 @@ public class JavaTree {
             Set<String> seen = new HashSet<>();
             for (Method m : t.getMethods()) {
                 if (m.getParameterCount() == 0 && m.getDeclaringClass() != Tree.class
-                        && m.getDeclaringClass() != Object.class && !m.isDefault()
+                        && m.getDeclaringClass() != Object.class
                         && (m.getName().startsWith("get") || m.getName().startsWith("is"))
                         && seen.add(m.getName())) {
                     out.add(m);

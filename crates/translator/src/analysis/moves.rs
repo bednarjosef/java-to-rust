@@ -128,7 +128,27 @@ impl Walk {
                 self.scope.truncate(mark);
                 self.loops -= 1;
             }
-            Stmt::Return(None, _) | Stmt::Break | Stmt::Continue => {}
+            Stmt::Switch { selector, cases } => {
+                self.expr(selector);
+                // The cases share one scope. A switch with fall-through is a `loop` in Rust, which
+                // would not let a value move inside it, so the cases count as a loop.
+                self.loops += 1;
+                let mark = self.scope.len();
+                for case in cases {
+                    for s in &case.body {
+                        self.stmt(s);
+                    }
+                }
+                self.scope.truncate(mark);
+                self.loops -= 1;
+            }
+            Stmt::Labeled { body, .. } => self.scoped(body),
+            Stmt::Yield(e) => self.expr(e),
+            Stmt::Return(None, _)
+            | Stmt::Break
+            | Stmt::Continue
+            | Stmt::BreakLabel(_)
+            | Stmt::ContinueLabel(_) => {}
             Stmt::Block(stmts) => self.block(stmts),
         }
     }

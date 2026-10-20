@@ -145,7 +145,7 @@ impl<'t> Lowering<'t> {
         }
         let init = node.get("initializer");
         // Java gives these fields `null`, which is not supported yet.
-        if init.is_none() && ty == Type::String {
+        if init.is_none() && matches!(ty, Type::String | Type::Array(_)) {
             return unsupported(node, "null");
         }
         let constant = Self::is_constant(node);

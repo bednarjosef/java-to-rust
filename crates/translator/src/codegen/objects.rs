@@ -82,9 +82,11 @@ pub(super) fn cell_name(class: &str, field: &str) -> String {
 }
 
 /// The value a field has before its constructor runs: Java's default, or a placeholder that the
-/// initializers overwrite. Object fields have no placeholder, so lowering rejects them.
+/// initializers overwrite. Object fields have no placeholder, so lowering rejects them, and it
+/// rejects string and array fields without an initializer, which Java sets to `null`.
 pub(super) fn default_value(ty: Type) -> &'static str {
     match ty {
+        Type::Array(_) => "java::from_vec(Vec::new())",
         Type::Int | Type::Long | Type::Byte | Type::Short | Type::Char => "0",
         Type::Double | Type::Float => "0.0",
         Type::Boolean => "false",
@@ -124,7 +126,14 @@ fn own_exprs(stmt: &Stmt) -> Vec<&Expr> {
         Stmt::If { cond, .. } | Stmt::While { cond, .. } | Stmt::DoWhile { cond, .. } => vec![cond],
         Stmt::ForEach { array, .. } => vec![array],
         Stmt::For { cond, update, .. } => cond.iter().chain(update.iter()).collect(),
-        Stmt::Return(None, _) | Stmt::Break | Stmt::Continue | Stmt::Block(_) => Vec::new(),
+        Stmt::Switch { selector: e, .. } | Stmt::Yield(e) => vec![e],
+        Stmt::Return(None, _)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Block(_)
+        | Stmt::Labeled { .. }
+        | Stmt::BreakLabel(_)
+        | Stmt::ContinueLabel(_) => Vec::new(),
     }
 }
 
