@@ -25,6 +25,7 @@ mod moves;
 mod nullness;
 mod objects;
 mod owned;
+mod patterns;
 mod ranges;
 mod statics;
 
@@ -166,9 +167,11 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     facts.isolated = borrowing.isolated;
     facts.writers = borrowing.writers;
     validate(class, &facts)?;
+    patterns::check(class)?;
     facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
     nullness::analyze(class, &mut facts);
+    patterns::check_enum_casts(class, &facts)?;
     boxing::analyze(class, &mut facts);
     borrowed_params(class, &mut facts);
     facts.borrowed_objects = borrowed_objects(class, &facts);

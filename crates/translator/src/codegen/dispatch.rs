@@ -36,6 +36,20 @@ pub(super) enum Need {
     Convert(usize, usize),
     /// The enum's `Display`.
     Display(usize),
+    /// `as_<t>()` on the enum of `s`: the object as a value of type `t` if it is one, as
+    /// `(s, t)`.
+    Narrow(usize, usize),
+}
+
+/// How a value of one class type becomes a value of another, in a cast or an `instanceof`.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Narrowing {
+    /// The value's type is the target type or below it: every object of it is one of the target.
+    Up,
+    /// The value is of the enum of this type, whose variants are tested.
+    Down(usize),
+    /// The value's class is known, and whether it is of the target type.
+    Known(bool),
 }
 
 impl<'a> Gen<'a> {
@@ -49,6 +63,9 @@ impl<'a> Gen<'a> {
             Need::Convert(s, t) => {
                 needs.insert(Need::Enum(s));
                 needs.insert(Need::Enum(t));
+            }
+            Need::Narrow(s, _) => {
+                needs.insert(Need::Enum(s));
             }
             Need::Body(i) => {
                 if let Home::Enum(t) = self.homes[i] {
@@ -110,6 +127,157 @@ impl<'a> Gen<'a> {
     fn to_name(&self, t: usize) -> String {
         let simple = self.class.types[t].name.rsplit(['.', '$']).next().unwrap_or_default();
         format!("to_{}", snake_case(simple).trim_end_matches('_'))
+    }
+
+    /// The name of the checked conversion to type `t`: `as_circle`.
+    fn as_name(&self, t: usize) -> String {
+        let simple = self.class.types[t].name.rsplit(['.', '$']).next().unwrap_or_default();
+        format!("as_{}", snake_case(simple).trim_end_matches('_'))
+    }
+
+    /// The binary name of type `t`, as the JVM shows it: `shapes.Outer$Inner`.
+    fn binary_name(&self, t: usize) -> String {
+        let decl = &self.class.types[t];
+        match decl.name.strip_prefix(&decl.package).and_then(|rest| rest.strip_prefix('.')) {
+            Some(rest) if !decl.package.is_empty() => format!("{}.{}", decl.package, rest.replace('.', "$")),
+            _ => decl.name.replace('.', "$"),
+        }
+    }
+
+    /// The type of the program that a class or enum type names.
+    pub(super) fn type_of(&self, ty: Type) -> Option<usize> {
+        match ty {
+            Type::Class(name) | Type::Enum(name) => self.class.type_index(name),
+            _ => None,
+        }
+    }
+
+    /// The Java type of the values of type `t`.
+    fn java_type(&self, t: usize) -> Type {
+        let decl = &self.class.types[t];
+        if decl.kind == TypeKind::Enum { Type::enum_type(&decl.name) } else { Type::class(&decl.name) }
+    }
+
+    /// How the value of `value`, of a class or enum type, becomes a value of class or enum type
+    /// `to`.
+    pub(super) fn narrowing(&self, value: &Expr, to: Type) -> Narrowing {
+        let h = &self.class.hierarchy;
+        let (Some(s), Some(t)) = (self.type_of(value.ty), self.type_of(to)) else { return Narrowing::Up };
+        if h.is_subtype(s, t) {
+            return Narrowing::Up;
+        }
+        match self.enum_of(value) {
+            Some(e) => Narrowing::Down(e),
+            None => Narrowing::Known(h.is_subtype(self.value_class(value), t)),
+        }
+    }
+
+    /// The variants of the enum of `s` whose objects are of type `t`.
+    fn passing(&self, s: usize, t: usize) -> Vec<usize> {
+        self.enum_variants(s).into_iter().filter(|&c| self.class.hierarchy.is_subtype(c, t)).collect()
+    }
+
+    /// The text of the value of `value` for a method to be called on it in a condition: a local
+    /// or `this` as it is, anything else in a block of its own, so that no borrow it makes
+    /// outlives the test (a let chain keeps its temporaries alive through the guarded block).
+    fn tested(&mut self, value: &'a Expr, text: String) -> String {
+        match self.peel(value).kind {
+            ExprKind::Var(_) | ExprKind::This => text,
+            _ => format!("{{ let value = {text}; value }}"),
+        }
+    }
+
+    /// `(T) value`, a checked downcast, or a cast across, from the enum of `s`.
+    fn downcast(&mut self, s: usize, to: Type, value: &'a Expr) -> Code {
+        let t = self.type_of(to).expect("a cast to a type of the program");
+        self.need(Need::Narrow(s, t));
+        let name = self.as_name(t);
+        let cast = self.runtime("cast");
+        let target = rust_string(&self.binary_name(t));
+        if self.nullable(value) {
+            let option = self.object_place(value);
+            let enum_name = struct_name(&self.class.types[s].name);
+            return Code::atom(format!(
+                "{option}.as_ref().map(|o| {cast}({enum_name}::{name}(o), {target}))"
+            ));
+        }
+        let obj = self.object(value);
+        Code::atom(format!("{cast}({obj}.{name}(), {target})"))
+    }
+
+    /// A cast of a value whose class is known to a type that it is not of, which always fails
+    /// (unless the value is null).
+    fn failing_cast(&mut self, to: Type, value: &'a Expr) -> Code {
+        let t = self.type_of(to).expect("a cast to a type of the program");
+        let failed = format!("{}({})", self.runtime("cast_failed"), rust_string(&self.binary_name(t)));
+        if self.nullable(value) {
+            let option = self.object_place(value);
+            let ty = self.ty_name(to);
+            return Code::atom(format!("{option}.as_ref().map(|_| -> {ty} {{ {failed} }})"));
+        }
+        let v = self.expr(value).text;
+        Code::new(format!("{{ let _ = {v}; {failed} }}"), LOWEST)
+    }
+
+    /// `value instanceof T`.
+    pub(super) fn instance_test(&mut self, value: &'a Expr, to: Type) -> Code {
+        let nullable = self.nullable(value);
+        let known = |g: &mut Self, passes: bool| {
+            if nullable && passes {
+                return Code::atom(format!("{}.is_some()", g.object_place(value)));
+            }
+            let text = passes.to_string();
+            if matches!(g.peel(value).kind, ExprKind::Var(_) | ExprKind::This) {
+                return Code::atom(text);
+            }
+            let v = g.expr(value).text;
+            Code::new(format!("{{ let _ = {v}; {text} }}"), LOWEST)
+        };
+        match self.narrowing(value, to) {
+            Narrowing::Up => known(self, true),
+            Narrowing::Known(passes) => known(self, passes),
+            Narrowing::Down(s) => {
+                let t = self.type_of(to).expect("a test of a type of the program");
+                let passing = self.passing(s, t);
+                if passing.is_empty() {
+                    return known(self, false);
+                }
+                let patterns: Vec<String> =
+                    passing.iter().map(|&c| format!("{}(_)", self.variant(s, c))).collect();
+                let patterns = patterns.join(" | ");
+                let text = if nullable {
+                    format!("matches!({}, Some({patterns}))", self.object_place(value))
+                } else {
+                    format!("matches!({}, {patterns})", self.object(value))
+                };
+                Code::atom(text)
+            }
+        }
+    }
+
+    /// The `Option` that `value instanceof T name` binds `name` from: the value as a `T` when the
+    /// test passes.
+    pub(super) fn pattern_source(&mut self, value: &'a Expr, to: Type) -> String {
+        let nullable = self.nullable(value);
+        match self.narrowing(value, to) {
+            Narrowing::Up | Narrowing::Known(true) => {
+                let v = self.class_cast(to, value).text;
+                if nullable { v } else { format!("Some({v})") }
+            }
+            Narrowing::Known(false) => format!("None::<{}>", self.ty_name(to)),
+            Narrowing::Down(s) => {
+                let t = self.type_of(to).expect("a test of a type of the program");
+                self.need(Need::Narrow(s, t));
+                let name = self.as_name(t);
+                let text = if nullable {
+                    let enum_name = struct_name(&self.class.types[s].name);
+                    format!("{}.as_ref().and_then({enum_name}::{name})", self.object_place(value))
+                } else {
+                    format!("{}.{name}()", self.object(value))
+                };
+                self.tested(value, text)
+            }
+        }
     }
 
     /// Whether the variant of `c` holds a value of an enum that implements the type, which is
@@ -209,10 +377,15 @@ impl<'a> Gen<'a> {
     /// A conversion of an object to a supertype: the same object as a value of the supertype's
     /// enum. Where both types have the same representation it changes nothing.
     pub(super) fn class_cast(&mut self, to: Type, value: &'a Expr) -> Code {
-        let Some(t) = self.enum_type(to) else { return self.expr(value) };
         if matches!(value.kind, ExprKind::Null) {
             return Code::atom("None");
         }
+        match self.narrowing(value, to) {
+            Narrowing::Down(s) => return self.downcast(s, to, value),
+            Narrowing::Known(false) => return self.failing_cast(to, value),
+            Narrowing::Up | Narrowing::Known(true) => {}
+        }
+        let Some(t) = self.enum_type(to) else { return self.expr(value) };
         // A new object becomes a value of the target's enum directly.
         if let ExprKind::New { ctor: Some(ctor), args, .. } = &value.kind {
             return self.new_object_as(*ctor, args, Some(t));
@@ -391,6 +564,7 @@ impl<'a> Gen<'a> {
                 Need::Base(s) if s == t => self.base_fn(t, false),
                 Need::BaseMut(s) if s == t => self.base_fn(t, true),
                 Need::Convert(s, to) if s == t => self.convert_fn(t, to),
+                Need::Narrow(s, to) if s == t => self.narrow_fn(t, to),
                 Need::Dispatch(s, group) if s == t => self.dispatcher(t, group),
                 Need::Body(i) if self.homes[i] == Home::Enum(t) => {
                     self.gap();
@@ -484,6 +658,38 @@ impl<'a> Gen<'a> {
         self.match_arms(t, &variants, &|g: &mut Self, c| {
             (format!("{}({})", g.variant(to, c), g.held(c)), true)
         });
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// `as_<to>()`: the object as a value of type `to` if it is one, else `None`.
+    fn narrow_fn(&mut self, t: usize, to: usize) {
+        let variants = self.enum_variants(t);
+        let ty = self.java_type(to);
+        let target = self.ty_name(ty);
+        let rep = (self.class.types[to].kind != TypeKind::Enum).then(|| self.enum_for(to)).flatten();
+        self.gap();
+        self.line(&format!("{}fn {}(&self) -> Option<{target}> {{", self.vis(), self.as_name(to)));
+        self.indent += 1;
+        let passing = self.passing(t, to);
+        if passing.is_empty() {
+            self.line("None");
+        } else {
+            self.line("match self {");
+            self.indent += 1;
+            for &c in &passing {
+                let value = match rep {
+                    Some(e) => format!("{}({})", self.variant(e, c), self.held(c)),
+                    None => self.held(c).to_string(),
+                };
+                self.line(&format!("{}(o) => Some({value}),", self.variant(t, c)));
+            }
+            if passing.len() < variants.len() {
+                self.line("_ => None,");
+            }
+            self.indent -= 1;
+            self.line("}");
+        }
         self.indent -= 1;
         self.line("}");
     }

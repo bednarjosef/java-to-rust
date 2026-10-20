@@ -432,9 +432,8 @@ impl<'t> Lowering<'t> {
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
                 let value = self.expr(node.child("expression")?)?;
-                if matches!(ty, Type::Class(_)) && ty != value.ty && value.ty != Type::Null {
-                    return unsupported(node, "casts between class types");
-                }
+                // A cast between the program's types, up, down or across: `Cast` converts as the
+                // implicit upcasts do, and checks a downcast.
                 ExprKind::Cast(ty, Box::new(value))
             }
             "CONDITIONAL_EXPRESSION" => {
@@ -463,7 +462,7 @@ impl<'t> Lowering<'t> {
                 None => self.select(node)?,
             },
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => return unsupported(node, "lambdas"),
-            "INSTANCE_OF" => return unsupported(node, "instanceof"),
+            "INSTANCE_OF" => self.instance_of(node)?,
             "SWITCH_EXPRESSION" => self.switch_expr(node)?,
             kind => {
                 let left = node.child("leftOperand");
@@ -504,7 +503,12 @@ impl<'t> Lowering<'t> {
     /// The name of the local variable or parameter that an identifier refers to.
     fn local(&self, node: Node) -> Result<String, Error> {
         match node.symbol() {
-            Some(s) if matches!(s.kind, "LOCAL_VARIABLE" | "PARAMETER" | "EXCEPTION_PARAMETER") => {
+            Some(s)
+                if matches!(
+                    s.kind,
+                    "LOCAL_VARIABLE" | "PARAMETER" | "EXCEPTION_PARAMETER" | "BINDING_VARIABLE"
+                ) =>
+            {
                 Ok(node.str("name").to_string())
             }
             _ => unsupported(node, &format!("the name `{}` here", node.str("name"))),
@@ -517,6 +521,9 @@ impl<'t> Lowering<'t> {
             return Ok(place);
         }
         match node.kind() {
+            "IDENTIFIER" if node.symbol().is_some_and(|s| s.kind == "BINDING_VARIABLE") => {
+                unsupported(node, "assigning a pattern variable")
+            }
             "IDENTIFIER" => Ok(Place::Var(self.local(node)?)),
             "ARRAY_ACCESS" => {
                 let (array, index) = self.index(node)?;

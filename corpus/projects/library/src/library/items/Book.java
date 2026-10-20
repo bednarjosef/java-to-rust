@@ -13,6 +13,10 @@ public class Book implements Item, Comparable<Book> {
         return title;
     }
 
+    public int pages() {
+        return pages;
+    }
+
     public int days() {
         return pages > 300 ? LOAN_DAYS * 2 : LOAN_DAYS;
     }

@@ -2916,3 +2916,110 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     );
     assert!(err.contains("constructors that throw an exception that is caught not supported yet"), "{err}");
 }
+
+const PATTERNS: &str = "
+    interface Shape { double area(); }
+    class Circle implements Shape {
+        final double r;
+        Circle(double r) { this.r = r; }
+        public double area() { return 3.0 * r * r; }
+    }
+    class Rect implements Shape {
+        final double w, h;
+        Rect(double w, double h) { this.w = w; this.h = h; }
+        public double area() { return w * h; }
+    }
+    enum Unit implements Shape { ONE; public double area() { return 1; } }
+    class Main {
+        static String show(Shape s) {
+            if (s instanceof Circle c) return \"circle \" + c.r;
+            else if (s instanceof Rect r && r.w == r.h) return \"square \" + r.w;
+            if (!(s instanceof Rect r)) return \"unit \" + ((Unit) s).ordinal();
+            return \"rect \" + r.w;
+        }
+        static boolean round(Shape s) { return s instanceof Circle; }
+        static boolean wide(Shape s) { return s instanceof Rect r && r.w > r.h; }
+        public static void main(String[] args) {
+            Shape[] all = { new Circle(1), new Rect(2, 2), new Rect(3, 1), Unit.ONE };
+            for (Shape s : all) System.out.println(show(s) + \" \" + round(s) + \" \" + wide(s));
+            Rect r = (Rect) all[1];
+            System.out.println(r.h);
+        }
+    }";
+
+#[test]
+fn instanceof_is_a_match_on_the_enum() {
+    let rust = translate(PATTERNS);
+    assert_contains(&rust, &["fn round(s: Shape) -> bool {\n    matches!(s, Shape::Circle(_))\n}"]);
+}
+
+#[test]
+fn a_pattern_binds_the_object_with_if_let() {
+    let rust = translate(PATTERNS);
+    assert_contains(
+        &rust,
+        &[
+            "    fn as_rect(&self) -> Option<Rc<Rect>> {\n        match self {\n            Shape::Rect(o) => Some(o.clone()),\n            _ => None,\n        }\n    }",
+            "    if let Some(c) = s.as_circle() {\n",
+            "    } else if let Some(r) = s.as_rect() && r.w == r.h {\n",
+            "    s.as_rect().is_some_and(|r| r.w > r.h)",
+        ],
+    );
+}
+
+#[test]
+fn a_negated_pattern_that_returns_is_let_else() {
+    let rust = translate(PATTERNS);
+    assert_contains(
+        &rust,
+        &["    let Some(r) = s.as_rect() else {\n", "    format!(\"rect {}\", java::Double(r.w))"],
+    );
+}
+
+#[test]
+fn downcasts_are_checked() {
+    let rust = translate(PATTERNS);
+    assert_contains(
+        &rust,
+        &[
+            "let r = java::cast(all[1].as_rect(), \"Rect\");",
+            "java::cast(s.as_unit(), \"Unit\") as i32",
+            "    fn as_unit(&self) -> Option<Unit> {\n        match self {\n            Shape::Unit(o) => Some(*o),",
+        ],
+    );
+}
+
+#[test]
+fn pattern_variables_are_read_only_where_the_translation_binds_them() {
+    let err = java_to_rust::translate(
+        "interface S {}
+        class A implements S { int v = 1; }
+        class B implements S {}
+        class M {
+            static int f(S s) {
+                if (!(s instanceof A a) || a.v == 0) return 0;
+                return a.v;
+            }
+            public static void main(String[] x) { System.out.println(f(new A()) + f(new B())); }
+        }",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("a pattern variable used here not supported yet"), "{err}");
+}
+
+#[test]
+fn a_cast_of_a_value_that_may_be_null_to_an_enum_is_rejected() {
+    let err = java_to_rust::translate(
+        "interface S {}
+        enum E implements S { X }
+        class M {
+            static S pick(int i) { return i == 0 ? null : E.X; }
+            public static void main(String[] x) { E e = (E) pick(1); System.out.println(e); }
+        }",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("casting a value that may be null to an enum not supported yet"),
+        "{err}"
+    );
+}

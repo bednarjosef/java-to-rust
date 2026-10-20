@@ -116,9 +116,13 @@ abstract methods, overriding and virtual calls, `super(...)` and `super.m(...)`,
 objects of a class tree, and printing through the class's `toString`. So do the program's
 interfaces: abstract, default, private and static methods, constants, interfaces extending
 interfaces, `Iface.super.m()`, classes and enums implementing them, and `Comparable` implemented by
-a class that calls `compareTo` directly. `instanceof`, casts between class types, `Object`, other
-interfaces of the JDK (`Runnable`, `Comparable` as a type), lambdas and generics are rejected with
-an error that names the construct and its position. So
+a class that calls `compareTo` directly. Between the program's own types, `instanceof` is a
+`matches!` on the type's enum, a pattern `x instanceof Circle c` binds `c` with `if let`, a let
+chain, `let .. else` (for `if (!(x instanceof Circle c)) return ..;`) or `is_some_and`, and a
+downcast or a cast across interfaces is checked, throwing `ClassCastException` when it fails. A
+pattern variable read anywhere else is rejected. `Object`, other interfaces of the JDK
+(`Runnable`, `Comparable` as a type), lambdas and generics are rejected with an error that names
+the construct and its position. So
 are the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and the like),
 `Character.toChars(int, char[], int)`, and the unsigned and parse methods with other argument counts.
 The design of the object model, and what is still to come, is in

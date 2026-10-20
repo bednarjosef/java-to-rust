@@ -46,6 +46,24 @@ impl<'t> Lowering<'t> {
         Ok(out)
     }
 
+    /// `value instanceof T` and `value instanceof T name` on a value of the program's types.
+    pub(super) fn instance_of(&self, node: Node<'t>) -> Result<ExprKind, Error> {
+        let value = self.expr(node.child("expression")?)?;
+        let type_node = node.child("type")?;
+        let ty = self.ty(type_node, type_node.java_type())?;
+        let binding = match node.get("pattern") {
+            Some(p) if p.kind() == "BINDING_PATTERN" => Some(p.child("variable")?.str("name").to_string()),
+            Some(p) => return unsupported(p, "record patterns"),
+            None => None,
+        };
+        if !matches!(value.ty, Type::Class(_) | Type::Enum(_))
+            || !matches!(ty, Type::Class(_) | Type::Enum(_))
+        {
+            return unsupported(node, "instanceof on these types");
+        }
+        Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
+    }
+
     /// Whether type `a` is type `b` or a subtype of it, through superclasses and interfaces.
     pub(super) fn is_subclass(&self, a: usize, b: usize) -> bool {
         a == b

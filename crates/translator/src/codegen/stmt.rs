@@ -23,6 +23,9 @@ impl<'a> Gen<'a> {
                 }
                 continue;
             }
+            if self.early_pattern_exit(stmt, rest) {
+                continue;
+            }
             match stmt {
                 // A `throw` that ends a method that throws is its `Err` result.
                 Stmt::Throw(value) if tail && rest.is_empty() && self.throwing => {
@@ -74,15 +77,19 @@ impl<'a> Gen<'a> {
                 if self.narrow_if(cond, then, otherwise.as_deref()) {
                     return;
                 }
-                let cond_text = self.condition(cond);
+                let (cond_text, narrowed) = self.guard(cond, then);
                 self.line(&format!("if {cond_text} {{"));
                 self.nested(then);
+                self.unnarrow(narrowed);
                 let mut otherwise = otherwise.as_deref();
                 while let Some(stmt) = otherwise {
-                    if let Stmt::If { cond, then, otherwise: next } = stmt {
-                        let cond_text = self.condition(cond);
+                    if let Stmt::If { cond, then, otherwise: next } = stmt
+                        && !self.narrows_else(cond, next.as_deref())
+                    {
+                        let (cond_text, narrowed) = self.guard(cond, then);
                         self.line(&format!("}} else if {cond_text} {{"));
                         self.nested(then);
+                        self.unnarrow(narrowed);
                         otherwise = next.as_deref();
                     } else {
                         self.line("} else {");
@@ -288,6 +295,15 @@ impl<'a> Gen<'a> {
                 };
                 self.line(&format!("let {mutable}{rust}{annotation} = {};", code.text));
             }
+        }
+    }
+
+    /// The condition of an `if` that guards `then`: a let chain where it binds (see `let_chain`),
+    /// and the names it narrows for `then`, which the caller unnarrows after it.
+    fn guard(&mut self, cond: &'a Expr, then: &'a Stmt) -> (String, Vec<String>) {
+        match self.let_chain(cond, &[then], &[]) {
+            Some(chain) => chain,
+            None => (self.condition(cond), Vec::new()),
         }
     }
 

@@ -1429,7 +1429,9 @@ impl<'a> Gen<'a> {
                         _ => self.quiet(x, depth),
                     })
             }
-            ExprKind::Unary(_, x) | ExprKind::Cast(_, x) => self.quiet(x, depth),
+            ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::InstanceOf { value: x, .. } => {
+                self.quiet(x, depth)
+            }
             ExprKind::Conditional(c, a, b) => [c, a, b].iter().all(|x| self.quiet(x, depth)),
             _ => false,
         }

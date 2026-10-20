@@ -411,6 +411,13 @@ pub enum ExprKind {
         prefix: bool,
     },
     Cast(Type, Box<Expr>),
+    /// `value instanceof T`, or with a pattern, `value instanceof T binding`, which binds the
+    /// variable `binding` where the test is true.
+    InstanceOf {
+        value: Box<Expr>,
+        ty: Type,
+        binding: Option<String>,
+    },
     /// `new T[d1][d2]...` with the given sizes; `ty` is the full array type.
     NewArray(Vec<Expr>),
     /// `{a, b, c}` or `new T[] {a, b, c}`; `ty` is the array type.
@@ -871,6 +878,7 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     match &e.kind {
         ExprKind::Unary(_, x)
         | ExprKind::Cast(_, x)
+        | ExprKind::InstanceOf { value: x, .. }
         | ExprKind::Length(x)
         | ExprKind::Field { object: x, .. } => visit_expr(x, f),
         ExprKind::Assign { target, value, .. } => {

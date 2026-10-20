@@ -579,4 +579,18 @@ fn collect_locals(stmts: &[Stmt], out: &mut Vec<String>) {
             }
         });
     }
+    // The variables of patterns.
+    for stmt in stmts {
+        visit_stmt(
+            stmt,
+            &mut |e| {
+                visit_expr(e, &mut |x| {
+                    if let ExprKind::InstanceOf { binding: Some(name), .. } = &x.kind {
+                        out.push(name.clone());
+                    }
+                })
+            },
+            &mut |_| {},
+        );
+    }
 }

@@ -236,6 +236,21 @@ pub fn throw(class: &str, message: &str) -> ! {
     exception::die(format_args!("{class}: {message}"))
 }
 
+/// Java's checked cast `(T) x` on a non-null object: the object as a `T` if it is one, which
+/// the translation finds (`x.as_t()`), else a `ClassCastException`. `to` is the binary name of
+/// `T`.
+pub fn cast<T>(value: Option<T>, to: &str) -> T {
+    match value {
+        Some(value) => value,
+        None => cast_failed(to),
+    }
+}
+
+/// The `ClassCastException` of a cast to class `to` (by binary name) that fails.
+pub fn cast_failed(to: &str) -> ! {
+    throw("java.lang.ClassCastException", &format!("cannot be cast to class {to}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
