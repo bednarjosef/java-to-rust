@@ -146,10 +146,13 @@ fn string_building_appends_in_place() {
 fn field_reads_are_braced_only_beside_a_mutable_borrow() {
     let rust = translate(
         "class P { int x; int y = x + 1; void set(int v) { x = v; } }
-        class A { public static void main(String[] a) {
-            P p = new P();
-            System.out.println(p.x);
-        } }",
+        class A {
+            static void share(P q) {}
+            public static void main(String[] a) {
+                P p = new P();
+                System.out.println(p.x);
+            }
+        }",
     );
     assert_contains(&rust, &["println!(\"{}\", p.borrow().x);", "this.borrow_mut().y = { this.borrow().x }"]);
     assert_lacks(&rust, &["{ p.borrow()"]);
@@ -161,6 +164,7 @@ fn field_read_arguments_beside_a_call_bind_in_a_let() {
         "class P { int x; void set(int v) { x = v; } }
         class A {
             static int f(int v) { return v + 1; }
+            static void share(P q) {}
             public static void main(String[] a) { P p = new P(); System.out.println(f(p.x)); }
         }",
     );
@@ -224,7 +228,63 @@ fn immutable_objects_are_shared_without_a_refcell() {
 fn an_object_written_outside_its_constructor_keeps_its_refcell() {
     let rust = translate(
         "class P { int x; void set(int v) { x = v; } }
-        class A { public static void main(String[] a) { P p = new P(); p.set(2); } }",
+        class A {
+            static void share(P q) {}
+            public static void main(String[] a) { P p = new P(); p.set(2); }
+        }",
     );
     assert_contains(&rust, &["Rc<RefCell<P>>", "fn set(this: &Rc<RefCell<P>>, v: i32)"]);
+}
+
+#[test]
+fn an_object_that_is_never_shared_is_a_plain_value() {
+    let rust = translate(
+        "class P { int x; P(int x) { this.x = x; } void set(int v) { x = v; } int get() { return x; } }
+        class A { public static void main(String[] a) {
+            P p = new P(1);
+            p.set(p.x + 1);
+            System.out.println(p.get());
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn new(x: i32) -> P {",
+            "let mut this = P { x: 0 };",
+            "fn set(&mut self, v: i32) {",
+            "fn get(&self) -> i32 {",
+            "let mut p = P::new(1);",
+            "p.set(p.x.wrapping_add(1));",
+            "println!(\"{}\", p.get());",
+        ],
+    );
+    assert_lacks(&rust, &["RefCell", "Rc", "borrow"]);
+}
+
+#[test]
+fn printing_an_object_does_not_share_it() {
+    let rust = translate(
+        "class P { int x; void set(int v) { x = v; } public String toString() { return \"p\" + x; } }
+        class A { public static void main(String[] a) {
+            P p = new P();
+            p.set(2);
+            System.out.println(p);
+            System.out.println(\"p=\" + p);
+        } }",
+    );
+    assert_contains(&rust, &["let mut p = P::new();", "println!(\"{}\", P::to_string(&p));"]);
+    assert_lacks(&rust, &["RefCell", "Rc"]);
+}
+
+#[test]
+fn a_local_that_no_later_statement_changes_is_not_mut() {
+    let rust = translate(
+        "class P { int x; P(int x) { this.x = x; } int get() { return x; } }
+        class A { public static void main(String[] a) {
+            P p = new P(1);
+            System.out.println(p.get());
+        } }",
+    );
+    assert_contains(&rust, &["let p = P::new(1);"]);
+    assert_lacks(&rust, &["let mut p"]);
 }

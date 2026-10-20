@@ -5,6 +5,7 @@
 //! only read) that form is used instead.
 
 mod objects;
+mod owned;
 
 use crate::analysis::Facts;
 use crate::ast::*;
@@ -20,6 +21,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         borrowed: HashSet::new(),
         int_receiver: false,
         double_receiver: false,
+        owned_self: false,
         guarded: false,
         annotations: Vec::new(),
         fn_names: method_names(class),
@@ -41,13 +43,13 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         }
     }
     let mut uses = Vec::new();
-    // Immutable objects are shared as `Rc` alone; statics and mutable objects also need `RefCell`.
-    let refcell = class
-        .types
-        .iter()
-        .zip(&live)
-        .any(|(t, &l)| (l && !facts.immutable.contains(&t.name)) || !t.statics.is_empty());
-    match (live.iter().any(|&l| l), refcell) {
+    // Owned objects are plain values and immutable ones are shared as `Rc` alone; statics and
+    // mutable objects also need `RefCell`.
+    let refcell = class.types.iter().zip(&live).any(|(t, &l)| {
+        (l && !facts.immutable.contains(&t.name) && !facts.owned.contains(&t.name)) || !t.statics.is_empty()
+    });
+    let shared = class.types.iter().zip(&live).any(|(t, &l)| l && !facts.owned.contains(&t.name));
+    match (shared, refcell) {
         (true, true) => uses.push("use std::cell::RefCell;\nuse std::rc::Rc;\n"),
         (true, false) => uses.push("use std::rc::Rc;\n"),
         (false, true) => uses.push("use std::cell::RefCell;\n"),
@@ -264,6 +266,8 @@ struct Gen<'a> {
     /// bare literal then get their type written (see `annotation`).
     int_receiver: bool,
     double_receiver: bool,
+    /// Whether the code being written is a method of an owned class, where `this` is `self`.
+    owned_self: bool,
     /// Whether the statement being emitted also borrows an object mutably (see `borrows_mut`).
     guarded: bool,
     /// Placeholders for type annotations decided at the end of the method: (placeholder, type,
@@ -348,9 +352,12 @@ impl<'a> Gen<'a> {
             .map(|i| m.params[i].name.clone())
             .collect();
         let name = &self.class.types[m.class].name;
+        self.owned_self = !m.is_static && !m.is_ctor && self.facts.owned.contains(name);
         let owner = self.this_type(name);
         let mut params = Vec::new();
-        if !m.is_static && !m.is_ctor {
+        if self.owned_self {
+            params.push(if self.facts.mutating.contains(&index) { "&mut self" } else { "&self" }.to_string());
+        } else if !m.is_static && !m.is_ctor {
             params.push(format!("this: {owner}"));
         }
         for p in &m.params {
@@ -359,7 +366,7 @@ impl<'a> Gen<'a> {
             params.push(format!("{mutable}{}: {ty}", self.local(&p.name)));
         }
         let ret = if m.is_ctor {
-            format!(" -> {}", class_type(name, self.facts.immutable.contains(name)))
+            format!(" -> {}", self.object_type(name))
         } else if m.ret == Type::Void {
             String::new()
         } else {
@@ -432,7 +439,7 @@ impl<'a> Gen<'a> {
     fn statement(&mut self, stmt: &'a Stmt, rest: &'a [Stmt]) {
         match stmt {
             Stmt::Local { ty, name, init, .. } => {
-                self.local_decl(*ty, name, init.as_ref(), assigns_any(rest, name));
+                self.local_decl(*ty, name, init.as_ref(), self.local_is_mut(*ty, name, rest));
             }
             Stmt::Expr(e) => self.effect(e),
             Stmt::If { cond, then, otherwise } => {
@@ -561,7 +568,7 @@ impl<'a> Gen<'a> {
             match stmt {
                 Stmt::Local { ty, name, init: value, .. } => {
                     // The variable is in scope in the condition, the update and the body.
-                    let mutable = assigns_any(&init[i + 1..], name)
+                    let mutable = self.local_is_mut(*ty, name, &init[i + 1..])
                         || update.iter().any(|u| assigns(u, name))
                         || cond.is_some_and(|c| assigns(c, name))
                         || assigns_stmt(body, name);

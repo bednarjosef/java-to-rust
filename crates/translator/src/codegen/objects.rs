@@ -174,14 +174,24 @@ impl<'a> Gen<'a> {
     /// The Rust type of a value of any type, including objects.
     pub(super) fn rust_type(&self, ty: Type) -> String {
         match ty {
-            Type::Class(name) => class_type(name, self.facts.immutable.contains(name)),
+            Type::Class(name) => self.object_type(name),
             _ => rust_type(ty).to_string(),
         }
     }
 
-    /// Whether `e` is an object of an immutable class, whose fields are read without a `RefCell`.
-    pub(super) fn is_immutable(&self, e: &Expr) -> bool {
-        matches!(e.ty, Type::Class(name) if self.facts.immutable.contains(name))
+    /// The Rust type of an object of class `name`: a plain value for an owned class.
+    pub(super) fn object_type(&self, name: &str) -> String {
+        if self.facts.owned.contains(name) {
+            struct_name(name)
+        } else {
+            class_type(name, self.facts.immutable.contains(name))
+        }
+    }
+
+    /// Whether `e` is an object whose fields are read and written without a `RefCell`: an object of
+    /// an immutable class, or of an owned class.
+    pub(super) fn is_plain(&self, e: &Expr) -> bool {
+        matches!(e.ty, Type::Class(name) if self.facts.immutable.contains(name) || self.facts.owned.contains(name))
     }
 
     /// The type of `this` in a method of class `name`: a reference to the object.
@@ -193,10 +203,15 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The name of `this` in the code being written: `self` in an owned class's method, else `this`.
+    pub(super) fn this_name(&self) -> &'static str {
+        if self.owned_self { "self" } else { "this" }
+    }
+
     /// The text of an object used for a field access: `this`, a variable, or an expression.
     pub(super) fn object(&mut self, e: &'a Expr) -> String {
         match &e.kind {
-            ExprKind::This => "this".to_string(),
+            ExprKind::This => self.this_name().to_string(),
             ExprKind::Var(name) => self.local(name),
             _ => self.expr(e).receiver(),
         }
@@ -205,7 +220,7 @@ impl<'a> Gen<'a> {
     /// `e` as the receiver of a method, borrowed; `this` is already a reference.
     pub(super) fn receiver_ref(&mut self, e: &'a Expr) -> String {
         match &e.kind {
-            ExprKind::This => "this".to_string(),
+            ExprKind::This => self.this_name().to_string(),
             _ => format!("&{}", self.object(e)),
         }
     }
@@ -219,7 +234,9 @@ impl<'a> Gen<'a> {
             .map(|(i, (a, p))| {
                 if self.facts.borrowed_params.contains(&(index, i)) {
                     self.str_ref(a)
-                } else if self.guarded && matches!(a.kind, ExprKind::Field { .. }) {
+                } else if self.guarded
+                    && matches!(&a.kind, ExprKind::Field { object, .. } if !self.is_plain(object))
+                {
                     // A lone `{ x }` argument draws rustc's unused_braces lint; a `let` keeps the
                     // scope of the `Ref` short while the call runs.
                     let outer = std::mem::replace(&mut self.guarded, false);
@@ -243,7 +260,7 @@ impl<'a> Gen<'a> {
     pub(super) fn field_read(&mut self, object: &'a Expr, name: &str, ty: Type) -> Code {
         let obj = self.object(object);
         let clone = if needs_clone(ty) { ".clone()" } else { "" };
-        if self.is_immutable(object) {
+        if self.is_plain(object) {
             return Code::atom(format!("{obj}.{}{clone}", snake_case(name)));
         }
         let read = format!("{obj}.borrow().{}{clone}", snake_case(name));
@@ -266,6 +283,13 @@ impl<'a> Gen<'a> {
 
     /// `receiver.name(args)`, a call of an instance method.
     pub(super) fn method_call(&mut self, receiver: &'a Expr, index: usize, args: &'a [Expr]) -> Code {
+        if self.is_owned_method(index) {
+            // An owned object is a value, so its method is called with method syntax: the receiver
+            // is borrowed by the call itself, and `p.set(p.x + 1)` is accepted by two-phase borrows.
+            let args = self.call_args(index, args).join(", ");
+            let obj = self.object(receiver);
+            return Code::atom(format!("{obj}.{}({args})", self.fn_names[index]));
+        }
         let mut all = vec![self.receiver_ref(receiver)];
         all.extend(self.call_args(index, args));
         Code::atom(format!("{}({})", self.qualified_fn(index), all.join(", ")))
@@ -311,8 +335,9 @@ impl<'a> Gen<'a> {
     ) -> Code {
         let mut lines = Vec::new();
         let slot = match place {
-            Place::Field { object, name } if self.is_immutable(object) => {
-                // Only a constructor writes a field of an immutable class, through its own `this`.
+            Place::Field { object, name } if self.is_plain(object) => {
+                // Only a constructor writes a field of an immutable class, through its own `this`;
+                // an owned object's fields are written by its methods.
                 Slot::Field { obj: self.object(object), field: snake_case(name), plain: true }
             }
             Place::Field { object, name } => {
@@ -414,9 +439,11 @@ impl<'a> Gen<'a> {
             return;
         }
         let name = &class.types[index].name;
-        let immutable = self.facts.immutable.contains(name);
+        // Immutable and owned objects are built in place, so `this` is a `&mut` to the value.
+        let by_value = self.facts.immutable.contains(name) || self.facts.owned.contains(name);
+        self.owned_self = false;
         self.gap();
-        let this = if immutable {
+        let this = if by_value {
             format!("&mut {}", struct_name(name))
         } else {
             format!("&{}", class_type(name, false))
@@ -429,7 +456,7 @@ impl<'a> Gen<'a> {
             let value = self.value(f.init.as_ref().expect("filtered"), f.ty).text;
             self.guarded = outer;
             let field = snake_case(&f.name);
-            if immutable {
+            if by_value {
                 self.line(&format!("this.{field} = {value};"));
             } else {
                 self.line(&format!("this.borrow_mut().{field} = {value};"));
@@ -468,6 +495,10 @@ impl<'a> Gen<'a> {
     /// before the rest of the body.
     pub(super) fn constructor(&mut self, m: &'a Method) {
         let class = self.class;
+        self.owned_self = false;
+        if self.facts.owned.contains(&class.types[m.class].name) {
+            return self.owned_constructor(m);
+        }
         let decl = &class.types[m.class];
         let (delegate, rest) = match m.body.split_first() {
             Some((Stmt::Expr(Expr { kind: ExprKind::ThisCall { args, resolved }, .. }), rest)) => {

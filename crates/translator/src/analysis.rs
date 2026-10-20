@@ -13,6 +13,7 @@
 //! default translation, so a weaker analysis only makes the output plainer, never wrong.
 
 mod objects;
+mod owned;
 mod ranges;
 
 use crate::ast::*;
@@ -32,6 +33,10 @@ pub struct Facts {
     pub borrowed_params: HashSet<(usize, usize)>,
     /// The classes whose objects never change after construction, by qualified name.
     pub immutable: HashSet<String>,
+    /// The classes whose objects are never shared, so they are plain values, by qualified name.
+    pub owned: HashSet<String>,
+    /// The instance methods (indexes into `Class::methods`) that change their owned object.
+    pub mutating: HashSet<usize>,
 }
 
 pub fn analyze(class: &Class) -> Facts {
@@ -40,6 +45,9 @@ pub fn analyze(class: &Class) -> Facts {
     borrowed_params(class, &mut facts);
     ascii_strings(class, &mut facts);
     facts.immutable = objects::immutable_classes(class);
+    let owned = owned::owned_classes(class, &facts.immutable);
+    facts.owned = owned.classes;
+    facts.mutating = owned.mutating;
     facts
 }
 
