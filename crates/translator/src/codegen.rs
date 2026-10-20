@@ -242,7 +242,10 @@ impl<'a> Gen<'a> {
         self.int_receiver = false;
         self.double_receiver = false;
         self.borrowed = (0..m.params.len())
-            .filter(|&i| self.facts.borrowed_params.contains(&(index, i)))
+            .filter(|&i| {
+                self.facts.borrowed_params.contains(&(index, i))
+                    || self.facts.borrowed_objects.contains(&(index, i))
+            })
             .map(|i| m.params[i].name.clone())
             .collect();
         self.borrowed_optional = (0..m.params.len())
@@ -273,6 +276,8 @@ impl<'a> Gen<'a> {
                     "Option<&str>".to_string()
                 } else if self.optional_var(index, p.ty, &p.name) {
                     format!("Option<{}>", self.ty_name(p.ty))
+                } else if self.facts.borrowed_objects.contains(&(index, i)) {
+                    format!("&{}", self.ty_name(p.ty))
                 } else if self.borrowed.contains(&p.name) {
                     "&str".to_string()
                 } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {

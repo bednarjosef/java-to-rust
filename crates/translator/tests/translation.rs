@@ -593,11 +593,11 @@ fn methods_that_reach_their_object_another_way_take_the_shared_handle() {
     assert_contains(
         &rust,
         &[
-            "fn register(this: &Rc<RefCell<P>>) {\n        share(this.clone());",
+            "fn register(this: &Rc<RefCell<P>>) {\n        share(this);",
             // `o` may be `this`, which the method then must not hold borrowed.
-            "fn copy(this: &Rc<RefCell<P>>, o: Rc<RefCell<P>>) {\n        this.borrow_mut().x = { o.borrow().x };",
+            "fn copy(this: &Rc<RefCell<P>>, o: &Rc<RefCell<P>>) {\n        this.borrow_mut().x = { o.borrow().x };",
             "P::register(&p);",
-            "P::copy(&q, p);",
+            "P::copy(&q, &p);",
         ],
     );
 }
@@ -1768,5 +1768,28 @@ fn arrays_whose_elements_may_be_null_hold_options() {
             "let rows: java::Array<Option<java::Array<i32>>> = java::filled(2, None);",
             "java::println!(\"{}\", java::get(&rows, 1).is_none());",
         ],
+    );
+}
+
+#[test]
+fn object_parameters_used_only_through_are_borrowed() {
+    let rust = translate(
+        "class Box { int v; }
+        class A {
+            static void twice(Box b) { b.v = b.v * 2; }
+            static Box keep(Box b) { return b; }
+            public static void main(String[] a) {
+                Box x = new Box();
+                x.v = 3;
+                twice(x);
+                Box y = keep(x);
+                System.out.println(x.v + \" \" + (x == y));
+            }
+        }",
+    );
+    // `keep` returns its parameter, so it takes the handle itself.
+    assert_contains(
+        &rust,
+        &["fn twice(b: &Rc<RefCell<Box>>) {", "twice(&x);", "fn keep(b: Rc<RefCell<Box>>)"],
     );
 }

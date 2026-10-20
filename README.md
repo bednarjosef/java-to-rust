@@ -147,7 +147,9 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   in the body's leading field assignments (`P { x, y }`; values with effects are computed into
   locals first where the literal's field order would change Java's order), and `new` shares it
   (`Rc::new(RefCell::new(P::new(1, 2)))`). A `toString` becomes `impl fmt::Display`, and an object
-  is printed as `{p}` when its `toString` can neither print nor throw.
+  is printed as `{p}` when its `toString` can neither print nor throw. An object parameter that
+  the method only uses through (fields, calls, comparison, printing, or passing it on to such a
+  parameter) is a `&Rc<..>` that the caller lends.
 
 Whole programs (`program.rs`) spread over files and packages translate too: javac compiles all
 of them in one run, with the source roots as its source path, and a reachability pass over its

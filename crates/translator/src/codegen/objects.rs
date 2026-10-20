@@ -346,8 +346,10 @@ impl<'a> Gen<'a> {
     }
 
     /// A non-null object reference as a `&Rc<..>`. A variable narrowed by a null check already is.
-    fn object_ref(&mut self, e: &'a Expr) -> String {
+    pub(super) fn object_ref(&mut self, e: &'a Expr) -> String {
         match &e.kind {
+            // A method that uses `this` as a value has it as a `&Rc<..>`.
+            ExprKind::This => self.this_name().to_string(),
             ExprKind::Var(name) if self.borrowed.contains(name) => self.local(name),
             _ => format!("&{}", self.object_place(e)),
         }
@@ -418,6 +420,8 @@ impl<'a> Gen<'a> {
             .map(|(i, (a, p))| {
                 if self.facts.borrowed_params.contains(&(index, i)) {
                     self.str_ref(a)
+                } else if self.facts.borrowed_objects.contains(&(index, i)) {
+                    self.object_ref(a)
                 } else if self.facts.borrowed_optional_params.contains(&(index, i)) {
                     self.option_arg(a)
                 } else if self.optional_var(index, p.ty, &p.name) {

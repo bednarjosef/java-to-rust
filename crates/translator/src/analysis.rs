@@ -53,6 +53,10 @@ pub struct Facts {
     pub borrowed_params: HashSet<(usize, usize)>,
     /// String parameters that are never assigned but can be null: `Option<&str>`.
     pub borrowed_optional_params: HashSet<(usize, usize)>,
+    /// Object parameters, as (method, parameter) indexes, that the method only uses through: it
+    /// reads and writes their fields, calls their methods, compares or prints them, and passes
+    /// them on to such parameters. They are `&Rc<..>`, which the caller lends.
+    pub borrowed_objects: HashSet<(usize, usize)>,
     /// String variables and parameters, as (method, name), that can hold null.
     pub nullable_vars: HashSet<(usize, String)>,
     /// Methods whose string or object return value can be null.
@@ -112,6 +116,7 @@ pub fn analyze(class: &Class) -> Facts {
     nullness::analyze(class, &mut facts);
     boxing::analyze(class, &mut facts);
     borrowed_params(class, &mut facts);
+    facts.borrowed_objects = borrowed_objects(class, &facts);
     ascii_strings(class, &mut facts);
     arrays::analyze(class, &mut facts);
     indexing::analyze(class, &mut facts);
@@ -172,6 +177,85 @@ fn borrowed_params(class: &Class, facts: &mut Facts) {
             }
         }
     }
+}
+
+fn borrowed_objects(class: &Class, facts: &Facts) -> HashSet<(usize, usize)> {
+    let mut borrowed: HashSet<(usize, usize)> = HashSet::new();
+    for (m, method) in class.methods.iter().enumerate() {
+        for (i, p) in method.params.iter().enumerate() {
+            if matches!(p.ty, Type::Class(_))
+                && !nullable_var(facts, m, &p.name)
+                && !assigns_any(&method.body, &p.name)
+            {
+                borrowed.insert((m, i));
+            }
+        }
+    }
+    // A parameter passed on to a parameter that is not borrowed is used as a value.
+    loop {
+        let losing: Vec<(usize, usize)> = borrowed
+            .iter()
+            .copied()
+            .filter(|&(m, i)| {
+                let method = &class.methods[m];
+                let name = &method.params[i].name;
+                let mut value = false;
+                for stmt in &method.body {
+                    visit_stmt(stmt, &mut |e| value |= used_as_value(e, name, &borrowed), &mut |_| {});
+                }
+                value
+            })
+            .collect();
+        if losing.is_empty() {
+            return borrowed;
+        }
+        for p in losing {
+            borrowed.remove(&p);
+        }
+    }
+}
+
+/// Whether `e` uses the object variable `name` other than through it: as the value of an
+/// assignment, an argument of a parameter that is not borrowed, or an operand of anything but a
+/// field access, a call on it, `==`, `!=` or a concatenation.
+fn used_as_value(e: &Expr, name: &str, borrowed: &HashSet<(usize, usize)>) -> bool {
+    let is_name = |x: &Expr| matches!(&x.kind, ExprKind::Var(v) if v == name);
+    let mut allowed = HashSet::new();
+    let mut uses = Vec::new();
+    visit_expr(e, &mut |x| match &x.kind {
+        ExprKind::Var(v) if v == name => uses.push(x.id),
+        ExprKind::Field { object, .. }
+        | ExprKind::Assign { target: Place::Field { object, .. }, .. }
+        | ExprKind::IncDec { target: Place::Field { object, .. }, .. }
+            if is_name(object) =>
+        {
+            allowed.insert(object.id);
+        }
+        ExprKind::MethodCall { receiver, .. } if is_name(receiver) => {
+            allowed.insert(receiver.id);
+        }
+        ExprKind::Binary(BinOp::Eq | BinOp::Ne | BinOp::Add, l, r) => {
+            allowed.extend([l, r].into_iter().filter(|o| is_name(o)).map(|o| o.id));
+        }
+        ExprKind::Builtin(Builtin::Print | Builtin::Println, args) => {
+            allowed.extend(args.iter().filter(|a| is_name(a)).map(|a| a.id));
+        }
+        _ => {}
+    });
+    visit_expr(e, &mut |x| match &x.kind {
+        ExprKind::Call { args, resolved: Some(callee), .. }
+        | ExprKind::MethodCall { args, resolved: Some(callee), .. }
+        | ExprKind::New { args, ctor: Some(callee), .. }
+        | ExprKind::ThisCall { args, resolved: Some(callee) } => {
+            for (j, a) in args.iter().enumerate() {
+                if is_name(a) && borrowed.contains(&(*callee, j)) {
+                    allowed.insert(a.id);
+                }
+            }
+        }
+        _ => {}
+    });
+    uses.iter().any(|id| !allowed.contains(id))
 }
 
 /// Which string variables, parameters and return values can hold a non-ASCII string. Starts from
