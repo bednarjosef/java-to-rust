@@ -5,15 +5,6 @@ Minimal programs that the translator gets wrong, though the feature is in the su
 pass. Java's output is what `java File.java` prints. When a failure is fixed, move its file into
 `corpus/features/` with the fixed behaviour.
 
-- `AmbiguousLiteralMethod.java`: `aFloat[Math.floorMod(Math.abs((sBoolean ? 2 : -1)), ...)]++;`,
-  a method call on a conditional of two `int` literals. Java prints nothing; rustc fails with
-  E0689 "can't call method `abs` on ambiguous numeric type `{integer}`". The fuzzer's seed 2 hits
-  the same error with `wrapping_sub` on `(~(0)) - c`, and seed 55 with `Math.abs(-(0))` alone,
-  and seed 115 with `wrapping_add` on a sum of a `long` conditional and a `short`.
-- `AssignmentInTernaryOr.java`: `boolean b = aBoolean[0] ? ((sBoolean = v4) || true) : false;`, an
-  assignment as the left operand of `||` inside a conditional branch. Java prints `false true`;
-  rustc fails with E0308 "mismatched types". The same assignment alone, or `||` alone in a
-  conditional, translates.
 - `CompoundThroughNullableField.java`: `h.box.v += 10` where `h.box` is a field that may be null,
   in a class whose fields are assigned after construction. Java prints `true`; rustc fails with
   E0716 "temporary value dropped while borrowed".
@@ -21,16 +12,9 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
   `Node` has a field assigned after construction. Java prints `0 1`; rustc fails with E0505
   "cannot move out of `single` because it is borrowed" (the `Ref` from the field read lives to the
   end of the statement).
-- `IndexedIncrementReadsArray.java`: `a5[Math.floorMod((0), a5.length)]++;` on an `int[]` local,
-  in a `switch` that is never taken. Java prints nothing; rustc fails with E0502 "cannot borrow
-  `a5` as immutable because it is also borrowed as mutable": the index reads `a5.length` while the
-  element is borrowed for `++`.
 - `MinCursorLeft.java`: a `while (t.left != null) t = t.left;` loop over a mutable class.
   Java prints `1`; rustc fails with E0506 "cannot assign to `t` because it is borrowed". Loops
   over classes that are never assigned after construction translate (their `Rc` is plain).
-- `NegatedUnsignedShiftCount.java`: `System.out.println(1 >>> (-(0)));`, a negated shift count.
-  Java prints `1`; rustc fails with E0600 "cannot apply unary operator `-` to type `u32`", the
-  same message as `NegatedCharCast` with the type of the operand here.
 - `NullObjectConcat.java`: `"slot " + slots[0]` where `slots` is a `Node[]` and `Node` has no
   `toString`. Java prints `slot null`; the translator rejects it with "printing an object without
   toString not supported yet". The value is always null, so the class's own printing is never

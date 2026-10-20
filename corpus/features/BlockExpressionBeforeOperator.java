@@ -44,7 +44,16 @@ public class BlockExpressionBeforeOperator {
         return (sChar++);
     }
 
+    static double sDouble = 3.0;
+
+    static boolean below(boolean c) {
+        boolean literal = c ? ((sDouble--) < 2) : false;
+        boolean conditional = c ? ((sDouble--) < (c ? 1.0 : 2.0)) : false;
+        return literal || conditional;
+    }
+
     public static void main(String[] args) {
+        System.out.println(below(true) + " " + below(true) + " " + sDouble);
         System.out.println(less(true) + " " + less(false) + " " + sShort);
         System.out.println(both(true) + " " + both(false) + " " + sFlag);
         System.out.println(sum(true) + " " + sum(false) + " " + sFloat);
