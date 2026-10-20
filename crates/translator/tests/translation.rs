@@ -976,11 +976,11 @@ fn packages_become_nested_modules() {
         &[
             "fn main() {\n    crate::com::example::app::main();\n}",
             "mod com {\n    pub(crate) mod example {\n        pub(crate) mod app {",
-            "        pub(crate) mod util {\n            use std::cell::RefCell;\n            use std::fmt;\n\n            use java_runtime as java;",
+            "        pub(crate) mod util {\n            use std::fmt;\n\n            use java_runtime as java;",
             // Imported, statically imported and fully qualified names are paths from the crate root.
             "crate::com::example::util::Counter::new(\"clicks\")",
             "crate::com::example::util::square(7)",
-            "crate::com::example::util::NUMBERS_LIMIT.with_borrow(|v| *v)",
+            "crate::com::example::util::NUMBERS_LIMIT.wrapping_sub(",
             "crate::com::example::util::cube(3)",
             // Names in the same package are not.
             "line(\"total\", clicks.total())",
@@ -1215,4 +1215,147 @@ fn system_natives_go_through_the_runtime() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("System.getenv` is not supported"), "{err}");
+}
+
+#[test]
+fn static_final_constants_are_consts_read_without_a_cell() {
+    let rust = translate(
+        "class A {
+            static final int LIMIT = 10;
+            static final String NAME = \"a\";
+            public static void main(String[] args) {
+                System.out.println(LIMIT + NAME);
+            }
+        }",
+    );
+    assert_contains(&rust, &["const A_LIMIT: i32 = 10;", "const A_NAME: &str = \"a\";"]);
+    assert_lacks(&rust, &["A_LIMIT: RefCell", "A_NAME: RefCell", "A_LIMIT.with"]);
+}
+
+#[test]
+fn static_blocks_run_once_in_an_init_function_guarded_by_a_flag() {
+    let rust = translate(
+        "class Helper {
+            static int made;
+            static { made = 10; }
+            static int make() { return made; }
+        }
+        public class A {
+            public static void main(String[] args) { System.out.println(Helper.make()); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "static HELPER__INITIALIZED: Cell<bool> = Cell::new(false);",
+            "fn init_helper() {",
+            "if HELPER__INITIALIZED.get() {",
+            "fn make() -> i32 {\n    init_helper();",
+        ],
+    );
+}
+
+#[test]
+fn static_initializers_without_effects_stay_lazy() {
+    let rust = translate(
+        "class A {
+            static int base = 4;
+            static int doubled = base * 2;
+            public static void main(String[] args) { System.out.println(doubled); }
+        }",
+    );
+    assert_lacks(&rust, &["fn init_a()", "INITIALIZED"]);
+}
+
+#[test]
+fn an_enum_is_a_copy_rust_enum_with_its_name_and_value_of() {
+    let rust = translate(
+        "public class A {
+            enum Color { RED, VERY_BIG }
+            public static void main(String[] args) { System.out.println(Color.valueOf(\"RED\")); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]\nenum AColor {\n    Red,\n    VeryBig,\n}",
+            "fn enum_name(self) -> String {",
+            "AColor::VeryBig => \"VERY_BIG\",",
+            "fn enum_value_of(name: &str) -> AColor {",
+            "_ => java::throw(\"IllegalArgumentException\", &format!(\"No enum constant A.Color.{name}\")),",
+            "impl fmt::Display for AColor {",
+            "write!(f, \"{}\", self.enum_name())",
+        ],
+    );
+}
+
+#[test]
+fn an_enum_field_is_an_accessor_that_matches_on_self() {
+    let rust = translate(
+        "public class A {
+            enum Planet {
+                MERCURY(3.0), VERY_BIG(5.5);
+                private final double mass;
+                Planet(double mass) { this.mass = mass; }
+                double scaled(double k) { return mass * k; }
+            }
+            public static void main(String[] args) { System.out.println(Planet.VERY_BIG.scaled(2.0)); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn mass(self) -> f64 {\n        match self {\n            APlanet::Mercury => 3.0,\n            APlanet::VeryBig => 5.5,",
+            "fn scaled(self, k: f64) -> f64 {\n        self.mass() * k",
+            "APlanet::VeryBig.scaled(2.0)",
+        ],
+    );
+}
+
+#[test]
+fn an_enum_with_a_field_that_is_not_final_is_rejected() {
+    let error = java_to_rust::translate(
+        "public class A {
+            enum Planet {
+                MERCURY(3.0);
+                private double mass;
+                Planet(double mass) { this.mass = mass; }
+            }
+            public static void main(String[] args) { }
+        }",
+    )
+    .expect_err("a mutable enum field is rejected");
+    assert!(error.to_string().contains("enum fields that are not final"), "{error}");
+}
+
+#[test]
+fn an_enum_field_set_first_by_every_constructor_needs_no_initializer() {
+    let rust = translate(
+        "public class A {
+            enum Color { RED, BLUE }
+            static class Paint {
+                private final Color color;
+                Paint(Color color) { this.color = color; }
+                Color color() { return color; }
+            }
+            public static void main(String[] args) { System.out.println(new Paint(Color.BLUE).color()); }
+        }",
+    );
+    assert_contains(&rust, &["fn new(color: AColor) -> APaint {\n        APaint { color }\n    }"]);
+}
+
+#[test]
+fn an_enum_field_that_a_constructor_reads_before_setting_it_is_rejected() {
+    let error = java_to_rust::translate(
+        "public class A {
+            enum Color { RED, BLUE }
+            static class Paint {
+                private Color color;
+                Paint(Color color) { System.out.println(this.color); this.color = color; }
+            }
+            public static void main(String[] args) { new Paint(Color.BLUE); }
+        }",
+    )
+    .expect_err("a field read before it is set is null");
+    assert!(error.to_string().contains("null enums not supported yet"), "{error}");
 }

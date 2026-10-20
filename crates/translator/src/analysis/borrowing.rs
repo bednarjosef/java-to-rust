@@ -48,7 +48,10 @@ pub fn borrowing(class: &Class, immutable: &HashSet<String>, owned: &HashSet<Str
         }
     }
     let class_of = |m: usize| class.types[class.methods[m].class].name.as_str();
-    let always = |m: usize| immutable.contains(class_of(m)) || owned.contains(class_of(m));
+    let always = |m: usize| {
+        let decl = &class.types[class.methods[m].class];
+        immutable.contains(class_of(m)) || owned.contains(class_of(m)) || decl.enum_constants.is_some()
+    };
     let mut methods: HashSet<usize> = (0..scans.len())
         .filter(|&m| {
             let method = &class.methods[m];

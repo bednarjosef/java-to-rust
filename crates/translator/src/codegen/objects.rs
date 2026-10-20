@@ -222,6 +222,9 @@ impl<'a> Gen<'a> {
         if matches!(e.kind, ExprKind::This) && self.this_form != ThisForm::Shared {
             return true;
         }
+        if matches!(e.ty, Type::Enum(_)) {
+            return true;
+        }
         matches!(e.ty, Type::Class(name) if self.facts.immutable.contains(name) || self.facts.owned.contains(name))
     }
 
@@ -392,6 +395,9 @@ impl<'a> Gen<'a> {
 
     /// A value read from a field of an object.
     pub(super) fn field_read(&mut self, object: &'a Expr, name: &str, ty: Type) -> Code {
+        if matches!(object.ty, Type::Enum(_)) {
+            return self.enum_field(object, name);
+        }
         let obj = self.object(object);
         let clone = if needs_clone(ty) { ".clone()" } else { "" };
         if self.is_plain(object) {
@@ -405,8 +411,15 @@ impl<'a> Gen<'a> {
 
     /// A value read from a static field.
     pub(super) fn static_read(&self, class: usize, name: &str, ty: Type) -> Code {
+        if let Some(constant) = self.constant_read(class, name, ty) {
+            return constant;
+        }
         let cell = cell_name(&self.class.types[class].name, name);
-        Code::atom(Slot::Static { cell }.read(ty))
+        let read = Slot::Static { cell }.read(ty);
+        match self.init_call(class) {
+            Some(init) => Code::atom(format!("{{ {init} {read} }}")),
+            None => Code::atom(read),
+        }
     }
 
     /// `new C(args)`, which calls the constructor that the checker chose. A constructor that builds
@@ -586,6 +599,16 @@ impl<'a> Gen<'a> {
         prefix: bool,
     ) -> Code {
         let mut lines = Vec::new();
+        // Java initializes the class of a static before it reads the static, but after the value
+        // of an assignment is computed, when it writes.
+        let init = match place {
+            Place::Static { class, .. } => self.init_call(*class),
+            _ => None,
+        };
+        let assigns = matches!(how, Update::Assign(_));
+        if !assigns {
+            lines.extend(init.clone());
+        }
         let slot = match place {
             Place::Field { object, name } if self.is_plain(object) => {
                 // Only a constructor writes a field of an immutable class, through its own `this`;
@@ -653,6 +676,9 @@ impl<'a> Gen<'a> {
         };
         self.guarded = outer;
         let stored = if needs_clone(ty) { format!("{new}.clone()") } else { new.clone() };
+        if assigns {
+            lines.extend(init);
+        }
         lines.push(slot.write(&stored));
         Code::atom(format!("{{ {} {result} }}", lines.join(" ")))
     }
@@ -792,29 +818,6 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
-    /// The thread-local cells of all static fields, initialized lazily on first use.
-    pub(super) fn statics(&mut self) {
-        if self.module_types().all(|t| t.statics.is_empty()) {
-            return;
-        }
-        self.gap();
-        self.line("thread_local! {");
-        self.indent += 1;
-        for decl in self.module_types() {
-            for f in &decl.statics {
-                let init = match &f.init {
-                    Some(e) => self.value(e, f.ty).text,
-                    None => default_value(f.ty).to_string(),
-                };
-                let cell = cell_name(&decl.name, &f.name);
-                let ty = self.ty_name(f.ty);
-                self.line(&format!("{}static {cell}: RefCell<{ty}> = RefCell::new({init});", self.vis()));
-            }
-        }
-        self.indent -= 1;
-        self.line("}");
-    }
-
     /// The body of a constructor, which builds the object and returns it. `this(...)` builds it by
     /// calling another constructor; otherwise every field gets its default and the initializers run
     /// before the rest of the body.
@@ -843,7 +846,7 @@ impl<'a> Gen<'a> {
                 let fields: Vec<String> = decl
                     .fields
                     .iter()
-                    .map(|f| format!("{}: {}", snake_case(&f.name), default_value(f.ty)))
+                    .map(|f| format!("{}: {}", snake_case(&f.name), self.placeholder(f.ty)))
                     .collect();
                 let name = struct_name(&decl.name);
                 let fields = fields.join(", ");

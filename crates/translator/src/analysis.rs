@@ -23,6 +23,7 @@ mod nullness;
 mod objects;
 mod owned;
 mod ranges;
+mod statics;
 
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
@@ -78,6 +79,9 @@ pub struct Facts {
     pub plain_constructors: HashSet<String>,
     /// Methods and constructors that touch no object but their own, so they borrow no other.
     pub isolated: HashSet<usize>,
+    /// The classes, by index in `Class::types`, whose static initialization runs eagerly through
+    /// an `init` function; the other classes initialize each static lazily on first access.
+    pub eager_init: HashSet<usize>,
 }
 
 pub fn analyze(class: &Class) -> Facts {
@@ -93,6 +97,7 @@ pub fn analyze(class: &Class) -> Facts {
     facts.self_methods = borrowing.methods;
     facts.plain_constructors = borrowing.plain_constructors;
     facts.isolated = borrowing.isolated;
+    facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
     arrays::analyze(class, &mut facts);
     indexing::analyze(class, &mut facts);
     moves::analyze(class, &mut facts);

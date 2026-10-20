@@ -90,7 +90,7 @@ impl<'a> Gen<'a> {
                 let field = snake_case(&f.name);
                 let value = match v {
                     Some(e) => self.value(e, f.ty).text,
-                    None => default_value(f.ty).to_string(),
+                    None => self.placeholder(f.ty),
                 };
                 if value == field { field } else { format!("{field}: {value}") }
             })

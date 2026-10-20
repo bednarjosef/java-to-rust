@@ -23,6 +23,8 @@ pub enum Type {
     Array(&'static Type),
     /// A class declared in the translated program, by name.
     Class(&'static str),
+    /// An enum declared in the translated program, by name. Its values are plain Rust enums.
+    Enum(&'static str),
     /// The type of `null`.
     Null,
 }
@@ -52,20 +54,16 @@ impl Type {
     }
 
     pub fn class(name: &str) -> Type {
-        static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
-        let mut names = NAMES.lock().unwrap();
-        let name = match names.iter().find(|n| **n == name) {
-            Some(n) => *n,
-            None => {
-                let n: &'static str = Box::leak(name.to_string().into_boxed_str());
-                names.push(n);
-                n
-            }
-        };
-        Type::Class(name)
+        Type::Class(interned_name(name))
     }
 
-    /// Whether values of this type are references (and so can be `null`).
+    /// The type of an enum declared in the file.
+    pub fn enum_type(name: &str) -> Type {
+        Type::Enum(interned_name(name))
+    }
+
+    /// Whether values of this type are references (and so can be `null`). An enum value is not:
+    /// Rust's enum is a plain value, and `null` enums are rejected.
     pub fn is_reference(self) -> bool {
         matches!(self, Type::String | Type::Array(_) | Type::Class(_) | Type::Null)
     }
@@ -78,6 +76,20 @@ impl Type {
             Type::Long
         } else {
             Type::Int
+        }
+    }
+}
+
+/// A class or enum name, leaked once so that types stay `Copy`.
+fn interned_name(name: &str) -> &'static str {
+    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut names = NAMES.lock().unwrap();
+    match names.iter().find(|n| **n == name) {
+        Some(&n) => n,
+        None => {
+            let n: &'static str = Box::leak(name.to_string().into_boxed_str());
+            names.push(n);
+            n
         }
     }
 }
@@ -109,7 +121,7 @@ impl fmt::Display for Type {
             Type::String => f.write_str("String"),
             Type::Void => f.write_str("void"),
             Type::Array(element) => write!(f, "{element}[]"),
-            Type::Class(name) => f.write_str(name),
+            Type::Class(name) | Type::Enum(name) => f.write_str(name),
             Type::Null => f.write_str("null"),
         }
     }
@@ -140,12 +152,24 @@ pub struct TypeDecl {
     pub fields: Vec<Field>,
     /// Static fields, in declaration order.
     pub statics: Vec<Field>,
+    /// The constants of an enum, in declaration order; `None` for a class.
+    pub enum_constants: Option<Vec<EnumConstant>>,
+}
+
+/// One constant of an enum: `PLANET(3.0, 4.0)`.
+pub struct EnumConstant {
+    pub name: String,
+    /// The value of each instance field, in declaration order: the constructor's assignment with
+    /// its parameters replaced by the constant's arguments (see `lower/enums.rs`).
+    pub values: Vec<Expr>,
 }
 
 pub struct Field {
     pub name: String,
     pub ty: Type,
     pub init: Option<Expr>,
+    /// A `static final` compile-time constant: a Rust `const`, with no cell.
+    pub constant: bool,
     pub pos: Pos,
 }
 
@@ -296,6 +320,11 @@ pub enum ExprKind {
         args: Vec<Expr>,
         resolved: Option<usize>,
     },
+    /// `E.CONSTANT` of an enum; `class` indexes `Class::types` and `ordinal` the constant.
+    EnumConstant {
+        class: usize,
+        ordinal: usize,
+    },
 }
 
 /// What an assignment, `++` or `--` writes to.
@@ -345,6 +374,14 @@ pub enum Builtin {
     CharToLowerCase,
     /// A method of the native layer: `System.arraycopy`, `Math.sin` and the like.
     Native(Native),
+    /// `e.ordinal()`; the receiver is the first argument.
+    EnumOrdinal,
+    /// `e.name()` and `e.toString()`, which the enum's default `toString` returns as `name()`.
+    EnumName,
+    /// `a.compareTo(b)` on enums, the difference of the ordinals.
+    EnumCompareTo,
+    /// `E.valueOf(s)` for the enum type of the call's result.
+    EnumValueOf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

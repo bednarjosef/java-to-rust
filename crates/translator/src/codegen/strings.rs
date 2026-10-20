@@ -56,6 +56,8 @@ impl<'a> Gen<'a> {
             {
                 out.push(Part::Arg(self.object_text(receiver)))
             }
+            // An enum prints through its `Display`, which is its name.
+            _ if matches!(e.ty, Type::Enum(_)) => out.push(Part::Arg(self.expr(e))),
             ExprKind::Binary(BinOp::Add, l, r) if e.ty == Type::String => {
                 self.concat_parts(l, assigned, out);
                 self.concat_parts(r, assigned, out);

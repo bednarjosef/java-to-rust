@@ -46,7 +46,7 @@ impl<'t> Lowering<'t> {
 
     /// Declares a class, named `outer.Name` inside `outer` (a class or a package).
     pub(super) fn declare_type(&mut self, node: Node<'t>, outer: Option<&str>) -> Result<(), Error> {
-        if node.kind() != "CLASS" {
+        if node.kind() != "CLASS" && node.kind() != "ENUM" {
             return unsupported(node, &kind_words(node.kind()));
         }
         if node.get("extendsClause").is_some()
@@ -72,8 +72,10 @@ impl<'t> Lowering<'t> {
                     sig: member.symbol().map_or("", |s| s.ty),
                 }),
                 "VARIABLE" | "EMPTY_STATEMENT" => {}
+                "ENUM" => self.declare_type(member, Some(&name))?,
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
                 "CLASS" => return unsupported(member, "inner classes"),
+                "BLOCK" if Self::is_static_block(member) => {}
                 "BLOCK" => return unsupported(member, "initializer blocks"),
                 "INTERFACE" => return unsupported(member, "interfaces"),
                 kind => return unsupported(member, &kind_words(kind)),
@@ -119,11 +121,21 @@ impl<'t> Lowering<'t> {
         let node = self.types[index].node;
         let (mut fields, mut statics) = (Vec::new(), Vec::new());
         let name = &self.types[index].name;
-        for member in node.list("members").filter(|m| m.kind() == "VARIABLE" && self.keeps(*m, name)) {
+        for member in node
+            .list("members")
+            .filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m) && self.keeps(*m, name))
+        {
             let field = self.field(member)?;
             if member.has_flag("STATIC") { statics.push(field) } else { fields.push(field) }
         }
-        Ok(TypeDecl { name: self.types[index].name.clone(), package: String::new(), fields, statics })
+        // An enum's constants need its constructors, which `lower` lowers after this.
+        Ok(TypeDecl {
+            name: self.types[index].name.clone(),
+            package: String::new(),
+            fields,
+            statics,
+            enum_constants: None,
+        })
     }
 
     fn field(&self, node: Node<'t>) -> Result<Field, Error> {
@@ -136,8 +148,15 @@ impl<'t> Lowering<'t> {
         if init.is_none() && ty == Type::String {
             return unsupported(node, "null");
         }
-        let init = init.map(|i| self.expr(i)).transpose()?;
-        Ok(Field { name: node.str("name").to_string(), ty, init, pos: node.pos() })
+        let constant = Self::is_constant(node);
+        let init = if constant {
+            let text = node.symbol().and_then(|s| s.constant).unwrap_or_default();
+            let kind = self.constant_literal(node, ty, text)?;
+            Some(self.synth(kind, node.pos(), ty))
+        } else {
+            init.map(|i| self.expr(i)).transpose()?
+        };
+        Ok(Field { name: node.str("name").to_string(), ty, init, constant, pos: node.pos() })
     }
 
     /// The place that `node` names when it is a field: `name`, `this.name`, `object.name` or
@@ -169,6 +188,9 @@ impl<'t> Lowering<'t> {
         if node.str("name") == "this" {
             return Ok(ExprKind::This);
         }
+        if let Some(constant) = node.symbol().and_then(|s| self.enum_constant(&s)) {
+            return Ok(constant);
+        }
         Ok(match self.field_place(node)? {
             Some(place) => read(place),
             None => ExprKind::Var(self.local(node)?),
@@ -177,6 +199,9 @@ impl<'t> Lowering<'t> {
 
     /// A select: a field of an object or of a class.
     pub(super) fn select(&self, node: Node<'t>) -> Result<ExprKind, Error> {
+        if let Some(constant) = node.symbol().and_then(|s| self.enum_constant(&s)) {
+            return Ok(constant);
+        }
         match self.field_place(node)? {
             Some(place) => Ok(read(place)),
             None => unsupported(node, "fields"),
@@ -202,7 +227,8 @@ impl<'t> Lowering<'t> {
 
     /// `this` of the class whose members are being lowered.
     pub(super) fn this(&self, node: Node<'t>) -> Expr {
-        let ty = Type::class(&self.types[self.current.get()].name);
+        let name = &self.types[self.current.get()].name;
+        let ty = if self.enum_index(name).is_some() { Type::enum_type(name) } else { Type::class(name) };
         self.synth(ExprKind::This, node.pos(), ty)
     }
 

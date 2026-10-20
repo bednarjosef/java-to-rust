@@ -9,10 +9,12 @@ use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
 mod code;
+mod enums;
 mod expr;
 mod names;
 mod null;
 mod primitives;
+mod statics;
 mod stmt;
 mod strings;
 
@@ -64,9 +66,15 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
     for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
         g.type_items(index);
     }
+    // An enum is never built with `new`, so it is emitted whether or not a `new` names it.
+    for index in (0..class.types.len()).filter(|&t| class.types[t].enum_constants.is_some()) {
+        g.enum_items(index);
+    }
     g.statics();
     for i in 0..class.methods.len() {
-        if class.methods[i].is_static {
+        let m = &class.methods[i];
+        let emit = if m.name == "<clinit>" { facts.eager_init.contains(&m.class) } else { m.is_static };
+        if emit {
             g.gap();
             g.method(i);
         }
@@ -225,11 +233,15 @@ impl<'a> Gen<'a> {
             .map(|i| m.params[i].name.clone())
             .collect();
         let name = &self.class.types[m.class].name;
-        let borrows = !m.is_static && !m.is_ctor && self.facts.self_methods.contains(&index);
-        self.display = borrows && self.displays(index);
+        let is_enum = self.class.types[m.class].enum_constants.is_some();
+        let borrows = !m.is_static && !m.is_ctor && (is_enum || self.facts.self_methods.contains(&index));
+        self.display = borrows && !is_enum && self.displays(index);
         self.this_form = if borrows { ThisForm::SelfRef } else { ThisForm::Shared };
         let mut params = Vec::new();
-        if borrows {
+        if borrows && is_enum {
+            // An enum is a `Copy` value, so its methods take `self` by value.
+            params.push("self".to_string());
+        } else if borrows {
             params.push(if self.facts.mutating.contains(&index) { "&mut self" } else { "&self" }.to_string());
         } else if !m.is_static && !m.is_ctor {
             params.push(format!("this: {}", self.this_type(name)));
@@ -269,9 +281,16 @@ impl<'a> Gen<'a> {
         if self.display {
             self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
         } else {
-            self.line(&format!("{}fn {}({}){ret} {{", self.vis(), self.fn_names[index], params.join(", ")));
+            let fn_name =
+                if m.name == "<clinit>" { statics::init_name(name) } else { self.fn_names[index].clone() };
+            self.line(&format!("{}fn {fn_name}({}){ret} {{", self.vis(), params.join(", ")));
         }
         self.indent += 1;
+        if m.name == "<clinit>" {
+            self.init_guard(name);
+        } else if self.facts.eager_init.contains(&m.class) && (m.is_static || m.is_ctor) {
+            self.line(&format!("{}();", statics::init_name(name)));
+        }
         if m.is_ctor {
             self.constructor(m);
         } else {
@@ -284,12 +303,17 @@ impl<'a> Gen<'a> {
     }
 
     /// Picks Rust names for the method's parameters and locals: snake case, distinct from each
-    /// other and from the functions, which share Rust's value namespace.
+    /// other and from the free functions, which share Rust's value namespace.
     fn name_locals(&mut self, m: &Method) {
         let mut java_names = Vec::new();
         java_names.extend(m.params.iter().map(|p| p.name.clone()));
         collect_locals(&m.body, &mut java_names);
-        let mut used: HashSet<String> = self.fn_names.iter().cloned().collect();
+        // Static methods are free functions, in the value namespace that locals share; instance
+        // methods and constructors are reached through their type or object.
+        let mut used: HashSet<String> = (0..self.fn_names.len())
+            .filter(|&i| self.class.methods[i].is_static)
+            .map(|i| self.fn_names[i].clone())
+            .collect();
         used.insert("java".into());
         if self.display {
             used.insert("f".into());

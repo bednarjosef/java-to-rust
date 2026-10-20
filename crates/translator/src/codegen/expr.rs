@@ -222,7 +222,9 @@ impl<'a> Gen<'a> {
                     _ => Code::atom(rust),
                 }
             }
+            ExprKind::This if matches!(e.ty, Type::Enum(_)) => Code::atom(self.this_name()),
             ExprKind::This => Code::atom("this.clone()"),
+            ExprKind::EnumConstant { class, ordinal } => Code::atom(self.constant_path(*class, *ordinal)),
             ExprKind::Field { object, name } => self.field_read(object, name, e.ty),
             ExprKind::Static { class, name } => self.static_read(*class, name, e.ty),
             ExprKind::New { args, ctor, .. } => {
@@ -435,6 +437,9 @@ impl<'a> Gen<'a> {
                 self.printing = outer;
                 let mac = self.runtime(if builtin == Builtin::Println { "println!" } else { "print!" });
                 self.format(&mac, parts)
+            }
+            Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
+                self.enum_builtin(builtin, args, ty)
             }
             Builtin::Exit => {
                 let code = self.value(&args[0], Type::Int);
