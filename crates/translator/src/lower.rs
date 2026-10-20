@@ -4,6 +4,7 @@
 //! outside it is reported as an error naming the construct.
 
 mod code_point;
+mod enum_nulls;
 mod enums;
 mod objects;
 mod statics;
