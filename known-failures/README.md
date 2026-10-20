@@ -29,9 +29,6 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
   `-4294967296`; rustc fails with "literal out of range for `i32`": a `long` literal under a unary
   operator is typed as `i32`. `~(9223372036854775807L)` fails the same way, and
   `(byte)(~(9223372036854775807L))` fails with "literal out of range for `i8`".
-- `NullEnumVariable.java`: a local `Level best = null;` of an enum type. Java prints `none` then
-  `HIGH`; the translator rejects it with "null enums not supported yet" (null objects are in the
-  supported subset).
 - `NullObjectConcat.java`: `"slot " + slots[0]` where `slots` is a `Node[]` and `Node` has no
   `toString`. Java prints `slot null`; the translator rejects it with "printing an object without
   toString not supported yet". The value is always null, so the class's own printing is never

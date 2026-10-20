@@ -29,7 +29,7 @@ mod statics;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
-pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_var};
+pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
 
 #[derive(Default)]
 pub struct Facts {

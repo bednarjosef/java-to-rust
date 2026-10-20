@@ -34,7 +34,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
         let mut on_expr = |m: usize, e: &Expr| {
             visit_expr(e, &mut |x| match &x.kind {
                 ExprKind::Assign { op: None, target, value }
-                    if x.ty.is_reference() && maybe_null(facts, m, value) =>
+                    if nullable_type(x.ty) && maybe_null(facts, m, value) =>
                 {
                     match target {
                         Place::Var(name) => vars.push((m, name.clone())),
@@ -75,7 +75,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             for stmt in &method.body {
                 let mut on_stmt = |s: &Stmt| match s {
                     Stmt::Local { ty, name, init: Some(init), .. }
-                        if ty.is_reference() && maybe_null(facts, m, init) =>
+                        if nullable_type(*ty) && maybe_null(facts, m, init) =>
                     {
                         declared.push((m, name.clone()));
                     }
@@ -172,10 +172,16 @@ pub fn nullable_var(facts: &Facts, m: usize, name: &str) -> bool {
     facts.nullable_vars.contains(&(m, name.to_string()))
 }
 
+/// The types whose values can be null: references, and enums, which are only ever null in a local
+/// (see `lower::enum_nulls`).
+pub fn nullable_type(ty: Type) -> bool {
+    ty.is_reference() || matches!(ty, Type::Enum(_))
+}
+
 /// Whether `e`, evaluated in method `m`, can produce null.
 pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
-    // Only references, and the null literal, can be null.
-    if !e.ty.is_reference() {
+    // Only references, enums and the null literal can be null.
+    if !nullable_type(e.ty) {
         return false;
     }
     match &e.kind {
