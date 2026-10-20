@@ -74,8 +74,9 @@ type (`byte`, `short`, `char`, `int`, `long`, `float`, `double`, `boolean`) and 
 arithmetic, `if`, `while`, `do`, `for`, `break`, `continue`, the conditional operator, `switch`
 statements and expressions on integers, chars, strings and enums (case labels may be constant
 expressions, which are folded as javac folds them), overloading, static and instance methods,
-fields with initializers, static fields, constructors (including `this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math`
-methods, the `Character` tests and case conversions on a `char`, the `MIN_VALUE`/`MAX_VALUE`
+fields with initializers, instance initializer blocks, static fields, constructors (including
+`this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math` methods,
+the `Character` tests and case conversions on a `char`, the `MIN_VALUE`/`MAX_VALUE`
 constants of the wrapper classes, `null` for `String`, and a user `toString` in `println` and
 string concatenation, object-typed fields and `null` objects. Strings have the common methods of
 `String` (searching, slicing, case, trimming, replacing, comparing, `split`/`replaceAll`/`matches`,

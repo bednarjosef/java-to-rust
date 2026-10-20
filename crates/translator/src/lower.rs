@@ -15,6 +15,7 @@ use std::cell::Cell;
 
 mod arrays;
 mod boxing;
+mod initializers;
 mod natives;
 mod primitives;
 mod program;
@@ -183,6 +184,9 @@ impl<'t> Lowering<'t> {
         };
         let Some(body) = node.get("body") else { return unsupported(node, "methods without a body") };
         let mut body = self.block(body)?;
+        if is_ctor {
+            self.run_initializer_blocks(info.owner, &mut body)?;
+        }
         if let Some(param) = args_param.filter(|p| reads_name(&body, p.str("name"))) {
             body.insert(0, self.args_decl(param));
         }

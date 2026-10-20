@@ -86,10 +86,7 @@ impl Census {
                         && reach.fields.contains(&(class.clone(), text(member, "name").to_string()))
                 }
                 "BLOCK" if member["static"].as_bool() == Some(true) => reach.initialized.contains(&class),
-                "BLOCK" => {
-                    features.insert("initializer blocks");
-                    reach.instantiated.contains(&class)
-                }
+                "BLOCK" => reach.instantiated.contains(&class),
                 _ => {
                     self.class(member, Some(decl), reach);
                     continue;

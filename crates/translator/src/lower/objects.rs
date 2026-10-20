@@ -76,7 +76,7 @@ impl<'t> Lowering<'t> {
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
                 "CLASS" => return unsupported(member, "inner classes"),
                 "BLOCK" if Self::is_static_block(member) => {}
-                "BLOCK" => return unsupported(member, "initializer blocks"),
+                "BLOCK" => self.check_initializer_block(node, member)?,
                 "INTERFACE" => return unsupported(member, "interfaces"),
                 kind => return unsupported(member, &kind_words(kind)),
             }

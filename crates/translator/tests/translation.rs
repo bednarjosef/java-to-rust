@@ -1953,3 +1953,21 @@ fn constant_case_labels_and_enum_switches_match_directly() {
     assert_contains(&rust, &["A_LIMIT => {", "11 => {", "ADir::Up => {", "ADir::Down => {"]);
     assert_lacks(&rust, &["_ => {}"]);
 }
+
+#[test]
+fn initializer_blocks_run_in_constructors() {
+    let rust = translate(
+        "class C { int n; { n = 3; } C() {} C(int k) { this(); n += k; } }
+        class A { public static void main(String[] a) { System.out.println(new C(2).n); } }",
+    );
+    // The block becomes part of the struct literal of `C()`; `C(int)` runs it through `C()`.
+    assert_contains(&rust, &["C { n: 3 }", "let mut this = C::new();"]);
+    let err = java_to_rust::translate(
+        "class C { { System.out.println(1); } int n = 2; }
+        class A { public static void main(String[] a) { System.out.println(new C().n); } }",
+    )
+    .expect_err("a field initializer after a block must be rejected");
+    assert!(
+        err.to_string().contains("a field initializer after an instance initializer block not supported yet")
+    );
+}
