@@ -43,7 +43,10 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         borrowed_optional: HashSet::new(),
         int_receiver: false,
         double_receiver: false,
-        owned_self: false,
+        this_form: ThisForm::Shared,
+        display: false,
+        lazy_text: false,
+        printing: false,
         guarded: false,
         annotations: Vec::new(),
         fn_names: method_names(class),
@@ -68,27 +71,23 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
             g.method(i);
         }
     }
-    let mut uses = Vec::new();
-    // Owned objects are plain values and immutable ones are shared as `Rc` alone; statics and
-    // mutable objects also need `RefCell`.
-    let refcell = class.types.iter().zip(&live).any(|(t, &l)| {
-        (l && !facts.immutable.contains(&t.name) && !facts.owned.contains(&t.name)) || !t.statics.is_empty()
-    });
-    let shared = class.types.iter().zip(&live).any(|(t, &l)| l && !facts.owned.contains(&t.name));
-    match (shared, refcell) {
-        (true, true) => uses.push("use std::cell::RefCell;\nuse std::rc::Rc;\n"),
-        (true, false) => uses.push("use std::rc::Rc;\n"),
-        (false, true) => uses.push("use std::cell::RefCell;\n"),
-        (false, false) => {}
-    }
-    if g.uses_runtime {
-        uses.push("use java_runtime as java;\n");
-    }
     let mut header = format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name);
+    let uses = modules::use_lines(&g.out);
     if !uses.is_empty() {
         header.push_str(&(uses.join("\n") + "\n"));
     }
     header + &g.out
+}
+
+/// How `this` is written in the code being generated.
+#[derive(Clone, Copy, PartialEq)]
+enum ThisForm {
+    /// `this`, a reference to the shared object: `&Rc<RefCell<C>>`, or `&C` for an immutable class.
+    Shared,
+    /// `self`, in a method that borrows its object.
+    SelfRef,
+    /// `this`, the plain value that a constructor is building.
+    Local,
 }
 
 /// The innermost enclosing loop, which decides how `continue` is translated.
@@ -122,9 +121,17 @@ struct Gen<'a> {
     /// bare literal then get their type written (see `annotation`).
     int_receiver: bool,
     double_receiver: bool,
-    /// Whether the code being written is a method of an owned class, where `this` is `self`.
-    owned_self: bool,
-    /// Whether the statement being emitted also borrows an object mutably (see `borrows_mut`).
+    /// How `this` is written in the code being generated.
+    this_form: ThisForm,
+    /// Whether the method being written is a `toString` written as `Display::fmt`, whose returns
+    /// write to the formatter `f`.
+    display: bool,
+    /// Whether the text being formatted shows objects through `Display`, when they are formatted
+    /// rather than converted to a `String` first (see `parts`).
+    lazy_text: bool,
+    /// Whether the text being formatted is printed.
+    printing: bool,
+    /// Whether the statement being emitted also borrows an object mutably (see `conflicts`).
     guarded: bool,
     /// Placeholders for type annotations decided at the end of the method: (placeholder, type,
     /// annotation).
@@ -147,7 +154,11 @@ impl<'a> Gen<'a> {
         for _ in 0..self.indent {
             self.out.push_str("    ");
         }
-        self.out.push_str(text);
+        if self.guarded {
+            self.out.push_str(&scoped_arguments(text));
+        } else {
+            self.out.push_str(text);
+        }
         self.out.push('\n');
     }
 
@@ -214,9 +225,11 @@ impl<'a> Gen<'a> {
             .map(|i| m.params[i].name.clone())
             .collect();
         let name = &self.class.types[m.class].name;
-        self.owned_self = !m.is_static && !m.is_ctor && self.facts.owned.contains(name);
+        let borrows = !m.is_static && !m.is_ctor && self.facts.self_methods.contains(&index);
+        self.display = borrows && self.displays(index);
+        self.this_form = if borrows { ThisForm::SelfRef } else { ThisForm::Shared };
         let mut params = Vec::new();
-        if self.owned_self {
+        if borrows {
             params.push(if self.facts.mutating.contains(&index) { "&mut self" } else { "&self" }.to_string());
         } else if !m.is_static && !m.is_ctor {
             params.push(format!("this: {}", self.this_type(name)));
@@ -242,7 +255,9 @@ impl<'a> Gen<'a> {
             })
             .collect();
         params.extend(typed);
-        let ret = if m.is_ctor {
+        let ret = if m.is_ctor && self.builds_plain(name) {
+            format!(" -> {}", struct_name(name))
+        } else if m.is_ctor {
             format!(" -> {}", self.object_type(name))
         } else if m.ret == Type::Void {
             String::new()
@@ -251,7 +266,11 @@ impl<'a> Gen<'a> {
         } else {
             format!(" -> {}", self.ty_name(m.ret))
         };
-        self.line(&format!("{}fn {}({}){ret} {{", self.vis(), self.fn_names[index], params.join(", ")));
+        if self.display {
+            self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
+        } else {
+            self.line(&format!("{}fn {}({}){ret} {{", self.vis(), self.fn_names[index], params.join(", ")));
+        }
         self.indent += 1;
         if m.is_ctor {
             self.constructor(m);
@@ -260,6 +279,7 @@ impl<'a> Gen<'a> {
         }
         self.indent -= 1;
         self.line("}");
+        self.display = false;
         self.resolve_annotations(start);
     }
 
@@ -271,6 +291,9 @@ impl<'a> Gen<'a> {
         collect_locals(&m.body, &mut java_names);
         let mut used: HashSet<String> = self.fn_names.iter().cloned().collect();
         used.insert("java".into());
+        if self.display {
+            used.insert("f".into());
+        }
         self.locals.clear();
         for name in java_names {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.locals.entry(name) {
@@ -279,6 +302,46 @@ impl<'a> Gen<'a> {
             }
         }
     }
+}
+
+/// A borrow scoped with braces, `{ x.borrow().f }`, is a function argument of its own in a
+/// guarded statement, where rustc's unused_braces lint would ask to drop braces that end the
+/// borrow; there it is written `{ let value = x.borrow().f; value }`. Text in string literals is
+/// left alone.
+fn scoped_arguments(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if escaped {
+            escaped = false;
+        } else if in_string {
+            escaped = c == b'\\';
+            in_string = c != b'"';
+        } else if c == b'"' {
+            in_string = true;
+        } else if (text[..i].ends_with('(') || text[..i].ends_with(", ")) && text[i..].starts_with("{ ") {
+            // A block with no braces or quotes inside, followed by the end of the argument.
+            if let Some(len) = text[i + 2..].find(['{', '}', '"'])
+                && text[i + 2 + len..].starts_with('}')
+                && text[i + 2..i + 2 + len].ends_with(' ')
+                && !text[i + 2..i + 2 + len].contains("let ")
+                && matches!(bytes.get(i + 3 + len), Some(b')' | b','))
+            {
+                let inner = text[i + 2..i + 1 + len].trim_end();
+                out.push_str(&format!("{{ let value = {inner}; value }}"));
+                i += 3 + len;
+                continue;
+            }
+        }
+        let next = i + text[i..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&text[i..next]);
+        i = next;
+    }
+    out
 }
 
 fn collect_locals(stmts: &[Stmt], out: &mut Vec<String>) {

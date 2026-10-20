@@ -74,19 +74,32 @@ impl<'a> Gen<'a> {
         if ty == Type::String {
             return self.append(&name, target, value);
         }
-        if let Some(text) = self.primitive_assignment(op, &name, ty, value, id) {
+        self.compound(op, &name, ty, value, id)
+    }
+
+    /// `place op= value` on a number, where reading `place` has no effect: in place when Rust's
+    /// operator does what Java's does, else Java's arithmetic and a write of the result.
+    pub(super) fn compound(
+        &mut self,
+        op: BinOp,
+        place: &str,
+        ty: Type,
+        value: &'a Expr,
+        id: ExprId,
+    ) -> String {
+        if let Some(text) = self.primitive_assignment(op, place, ty, value, id) {
             return text;
         }
         if let Some(symbol) = self.in_place_op(op, ty, value, id) {
             let v = self.value(value, if op.is_shift() { value.ty } else { ty });
-            return format!("{name} {symbol} {}", v.text);
+            return format!("{place} {symbol} {}", v.text);
         }
         let result = crate::types::binary_type(op, ty, value.ty).expect("checked");
         // Java's compound assignment casts the result back to the variable's type.
-        let current = Code::atom(name.clone());
+        let current = Code::atom(place.to_string());
         let right = self.operand(value);
         let code = self.binary(op, Operand { code: current, ty }, right, result, id);
-        format!("{name} = {}", self.convert(code, result, ty).text)
+        format!("{place} = {}", self.convert(code, result, ty).text)
     }
 
     /// Whether a division or remainder can neither throw nor overflow.
@@ -111,15 +124,15 @@ impl<'a> Gen<'a> {
             {
                 return format!("{name} += {}", self.str_ref(value));
             }
+            if matches!(value.ty, Type::Class(_)) {
+                let index = self.to_string_index(value);
+                return format!("{name} += &{}", self.method_call(value, index, &[]).text);
+            }
             let mut parts = Vec::new();
             self.parts(value, &mut parts);
             if parts.len() == 1 {
                 match parts.pop().expect("one part") {
                     Part::Lit(text) => return format!("{name} += {}", rust_string(&text)),
-                    // An object's text is already a `String`.
-                    Part::Arg(code) if matches!(value.ty, Type::Class(_)) => {
-                        return format!("{name} += &{}", code.text);
-                    }
                     Part::Arg(code) => {
                         let ty = if value.ty == Type::Double { Type::Void } else { value.ty };
                         return format!("{name} += &{}.to_string()", self.recv(&code, ty));
@@ -136,6 +149,11 @@ impl<'a> Gen<'a> {
     /// `x += 1` or `x -= 1` as a Rust statement.
     pub(super) fn step(&mut self, target: &str, ty: Type, increment: bool, id: ExprId) -> String {
         let name = self.local(target);
+        self.step_place(name, ty, increment, id)
+    }
+
+    /// `place++` or `place--` as a statement, where reading `place` has no effect.
+    pub(super) fn step_place(&mut self, name: String, ty: Type, increment: bool, id: ExprId) -> String {
         if ty.is_floating() || self.no_overflow(id) {
             let one = if ty.is_floating() { "1.0" } else { "1" };
             format!("{name} {} {one}", if increment { "+=" } else { "-=" })
@@ -410,9 +428,11 @@ impl<'a> Gen<'a> {
             }
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
+                let outer = std::mem::replace(&mut self.printing, true);
                 if let Some(arg) = args.first() {
                     self.parts(arg, &mut parts);
                 }
+                self.printing = outer;
                 let mac = self.runtime(if builtin == Builtin::Println { "println!" } else { "print!" });
                 self.format(&mac, parts)
             }

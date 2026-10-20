@@ -3,6 +3,7 @@
 //! that no `RefCell` borrow outlives the expression that made it. Static fields live in
 //! thread-local cells, which are initialized on first use.
 
+use super::null::has_effects;
 use super::*;
 
 /// What an assignment, `++` or `--` does to a field or static field.
@@ -56,11 +57,12 @@ pub(super) fn needs_clone(ty: Type) -> bool {
     matches!(ty, Type::String | Type::Array(_) | Type::Class(_))
 }
 
-/// The Rust name of a class: its name in its package with the dots replaced, after the path of its
+/// The Rust name of a class: its name in its package without the dots (`Outer.Inner` is
+/// `OuterInner`), after the path of its
 /// module when that is not the module being written (see `modules`).
 pub(super) fn struct_name(name: &str) -> String {
     let (path, local) = modules::split(name);
-    path + &local.replace('.', "_")
+    path + &local.replace('.', "")
 }
 
 /// The Rust type of an object of a class. An immutable class's objects never change, so they need
@@ -113,45 +115,30 @@ pub(super) fn live_types(class: &Class) -> Vec<bool> {
     live
 }
 
-/// Whether an expression writes a field or calls a method or constructor, which may borrow an
-/// object mutably while a field read of the same statement still holds its `Ref`.
-pub(super) fn borrows_mut(e: &Expr) -> bool {
-    let mut found = false;
-    visit_expr(e, &mut |x| {
-        found |= matches!(
-            &x.kind,
-            ExprKind::Assign { target: Place::Field { .. }, .. }
-                | ExprKind::IncDec { target: Place::Field { .. }, .. }
-                | ExprKind::Call { .. }
-                | ExprKind::MethodCall { .. }
-                | ExprKind::New { .. }
-                | ExprKind::ThisCall { .. }
-        ) || converts_object(x);
-    });
-    found
-}
-
-/// Whether an expression turns an object into text, which runs the object's `toString`.
-fn converts_object(x: &Expr) -> bool {
-    match &x.kind {
-        ExprKind::Builtin(_, args) => args.iter().any(|a| matches!(a.ty, Type::Class(_))),
-        ExprKind::Binary(_, l, r) => matches!(l.ty, Type::Class(_)) || matches!(r.ty, Type::Class(_)),
-        _ => false,
-    }
-}
-
-/// Whether the expressions that a statement evaluates itself borrow mutably; the expressions of
-/// nested statements are checked when those are emitted.
-pub(super) fn stmt_borrows_mut(stmt: &Stmt) -> bool {
-    let exprs: Vec<&Expr> = match stmt {
+/// The expressions that a statement evaluates itself; the expressions of nested statements are
+/// emitted as statements of their own.
+fn own_exprs(stmt: &Stmt) -> Vec<&Expr> {
+    match stmt {
         Stmt::Local { init, .. } => init.iter().collect(),
         Stmt::Expr(e) | Stmt::Return(Some(e), _) => vec![e],
         Stmt::If { cond, .. } | Stmt::While { cond, .. } | Stmt::DoWhile { cond, .. } => vec![cond],
         Stmt::ForEach { array, .. } => vec![array],
         Stmt::For { cond, update, .. } => cond.iter().chain(update.iter()).collect(),
         Stmt::Return(None, _) | Stmt::Break | Stmt::Continue | Stmt::Block(_) => Vec::new(),
-    };
-    exprs.into_iter().any(borrows_mut)
+    }
+}
+
+/// Whether an expression turns an object into text, which runs the object's `toString`; the
+/// object, if so.
+fn converted_objects(x: &Expr) -> Vec<&Expr> {
+    let is_object = |a: &&Expr| matches!(a.ty, Type::Class(_));
+    match &x.kind {
+        ExprKind::Builtin(Builtin::Print | Builtin::Println, args) => args.iter().filter(is_object).collect(),
+        ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
+            [&**l, &**r].into_iter().filter(is_object).collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Whether some expression of the statements is `this`, so that a constructor must bind it.
@@ -167,6 +154,58 @@ fn uses_this(stmts: &[Stmt]) -> bool {
     found
 }
 
+/// Whether a constructor starts by calling another one with `this(...)`.
+pub(super) fn delegates(m: &Method) -> bool {
+    matches!(m.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })))
+}
+
+/// Whether an expression reads or uses `this`.
+pub(super) fn mentions_this(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::This));
+    found
+}
+
+/// Whether two expressions are the same `this` or local.
+fn same_object(a: &Expr, b: &Expr) -> bool {
+    match (&a.kind, &b.kind) {
+        (ExprKind::This, ExprKind::This) => true,
+        (ExprKind::Var(x), ExprKind::Var(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Whether an expression writes a field of `object` or calls a method that changes it.
+fn changes_object(e: &Expr, object: &Expr, mutating: &HashSet<usize>) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| {
+        found |= match &x.kind {
+            ExprKind::Assign { target: Place::Field { object: o, .. }, .. }
+            | ExprKind::IncDec { target: Place::Field { object: o, .. }, .. } => same_object(o, object),
+            ExprKind::MethodCall { receiver, resolved: Some(j), .. } => {
+                same_object(receiver, object) && mutating.contains(j)
+            }
+            _ => false,
+        }
+    });
+    found
+}
+
+/// Whether an expression reads a field of an object of class `name` or turns one into text.
+fn reads_class(e: &Expr, name: &str) -> bool {
+    let of_class = |x: &Expr| matches!(x.ty, Type::Class(c) if c == name);
+    let mut found = false;
+    visit_expr(e, &mut |x| {
+        found |= match &x.kind {
+            ExprKind::Field { object, .. } => of_class(object),
+            ExprKind::Builtin(_, args) => args.iter().any(of_class),
+            ExprKind::Binary(_, l, r) => of_class(l) || of_class(r),
+            _ => false,
+        }
+    });
+    found
+}
+
 impl<'a> Gen<'a> {
     /// The Rust type of an object of class `name`: a plain value for an owned class.
     pub(super) fn object_type(&self, name: &str) -> String {
@@ -178,8 +217,11 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether `e` is an object whose fields are read and written without a `RefCell`: an object of
-    /// an immutable class, or of an owned class.
+    /// an immutable class or of an owned class, or `this` when it is borrowed or being built.
     pub(super) fn is_plain(&self, e: &Expr) -> bool {
+        if matches!(e.kind, ExprKind::This) && self.this_form != ThisForm::Shared {
+            return true;
+        }
         matches!(e.ty, Type::Class(name) if self.facts.immutable.contains(name) || self.facts.owned.contains(name))
     }
 
@@ -192,9 +234,26 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The name of `this` in the code being written: `self` in an owned class's method, else `this`.
+    /// The name of `this` in the code being written: `self` in a method that borrows its object,
+    /// else `this`.
     pub(super) fn this_name(&self) -> &'static str {
-        if self.owned_self { "self" } else { "this" }
+        if self.this_form == ThisForm::SelfRef { "self" } else { "this" }
+    }
+
+    /// Whether the constructors of class `name` build a plain value, which `new` then shares.
+    pub(super) fn builds_plain(&self, name: &str) -> bool {
+        self.facts.owned.contains(name) || self.facts.plain_constructors.contains(name)
+    }
+
+    /// Whether the field initializers of class `t` are written into its one constructor's struct
+    /// literal, rather than run by a `field_inits` method that every constructor calls.
+    pub(super) fn inline_inits(&self, t: usize) -> bool {
+        let decl = &self.class.types[t];
+        let building =
+            self.class.methods.iter().filter(|m| m.is_ctor && m.class == t && !delegates(m)).count();
+        self.builds_plain(&decl.name)
+            && building == 1
+            && decl.fields.iter().filter_map(|f| f.init.as_ref()).all(|e| !mentions_this(e))
     }
 
     /// The text of an object used for a field access: `this`, a variable, or an expression.
@@ -230,9 +289,7 @@ impl<'a> Gen<'a> {
                     self.optional(a).text
                 } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {
                     self.borrowed_arg(a, written)
-                } else if self.guarded
-                    && matches!(&a.kind, ExprKind::Field { object, .. } if !self.is_plain(object))
-                {
+                } else if self.guarded && self.holds_borrow(a) {
                     // A lone `{ x }` argument draws rustc's unused_braces lint; a `let` keeps the
                     // scope of the `Ref` short while the call runs.
                     let outer = std::mem::replace(&mut self.guarded, false);
@@ -244,6 +301,87 @@ impl<'a> Gen<'a> {
                 }
             })
             .collect()
+    }
+
+    /// Whether a statement's own expressions may borrow an object mutably while another borrow made
+    /// by the statement is still alive, so that every borrow must end where it is made.
+    pub(super) fn stmt_conflicts(&self, stmt: &Stmt) -> bool {
+        self.conflicts(&own_exprs(stmt))
+    }
+
+    /// Whether the borrows that evaluating the expressions makes may conflict: a `RefCell` borrow
+    /// lives to the end of the statement, so two borrows conflict when one of them is mutable.
+    pub(super) fn conflicts(&self, exprs: &[&Expr]) -> bool {
+        let (mut borrows, mut mutable) = (0, 0);
+        for e in exprs {
+            visit_expr(e, &mut |x| {
+                let (b, m) = self.borrows_here(x);
+                borrows += b;
+                mutable += m;
+            });
+        }
+        mutable > 0 && borrows > 1
+    }
+
+    /// The borrows of a shared object that one expression node makes (not counting its operands),
+    /// and how many of them may be mutable. A method or constructor that reaches objects other
+    /// than its own object may borrow any of them.
+    fn borrows_here(&self, x: &Expr) -> (usize, usize) {
+        let call = |index: usize, receiver: Option<&Expr>| {
+            let mut counts = (0, 0);
+            let shared = receiver.is_some_and(|r| !self.is_plain(r));
+            if receiver.is_some() && !self.facts.self_methods.contains(&index) {
+                counts = (1, 1);
+            } else if shared {
+                counts = (1, usize::from(self.facts.mutating.contains(&index)));
+            }
+            if !self.facts.isolated.contains(&index) {
+                counts = (counts.0 + 1, counts.1 + 1);
+            }
+            counts
+        };
+        let mut counts = match &x.kind {
+            ExprKind::Field { object, .. } => (usize::from(!self.is_plain(object)), 0),
+            ExprKind::Assign { target: Place::Field { object, .. }, .. }
+            | ExprKind::IncDec { target: Place::Field { object, .. }, .. } => {
+                let shared = usize::from(!self.is_plain(object));
+                (shared, shared)
+            }
+            ExprKind::MethodCall { receiver, resolved: Some(index), .. } => call(*index, Some(receiver)),
+            ExprKind::Call { resolved: Some(index), .. }
+            | ExprKind::New { ctor: Some(index), .. }
+            | ExprKind::ThisCall { resolved: Some(index), .. } => call(*index, None),
+            _ => (0, 0),
+        };
+        for object in converted_objects(x) {
+            let (b, m) = call(self.to_string_index(object), Some(object));
+            counts = (counts.0 + b, counts.1 + m);
+        }
+        counts
+    }
+
+    /// The index of the `toString` method of an object's class.
+    pub(super) fn to_string_index(&self, e: &Expr) -> usize {
+        let Type::Class(name) = e.ty else { unreachable!("an object has a class type") };
+        self.class
+            .methods
+            .iter()
+            .position(|m| {
+                self.class.types[m.class].name == name && m.name == "toString" && m.params.is_empty()
+            })
+            .expect("lowering checks that the class has toString")
+    }
+
+    /// Whether `a` reads a shared object through a `RefCell` borrow that would live to the end of
+    /// the statement: a field read, or a call of a method that borrows its object.
+    fn holds_borrow(&self, a: &Expr) -> bool {
+        match &a.kind {
+            ExprKind::Field { object, .. } => !self.is_plain(object),
+            ExprKind::MethodCall { receiver, resolved: Some(index), .. } => {
+                self.facts.self_methods.contains(index) && !self.is_plain(receiver)
+            }
+            _ => false,
+        }
     }
 
     /// The Rust path of a method or constructor, such as `Point::new` or `Point::norm`.
@@ -271,38 +409,105 @@ impl<'a> Gen<'a> {
         Code::atom(Slot::Static { cell }.read(ty))
     }
 
-    /// `new C(args)`, which calls the constructor that the checker chose.
+    /// `new C(args)`, which calls the constructor that the checker chose. A constructor that builds
+    /// a plain value is wrapped here, unless the class is owned.
     pub(super) fn new_object(&mut self, ctor: usize, args: &'a [Expr]) -> Code {
         let args = self.call_args(ctor, args).join(", ");
-        Code::atom(format!("{}({args})", self.qualified_fn(ctor)))
+        let call = format!("{}({args})", self.qualified_fn(ctor));
+        let name = &self.class.types[self.class.methods[ctor].class].name;
+        Code::atom(if self.facts.owned.contains(name) || !self.builds_plain(name) {
+            call
+        } else if self.facts.immutable.contains(name) {
+            format!("Rc::new({call})")
+        } else {
+            format!("Rc::new(RefCell::new({call}))")
+        })
     }
 
-    /// `receiver.name(args)`, a call of an instance method.
+    /// `receiver.name(args)`, a call of an instance method. A method that borrows its object is
+    /// called with method syntax, on a shared object through `borrow()` or `borrow_mut()`.
     pub(super) fn method_call(&mut self, receiver: &'a Expr, index: usize, args: &'a [Expr]) -> Code {
-        if self.is_owned_method(index) {
-            // An owned object is a value, so its method is called with method syntax: the receiver
-            // is borrowed by the call itself, and `p.set(p.x + 1)` is accepted by two-phase borrows.
+        if !self.facts.self_methods.contains(&index) {
+            let mut all = vec![self.receiver_ref(receiver)];
+            all.extend(self.call_args(index, args));
+            return Code::atom(format!("{}({})", self.qualified_fn(index), all.join(", ")));
+        }
+        let mutating = self.facts.mutating.contains(&index);
+        if self.is_plain(receiver) {
+            // The call borrows a plain object itself, and two-phase borrows accept `p.set(p.x + 1)`;
+            // an argument that changes the object must run before the call borrows it.
+            if mutating && args.iter().any(|a| changes_object(a, receiver, &self.facts.mutating)) {
+                return self.bound_call(receiver, index, args, "");
+            }
             let args = self.call_args(index, args).join(", ");
             let obj = self.object(receiver);
             return Code::atom(format!("{obj}.{}({args})", self.fn_names[index]));
         }
-        let mut all = vec![self.receiver_ref(receiver)];
-        all.extend(self.call_args(index, args));
-        Code::atom(format!("{}({})", self.qualified_fn(index), all.join(", ")))
+        let borrow = if mutating { ".borrow_mut()" } else { ".borrow()" };
+        let Type::Class(class) = receiver.ty else { unreachable!("a receiver has a class type") };
+        // The receiver is borrowed before the arguments run, so arguments that may reach an object
+        // of the class run first.
+        if args.iter().any(|a| has_effects(a) || reads_class(a, class)) {
+            return self.bound_call(receiver, index, args, borrow);
+        }
+        let obj = self.object(receiver);
+        let args = self.call_args(index, args).join(", ");
+        let call = format!("{obj}{borrow}.{}({args})", self.fn_names[index]);
+        Code::atom(if self.guarded { format!("{{ {call} }}") } else { call })
+    }
+
+    /// A method call whose arguments are bound before the call borrows its object, in Java's order:
+    /// the receiver, the arguments, then the call.
+    fn bound_call(&mut self, receiver: &'a Expr, index: usize, args: &'a [Expr], borrow: &str) -> Code {
+        let outer = std::mem::replace(&mut self.guarded, false);
+        let mut lines = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        let obj = match &receiver.kind {
+            ExprKind::This | ExprKind::Var(_) => self.object(receiver),
+            _ => {
+                let temp = self.temp("object");
+                let text = self.expr(receiver).text;
+                lines.push(format!("let {temp} = {text};"));
+                names.push(temp.clone());
+                temp
+            }
+        };
+        let texts = self.call_args(index, args);
+        let mut bound = Vec::new();
+        for (text, p) in texts.into_iter().zip(&self.class.methods[index].params) {
+            let mut temp = self.temp(&snake_case(&p.name));
+            while names.contains(&temp) {
+                temp.push('_');
+            }
+            lines.push(format!("let {temp} = {text};"));
+            names.push(temp.clone());
+            bound.push(temp);
+        }
+        self.guarded = outer;
+        lines.push(format!("{obj}{borrow}.{}({})", self.fn_names[index], bound.join(", ")));
+        Code::atom(format!("{{ {} }}", lines.join(" ")))
     }
 
     /// The text of an object, which Java gets from its class's `toString` (lowering rejects classes
     /// without one).
     pub(super) fn object_text(&mut self, e: &'a Expr) -> Code {
-        let Type::Class(name) = e.ty else { unreachable!("an object has a class type") };
-        let index = self
-            .class
-            .methods
-            .iter()
-            .position(|m| {
-                self.class.types[m.class].name == name && m.name == "toString" && m.params.is_empty()
-            })
-            .expect("lowering checks that the class has toString");
+        let index = self.to_string_index(e);
+        if !self.displays(index) {
+            return self.text_call(e, index);
+        }
+        if !self.lazy_text || (self.printing && !self.quiet_text(e, 0)) {
+            return self.method_call(e, index, &[]);
+        }
+        // The object is formatted through its `Display`.
+        let obj = self.object(e);
+        Code::atom(if self.is_plain(e) { obj } else { format!("{obj}.borrow()") })
+    }
+
+    /// A call of a `toString` that is a plain method.
+    fn text_call(&mut self, e: &'a Expr, index: usize) -> Code {
+        if self.facts.self_methods.contains(&index) {
+            return self.method_call(e, index, &[]);
+        }
         Code::atom(format!("{}({})", self.qualified_fn(index), self.receiver_ref(e)))
     }
 
@@ -316,6 +521,57 @@ impl<'a> Gen<'a> {
             name = format!("{base}_{i}");
         }
         name
+    }
+
+    /// A field assignment, `++` or `--` evaluated for its effect, written in place: `p.x = v`,
+    /// `self.count += 1`, `obj.borrow_mut().total += n`. `None` where Java's order of evaluation
+    /// needs the general form of `update`: a compound assignment reads the field before its right
+    /// operand runs, so that operand must have no effects.
+    pub(super) fn field_effect(&mut self, e: &'a Expr) -> Option<String> {
+        let (target, how) = match &e.kind {
+            ExprKind::Assign { op: None, target, value } => (target, Update::Assign(value)),
+            ExprKind::Assign { op: Some(op), target, value } => (target, Update::Compound(*op, value)),
+            ExprKind::IncDec { target, increment, .. } => (target, Update::Step(*increment)),
+            _ => return None,
+        };
+        let Place::Field { object, name } = target else { return None };
+        if !matches!(object.kind, ExprKind::This | ExprKind::Var(_)) {
+            return None;
+        }
+        let ty = e.ty;
+        if let Update::Compound(_, value) = how
+            && (ty == Type::String || has_effects(value))
+        {
+            return None;
+        }
+        let obj = self.object(object);
+        let field = snake_case(name);
+        if self.is_plain(object) {
+            let place = format!("{obj}.{field}");
+            return Some(match how {
+                Update::Assign(value) => format!("{place} = {}", self.value(value, ty).text),
+                Update::Compound(op, value) => self.compound(op, &place, ty, value, e.id),
+                Update::Step(increment) => self.step_place(place, ty, increment, e.id),
+            });
+        }
+        // The right operand runs before the field is borrowed, and the borrow of every field it
+        // reads ends first.
+        let place = format!("{obj}.borrow_mut().{field}");
+        let outer = std::mem::replace(&mut self.guarded, true);
+        let text = match how {
+            Update::Assign(value) => Some(format!("{place} = {}", self.value(value, ty).text)),
+            Update::Compound(op, value) => self.in_place_op(op, ty, value, e.id).map(|symbol| {
+                let v = self.value(value, if op.is_shift() { value.ty } else { ty });
+                format!("{place} {symbol} {}", v.text)
+            }),
+            Update::Step(increment) if ty.is_floating() || self.no_overflow(e.id) => {
+                let one = if ty.is_floating() { "1.0" } else { "1" };
+                Some(format!("{place} {} {one}", if increment { "+=" } else { "-=" }))
+            }
+            Update::Step(_) => None,
+        };
+        self.guarded = outer;
+        text
     }
 
     /// An assignment, `++` or `--` to a field or a static field, as a block that yields the value
@@ -357,7 +613,7 @@ impl<'a> Gen<'a> {
         // The right-hand side is computed on its own line, before the write, so only a call or a
         // field write inside it can conflict with a field read.
         let rhs = match &how {
-            Update::Assign(value) | Update::Compound(_, value) => borrows_mut(value),
+            Update::Assign(value) | Update::Compound(_, value) => self.conflicts(&[value]),
             Update::Step(_) => false,
         };
         let outer = std::mem::replace(&mut self.guarded, rhs);
@@ -419,34 +675,106 @@ impl<'a> Gen<'a> {
         self.line(&format!("impl {name} {{"));
         self.indent += 1;
         self.field_inits(index);
+        let mut display = None;
         for i in 0..class.methods.len() {
             if class.methods[i].class == index && !class.methods[i].is_static {
+                if self.displays(i) {
+                    display = Some(i);
+                    continue;
+                }
                 self.gap();
                 self.method(i);
             }
         }
         self.indent -= 1;
         self.line("}");
+        // `toString` is how the object is displayed.
+        if let Some(i) = display {
+            self.gap();
+            self.line(&format!("impl fmt::Display for {name} {{"));
+            self.indent += 1;
+            self.method(i);
+            self.indent -= 1;
+            self.line("}");
+        }
+    }
+
+    /// Whether method `index` is a `toString` that becomes the class's `Display` implementation:
+    /// it borrows its object without changing it and never returns null.
+    pub(super) fn displays(&self, index: usize) -> bool {
+        let m = &self.class.methods[index];
+        m.name == "toString"
+            && m.params.is_empty()
+            && !m.is_static
+            && m.ret == Type::String
+            && self.facts.self_methods.contains(&index)
+            && !self.facts.mutating.contains(&index)
+            && !self.facts.nullable_returns.contains(&index)
+    }
+
+    /// Whether displaying an object of `e`'s class can neither print nor throw, so that printing
+    /// may format it in the middle of the printed line: its `toString` returns a concatenation of
+    /// constants, variables and fields that cannot throw.
+    fn quiet_text(&self, e: &Expr, depth: usize) -> bool {
+        let index = self.to_string_index(e);
+        let m = &self.class.methods[index];
+        depth < 4
+            && self.displays(index)
+            && matches!(&m.body[..], [Stmt::Return(Some(value), _)] if self.quiet(value, depth))
+    }
+
+    fn quiet(&self, e: &Expr, depth: usize) -> bool {
+        match &e.kind {
+            ExprKind::Int(_)
+            | ExprKind::Long(_)
+            | ExprKind::Double(_)
+            | ExprKind::Float(_)
+            | ExprKind::Char(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Str(_)
+            | ExprKind::Var(_) => !matches!(e.ty, Type::Class(_) | Type::Array(_)),
+            ExprKind::Field { object, .. } => {
+                matches!(object.kind, ExprKind::This)
+                    && match e.ty {
+                        Type::Class(_) => self.quiet_text(e, depth + 1),
+                        Type::Array(_) => false,
+                        _ => true,
+                    }
+            }
+            ExprKind::Binary(op, l, r) => {
+                !matches!(op, BinOp::Div | BinOp::Rem)
+                    && [l, r].iter().all(|x| match x.ty {
+                        Type::Class(_) if matches!(x.kind, ExprKind::This) => false,
+                        _ => self.quiet(x, depth),
+                    })
+            }
+            ExprKind::Unary(_, x) | ExprKind::Cast(_, x) => self.quiet(x, depth),
+            ExprKind::Conditional(c, a, b) => [c, a, b].iter().all(|x| self.quiet(x, depth)),
+            _ => false,
+        }
     }
 
     /// Runs the field initializers of an object, in source order, on `this`.
     fn field_inits(&mut self, index: usize) {
         let class = self.class;
         let inits: Vec<&'a Field> = class.types[index].fields.iter().filter(|f| f.init.is_some()).collect();
-        if inits.is_empty() {
+        if inits.is_empty() || self.inline_inits(index) {
             return;
         }
         let name = &class.types[index].name;
-        // Immutable and owned objects are built in place, so `this` is a `&mut` to the value.
-        let by_value = self.facts.immutable.contains(name) || self.facts.owned.contains(name);
-        self.owned_self = false;
+        // A plain value is built in place, so its initializers borrow it as `&mut self`; an
+        // immutable object is built in place too.
+        let plain = self.builds_plain(name);
+        let by_value = plain || self.facts.immutable.contains(name);
+        self.this_form = if plain { ThisForm::SelfRef } else { ThisForm::Shared };
         self.gap();
-        let this = if by_value {
-            format!("&mut {}", struct_name(name))
+        if plain {
+            self.line("fn field_inits(&mut self) {");
+        } else if by_value {
+            self.line(&format!("fn field_inits(this: &mut {}) {{", struct_name(name)));
         } else {
-            format!("&{}", class_type(name, false))
-        };
-        self.line(&format!("fn field_inits(this: {this}) {{"));
+            self.line(&format!("fn field_inits(this: &{}) {{", class_type(name, false)));
+        }
         self.indent += 1;
         for f in inits {
             // The line writes a field, so a read in the value must end its `Ref` first.
@@ -455,7 +783,7 @@ impl<'a> Gen<'a> {
             self.guarded = outer;
             let field = snake_case(&f.name);
             if by_value {
-                self.line(&format!("this.{field} = {value};"));
+                self.line(&format!("{}.{field} = {value};", self.this_name()));
             } else {
                 self.line(&format!("this.borrow_mut().{field} = {value};"));
             }
@@ -492,9 +820,9 @@ impl<'a> Gen<'a> {
     /// before the rest of the body.
     pub(super) fn constructor(&mut self, m: &'a Method) {
         let class = self.class;
-        self.owned_self = false;
-        if self.facts.owned.contains(&class.types[m.class].name) {
-            return self.owned_constructor(m);
+        self.this_form = ThisForm::Shared;
+        if self.builds_plain(&class.types[m.class].name) {
+            return self.plain_constructor(m);
         }
         let decl = &class.types[m.class];
         let (delegate, rest) = match m.body.split_first() {

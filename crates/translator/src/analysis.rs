@@ -9,12 +9,14 @@
 //!   they can be null.
 //! - Array locals that no other name can see are plain `Vec`s (see `arrays`).
 //! - Classes whose objects never change after construction are shared without a `RefCell`
-//!   (see `objects`).
+//!   (see `objects`), and methods that only reach their object through `this` borrow it as
+//!   `&self` or `&mut self` (see `borrowing`).
 //!
 //! The facts form a table keyed by expression id. An expression without a fact gets the faithful
 //! default translation, so a weaker analysis only makes the output plainer, never wrong.
 
 mod arrays;
+mod borrowing;
 mod indexing;
 mod moves;
 mod nullness;
@@ -68,8 +70,14 @@ pub struct Facts {
     pub immutable: HashSet<String>,
     /// The classes whose objects are never shared, so they are plain values, by qualified name.
     pub owned: HashSet<String>,
-    /// The instance methods (indexes into `Class::methods`) that change their owned object.
+    /// The instance methods (indexes into `Class::methods`) that change their object.
     pub mutating: HashSet<usize>,
+    /// The instance methods that borrow their object for the call: `&self` or `&mut self`.
+    pub self_methods: HashSet<usize>,
+    /// The classes whose constructors build a plain value, which `new` then shares.
+    pub plain_constructors: HashSet<String>,
+    /// Methods and constructors that touch no object but their own, so they borrow no other.
+    pub isolated: HashSet<usize>,
 }
 
 pub fn analyze(class: &Class) -> Facts {
@@ -79,9 +87,12 @@ pub fn analyze(class: &Class) -> Facts {
     borrowed_params(class, &mut facts);
     ascii_strings(class, &mut facts);
     facts.immutable = objects::immutable_classes(class);
-    let owned = owned::owned_classes(class, &facts.immutable);
-    facts.owned = owned.classes;
-    facts.mutating = owned.mutating;
+    facts.owned = owned::owned_classes(class, &facts.immutable);
+    let borrowing = borrowing::borrowing(class, &facts.immutable, &facts.owned);
+    facts.mutating = borrowing.mutating;
+    facts.self_methods = borrowing.methods;
+    facts.plain_constructors = borrowing.plain_constructors;
+    facts.isolated = borrowing.isolated;
     arrays::analyze(class, &mut facts);
     indexing::analyze(class, &mut facts);
     moves::analyze(class, &mut facts);

@@ -36,7 +36,12 @@ impl<'a> Gen<'a> {
             }
             _ => {}
         });
+        // An object is formatted through its `Display`, which runs its `toString` when the text is
+        // formatted, after every operand; that is Java's order only when no operand has effects.
+        let lazy = !self.effects_besides_text(e);
+        let outer = std::mem::replace(&mut self.lazy_text, lazy);
         self.concat_parts(e, &assigned, out);
+        self.lazy_text = outer;
     }
 
     pub(super) fn concat_parts(&mut self, e: &'a Expr, assigned: &HashSet<String>, out: &mut Vec<Part>) {
@@ -45,6 +50,12 @@ impl<'a> Gen<'a> {
         }
         match &e.kind {
             _ if matches!(e.ty, Type::Class(_)) => out.push(Part::Arg(self.object_text(e))),
+            // `x.toString()` shows `x` like concatenating it does.
+            ExprKind::MethodCall { receiver, resolved: Some(index), args, .. }
+                if args.is_empty() && self.displays(*index) =>
+            {
+                out.push(Part::Arg(self.object_text(receiver)))
+            }
             ExprKind::Binary(BinOp::Add, l, r) if e.ty == Type::String => {
                 self.concat_parts(l, assigned, out);
                 self.concat_parts(r, assigned, out);
@@ -77,6 +88,21 @@ impl<'a> Gen<'a> {
                     out.push(Part::Arg(code));
                 }
             }
+        }
+    }
+
+    /// Whether an expression has effects other than the `toString` calls of objects it shows.
+    fn effects_besides_text(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::MethodCall { receiver, resolved: Some(index), args, .. }
+                if args.is_empty() && self.displays(*index) =>
+            {
+                self.effects_besides_text(receiver)
+            }
+            ExprKind::Binary(BinOp::Add, l, r) if e.ty == Type::String => {
+                self.effects_besides_text(l) || self.effects_besides_text(r)
+            }
+            _ => null::has_effects(e),
         }
     }
 

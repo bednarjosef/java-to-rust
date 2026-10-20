@@ -445,37 +445,46 @@ fn equals_on_null_evaluates_its_argument_first() {
 }
 
 #[test]
-fn field_reads_are_braced_only_beside_a_mutable_borrow() {
+fn borrows_are_scoped_only_beside_a_mutable_borrow() {
     let rust = translate(
-        "class P { int x; int y = x + 1; void set(int v) { x = v; } }
+        "class P { int x; int bump() { x++; return x; } }
         class A {
             static void share(P q) {}
+            static int f(int v) { return v + 1; }
             public static void main(String[] a) {
                 P p = new P();
                 System.out.println(p.x);
+                System.out.println(f(p.x) + p.bump());
             }
         }",
     );
-    assert_contains(&rust, &["println!(\"{}\", p.borrow().x);", "this.borrow_mut().y = { this.borrow().x }"]);
-    assert_lacks(&rust, &["{ p.borrow()"]);
+    assert_contains(
+        &rust,
+        &[
+            "java::println!(\"{}\", p.borrow().x);",
+            // A lone braced argument would draw rustc's unused_braces lint, so it is a `let`.
+            "f({ let value = p.borrow().x; value }).wrapping_add({ let value = p.borrow_mut().bump(); value })",
+        ],
+    );
 }
 
 #[test]
-fn field_read_arguments_beside_a_call_bind_in_a_let() {
+fn arguments_that_read_the_receiver_run_before_it_is_borrowed() {
     let rust = translate(
-        "class P { int x; void set(int v) { x = v; } }
+        "class P { int x; void add(int n) { x += n; } int get() { return x; } }
         class A {
-            static int f(int v) { return v + 1; }
             static void share(P q) {}
-            public static void main(String[] a) { P p = new P(); System.out.println(f(p.x)); }
+            public static void main(String[] a) { P p = new P(); P q = p; q.add(p.get()); q.add(2); }
         }",
     );
-    assert_contains(&rust, &["f({ let value = p.borrow().x; value })"]);
-    assert_lacks(&rust, &["f({ p.borrow()"]);
+    assert_contains(
+        &rust,
+        &["{ let n = p.borrow().get(); q.borrow_mut().add(n) };", "q.borrow_mut().add(2);"],
+    );
 }
 
 #[test]
-fn objects_print_through_their_to_string() {
+fn to_string_is_display() {
     let rust = translate(
         "class P { int x; public String toString() { return \"P\" + x; } }
         class A { public static void main(String[] a) {
@@ -483,10 +492,33 @@ fn objects_print_through_their_to_string() {
             System.out.println(p);
             String s = \"p=\";
             s += p;
+            System.out.println(s + p.toString());
         } }",
     );
-    assert_contains(&rust, &["println!(\"{}\", P::to_string(&p));", "s += &P::to_string(&p);"]);
-    assert_lacks(&rust, &["P::to_string(&p).to_string()"]);
+    assert_contains(
+        &rust,
+        &[
+            "impl fmt::Display for P {\n    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {\n        write!(f, \"P{}\", self.x)\n    }\n}",
+            "use std::fmt;",
+            "java::println!(\"{p}\");",
+            "s += &p.to_string();",
+            "java::println!(\"{s}{p}\");",
+        ],
+    );
+    assert_lacks(&rust, &["fn to_string"]);
+}
+
+#[test]
+fn objects_whose_to_string_can_throw_are_converted_before_printing() {
+    let rust = translate(
+        "class P { int x; public String toString() { return \"P\" + 10 / x; } }
+        class A { public static void main(String[] a) {
+            P p = new P();
+            System.out.println(\"value \" + p);
+        } }",
+    );
+    // Formatting `{p}` in the line would print `value ` before the division throws.
+    assert_contains(&rust, &["java::println!(\"value {}\", p.to_string());"]);
 }
 
 #[test]
@@ -509,33 +541,65 @@ fn immutable_objects_are_shared_without_a_refcell() {
         &rust,
         &[
             "struct P {",
-            "impl P {",
-            "fn field_inits(this: &mut P) {",
-            "this.y = this.x.wrapping_add(1);",
-            "fn new(x: i32) -> Rc<P> {",
-            "let mut obj = P { x: 0, y: 0 };",
-            "let this = &mut obj;",
-            "P::field_inits(this);",
-            "this.x = value;",
-            "Rc::new(obj)",
-            "fn sum(this: &P) -> i32 {",
-            "P::sum(&p)",
-            "p.x",
+            "fn field_inits(&mut self) {",
+            "self.y = self.x.wrapping_add(1);",
+            "fn new(x: i32) -> P {",
+            "let mut this = P { x: 0, y: 0 };",
+            "this.field_inits();",
+            "this.x = x;",
+            "fn sum(&self) -> i32 {",
+            "let p = Rc::new(P::new(3));",
+            "p.sum().wrapping_add(p.x)",
         ],
     );
     assert_lacks(&rust, &["RefCell", "borrow"]);
 }
 
 #[test]
-fn an_object_written_outside_its_constructor_keeps_its_refcell() {
+fn methods_borrow_their_shared_object() {
     let rust = translate(
-        "class P { int x; void set(int v) { x = v; } }
+        "class P { int x; P(int x) { this.x = x; } void set(int v) { x = v; } int get() { return x; } }
         class A {
             static void share(P q) {}
-            public static void main(String[] a) { P p = new P(); p.set(2); }
+            public static void main(String[] a) { P p = new P(1); p.set(2); System.out.println(p.get()); }
         }",
     );
-    assert_contains(&rust, &["Rc<RefCell<P>>", "fn set(this: &Rc<RefCell<P>>, v: i32)"]);
+    assert_contains(
+        &rust,
+        &[
+            "fn new(x: i32) -> P {\n        P { x }\n    }",
+            "fn set(&mut self, v: i32) {\n        self.x = v;\n    }",
+            "fn get(&self) -> i32 {",
+            "let p = Rc::new(RefCell::new(P::new(1)));",
+            "p.borrow_mut().set(2);",
+            "java::println!(\"{}\", p.borrow().get());",
+        ],
+    );
+}
+
+#[test]
+fn methods_that_reach_their_object_another_way_take_the_shared_handle() {
+    let rust = translate(
+        "class P {
+            int x;
+            void register() { A.share(this); }
+            void copy(P o) { x = o.x; }
+        }
+        class A {
+            static void share(P q) {}
+            public static void main(String[] a) { P p = new P(); P q = p; p.register(); q.copy(p); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn register(this: &Rc<RefCell<P>>) {\n        share(this.clone());",
+            // `o` may be `this`, which the method then must not hold borrowed.
+            "fn copy(this: &Rc<RefCell<P>>, o: Rc<RefCell<P>>) {\n        this.borrow_mut().x = { o.borrow().x };",
+            "P::register(&p);",
+            "P::copy(&q, p);",
+        ],
+    );
 }
 
 #[test]
@@ -551,16 +615,36 @@ fn an_object_that_is_never_shared_is_a_plain_value() {
     assert_contains(
         &rust,
         &[
-            "fn new(x: i32) -> P {",
-            "let mut this = P { x: 0 };",
+            "fn new(x: i32) -> P {\n        P { x }\n    }",
             "fn set(&mut self, v: i32) {",
             "fn get(&self) -> i32 {",
             "let mut p = P::new(1);",
             "p.set(p.x.wrapping_add(1));",
-            "println!(\"{}\", p.get());",
+            "java::println!(\"{}\", p.get());",
         ],
     );
     assert_lacks(&rust, &["RefCell", "Rc", "borrow"]);
+}
+
+#[test]
+fn constructors_keep_java_order_in_their_struct_literal() {
+    let rust = translate(
+        "class P {
+            int a; int b; int c = 7;
+            P(int x) { b = x; c = A.next(); a = A.next(); System.out.println(a); }
+        }
+        class A {
+            static int n;
+            static int next() { n++; return n; }
+            public static void main(String[] a) { P p = new P(5); System.out.println(p.a + p.b + p.c); }
+        }",
+    );
+    // `b` and `c` are taken into the literal; `a` is assigned by a call after `c`'s, but its field
+    // comes first in the literal, so it and the rest of the body run on the value.
+    assert_contains(
+        &rust,
+        &["let mut this = P { a: 0, b: x, c: next() };", "this.a = next();", "        this\n"],
+    );
 }
 
 #[test]
@@ -574,14 +658,17 @@ fn printing_an_object_does_not_share_it() {
             System.out.println(\"p=\" + p);
         } }",
     );
-    assert_contains(&rust, &["let mut p = P::new();", "println!(\"{}\", P::to_string(&p));"]);
+    assert_contains(
+        &rust,
+        &["let mut p = P::new();", "java::println!(\"{p}\");", "java::println!(\"p={p}\");"],
+    );
     assert_lacks(&rust, &["RefCell", "Rc"]);
 }
 
 #[test]
 fn a_local_that_no_later_statement_changes_is_not_mut() {
     let rust = translate(
-        "class P { int x; P(int x) { this.x = x; } int get() { return x; } }
+        "class P { int x; P(int x) { this.x = x; } int get() { return x; } void set(int v) { x = v; } }
         class A { public static void main(String[] a) {
             P p = new P(1);
             System.out.println(p.get());
@@ -889,7 +976,7 @@ fn packages_become_nested_modules() {
         &[
             "fn main() {\n    crate::com::example::app::main();\n}",
             "mod com {\n    pub(crate) mod example {\n        pub(crate) mod app {",
-            "        pub(crate) mod util {\n            use std::cell::RefCell;\n\n            use java_runtime as java;",
+            "        pub(crate) mod util {\n            use std::cell::RefCell;\n            use std::fmt;\n\n            use java_runtime as java;",
             // Imported, statically imported and fully qualified names are paths from the crate root.
             "crate::com::example::util::Counter::new(\"clicks\")",
             "crate::com::example::util::square(7)",
@@ -920,7 +1007,7 @@ fn classes_with_one_name_in_two_packages() {
         &[
             "crate::com::shop::model::Item::new_string_i32(\"apple\", 3)",
             "crate::com::shop::legacy::Item::new(7)",
-            "crate::com::shop::model::Registry_Entry::new(4)",
+            "crate::com::shop::model::RegistryEntry::new(4)",
             "crate::com::shop::model::REGISTRY_CREATED.with_borrow(|v| *v)",
             "pub(crate) static COUNTER_HITS: RefCell<i32>",
         ],

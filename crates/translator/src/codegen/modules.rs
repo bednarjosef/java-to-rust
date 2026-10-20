@@ -93,18 +93,23 @@ fn module_name(segment: &str) -> String {
 }
 
 /// The `use` lines that code of one module needs, found in its text.
-fn use_lines(code: &str) -> Vec<&'static str> {
+pub(super) fn use_lines(code: &str) -> Vec<String> {
+    let mut std = String::new();
+    if code.contains("RefCell") {
+        std.push_str("use std::cell::RefCell;\n");
+    }
+    if code.contains("impl fmt::Display") {
+        std.push_str("use std::fmt;\n");
+    }
+    if code.contains("Rc<") || code.contains("Rc::") {
+        std.push_str("use std::rc::Rc;\n");
+    }
     let mut uses = Vec::new();
-    let refcell = code.contains("RefCell");
-    let rc = code.contains("Rc<") || code.contains("Rc::");
-    match (rc, refcell) {
-        (true, true) => uses.push("use std::cell::RefCell;\nuse std::rc::Rc;\n"),
-        (true, false) => uses.push("use std::rc::Rc;\n"),
-        (false, true) => uses.push("use std::cell::RefCell;\n"),
-        (false, false) => {}
+    if !std.is_empty() {
+        uses.push(std);
     }
     if code.contains("java::") {
-        uses.push("use java_runtime as java;\n");
+        uses.push("use java_runtime as java;\n".to_string());
     }
     uses
 }

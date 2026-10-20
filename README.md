@@ -127,12 +127,19 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   becomes `&[T]` or `&mut [T]` when every call passes a distinct plain array, and a counting loop
   that only reads `a[i]` becomes `for x in a.iter().cloned()`. Arrays that are returned, copied,
   or given to `java.util.Arrays` stay shared for now.
-- Objects follow the same pattern (`analysis/objects.rs`, `analysis/owned.rs`). The faithful
+- Objects follow the same pattern (`analysis/objects.rs`, `analysis/owned.rs`, `analysis/borrowing.rs`). The faithful
   form of an object is `Rc<RefCell<C>>`, because Java references are shared and mutable. A class
   whose objects never change after construction is shared as `Rc<C>`. A class whose objects are
   never shared (no class-typed field, parameter or return value, and each object is created by
   `new` into a local that only calls or prints it) is a plain value: its methods take `&self` or
   `&mut self`, and a call on it uses method syntax so that `p.set(p.x + 1)` borrows as Rust allows.
+  Methods of shared classes borrow their object too (`analysis/borrowing.rs`) when they use
+  `this` only for its fields and for such calls, and nothing they run reaches an object of their
+  class another way; a call is then `p.borrow_mut().set(2)`, with arguments that could reach the
+  object bound first. Constructors build a plain value, starting from a struct literal that takes
+  in the body's leading field assignments (`P { x, y }`), and `new` shares it
+  (`Rc::new(RefCell::new(P::new(1, 2)))`). A `toString` becomes `impl fmt::Display`, and an object
+  is printed as `{p}` when its `toString` can neither print nor throw.
 
 Whole programs (`program.rs`) spread over files and packages translate too: javac compiles all
 of them in one run, with the source roots as its source path, and a reachability pass over its

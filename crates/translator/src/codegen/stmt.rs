@@ -29,7 +29,8 @@ impl<'a> Gen<'a> {
             }
             match stmt {
                 Stmt::Return(Some(value), _) if tail && rest.is_empty() => {
-                    let outer = std::mem::replace(&mut self.guarded, stmt_borrows_mut(stmt));
+                    let conflicts = self.stmt_conflicts(stmt);
+                    let outer = std::mem::replace(&mut self.guarded, conflicts);
                     let code = self.returned(value);
                     self.line(&code.text);
                     self.guarded = outer;
@@ -55,7 +56,8 @@ impl<'a> Gen<'a> {
     /// One statement; `rest` holds the statements after it in the same block, where a local
     /// declared here is in scope.
     pub(super) fn stmt(&mut self, stmt: &'a Stmt, rest: &'a [Stmt]) {
-        let outer = std::mem::replace(&mut self.guarded, stmt_borrows_mut(stmt));
+        let conflicts = self.stmt_conflicts(stmt);
+        let outer = std::mem::replace(&mut self.guarded, conflicts);
         self.statement(stmt, rest);
         self.guarded = outer;
     }
@@ -147,6 +149,13 @@ impl<'a> Gen<'a> {
     /// The value of a `return`: a string variable is moved out rather than copied, since the
     /// method ends.
     pub(super) fn returned(&mut self, value: &'a Expr) -> Code {
+        if self.display {
+            // `Display::fmt` writes the text that `toString` returns.
+            let mut parts = Vec::new();
+            self.parts(value, &mut parts);
+            let text = self.format("write!", parts).text;
+            return Code::atom(text.replacen("write!(", "write!(f, ", 1));
+        }
         if self.optional_return() {
             return self.optional(value);
         }
@@ -320,6 +329,12 @@ impl<'a> Gen<'a> {
             }
             ExprKind::IncDec { target: Place::Index(array, index), increment, prefix } => {
                 let text = self.index_step(array, index, e.ty, *increment, *prefix, e.id, false);
+                self.line(&format!("{text};"));
+            }
+            ExprKind::Assign { target: Place::Field { .. }, .. }
+            | ExprKind::IncDec { target: Place::Field { .. }, .. }
+                if let Some(text) = self.field_effect(e) =>
+            {
                 self.line(&format!("{text};"));
             }
             _ => {
