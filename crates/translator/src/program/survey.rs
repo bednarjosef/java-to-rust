@@ -126,13 +126,6 @@ impl Census {
                     "ENHANCED_FOR_LOOP" if !text(&node["expression"], "javaType").ends_with(']') => {
                         _ = features.insert("for-each over collections")
                     }
-                    "SYNCHRONIZED" => _ = features.insert("synchronized blocks"),
-                    "ASSERT" => _ = features.insert("assert"),
-                    "SWITCH" | "SWITCH_EXPRESSION"
-                        if text(&node["expression"], "javaType") == "java.lang.String" =>
-                    {
-                        _ = features.insert("switch on strings")
-                    }
                     "BINDING_PATTERN" | "RECORD_PATTERN" => _ = features.insert("patterns"),
                     "METHOD_INVOCATION" if text(&node["methodSelect"]["expression"], "name") == "super" => {
                         _ = features.insert("super calls")
