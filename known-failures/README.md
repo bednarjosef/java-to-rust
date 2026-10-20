@@ -12,6 +12,11 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
   `Node` has a field assigned after construction. Java prints `0 1`; rustc fails with E0505
   "cannot move out of `single` because it is borrowed" (the `Ref` from the field read lives to the
   end of the statement).
+- `LoneSurrogateCompareTo.java`: `"😀x".substring(1)`, which starts with a lone low
+  surrogate, compared with `compareTo`. Java prints `2 -56772 -30747`; the translation prints
+  `2 -3 26022`: the length is right, but `java::compare_to` sees the lone surrogate as `?` (63)
+  instead of the code unit 0xDE00. The strings fuzzer's seeds 18, 51 and 396 (of 600) differ this
+  way.
 - `MinCursorLeft.java`: a `while (t.left != null) t = t.left;` loop over a mutable class.
   Java prints `1`; rustc fails with E0506 "cannot assign to `t` because it is borrowed". Loops
   over classes that are never assigned after construction translate (their `Rc` is plain).
