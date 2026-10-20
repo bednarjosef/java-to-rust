@@ -12,10 +12,12 @@ pub(super) fn has_continue(body: &Stmt) -> bool {
 
 impl<'a> Gen<'a> {
     /// The statements of a block. In a function body (`tail`), a final `return x;` becomes the
-    /// tail expression `x`.
+    /// tail expression `x`, and `T x = e; return x;` becomes `e`.
     pub(super) fn stmts(&mut self, stmts: &'a [Stmt], tail: bool) {
+        let folded = tail && self.folds_into_return(stmts);
+        let end = if folded { stmts.len() - 2 } else { stmts.len() };
         let mut narrowed = Vec::new();
-        for (i, stmt) in stmts.iter().enumerate() {
+        for (i, stmt) in stmts[..end].iter().enumerate() {
             let rest = &stmts[i + 1..];
             if let Some(name) = self.early_null_exit(stmt, rest) {
                 if self.borrowed.insert(name.to_string()) {
@@ -24,15 +26,12 @@ impl<'a> Gen<'a> {
                 continue;
             }
             match stmt {
-                Stmt::Return(Some(value), _) if tail && rest.is_empty() => {
-                    let conflicts = self.stmt_conflicts(stmt);
-                    let outer = std::mem::replace(&mut self.guarded, conflicts);
-                    let code = self.returned(value);
-                    self.line(&code.text);
-                    self.guarded = outer;
-                }
+                _ if tail && rest.is_empty() && self.tail_value(stmt) => self.tail_stmt(stmt),
                 _ => self.stmt(stmt, rest),
             }
+        }
+        if folded {
+            self.tail_local(&stmts[end]);
         }
         for name in narrowed {
             self.borrowed.remove(name);
@@ -41,12 +40,7 @@ impl<'a> Gen<'a> {
 
     /// The body of an `if` or a loop.
     pub(super) fn nested(&mut self, stmt: &'a Stmt) {
-        self.indent += 1;
-        match stmt {
-            Stmt::Block(stmts) => self.stmts(stmts, false),
-            _ => self.stmt(stmt, &[]),
-        }
-        self.indent -= 1;
+        self.nested_in(stmt, false);
     }
 
     /// One statement; `rest` holds the statements after it in the same block, where a local
@@ -65,28 +59,7 @@ impl<'a> Gen<'a> {
             }
             Stmt::Expr(e) => self.effect(e),
             Stmt::ForEach { name, array, body, .. } => self.for_each(name, array, body),
-            Stmt::If { cond, then, otherwise } => {
-                if self.narrow_if(cond, then, otherwise.as_deref()) {
-                    return;
-                }
-                let cond_text = self.condition(cond);
-                self.line(&format!("if {cond_text} {{"));
-                self.nested(then);
-                let mut otherwise = otherwise.as_deref();
-                while let Some(stmt) = otherwise {
-                    if let Stmt::If { cond, then, otherwise: next } = stmt {
-                        let cond_text = self.condition(cond);
-                        self.line(&format!("}} else if {cond_text} {{"));
-                        self.nested(then);
-                        otherwise = next.as_deref();
-                    } else {
-                        self.line("} else {");
-                        self.nested(stmt);
-                        otherwise = None;
-                    }
-                }
-                self.line("}");
-            }
+            Stmt::If { cond, then, otherwise } => self.if_stmt(cond, then, otherwise.as_deref(), false),
             Stmt::While { cond, body } => {
                 if matches!(cond.kind, ExprKind::Bool(true)) {
                     self.line("loop {");
@@ -123,7 +96,7 @@ impl<'a> Gen<'a> {
             }
             Stmt::Break => self.plain_jump(false),
             Stmt::Continue => self.plain_jump(true),
-            Stmt::Switch { selector, cases } => self.switch_form(selector, cases, None),
+            Stmt::Switch { selector, cases } => self.switch_form(selector, cases, None, false),
             Stmt::Labeled { label, body } => self.labeled(label, body),
             Stmt::BreakLabel(label) => self.labeled_jump(label, false),
             Stmt::ContinueLabel(label) => self.labeled_jump(label, true),
@@ -194,21 +167,29 @@ impl<'a> Gen<'a> {
         {
             return;
         }
-        if let Some((var, start, end)) = counting_loop(init, cond, update, body) {
-            // `counting_loop` checks that the bound has the loop variable's type.
-            let ty = end.ty;
-            let start = self.value(start, ty);
-            let end = self.value(end, ty);
+        if let Some(counted) = counting(init, cond, update, body) {
+            let ty = counted.ty;
+            let start = self.value(counted.from, ty);
+            let end = self.value(counted.to, ty);
             let mut used = false;
-            visit_stmt(body, &mut |e| used |= mentions(e, var), &mut |_| {});
-            let var = if used { self.local(var) } else { "_".to_string() };
+            visit_stmt(body, &mut |e| used |= mentions(e, counted.var), &mut |_| {});
+            let var = if used { self.local(counted.var) } else { "_".to_string() };
             let start_text = if used && start.untyped && end.untyped {
                 let suffix = self.annotation(ty, rust_type(ty).to_string());
                 if suffix == rust_type(ty) { start.typed() } else { format!("{}{suffix}", start.text) }
             } else {
                 start.at(ADD + 1)
             };
-            self.line(&format!("for {var} in {start_text}..{} {{", end.at(ADD + 1)));
+            let range =
+                format!("{start_text}{}{}", if counted.inclusive { "..=" } else { ".." }, end.at(ADD + 1));
+            let range = if counted.descending {
+                format!("({range}).rev()")
+            } else if counted.step > 1 {
+                format!("({range}).step_by({})", counted.step)
+            } else {
+                range
+            };
+            self.line(&format!("for {var} in {range} {{"));
             self.loop_body(Loop::Plain, body, &[]);
             self.line("}");
             return;

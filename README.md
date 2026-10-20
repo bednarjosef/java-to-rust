@@ -45,6 +45,19 @@ time:
 
 Whatever no analysis can prove stays at the level 1 default, so the output is always correct.
 
+### Idiomatic statements and loops
+
+Statements have their own plainer forms, chosen only where the meaning is the same. A counting
+loop `for (int i = a; i < b; i++)` becomes `for i in a..b` when nothing in the body or the bound
+can change while it runs; `<=`, `+=` steps and downward loops become ranges with `..=`,
+`step_by` and `rev`. A `return` at the end of a function is the tail expression, and a primitive
+local returned at the end is written as its value. A switch with one labelled case is an
+`if let`, and a braced case body is read as its statements. On the 157 corpus programs,
+`scripts/clippy-corpus.sh` counts 201 clippy and rustc warnings in the generated code, down from
+262 before this work (`needless_return` 57 → 0, `single_match` 2 → 0, `never_loop` 1 → 0).
+What remains is mostly expression code (`eq_op`, `approx_constant`, `unused_parens`) and
+reference-typed locals (`let_and_return`), which need the nullness and aliasing work first.
+
 ## Testing
 
 Every test program runs on Java and, translated, as Rust; the two outputs (printed text, results,
