@@ -77,9 +77,22 @@ names the construct and its position.
 
 The pieces: [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) parses the source
 (`crates/translator/src/parse.rs`), the checker gives every expression its Java type and resolves
-overloads (`check.rs`), and the generator writes Rust (`codegen.rs`) that uses the runtime crate
-(`crates/runtime`) for what Rust lacks: Java's double printing, integer division that throws, and
-`Math.max`/`min` on NaN.
+overloads (`check.rs`), the analyses prove facts about the program (`analysis.rs`), and the
+generator writes Rust (`codegen.rs`) that uses the runtime crate (`crates/runtime`) for what Rust
+lacks: Java's double printing, integer division that throws, and `Math.max`/`min` on NaN.
+
+The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b` is
+`java::rem(a, b)`. The first analyses decide where plain Rust means the same:
+
+- Range analysis (`analysis/ranges.rs`) tracks the values every `int` and `long` can hold, by
+  abstract interpretation over intervals: conditions narrow ranges, loops are solved with
+  widening to the program's constants and narrowing, counters in counting loops are bounded by
+  the trip count, and argument and return ranges flow between methods. Arithmetic that provably
+  stays in range uses `+`, `-`, `*`, and division by a provably nonzero divisor uses `/` and `%`.
+- Strings that are only ever ASCII use `len()` for `length()`; string parameters that are never
+  assigned are borrowed as `&str`.
+
+Translation never runs the program; it only reads the source.
 
 ```
 cargo run -p java-to-rust -- Program.java                 # print the Rust translation
@@ -87,5 +100,6 @@ cargo run -p java-to-rust -- Program.java --crate out/    # write a Cargo projec
 cargo test                                                # needs a JDK: runs corpus/ on both
 ```
 
-The corpus test runs every program in `corpus/` with `java`, translates and builds it, and
-compares standard output and exit code.
+The corpus test runs every program in `corpus/` with `java`, translates and builds it with
+overflow checks on (so a wrong "cannot overflow" fact panics), and compares standard output and
+exit code. `crates/translator/tests/translation.rs` pins down what the output looks like.

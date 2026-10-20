@@ -14,7 +14,7 @@ pub fn parse(source: &str) -> Result<Class, Error> {
     if root.has_error() {
         return syntax_error(root);
     }
-    Lowering { source }.program(root)
+    Lowering { source, next_id: std::cell::Cell::new(0) }.program(root)
 }
 
 fn syntax_error<T>(node: Node) -> Result<T, Error> {
@@ -57,6 +57,7 @@ fn unsupported<T>(node: Node, what: &str) -> Result<T, Error> {
 
 struct Lowering<'s> {
     source: &'s str,
+    next_id: std::cell::Cell<ExprId>,
 }
 
 impl Lowering<'_> {
@@ -367,7 +368,9 @@ impl Lowering<'_> {
             "field_access" => return unsupported(node, "fields"),
             kind => return unsupported(node, &kind.replace('_', " ")),
         };
-        Ok(Expr { kind, pos: pos(node), ty: Type::Void })
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+        Ok(Expr { kind, pos: pos(node), ty: Type::Void, id })
     }
 
     fn call(&self, node: Node) -> Result<ExprKind, Error> {

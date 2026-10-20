@@ -1,6 +1,7 @@
 //! Translates Java source code into Rust source code: parse with tree-sitter, lower to a typed
-//! syntax tree, check types, generate Rust.
+//! syntax tree, check types, prove facts about the program, generate Rust.
 
+pub mod analysis;
 pub mod ast;
 pub mod check;
 pub mod codegen;
@@ -13,5 +14,6 @@ pub use ast::Error;
 pub fn translate(java: &str) -> Result<String, Error> {
     let mut class = parse::parse(java)?;
     check::check(&mut class)?;
-    Ok(codegen::generate(&class))
+    let facts = analysis::analyze(&class);
+    Ok(codegen::generate(&class, &facts))
 }

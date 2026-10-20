@@ -1,14 +1,22 @@
 //! Generates Rust source from the checked syntax tree. Every construct is translated so that it
 //! behaves exactly like Java: `int` arithmetic wraps, division by zero throws, doubles print
-//! like Java. Where a cheaper or more readable form is provably equivalent (dividing by a
-//! nonzero constant, a counting `for` loop) that form is used instead.
+//! like Java. Where the analyses prove a plainer form equivalent (an addition that cannot
+//! overflow, a divisor that cannot be zero, a counting `for` loop, a string parameter that is
+//! only read) that form is used instead.
 
+use crate::analysis::Facts;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
-pub fn generate(class: &Class) -> String {
+pub fn generate(class: &Class, facts: &Facts) -> String {
     let mut g = Gen {
         class,
+        facts,
+        method: 0,
+        borrowed: HashSet::new(),
+        int_receiver: false,
+        double_receiver: false,
+        annotations: Vec::new(),
         fn_names: method_names(class),
         locals: HashMap::new(),
         out: String::new(),
@@ -54,6 +62,8 @@ struct Code {
     /// Whether the Rust type is left to inference, as for `0` or `if c { 1 } else { 2 }`.
     /// Rust cannot call methods on such values, so their type must be written somewhere.
     untyped: bool,
+    /// For an untyped expression of literals such as `24 * 60`, the text with its type written.
+    typed_text: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -65,7 +75,7 @@ enum Literal {
 
 impl Code {
     fn new(text: impl Into<String>, prec: u8) -> Code {
-        Code { text: text.into(), prec, literal: None, untyped: false }
+        Code { text: text.into(), prec, literal: None, untyped: false, typed_text: None }
     }
 
     fn atom(text: impl Into<String>) -> Code {
@@ -80,7 +90,13 @@ impl Code {
             Literal::Long(v) => (v.to_string(), v < 0),
             Literal::Double(v) => (format!("{v:?}"), v.is_sign_negative()),
         };
-        Code { text, prec: if negative { UNARY } else { ATOM }, literal: Some(literal), untyped: true }
+        Code {
+            text,
+            prec: if negative { UNARY } else { ATOM },
+            literal: Some(literal),
+            untyped: true,
+            typed_text: None,
+        }
     }
 
     /// The text, in parentheses if it binds looser than `prec`.
@@ -91,6 +107,9 @@ impl Code {
     /// The text with a type suffix on a numeric literal, so that its type does not depend on
     /// inference.
     fn typed(&self) -> String {
+        if let Some(text) = &self.typed_text {
+            return text.clone();
+        }
         match self.literal {
             Some(Literal::Int(v)) if v != i32::MIN => format!("{v}i32"),
             Some(Literal::Long(v)) if v != i64::MIN => format!("{v}i64"),
@@ -207,6 +226,19 @@ enum Part {
 
 struct Gen<'a> {
     class: &'a Class,
+    facts: &'a Facts,
+    /// The index of the current method.
+    method: usize,
+    /// The current method's string parameters that are borrowed as `&str`.
+    borrowed: HashSet<String>,
+    /// Whether the current method calls a method on an `i32` or `f64` value that is not a
+    /// literal. Rust needs the type of such a value to be known, so variables initialized with a
+    /// bare literal then get their type written (see `annotation`).
+    int_receiver: bool,
+    double_receiver: bool,
+    /// Placeholders for type annotations decided at the end of the method: (placeholder, type,
+    /// annotation).
+    annotations: Vec<(String, Type, String)>,
     fn_names: Vec<String>,
     /// Java local variable names to Rust names, for the current method.
     locals: HashMap<String, String>,
@@ -236,16 +268,62 @@ impl<'a> Gen<'a> {
         self.locals.get(java).cloned().unwrap_or_else(|| snake_case(java))
     }
 
+    /// `code` as the receiver of a method call on a value of Java type `ty`.
+    fn recv(&mut self, code: &Code, ty: Type) -> String {
+        if code.literal.is_none() {
+            match ty {
+                Type::Int => self.int_receiver = true,
+                Type::Double => self.double_receiver = true,
+                _ => {}
+            }
+        }
+        code.receiver()
+    }
+
+    /// The type written for a variable initialized with an untyped expression: `: i64`, since an
+    /// integer literal would default to `i32`; for `i32` and `f64`, which are the defaults, only
+    /// when the method calls methods on such values.
+    fn annotation(&mut self, ty: Type, text: String) -> String {
+        if !matches!(ty, Type::Int | Type::Double) {
+            return text;
+        }
+        let placeholder = format!("\u{1}{}\u{1}", self.annotations.len());
+        self.annotations.push((placeholder.clone(), ty, text));
+        placeholder
+    }
+
+    fn resolve_annotations(&mut self, from: usize) {
+        let mut text = self.out.split_off(from);
+        for (placeholder, ty, annotation) in self.annotations.drain(..) {
+            let needed = if ty == Type::Int { self.int_receiver } else { self.double_receiver };
+            text = text.replace(&placeholder, if needed { &annotation } else { "" });
+        }
+        self.out.push_str(&text);
+    }
+
+    fn no_overflow(&self, id: ExprId) -> bool {
+        self.facts.no_overflow.contains(&id)
+    }
+
     fn method(&mut self, index: usize) {
         let m = &self.class.methods[index];
         self.ret = m.ret;
+        self.method = index;
         self.name_locals(m);
+        let start = self.out.len();
+        self.int_receiver = false;
+        self.double_receiver = false;
+        self.borrowed = (0..m.params.len())
+            .filter(|&i| self.facts.borrowed_params.contains(&(index, i)))
+            .map(|i| m.params[i].name.clone())
+            .collect();
         let params: Vec<String> = m
             .params
             .iter()
             .map(|p| {
                 let mutable = if assigns_any(&m.body, &p.name) { "mut " } else { "" };
-                format!("{mutable}{}: {}", self.local(&p.name), rust_type(p.ty))
+                let ty = if self.borrowed.contains(&p.name) { "&str" } else { rust_type(p.ty) };
+                format!("{mutable}{}: {ty}", self.local(&p.name))
             })
             .collect();
         let ret = if m.ret == Type::Void { String::new() } else { format!(" -> {}", rust_type(m.ret)) };
@@ -254,6 +332,7 @@ impl<'a> Gen<'a> {
         self.stmts(&m.body, true);
         self.indent -= 1;
         self.line("}");
+        self.resolve_annotations(start);
     }
 
     /// Picks Rust names for the method's parameters and locals: snake case, distinct from each
@@ -280,7 +359,7 @@ impl<'a> Gen<'a> {
             let rest = &stmts[i + 1..];
             match stmt {
                 Stmt::Return(Some(value), _) if tail && rest.is_empty() => {
-                    let code = self.value(value, self.ret);
+                    let code = self.returned(value);
                     self.line(&code.text);
                 }
                 _ => self.stmt(stmt, rest),
@@ -347,7 +426,7 @@ impl<'a> Gen<'a> {
             Stmt::For { init, cond, update, body } => self.for_loop(init, cond.as_ref(), update, body),
             Stmt::Return(None, _) => self.line("return;"),
             Stmt::Return(Some(value), _) => {
-                let code = self.value(value, self.ret);
+                let code = self.returned(value);
                 self.line(&format!("return {};", code.text));
             }
             Stmt::Break => self.line("break;"),
@@ -374,6 +453,18 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The value of a `return`: a string variable is moved out rather than copied, since the
+    /// method ends.
+    fn returned(&mut self, value: &'a Expr) -> Code {
+        if let ExprKind::Var(name) = &value.kind
+            && value.ty == Type::String
+            && !self.borrowed.contains(name)
+        {
+            return Code::atom(self.local(name));
+        }
+        self.value(value, self.ret)
+    }
+
     /// `if !cond { break; }`, ending a translated `do`-`while` loop.
     fn exit_unless(&mut self, cond: &'a Expr) {
         let negated = self.negate(cond);
@@ -397,13 +488,18 @@ impl<'a> Gen<'a> {
 
     fn for_loop(&mut self, init: &'a [Stmt], cond: Option<&'a Expr>, update: &'a [Expr], body: &'a Stmt) {
         if let Some((var, start, end)) = counting_loop(init, cond, update, body) {
-            let start = self.value(start, Type::Int);
-            let end = self.value(end, Type::Int);
+            let ty = start.ty.max_integral(end.ty);
+            let start = self.value(start, ty);
+            let end = self.value(end, ty);
             let mut used = false;
             visit_stmt(body, &mut |e| used |= mentions(e, var), &mut |_| {});
             let var = if used { self.local(var) } else { "_".to_string() };
-            let start_text =
-                if used && start.untyped && end.untyped { start.typed() } else { start.at(ADD + 1) };
+            let start_text = if used && start.untyped && end.untyped {
+                let suffix = self.annotation(ty, rust_type(ty).to_string());
+                if suffix == rust_type(ty) { start.typed() } else { format!("{}{suffix}", start.text) }
+            } else {
+                start.at(ADD + 1)
+            };
             self.line(&format!("for {var} in {start_text}..{} {{", end.at(ADD + 1)));
             self.loop_body(Loop::Plain, body, &[]);
             self.line("}");
@@ -443,7 +539,11 @@ impl<'a> Gen<'a> {
             None => self.line(&format!("let {mutable}{rust}: {};", rust_type(ty))),
             Some(init) => {
                 let code = self.value(init, ty);
-                let annotation = if code.untyped { format!(": {}", rust_type(ty)) } else { String::new() };
+                let annotation = if code.untyped {
+                    self.annotation(ty, format!(": {}", rust_type(ty)))
+                } else {
+                    String::new()
+                };
                 self.line(&format!("let {mutable}{rust}{annotation} = {};", code.text));
             }
         }
@@ -471,7 +571,7 @@ impl<'a> Gen<'a> {
                     _ => BinOp::Lt,
                 };
                 let (l, r) = (self.operand(l), self.operand(r));
-                return self.binary(flipped, l, r, Type::Boolean).text;
+                return self.binary(flipped, l, r, Type::Boolean, cond.id).text;
             }
             _ => {}
         }
@@ -482,11 +582,11 @@ impl<'a> Gen<'a> {
     fn effect(&mut self, e: &'a Expr) {
         match &e.kind {
             ExprKind::Assign { op, target, value } => {
-                let text = self.assignment(*op, target, e.ty, value);
+                let text = self.assignment(*op, target, e.ty, value, e.id);
                 self.line(&format!("{text};"));
             }
             ExprKind::IncDec { target, increment, .. } => {
-                let text = self.step(target, e.ty, *increment);
+                let text = self.step(target, e.ty, *increment, e.id);
                 self.line(&format!("{text};"));
             }
             _ => {
@@ -497,7 +597,14 @@ impl<'a> Gen<'a> {
     }
 
     /// `target = value` or `target op= value` as a Rust statement, without the semicolon.
-    fn assignment(&mut self, op: Option<BinOp>, target: &str, ty: Type, value: &'a Expr) -> String {
+    fn assignment(
+        &mut self,
+        op: Option<BinOp>,
+        target: &str,
+        ty: Type,
+        value: &'a Expr,
+        id: ExprId,
+    ) -> String {
         let name = self.local(target);
         let Some(op) = op else {
             return format!("{name} = {}", self.value(value, ty).text);
@@ -517,9 +624,14 @@ impl<'a> Gen<'a> {
             BinOp::Shl => "<<=",
             _ => ">>=",
         };
+        let result = crate::check::binary_type(op, ty, value.ty).expect("checked");
         let simple = match op {
             // Double arithmetic has no traps, and the result is already a double.
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => ty == Type::Double,
+            _ if ty == Type::Double => {
+                !op.is_shift() && !matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            }
+            BinOp::Add | BinOp::Sub | BinOp::Mul => result == ty && self.no_overflow(id),
+            BinOp::Div | BinOp::Rem => result == ty && self.safe_division(id, value),
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
                 ty == Type::Boolean || (ty.is_integral() && crate::check::promote(ty, value.ty) == ty)
             }
@@ -532,25 +644,40 @@ impl<'a> Gen<'a> {
             return format!("{name} {} {}", compound(op), v.text);
         }
         // Java's compound assignment casts the result back to the variable's type.
-        let result = crate::check::binary_type(op, ty, value.ty).expect("checked");
         let current = Code::atom(name.clone());
         let right = self.operand(value);
-        let code = self.binary(op, Operand { code: current, ty }, right, result);
+        let code = self.binary(op, Operand { code: current, ty }, right, result, id);
         format!("{name} = {}", self.convert(code, result, ty).text)
+    }
+
+    /// Whether a division or remainder can neither throw nor overflow.
+    fn safe_division(&self, id: ExprId, divisor: &Expr) -> bool {
+        let constant = match divisor.kind {
+            ExprKind::Int(v) => Some(v as i64),
+            ExprKind::Long(v) => Some(v),
+            _ => None,
+        };
+        self.facts.safe_division.contains(&id) || constant.is_some_and(|v| v != 0 && v != -1)
     }
 
     /// `s += value` on a string.
     fn append(&mut self, name: &str, target: &str, value: &'a Expr) -> String {
         if !mentions(value, target) {
-            if let ExprKind::Str(s) = &value.kind {
-                return format!("{name}.push_str({})", rust_string(s));
-            }
-            if let (ExprKind::Var(v), Type::String) = (&value.kind, value.ty) {
-                return format!("{name}.push_str(&{})", self.local(v));
+            if value.ty == Type::String && matches!(value.kind, ExprKind::Str(_) | ExprKind::Var(_)) {
+                return format!("{name} += {}", self.str_ref(value));
             }
             let mut parts = Vec::new();
             self.parts(value, &mut parts);
-            return format!("{name}.push_str(&{})", self.format("format!", parts).text);
+            if parts.len() == 1 {
+                match parts.pop().expect("one part") {
+                    Part::Lit(text) => return format!("{name} += {}", rust_string(&text)),
+                    Part::Arg(code) => {
+                        let ty = if value.ty == Type::Double { Type::Void } else { value.ty };
+                        return format!("{name} += &{}.to_string()", self.recv(&code, ty));
+                    }
+                }
+            }
+            return format!("{name} += &{}", self.format("format!", parts).text);
         }
         let mut parts = vec![Part::Arg(Code::atom(name))];
         self.parts(value, &mut parts);
@@ -558,13 +685,15 @@ impl<'a> Gen<'a> {
     }
 
     /// `x += 1` or `x -= 1` as a Rust statement.
-    fn step(&mut self, target: &str, ty: Type, increment: bool) -> String {
+    fn step(&mut self, target: &str, ty: Type, increment: bool, id: ExprId) -> String {
         let name = self.local(target);
-        match (ty, increment) {
-            (Type::Double, true) => format!("{name} += 1.0"),
-            (Type::Double, false) => format!("{name} -= 1.0"),
-            (_, true) => format!("{name} = {name}.wrapping_add(1)"),
-            (_, false) => format!("{name} = {name}.wrapping_sub(1)"),
+        if ty == Type::Double || self.no_overflow(id) {
+            let one = if ty == Type::Double { "1.0" } else { "1" };
+            format!("{name} {} {one}", if increment { "+=" } else { "-=" })
+        } else if increment {
+            format!("{name} = {name}.wrapping_add(1)")
+        } else {
+            format!("{name} = {name}.wrapping_sub(1)")
         }
     }
 
@@ -607,17 +736,25 @@ impl<'a> Gen<'a> {
             ExprKind::Long(v) => Code::literal(Literal::Long(*v)),
             ExprKind::Double(v) => Code::literal(Literal::Double(*v)),
             ExprKind::Bool(b) => Code::atom(b.to_string()),
+            ExprKind::Str(s) if s.is_empty() => Code::atom("String::new()"),
             ExprKind::Str(s) => Code::atom(format!("String::from({})", rust_string(s))),
             ExprKind::Var(name) => {
                 let rust = self.local(name);
-                if e.ty == Type::String { Code::atom(format!("{rust}.clone()")) } else { Code::atom(rust) }
+                match e.ty {
+                    Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
+                    Type::String => Code::atom(format!("{rust}.clone()")),
+                    _ => Code::atom(rust),
+                }
             }
             ExprKind::Unary(op, operand) => {
                 let code = self.value(operand, e.ty);
                 match (op, e.ty) {
                     (UnOp::Plus, _) => code,
                     (UnOp::Neg, Type::Double) => Code::new(format!("-{}", code.at(UNARY)), UNARY),
-                    (UnOp::Neg, _) => Code::atom(format!("{}.wrapping_neg()", code.receiver())),
+                    (UnOp::Neg, _) if self.no_overflow(e.id) => {
+                        Code::new(format!("-{}", code.at(UNARY)), UNARY)
+                    }
+                    (UnOp::Neg, _) => Code::atom(format!("{}.wrapping_neg()", self.recv(&code, e.ty))),
                     (UnOp::Not | UnOp::BitNot, _) => Code::new(format!("!{}", code.at(UNARY)), UNARY),
                 }
             }
@@ -628,14 +765,14 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Binary(op, l, r) => {
                 let (l, r) = (self.operand(l), self.operand(r));
-                self.binary(*op, l, r, e.ty)
+                self.binary(*op, l, r, e.ty, e.id)
             }
             ExprKind::Assign { op, target, value } => {
-                let text = self.assignment(*op, target, e.ty, value);
+                let text = self.assignment(*op, target, e.ty, value, e.id);
                 Code::new(format!("{{ {text}; {} }}", self.read(target, e.ty)), LOWEST)
             }
             ExprKind::IncDec { target, increment, prefix } => {
-                let text = self.step(target, e.ty, *increment);
+                let text = self.step(target, e.ty, *increment, e.id);
                 let name = self.local(target);
                 if *prefix {
                     Code::new(format!("{{ {text}; {name} }}"), LOWEST)
@@ -656,11 +793,21 @@ impl<'a> Gen<'a> {
             ExprKind::Call { args, resolved, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
                 let params = &self.class.methods[index].params;
-                let args: Vec<String> =
-                    args.iter().zip(params).map(|(a, p)| self.value(a, p.ty).text).collect();
+                let args: Vec<String> = args
+                    .iter()
+                    .zip(params)
+                    .enumerate()
+                    .map(|(i, (a, p))| {
+                        if self.facts.borrowed_params.contains(&(index, i)) {
+                            self.str_ref(a)
+                        } else {
+                            self.value(a, p.ty).text
+                        }
+                    })
+                    .collect();
                 Code::atom(format!("{}({})", self.fn_names[index], args.join(", ")))
             }
-            ExprKind::Builtin(builtin, args) => self.builtin(*builtin, args, e.ty),
+            ExprKind::Builtin(builtin, args) => self.builtin(*builtin, args, e.ty, e.id),
         }
     }
 
@@ -670,7 +817,7 @@ impl<'a> Gen<'a> {
         if ty == Type::String { format!("{name}.clone()") } else { name }
     }
 
-    fn binary(&mut self, op: BinOp, l: Operand, r: Operand, result: Type) -> Code {
+    fn binary(&mut self, op: BinOp, l: Operand, r: Operand, result: Type, id: ExprId) -> Code {
         // Comparisons promote their operands; other operators work in the result type, except
         // that a shift distance keeps its own type.
         let operand_type = if op.is_comparison() && l.ty.is_numeric() {
@@ -682,22 +829,24 @@ impl<'a> Gen<'a> {
         };
         let left = self.convert(l.code, l.ty, operand_type);
         let right = if op.is_shift() { r.code } else { self.convert(r.code, r.ty, operand_type) };
+        // Integer arithmetic that may overflow wraps, as in Java.
         let integral = operand_type.is_integral();
-        let method = |name: &str, left: &Code, right: &Code| {
-            Code::atom(format!("{}.{name}({})", left.receiver(), right.text))
+        let wrapping = integral && !self.no_overflow(id);
+        let mut method = |name: &str, left: &Code, right: &Code| {
+            Code::atom(format!("{}.{name}({})", self.recv(left, operand_type), right.text))
         };
         match op {
-            BinOp::Add if integral => method("wrapping_add", &left, &right),
-            BinOp::Sub if integral => method("wrapping_sub", &left, &right),
-            BinOp::Mul if integral => method("wrapping_mul", &left, &right),
+            BinOp::Add if wrapping => method("wrapping_add", &left, &right),
+            BinOp::Sub if wrapping => method("wrapping_sub", &left, &right),
+            BinOp::Mul if wrapping => method("wrapping_mul", &left, &right),
             BinOp::Div | BinOp::Rem if integral => {
                 // Dividing by a constant other than 0 and -1 can neither throw nor overflow.
-                let safe = match right.literal {
+                let constant = match right.literal {
                     Some(Literal::Int(v)) => v != 0 && v != -1,
                     Some(Literal::Long(v)) => v != 0 && v != -1,
                     _ => false,
                 };
-                if safe {
+                if constant || self.facts.safe_division.contains(&id) {
                     infix(if op == BinOp::Div { "/" } else { "%" }, MUL, &left, &right)
                 } else {
                     let f = self.runtime(if op == BinOp::Div { "div" } else { "rem" });
@@ -740,8 +889,8 @@ impl<'a> Gen<'a> {
             _ => {
                 let distance = format!("{} as u32", right.cast_operand());
                 match op {
-                    BinOp::Shl => Code::atom(format!("{}.wrapping_shl({distance})", left.receiver())),
-                    BinOp::Shr => Code::atom(format!("{}.wrapping_shr({distance})", left.receiver())),
+                    BinOp::Shl => Code::atom(format!("{}.wrapping_shl({distance})", self.recv(&left, ty))),
+                    BinOp::Shr => Code::atom(format!("{}.wrapping_shr({distance})", self.recv(&left, ty))),
                     _ => Code::new(
                         format!(
                             "({} as {unsigned}).wrapping_shr({distance}) as {}",
@@ -755,7 +904,7 @@ impl<'a> Gen<'a> {
         }
     }
 
-    fn builtin(&mut self, builtin: Builtin, args: &'a [Expr], ty: Type) -> Code {
+    fn builtin(&mut self, builtin: Builtin, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
         match builtin {
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
@@ -772,8 +921,8 @@ impl<'a> Gen<'a> {
             Builtin::MathAbs => {
                 let x = self.value(&args[0], ty);
                 // Math.abs(Integer.MIN_VALUE) is Integer.MIN_VALUE.
-                let method = if ty == Type::Double { "abs" } else { "wrapping_abs" };
-                Code::atom(format!("{}.{method}()", x.receiver()))
+                let method = if ty == Type::Double || self.no_overflow(id) { "abs" } else { "wrapping_abs" };
+                Code::atom(format!("{}.{method}()", self.recv(&x, ty)))
             }
             Builtin::MathMax | Builtin::MathMin => {
                 let a = self.value(&args[0], ty);
@@ -783,17 +932,25 @@ impl<'a> Gen<'a> {
                     // f64::max ignores NaN; Java's Math.max returns it.
                     Code::atom(format!("{}({}, {})", self.runtime(name), a.text, b.text))
                 } else {
-                    Code::atom(format!("{}.{name}({})", a.receiver(), b.text))
+                    Code::atom(format!("{}.{name}({})", self.recv(&a, ty), b.text))
                 }
             }
             Builtin::MathSqrt => {
                 let x = self.value(&args[0], Type::Double);
-                Code::atom(format!("{}.sqrt()", x.receiver()))
+                Code::atom(format!("{}.sqrt()", self.recv(&x, Type::Double)))
             }
             Builtin::MathPow => {
                 let a = self.value(&args[0], Type::Double);
                 let b = self.value(&args[1], Type::Double);
-                Code::atom(format!("{}.powf({})", a.receiver(), b.text))
+                Code::atom(format!("{}.powf({})", self.recv(&a, Type::Double), b.text))
+            }
+            // UTF-16 length and UTF-8 length agree on ASCII text.
+            Builtin::StringLength if self.facts.ascii_length.contains(&id) => {
+                let s = match &args[0].kind {
+                    ExprKind::Str(_) | ExprKind::Var(_) => self.str_value(&args[0]),
+                    _ => self.expr(&args[0]).at(ATOM),
+                };
+                Code::new(format!("{s}.len() as i32"), AS)
             }
             Builtin::StringLength => {
                 let s = self.str_ref(&args[0]);
@@ -811,6 +968,7 @@ impl<'a> Gen<'a> {
     fn str_ref(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             ExprKind::Str(s) => rust_string(s),
+            ExprKind::Var(name) if self.borrowed.contains(name) => self.local(name),
             ExprKind::Var(name) => format!("&{}", self.local(name)),
             _ => format!("&{}", self.expr(e).at(UNARY)),
         }
@@ -903,6 +1061,9 @@ impl<'a> Gen<'a> {
             }
         }
         if mac == "format!" && args.is_empty() && !template.contains('{') {
+            if template.is_empty() {
+                return Code::atom("String::new()");
+            }
             return Code::atom(format!("String::from(\"{template}\")"));
         }
         if mac == "println!" && template.is_empty() {
@@ -922,21 +1083,23 @@ fn infix(op: &str, prec: u8, left: &Code, right: &Code) -> Code {
     // `a as i64 < b` would parse `<` as the start of generic arguments.
     let left_cast = matches!(op, "<" | "<<") && ends_with_cast(&left.text) && left.prec >= prec;
     let left_prec = if prec == CMP { CMP + 1 } else { prec };
-    let l = if left_cast {
-        format!("({})", left.text)
-    } else if left.untyped
-        && right.untyped
-        && left.literal.is_some()
-        && !(prec == CMP && matches!(left.literal, Some(Literal::Int(_))))
-    {
-        // `7 / 2` alone would leave the type to inference; comparing ints needs no type.
-        let typed = left.typed();
-        if left.prec < left_prec { format!("({typed})") } else { typed }
-    } else {
-        left.at(left_prec)
-    };
+    let l = if left_cast { format!("({})", left.text) } else { left.at(left_prec) };
     let r = right.at(prec + 1);
-    Code::new(format!("{l} {op} {r}"), prec)
+    let mut code = Code::new(format!("{l} {op} {r}"), prec);
+    if left.untyped && right.untyped && left.literal.is_some() {
+        // In `7 / 2` the type is left to inference, which defaults to `i32` and `f64`: right for
+        // int and double, but a long needs its type written.
+        let typed = left.typed();
+        let typed = if left.prec < left_prec { format!("({typed})") } else { typed };
+        let typed_text = format!("{typed} {op} {r}");
+        if matches!(left.literal, Some(Literal::Long(_))) {
+            code.text = typed_text;
+        } else if prec != CMP {
+            code.untyped = true;
+            code.typed_text = Some(typed_text);
+        }
+    }
+    code
 }
 
 fn ends_with_cast(text: &str) -> bool {
@@ -964,75 +1127,6 @@ fn in_shift_range(e: &Expr, ty: Type) -> bool {
     }
 }
 
-/// Recognizes `for (int i = a; i < b; i++)` where the body never assigns `i` and `b` cannot
-/// change during the loop, which is exactly `for i in a..b`.
-fn counting_loop<'e>(
-    init: &'e [Stmt],
-    cond: Option<&'e Expr>,
-    update: &'e [Expr],
-    body: &'e Stmt,
-) -> Option<(&'e str, &'e Expr, &'e Expr)> {
-    let [Stmt::Local { ty: Type::Int, name, init: Some(start), .. }] = init else { return None };
-    let ExprKind::Binary(BinOp::Lt, var, end) = &cond?.kind else { return None };
-    if !matches!(&var.kind, ExprKind::Var(v) if v == name) || end.ty != Type::Int {
-        return None;
-    }
-    let steps_by_one = match update {
-        [Expr { kind: ExprKind::IncDec { target, increment: true, .. }, .. }] => target == name,
-        [Expr { kind: ExprKind::Assign { op: Some(BinOp::Add), target, value }, .. }] => {
-            target == name && matches!(value.kind, ExprKind::Int(1))
-        }
-        _ => false,
-    };
-    if !steps_by_one || assigns_stmt(body, name) || !stable(end, name, body) {
-        return None;
-    }
-    Some((name, start, end))
-}
-
-/// Whether `e` evaluates to the same value on every iteration of a loop with this body.
-fn stable(e: &Expr, loop_var: &str, body: &Stmt) -> bool {
-    match &e.kind {
-        ExprKind::Int(_) | ExprKind::Long(_) => true,
-        ExprKind::Var(v) => v != loop_var && !assigns_stmt(body, v),
-        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) => stable(x, loop_var, body),
-        ExprKind::Binary(_, l, r) => stable(l, loop_var, body) && stable(r, loop_var, body),
-        _ => false,
-    }
-}
-
-/// Whether `e` assigns the local variable `name`.
-fn assigns(e: &Expr, name: &str) -> bool {
-    let mut found = false;
-    visit_expr(e, &mut |x| match &x.kind {
-        ExprKind::Assign { target, .. } | ExprKind::IncDec { target, .. } => found |= target == name,
-        _ => {}
-    });
-    found
-}
-
-fn assigns_any(stmts: &[Stmt], name: &str) -> bool {
-    stmts.iter().any(|s| assigns_stmt(s, name))
-}
-
-fn assigns_stmt(stmt: &Stmt, name: &str) -> bool {
-    let mut found = false;
-    visit_stmt(stmt, &mut |e| found |= assigns(e, name), &mut |_| {});
-    found
-}
-
-/// Whether `e` reads or writes the variable `name`.
-fn mentions(e: &Expr, name: &str) -> bool {
-    let mut found = false;
-    visit_expr(e, &mut |x| match &x.kind {
-        ExprKind::Var(v) | ExprKind::Assign { target: v, .. } | ExprKind::IncDec { target: v, .. } => {
-            found |= v == name
-        }
-        _ => {}
-    });
-    found
-}
-
 /// Whether a loop body contains a `continue` of that loop (not of a nested loop).
 fn has_continue(body: &Stmt) -> bool {
     match body {
@@ -1052,57 +1146,5 @@ fn collect_locals(stmts: &[Stmt], out: &mut Vec<String>) {
                 out.push(name.clone());
             }
         });
-    }
-}
-
-/// Calls `on_expr` on every top-level expression and `on_stmt` on every statement in `stmt`.
-fn visit_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn FnMut(&Stmt)) {
-    on_stmt(stmt);
-    match stmt {
-        Stmt::Local { init: Some(e), .. } => on_expr(e),
-        Stmt::Local { init: None, .. } => {}
-        Stmt::Expr(e) | Stmt::Return(Some(e), _) => on_expr(e),
-        Stmt::If { cond, then, otherwise } => {
-            on_expr(cond);
-            visit_stmt(then, on_expr, on_stmt);
-            if let Some(o) = otherwise {
-                visit_stmt(o, on_expr, on_stmt);
-            }
-        }
-        Stmt::While { cond, body } | Stmt::DoWhile { body, cond } => {
-            on_expr(cond);
-            visit_stmt(body, on_expr, on_stmt);
-        }
-        Stmt::For { init, cond, update, body } => {
-            init.iter().for_each(|s| visit_stmt(s, on_expr, on_stmt));
-            if let Some(cond) = cond {
-                on_expr(cond);
-            }
-            update.iter().for_each(&mut *on_expr);
-            visit_stmt(body, on_expr, on_stmt);
-        }
-        Stmt::Block(stmts) => stmts.iter().for_each(|s| visit_stmt(s, on_expr, on_stmt)),
-        Stmt::Return(None, _) | Stmt::Break | Stmt::Continue => {}
-    }
-}
-
-/// Calls `f` on `e` and every expression inside it.
-fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
-    f(e);
-    match &e.kind {
-        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::Assign { value: x, .. } => visit_expr(x, f),
-        ExprKind::Binary(_, l, r) => {
-            visit_expr(l, f);
-            visit_expr(r, f);
-        }
-        ExprKind::Conditional(c, a, b) => {
-            visit_expr(c, f);
-            visit_expr(a, f);
-            visit_expr(b, f);
-        }
-        ExprKind::Call { args, .. } | ExprKind::Builtin(_, args) => {
-            args.iter().for_each(|a| visit_expr(a, f))
-        }
-        _ => {}
     }
 }
