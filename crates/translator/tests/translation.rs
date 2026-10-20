@@ -141,3 +141,58 @@ fn string_building_appends_in_place() {
     );
     assert_contains(&rust, &["let mut s = String::new();", "s += &i.to_string();", "s += \",\";"]);
 }
+
+#[test]
+fn unaliased_arrays_are_vecs_indexed_in_bounds() {
+    let rust = translate(
+        "class A { public static void main(String[] args) {
+            int[] squares = new int[5];
+            for (int i = 0; i < squares.length; i++) { squares[i] = i * i; }
+            int sum = 0;
+            for (int x : squares) { sum += x; }
+            System.out.println(sum);
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "let mut squares: Vec<i32> = java::new_vec(5, 0);",
+            "squares[i as usize] = i.wrapping_mul(i);",
+            "for x in squares.iter().cloned() {",
+        ],
+    );
+    assert_lacks(&rust, &["java::Array", "java::get", "java::set"]);
+}
+
+#[test]
+fn arrays_seen_through_two_names_are_shared() {
+    let rust = translate(
+        "class A { public static void main(String[] args) {
+            int[] a = new int[3];
+            int[] b = a;
+            b[0] = 5;
+            System.out.println(a[0]);
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &["let a: java::Array<i32> = java::filled(3, 0);", "let b: java::Array<i32> = a.clone();", "java::set(&b, 0, 5);"],
+    );
+    assert_lacks(&rust, &["Vec<i32>"]);
+}
+
+#[test]
+fn arrays_passed_to_methods_are_shared() {
+    let rust = translate(
+        "class A {
+            static void fill(int[] v) { v[0] = 1; }
+            public static void main(String[] args) {
+                int[] a = new int[3];
+                fill(a);
+                System.out.println(a[0]);
+            }
+        }",
+    );
+    assert_contains(&rust, &["fn fill(v: java::Array<i32>)", "let a: java::Array<i32> = java::filled(3, 0);"]);
+    assert_lacks(&rust, &["Vec<i32>"]);
+}
