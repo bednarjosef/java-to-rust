@@ -203,7 +203,14 @@ impl<'a> Gen<'a> {
     /// An assignment, `++` or `--` to a field or a static field, as a block that yields the value
     /// of the expression. Java's order is kept: the object, the old value, the right operand, then
     /// the write. No `RefCell` borrow is held while the right operand runs.
-    pub(super) fn update(&mut self, place: &'a Place, ty: Type, how: Update<'a>, id: ExprId, prefix: bool) -> Code {
+    pub(super) fn update(
+        &mut self,
+        place: &'a Place,
+        ty: Type,
+        how: Update<'a>,
+        id: ExprId,
+        prefix: bool,
+    ) -> Code {
         let mut lines = Vec::new();
         let slot = match place {
             Place::Field { object, name } => {
@@ -216,7 +223,9 @@ impl<'a> Gen<'a> {
                 lines.push(format!("let {obj} = {owned};"));
                 Slot::Field { obj, field: snake_case(name) }
             }
-            Place::Static { class, name } => Slot::Static { cell: cell_name(&self.class.types[*class].name, name) },
+            Place::Static { class, name } => {
+                Slot::Static { cell: cell_name(&self.class.types[*class].name, name) }
+            }
             Place::Var(_) => unreachable!("variables are assigned by `assignment`"),
         };
         let old = self.temp("old");

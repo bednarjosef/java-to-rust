@@ -200,15 +200,33 @@ pub enum ExprKind {
     /// `this`: the object an instance method or constructor runs on.
     This,
     /// `object.name`, an instance field.
-    Field { object: Box<Expr>, name: String },
+    Field {
+        object: Box<Expr>,
+        name: String,
+    },
     /// `Class.name`, a static field; `class` indexes `Class::types`.
-    Static { class: usize, name: String },
+    Static {
+        class: usize,
+        name: String,
+    },
     /// `new C(args)`; `ctor` is the chosen constructor, an index into `Class::methods`.
-    New { class: usize, args: Vec<Expr>, ctor: Option<usize> },
+    New {
+        class: usize,
+        args: Vec<Expr>,
+        ctor: Option<usize>,
+    },
     /// `receiver.name(args)`, a call of an instance method; `resolved` as for `Call`.
-    MethodCall { receiver: Box<Expr>, name: String, args: Vec<Expr>, resolved: Option<usize> },
+    MethodCall {
+        receiver: Box<Expr>,
+        name: String,
+        args: Vec<Expr>,
+        resolved: Option<usize>,
+    },
     /// `this(args)`, a constructor calling another constructor of its class.
-    ThisCall { args: Vec<Expr>, resolved: Option<usize> },
+    ThisCall {
+        args: Vec<Expr>,
+        resolved: Option<usize>,
+    },
 }
 
 /// What an assignment, `++` or `--` writes to.
@@ -432,9 +450,7 @@ pub fn visit_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn
 pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     f(e);
     match &e.kind {
-        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::Field { object: x, .. } => {
-            visit_expr(x, f)
-        }
+        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::Field { object: x, .. } => visit_expr(x, f),
         ExprKind::Assign { target, value, .. } => {
             visit_place(target, f);
             visit_expr(value, f);
