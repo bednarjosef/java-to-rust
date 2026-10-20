@@ -8,7 +8,8 @@ impl<'a> Gen<'a> {
     /// Whether method `index` is an instance method of an owned class.
     pub(super) fn is_owned_method(&self, index: usize) -> bool {
         let m = &self.class.methods[index];
-        !m.is_static && self.facts.owned.contains(&self.class.types[m.class].name)
+        let decl = &self.class.types[m.class];
+        !m.is_static && (decl.enum_constants.is_some() || self.facts.owned.contains(&decl.name))
     }
 
     /// The body of a constructor of an owned class: the object is built as a plain value named
@@ -19,7 +20,7 @@ impl<'a> Gen<'a> {
         let initialize = decl.fields.iter().any(|f| f.init.is_some());
         let mutable = initialize || self.changes_owned(&m.body, &|e| matches!(e.kind, ExprKind::This));
         let fields: Vec<String> =
-            decl.fields.iter().map(|f| format!("{}: {}", snake_case(&f.name), default_value(f.ty))).collect();
+            decl.fields.iter().map(|f| format!("{}: {}", snake_case(&f.name), self.placeholder(f.ty))).collect();
         let mut_kw = if mutable { "mut " } else { "" };
         self.line(&format!("let {mut_kw}this = {} {{ {} }};", struct_name(&decl.name), fields.join(", ")));
         if initialize {

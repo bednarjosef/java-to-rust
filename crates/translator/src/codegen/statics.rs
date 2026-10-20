@@ -59,7 +59,7 @@ impl<'a> Gen<'a> {
         for (t, f) in cells {
             let init = match &f.init {
                 Some(e) if !self.facts.eager_init.contains(&t) => self.value(e, f.ty).text,
-                _ => default_value(f.ty).to_string(),
+                _ => self.placeholder(f.ty),
             };
             let cell = cell_name(&class.types[t].name, &f.name);
             let ty = self.ty_name(f.ty);

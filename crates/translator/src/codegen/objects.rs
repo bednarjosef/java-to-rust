@@ -251,6 +251,9 @@ impl<'a> Gen<'a> {
 
     /// A value read from a field of an object.
     pub(super) fn field_read(&mut self, object: &'a Expr, name: &str, ty: Type) -> Code {
+        if matches!(object.ty, Type::Enum(_)) {
+            return self.enum_field(object, name);
+        }
         let obj = self.object(object);
         let clone = if needs_clone(ty) { ".clone()" } else { "" };
         if self.is_plain(object) {
@@ -509,7 +512,7 @@ impl<'a> Gen<'a> {
                 let fields: Vec<String> = decl
                     .fields
                     .iter()
-                    .map(|f| format!("{}: {}", snake_case(&f.name), default_value(f.ty)))
+                    .map(|f| format!("{}: {}", snake_case(&f.name), self.placeholder(f.ty)))
                     .collect();
                 let name = struct_name(&decl.name);
                 let fields = fields.join(", ");

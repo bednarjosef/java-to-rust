@@ -9,6 +9,7 @@ use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
 mod code;
+mod enums;
 mod expr;
 mod names;
 mod null;
@@ -54,6 +55,10 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
     };
     for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
         g.type_items(index);
+    }
+    // An enum is never built with `new`, so it is emitted whether or not a `new` names it.
+    for index in (0..class.types.len()).filter(|&t| class.types[t].enum_constants.is_some()) {
+        g.enum_items(index);
     }
     g.statics();
     for i in 0..class.methods.len() {
@@ -214,9 +219,13 @@ impl<'a> Gen<'a> {
             .map(|i| m.params[i].name.clone())
             .collect();
         let name = &self.class.types[m.class].name;
-        self.owned_self = !m.is_static && !m.is_ctor && self.facts.owned.contains(name);
+        let is_enum = self.class.types[m.class].enum_constants.is_some();
+        self.owned_self = !m.is_static && !m.is_ctor && (is_enum || self.facts.owned.contains(name));
         let mut params = Vec::new();
-        if self.owned_self {
+        if self.owned_self && is_enum {
+            // An enum is a `Copy` value, so its methods take `self` by value.
+            params.push("self".to_string());
+        } else if self.owned_self {
             params.push(if self.facts.mutating.contains(&index) { "&mut self" } else { "&self" }.to_string());
         } else if !m.is_static && !m.is_ctor {
             params.push(format!("this: {}", self.this_type(name)));

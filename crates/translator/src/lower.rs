@@ -3,6 +3,7 @@
 //! resolved every name and call, so lowering only maps them onto the supported subset. Anything
 //! outside it is reported as an error naming the construct.
 
+mod enums;
 mod objects;
 mod statics;
 
@@ -20,14 +21,21 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
     let decls: Vec<Node> = unit.list("typeDecls").filter(|n| n.kind() != "EMPTY_STATEMENT").collect();
     let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
     let lowering = Lowering::declare(&decls)?;
-    let types: Vec<TypeDecl> =
+    let mut types: Vec<TypeDecl> =
         (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
     let mut methods: Vec<Method> =
         (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
     for index in (0..types.len()).filter(|&t| lowering.has_static_init(t)) {
         methods.push(lowering.clinit(index)?);
     }
-    Ok(Class { name: first.str("simpleName").to_string(), types, methods })
+    for index in (0..types.len()).filter(|&t| lowering.types[t].node.kind() == "ENUM") {
+        lowering.check_enum(index, &methods)?;
+        let constants = lowering.enum_constants(index, &types[index].fields, &methods)?;
+        types[index].enum_constants = Some(constants);
+    }
+    let class = Class { name: first.str("simpleName").to_string(), types, methods };
+    enums::check_nulls(&class)?;
+    Ok(class)
 }
 
 /// A node of javac's tree.
@@ -184,6 +192,7 @@ impl<'t> Lowering<'t> {
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
             "float" => Ok(Type::Float),
+            _ if self.enum_index(name).is_some() => Ok(Type::enum_type(name)),
             _ if self.type_index(name).is_some() => Ok(Type::class(name)),
             "<nulltype>" => Ok(Type::Null),
             _ if name.ends_with("[]") => Ok(Type::array(self.ty(node, &name[..name.len() - 2])?)),
@@ -419,6 +428,9 @@ impl<'t> Lowering<'t> {
         let system_out = receiver
             .and_then(|r| r.symbol())
             .is_some_and(|s| s.kind == "FIELD" && s.owner == "java.lang.System" && s.name == "out");
+        if let Some(kind) = self.enum_call(node, &symbol, receiver, &mut args)? {
+            return Ok(kind);
+        }
         let builtin = match (symbol.owner, symbol.name) {
             ("java.io.PrintStream", "println") if system_out => Builtin::Println,
             ("java.io.PrintStream", "print") if system_out => Builtin::Print,

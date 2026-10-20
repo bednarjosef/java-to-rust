@@ -44,7 +44,12 @@ impl<'t> Lowering<'t> {
     pub(super) fn has_static_init(&self, index: usize) -> bool {
         self.types[index].node.list("members").any(|m| match m.kind() {
             "BLOCK" => Self::is_static_block(m),
-            "VARIABLE" => m.has_flag("STATIC") && m.get("initializer").is_some() && !Self::is_constant(m),
+            "VARIABLE" => {
+                m.has_flag("STATIC")
+                    && m.get("initializer").is_some()
+                    && !Self::is_constant(m)
+                    && !enums::is_enum_constant(m)
+            }
             _ => false,
         })
     }
@@ -57,7 +62,8 @@ impl<'t> Lowering<'t> {
         let node = self.types[index].node;
         let mut body = Vec::new();
         for member in node.list("members") {
-            if !member.has_flag("STATIC") && !Self::is_static_block(member) {
+            // Enum constants are values built by the enum's own code, not initializers.
+            if (!member.has_flag("STATIC") && !Self::is_static_block(member)) || enums::is_enum_constant(member) {
                 continue;
             }
             match member.kind() {
