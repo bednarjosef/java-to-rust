@@ -1,0 +1,192 @@
+//! Calls into the native layer (`ast::Native`): Rust's own float methods where they give Java's
+//! results, and the runtime's `natives`, `math`, `fdlibm` and `out` otherwise.
+
+use super::*;
+
+impl<'a> Gen<'a> {
+    pub(super) fn native(&mut self, native: Native, args: &'a [Expr], ty: Type) -> Code {
+        let call = |g: &mut Self, f: &str, args: Vec<String>| {
+            Code::atom(format!("{}({})", g.runtime(f), args.join(", ")))
+        };
+        match native {
+            Native::Math { name, strict } => self.math(name, strict, args, ty),
+            Native::ArrayCopy => self.array_copy(args),
+            Native::DoubleToLongBits => {
+                let x = self.value(&args[0], Type::Double).text;
+                call(self, "double_to_long_bits", vec![x])
+            }
+            Native::DoubleToRawLongBits | Native::FloatToRawIntBits => {
+                let (from, to) = if native == Native::DoubleToRawLongBits {
+                    (Type::Double, "i64")
+                } else {
+                    (Type::Float, "i32")
+                };
+                let x = self.value(&args[0], from);
+                Code::new(format!("{}.to_bits() as {to}", self.recv(&x, from)), AS)
+            }
+            Native::LongBitsToDouble | Native::IntBitsToFloat => {
+                let (from, unsigned, to) = if native == Native::LongBitsToDouble {
+                    (Type::Long, "u64", "f64")
+                } else {
+                    (Type::Int, "u32", "f32")
+                };
+                let bits = self.value(&args[0], from);
+                Code::atom(format!("{to}::from_bits({} as {unsigned})", bits.cast_operand()))
+            }
+            Native::FloatToIntBits => {
+                let x = self.value(&args[0], Type::Float).text;
+                call(self, "float_to_int_bits", vec![x])
+            }
+            Native::IdentityHash => {
+                let object = match &args[0].kind {
+                    ExprKind::Var(name) => format!("&{}", self.local(name)),
+                    // `this` is already a reference to the `Rc`.
+                    ExprKind::This => self.this_name().to_string(),
+                    _ => format!("&{}", self.expr(&args[0]).at(UNARY)),
+                };
+                call(self, "identity_hash", vec![object])
+            }
+            Native::CurrentTimeMillis => call(self, "current_time_millis", vec![]),
+            Native::NanoTime => call(self, "nano_time", vec![]),
+            Native::AvailableProcessors => call(self, "available_processors", vec![]),
+            Native::LineSeparator => call(self, "line_separator", vec![]),
+            Native::OutWrite => {
+                let b = self.value(&args[0], Type::Int).text;
+                call(self, "write_byte", vec![b])
+            }
+            Native::OutFlush => call(self, "flush", vec![]),
+            Native::ErrPrint { newline } => {
+                let mac = self.runtime(if newline { "eprintln!" } else { "eprint!" });
+                if args.is_empty() {
+                    return Code::atom(format!("{mac}()"));
+                }
+                let mut parts = Vec::new();
+                self.parts(&args[0], &mut parts);
+                self.format(&mac, parts)
+            }
+            Native::PrintChars { newline } => {
+                let chars = self.slice_of(&args[0]);
+                call(self, if newline { "println_chars" } else { "print_chars" }, vec![chars])
+            }
+        }
+    }
+
+    /// A `Math` or `StrictMath` function. `ty` is the type of the call, which picks the overload.
+    fn math(&mut self, name: &str, strict: bool, args: &'a [Expr], ty: Type) -> Code {
+        // The operand type of the overloads: `round(float)` returns `int`, `floorMod(long, int)`
+        // computes in `long`.
+        let operand = match name {
+            "round" if ty == Type::Int => Type::Float,
+            "signum" | "ulp" | "nextUp" | "fma" => ty,
+            "floorDiv" | "floorMod" if args.iter().any(|a| a.ty == Type::Long) => Type::Long,
+            "floorDiv" | "floorMod" => Type::Int,
+            _ => Type::Double,
+        };
+        let values: Vec<Code> = args.iter().map(|a| self.value(a, operand)).collect();
+        let x = self.recv(&values[0], operand);
+        let method = |m: &str| Code::atom(format!("{x}.{m}()"));
+        let float = if operand == Type::Float { "_f32" } else { "" };
+        let texts: Vec<String> = values.iter().map(|v| v.text.clone()).collect();
+        match name {
+            // Exact in Rust as in Java, and the same in `Math` and `StrictMath`.
+            "floor" | "ceil" => method(name),
+            "rint" => method("round_ties_even"),
+            "toRadians" => method("to_radians"),
+            "toDegrees" => method("to_degrees"),
+            "fma" => Code::atom(format!("{x}.mul_add({}, {})", texts[1], texts[2])),
+            "round" | "signum" | "ulp" | "nextUp" => {
+                let f = match name {
+                    "nextUp" => "next_up",
+                    other => other,
+                };
+                Code::atom(format!("{}({})", self.runtime(&format!("{f}{float}")), texts[0]))
+            }
+            "floorDiv" | "floorMod" => {
+                let f = if name == "floorDiv" { "floor_div" } else { "floor_mod" };
+                let result = Code::atom(format!("{}({}, {})", self.runtime(f), texts[0], texts[1]));
+                if ty == operand { result } else { self.convert(result, operand, ty) }
+            }
+            // HotSpot's own code for `Math`, which the platform's libm is closest to.
+            "sin" | "cos" | "tan" | "exp" | "cbrt" | "sinh" | "tanh" if !strict => method(name),
+            "log" if !strict => method("ln"),
+            "pow" if !strict => Code::atom(format!("{x}.powf({})", texts[1])),
+            "log10" if !strict => Code::atom(format!("{}({})", self.runtime("log10"), texts[0])),
+            // fdlibm: all of `StrictMath`, and `Math` where HotSpot delegates to it.
+            _ => {
+                let f = if name == "IEEEremainder" { "remainder" } else { name };
+                Code::atom(format!("{}({})", self.runtime(&format!("fdlibm::{f}")), texts.join(", ")))
+            }
+        }
+    }
+
+    /// `System.arraycopy(src, srcPos, dest, destPos, length)`. Shared arrays go through
+    /// `java::arraycopy`, which also handles a copy within one array; plain arrays are copied
+    /// between slices, or within one with `java::copy_within`.
+    fn array_copy(&mut self, args: &'a [Expr]) -> Code {
+        let [src, src_pos, dest, dest_pos, length] = args else {
+            unreachable!("arraycopy has five arguments")
+        };
+        let plain_name = |g: &Self, e: &Expr| match &e.kind {
+            ExprKind::Var(name) if g.plain(name).is_some() => Some(name.clone()),
+            _ => None,
+        };
+        let (src_plain, dest_plain) = (plain_name(self, src), plain_name(self, dest));
+        if src_plain.is_none() && dest_plain.is_none() {
+            let (s, d) = (self.shared_handle(src), self.shared_handle(dest));
+            let ints: Vec<String> =
+                [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
+            let f = self.runtime("arraycopy");
+            return Code::atom(format!("{f}({s}, {}, {d}, {}, {})", ints[0], ints[1], ints[2]));
+        }
+        // A `&mut` borrow of a plain destination conflicts with a later argument that reads it,
+        // such as `a.length - 1`, so then the positions are computed first, in Java's order.
+        let names: Vec<&String> = src_plain.iter().chain(&dest_plain).collect();
+        let hoist = [src_pos, dest_pos, length].iter().any(|e| names.iter().any(|n| mentions(e, n)));
+        let mut ints: Vec<String> =
+            [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
+        let mut prefix = String::new();
+        if hoist {
+            prefix = format!("let (src_pos, dest_pos, length) = ({}); ", ints.join(", "));
+            ints = ["src_pos", "dest_pos", "length"].map(String::from).to_vec();
+        }
+        let call = match (&src_plain, &dest_plain) {
+            (Some(s), Some(d)) if s == d => {
+                let a = self.mut_ref(&self.local(d));
+                format!("{}({a}, {}, {}, {})", self.runtime("copy_within"), ints[0], ints[1], ints[2])
+            }
+            _ => {
+                let s = self.slice_of(src);
+                let d = match &dest_plain {
+                    Some(d) => self.mut_ref(&self.local(d)),
+                    None => format!("&mut {}.borrow_mut()", self.array_receiver(dest)),
+                };
+                format!("{}({s}, {}, {d}, {}, {})", self.runtime("copy_slice"), ints[0], ints[1], ints[2])
+            }
+        };
+        if hoist { Code::atom(format!("{{ {prefix}{call} }}")) } else { Code::atom(call) }
+    }
+
+    /// A shared array as the `&Array` the runtime takes.
+    fn shared_handle(&mut self, e: &'a Expr) -> String {
+        match &e.kind {
+            ExprKind::Var(name) => format!("&{}", self.local(name)),
+            _ => format!("&{}", self.expr(e).at(UNARY)),
+        }
+    }
+
+    /// An array as a `&[T]` for reading: a plain array borrowed, a shared one through its cell.
+    fn slice_of(&mut self, e: &'a Expr) -> String {
+        match &e.kind {
+            ExprKind::Var(name) if self.plain(name).is_some() => self.borrowed_arg(e, false),
+            _ => format!("&{}.borrow()", self.array_receiver(e)),
+        }
+    }
+
+    /// A shared array as the receiver of `borrow()`: a variable as it is, without a clone.
+    fn array_receiver(&mut self, e: &'a Expr) -> String {
+        match &e.kind {
+            ExprKind::Var(name) => self.local(name),
+            _ => self.expr(e).receiver(),
+        }
+    }
+}

@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::cell::Cell;
 
 mod arrays;
+mod natives;
 mod primitives;
 mod program;
 mod sync;
@@ -428,6 +429,9 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ThisCall { args, resolved: self.method_index(&symbol) });
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {
+            return Ok(ExprKind::Builtin(builtin, args));
+        }
         let system_out = receiver
             .and_then(|r| r.symbol())
             .is_some_and(|s| s.kind == "FIELD" && s.owner == "java.lang.System" && s.name == "out");

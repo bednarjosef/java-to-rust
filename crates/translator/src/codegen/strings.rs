@@ -107,8 +107,8 @@ impl<'a> Gen<'a> {
             }
             return Code::atom(format!("String::from(\"{template}\")"));
         }
-        if mac == "println!" && template.is_empty() {
-            return Code::atom("println!()");
+        if mac.ends_with("println!") && template.is_empty() {
+            return Code::atom(format!("{mac}()"));
         }
         let args: String = args.iter().map(|a| format!(", {a}")).collect();
         Code::atom(format!("{mac}(\"{template}\"{args})"))

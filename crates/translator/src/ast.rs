@@ -3,6 +3,9 @@
 
 use std::fmt;
 
+mod natives;
+pub use natives::*;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Type {
     Int,
@@ -340,6 +343,8 @@ pub enum Builtin {
     CharIsLowerCase,
     CharToUpperCase,
     CharToLowerCase,
+    /// A method of the native layer: `System.arraycopy`, `Math.sin` and the like.
+    Native(Native),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

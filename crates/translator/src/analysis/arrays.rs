@@ -196,6 +196,11 @@ impl Uses {
                 Place::Field { .. } | Place::Static { .. } => {}
             },
             ExprKind::IncDec { target: Place::Index(array, _), .. } => self.element_write(array),
+            // `System.arraycopy` reads its source and writes its destination, like indexing.
+            ExprKind::Builtin(Builtin::Native(Native::ArrayCopy), args) => {
+                self.good.insert(args[0].id);
+                self.element_write(&args[2]);
+            }
             ExprKind::Call { args, resolved: Some(callee), .. }
             | ExprKind::MethodCall { args, resolved: Some(callee), .. }
             | ExprKind::New { args, ctor: Some(callee), .. }

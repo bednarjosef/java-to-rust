@@ -24,6 +24,7 @@ use primitives::*;
 
 mod arrays;
 mod modules;
+mod natives;
 mod objects;
 mod owned;
 mod sync;

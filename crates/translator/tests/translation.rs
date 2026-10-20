@@ -30,7 +30,7 @@ fn counters_in_counting_loops_use_plain_arithmetic() {
         } }",
     );
     assert_contains(&rust, &["let mut count = 0;", "for i in 0..1000 {", "i % 7 == 0", "count += 1;"]);
-    assert_lacks(&rust, &["wrapping", "java::"]);
+    assert_lacks(&rust, &["wrapping", "java::rem", "java::div"]);
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn modular_arithmetic_stays_in_range() {
         }",
     );
     assert_contains(&rust, &["result = result * base % mod_;", "base = base * base % mod_;", "exp /= 2;"]);
-    assert_lacks(&rust, &["wrapping", "java::"]);
+    assert_lacks(&rust, &["wrapping", "java::rem", "java::div"]);
 }
 
 #[test]
@@ -958,7 +958,10 @@ fn listed_files_without_packages_stay_flat() {
     let program = java_to_rust::Program { main: "Main".into(), files, ..Default::default() };
     let rust =
         java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
-    assert_contains(&rust, &["fn twice(x: i32) -> i32 {", "fn main() {\n    println!(\"{}\", twice(4));"]);
+    assert_contains(
+        &rust,
+        &["fn twice(x: i32) -> i32 {", "fn main() {\n    java::println!(\"{}\", twice(4));"],
+    );
     assert_lacks(&rust, &["mod ", "pub(crate)", "unused"]);
 }
 
@@ -1012,4 +1015,117 @@ fn program_errors_name_their_file() {
     let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
     let error = java_to_rust::translate_program(&program).expect_err("Object is not supported").to_string();
     assert!(error.ends_with("Other.java:4:9: Object not supported yet"), "{error}");
+}
+
+#[test]
+fn arraycopy_copies_plain_arrays_between_slices() {
+    let rust = translate(
+        "class A { public static void main(String[] a) {
+            int[] src = {1, 2, 3, 4};
+            int[] dst = new int[4];
+            System.arraycopy(src, 1, dst, 0, 3);
+            System.arraycopy(dst, 1, dst, 0, dst.length - 1);
+            int[] shared = new int[2];
+            int[] alias = shared;
+            System.arraycopy(src, 0, shared, 0, 2);
+            System.out.println(dst[0] + alias[1]);
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "let src: Vec<i32> = vec![1, 2, 3, 4];",
+            "java::copy_slice(&src, 1, &mut dst, 0, 3);",
+            "let (src_pos, dest_pos, length) = (1, 0, dst.len() as i32 - 1); \
+             java::copy_within(&mut dst, src_pos, dest_pos, length)",
+            "java::copy_slice(&src, 0, &mut shared.borrow_mut(), 0, 2);",
+        ],
+    );
+}
+
+#[test]
+fn math_uses_rust_methods_where_they_match_hotspot() {
+    let rust = translate(
+        "class A { public static void main(String[] a) {
+            double x = 0.5;
+            System.out.println(Math.sin(x) + StrictMath.sin(x) + Math.asin(x) + Math.log(x) + Math.log10(x));
+            System.out.println(Math.floor(x) + Math.rint(x) + Math.round(x) + Math.floorMod(-7, 3) + Math.fma(x, x, x));
+            System.out.println(Math.atan2(x, 1.0) + Math.IEEEremainder(x, 0.3) + Math.signum(x) + Math.PI);
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "x.sin()",
+            "java::fdlibm::sin(x)",
+            "java::fdlibm::asin(x)",
+            "x.ln()",
+            "java::log10(x)",
+            "x.floor()",
+            "x.round_ties_even()",
+            "java::round(x)",
+            "java::floor_mod(-7, 3)",
+            "x.mul_add(x, x)",
+            "java::fdlibm::atan2(x, 1.0)",
+            "java::fdlibm::remainder(x, 0.3)",
+            "java::signum(x)",
+            "3.141592653589793",
+        ],
+    );
+}
+
+#[test]
+fn bit_conversions_are_plain_where_java_keeps_the_bits() {
+    let rust = translate(
+        "class A { public static void main(String[] a) {
+            double d = 1.5;
+            long bits = Double.doubleToRawLongBits(d);
+            float f = Float.intBitsToFloat(7);
+            System.out.println(bits + Double.doubleToLongBits(d) + \" \" + Double.longBitsToDouble(bits) + f);
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "let bits = d.to_bits() as i64;",
+            "let f = f32::from_bits(7i32 as u32);",
+            "java::double_to_long_bits(d)",
+            "f64::from_bits(bits as u64)",
+        ],
+    );
+}
+
+#[test]
+fn system_natives_go_through_the_runtime() {
+    let rust = translate(
+        "class A {
+            int v;
+            public static void main(String[] a) {
+                A x = new A();
+                long t = System.nanoTime() + System.currentTimeMillis();
+                System.err.println(\"t \" + t + System.lineSeparator());
+                System.out.println(x.hashCode() == System.identityHashCode(x));
+                System.out.write(65);
+                System.out.flush();
+                System.out.println(Runtime.getRuntime().availableProcessors());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::nano_time()",
+            "java::current_time_millis()",
+            "java::eprintln!(\"t {t}{}\", java::line_separator());",
+            "java::identity_hash(&x) == java::identity_hash(&x)",
+            "java::write_byte(65);",
+            "java::flush();",
+            "java::available_processors()",
+        ],
+    );
+    let err = java_to_rust::translate(
+        "class A { public static void main(String[] a) { System.out.println(System.getenv(\"HOME\")); } }",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("System.getenv` is not supported"), "{err}");
 }

@@ -413,8 +413,8 @@ impl<'a> Gen<'a> {
                 if let Some(arg) = args.first() {
                     self.parts(arg, &mut parts);
                 }
-                let mac = if builtin == Builtin::Println { "println!" } else { "print!" };
-                self.format(mac, parts)
+                let mac = self.runtime(if builtin == Builtin::Println { "println!" } else { "print!" });
+                self.format(&mac, parts)
             }
             Builtin::Exit => {
                 let code = self.value(&args[0], Type::Int);
@@ -469,6 +469,7 @@ impl<'a> Gen<'a> {
             | Builtin::CharIsLowerCase
             | Builtin::CharToUpperCase
             | Builtin::CharToLowerCase => self.char_builtin(builtin, args, id),
+            Builtin::Native(native) => self.native(native, args, ty),
         }
     }
 }

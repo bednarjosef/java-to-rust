@@ -145,6 +145,20 @@ become nested modules in one output file (`com.example.util` is `mod com { pub(c
 root, such as `crate::com::example::util::Counter::new(..)`, and items in packages are
 `pub(crate)`. A program without packages is written like a single file.
 
+The native layer, the JDK methods that bottom out in the JVM, is hand-written in the runtime
+(`natives.rs`, `math.rs`, `fdlibm/`, `out.rs`) and recognised by owner and name
+(`lower/natives.rs`): `System.arraycopy` (between shared or plain arrays, overlap as through a
+temporary, bounds checked first), the `Double` and `Float` bit conversions, `Math` and
+`StrictMath`, `System.identityHashCode` and an inherited `hashCode()` (derived from the `Rc`'s
+address: stable for the object's life, but like Java's different on every run), the clocks,
+`availableProcessors`, the line separator, `System.err` and `System.out.write`/`flush`.
+`StrictMath` is a port of fdlibm 5.3 and matches Java bit for bit; so does `Math` where HotSpot
+delegates to fdlibm. HotSpot replaces `Math.sin`, `cos`, `tan`, `exp`, `log`, `pow`, `cbrt`,
+`sinh` and `tanh` with its own code, which cannot be ported; they become Rust's methods (the
+platform libm), which agree with it on all but about 0.1 percent of arguments, and
+`Math.log10` is computed correctly rounded, as HotSpot's is. `System.out` is buffered
+(`java::println!`), several times faster than `println!` for programs that print a lot.
+
 Translation never runs the program; it only compiles it. Starting javac costs about half a
 second per run; building the translator needs `javac` (JDK 21 or newer) on PATH.
 
