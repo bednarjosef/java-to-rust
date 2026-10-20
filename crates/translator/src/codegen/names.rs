@@ -61,7 +61,7 @@ pub(super) fn method_names(class: &Class) -> Vec<String> {
             let overloaded = class.methods.iter().filter(|o| o.name == m.name).count() > 1;
             if overloaded {
                 for p in &m.params {
-                    base = format!("{base}_{}", rust_type(p.ty).to_lowercase());
+                    base = format!("{base}_{}", name_part(p.ty));
                 }
             }
             unique(base, &mut used)

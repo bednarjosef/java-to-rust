@@ -16,8 +16,13 @@ mod stmt;
 mod strings;
 
 use code::*;
+use expr::Operand;
 use names::*;
 use null::is_null_test;
+
+mod arrays;
+
+use arrays::name_part;
 
 pub fn generate(class: &Class, facts: &Facts) -> String {
     let mut g = Gen {
@@ -30,6 +35,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         annotations: Vec::new(),
         fn_names: method_names(class),
         locals: HashMap::new(),
+        elements: HashMap::new(),
         out: String::new(),
         indent: 0,
         loops: Vec::new(),
@@ -83,6 +89,8 @@ struct Gen<'a> {
     fn_names: Vec<String>,
     /// Java local variable names to Rust names, for the current method.
     locals: HashMap<String, String>,
+    /// Reads of elements that a for-each-style loop has bound to a variable, by expression.
+    elements: HashMap<ExprId, String>,
     out: String,
     indent: usize,
     loops: Vec<Loop<'a>>,
@@ -161,14 +169,17 @@ impl<'a> Gen<'a> {
         let params: Vec<String> = m
             .params
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(i, p)| {
                 let mutable = if assigns_any(&m.body, &p.name) { "mut " } else { "" };
                 let ty = if self.optional_var(index, p.ty, &p.name) {
-                    "Option<String>"
+                    "Option<String>".to_string()
                 } else if self.borrowed.contains(&p.name) {
-                    "&str"
+                    "&str".to_string()
+                } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {
+                    self.borrowed_ty(p.ty, written)
                 } else {
-                    rust_type(p.ty)
+                    self.ty_name(p.ty)
                 };
                 format!("{mutable}{}: {ty}", self.local(&p.name))
             })
@@ -178,7 +189,7 @@ impl<'a> Gen<'a> {
         } else if self.optional_return() {
             " -> Option<String>".to_string()
         } else {
-            format!(" -> {}", rust_type(m.ret))
+            format!(" -> {}", self.ty_name(m.ret))
         };
         self.line(&format!("fn {}({}){ret} {{", self.fn_names[index], params.join(", ")));
         self.indent += 1;
@@ -209,7 +220,7 @@ impl<'a> Gen<'a> {
 fn collect_locals(stmts: &[Stmt], out: &mut Vec<String>) {
     for stmt in stmts {
         visit_stmt(stmt, &mut |_| {}, &mut |s| {
-            if let Stmt::Local { name, .. } = s {
+            if let Stmt::Local { name, .. } | Stmt::ForEach { name, .. } = s {
                 out.push(name.clone());
             }
         });

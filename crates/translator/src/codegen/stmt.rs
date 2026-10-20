@@ -58,6 +58,7 @@ impl<'a> Gen<'a> {
                 self.local_decl(*ty, name, init.as_ref(), assigns_any(rest, name));
             }
             Stmt::Expr(e) => self.effect(e),
+            Stmt::ForEach { name, array, body, .. } => self.for_each(name, array, body),
             Stmt::If { cond, then, otherwise } => {
                 if self.narrow_if(cond, then, otherwise.as_deref()) {
                     return;
@@ -172,6 +173,11 @@ impl<'a> Gen<'a> {
         update: &'a [Expr],
         body: &'a Stmt,
     ) {
+        if let Some(cond) = cond
+            && self.element_loop(cond, body)
+        {
+            return;
+        }
         if let Some((var, start, end)) = counting_loop(init, cond, update, body) {
             let ty = start.ty.max_integral(end.ty);
             let start = self.value(start, ty);
@@ -221,14 +227,23 @@ impl<'a> Gen<'a> {
         if self.optional_var(self.method, ty, name) {
             return self.optional_local(name, init, mutable);
         }
+        if let Some(written) = self.plain(name) {
+            self.plain_local(ty, name, init, written);
+            return;
+        }
         let mutable = if mutable { "mut " } else { "" };
         let rust = self.local(name);
         match init {
-            None => self.line(&format!("let {mutable}{rust}: {};", rust_type(ty))),
+            None => {
+                let ty_text = self.ty_name(ty);
+                self.line(&format!("let {mutable}{rust}: {ty_text};"));
+            }
             Some(init) => {
                 let code = self.value(init, ty);
-                let annotation = if code.untyped {
-                    self.annotation(ty, format!(": {}", rust_type(ty)))
+                // An array's element type cannot be inferred from `from_vec(vec![])`, so it is always written.
+                let annotation = if code.untyped || matches!(ty, Type::Array(_)) {
+                    let ty_text = self.ty_name(ty);
+                    self.annotation(ty, format!(": {ty_text}"))
                 } else {
                     String::new()
                 };
@@ -278,6 +293,18 @@ impl<'a> Gen<'a> {
             }
             ExprKind::IncDec { target: Place::Var(target), increment, .. } => {
                 let text = self.step(target, e.ty, *increment, e.id);
+                self.line(&format!("{text};"));
+            }
+            ExprKind::Assign { op: None, target: Place::Index(array, index), value } => {
+                let text = self.index_set(e.id, array, index, e.ty, value, false);
+                self.line(&format!("{text};"));
+            }
+            ExprKind::Assign { op: Some(op), target: Place::Index(array, index), value } => {
+                let text = self.index_update(*op, array, index, e.ty, value, e.id);
+                self.line(&format!("{text};"));
+            }
+            ExprKind::IncDec { target: Place::Index(array, index), increment, prefix } => {
+                let text = self.index_step(array, index, e.ty, *increment, *prefix, e.id);
                 self.line(&format!("{text};"));
             }
             _ => {

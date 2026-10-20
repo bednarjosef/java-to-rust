@@ -7,6 +7,9 @@ use crate::ast::*;
 use serde_json::Value;
 use std::cell::Cell;
 
+mod arrays;
+use arrays::{is_array_length, reads_name};
+
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
     let mut classes = unit.list("typeDecls").filter(|n| n.kind() != "EMPTY_STATEMENT");
@@ -145,6 +148,7 @@ impl<'t> Lowering<'t> {
             && ret == Type::Void
             && params.len() == 1
             && param_type(params[0]) == "java.lang.String[]";
+        let args_param = is_main.then(|| params[0]);
         let params = if is_main {
             Vec::new()
         } else {
@@ -154,7 +158,11 @@ impl<'t> Lowering<'t> {
                 .collect::<Result<_, Error>>()?
         };
         let Some(body) = node.get("body") else { return unsupported(node, "methods without a body") };
-        Ok(Method { name, params, ret, body: self.block(body)?, is_main, pos: node.pos() })
+        let mut body = self.block(body)?;
+        if let Some(param) = args_param.filter(|p| reads_name(&body, p.str("name"))) {
+            body.insert(0, self.args_decl(param));
+        }
+        Ok(Method { name, params, ret, body, is_main, pos: node.pos() })
     }
 
     /// The supported type named by javac's `name` for it.
@@ -168,7 +176,8 @@ impl<'t> Lowering<'t> {
             "java.lang.String" => Ok(Type::String),
             "char" | "float" | "byte" | "short" => unsupported(node, name),
             "<nulltype>" => Ok(Type::Null),
-            _ if name.ends_with("[]") || name.ends_with("...") => unsupported(node, "arrays"),
+            _ if name.ends_with("[]") => Ok(Type::array(self.ty(node, &name[..name.len() - 2])?)),
+            _ if name.ends_with("...") => unsupported(node, "varargs"),
             _ => unsupported(node, &format!("type `{name}`")),
         }
     }
@@ -243,7 +252,7 @@ impl<'t> Lowering<'t> {
                 }
                 if node.kind() == "BREAK" { Stmt::Break } else { Stmt::Continue }
             }
-            "ENHANCED_FOR_LOOP" => return unsupported(node, "for-each loops"),
+            "ENHANCED_FOR_LOOP" => self.for_each(node)?,
             "SWITCH" => return unsupported(node, "switch"),
             "TRY" | "THROW" => return unsupported(node, "exceptions"),
             "LABELED_STATEMENT" => return unsupported(node, "labeled statements"),
@@ -307,7 +316,14 @@ impl<'t> Lowering<'t> {
             ),
             "METHOD_INVOCATION" => self.call(node)?,
             "NEW_CLASS" => return unsupported(node, "objects"),
-            "NEW_ARRAY" | "ARRAY_ACCESS" => return unsupported(node, "arrays"),
+            "NEW_ARRAY" => self.new_array(node)?,
+            "ARRAY_ACCESS" => {
+                let (array, index) = self.index(node)?;
+                ExprKind::Index(Box::new(array), Box::new(index))
+            }
+            "MEMBER_SELECT" if is_array_length(node) => {
+                ExprKind::Length(Box::new(self.expr(node.child("expression")?)?))
+            }
             "MEMBER_SELECT" => return unsupported(node, "fields"),
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => return unsupported(node, "lambdas"),
             "INSTANCE_OF" => return unsupported(node, "instanceof"),
@@ -350,7 +366,10 @@ impl<'t> Lowering<'t> {
     fn target(&self, node: Node) -> Result<Place, Error> {
         match node.kind() {
             "IDENTIFIER" => Ok(Place::Var(self.local(node)?)),
-            "ARRAY_ACCESS" => unsupported(node, "arrays"),
+            "ARRAY_ACCESS" => {
+                let (array, index) = self.index(node)?;
+                Ok(Place::Index(Box::new(array), Box::new(index)))
+            }
             _ => unsupported(node, "assignment to anything but a local variable"),
         }
     }
@@ -372,6 +391,7 @@ impl<'t> Lowering<'t> {
             ("java.lang.Math", "min") => Builtin::MathMin,
             ("java.lang.Math", "sqrt") => Builtin::MathSqrt,
             ("java.lang.Math", "pow") => Builtin::MathPow,
+            ("java.util.Arrays", name) => return self.arrays_call(node, name, args),
             ("java.lang.String", "length" | "equals") => {
                 if symbol.name == "equals" && !matches!(args[0].ty, Type::String | Type::Null) {
                     return unsupported(node, "equals with an argument that is not a String");

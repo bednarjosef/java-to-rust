@@ -407,6 +407,19 @@ impl<'a> Analysis<'a> {
                 None
             }
             Stmt::Block(stmts) => self.stmts(stmts, Some(env)),
+            Stmt::ForEach { ty, name, array, body } => {
+                self.expr(array, &mut env);
+                if ty.is_integral() {
+                    env.insert(name.clone(), Var { ty: *ty, range: Interval::full(*ty) });
+                }
+                let out = self.looping(env, None, body, &[], false);
+                // The loop also ends when the elements run out, in the state at its head.
+                let head = self.heads.get(&(&**body as *const Stmt as usize)).cloned();
+                join(head, out).map(|mut env| {
+                    env.remove(name);
+                    env
+                })
+            }
         }
     }
 
@@ -684,6 +697,32 @@ impl<'a> Analysis<'a> {
                 let range = self.arith(op, current, Interval::point(1), var.ty, e.id);
                 env.insert(target.clone(), Var { ty: var.ty, range });
                 if *prefix { range } else { current }
+            }
+            ExprKind::NewArray(items) | ExprKind::ArrayLit(items) => {
+                for item in items {
+                    self.expr(item, env);
+                }
+                other
+            }
+            ExprKind::Index(array, index) => {
+                self.expr(array, env);
+                self.expr(index, env);
+                if ty.is_integral() { Interval::full(ty) } else { other }
+            }
+            ExprKind::Length(array) => {
+                self.expr(array, env);
+                Interval::new(0, i32::MAX as i128)
+            }
+            ExprKind::Assign { target: Place::Index(array, index), value, .. } => {
+                self.expr(array, env);
+                self.expr(index, env);
+                self.expr(value, env);
+                if ty.is_integral() { Interval::full(ty) } else { other }
+            }
+            ExprKind::IncDec { target: Place::Index(array, index), .. } => {
+                self.expr(array, env);
+                self.expr(index, env);
+                if ty.is_integral() { Interval::full(ty) } else { other }
             }
             ExprKind::Cast(to, x) => {
                 let v = self.expr(x, env);

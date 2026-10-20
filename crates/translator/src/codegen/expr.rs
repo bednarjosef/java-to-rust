@@ -123,10 +123,10 @@ impl<'a> Gen<'a> {
         if ty == Type::Double || self.no_overflow(id) {
             let one = if ty == Type::Double { "1.0" } else { "1" };
             format!("{name} {} {one}", if increment { "+=" } else { "-=" })
-        } else if increment {
-            format!("{name} = {name}.wrapping_add(1)")
         } else {
-            format!("{name} = {name}.wrapping_sub(1)")
+            let recv = self.recv(&Code::atom(name.clone()), ty);
+            let method = if increment { "wrapping_add" } else { "wrapping_sub" };
+            format!("{name} = {recv}.{method}(1)")
         }
     }
 
@@ -175,7 +175,7 @@ impl<'a> Gen<'a> {
                 let rust = self.local(name);
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
-                    Type::String => Code::atom(format!("{rust}.clone()")),
+                    Type::String | Type::Array(_) => Code::atom(format!("{rust}.clone()")),
                     _ => Code::atom(rust),
                 }
             }
@@ -216,6 +216,19 @@ impl<'a> Gen<'a> {
                     Code::new(format!("{{ let {old} = {name}; {text}; {old} }}"), LOWEST)
                 }
             }
+            ExprKind::Assign { op: None, target: Place::Index(array, index), value } => {
+                Code::atom(self.index_set(e.id, array, index, e.ty, value, true))
+            }
+            ExprKind::Assign { op: Some(op), target: Place::Index(array, index), value } => {
+                Code::atom(self.index_update(*op, array, index, e.ty, value, e.id))
+            }
+            ExprKind::IncDec { target: Place::Index(array, index), increment, prefix } => {
+                Code::atom(self.index_step(array, index, e.ty, *increment, *prefix, e.id))
+            }
+            ExprKind::Index(array, index) => self.index(e.id, array, index),
+            ExprKind::Length(array) => self.length(array),
+            ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
+            ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
                 let cond = self.condition(cond);
@@ -240,6 +253,8 @@ impl<'a> Gen<'a> {
                             self.str_ref(a)
                         } else if self.optional_var(index, p.ty, &p.name) {
                             self.optional(a).text
+                        } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {
+                            self.borrowed_arg(a, written)
                         } else {
                             self.value(a, p.ty).text
                         }
@@ -346,6 +361,9 @@ impl<'a> Gen<'a> {
 
     pub(super) fn builtin(&mut self, builtin: Builtin, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
         match builtin {
+            Builtin::ArraysToString | Builtin::ArraysFill | Builtin::ArraysSort | Builtin::ArraysCopyOf => {
+                self.arrays_builtin(builtin, args)
+            }
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
                 if let Some(arg) = args.first() {

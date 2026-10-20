@@ -6,15 +6,17 @@
 //!   instead of `wrapping_add` and `java::div` (see `ranges`).
 //! - Strings that are always ASCII have a `len()` equal to Java's UTF-16 `length()`.
 //! - String parameters that a method never assigns and that are never null are borrowed as `&str`.
+//! - Array locals that no other name can see are plain `Vec`s (see `arrays`).
 //!
 //! The facts form a table keyed by expression id. An expression without a fact gets the faithful
 //! default translation, so a weaker analysis only makes the output plainer, never wrong.
 
+mod arrays;
 mod nullness;
 mod ranges;
 
 use crate::ast::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub use nullness::{maybe_null, nullable_var};
 
@@ -34,6 +36,17 @@ pub struct Facts {
     pub nullable_vars: HashSet<(usize, String)>,
     /// Methods whose string return value can be null.
     pub nullable_returns: HashSet<usize>,
+    /// Array locals, as (method, name), that no other name can see: plain `Vec`s. The flag says
+    /// whether an element of the array is ever assigned.
+    pub plain_arrays: HashMap<(usize, String), bool>,
+    /// `a[i]` expressions that a counting loop over the plain array `a` proves in bounds.
+    pub in_bounds: HashSet<ExprId>,
+    /// Array parameters, as (method, parameter) indexes, that are plain at every call: `&[T]`, or
+    /// `&mut [T]` when the flag says the elements are written.
+    pub borrowed_arrays: HashMap<(usize, usize), bool>,
+    /// Counting loops over a plain array whose body only reads `a[i]`, keyed by the loop
+    /// condition: the reads that can become elements of `for x in a.iter()`.
+    pub element_loops: HashMap<ExprId, Vec<ExprId>>,
 }
 
 pub fn analyze(class: &Class) -> Facts {
@@ -42,6 +55,7 @@ pub fn analyze(class: &Class) -> Facts {
     nullness::analyze(class, &mut facts);
     borrowed_params(class, &mut facts);
     ascii_strings(class, &mut facts);
+    arrays::analyze(class, &mut facts);
     facts
 }
 

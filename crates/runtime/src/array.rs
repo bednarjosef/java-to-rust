@@ -1,0 +1,126 @@
+//! Java arrays. An array is a shared handle to its elements: copying the handle gives a second
+//! name for the same array, as in Java, and every access is bounds-checked the way Java checks it.
+
+use crate::throw;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+pub type Array<T> = Rc<RefCell<Vec<T>>>;
+
+/// An array with the given elements, as in `{a, b, c}`.
+pub fn from_vec<T>(items: Vec<T>) -> Array<T> {
+    Rc::new(RefCell::new(items))
+}
+
+/// `new T[len]` with every element `zero`, the default value of `T`.
+pub fn filled<T: Clone>(len: i32, zero: T) -> Array<T> {
+    let len = size(len);
+    from_vec(vec![zero; len])
+}
+
+/// `new T[len]` whose element `i` is `make(i)`, so that each row of `new T[n][m]` is a new array.
+pub fn tabulate<T>(len: i32, make: impl FnMut(usize) -> T) -> Array<T> {
+    let len = size(len);
+    from_vec((0..len).map(make).collect())
+}
+
+/// The length of an array being created; Java throws for a negative length.
+pub(crate) fn size(len: i32) -> usize {
+    if len < 0 {
+        throw("java.lang.NegativeArraySizeException", &len.to_string());
+    }
+    len as usize
+}
+
+/// The position of element `i` in an array of `len` elements, checked the way Java checks it.
+pub(crate) fn position(len: usize, i: i32) -> usize {
+    if i < 0 || i as usize >= len {
+        throw(
+            "java.lang.ArrayIndexOutOfBoundsException",
+            &format!("Index {i} out of bounds for length {len}"),
+        );
+    }
+    i as usize
+}
+
+/// `a.length`.
+pub fn len<T>(a: &Array<T>) -> i32 {
+    a.borrow().len() as i32
+}
+
+/// `a[i]`.
+pub fn get<T: Clone>(a: &Array<T>, i: i32) -> T {
+    let items = a.borrow();
+    items[position(items.len(), i)].clone()
+}
+
+/// `a[i] = v`. Java evaluates `a`, `i` and `v` before the check, and so do the arguments.
+pub fn set<T>(a: &Array<T>, i: i32, v: T) {
+    let mut items = a.borrow_mut();
+    let i = position(items.len(), i);
+    items[i] = v;
+}
+
+/// `a[i] op= ...`: `f` computes the new element from the old one. The old element is read, and
+/// the borrow released, before `f` runs, so `f` may read the array. Returns the new element.
+pub fn update<T: Clone>(a: &Array<T>, i: i32, f: impl FnOnce(T) -> T) -> T {
+    let new = f(get(a, i));
+    set(a, i, new.clone());
+    new
+}
+
+/// `a[i]++` and the like: as `update`, but returns the old element.
+pub fn post_update<T: Clone>(a: &Array<T>, i: i32, f: impl FnOnce(T) -> T) -> T {
+    let old = get(a, i);
+    set(a, i, f(old.clone()));
+    old
+}
+
+/// `Arrays.toString(a)`, with `show` formatting each element as Java does.
+pub fn to_string<T: Clone>(a: &Array<T>, show: impl Fn(T) -> String) -> String {
+    let items: Vec<String> = a.borrow().iter().cloned().map(show).collect();
+    format!("[{}]", items.join(", "))
+}
+
+/// `Arrays.fill(a, v)`.
+pub fn fill<T: Clone>(a: &Array<T>, v: T) {
+    a.borrow_mut().fill(v);
+}
+
+/// `Arrays.sort(a)` for integers and booleans.
+pub fn sort<T: Ord>(a: &Array<T>) {
+    a.borrow_mut().sort();
+}
+
+/// `Arrays.sort(a)` for doubles, in Java's order: -0.0 before 0.0, NaN last.
+pub fn sort_doubles(a: &Array<f64>) {
+    a.borrow_mut().sort_by(f64::total_cmp);
+}
+
+/// `Arrays.copyOf(a, len)`: the first `len` elements, padded with `zero`.
+pub fn copy_of<T: Clone>(a: &Array<T>, len: i32, zero: T) -> Array<T> {
+    let len = size(len);
+    let mut items = a.borrow().clone();
+    items.resize(len, zero);
+    from_vec(items)
+}
+
+/// `a[i] = v` as an expression: stores `v` and gives it back.
+pub fn store<T: Clone>(a: &Array<T>, i: i32, v: T) -> T {
+    set(a, i, v.clone());
+    v
+}
+
+/// The elements of `a` in order, read one at a time as a for-each loop reads them. The length
+/// is fixed when the loop starts, and the loop holds its own handle, as Java's does.
+pub fn each<T: Clone>(a: Array<T>) -> impl Iterator<Item = T> {
+    let len = len(&a);
+    (0..len).map(move |k| get(&a, k))
+}
+
+/// Checks the sizes of a multi-dimensional `new`, before any array is allocated.
+pub fn check_sizes(dims: &[i32]) {
+    for &d in dims {
+        size(d);
+    }
+}

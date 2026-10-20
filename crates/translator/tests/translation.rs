@@ -256,3 +256,117 @@ fn a_branch_that_assigns_the_string_does_not_narrow_it() {
     );
     assert_lacks(&rust, &["if let Some(s)", "let Some(s)"]);
 }
+
+#[test]
+fn unaliased_arrays_are_vecs_indexed_in_bounds() {
+    let rust = translate(
+        "class A { public static void main(String[] args) {
+            int[] squares = new int[5];
+            for (int i = 0; i < squares.length; i++) { squares[i] = i * i; }
+            int sum = 0;
+            for (int x : squares) { sum += x; }
+            System.out.println(sum);
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "let mut squares: Vec<i32> = java::new_vec(5, 0);",
+            "squares[i as usize] = i.wrapping_mul(i);",
+            "for x in squares.iter().cloned() {",
+        ],
+    );
+    assert_lacks(&rust, &["java::Array", "java::get", "java::set"]);
+}
+
+#[test]
+fn arrays_seen_through_two_names_are_shared() {
+    let rust = translate(
+        "class A { public static void main(String[] args) {
+            int[] a = new int[3];
+            int[] b = a;
+            b[0] = 5;
+            System.out.println(a[0]);
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "let a: java::Array<i32> = java::filled(3, 0);",
+            "let b: java::Array<i32> = a.clone();",
+            "java::set(&b, 0, 5);",
+        ],
+    );
+    assert_lacks(&rust, &["Vec<i32>"]);
+}
+
+#[test]
+fn arrays_passed_to_methods_are_borrowed() {
+    let rust = translate(
+        "class A {
+            static void fill(int[] v) { v[0] = 1; }
+            public static void main(String[] args) {
+                int[] a = new int[3];
+                fill(a);
+                System.out.println(a[0]);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["fn fill(v: &mut [i32])", "fill(&mut a);", "let mut a: Vec<i32> = java::new_vec(3, 0);"],
+    );
+    assert_lacks(&rust, &["java::Array"]);
+}
+
+#[test]
+fn arrays_passed_twice_in_one_call_are_shared() {
+    let rust = translate(
+        "class A {
+            static void two(int[] x, int[] y) { x[0] = y[0]; }
+            public static void main(String[] args) {
+                int[] a = new int[2];
+                two(a, a);
+                System.out.println(a[0]);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn two(x: java::Array<i32>, y: java::Array<i32>)",
+            "let a: java::Array<i32> = java::filled(2, 0);",
+        ],
+    );
+    assert_lacks(&rust, &["Vec<i32>", "&mut ["]);
+}
+
+#[test]
+fn counting_loops_that_only_read_elements_become_iterators() {
+    let rust = translate(
+        "class A { public static void main(String[] args) {
+            int[] a = new int[4];
+            for (int i = 0; i < a.length; i++) { a[i] = i * 3; }
+            int s = 0;
+            for (int i = 0; i < a.length; i++) { s += a[i]; }
+            System.out.println(s);
+        } }",
+    );
+    assert_contains(&rust, &["for item in a.iter().cloned() {", "s = s.wrapping_add(item);"]);
+    assert_lacks(&rust, &["s.wrapping_add(a["]);
+}
+
+#[test]
+fn element_loops_that_write_or_use_the_index_stay_indexed() {
+    let rust = translate(
+        "class A { public static void main(String[] args) {
+            int[] a = new int[4];
+            int s = 0;
+            for (int i = 0; i < a.length; i++) { s += a[i]; a[i] = 1; }
+            for (int i = 0; i < a.length; i++) { s += a[i] + i; }
+            System.out.println(s);
+        } }",
+    );
+    assert_contains(&rust, &["while i < a.len() as i32 {"]);
+    assert_lacks(&rust, &["a.iter().cloned()"]);
+}
