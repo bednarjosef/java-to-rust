@@ -12,6 +12,7 @@ mod boxing;
 mod code;
 mod enums;
 mod expr;
+mod math;
 mod names;
 mod null;
 mod primitives;

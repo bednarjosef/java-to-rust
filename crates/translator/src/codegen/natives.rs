@@ -73,6 +73,9 @@ impl<'a> Gen<'a> {
 
     /// A `Math` or `StrictMath` function. `ty` is the type of the call, which picks the overload.
     fn math(&mut self, name: &str, strict: bool, args: &'a [Expr], ty: Type) -> Code {
+        if let Some(code) = self.math_extra(name, args, ty) {
+            return code;
+        }
         // The operand type of the overloads: `round(float)` returns `int`, `floorMod(long, int)`
         // computes in `long`.
         let operand = match name {

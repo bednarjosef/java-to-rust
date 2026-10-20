@@ -108,6 +108,16 @@ pub fn next_up_f32(x: f32) -> f32 {
     }
 }
 
+/// `Math.nextDown(double)`: the next double toward negative infinity, by symmetry with `next_up`.
+pub fn next_down(x: f64) -> f64 {
+    -next_up(-x)
+}
+
+/// `Math.nextDown(float)`.
+pub fn next_down_f32(x: f32) -> f32 {
+    -next_up_f32(-x)
+}
+
 /// `Math.log10`, correctly rounded as HotSpot's is (the platform's `log10` is not: it differs from
 /// Java on about 4 percent of arguments). The logarithm is computed in double-double arithmetic,
 /// about 104 bits, and rounded once.
