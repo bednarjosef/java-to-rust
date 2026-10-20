@@ -131,6 +131,8 @@ pub struct Class {
 /// A class of the file: its fields. Methods and constructors are in `Class::methods`.
 pub struct TypeDecl {
     pub name: String,
+    /// The class's package, such as `com.example`; empty for the unnamed package.
+    pub package: String,
     /// Instance fields, in declaration order.
     pub fields: Vec<Field>,
     /// Static fields, in declaration order.

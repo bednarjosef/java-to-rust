@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: java-to-rust <Input.java> [-o <output.rs> | --crate <directory>]";
+const USAGE: &str = "usage: java-to-rust <Input.java> [-o <output.rs> | --crate <directory>]
+       java-to-rust --main <package.Class> [--source <root>]... [--library <root>]... [<File.java>]...
+                    [-o <output.rs> | --crate <directory>]";
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -17,19 +19,56 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Vec<String>) -> Result<(), String> {
+    if args.iter().any(|a| matches!(a.as_str(), "--main" | "--source" | "--library")) {
+        return run_program(&args);
+    }
     let (input, output) = match &args[..] {
         [input] => (input, None),
-        [input, flag, out] if flag == "-o" || flag == "--crate" => (input, Some((flag.as_str(), out))),
+        [input, flag, out] if flag == "-o" || flag == "--crate" => {
+            (input, Some((flag.as_str(), out.as_str())))
+        }
         _ => return Err(USAGE.into()),
     };
     let java = std::fs::read_to_string(input).map_err(|e| format!("{input}: {e}"))?;
     let rust = java_to_rust::translate(&java).map_err(|e| format!("{input}:{e}"))?;
+    emit(output, input, &rust)
+}
+
+/// Prints the translation, or writes it to a file (`-o`) or a Cargo project (`--crate`) named
+/// after `input`.
+fn emit(output: Option<(&str, &str)>, input: &str, rust: &str) -> Result<(), String> {
     match output {
         None => print!("{rust}"),
         Some(("-o", path)) => std::fs::write(path, rust).map_err(|e| format!("{path}: {e}"))?,
-        Some((_, dir)) => write_crate(Path::new(dir), input, &rust).map_err(|e| format!("{dir}: {e}"))?,
+        Some((_, dir)) => write_crate(Path::new(dir), input, rust).map_err(|e| format!("{dir}: {e}"))?,
     }
     Ok(())
+}
+
+/// Whole-program mode: `--main` names the class whose `main` starts the program, each
+/// `--source` is a source root laid out by package, each `--library` a root that classes are
+/// only read from when the program uses them, and other arguments are single source files.
+fn run_program(args: &[String]) -> Result<(), String> {
+    let mut program = java_to_rust::Program::default();
+    let mut output = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let mut value = || args.next().cloned().ok_or_else(|| format!("{arg} needs a value\n{USAGE}"));
+        match arg.as_str() {
+            "--main" => program.main = value()?,
+            "--source" => program.sources.push(value()?.into()),
+            "--library" => program.libraries.push(value()?.into()),
+            "-o" | "--crate" => output = Some((arg.as_str(), value()?)),
+            flag if flag.starts_with('-') => return Err(format!("unknown option {flag}\n{USAGE}")),
+            file => program.files.push(file.into()),
+        }
+    }
+    if program.main.is_empty() {
+        return Err(format!("--main is required for a program\n{USAGE}"));
+    }
+    let rust = java_to_rust::translate_program(&program).map_err(|e| e.to_string())?;
+    let name = program.main.rsplit('.').next().unwrap_or("translated").to_string();
+    emit(output.as_ref().map(|(flag, path)| (*flag, path.as_str())), &name, &rust)
 }
 
 /// A Cargo project around the translation, depending on the runtime crate of this checkout.
