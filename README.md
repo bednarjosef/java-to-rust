@@ -206,12 +206,24 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
 - Arrays (`int[]`, `long[]`, `double[]`, `boolean[]`, `String[]`, and arrays of arrays) are shared
   references in the faithful form, `java::Array<T>`: a shared cell whose clones see each other's
   writes. The aliasing analysis (`analysis/arrays.rs`) finds local arrays that no other name can
-  see, and those become a plain `Vec<T>`. Indexing a `Vec` is `a[i as usize]` where a counting
-  loop over `a.length` proves the index in bounds, and `java::at`/`java::put` otherwise. Bounds
-  and size errors go through `java::throw`, so they exit with code 1 as Java does. A parameter
-  becomes `&[T]` or `&mut [T]` when every call passes a distinct plain array, and a counting loop
-  that only reads `a[i]` becomes `for x in a.iter().cloned()`. Arrays that are returned, copied,
-  or given to `java.util.Arrays` stay shared for now. Arrays of strings, objects or arrays hold
+  see, and those become a plain `Vec<T>`, or `Vec<Vec<T>>` (at any depth) for arrays of arrays
+  of primitives or strings whose rows are only reached through the array. A plain local may take
+  a new array, a literal, another plain local that is dead afterwards (`a = b; b = c;` moves the
+  `Vec`), or the result of a method that returns only arrays it made, which then returns the
+  `Vec`. A plain array that meets code needing a shared one is converted once with `java::share`.
+  A second name that is used later (`int[] b = a;`, a row kept in a variable, a field, `==`,
+  `java.util.Arrays`) keeps the array shared, so writes through one name show through the other.
+  Indexing a `Vec` is `a[i as usize]` where the bounds analysis (`analysis/arrays/bounds.rs`)
+  proves the index in range (loop and `if` guards, lengths of rows, declared sizes), and
+  `java::at`/`java::put`/`java::modify` otherwise, whose failing path is cold and out of line.
+  Bounds and size errors go through `java::throw`, so they exit with code 1 as Java does. A
+  parameter becomes `&[T]`, `&mut [T]`, `&[Vec<T>]` or `&mut [Vec<T>]` when every call can lend
+  it a plain array or a row of one, a counting loop that only reads `a[i]` becomes
+  `for x in a.iter().cloned()`, and a for-each over the rows of a plain array borrows them
+  (`for row in m.iter()`). An innermost counting loop that reaches a plain array only at its
+  index checks once, before it starts, that the whole range is in bounds, and then runs over
+  slices with no checks (`let b_row = &b[k][..n];`); otherwise it runs with Java's checks
+  (`analysis/arrays/slices.rs`). Arrays of strings, objects or arrays hold
   `Option`s when some array of that element type may hold null (`new String[n]`,
   `new int[n][]`, or a stored value that may be null), and plain values otherwise.
 - `java.util.Arrays` on arrays of primitives and strings (`lower/java_arrays.rs`,

@@ -42,6 +42,8 @@ mod modules;
 mod natives;
 mod objects;
 mod owned;
+mod plain_arrays;
+mod sliced_loops;
 mod sync;
 
 use arrays::name_part;
@@ -74,6 +76,8 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         locals: HashMap::new(),
         boxed: HashMap::new(),
         elements: HashMap::new(),
+        sliced: HashMap::new(),
+        sliced_accesses: HashSet::new(),
         out: String::new(),
         indent: 0,
         frames: Vec::new(),
@@ -184,6 +188,11 @@ struct Gen<'a> {
     boxed: HashMap<String, Type>,
     /// Reads of elements that a for-each-style loop has bound to a variable, by expression.
     elements: HashMap<ExprId, String>,
+    /// The plain arrays that the loop being written reaches through slices (see
+    /// `sliced_loops.rs`): Java name to the slice's Rust name and how many rows it skips.
+    sliced: HashMap<String, (String, usize)>,
+    /// The accesses that the check before a sliced loop puts in bounds.
+    sliced_accesses: HashSet<ExprId>,
     out: String,
     indent: usize,
     /// The statements that Java can break out of or continue, innermost last (see `switch.rs`).
@@ -320,6 +329,8 @@ impl<'a> Gen<'a> {
             String::new()
         } else if self.optional_return() {
             format!(" -> Option<{}>", self.ty_name(m.ret))
+        } else if self.facts.owned_returns.contains(&index) {
+            format!(" -> {}", self.plain_ty(m.ret))
         } else {
             format!(" -> {}", self.ty_name(m.ret))
         };

@@ -229,6 +229,9 @@ impl<'a> Gen<'a> {
     }
 
     pub(super) fn expr(&mut self, e: &'a Expr) -> Code {
+        if let Some(code) = self.shared_array(e) {
+            return code;
+        }
         match &e.kind {
             ExprKind::Int(v) => Code::literal(Literal::Int(*v)),
             ExprKind::Long(v) => Code::literal(Literal::Long(*v)),
