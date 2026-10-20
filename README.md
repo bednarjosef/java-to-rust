@@ -61,6 +61,15 @@ projects together with their own unit tests, and randomly generated programs tha
 corner cases nobody writes by hand. The whole corpus runs on every change, and a table per
 program shows what a change improved or broke.
 
+## Performance
+
+`benchmarks/` holds programs that run for seconds on Java: sieve, Collatz, n-body, Mandelbrot,
+matrix multiply, sorting a million ints, binary trees, a linked list, string building, statics and
+a bytecode interpreter. They are kept out of `corpus/` because the corpus test runs every program
+there. `python3 scripts/benchmark.py` checks that each translation prints what Java prints, then
+times both sides (median of five wall-clock runs, JVM start-up included) and prints a table.
+`docs/performance.md` has the table from one run and the causes of the slow cases.
+
 ## First milestone
 
 Level 1 end to end for a subset of Java: classes, interfaces, inheritance, generics, the common
