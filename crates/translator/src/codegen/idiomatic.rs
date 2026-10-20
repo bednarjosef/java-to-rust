@@ -25,7 +25,13 @@ impl<'a> Gen<'a> {
 
     /// `x = x op v` on a local `name` of type `ty`, written `x op= v` where Rust's compound
     /// assignment does what Java's does: the value is only read before it is stored.
-    pub(super) fn self_update(&mut self, name: &str, target: &str, ty: Type, value: &'a Expr) -> Option<String> {
+    pub(super) fn self_update(
+        &mut self,
+        name: &str,
+        target: &str,
+        ty: Type,
+        value: &'a Expr,
+    ) -> Option<String> {
         let ExprKind::Binary(op, l, r) = &value.kind else { return None };
         let reads_target = matches!(&l.kind, ExprKind::Var(v) if v == target);
         if !reads_target || value.ty != ty {

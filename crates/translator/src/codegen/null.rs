@@ -163,13 +163,17 @@ impl<'a> Gen<'a> {
             } else {
                 (self.value(&args[1], Type::String).text, format!("{non_null}(receiver_) == other_"))
             };
-            return Code::new(format!("match ({receiver}, {other}) {{ (receiver_, other_) => {test} }}"), LOWEST);
+            return Code::new(
+                format!("match ({receiver}, {other}) {{ (receiver_, other_) => {test} }}"),
+                LOWEST,
+            );
         }
         let receiver = if self.nullable(&args[0]) { self.deref(&args[0]) } else { self.str_value(&args[0]) };
         if self.nullable(&args[1]) {
             let option = self.option_ref(&args[1]);
             // A `match` is parenthesised where it is used as an operand, not in an `if` condition.
-            let text = format!("match {receiver} {{ receiver_ => {option}.is_some_and(|o| o == receiver_) }}");
+            let text =
+                format!("match {receiver} {{ receiver_ => {option}.is_some_and(|o| o == receiver_) }}");
             return Code::new(text, LOWEST);
         }
         let other = self.str_value(&args[1]);

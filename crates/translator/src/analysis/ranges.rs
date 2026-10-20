@@ -14,8 +14,8 @@
 //! Each arithmetic operation is checked against its type's bounds on the final fixpoint; one
 //! that stays within them on every path cannot overflow.
 
-use super::constants::static_value;
 use super::Facts;
+use super::constants::static_value;
 use crate::ast::*;
 use crate::types::binary_type;
 use std::collections::{HashMap, HashSet};
