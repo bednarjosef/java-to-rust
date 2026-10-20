@@ -192,3 +192,20 @@ fn null_checks_test_the_option() {
     );
     assert_contains(&rust, &["let s: Option<String> = None;", "if s.as_deref().is_none() {"]);
 }
+
+#[test]
+fn dereferencing_a_maybe_null_parameter_throws() {
+    let rust = translate(
+        "class A {
+            static int size(String s) { return s.length(); }
+            public static void main(String[] a) {
+                System.out.println(size(null));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["fn size(s: Option<String>) -> i32", "java::non_null(s.as_deref()).len() as i32"],
+    );
+    assert_lacks(&rust, &["unwrap()"]);
+}
