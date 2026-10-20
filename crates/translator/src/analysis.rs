@@ -15,6 +15,7 @@
 //! default translation, so a weaker analysis only makes the output plainer, never wrong.
 
 mod arrays;
+mod boxing;
 mod indexing;
 mod nullness;
 mod objects;
@@ -63,12 +64,16 @@ pub struct Facts {
     pub owned: HashSet<String>,
     /// The instance methods (indexes into `Class::methods`) that change their owned object.
     pub mutating: HashSet<usize>,
+    /// The boxed kinds (`Type::Boxed` of the primitive) whose identity `==` observes: their boxes
+    /// are shared objects. Every other boxed kind is its primitive value.
+    pub faithful_boxes: HashSet<Type>,
 }
 
 pub fn analyze(class: &Class) -> Facts {
     let mut facts = Facts::default();
     ranges::analyze(class, &mut facts);
     nullness::analyze(class, &mut facts);
+    boxing::analyze(class, &mut facts);
     borrowed_params(class, &mut facts);
     ascii_strings(class, &mut facts);
     facts.immutable = objects::immutable_classes(class);
