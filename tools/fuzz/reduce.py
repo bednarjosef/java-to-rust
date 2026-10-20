@@ -4,23 +4,28 @@
     python3 tools/fuzz/reduce.py target/fuzz/runs/s17/Prog.java [--out Reduced.java]
                                  [--jobs 4] [--max-tests 400]
 
-A candidate is kept when it fails the same way as the original: the same status (mismatch,
-rustc, translator-crash or rust-timeout) and the same key (for rustc, the error code). A
-candidate that javac rejects, or that is fixed or fails differently, is discarded.
+A failure's class is its status and key: mismatch, rustc (key: the error code, or the first 60
+characters of the message), translator-crash, rust-timeout or rejected (key: the message). A
+candidate is kept only when it has the same class as the original. javac runs inside the
+translator, so a candidate javac rejects is `invalid` and is never kept; Rust is built only for
+programs the translator accepted, and Java runs only when the Rust output is needed.
 
-Two kinds of candidate, tried until neither shrinks the program:
+Two passes, repeated until neither shrinks the program:
   1. delete a statement or member: one line, or a block from a line ending in `{` to its
      closing `}`. Lines indented 4 spaces or more are candidates, so the class header stays.
+     The pass goes bottom up, so each range is tried once and an accepted deletion does not
+     move the ranges above it.
   2. simplify a parenthesised group: replace it with 0, 1, true or false, or with one operand
      of its top-level binary operator. Groups that follow a name (calls, `m0(`) are skipped:
      replacing their argument list would change the program's shape, not just simplify it.
 
-Candidates are run in parallel batches; the first one in order that keeps the failure is
-accepted. Results are cached by text, so no candidate is run twice.
+Candidates run in parallel batches (`--jobs`); the first kept candidate in order is accepted.
+Results are cached by text, so no candidate runs twice. `--max-tests` caps the candidates run.
 """
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -28,7 +33,7 @@ import run as fuzzrun  # noqa: E402
 
 MEMBER_INDENT = 4  # class members and the body of each method
 MAIN = 'public static void main('  # a candidate without it has no Java run to compare
-FAILURES = ('mismatch', 'rustc', 'translator-crash', 'rust-timeout')
+REDUCIBLE = ('mismatch', 'rustc', 'translator-crash', 'rust-timeout', 'rejected')
 BINARY_OPS = ['&&', '||', '<<', '>>>', '>>', '<=', '>=', '==', '!=', '+', '-', '*', '/', '%',
               '&', '|', '^', '<', '>']
 REPLACEMENTS = ['0', '1', 'true', 'false']
@@ -54,10 +59,22 @@ def units(lines):
     return out
 
 
-def deletions(lines):
-    """Candidate texts, each with one statement range removed; the largest ranges first."""
-    for start, end in sorted(units(lines), key=lambda u: u[0] - u[1]):
-        yield '\n'.join(lines[:start] + lines[end + 1:]) + '\n'
+def families(lines):
+    """The units inside each unit (or outside all of them), as lists of sibling units in order."""
+    us = units(lines)
+    kids = {}
+    for k, (s, e) in enumerate(us):
+        containing = [j for j, (a, b) in enumerate(us) if a < s and e <= b]
+        parent = min(containing, key=lambda j: us[j][1] - us[j][0], default=None)
+        kids.setdefault(parent, []).append(us[k])
+    return list(kids.values())
+
+
+def runs(lines, chunk):
+    """Line ranges (first, last) of `chunk` consecutive siblings, the bottom ones first."""
+    out = [(fam[i][0], fam[i + chunk - 1][1])
+           for fam in families(lines) for i in range(len(fam) - chunk + 1)]
+    return sorted(out, reverse=True)
 
 
 def groups(line):
@@ -89,19 +106,14 @@ def operands(inner):
     return None
 
 
-def simplifications(lines):
-    """Candidate texts, each with one parenthesised group replaced by something simpler."""
-    for i, line in enumerate(lines):
-        if len(line) - len(line.lstrip()) < MEMBER_INDENT:
-            continue
-        for start, end in groups(line):
-            replacements = list(REPLACEMENTS)
-            split = operands(line[start + 1:end])
-            if split:
-                replacements += [part for part in split if part]
-            for r in replacements:
-                changed = line[:start] + '(' + r + ')' + line[end + 1:]
-                yield '\n'.join(lines[:i] + [changed] + lines[i + 1:]) + '\n'
+def replacements(line, start, end):
+    """What the group at (start, end) of `line` may become: constants, then its operands."""
+    split = operands(line[start + 1:end]) or ()
+    return REPLACEMENTS + [part for part in split if part]
+
+
+def text_of(lines):
+    return '\n'.join(lines) + '\n'
 
 
 class Reducer:
@@ -113,56 +125,96 @@ class Reducer:
         self.tests = 0
         self.seen = {}  # text -> whether it keeps the failure
 
-    def first_kept(self, candidates, limit):
-        """Runs the untested candidates in batches; returns the first one that keeps the failure.
+    def candidate(self, lines, size):
+        """The text of `lines` as a candidate, or None when it cannot be a smaller program."""
+        text = text_of(lines)
+        return text if len(text) < size and MAIN in text else None
 
-        Only candidates shorter than `limit` characters are tried, so every accepted candidate
-        is strictly smaller than the one it replaces and the reduction must end.
+    def first_kept(self, texts):
+        """Index of the first text that keeps the failure, or None. None entries are skipped.
+
+        Texts run in parallel batches of `jobs`; the batch that holds the answer is always run
+        whole, so the result depends only on the order of the texts.
         """
-        batch = []
-        for text in candidates:
+        for start in range(0, len(texts), self.jobs):
             if self.tests >= self.max_tests:
                 break
-            if len(text) >= limit or MAIN not in text:
-                continue
-            if text in self.seen:
-                if self.seen[text]:
-                    return text
-                continue
-            if text not in batch:
-                batch.append(text)
-            if len(batch) == self.jobs:
-                kept = self.test(batch)
-                batch = []
-                if kept:
-                    return kept
-        return self.test(batch) if batch else None
+            chunk = texts[start:start + self.jobs]
+            fresh = [t for t in dict.fromkeys(chunk) if t is not None and t not in self.seen]
+            fresh = fresh[:self.max_tests - self.tests]
+            self.tests += len(fresh)
+            items = [(f'reduce{i}', t) for i, t in enumerate(fresh)]
+            for t, result in zip(fresh, self.runner.classify_many(items)):
+                self.seen[t] = (result['status'], result['key']) == self.signature
+            for k, t in enumerate(chunk):
+                if t is not None and self.seen.get(t):
+                    return start + k
+        return None
 
-    def test(self, batch):
-        self.tests += len(batch)
-        items = [(f'reduce{i}', text) for i, text in enumerate(batch)]
-        kept = None
-        for text, result in zip(batch, self.runner.classify_many(items)):
-            self.seen[text] = (result['status'], result['key']) == self.signature
-            if self.seen[text] and kept is None:
-                kept = text
-        return kept
+    def delete_pass(self, lines):
+        """Deletes runs of siblings, largest runs first (halving, as delta debugging does)."""
+        chunk = 1
+        while 2 * chunk <= max((len(kids) for kids in families(lines)), default=0):
+            chunk *= 2
+        while chunk >= 1 and self.tests < self.max_tests:
+            lines = self.delete_runs(lines, chunk)
+            chunk //= 2
+        return lines
+
+    def delete_runs(self, lines, chunk):
+        """Deletes runs of `chunk` siblings from the bottom up; each run is tried once."""
+        size = len(text_of(lines))
+        pos = len(lines)  # only runs that start above `pos` are still untried
+        while self.tests < self.max_tests:
+            ranges = [r for r in runs(lines, chunk) if r[0] < pos][:self.jobs]
+            if not ranges:
+                break
+            texts = [self.candidate(lines[:s] + lines[e + 1:], size) for s, e in ranges]
+            k = self.first_kept(texts)
+            if k is None:
+                pos = ranges[-1][0]
+            else:
+                start, end = ranges[k]
+                lines = lines[:start] + lines[end + 1:]
+                size = len(text_of(lines))
+                pos = start
+        return lines
+
+    def simplify_pass(self, lines):
+        """Replaces parenthesised groups by simpler text, top to bottom; returns the lines kept."""
+        i = 0
+        while i < len(lines) and self.tests < self.max_tests:
+            changed = self.simplify_line(lines, i)
+            if changed is None:
+                i += 1
+            else:
+                lines = changed  # the same line again: its groups have changed
+        return lines
+
+    def simplify_line(self, lines, i):
+        """The lines with one group of line `i` simplified, or None when none can be."""
+        line = lines[i]
+        if len(line) - len(line.lstrip()) < MEMBER_INDENT:
+            return None
+        size = len(text_of(lines))
+        for start, end in groups(line):
+            variants = [line[:start] + '(' + r + ')' + line[end + 1:]
+                        for r in replacements(line, start, end)]
+            texts = [self.candidate(lines[:i] + [v] + lines[i + 1:], size) for v in variants]
+            k = self.first_kept(texts)
+            if k is not None:
+                return lines[:i] + [variants[k]] + lines[i + 1:]
+        return None
 
     def reduce(self, text):
         lines = text.rstrip('\n').split('\n')
-        progress = True
-        while progress and self.tests < self.max_tests:
-            progress = False
-            for generate in (deletions, simplifications):
-                while self.tests < self.max_tests:
-                    current = '\n'.join(lines) + '\n'
-                    kept = self.first_kept(generate(lines), len(current))
-                    if kept is None:
-                        break
-                    lines = kept.rstrip('\n').split('\n')
-                    progress = True
-                    print(f'  {len(lines)} lines, {self.tests} tests', file=sys.stderr)
-        return '\n'.join(lines) + '\n'
+        while self.tests < self.max_tests:
+            new = self.simplify_pass(self.delete_pass(lines))
+            if new == lines:
+                break
+            lines = new
+            print(f'  {len(lines)} lines, {self.tests} tests', file=sys.stderr)
+        return text_of(lines)
 
 
 def main():
@@ -174,6 +226,7 @@ def main():
     ap.add_argument('--no-build', action='store_true', help='skip cargo build of the translator')
     args = ap.parse_args()
 
+    started = time.monotonic()
     text = args.program.read_text()
     if not args.no_build:
         fuzzrun.build_translator()
@@ -181,14 +234,16 @@ def main():
     original = next(runner.classify_many([('original', text)]))
     signature = (original['status'], original['key'])
     print(f'original: {original["status"]} {original["detail"]}', file=sys.stderr)
-    if original['status'] not in FAILURES:
+    if original['status'] not in REDUCIBLE:
         sys.exit(f'{args.program} does not fail in a way that reduction keeps: {original["status"]}')
 
     reducer = Reducer(runner, signature, args.jobs, args.max_tests)
     reduced = reducer.reduce(text)
     out = args.out or args.program.with_name('Reduced.java')
     out.write_text(reduced)
-    print(f'reduced to {len(reduced.splitlines())} lines in {reducer.tests} tests: {out}')
+    seconds = time.monotonic() - started
+    print(f'reduced to {len(reduced.splitlines())} lines in {reducer.tests} tests, '
+          f'{seconds:.0f} s: {out}')
 
 
 if __name__ == '__main__':
