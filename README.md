@@ -97,8 +97,10 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   writes. The aliasing analysis (`analysis/arrays.rs`) finds local arrays that no other name can
   see, and those become a plain `Vec<T>`. Indexing a `Vec` is `a[i as usize]` where a counting
   loop over `a.length` proves the index in bounds, and `java::at`/`java::put` otherwise. Bounds
-  and size errors go through `java::throw`, so they exit with code 1 as Java does. Arrays passed
-  to methods, returned, copied, or given to `java.util.Arrays` stay shared for now.
+  and size errors go through `java::throw`, so they exit with code 1 as Java does. A parameter
+  becomes `&[T]` or `&mut [T]` when every call passes a distinct plain array, and a counting loop
+  that only reads `a[i]` becomes `for x in a.iter().cloned()`. Arrays that are returned, copied,
+  or given to `java.util.Arrays` stay shared for now.
 
 Translation never runs the program; it only compiles it. Starting javac costs about half a
 second per file; building the translator needs `javac` (JDK 21 or newer) on PATH.
