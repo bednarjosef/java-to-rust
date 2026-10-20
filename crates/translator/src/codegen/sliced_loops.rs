@@ -63,7 +63,10 @@ impl<'a> Gen<'a> {
             self.sliced.insert(root, (name, depth));
         }
         self.sliced_accesses.extend(sliced.accesses.iter().copied());
+        // Both copies of the loop take its Java label.
+        let label = self.pending.clone();
         self.range_loop(counted, body);
+        self.pending = label;
         self.sliced.clear();
         self.sliced_accesses.clear();
         self.indent -= 1;

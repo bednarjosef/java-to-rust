@@ -34,10 +34,48 @@ public class ArraySlicedLoops {
         return s;
     }
 
+    // A labeled loop, with `continue`, `break` and a switch in its body.
+    static int firstOver(int[][] g, int r, int n, int limit) {
+        int found = -1;
+        scan:
+        for (int j = 0; j < n; j++) {
+            switch (g[r][j] % 3) {
+                case 0:
+                    continue scan;
+                default:
+                    break;
+            }
+            if (g[r][j] > limit) {
+                found = j;
+                break scan;
+            }
+        }
+        return found;
+    }
+
+    // `continue` of the outer loop from inside a sliced loop.
+    static int countUntilNegative(int[][] g, int n) {
+        int count = 0;
+        rows:
+        for (int r = 0; r < g.length; r++) {
+            for (int j = 0; j < n; j++) {
+                if (g[r][j] < 0) {
+                    continue rows;
+                }
+                count++;
+            }
+        }
+        return count;
+    }
+
     public static void main(String[] args) {
         int[][] g = grid(3, 4);
         System.out.println("rowSum " + rowSum(g, 1, 4) + " " + rowSum(g, 2, 0) + " " + rowSum(g, 3, 0));
 
+        System.out.println("firstOver " + firstOver(g, 1, 4, 11) + " " + firstOver(g, 2, 4, 100));
+        g[1][1] = -5;
+        System.out.println("count " + countUntilNegative(g, 4));
+        g[1][1] = 11;
         addRow(g, 0, 2, 4);
         System.out.println(g[0][0] + " " + g[0][3]);
 
