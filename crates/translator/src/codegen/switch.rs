@@ -260,6 +260,8 @@ impl<'a> Gen<'a> {
             && self.borrowed.contains(name)
         {
             self.local(name)
+        } else if let ExprKind::Var(name) = &selector.kind {
+            format!("{}.as_str()", self.local(name))
         } else {
             format!("&*{}", self.expr(selector).at(UNARY))
         };
