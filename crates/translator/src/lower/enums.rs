@@ -62,10 +62,14 @@ fn subst(e: &Expr, args: &[(&str, &Expr)]) -> Expr {
             ExprKind::Binary(*op, Box::new(subst(a, args)), Box::new(subst(b, args)))
         }
         ExprKind::Cast(ty, x) => ExprKind::Cast(*ty, Box::new(subst(x, args))),
-        ExprKind::Conditional(c, a, b) => {
-            ExprKind::Conditional(Box::new(subst(c, args)), Box::new(subst(a, args)), Box::new(subst(b, args)))
+        ExprKind::Conditional(c, a, b) => ExprKind::Conditional(
+            Box::new(subst(c, args)),
+            Box::new(subst(a, args)),
+            Box::new(subst(b, args)),
+        ),
+        ExprKind::Builtin(builtin, xs) => {
+            ExprKind::Builtin(*builtin, xs.iter().map(|x| subst(x, args)).collect())
         }
-        ExprKind::Builtin(builtin, xs) => ExprKind::Builtin(*builtin, xs.iter().map(|x| subst(x, args)).collect()),
         _ => unreachable!("`pure` accepts only the forms that `subst` copies"),
     };
     Expr { kind, pos: e.pos, ty: e.ty, id: e.id }
@@ -140,7 +144,8 @@ impl<'t> Lowering<'t> {
     /// Checks an enum's members and constructors against what the translation supports.
     pub(super) fn check_enum(&self, index: usize, methods: &[Method]) -> Result<(), Error> {
         let node = self.types[index].node;
-        let method_names: Vec<&str> = node.list("members").filter(|m| m.kind() == "METHOD").map(|m| m.str("name")).collect();
+        let method_names: Vec<&str> =
+            node.list("members").filter(|m| m.kind() == "METHOD").map(|m| m.str("name")).collect();
         for member in node.list("members") {
             match member.kind() {
                 "VARIABLE" if is_enum_constant(member) => {}
@@ -258,7 +263,8 @@ fn null_enum_in(e: &Expr, class: &Class) -> bool {
         ExprKind::Binary(BinOp::Eq | BinOp::Ne, a, b) => null_for(a, b.ty) || null_for(b, a.ty),
         ExprKind::Assign { value, .. } => null_for(value, e.ty),
         ExprKind::Conditional(_, a, b) => {
-            matches!(e.ty, Type::Enum(_)) && (matches!(a.kind, ExprKind::Null) || matches!(b.kind, ExprKind::Null))
+            matches!(e.ty, Type::Enum(_))
+                && (matches!(a.kind, ExprKind::Null) || matches!(b.kind, ExprKind::Null))
         }
         ExprKind::Cast(ty, x) => null_for(x, *ty),
         ExprKind::ArrayLit(elements) => {
@@ -288,10 +294,10 @@ pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
     };
     for (t, decl) in class.types.iter().enumerate() {
         for f in decl.fields.iter().chain(&decl.statics) {
-            if let Some(init) = &f.init {
-                if null_for(init, f.ty) {
-                    record(init.pos);
-                }
+            if let Some(init) = &f.init
+                && null_for(init, f.ty)
+            {
+                record(init.pos);
             }
         }
         for f in decl.fields.iter().filter(|f| f.init.is_none() && matches!(f.ty, Type::Enum(_))) {
@@ -307,7 +313,13 @@ pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
         for stmt in &m.body {
             visit_stmt(
                 stmt,
-                &mut |e| visit_expr(e, &mut |x| if null_enum_in(x, class) { record(x.pos) }),
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if null_enum_in(x, class) {
+                            record(x.pos)
+                        }
+                    })
+                },
                 &mut |s| match s {
                     Stmt::Local { ty, init: Some(init), pos, .. } if null_for(init, *ty) => record(*pos),
                     Stmt::Return(Some(e), _) if null_for(e, m.ret) => record(e.pos),

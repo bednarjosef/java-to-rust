@@ -19,8 +19,11 @@ impl<'a> Gen<'a> {
         let decl = &class.types[m.class];
         let initialize = decl.fields.iter().any(|f| f.init.is_some());
         let mutable = initialize || self.changes_owned(&m.body, &|e| matches!(e.kind, ExprKind::This));
-        let fields: Vec<String> =
-            decl.fields.iter().map(|f| format!("{}: {}", snake_case(&f.name), self.placeholder(f.ty))).collect();
+        let fields: Vec<String> = decl
+            .fields
+            .iter()
+            .map(|f| format!("{}: {}", snake_case(&f.name), self.placeholder(f.ty)))
+            .collect();
         let mut_kw = if mutable { "mut " } else { "" };
         self.line(&format!("let {mut_kw}this = {} {{ {} }};", struct_name(&decl.name), fields.join(", ")));
         if initialize {

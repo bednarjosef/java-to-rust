@@ -63,7 +63,9 @@ impl<'t> Lowering<'t> {
         let mut body = Vec::new();
         for member in node.list("members") {
             // Enum constants are values built by the enum's own code, not initializers.
-            if (!member.has_flag("STATIC") && !Self::is_static_block(member)) || enums::is_enum_constant(member) {
+            if (!member.has_flag("STATIC") && !Self::is_static_block(member))
+                || enums::is_enum_constant(member)
+            {
                 continue;
             }
             match member.kind() {

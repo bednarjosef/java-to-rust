@@ -82,7 +82,7 @@ fn interned_name(name: &str) -> &'static str {
     static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
     let mut names = NAMES.lock().unwrap();
     match names.iter().find(|n| **n == name) {
-        Some(n) => *n,
+        Some(&n) => n,
         None => {
             let n: &'static str = Box::leak(name.to_string().into_boxed_str());
             names.push(n);

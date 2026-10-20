@@ -112,7 +112,8 @@ impl<'t> Lowering<'t> {
         self.current.set(index);
         let node = self.types[index].node;
         let (mut fields, mut statics) = (Vec::new(), Vec::new());
-        for member in node.list("members").filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m)) {
+        for member in node.list("members").filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m))
+        {
             let field = self.field(member)?;
             if member.has_flag("STATIC") { statics.push(field) } else { fields.push(field) }
         }
