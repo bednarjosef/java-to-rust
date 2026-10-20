@@ -294,10 +294,9 @@ impl<'a> Gen<'a> {
                 let new = self.element_update(op, ty, rhs, id, &slot);
                 return format!("{slot} = {new}");
             }
-            let i = self.value(index, Type::Int).text;
             let old = self.fresh_name(&["old", "previous", "before"]);
             let new = self.element_update(op, ty, rhs, id, old);
-            return format!("{}({}, {i}, |{old}| {new})", self.runtime("modify"), self.mut_ref(&a));
+            return self.modify((name, &a), index, old, &new);
         }
         if let Some((_, a)) = self.plain_of(array) {
             let i = self.value(index, Type::Int).text;
@@ -331,7 +330,7 @@ impl<'a> Gen<'a> {
         id: ExprId,
         used: bool,
     ) -> String {
-        if let Some((_, a)) = self.plain_of(array)
+        if let Some((name, a)) = self.plain_of(array)
             && !used
         {
             if self.facts.in_bounds.contains(&id) && simple_index(index) {
@@ -346,10 +345,9 @@ impl<'a> Gen<'a> {
                 }
                 return format!("{slot} = {}", self.step_value(ty, increment, id, &slot));
             }
-            let i = self.value(index, Type::Int).text;
             let old = self.fresh_name(&["old", "previous", "before"]);
             let new = self.step_value(ty, increment, id, old);
-            return format!("{}({}, {i}, |{old}| {new})", self.runtime("modify"), self.mut_ref(&a));
+            return self.modify((name, &a), index, old, &new);
         }
         if let Some((_, a)) = self.plain_of(array) {
             let i = self.value(index, Type::Int).text;
@@ -373,6 +371,20 @@ impl<'a> Gen<'a> {
         let new = self.step_value(ty, increment, id, old);
         let helper = if prefix { "update" } else { "post_update" };
         Self::bound_write(binding, format!("{}({handle}, {i}, |{old}| {new})", self.runtime(helper)))
+    }
+
+    /// `java::modify(&mut a, i, |old| new)` on the plain array `a`. The index is bound first when
+    /// it mentions `a`, as in `a[Math.floorMod(k, a.length)] += 1`, since the call borrows `a`
+    /// mutably before its arguments are evaluated.
+    fn modify(&mut self, (name, a): (&str, &str), index: &'a Expr, old: &str, new: &str) -> String {
+        let i = self.value(index, Type::Int).text;
+        let modify = self.runtime("modify");
+        let mr = self.mut_ref(a);
+        if !mentions(index, name) {
+            return format!("{modify}({mr}, {i}, |{old}| {new})");
+        }
+        let slot = self.fresh_name(&["index", "slot", "at"]);
+        format!("{{ let {slot} = {i}; {modify}({mr}, {slot}, |{old}| {new}) }}")
     }
 
     /// `slot op= rhs` where Rust's compound assignment does what Java's does.

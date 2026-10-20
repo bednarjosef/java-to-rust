@@ -48,23 +48,28 @@ pub(super) struct Frame<'a> {
 
 /// Whether a case's statements always leave the switch (so they do not fall into the next case).
 fn leaves(body: &[Stmt]) -> bool {
-    matches!(
-        body.last(),
-        Some(
-            Stmt::Break
-                | Stmt::Continue
-                | Stmt::Return(..)
-                | Stmt::BreakLabel(_)
-                | Stmt::ContinueLabel(_)
-                | Stmt::Yield(_)
-        )
-    )
+    match body.last() {
+        Some(Stmt::Block(inner)) => leaves(inner),
+        last => matches!(
+            last,
+            Some(
+                Stmt::Break
+                    | Stmt::Continue
+                    | Stmt::Return(..)
+                    | Stmt::BreakLabel(_)
+                    | Stmt::ContinueLabel(_)
+                    | Stmt::Yield(_)
+            )
+        ),
+    }
 }
 
 /// A case's statements without the `break` that ends an arrow case or a case that leaves anyway.
 fn strip(body: &[Stmt]) -> &[Stmt] {
     match body.split_last() {
         Some((Stmt::Break, rest)) => rest,
+        // `case x: { ...; break; }` is the statements of its braces.
+        Some((Stmt::Block(inner), [])) => strip(inner),
         _ => body,
     }
 }
@@ -299,8 +304,26 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// A switch statement, or a switch expression when `value` is its type.
-    pub(super) fn switch_form(&mut self, selector: &'a Expr, cases: &'a [Case], value: Option<Type>) {
+    /// Whether a switch, as the last statement of a function body, is the function's value: no
+    /// case falls through or leaves early, every case ends in a value, and there is a default (or
+    /// every constant of the enum), so the `match` has no `_ => {}` arm.
+    pub(super) fn tail_switch(&self, selector: &Expr, cases: &[Case]) -> bool {
+        let falls = cases.split_last().is_some_and(|(_, init)| init.iter().any(|c| !leaves(&c.body)));
+        !falls
+            && !cases.iter().any(|c| strip(&c.body).iter().any(breaks_out))
+            && arms(cases).iter().all(|c| strip(&c.body).last().is_some_and(|s| self.tail_value(s)))
+            && (cases.iter().any(is_default) || exhaustive(self.class, selector, cases))
+    }
+
+    /// A switch statement, or a switch expression when `value` is its type. `tail`: the switch is
+    /// the function's value (see `tail_switch`), and its arms end in tail expressions.
+    pub(super) fn switch_form(
+        &mut self,
+        selector: &'a Expr,
+        cases: &'a [Case],
+        value: Option<Type>,
+        tail: bool,
+    ) {
         let labeled = self.pending.is_some();
         self.chars = char_cases(selector, cases);
         self.exhaustive = exhaustive(self.class, selector, cases);
@@ -338,7 +361,7 @@ impl<'a> Gen<'a> {
         } else if labeled || value.is_some() || cases.iter().any(|c| strip(&c.body).iter().any(breaks_out)) {
             self.block(&text, cases, value);
         } else {
-            self.matched(&text, cases);
+            self.matched(&text, cases, tail);
         }
     }
 
@@ -348,7 +371,7 @@ impl<'a> Gen<'a> {
         let indent = self.indent;
         let pending = self.pending.take();
         self.indent += 1;
-        self.switch_form(selector, cases, Some(ty));
+        self.switch_form(selector, cases, Some(ty), false);
         self.indent = indent;
         self.pending = pending;
         let body = self.out.split_off(mark);
@@ -356,15 +379,31 @@ impl<'a> Gen<'a> {
     }
 
     /// No case falls through and none leaves early: `match`, with `_ => {}` when there is no default.
-    fn matched(&mut self, text: &str, cases: &'a [Case]) {
+    fn matched(&mut self, text: &str, cases: &'a [Case], tail: bool) {
         let chars = std::mem::take(&mut self.chars);
         let exhaustive = std::mem::take(&mut self.exhaustive);
+        // One label, and nothing for any other value: `if let`, as clippy's `single_match` asks.
+        let nothing_else = match cases.iter().find(|c| is_default(c)) {
+            Some(default) => strip(&default.body).is_empty(),
+            None => !exhaustive,
+        };
+        let labeled: Vec<&Case> = cases.iter().filter(|c| !is_default(c)).collect();
+        if let [case] = labeled.as_slice()
+            && nothing_else
+        {
+            self.line(&format!("if let {} = {text} {{", self.pattern(case, chars)));
+            self.indent += 1;
+            self.stmts(strip(&case.body), tail);
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
         self.line(&format!("match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {
             self.line(&format!("{} => {{", self.pattern(case, chars)));
             self.indent += 1;
-            self.stmts(strip(&case.body), false);
+            self.stmts(strip(&case.body), tail);
             self.indent -= 1;
             self.line("}");
         }
@@ -416,9 +455,7 @@ impl<'a> Gen<'a> {
             let Some((Stmt::Yield(value), init)) = case.body.split_last() else { unreachable!() };
             self.line(&format!("{} => {{", self.pattern(case, chars)));
             self.indent += 1;
-            self.stmts(init, false);
-            let code = self.value(value, ty);
-            self.line(&code.text);
+            self.yielded(init, value, ty);
             self.indent -= 1;
             self.line("}");
         }

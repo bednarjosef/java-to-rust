@@ -34,6 +34,105 @@ fn counters_in_counting_loops_use_plain_arithmetic() {
 }
 
 #[test]
+fn counting_loops_with_steps_and_inclusive_bounds_become_ranges() {
+    let rust = translate(
+        "class A { public static void main(String[] a) {
+            String s = \"abc\";
+            for (int i = 0; i < 10; i += 3) { System.out.println(i); }
+            for (int i = s.length() - 1; i >= 0; i--) { System.out.println(s.charAt(i)); }
+            for (int i = 0; i <= 5; i++) { System.out.println(i); }
+            for (long i = 1; i <= 5; i++) { System.out.println(i); }
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "for i in (0..10).step_by(3) {",
+            "for i in (0..s.len() as i32).rev() {",
+            "for i in 0..=5 {",
+            "for i in 1i64..=5 {",
+        ],
+    );
+}
+
+#[test]
+fn counting_loops_that_could_change_or_wrap_stay_while_loops() {
+    let changed = translate(
+        "class A { public static void main(String[] a) {
+            int n = 4;
+            for (int i = 0; i < n; i++) { n = 2; }
+        } }",
+    );
+    assert_contains(&changed, &["while i < n {"]);
+    let assigned = translate(
+        "class A { public static void main(String[] a) {
+            for (int i = 0; i < 10; i++) { i += 2; }
+        } }",
+    );
+    assert_contains(&assigned, &["while i < 10 {"]);
+    let max = translate(
+        "class A { public static void main(String[] a) {
+            for (int i = 0; i <= Integer.MAX_VALUE; i++) { if (i == 5) break; }
+        } }",
+    );
+    assert_contains(&max, &["while i <= 2147483647 {"]);
+}
+
+#[test]
+fn returns_that_end_a_function_become_its_value() {
+    let sign = translate(
+        "class A { static String sign(int n) {
+            if (n > 0) { return \"pos\"; } else if (n < 0) { return \"neg\"; } else { return \"zero\"; }
+        } }",
+    );
+    assert_contains(&sign, &["} else if n < 0 {", "        String::from(\"zero\")\n    }\n}"]);
+    assert!(!sign.contains("return"), "{sign}");
+    let nested = translate(
+        "class A { static int nested(int n) {
+            if (n > 0) { int m = n * 2; return m; } else { if (n == 0) { return 7; } else { return -1; } }
+        } }",
+    );
+    assert_contains(&nested, &["        n.wrapping_mul(2)\n", "} else if n == 0 {"]);
+    assert!(!nested.contains("return"), "{nested}");
+    let partial = translate("class A { static int partial(int n) { if (n > 0) { return 1; } return 2; } }");
+    assert_contains(&partial, &["        return 1;\n    }\n    2\n}"]);
+    let day = translate(
+        "class A { static String day(int d) {
+            switch (d) { case 1: return \"Mon\"; default: return \"midweek\"; }
+        } }",
+    );
+    assert_contains(&day, &["    match d {"]);
+    assert!(!day.contains("return"), "{day}");
+    let open = translate(
+        "class A { static String open(int d) {
+            switch (d) { case 1: return \"Mon\"; case 2: break; }
+            return \"none\";
+        } }",
+    );
+    assert_contains(&open, &["            return String::from(\"Mon\");\n"]);
+}
+
+#[test]
+fn a_primitive_local_returned_at_the_end_is_the_value() {
+    let twice = translate("class A { static int twice(int n) { int r = n + n; return r; } }");
+    assert!(!twice.contains("let r") && !twice.contains("return"), "{twice}");
+    let text = translate("class A { static String text() { String t = \"a\"; return t; } }");
+    assert_contains(&text, &["    let t = String::from(\"a\");\n"]);
+}
+
+#[test]
+fn a_switch_with_one_label_is_if_let_and_braced_cases_are_plain() {
+    let rust = translate(
+        "class A { static void f(int n) {
+            switch (n) { case 3: System.out.println(\"three\"); break; }
+            switch (n) { case 4: { System.out.println(\"four\"); break; } default: break; }
+        } }",
+    );
+    assert_contains(&rust, &["if let 3 = n {", "if let 4 = n {"]);
+    assert_lacks(&rust, &["loop {", "match n", "break"]);
+}
+
+#[test]
 fn trial_division_is_plain() {
     let rust = translate(
         "class A {
@@ -1785,7 +1884,15 @@ fn arrow_switch_expression_is_a_match_that_yields_a_value() {
             }
         }",
     );
-    assert_contains(&rust, &["let r = {", "match s {", "100 => {", "-4 => {", "let t = s as i32 * 3;"]);
+    assert_contains(
+        &rust,
+        &[
+            "fn code(s: i16) -> i32 {\n    {\n",
+            "match s {",
+            "100 => {",
+            "-4 => {\n                s as i32 * 3\n",
+        ],
+    );
     assert_lacks(&rust, &["'sw"]);
 }
 

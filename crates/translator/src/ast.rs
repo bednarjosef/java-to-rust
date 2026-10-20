@@ -5,6 +5,7 @@ use std::fmt;
 
 mod charsets;
 mod code_point;
+mod counting;
 mod hierarchy;
 mod java_arrays;
 mod natives;
@@ -12,6 +13,7 @@ mod strings;
 mod unsigned;
 pub use charsets::*;
 pub use code_point::*;
+pub use counting::*;
 pub use hierarchy::*;
 pub use java_arrays::*;
 pub use natives::*;
@@ -711,36 +713,6 @@ pub fn error<T>(pos: Pos, message: impl Into<String>) -> Result<T, Error> {
 }
 
 // Queries over the syntax tree, shared by the analyses and the code generator.
-
-/// Recognizes `for (int i = a; i < b; i++)` (or `long i`) where the body never assigns `i` and `b`
-/// cannot change during the loop, which is exactly `for i in a..b`.
-pub fn counting_loop<'e>(
-    init: &'e [Stmt],
-    cond: Option<&'e Expr>,
-    update: &'e [Expr],
-    body: &'e Stmt,
-) -> Option<(&'e str, &'e Expr, &'e Expr)> {
-    let [Stmt::Local { ty, name, init: Some(start), .. }] = init else { return None };
-    let ExprKind::Binary(BinOp::Lt, var, end) = &cond?.kind else { return None };
-    if !ty.is_integral() || !matches!(&var.kind, ExprKind::Var(v) if v == name) || end.ty != *ty {
-        return None;
-    }
-    let steps_by_one = match update {
-        [Expr { kind: ExprKind::IncDec { target: Place::Var(target), increment: true, .. }, .. }] => {
-            target == name
-        }
-        [
-            Expr {
-                kind: ExprKind::Assign { op: Some(BinOp::Add), target: Place::Var(target), value }, ..
-            },
-        ] => target == name && matches!(value.kind, ExprKind::Int(1) | ExprKind::Long(1)),
-        _ => false,
-    };
-    if !steps_by_one || assigns_stmt(body, name) || !stable(end, name, body) {
-        return None;
-    }
-    Some((name, start, end))
-}
 
 /// Whether `e` evaluates to the same value on every iteration of a loop with this body.
 pub fn stable(e: &Expr, loop_var: &str, body: &Stmt) -> bool {

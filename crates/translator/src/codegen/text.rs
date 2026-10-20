@@ -443,7 +443,7 @@ impl<'a> Gen<'a> {
                 (base.to_string(), self.shown(x.ty, value))
             }
             // Enums show their names; numbers and booleans show as Rust shows them.
-            _ => (base.to_string(), self.expr(x).text),
+            _ => (base.to_string(), self.expr(x).generic_arg()),
         }
     }
 

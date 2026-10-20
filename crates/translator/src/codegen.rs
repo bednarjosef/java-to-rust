@@ -26,6 +26,7 @@ mod statics;
 mod stmt;
 mod strings;
 mod switch;
+mod tail;
 mod text;
 mod unsigned;
 

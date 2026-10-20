@@ -265,17 +265,25 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Unary(op, operand) => {
                 let code = self.value(operand, e.ty);
-                match (op, e.ty) {
-                    (UnOp::Plus, _) => code,
-                    (UnOp::Neg, Type::Double | Type::Float) => {
-                        Code::new(format!("-{}", code.at(UNARY)), UNARY)
-                    }
-                    (UnOp::Neg, _) if self.no_overflow(e.id) => {
-                        Code::new(format!("-{}", code.at(UNARY)), UNARY)
-                    }
-                    (UnOp::Neg, _) => Code::atom(format!("{}.wrapping_neg()", self.recv(&code, e.ty))),
-                    (UnOp::Not | UnOp::BitNot, _) => Code::new(format!("!{}", code.at(UNARY)), UNARY),
+                if let Some(literal) = code.literal.and_then(|lit| fold_unary(*op, lit)) {
+                    return Code::literal(literal);
                 }
+                let prefix = match (op, e.ty) {
+                    (UnOp::Plus, _) => return code,
+                    (UnOp::Neg, Type::Double | Type::Float) => "-",
+                    (UnOp::Neg, _) if self.no_overflow(e.id) => "-",
+                    (UnOp::Neg, _) => {
+                        return Code::atom(format!("{}.wrapping_neg()", self.recv(&code, e.ty)));
+                    }
+                    (UnOp::Not | UnOp::BitNot, _) => "!",
+                };
+                let mut result = Code::new(format!("{prefix}{}", code.at(UNARY)), UNARY);
+                // `-(if c { 1 } else { 2 })` leaves its type to inference too.
+                if code.untyped {
+                    result.untyped = true;
+                    result.typed_text = Some(format!("{prefix}{}", code.typed_at(UNARY)));
+                }
+                result
             }
             ExprKind::Null => Code::atom("None"),
             ExprKind::Binary(BinOp::Add, ..) if e.ty == Type::String => {
@@ -369,9 +377,20 @@ impl<'a> Gen<'a> {
                 } else {
                     (self.value(a, e.ty), self.value(b, e.ty))
                 };
-                let mut code = Code::new(format!("if {cond} {{ {} }} else {{ {} }}", a.text, b.text), LOWEST);
-                code.untyped = a.untyped && b.untyped;
-                code
+                let text = |a: String, b: String| format!("if {cond} {{ {a} }} else {{ {b} }}");
+                if a.untyped && b.untyped {
+                    // As for literals, inference gives the branches `i32` or `f64` unless the
+                    // type is written.
+                    let typed = text(a.typed(), b.typed());
+                    if !matches!(e.ty, Type::Int | Type::Double) {
+                        return Code::new(typed, LOWEST);
+                    }
+                    let mut code = Code::new(text(a.text, b.text), LOWEST);
+                    code.untyped = true;
+                    code.typed_text = Some(typed);
+                    return code;
+                }
+                Code::new(text(a.text, b.text), LOWEST)
             }
             ExprKind::Call { args, resolved, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");

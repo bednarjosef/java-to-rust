@@ -261,7 +261,7 @@ pub(super) fn pattern(e: &Expr) -> Option<(&Expr, Type, &str)> {
 }
 
 /// `!(value instanceof T name)`: the pattern, when `e` is a negated one.
-fn negated_pattern(e: &Expr) -> Option<(&Expr, Type, &str)> {
+pub(super) fn negated_pattern(e: &Expr) -> Option<(&Expr, Type, &str)> {
     match &e.kind {
         ExprKind::Unary(UnOp::Not, inner) => pattern(inner),
         _ => None,

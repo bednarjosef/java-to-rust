@@ -124,6 +124,9 @@ impl<'a> Gen<'a> {
                     out.push(Part::Lit(literal_text(literal)));
                 } else if matches!(e.ty, Type::Double | Type::Float | Type::Char) {
                     out.push(Part::Arg(Code::atom(self.shown(e.ty, code.text))));
+                } else if assigned.iter().any(|name| self.local(name) == code.text) {
+                    // A cast that changes nothing, such as `(long) x`, reads the variable too.
+                    out.push(Part::Arg(Code::atom(format!("{{ {} }}", code.text))));
                 } else {
                     out.push(Part::Arg(code));
                 }
