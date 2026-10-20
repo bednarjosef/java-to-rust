@@ -94,11 +94,9 @@ fn scan(method: &Method) -> Scan {
     }
     let mut params = Vec::new();
     for (i, p) in method.params.iter().enumerate() {
-        if let Type::Array(elem) = &p.ty {
-            if !matches!(**elem, Type::Array(_)) {
-                params.push((i, p.name.clone()));
-                arrays.insert(p.name.clone());
-            }
+        if let Type::Array(elem) = &p.ty && !matches!(**elem, Type::Array(_)) {
+            params.push((i, p.name.clone()));
+            arrays.insert(p.name.clone());
         }
     }
     let bad: HashSet<String> = uses
@@ -201,10 +199,8 @@ fn solve(scans: &[Scan]) -> (Vec<HashSet<String>>, HashSet<(usize, usize)>) {
         for (m, scan) in scans.iter().enumerate() {
             for call in &scan.calls {
                 for (i, arg) in call.args.iter().enumerate() {
-                    if let Some(name) = arg {
-                        if !borrowed.contains(&(call.callee, i)) && plain[m].remove(name) {
-                            changed = true;
-                        }
+                    if let Some(name) = arg && !borrowed.contains(&(call.callee, i)) && plain[m].remove(name) {
+                        changed = true;
                     }
                 }
             }

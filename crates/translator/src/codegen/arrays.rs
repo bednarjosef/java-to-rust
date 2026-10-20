@@ -182,7 +182,7 @@ impl<'a> Gen<'a> {
             return format!("{a}[{i} as usize] = {v}");
         }
         let put = self.runtime("put");
-        let mr = self.mut_ref(&a);
+        let mr = self.mut_ref(a);
         if !mentions(index, name) && !mentions(rhs, name) {
             return format!("{put}({mr}, {i}, {v})");
         }
