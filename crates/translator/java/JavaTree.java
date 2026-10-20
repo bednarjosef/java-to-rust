@@ -163,7 +163,10 @@ public class JavaTree {
             out.append(b);
         } else if (value instanceof Enum<?> e) {
             string(e.name(), out);
-        } else if (value instanceof Number || value instanceof Character || value instanceof CharSequence) {
+        } else if (value instanceof Character c) {
+            // A char literal as its UTF-16 code unit: JSON readers reject a lone surrogate.
+            string(Integer.toString(c), out);
+        } else if (value instanceof Number || value instanceof CharSequence) {
             // Literal values and names; numbers as text so that no precision is lost.
             string(value.toString(), out);
         } else {

@@ -35,6 +35,11 @@ pub(super) enum Literal {
     Int(i32),
     Long(i64),
     Double(f64),
+    Float(f32),
+    /// A `char` literal as written in the source, such as `'a'`.
+    Char(u16),
+    /// A `byte`, `short` or `char` constant given as a number.
+    Small(i32, Type),
 }
 
 impl Code {
@@ -52,7 +57,8 @@ impl Code {
             Literal::Long(i64::MIN) => ("i64::MIN".to_string(), false),
             Literal::Int(v) => (v.to_string(), v < 0),
             Literal::Long(v) => (v.to_string(), v < 0),
-            Literal::Double(v) => (format!("{v:?}"), v.is_sign_negative()),
+            Literal::Double(v) if v.is_finite() => (format!("{v:?}"), v.is_sign_negative()),
+            _ => return small_literal(literal),
         };
         Code {
             text,
@@ -77,7 +83,9 @@ impl Code {
         match self.literal {
             Some(Literal::Int(v)) if v != i32::MIN => format!("{v}i32"),
             Some(Literal::Long(v)) if v != i64::MIN => format!("{v}i64"),
-            Some(Literal::Double(v)) => format!("{v:?}f64"),
+            Some(Literal::Double(v)) if v.is_finite() => format!("{v:?}f64"),
+            Some(Literal::Float(v)) if v.is_finite() => format!("{v:?}f32"),
+            Some(Literal::Small(v, ty)) => format!("{v}{}", rust_type(ty)),
             _ => self.text.clone(),
         }
     }
@@ -99,6 +107,10 @@ pub(super) fn rust_type(ty: Type) -> &'static str {
         Type::Int => "i32",
         Type::Long => "i64",
         Type::Double => "f64",
+        Type::Byte => "i8",
+        Type::Short => "i16",
+        Type::Char => "u16",
+        Type::Float => "f32",
         Type::Boolean => "bool",
         Type::String => "String",
         Type::Void => "()",
@@ -130,7 +142,9 @@ pub(super) fn infix(op: &str, prec: u8, left: &Code, right: &Code) -> Code {
 }
 
 pub(super) fn ends_with_cast(text: &str) -> bool {
-    ["i32", "i64", "f64", "u32", "u64"].iter().any(|t| text.ends_with(&format!(" as {t}")))
+    ["i32", "i64", "f64", "u32", "u64", "i8", "i16", "u16", "f32"]
+        .iter()
+        .any(|t| text.ends_with(&format!(" as {t}")))
 }
 
 pub(super) fn is_identifier(text: &str) -> bool {

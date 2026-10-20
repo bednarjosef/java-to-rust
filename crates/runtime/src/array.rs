@@ -92,9 +92,20 @@ pub fn sort<T: Ord>(a: &Array<T>) {
     a.borrow_mut().sort();
 }
 
-/// `Arrays.sort(a)` for doubles, in Java's order: -0.0 before 0.0, NaN last.
+/// `Arrays.sort(a)` for doubles, in Java's order (`Double.compare`): -0.0 before 0.0, and every
+/// NaN last, whatever its sign bit (`total_cmp` puts a negative NaN, which x86 makes for `0.0 / 0.0`,
+/// first).
 pub fn sort_doubles(a: &Array<f64>) {
-    a.borrow_mut().sort_by(f64::total_cmp);
+    let key = |v: f64| if v.is_nan() { i64::MAX } else { v.to_bits() as i64 };
+    a.borrow_mut()
+        .sort_by(|x, y| x.partial_cmp(y).filter(|o| o.is_ne()).unwrap_or_else(|| key(*x).cmp(&key(*y))));
+}
+
+/// `Arrays.sort(a)` for floats, in Java's order (`Float.compare`), as for doubles.
+pub fn sort_floats(a: &Array<f32>) {
+    let key = |v: f32| if v.is_nan() { i32::MAX } else { v.to_bits() as i32 };
+    a.borrow_mut()
+        .sort_by(|x, y| x.partial_cmp(y).filter(|o| o.is_ne()).unwrap_or_else(|| key(*x).cmp(&key(*y))));
 }
 
 /// `Arrays.copyOf(a, len)`: the first `len` elements, padded with `zero`.

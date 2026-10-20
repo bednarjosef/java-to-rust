@@ -604,3 +604,135 @@ fn a_method_without_parameters_has_a_return_range() {
     );
     assert_contains(&rust, &["seven().wrapping_mul(400000000)"]);
 }
+
+#[test]
+fn char_arithmetic_in_range_is_plain() {
+    let rust = translate(
+        "class A {
+            static char next(char c) { return (char) (c + 1); }
+            static int index(char c) { return c - 'a'; }
+            public static void main(String[] a) {
+                for (char c = 'a'; c < 'z'; c++) { System.out.print(next(c)); System.out.print(index(c)); }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn next(c: u16) -> u16 {",
+            "    c + 1\n",
+            "c as i32 - 'a' as i32",
+            "for c in 'a' as u16..'z' as u16 {",
+        ],
+    );
+    assert_lacks(&rust, &["wrapping"]);
+}
+
+#[test]
+fn char_arithmetic_that_may_wrap_wraps_in_the_small_type() {
+    let rust = translate(
+        "class A {
+            static char next(char c) { return (char) (c + 1); }
+            public static void main(String[] a) { System.out.println(next(Character.MAX_VALUE)); }
+        }",
+    );
+    assert_contains(&rust, &["c.wrapping_add(1)"]);
+}
+
+#[test]
+fn small_integers_narrow_implicitly() {
+    let rust = translate(
+        "class A {
+            static byte add(byte b, int x) { b += x; return b; }
+            public static void main(String[] a) {
+                byte b = 10;
+                b += 5;
+                short s = 100;
+                s++;
+                System.out.println(add(b, 300) + s);
+            }
+        }",
+    );
+    assert_contains(&rust, &["let mut b: i8 = 10;", "b += 5;", "s += 1;", "b = b.wrapping_add(x as i8);"]);
+}
+
+#[test]
+fn narrowing_casts_follow_java() {
+    let rust = translate(
+        "class A {
+            static byte low(int i) { return (byte) i; }
+            static char fromDouble(double d) { return (char) d; }
+            static int truncate(float f) { return (int) f; }
+            public static void main(String[] a) {
+                System.out.println(low(200) + \" \" + (int) fromDouble(-1.5) + \" \" + truncate(3.9f));
+                System.out.println((byte) 200 + \" \" + (char) 65 + \" \" + (short) 70000);
+            }
+        }",
+    );
+    assert_contains(&rust, &["i as i8", "d as i32 as u16", "f as i32", "\"-56 A 4464\""]);
+}
+
+#[test]
+fn chars_compare_and_print_as_chars() {
+    let rust = translate(
+        "class A {
+            static boolean lower(char c) { return c >= 'a' && c <= 'z'; }
+            public static void main(String[] a) { char c = 'q'; System.out.println(c + \" \" + lower(c)); }
+        }",
+    );
+    assert_contains(&rust, &["c >= 'a' as u16 && c <= 'z' as u16", "java::Char(c)"]);
+}
+
+#[test]
+fn char_at_on_an_ascii_string_in_a_counting_loop_indexes_bytes() {
+    let rust = translate(
+        "class A {
+            static int vowels(String s) {
+                int n = 0;
+                for (int i = 0; i < s.length(); i++) { char c = s.charAt(i); if (c == 'a' || c == 'e') n++; }
+                return n;
+            }
+            public static void main(String[] a) { System.out.println(vowels(\"banana tree\") + \" \" + \"xyz\".charAt(1)); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["for i in 0..s.len() as i32 {", "s.as_bytes()[i as usize] as u16", "java::ascii_char_at("],
+    );
+}
+
+#[test]
+fn char_at_on_text_that_may_not_be_ascii_counts_utf16_units() {
+    let rust = translate(
+        "class A {
+            public static void main(String[] a) { String s = \"héllo\"; System.out.println(s.charAt(1)); }
+        }",
+    );
+    assert_contains(&rust, &["java::char_at(&s, 1)"]);
+    assert_lacks(&rust, &["as_bytes"]);
+}
+
+#[test]
+fn floats_are_f32_and_print_like_java() {
+    let rust = translate(
+        "class A {
+            public static void main(String[] a) {
+                float f = 1.5f;
+                f *= 2;
+                f += 0.1;
+                System.out.println(f + \" \" + (f == 0.5) + \" \" + Math.max(f, 2f));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "let mut f: f32 = 1.5;",
+            "f *= 2.0;",
+            "f = (f as f64 + 0.1) as f32;",
+            "java::Float(f)",
+            "f == 0.5",
+            "java::max_f32(f, 2.0)",
+        ],
+    );
+}

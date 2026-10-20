@@ -11,7 +11,11 @@ pub use slice::*;
 use std::fmt;
 use std::io::Write;
 
+mod character;
+mod float;
 mod null;
+pub use character::*;
+pub use float::*;
 pub use null::non_null;
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
@@ -34,7 +38,12 @@ pub fn double_to_string(d: f64) -> String {
     if d == 0.0 {
         return format!("{sign}0.0");
     }
-    let (digits, exp) = shortest_digits(d.abs());
+    layout(sign, shortest_digits(d.abs()))
+}
+
+/// Lays out the digits and exponent of a positive number the way `Double.toString` and
+/// `Float.toString` do: plain from `0.001` up to `10^7`, scientific (`1.0E7`) outside that.
+fn layout(sign: &str, (digits, exp): (String, i32)) -> String {
     if (-3..7).contains(&exp) {
         let (int, frac) = if exp >= 0 {
             let int_len = exp as usize + 1;
@@ -56,7 +65,7 @@ pub fn double_to_string(d: f64) -> String {
 /// The decimal digits and exponent Java picks for a positive finite `d`: the shortest decimal
 /// that rounds to `d`, except that when one digit would do, Java takes the closest decimal of
 /// at most two digits (so `Double.MIN_VALUE` prints as `4.9E-324`, not `5.0E-324`).
-fn shortest_digits(d: f64) -> (String, i32) {
+fn shortest_digits<T: fmt::LowerExp + std::str::FromStr + PartialEq>(d: T) -> (String, i32) {
     let split = |s: String| {
         let (mantissa, exp) = s.split_once('e').expect("{:e} output has an exponent");
         (mantissa.replace('.', ""), exp.parse::<i32>().expect("exponent is an integer"))
@@ -64,7 +73,7 @@ fn shortest_digits(d: f64) -> (String, i32) {
     let (digits, exp) = split(format!("{d:e}"));
     if digits.len() == 1 {
         let two = format!("{d:.1e}");
-        if two.parse::<f64>() == Ok(d) {
+        if two.parse::<T>().ok() == Some(d) {
             let (two_digits, two_exp) = split(two);
             return (two_digits.trim_end_matches('0').to_string(), two_exp);
         }

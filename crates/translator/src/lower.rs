@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::cell::Cell;
 
 mod arrays;
+mod primitives;
 use arrays::{is_array_length, reads_name};
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
@@ -170,8 +171,11 @@ impl<'t> Lowering<'t> {
             "boolean" => Ok(Type::Boolean),
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
+            "byte" => Ok(Type::Byte),
+            "short" => Ok(Type::Short),
+            "char" => Ok(Type::Char),
+            "float" => Ok(Type::Float),
             _ if self.type_index(name).is_some() => Ok(Type::class(name)),
-            "char" | "float" | "byte" | "short" => unsupported(node, name),
             "<nulltype>" => Ok(Type::Null),
             _ if name.ends_with("[]") => Ok(Type::array(self.ty(node, &name[..name.len() - 2])?)),
             _ if name.ends_with("...") => unsupported(node, "varargs"),
@@ -273,13 +277,16 @@ impl<'t> Lowering<'t> {
             "DOUBLE_LITERAL" => ExprKind::Double(self.number(node)?),
             "BOOLEAN_LITERAL" => ExprKind::Bool(node.0["value"] == true),
             "STRING_LITERAL" => ExprKind::Str(node.str("value").to_string()),
-            "CHAR_LITERAL" => return unsupported(node, "char"),
-            "FLOAT_LITERAL" => return unsupported(node, "float"),
+            "CHAR_LITERAL" => self.char_literal(node)?,
+            "FLOAT_LITERAL" => self.float_literal(node)?,
             "NULL_LITERAL" => ExprKind::Null,
             "IDENTIFIER" => self.name(node)?,
             // javac folds the minus sign into integer literals only; fold it into doubles too.
             "UNARY_MINUS" if node.child("expression")?.kind() == "DOUBLE_LITERAL" => {
                 ExprKind::Double(-self.number::<f64>(node.child("expression")?)?)
+            }
+            "UNARY_MINUS" if node.child("expression")?.kind() == "FLOAT_LITERAL" => {
+                ExprKind::Float(-self.number::<f32>(node.child("expression")?)?)
             }
             kind @ ("UNARY_MINUS" | "UNARY_PLUS" | "LOGICAL_COMPLEMENT" | "BITWISE_COMPLEMENT") => {
                 let op = match kind {
@@ -333,7 +340,10 @@ impl<'t> Lowering<'t> {
             "MEMBER_SELECT" if is_array_length(node) => {
                 ExprKind::Length(Box::new(self.expr(node.child("expression")?)?))
             }
-            "MEMBER_SELECT" => self.select(node)?,
+            "MEMBER_SELECT" => match self.constant_field(node) {
+                Some(constant) => constant,
+                None => self.select(node)?,
+            },
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => return unsupported(node, "lambdas"),
             "INSTANCE_OF" => return unsupported(node, "instanceof"),
             "SWITCH_EXPRESSION" => return unsupported(node, "switch"),
@@ -418,6 +428,12 @@ impl<'t> Lowering<'t> {
                 args.insert(0, self.expr(receiver)?);
                 if symbol.name == "length" { Builtin::StringLength } else { Builtin::StringEquals }
             }
+            ("java.lang.String", "charAt") => {
+                let receiver = receiver.expect("an instance method has a receiver");
+                args.insert(0, self.expr(receiver)?);
+                Builtin::StringCharAt
+            }
+            ("java.lang.Character", name) => self.character_method(node, name, symbol.ty)?,
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);

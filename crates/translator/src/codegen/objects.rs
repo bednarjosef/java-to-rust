@@ -80,8 +80,8 @@ pub(super) fn cell_name(class: &str, field: &str) -> String {
 /// initializers overwrite. Object fields have no placeholder, so lowering rejects them.
 pub(super) fn default_value(ty: Type) -> &'static str {
     match ty {
-        Type::Int | Type::Long => "0",
-        Type::Double => "0.0",
+        Type::Int | Type::Long | Type::Byte | Type::Short | Type::Char => "0",
+        Type::Double | Type::Float => "0.0",
         Type::Boolean => "false",
         Type::String => "String::new()",
         _ => unreachable!("lowering rejects fields of type {ty}"),

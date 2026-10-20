@@ -69,12 +69,14 @@ translates, compiles and matches Java's output.
 
 ## Current state
 
-A first end-to-end pipeline for a small subset: several classes with `int`, `long`, `double`,
-`boolean` and `String` locals, arithmetic, `if`, `while`, `do`, `for`, `break`, `continue`, the
-conditional operator, overloading, static and instance methods, fields with initializers, static
-fields, constructors (including `this(...)`), `new`, arrays, `System.out.print`/`println`,
-`System.exit`, a few `Math` methods and `String.length`/`equals`, `null` for `String`, and a user
-`toString` in `println` and string concatenation. Inheritance, interfaces, generics and
+A first end-to-end pipeline for a small subset: several classes with locals of every primitive
+type (`byte`, `short`, `char`, `int`, `long`, `float`, `double`, `boolean`) and `String`,
+arithmetic, `if`, `while`, `do`, `for`, `break`, `continue`, the conditional operator,
+overloading, static and instance methods, fields with initializers, static fields, constructors
+(including `this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math`
+methods, `String.length`/`equals`/`charAt`, the `Character` tests and case conversions on a
+`char`, the `MIN_VALUE`/`MAX_VALUE` constants of the wrapper classes, `null` for `String`, and a
+user `toString` in `println` and string concatenation. Inheritance, interfaces, generics and
 object-typed fields are rejected with an error that names the construct and its position.
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
@@ -82,18 +84,34 @@ The pieces: javac compiles the source (parse and attribute only) through a small
 every expression and the declaration every name and call refers to. `lower.rs` maps that tree onto
 the supported subset (`ast.rs`), the analyses prove facts about the program (`analysis.rs`), and the
 generator writes Rust (`codegen.rs`) that uses the runtime crate (`crates/runtime`) for what Rust
-lacks: Java's double printing, integer division that throws, and `Math.max`/`min` on NaN.
+lacks: Java's double and float printing, integer division that throws, `Math.max`/`min` on NaN,
+printing a `char`, `String.charAt` by UTF-16 unit and the `Character` methods.
+
+`byte`, `short`, `char` and `float` are `i8`, `i16`, `u16` (Java's `char` is a UTF-16 code unit,
+not a Unicode scalar value like Rust's `char`) and `f32`. Java promotes the small types to `int`
+for arithmetic, so `c - 'a'` is `c as i32 - 'a' as i32`, and narrows with casts that keep the low
+bits, as Rust's `as` does; floating values reach the small types through `int`
+(`d as i32 as u16`). `b += x` and `b++` narrow implicitly: wrapping arithmetic in the small type
+keeps the same bits, so they become `b = b.wrapping_add(x as i8)` and `b = b.wrapping_add(1)`.
+Strings are Rust strings, so a lone surrogate `char` turns into `?` when it is printed or
+concatenated (as Java's UTF-8 output prints it), even where Java would later pair it up. The
+`Character` methods are exact on Latin-1 and use Rust's Unicode tables beyond it.
 
 The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b` is
 `java::rem(a, b)`. The first analyses decide where plain Rust means the same:
 
-- Range analysis (`analysis/ranges.rs`) tracks the values every `int` and `long` can hold, by
-  abstract interpretation over intervals: conditions narrow ranges, loops are solved with
-  widening to the program's constants and narrowing, counters in counting loops are bounded by
-  the trip count, and argument and return ranges flow between methods. Arithmetic that provably
-  stays in range uses `+`, `-`, `*`, and division by a provably nonzero divisor uses `/` and `%`.
-- Strings that are only ever ASCII use `len()` for `length()`; string parameters that are never
-  assigned are borrowed as `&str`.
+- Range analysis (`analysis/ranges.rs`) tracks the values every integer variable (`byte`,
+  `short`, `char`, `int`, `long`) can hold, by abstract interpretation over intervals: conditions
+  narrow ranges, loops are solved with widening to the program's constants and narrowing,
+  counters in counting loops are bounded by the trip count, and argument and return ranges flow
+  between methods. Arithmetic that provably stays in range uses `+`, `-`, `*`, and division by a
+  provably nonzero divisor uses `/` and `%`. On the small types it also shows when a compound
+  assignment or a narrowing cast keeps its value: `b += 5` stays `b += 5`, and
+  `(char) (c + 1)` becomes `c + 1` in `u16` (or `c.wrapping_add(1)` when it may wrap).
+- Strings that are only ever ASCII use `len()` for `length()` and index bytes for `charAt`
+  (`java::ascii_char_at`); inside `for (int i = 0; i < s.length(); i++)` the index is also in
+  bounds (`analysis/indexing.rs`), so `s.charAt(i)` is `s.as_bytes()[i as usize] as u16`. String
+  parameters that are never assigned are borrowed as `&str`.
 - Nullness analysis (`analysis/nullness.rs`) finds the strings that may be null (locals,
   parameters across calls, return values). Only those are `Option<String>`; the others stay
   `String` or `&str`. A null check narrows the string in the branch where it is not null

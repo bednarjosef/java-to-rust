@@ -342,8 +342,7 @@ impl<'a> Gen<'a> {
             Builtin::ArraysToString => {
                 let show = match elem {
                     Type::String => "|v| v".to_string(),
-                    Type::Double => format!("|v| {}(v).to_string()", self.runtime("Double")),
-                    _ => "|v| v.to_string()".to_string(),
+                    _ => format!("|v| {}.to_string()", self.shown(elem, "v".to_string())),
                 };
                 Code::atom(format!("{}({handle}, {show})", self.runtime("to_string")))
             }
@@ -352,7 +351,11 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({handle}, {v})", self.runtime("fill")))
             }
             Builtin::ArraysSort => {
-                let helper = if elem == Type::Double { "sort_doubles" } else { "sort" };
+                let helper = match elem {
+                    Type::Double => "sort_doubles",
+                    Type::Float => "sort_floats",
+                    _ => "sort",
+                };
                 Code::atom(format!("{}({handle})", self.runtime(helper)))
             }
             Builtin::ArraysCopyOf => {
@@ -421,6 +424,10 @@ fn zero_value(ty: Type) -> &'static str {
     match ty {
         Type::Int => "0",
         Type::Long => "0i64",
+        Type::Byte => "0i8",
+        Type::Short => "0i16",
+        Type::Char => "0u16",
+        Type::Float => "0.0f32",
         Type::Double => "0.0",
         Type::Boolean => "false",
         _ => unreachable!("lowering rejects arrays of nullable elements"),

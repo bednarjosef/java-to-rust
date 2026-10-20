@@ -45,8 +45,8 @@ impl<'t> Lowering<'t> {
             Some(Type::Array(elem)) => *elem,
             _ => return unsupported(node, "this call"),
         };
-        let printable = matches!(elem, Type::Int | Type::Long | Type::Double | Type::Boolean | Type::String);
-        let primitive = matches!(elem, Type::Int | Type::Long | Type::Double | Type::Boolean);
+        let primitive = elem.is_numeric() || elem == Type::Boolean;
+        let printable = primitive || elem == Type::String;
         let builtin = match (name, args.len()) {
             ("toString", 1) if printable => Builtin::ArraysToString,
             ("fill", 2) if printable => Builtin::ArraysFill,

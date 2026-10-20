@@ -15,6 +15,7 @@
 //! default translation, so a weaker analysis only makes the output plainer, never wrong.
 
 mod arrays;
+mod indexing;
 mod nullness;
 mod objects;
 mod owned;
@@ -33,8 +34,10 @@ pub struct Facts {
     /// Integer `/`, `%` and their compound assignments whose divisor is never zero and that never
     /// compute `MIN / -1`.
     pub safe_division: HashSet<ExprId>,
-    /// `String.length()` calls on strings that are always ASCII.
+    /// `String.length()` and `String.charAt` calls on strings that are always ASCII.
     pub ascii_length: HashSet<ExprId>,
+    /// `s.charAt(i)` calls whose index is always within the string.
+    pub index_in_bounds: HashSet<ExprId>,
     /// String parameters, as (method, parameter) indexes, that are never assigned.
     pub borrowed_params: HashSet<(usize, usize)>,
     /// String parameters that are never assigned but can be null: `Option<&str>`.
@@ -73,6 +76,7 @@ pub fn analyze(class: &Class) -> Facts {
     facts.owned = owned.classes;
     facts.mutating = owned.mutating;
     arrays::analyze(class, &mut facts);
+    indexing::analyze(class, &mut facts);
     facts
 }
 
@@ -108,6 +112,10 @@ impl NonAscii {
 
     /// Whether `e`, evaluated in method `m`, is ASCII text (or not a string at all).
     fn ascii(&self, class: &Class, m: usize, e: &Expr) -> bool {
+        if e.ty == Type::Char {
+            // A char is only known to be ASCII when it is a constant.
+            return matches!(e.kind, ExprKind::Char(c) if c < 0x80);
+        }
         if e.ty != Type::String {
             return true;
         }
@@ -196,7 +204,8 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
                 stmt,
                 &mut |e| {
                     visit_expr(e, &mut |x| {
-                        if let ExprKind::Builtin(Builtin::StringLength, args) = &x.kind
+                        if let ExprKind::Builtin(Builtin::StringLength | Builtin::StringCharAt, args) =
+                            &x.kind
                             && non_ascii.ascii(class, m, &args[0])
                         {
                             facts.ascii_length.insert(x.id);

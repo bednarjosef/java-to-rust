@@ -193,7 +193,8 @@ impl<'a> Gen<'a> {
             return;
         }
         if let Some((var, start, end)) = counting_loop(init, cond, update, body) {
-            let ty = start.ty.max_integral(end.ty);
+            // `counting_loop` checks that the bound has the loop variable's type.
+            let ty = end.ty;
             let start = self.value(start, ty);
             let end = self.value(end, ty);
             let mut used = false;
@@ -278,8 +279,8 @@ impl<'a> Gen<'a> {
             ExprKind::Unary(UnOp::Not, inner) => return self.condition(inner),
             ExprKind::Binary(op, l, r)
                 if op.is_comparison()
-                    && l.ty != Type::Double
-                    && r.ty != Type::Double
+                    && !l.ty.is_floating()
+                    && !r.ty.is_floating()
                     && !is_null_test(*op, l, r) =>
             {
                 let flipped = match op {
