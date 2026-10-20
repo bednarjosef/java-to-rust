@@ -3,12 +3,14 @@
 
 use std::fmt;
 
+mod charsets;
 mod code_point;
 mod hierarchy;
 mod java_arrays;
 mod natives;
 mod strings;
 mod unsigned;
+pub use charsets::*;
 pub use code_point::*;
 pub use hierarchy::*;
 pub use java_arrays::*;
@@ -42,6 +44,9 @@ pub enum Type {
     Boxed(&'static Type),
     /// `java.lang.StringBuilder`, a shared and mutable text (`java::StringBuilder`).
     StringBuilder,
+    /// `java.nio.charset.Charset`, only as an expression (`Builtin::Charset`) that is the charset
+    /// argument of `getBytes` or `new String`; no variable has this type.
+    Charset,
 }
 
 impl Type {
@@ -173,6 +178,7 @@ impl fmt::Display for Type {
             Type::Class(name) | Type::Enum(name) => f.write_str(name),
             Type::Null => f.write_str("null"),
             Type::StringBuilder => f.write_str("StringBuilder"),
+            Type::Charset => f.write_str("Charset"),
             Type::Boxed(primitive) => f.write_str(match primitive {
                 Type::Int => "Integer",
                 Type::Char => "Character",
@@ -530,6 +536,8 @@ pub enum Builtin {
     String(StringOp),
     /// A method of `StringBuilder`, see `BuilderOp`.
     Builder(BuilderOp),
+    /// A charset, see `CharsetOp`: the value of a `StandardCharsets` constant or `forName`.
+    Charset(CharsetOp),
     /// `String.format(format, args...)` and `format.formatted(args...)`: the format, then the
     /// arguments.
     Format,

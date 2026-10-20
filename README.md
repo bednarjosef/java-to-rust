@@ -101,16 +101,26 @@ and `MIN_NORMAL` constants of the wrapper classes, `null` for `String`, and a us
 `println` and string concatenation, object-typed fields and `null` objects. Strings have the
 common methods of `String` (searching, slicing, case, trimming, replacing, comparing,
 `split`/`replaceAll`/`matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf`,
-`new String(char[])`), `StringBuilder`, `String.format`/`formatted`/`printf` and the bit and radix
-methods of `Integer` and `Long` (`toHexString`, `bitCount`, `numberOfLeadingZeros`,
-`toString(v, radix)`, ...), all hand-written in the runtime with Java's exact results. Class
+`new String(char[])`), `StringBuilder` and `StringBuffer` (the same type in the runtime, as
+`java::StringBuilder`), `String.format`/`formatted`/`printf` and the bit and radix methods of
+`Integer` and `Long` (`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...),
+all hand-written in the runtime with Java's exact results. Strings and bytes meet through
+`getBytes()`, `getBytes(charset)` and `getBytes("name")`, and `new String(bytes)`,
+`new String(bytes, charset)`, `new String(bytes, offset, length, charset)` and the name forms, for
+UTF-8, US-ASCII, ISO-8859-1, UTF-16 (with its byte order mark), UTF-16BE and UTF-16LE. The
+`StandardCharsets` constants and `Charset.forName` are charsets only in those arguments: a `Charset`
+kept in a variable or passed elsewhere is rejected. Encoding replaces unmappable characters as Java
+does, and decoding replaces malformed input as Java's `String` does (`crates/runtime/src/charset.rs`). Class
 trees of the program's own classes translate, abstract or not and of any depth: `extends`,
 abstract methods, overriding and virtual calls, `super(...)` and `super.m(...)`, upcasts, `==` on
-objects of a class tree, and printing through the class's `toString`. Interfaces, `instanceof`,
-casts between class types, `Object` and generics are rejected with an error that names the
-construct and its position. So are the `int` code-point overloads of the other `Character` tests
-(`isLetter(int)` and the like), `Character.toChars(int, char[], int)`, and the unsigned and parse
-methods with other argument counts.
+objects of a class tree, and printing through the class's `toString`. So do the program's
+interfaces: abstract, default, private and static methods, constants, interfaces extending
+interfaces, `Iface.super.m()`, classes and enums implementing them, and `Comparable` implemented by
+a class that calls `compareTo` directly. `instanceof`, casts between class types, `Object`, other
+interfaces of the JDK (`Runnable`, `Comparable` as a type), lambdas and generics are rejected with
+an error that names the construct and its position. So
+are the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and the like),
+`Character.toChars(int, char[], int)`, and the unsigned and parse methods with other argument counts.
 The design of the object model, and what is still to come, is in
 [docs/object-model.md](docs/object-model.md).
 
@@ -246,7 +256,14 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   another (`d.to_animal()`). The enum gets only the methods that the program calls. A class whose
   objects are never used as a value of a supertype stays out of the enum and can stay an owned
   value; the classes of one tree are immutable together or not at all, so `base()` has one type.
-  The methods of an override group share what the analyses decide about their parameters and
+  An interface is a type like any other: an enum over the classes that implement it, or that
+  class's object when there is one, with its default methods on the enum
+  (`fn kind_in_shape(&self)`) or in that class, its static methods free functions and its
+  constants `const` items or cells. An enum that implements an interface is a variant holding the
+  constant itself (`Shape::Color(Color)`), compared by value. A type's enum has a variant only
+  for the classes whose objects become values of the type (`hierarchy::flows`: a `new`, an
+  upcast, or running a method that the type declares), so a class whose subclasses' objects are
+  only ever used through an interface stays a plain struct. The methods of an override group share what the analyses decide about their parameters and
   results, as a call may run any of them. A superclass's static initialization runs before its
   subclass's.
 
@@ -274,7 +291,7 @@ nothing.
 
 `--survey` prints what the code reachable from `main` uses that is not supported yet instead of
 translating it: for the program's own code and for its library code, separately, per feature
-(interfaces, inheritance, generic classes, exceptions, lambdas, ...) the classes and pieces of code
+(generic classes, exceptions, lambdas, ...) the classes and pieces of code
 (methods, field initializers, initializer blocks) that use it, those it alone blocks, and up to
 three example places (`file:line`, relative to the source or library root). It also prints the
 order of features that frees the most code at each step, the methods of the runtime's classes
@@ -326,5 +343,10 @@ cargo test                                                # needs a JDK: runs co
 The corpus test runs every program in `corpus/` with `java`, translates and builds it with
 overflow checks on (so a wrong "cannot overflow" fact panics), and compares standard output and
 exit code. A multi-file program is a directory of `corpus/projects/` with a source root `src/`
-and a file `main` that names the main class; it runs on Java after `javac`.
+and a file `main` that names the main class; it runs on Java after `javac`. Java's runs,
+translation and the Cargo build run in parallel, one thread per CPU. All the Rust programs are
+one Cargo project under `target/tmp/corpus`, kept between runs, so a program is rebuilt only when
+its translation changes: a warm run takes about as long as translating the corpus. The report
+lists every failing program with the first differing lines of output. `CORPUS_FILTER=text cargo
+test --test corpus` runs only the programs whose name contains `text`.
 `crates/translator/tests/translation.rs` pins down what the output looks like.

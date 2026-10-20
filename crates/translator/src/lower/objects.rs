@@ -47,14 +47,11 @@ impl<'t> Lowering<'t> {
 
     /// Declares a class, named `outer.Name` inside `outer` (a class or a package).
     pub(super) fn declare_type(&mut self, node: Node<'t>, outer: Option<&str>) -> Result<(), Error> {
-        if node.kind() != "CLASS" && node.kind() != "ENUM" {
+        if !matches!(node.kind(), "CLASS" | "ENUM" | "INTERFACE") {
             return unsupported(node, &kind_words(node.kind()));
         }
         if node.list("typeParameters").next().is_some() {
             return unsupported(node, "generic classes");
-        }
-        if node.list("implementsClause").next().is_some() {
-            return unsupported(node, "interfaces");
         }
         let simple = node.str("simpleName");
         let name = match outer {
@@ -73,12 +70,11 @@ impl<'t> Lowering<'t> {
                     sig: member.symbol().map_or("", |s| s.ty),
                 }),
                 "VARIABLE" | "EMPTY_STATEMENT" => {}
-                "ENUM" => self.declare_type(member, Some(&name))?,
+                "ENUM" | "INTERFACE" => self.declare_type(member, Some(&name))?,
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
                 "CLASS" => return unsupported(member, "inner classes"),
                 "BLOCK" if Self::is_static_block(member) => {}
                 "BLOCK" => self.check_initializer_block(node, member)?,
-                "INTERFACE" => return unsupported(member, "interfaces"),
                 kind => return unsupported(member, &kind_words(kind)),
             }
         }
@@ -113,13 +109,16 @@ impl<'t> Lowering<'t> {
             std::iter::successors(Some(c), |&a| self.superclass(a).ok().flatten())
                 .any(|a| declares(a, with_body))
         };
-        let concrete =
-            |c: usize| self.types[c].node.kind() == "CLASS" && !self.types[c].node.has_flag("ABSTRACT");
-        let mut objects = (0..self.types.len()).filter(|&c| concrete(c) && self.is_subclass(c, t)).peekable();
+        let kind = |c: usize| self.types[c].node.kind();
+        let concrete = |c: usize| kind(c) == "CLASS" && !self.types[c].node.has_flag("ABSTRACT");
+        let mut objects = (0..self.types.len())
+            .filter(|&c| (concrete(c) || kind(c) == "ENUM") && self.is_subclass(c, t))
+            .peekable();
         if objects.peek().is_none() {
             return inherits(t, false);
         }
-        objects.all(|c| inherits(c, true))
+        // An enum's constant prints its name, or what the enum's `toString` makes it.
+        objects.all(|c| kind(c) == "ENUM" || inherits(c, true))
     }
 
     /// Rejects printing or concatenating an object whose class has no `toString`: Java would print
@@ -165,7 +164,7 @@ impl<'t> Lowering<'t> {
             kind,
             is_abstract: kind == TypeKind::Interface || node.has_flag("ABSTRACT"),
             extends: self.superclass(index)?,
-            implements: Vec::new(),
+            implements: self.interfaces(index)?,
             fields,
             statics,
             enum_constants: None,
@@ -201,7 +200,7 @@ impl<'t> Lowering<'t> {
             // Java evaluates an object in front of a static field and ignores it, even null;
             // one without effects is simply dropped.
             if let Some(r) = receiver
-                && r.symbol().is_none_or(|s| s.kind != "CLASS")
+                && r.symbol().is_none_or(|s| !matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM"))
                 && has_effects(&self.expr(r)?)
             {
                 return unsupported(node, "static fields through an expression with effects");

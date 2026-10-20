@@ -1547,7 +1547,7 @@ impl<'a> Gen<'a> {
 
     /// A blank line before an item, unless the output is empty or a line of an item is last.
     pub(super) fn gap(&mut self) {
-        if self.out.ends_with("}\n") {
+        if self.out.ends_with("}\n") || self.out.ends_with(";\n") {
             self.out.push('\n');
         }
     }

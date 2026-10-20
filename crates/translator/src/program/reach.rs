@@ -79,6 +79,7 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.Short",
     "java.lang.StrictMath",
     "java.lang.String",
+    "java.lang.StringBuffer",
     "java.lang.StringBuilder",
     "java.lang.System",
     "java.lang.Thread",
@@ -433,6 +434,11 @@ pub(super) fn symbol_type(node: &Value) -> &str {
 }
 
 pub(super) fn has_flag(node: &Value, flag: &str) -> bool {
+    if flag == "STATIC"
+        && let Some(s) = node["symbol"]["static"].as_bool()
+    {
+        return s;
+    }
     node["modifiers"]["flags"].as_array().is_some_and(|f| f.iter().any(|x| x == flag))
 }
 

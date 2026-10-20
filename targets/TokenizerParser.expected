@@ -1,0 +1,13 @@
+[Token[kind=IDENT, text=x1, column=0], Token[kind=EQUALS, text==, column=3], Token[kind=LPAREN, text=(, column=5], Token[kind=NUMBER, text=4, column=6], Token[kind=PLUS, text=+, column=7], Token[kind=NUMBER, text=5, column=9], Token[kind=RPAREN, text=), column=10], Token[kind=STAR, text=*, column=11], Token[kind=NUMBER, text=2, column=12], Token[kind=END, text=, column=13]]
+x = 6 * 7  =>  42
+y = x - 2 * (3 + 4)  =>  28
+-y + x / 5  =>  -20
+z = (y - x) * -2  =>  28
+z / (x - 42)  =>  eval error: division by zero
+w + 1  =>  eval error: unknown variable w
+3 +* 4  =>  syntax error: unexpected '*' at column 3
+(1 + 2  =>  syntax error: expected RPAREN but found end of line
+10 / 3 # comment  =>  syntax error: bad character '#' at column 7
+100 - 9 - 1  =>  90
+2 * 3 * 4 - 5 / 2  =>  22
+environment: {x=42, y=28, z=28}

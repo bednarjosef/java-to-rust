@@ -1,0 +1,13 @@
+initial: {a=1, b=2, c=3}
+get a: 1
+after put d: {c=3, a=1, d=4} evicted: b=2
+get missing: null, default: -1
+after e: {a=1, d=4, e=10} evicted: b=2 c=3
+containsKey c: false, remove d: 4
+  entry e -> 10
+  entry f -> 6
+  entry g -> 7
+fib(40) = 102334155
+fib(90) = 2880067194370816120
+cache stats: hits=88 misses=89 ratio=49%, cached values 64
+pair: (entries, 3)

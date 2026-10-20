@@ -1,0 +1,12 @@
+step 1: connect -> CONNECTING
+step 2: ack -> CONNECTED
+step 3: send -> CONNECTED
+step 4: send -> CONNECTED
+step 5: close -> CLOSED
+finished after 5 steps in CLOSED
+first session ended CLOSED (ordinal 3)
+second session:
+step 1: connect -> CONNECTING
+step 2: ack -> CONNECTED
+step 3: send -> CONNECTED
+finished after 3 steps in CONNECTED

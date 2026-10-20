@@ -1,0 +1,15 @@
+Dog(rex, energy 10) says woof
+  I am rex and I am a dog
+  rex has 4 legs and trots
+Duck(donald, energy 5) says quack
+  I am donald
+  donald has 2 legs and swims and walks
+Fish(nemo, energy 2) says blub
+  I am nemo
+  swimmer using Fish
+after eating: Dog(rex, energy 17)
+walker kind: walker
+default legs constant: 4
+I am lambda thing
+unknown just a string
+total legs: 6

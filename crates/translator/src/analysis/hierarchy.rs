@@ -107,15 +107,102 @@ pub fn base_path(facts: &Facts, class: &Class, c: usize, d: usize) -> String {
     path
 }
 
-/// The concrete classes whose objects the values of type `t` can be: those under it that are
-/// not plain values (an owned class is never converted to another type).
+/// The concrete classes whose objects the values of type `t` can be: those under it whose
+/// objects reach a value of `t` (see `flows`) and are not plain values (an owned class is never
+/// converted to another type), and the enums that implement it, whose constants are `Copy`
+/// values.
 pub fn variants(class: &Class, facts: &Facts, t: usize) -> Vec<usize> {
     class
         .hierarchy
         .concretes(t)
         .into_iter()
-        .filter(|&c| !facts.owned.contains(&class.types[c].name))
+        .filter(|&c| facts.flows[t].contains(&c))
+        .filter(|&c| class.types[c].kind == TypeKind::Enum || !facts.owned.contains(&class.types[c].name))
         .collect()
+}
+
+/// For each type, the concrete classes (and enums) whose objects become values of that type: a
+/// `new` makes an object of its class, an upcast makes the objects of its operand's type values
+/// of the target type, and an object that runs a method its class inherits is the `this` of
+/// that method, a value of the type that declares it (unless the method lives on a fields
+/// struct, which borrows only the fields). A call of an inherited method, or `super.m()`, makes
+/// the receiver a value of the type that declares the method. An enum's constants are values of
+/// the enum.
+pub fn flows(class: &Class, field_level: &HashSet<usize>) -> Vec<HashSet<usize>> {
+    let h = &class.hierarchy;
+    let n = class.types.len();
+    let mut flows: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    let mut edges: HashSet<(usize, usize)> = HashSet::new();
+    for (t, decl) in class.types.iter().enumerate() {
+        if decl.kind == TypeKind::Enum {
+            flows[t].insert(t);
+        }
+    }
+    // Object code that a class inherits: its `this` is a value of the declaring type.
+    for (m, method) in class.methods.iter().enumerate() {
+        if method.is_static || method.is_ctor || method.is_abstract || field_level.contains(&m) {
+            continue;
+        }
+        for c in h.concretes(method.class) {
+            if c != method.class && h.implementation(m, c) == Some(m) {
+                edges.insert((c, method.class));
+            }
+        }
+    }
+    let index = |ty: Type| match ty {
+        Type::Class(name) | Type::Enum(name) => class.type_index(name),
+        _ => None,
+    };
+    let mut note = |e: &Expr, at: usize| match &e.kind {
+        ExprKind::New { class: c, .. } => _ = flows[*c].insert(*c),
+        ExprKind::Cast(to, value) => {
+            if let (Some(t), Some(s)) = (index(*to), index(value.ty)) {
+                edges.insert((s, t));
+            }
+        }
+        // `super.m()`: `this` as a value of the superclass.
+        ExprKind::This => {
+            if let Some(t) = index(e.ty)
+                && t != at
+            {
+                edges.insert((at, t));
+            }
+        }
+        ExprKind::MethodCall { receiver, resolved: Some(r), .. } => {
+            let d = class.methods[*r].class;
+            if let Some(s) = index(receiver.ty)
+                && s != d
+                && !class.methods[*r].is_static
+                && !field_level.contains(r)
+            {
+                edges.insert((s, d));
+            }
+        }
+        _ => {}
+    };
+    for m in &class.methods {
+        for s in &m.body {
+            visit_stmt(s, &mut |e| visit_expr(e, &mut |x| note(x, m.class)), &mut |_| {});
+        }
+    }
+    for (t, decl) in class.types.iter().enumerate() {
+        let constants = decl.enum_constants.iter().flatten().flat_map(|c| &c.values);
+        for init in decl.fields.iter().chain(&decl.statics).filter_map(|f| f.init.as_ref()).chain(constants) {
+            visit_expr(init, &mut |x| note(x, t));
+        }
+    }
+    loop {
+        let mut changed = false;
+        for &(s, t) in &edges {
+            let moved: Vec<usize> =
+                flows[s].iter().copied().filter(|&c| h.is_subtype(c, t) && !flows[t].contains(&c)).collect();
+            changed |= !moved.is_empty();
+            flows[t].extend(moved);
+        }
+        if !changed {
+            return flows;
+        }
+    }
 }
 
 /// How values of class type `t` are represented.
@@ -123,8 +210,10 @@ pub fn rep(class: &Class, facts: &Facts, t: usize) -> Rep {
     if class.hierarchy.is_concrete(t) && !class.hierarchy.has_subtypes(t) {
         return Rep::Object(t);
     }
+    // A value of an interface that only an enum implements is still the interface's enum: a
+    // value of a class type is an object everywhere else.
     match variants(class, facts, t)[..] {
-        [only] => Rep::Object(only),
+        [only] if class.types[only].kind == TypeKind::Class => Rep::Object(only),
         _ => Rep::Enum(t),
     }
 }

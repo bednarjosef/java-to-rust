@@ -2,14 +2,14 @@
 //! from `analysis::maybe_null` and `analysis::nullable_var`; here is how each use is written.
 
 use super::*;
-use crate::analysis::{conjuncts, maybe_null, nullable_var};
+use crate::analysis::{conjuncts, maybe_null, nullable_type, nullable_var};
 
-/// Whether `l == r` or `l != r` compares a string with the `null` literal.
+/// Whether `l == r` or `l != r` compares a string, object or enum with the `null` literal.
 pub(super) fn is_null_test(op: BinOp, l: &Expr, r: &Expr) -> bool {
     matches!(op, BinOp::Eq | BinOp::Ne)
         && (matches!(l.kind, ExprKind::Null) || matches!(r.kind, ExprKind::Null))
-        && l.ty.is_reference()
-        && r.ty.is_reference()
+        && nullable_type(l.ty)
+        && nullable_type(r.ty)
 }
 
 impl<'a> Gen<'a> {
@@ -27,7 +27,7 @@ impl<'a> Gen<'a> {
 
     /// Whether the variable or parameter `name` of method `method`, of type `ty`, is an `Option`.
     pub(super) fn optional_var(&self, method: usize, ty: Type, name: &str) -> bool {
-        ty.is_reference() && nullable_var(self.facts, method, name)
+        nullable_type(ty) && nullable_var(self.facts, method, name)
     }
 
     /// Whether the current method returns an `Option<String>`.
@@ -83,7 +83,7 @@ impl<'a> Gen<'a> {
     /// for an object.
     fn option_source(&self, name: &str, ty: Type) -> String {
         let rust = self.local(name);
-        if matches!(ty, Type::Class(_) | Type::StringBuilder) {
+        if matches!(ty, Type::Class(_) | Type::StringBuilder | Type::Enum(_)) {
             return format!("{rust}.as_ref()");
         }
         // An `Option<i32>` is `Copy` and matches as it is; a faithful box is `as_deref`'d.
@@ -190,8 +190,16 @@ impl<'a> Gen<'a> {
         if matches!(e.kind, ExprKind::Null) {
             return Some(Part::Lit("null".to_string()));
         }
-        if !e.ty.is_reference() || !self.nullable(e) {
+        if !nullable_type(e.ty) || !self.nullable(e) {
             return None;
+        }
+        if let Type::Enum(_) = e.ty {
+            // A nullable enum local is an `Option` of the enum, shown as its name or as `null`.
+            let option = match &e.kind {
+                ExprKind::Var(name) if assigned.contains(name) => format!("{}.clone()", self.local(name)),
+                _ => self.option_ref(e),
+            };
+            return Some(Part::Arg(Code::atom(format!("{}({option})", self.runtime("or_null")))));
         }
         if matches!(e.ty, Type::Boxed(_)) {
             return Some(Part::Arg(Code::atom(self.boxed_text(e, e.ty.unboxed()))));
@@ -257,7 +265,8 @@ impl<'a> Gen<'a> {
             _ => return None,
         };
         let ExprKind::Var(name) = &var.kind else { return None };
-        if !self.nullable(var) {
+        // An enum stays an `Option` of the enum: its null test does not bind it as a reference.
+        if matches!(var.ty, Type::Enum(_)) || !self.nullable(var) {
             return None;
         }
         Some((name.as_str(), matches!(op, BinOp::Ne), var.ty))

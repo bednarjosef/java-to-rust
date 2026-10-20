@@ -17,8 +17,8 @@ pub struct Hierarchy {
     superclass: Vec<Option<usize>>,
     /// The interfaces each type implements or extends directly.
     interfaces: Vec<Vec<usize>>,
-    /// Whether each type is a class that can have objects of its own (not abstract, not an
-    /// interface, not an enum).
+    /// Whether each type can have values of exactly its own type: a class that is not abstract,
+    /// or an enum (whose constants are its values; an enum has no subtypes).
     concrete: Vec<bool>,
     /// The instance fields each type declares, by name.
     fields: Vec<Vec<String>>,
@@ -71,7 +71,10 @@ impl Hierarchy {
             overriders,
             superclass: types.iter().map(|t| t.extends).collect(),
             interfaces: types.iter().map(|t| t.implements.clone()).collect(),
-            concrete: types.iter().map(|t| t.kind == TypeKind::Class && !t.is_abstract).collect(),
+            concrete: types
+                .iter()
+                .map(|t| t.kind == TypeKind::Class && !t.is_abstract || t.kind == TypeKind::Enum)
+                .collect(),
             fields: types.iter().map(|t| t.fields.iter().map(|f| f.name.clone()).collect()).collect(),
             method_class: methods.iter().map(|m| m.class).collect(),
             method_abstract: methods.iter().map(|m| m.is_abstract).collect(),
@@ -108,7 +111,8 @@ impl Hierarchy {
         !self.subtypes[t].is_empty()
     }
 
-    /// Whether `t` is a class that can have objects of exactly its own class.
+    /// Whether `t` can have values of exactly its own type: a class that is not abstract, or an
+    /// enum.
     pub fn is_concrete(&self, t: usize) -> bool {
         self.concrete[t]
     }

@@ -1,0 +1,30 @@
+withdraw 30 from acc-1
+  ok, balance 70
+  end of attempt
+withdraw 500 from acc-1
+  insufficient: short by 430 (430)
+  end of attempt
+withdraw -5 from acc-1
+  rejected: amount must be positive: -5
+  end of attempt
+withdraw 900 from acc-1
+  account acc-1 is locked, caused by too many failures
+  end of attempt
+withdraw 10 from acc-1
+  ok, balance 60
+  end of attempt
+  parsed 17
+  bad number 'x1'
+  parsed x1
+parse results: 17 -1
+  finally runs before return
+finallyWins: 1
+returnFromFinally: 42
+loop body 0
+loop finally 0
+loop finally 1
+level 0 failed
+root cause: IOException after 1 causes
+inner finally
+outer caught inner
+balance at end: 60

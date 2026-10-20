@@ -341,7 +341,9 @@ impl<'a> Gen<'a> {
             ExprKind::Length(array) => self.length(array),
             ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
-            ExprKind::Cast(to @ Type::Class(_), value) if matches!(value.ty, Type::Class(_)) => {
+            ExprKind::Cast(to @ Type::Class(_), value)
+                if matches!(value.ty, Type::Class(_) | Type::Enum(_)) =>
+            {
                 self.class_cast(*to, value)
             }
             ExprKind::Cast(ty, value) => self.value(value, *ty),
@@ -501,6 +503,7 @@ impl<'a> Gen<'a> {
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
             Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty),
             Builtin::CodePoint(op) => self.code_point_builtin(op, args),
+            Builtin::Charset(op) => self.charset_builtin(op, args),
             Builtin::CharNumericValue => self.char_numeric_value(args),
             Builtin::CharDigit | Builtin::CharForDigit => self.character_radix(builtin, args),
             Builtin::Exit => {

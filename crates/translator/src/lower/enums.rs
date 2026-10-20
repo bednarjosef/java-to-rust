@@ -260,39 +260,10 @@ fn set_before_use(class: &Class, index: usize, name: &str) -> bool {
         })
 }
 
-fn null_for(value: &Expr, ty: Type) -> bool {
-    matches!(value.kind, ExprKind::Null) && matches!(ty, Type::Enum(_))
-}
-
-/// Whether an expression gives `null` to an enum: in an assignment, a conditional, a cast, an
-/// array, or an argument of a call.
-fn null_enum_in(e: &Expr, class: &Class) -> bool {
-    match &e.kind {
-        ExprKind::Binary(BinOp::Eq | BinOp::Ne, a, b) => null_for(a, b.ty) || null_for(b, a.ty),
-        ExprKind::Assign { value, .. } => null_for(value, e.ty),
-        ExprKind::Conditional(_, a, b) => {
-            matches!(e.ty, Type::Enum(_))
-                && (matches!(a.kind, ExprKind::Null) || matches!(b.kind, ExprKind::Null))
-        }
-        ExprKind::Cast(ty, x) => null_for(x, *ty),
-        ExprKind::ArrayLit(elements) => {
-            matches!(e.ty, Type::Array(el) if matches!(el, Type::Enum(_)))
-                && elements.iter().any(|x| matches!(x.kind, ExprKind::Null))
-        }
-        ExprKind::NewArray(_) => matches!(e.ty, Type::Array(el) if matches!(el, Type::Enum(_))),
-        ExprKind::Call { args, resolved: Some(r), .. }
-        | ExprKind::MethodCall { args, resolved: Some(r), .. }
-        | ExprKind::New { args, ctor: Some(r), .. }
-        | ExprKind::ThisCall { args, resolved: Some(r) } => {
-            args.iter().zip(&class.methods[*r].params).any(|(a, p)| null_for(a, p.ty))
-        }
-        _ => false,
-    }
-}
-
-/// Rejects `null` where an enum value is expected. Java gives an enum-typed field `null` until it
-/// is set, so an instance field without an initializer is allowed only when every constructor
-/// sets it first (see `set_before_use`), and a static field must have an initializer.
+/// Rejects `null` where an enum value is expected, except in a nullable enum local (see
+/// `enum_nulls`). Java gives an enum-typed field `null` until it is set, so an instance field
+/// without an initializer is allowed only when every constructor sets it first (see
+/// `set_before_use`), and a static field must have an initializer.
 pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
     let found: Cell<Option<Pos>> = Cell::new(None);
     let record = |pos: Pos| {
@@ -303,7 +274,8 @@ pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
     for (t, decl) in class.types.iter().enumerate() {
         for f in decl.fields.iter().chain(&decl.statics) {
             if let Some(init) = &f.init
-                && null_for(init, f.ty)
+                && matches!(init.kind, ExprKind::Null)
+                && matches!(f.ty, Type::Enum(_))
             {
                 record(init.pos);
             }
@@ -317,23 +289,9 @@ pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
             record(f.pos);
         }
     }
-    for m in &class.methods {
-        for stmt in &m.body {
-            visit_stmt(
-                stmt,
-                &mut |e| {
-                    visit_expr(e, &mut |x| {
-                        if null_enum_in(x, class) {
-                            record(x.pos)
-                        }
-                    })
-                },
-                &mut |s| match s {
-                    Stmt::Local { ty, init: Some(init), pos, .. } if null_for(init, *ty) => record(*pos),
-                    Stmt::Return(Some(e), _) if null_for(e, m.ret) => record(e.pos),
-                    _ => {}
-                },
-            );
+    for m in 0..class.methods.len() {
+        if let Some(pos) = enum_nulls::escape(class, m) {
+            record(pos);
         }
     }
     match found.get() {

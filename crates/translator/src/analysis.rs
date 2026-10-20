@@ -30,7 +30,7 @@ mod statics;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
-pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_var};
+pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
 
 #[derive(Default)]
 pub struct Facts {
@@ -86,6 +86,9 @@ pub struct Facts {
     pub immutable: HashSet<String>,
     /// The classes whose objects are never shared, so they are plain values, by qualified name.
     pub owned: HashSet<String>,
+    /// For each type (index into `Class::types`), the concrete classes and enums whose values
+    /// become values of that type (see `hierarchy::flows`).
+    pub flows: Vec<HashSet<usize>>,
     /// The instance methods (indexes into `Class::methods`) that change their object.
     pub mutating: HashSet<usize>,
     /// The instance methods that borrow their object for the call: `&self` or `&mut self`.
@@ -141,6 +144,7 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     facts.immutable = objects::immutable_classes(class);
     facts.field_level = hierarchy::field_level(class, &reach.reach, &facts.immutable, &facts.fields_structs);
     facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
+    facts.flows = hierarchy::flows(class, &facts.field_level);
     let borrowing = borrowing::borrowing(class, &facts, &reach);
     facts.mutating = borrowing.mutating;
     facts.self_methods = borrowing.methods;
@@ -187,6 +191,27 @@ fn validate(class: &Class, facts: &Facts) -> Result<(), Error> {
                 return Err(Error {
                     pos: m.pos,
                     message: "covariant return types not supported yet".to_string(),
+                });
+            }
+        }
+    }
+    // An enum may implement an interface's method with one that every enum has; the dispatcher
+    // knows `name()`, `ordinal()` and `toString()`.
+    for e in (0..class.types.len()).filter(|&e| class.types[e].kind == TypeKind::Enum) {
+        for (m, method) in class.methods.iter().enumerate() {
+            let builtin =
+                matches!(method.name.as_str(), "name" | "ordinal" | "toString") && method.params.is_empty();
+            if method.is_abstract
+                && class.hierarchy.is_subtype(e, method.class)
+                && class.hierarchy.implementation(m, e).is_none()
+                && !builtin
+            {
+                return Err(Error {
+                    pos: method.pos,
+                    message: format!(
+                        "an enum's own `{}` implementing `{}.{}` not supported yet",
+                        method.name, class.types[method.class].name, method.name
+                    ),
                 });
             }
         }

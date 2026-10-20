@@ -1,0 +1,11 @@
+peek: deploy(p5,20ms) size 5
+t=0020 deploy   done
+t=0025 email    done
+t=0070 report   done
+t=0100 backup   done
+t=0110 cleanup  done
+by duration: bca
+longest first: longest shorter word over
+left in queue: 3 empty? false
+smallest 3, next 3, describe: !!
+remaining: 5 ..--

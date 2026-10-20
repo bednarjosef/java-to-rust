@@ -1,0 +1,16 @@
+digit sum 2: [gus]
+digit sum 3: [ann]
+digit sum 4: [bob, dee, eve]
+digit sum 7: [cid]
+digit sum 9: [fay]
+digit sum 99 count: 0
+primes: 10 contains 13? true
+odd primes: 9
+union size: 16
+non-primes: 6
+removed 1? true, again? false
+equals: true, compare: 1
+sum: 2000
+overflow: -2147483648
+division: -3 remainder: -1
+hash sizes: 5 false

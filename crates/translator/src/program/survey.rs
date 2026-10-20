@@ -518,13 +518,19 @@ fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String
     let mut features = BTreeSet::new();
     let kind = text(decl, "kind");
     match kind {
-        "INTERFACE" => _ = features.insert("interfaces"),
         "ANNOTATION_TYPE" => _ = features.insert("annotation types"),
         "RECORD" => _ = features.insert("records"),
         _ => {}
     }
-    if !decl["implementsClause"].as_array().is_none_or(Vec::is_empty) {
-        features.insert("interfaces");
+    // The program's own interfaces translate; a generic one is a generic class, and one from
+    // elsewhere is not translated.
+    for clause in decl["implementsClause"].as_array().into_iter().flatten() {
+        let interface = text(clause, "javaType");
+        if interface.contains('<') {
+            features.insert("generic classes");
+        } else if !declared.contains(interface) {
+            features.insert("implementing interfaces outside the sources");
+        }
     }
     // Class trees of the program's own classes translate; a superclass from elsewhere does not.
     if kind == "CLASS" && !decl["extendsClause"].is_null() {

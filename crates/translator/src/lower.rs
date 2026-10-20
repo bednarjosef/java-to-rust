@@ -4,6 +4,7 @@
 //! outside it is reported as an error naming the construct.
 
 mod code_point;
+mod enum_nulls;
 mod enums;
 mod hierarchy;
 mod objects;
@@ -18,6 +19,7 @@ use std::cell::Cell;
 
 mod arrays;
 mod boxing;
+mod charsets;
 mod constant_bodies;
 mod initializers;
 mod java_arrays;
@@ -44,15 +46,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
     let mut methods: Vec<Method> =
         (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
-    for index in (0..types.len()).filter(|&t| lowering.has_static_init(t)) {
-        methods.push(lowering.clinit(index)?);
-    }
-    for index in (0..types.len()).filter(|&t| lowering.types[t].node.kind() == "ENUM") {
-        lowering.constant_bodies(index, &mut methods)?;
-        lowering.check_enum(index, &methods)?;
-        let constants = lowering.enum_constants(index, &types[index].fields, &methods)?;
-        types[index].enum_constants = Some(constants);
-    }
+    lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
     let hierarchy = Hierarchy::new(&types, &methods);
     let class = Class { name: first.str("simpleName").to_string(), types, methods, hierarchy };
     enums::check_nulls(&class)?;
@@ -124,7 +118,14 @@ impl<'t> Node<'t> {
         })
     }
 
+    /// Whether the declaration has a modifier. `STATIC` comes from the declaration's symbol when it
+    /// has one, which also knows the implicit modifier of an interface's fields and nested types.
     fn has_flag(self, flag: &str) -> bool {
+        if flag == "STATIC"
+            && let Some(s) = self.get("symbol").and_then(|s| s.0["static"].as_bool())
+        {
+            return s;
+        }
         self.get("modifiers")
             .is_some_and(|m| m.0["flags"].as_array().is_some_and(|f| f.iter().any(|x| x == flag)))
     }
@@ -158,6 +159,23 @@ struct Lowering<'t> {
 }
 
 impl<'t> Lowering<'t> {
+    /// What lowering adds once every declared method is lowered, for a file and a whole program
+    /// alike: the `<clinit>` of each class with static initialization, and each enum's constant
+    /// bodies and constants. An error comes with the index of the type it is in.
+    fn finish_types(&self, types: &mut [TypeDecl], methods: &mut Vec<Method>) -> Result<(), (usize, Error)> {
+        for index in (0..types.len()).filter(|&t| self.has_static_init(t)) {
+            methods.push(self.clinit(index).map_err(|e| (index, e))?);
+        }
+        for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
+            let in_type = |e| (index, e);
+            self.constant_bodies(index, methods).map_err(in_type)?;
+            self.check_enum(index, methods).map_err(in_type)?;
+            let constants = self.enum_constants(index, &types[index].fields, methods).map_err(in_type)?;
+            types[index].enum_constants = Some(constants);
+        }
+        Ok(())
+    }
+
     fn method(&self, index: usize) -> Result<Method, Error> {
         let info = &self.methods[index];
         let node = info.node;
@@ -197,7 +215,10 @@ impl<'t> Lowering<'t> {
         // `constant_bodies` makes its body.
         let abstract_in_enum =
             node.has_flag("ABSTRACT") && self.enum_index(&self.types[info.owner].name).is_some();
-        let is_abstract = node.get("body").is_none() && node.has_flag("ABSTRACT") && !abstract_in_enum;
+        let in_interface = self.types[info.owner].node.kind() == "INTERFACE";
+        let is_abstract = node.get("body").is_none()
+            && (node.has_flag("ABSTRACT") || in_interface && !is_static)
+            && !abstract_in_enum;
         let mut body = match node.get("body") {
             Some(body) => self.block(body)?,
             None if abstract_in_enum || is_abstract => Vec::new(),
@@ -236,7 +257,10 @@ impl<'t> Lowering<'t> {
             "boolean" => Ok(Type::Boolean),
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
-            "java.lang.StringBuilder" => Ok(Type::StringBuilder),
+            "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
+            "java.nio.charset.Charset" => {
+                error(node.pos(), "a `Charset` outside `getBytes` or `new String` not supported yet")
+            }
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
@@ -498,7 +522,7 @@ impl<'t> Lowering<'t> {
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
-        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+        let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
             let resolved = self.method_index(&symbol);
@@ -549,8 +573,19 @@ impl<'t> Lowering<'t> {
                 args.insert(0, self.expr(receiver)?);
                 Builtin::StringCharAt
             }
+            ("java.lang.String", "getBytes") if args.len() <= 1 => {
+                let receiver = receiver.expect("an instance method has a receiver");
+                args.insert(0, self.expr(receiver)?);
+                Builtin::String(StringOp::GetBytes)
+            }
             ("java.lang.String", _) => return self.string_call(node, &symbol, receiver, args),
-            ("java.lang.StringBuilder" | "java.lang.AbstractStringBuilder" | "java.lang.CharSequence", _) => {
+            (
+                "java.lang.StringBuilder"
+                | "java.lang.StringBuffer"
+                | "java.lang.AbstractStringBuilder"
+                | "java.lang.CharSequence",
+                _,
+            ) => {
                 return self.builder_call(node, &symbol, receiver, args);
             }
             (owner, name) if unsigned::is_unsigned_method(owner, name) => {
@@ -573,7 +608,13 @@ impl<'t> Lowering<'t> {
                 if symbol.is_static {
                     return Ok(ExprKind::Call { name, args, resolved });
                 }
-                let is_super = receiver.is_some_and(|r| r.kind() == "IDENTIFIER" && r.str("name") == "super");
+                // `super.m()`, or `Iface.super.m()` for a default method of an interface.
+                let is_super = receiver.is_some_and(|r| {
+                    r.kind() == "IDENTIFIER" && r.str("name") == "super"
+                        || r.kind() == "MEMBER_SELECT"
+                            && r.str("identifier") == "super"
+                            && self.types[self.current.get()].node.kind() != "INTERFACE"
+                });
                 let receiver = match receiver {
                     Some(r) if is_super => {
                         let ty = self.ty(r, r.java_type())?;
