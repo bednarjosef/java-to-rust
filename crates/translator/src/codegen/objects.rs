@@ -309,6 +309,14 @@ impl<'a> Gen<'a> {
                     (format!("{obj}.borrow().{field}"), true)
                 }
             }
+            // An element of a plain array is a place too.
+            ExprKind::Index(..) => {
+                let text = self.expr(e).receiver();
+                match text.strip_suffix(".clone()") {
+                    Some(place) => (place.to_string(), true),
+                    None => (text, false),
+                }
+            }
             _ => (self.expr(e).receiver(), false),
         }
     }
@@ -673,7 +681,14 @@ impl<'a> Gen<'a> {
             _ => return None,
         };
         let Place::Field { object, name } = target else { return None };
-        if !matches!(object.kind, ExprKind::This | ExprKind::Var(_)) {
+        // Java takes the object before the value, which Rust computes first: another object
+        // expression is only written in place when neither has effects.
+        let stable = matches!(object.kind, ExprKind::This | ExprKind::Var(_));
+        let pure_value = match how {
+            Update::Assign(value) | Update::Compound(_, value) => !has_effects(value),
+            Update::Step(_) => true,
+        };
+        if !stable && (has_effects(object) || !pure_value) {
             return None;
         }
         let ty = e.ty;

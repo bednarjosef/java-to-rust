@@ -1744,3 +1744,29 @@ fn objects_that_may_be_null_print_as_null() {
         ],
     );
 }
+
+#[test]
+fn arrays_whose_elements_may_be_null_hold_options() {
+    let rust = translate(
+        "class A {
+            public static void main(String[] a) {
+                String[] words = new String[3];
+                words[1] = \"mid\";
+                System.out.println(words[0] + words[1]);
+                int[][] rows = new int[2][];
+                rows[0] = new int[] {1, 2};
+                System.out.println(rows[1] == null);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "let mut words: Vec<Option<String>> = vec![None; 3];",
+            "words[1] = Some(String::from(\"mid\"));",
+            "java::println!(\"{}{}\", words[0].as_deref().unwrap_or(\"null\"), words[1].as_deref().unwrap_or(\"null\"));",
+            "let rows: java::Array<Option<java::Array<i32>>> = java::filled(2, None);",
+            "java::println!(\"{}\", java::get(&rows, 1).is_none());",
+        ],
+    );
+}

@@ -16,11 +16,6 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ArrayLit(items));
         }
         let sizes = node.list("dimensions").map(|d| self.expr(d)).collect::<Result<Vec<_>, _>>()?;
-        // An element that is not given a size is `null`, which is not supported yet; neither is
-        // a `String` element, which a `new` always leaves `null`.
-        if sizes.len() < depth(ty) || leaf(ty) == Type::String {
-            return unsupported(node, "null");
-        }
         Ok(ExprKind::NewArray(sizes))
     }
 
@@ -84,14 +79,6 @@ pub(super) fn reads_name(body: &[Stmt], name: &str) -> bool {
         visit_stmt(stmt, &mut |e| found |= mentions(e, name), &mut |_| {});
     }
     found
-}
-
-/// How many array levels a type has: 0 for `int`, 2 for `int[][]`.
-fn depth(ty: Type) -> usize {
-    match ty {
-        Type::Array(element) => 1 + depth(*element),
-        _ => 0,
-    }
 }
 
 /// The type of the innermost elements: `int` for `int[][]`.

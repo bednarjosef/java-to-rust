@@ -100,7 +100,7 @@ impl<'a> Gen<'a> {
             ExprKind::Cast(_, inner) => self.option_ref(inner),
             // In a format, a field is borrowed until the text is formatted, after every operand,
             // so it is borrowed only when no operand has effects.
-            ExprKind::Field { .. } if !self.formatting || self.lazy_text => {
+            ExprKind::Field { .. } | ExprKind::Index(..) if !self.formatting || self.lazy_text => {
                 format!("{}.as_deref()", self.object_place(e))
             }
             _ => format!("{}.as_deref()", self.expr(e).at(ATOM)),
@@ -123,10 +123,15 @@ impl<'a> Gen<'a> {
             let test = if matches!(op, BinOp::Ne) { "is_some" } else { "is_none" };
             let text = match &other.kind {
                 // A variable or field is tested where it is, without a copy.
-                ExprKind::Var(_) | ExprKind::Field { .. } => format!("{}.{test}()", self.object_place(other)),
+                ExprKind::Var(_) | ExprKind::Field { .. } | ExprKind::Index(..) => {
+                    format!("{}.{test}()", self.object_place(other))
+                }
                 ExprKind::Static { class, name } if self.init_call(*class).is_none() => {
                     let cell = cell_name(&self.class.types[*class].name, name);
                     format!("{cell}.with_borrow(Option::{test})")
+                }
+                _ if matches!(other.ty, Type::Class(_) | Type::Array(_)) => {
+                    format!("{}.{test}()", self.expr(other).at(ATOM))
                 }
                 _ => format!("{}.{test}()", self.option_ref(other)),
             };

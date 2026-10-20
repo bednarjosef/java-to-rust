@@ -146,6 +146,10 @@ fn corpus_matches_java() {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
+    // A program that no longer compiles must not run the binary of an earlier build.
+    for p in &programs {
+        let _ = std::fs::remove_file(work.join("target/debug").join(&p.name));
+    }
     let build = Command::new("cargo")
         .args(["build", "--bins", "--keep-going", "--message-format=short", "--target-dir"])
         .arg(work.join("target"))

@@ -61,6 +61,9 @@ pub struct Facts {
     pub nullable_fields: HashSet<(String, String)>,
     /// String and object static fields, as (class index, field), that can hold null.
     pub nullable_statics: HashSet<(usize, String)>,
+    /// The element types (strings, objects and arrays) whose arrays can hold null: their
+    /// elements are `Option`s, in every array of that element type.
+    pub nullable_elements: HashSet<Type>,
     /// Array locals, as (method, name), that no other name can see: plain `Vec`s. The flag says
     /// whether an element of the array is ever assigned.
     pub plain_arrays: HashMap<(usize, String), bool>,

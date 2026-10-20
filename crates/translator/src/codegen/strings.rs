@@ -9,7 +9,22 @@ impl<'a> Gen<'a> {
             ExprKind::Str(s) => rust_string(s),
             ExprKind::Var(name) if self.borrowed.contains(name) => self.local(name),
             ExprKind::Var(name) => format!("&{}", self.local(name)),
+            ExprKind::Field { object, .. } if self.field_in_place(object) => {
+                format!("&{}", self.object_place(e))
+            }
             _ => format!("&{}", self.expr(e).at(UNARY)),
+        }
+    }
+
+    /// Whether a string field of `object` can be borrowed where it is for as long as the statement
+    /// runs: an immutable object never changes, and a shared object's borrow is scoped where the
+    /// statement may change it (see `conflicts`). An owned object, or `this` borrowed by a method,
+    /// may be changed by a call in the same statement, which the borrow would forbid.
+    pub(super) fn field_in_place(&self, object: &Expr) -> bool {
+        match object.ty {
+            Type::Class(name) if self.facts.immutable.contains(name) => true,
+            Type::Class(_) => !self.is_plain(object),
+            _ => false,
         }
     }
 
@@ -18,6 +33,7 @@ impl<'a> Gen<'a> {
         match &e.kind {
             ExprKind::Str(s) => rust_string(s),
             ExprKind::Var(name) => self.local(name),
+            ExprKind::Field { object, .. } if self.field_in_place(object) => self.object_place(e),
             _ => self.expr(e).at(CMP + 1),
         }
     }

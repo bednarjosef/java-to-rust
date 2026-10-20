@@ -141,10 +141,6 @@ impl<'t> Lowering<'t> {
     fn field(&self, node: Node<'t>) -> Result<Field, Error> {
         let ty = self.ty(node, node.symbol().map_or("", |s| s.ty))?;
         let init = node.get("initializer");
-        // Java gives these fields `null`, which is not supported yet for arrays.
-        if init.is_none() && matches!(ty, Type::Array(_)) {
-            return unsupported(node, "null");
-        }
         let constant = Self::is_constant(node);
         let init = if constant {
             let text = node.symbol().and_then(|s| s.constant).unwrap_or_default();

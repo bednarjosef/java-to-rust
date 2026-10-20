@@ -78,6 +78,19 @@ impl Type {
         }
     }
 
+    /// The element type of an array type.
+    pub fn element(self) -> Type {
+        match self {
+            Type::Array(elem) => *elem,
+            _ => unreachable!("an element of a type that is not an array: {self}"),
+        }
+    }
+
+    /// The type of `levels` nested elements: `int[]` for `int[][][]` at 2.
+    pub fn element_at(self, levels: usize) -> Type {
+        (0..levels).fold(self, |ty, _| ty.element())
+    }
+
     /// Whether values of this type are references (and so can be `null`). An enum value is not:
     /// Rust's enum is a plain value, and `null` enums are rejected.
     pub fn is_reference(self) -> bool {

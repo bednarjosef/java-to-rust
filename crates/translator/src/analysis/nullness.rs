@@ -22,7 +22,9 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             facts.nullable_returns.len(),
             facts.nullable_fields.len(),
             facts.nullable_statics.len(),
+            facts.nullable_elements.len(),
         );
+        let mut elements = Vec::new();
         let mut vars = Vec::new();
         let mut params = Vec::new();
         let mut declared = Vec::new();
@@ -44,8 +46,19 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                                     }
                                 }
                                 Place::Static { class, name } => statics.push((*class, name.clone())),
-                                Place::Index(..) => {}
+                                Place::Index(array, _) => elements.push(array.ty.element()),
                             }
+                        }
+                        // `new T[n]` leaves its strings and objects null, and `new T[n][]` its
+                        // arrays.
+                        ExprKind::NewArray(sizes) => {
+                            let elem = x.ty.element_at(sizes.len());
+                            if elem.is_reference() {
+                                elements.push(elem);
+                            }
+                        }
+                        ExprKind::ArrayLit(items) if items.iter().any(|item| maybe_null(facts, m, item)) => {
+                            elements.push(x.ty.element());
                         }
                         ExprKind::Call { args, resolved: Some(callee), .. }
                         | ExprKind::MethodCall { args, resolved: Some(callee), .. }
@@ -67,6 +80,11 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                         declared.push((m, name.clone()));
                     }
                     Stmt::Return(Some(value), _) if maybe_null(facts, m, value) => returns.push(m),
+                    Stmt::ForEach { name, array, .. }
+                        if facts.nullable_elements.contains(&array.ty.element()) =>
+                    {
+                        declared.push((m, name.clone()));
+                    }
                     _ => {}
                 };
                 visit_stmt(stmt, &mut on_expr, &mut on_stmt);
@@ -95,11 +113,13 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
         facts.nullable_returns.extend(returns);
         facts.nullable_fields.extend(fields);
         facts.nullable_statics.extend(statics);
+        facts.nullable_elements.extend(elements);
         let after = (
             facts.nullable_vars.len(),
             facts.nullable_returns.len(),
             facts.nullable_fields.len(),
             facts.nullable_statics.len(),
+            facts.nullable_elements.len(),
         );
         if before == after {
             break;
@@ -107,10 +127,10 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
     }
 }
 
-/// The fields whose nullness is analyzed: strings and objects. A string field without an
-/// initializer is rejected by lowering, and a boxed field is always an `Option`.
+/// The fields whose nullness is analyzed: strings, arrays and objects. A boxed field is always an
+/// `Option`.
 fn may_be_unset(ty: Type) -> bool {
-    matches!(ty, Type::String | Type::Class(_))
+    matches!(ty, Type::String | Type::Array(_) | Type::Class(_))
 }
 
 /// Whether every constructor of class `t` sets the field `name` to a value that is not null
@@ -180,9 +200,12 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
             matches!(object.ty, Type::Class(owner) if facts.nullable_fields.contains(&(owner.to_string(), name.clone())))
         }
         ExprKind::Static { class, name } => facts.nullable_statics.contains(&(*class, name.clone())),
-        ExprKind::Assign { op: None, target: Place::Field { .. } | Place::Static { .. }, value } => {
-            maybe_null(facts, m, value)
-        }
+        ExprKind::Index(array, _) => facts.nullable_elements.contains(&array.ty.element()),
+        ExprKind::Assign {
+            op: None,
+            target: Place::Field { .. } | Place::Static { .. } | Place::Index(..),
+            value,
+        } => maybe_null(facts, m, value),
         _ => false,
     }
 }

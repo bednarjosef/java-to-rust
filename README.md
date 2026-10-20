@@ -131,7 +131,9 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   and size errors go through `java::throw`, so they exit with code 1 as Java does. A parameter
   becomes `&[T]` or `&mut [T]` when every call passes a distinct plain array, and a counting loop
   that only reads `a[i]` becomes `for x in a.iter().cloned()`. Arrays that are returned, copied,
-  or given to `java.util.Arrays` stay shared for now.
+  or given to `java.util.Arrays` stay shared for now. Arrays of strings, objects or arrays hold
+  `Option`s when some array of that element type may hold null (`new String[n]`,
+  `new int[n][]`, or a stored value that may be null), and plain values otherwise.
 - Objects follow the same pattern (`analysis/objects.rs`, `analysis/owned.rs`, `analysis/borrowing.rs`). The faithful
   form of an object is `Rc<RefCell<C>>`, because Java references are shared and mutable. A class
   whose objects never change after construction is shared as `Rc<C>`. A class whose objects are

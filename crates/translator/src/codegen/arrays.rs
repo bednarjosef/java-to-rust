@@ -11,7 +11,7 @@ impl<'a> Gen<'a> {
     pub(super) fn ty_name(&mut self, ty: Type) -> String {
         match ty {
             Type::Array(elem) => {
-                let elem = self.ty_name(*elem);
+                let elem = self.element_ty_name(*elem);
                 format!("{}<{elem}>", self.runtime("Array"))
             }
             Type::Class(name) => self.object_type(name),
@@ -19,6 +19,28 @@ impl<'a> Gen<'a> {
             Type::Boxed(_) => self.boxed_name(ty),
             _ => rust_type(ty).to_string(),
         }
+    }
+
+    /// The Rust type of an array element of type `elem`: an `Option` where arrays of it may hold
+    /// null.
+    pub(super) fn element_ty_name(&mut self, elem: Type) -> String {
+        let name = self.ty_name(elem);
+        if self.nullable_element(elem) { format!("Option<{name}>") } else { name }
+    }
+
+    /// Whether elements of type `elem` may be null, in any array.
+    pub(super) fn nullable_element(&self, elem: Type) -> bool {
+        self.facts.nullable_elements.contains(&elem)
+    }
+
+    /// `e` as an element of type `elem`: in `Some` where the elements may be null.
+    fn element_value(&mut self, e: &'a Expr, elem: Type) -> String {
+        if self.nullable_element(elem) { self.optional_to(e, elem).text } else { self.value(e, elem).text }
+    }
+
+    /// The value of a new array's elements: zero, `false`, or `None` for references.
+    fn element_zero(&self, elem: Type) -> &'static str {
+        if elem.is_reference() { "None" } else { zero_value(elem) }
     }
 
     /// Whether the local `name` is a plain array: `Some` with whether its elements are written.
@@ -36,7 +58,7 @@ impl<'a> Gen<'a> {
     /// The type of an array parameter that the aliasing analysis borrows: a slice.
     pub(super) fn borrowed_ty(&mut self, ty: Type, written: bool) -> String {
         let Type::Array(elem) = ty else { unreachable!("only arrays are borrowed") };
-        let elem = self.ty_name(*elem);
+        let elem = self.element_ty_name(*elem);
         if written { format!("&mut [{elem}]") } else { format!("&[{elem}]") }
     }
 
@@ -49,7 +71,7 @@ impl<'a> Gen<'a> {
                 unreachable!("borrowed arguments are names or literals")
             };
             let elem = element(e.ty);
-            let items: Vec<String> = items.iter().map(|item| self.value(item, elem).text).collect();
+            let items: Vec<String> = items.iter().map(|item| self.element_value(item, elem)).collect();
             let mutably = if written { "mut " } else { "" };
             return format!("&{mutably}[{}]", items.join(", "));
         };
@@ -93,8 +115,15 @@ impl<'a> Gen<'a> {
 
     /// `e` as a borrowed array handle, for the runtime helpers that take `&Array`.
     fn handle(&mut self, e: &'a Expr) -> String {
+        if self.nullable(e) {
+            // Using a null array throws `NullPointerException`.
+            let place = self.object_place(e);
+            return format!("{}({place}.as_ref())", self.runtime("non_null"));
+        }
         match &e.kind {
             ExprKind::Var(name) => format!("&{}", self.local(name)),
+            // A field is borrowed where it is, without a copy of the handle.
+            ExprKind::Field { .. } => format!("&{}", self.object_place(e)),
             _ => format!("&{}", self.expr(e).at(UNARY)),
         }
     }
@@ -104,22 +133,22 @@ impl<'a> Gen<'a> {
         let mutable = if written { "mut " } else { "" };
         let rust = self.local(name);
         let elem = element(ty);
-        let elem_ty = self.ty_name(elem);
+        let elem_ty = self.element_ty_name(elem);
         let init = init.expect("analysis gives plain arrays an initializer");
         let text = match &init.kind {
             ExprKind::NewArray(sizes) => {
                 let [size] = sizes.as_slice() else { unreachable!("analysis keeps one-dimensional arrays") };
                 match size.kind {
                     // A size that is not negative needs no check.
-                    ExprKind::Int(n) if n >= 0 => format!("vec![{}; {n}]", zero_value(elem)),
+                    ExprKind::Int(n) if n >= 0 => format!("vec![{}; {n}]", self.element_zero(elem)),
                     _ => {
                         let n = self.value(size, Type::Int).text;
-                        format!("{}({n}, {})", self.runtime("new_vec"), zero_value(elem))
+                        format!("{}({n}, {})", self.runtime("new_vec"), self.element_zero(elem))
                     }
                 }
             }
             ExprKind::ArrayLit(items) => {
-                let items: Vec<String> = items.iter().map(|item| self.value(item, elem).text).collect();
+                let items: Vec<String> = items.iter().map(|item| self.element_value(item, elem)).collect();
                 format!("vec![{}]", items.join(", "))
             }
             _ => unreachable!("analysis keeps only fresh arrays in plain locals"),
@@ -157,7 +186,7 @@ impl<'a> Gen<'a> {
     /// `new T[n]`, or `new T[n][m]` and so on. Every size is evaluated, and checked, before any
     /// array is allocated, as Java does.
     pub(super) fn new_array(&mut self, ty: Type, sizes: &'a [Expr]) -> Code {
-        let zero = zero_value(leaf(ty));
+        let zero = self.element_zero(ty.element_at(sizes.len()));
         if let [size] = sizes {
             let n = self.value(size, Type::Int).text;
             return Code::atom(format!("{}({n}, {zero})", self.runtime("filled")));
@@ -175,7 +204,7 @@ impl<'a> Gen<'a> {
     /// `{a, b}` and `new T[] {a, b}`.
     pub(super) fn array_lit(&mut self, ty: Type, items: &'a [Expr]) -> Code {
         let elem = element(ty);
-        let items: Vec<String> = items.iter().map(|item| self.value(item, elem).text).collect();
+        let items: Vec<String> = items.iter().map(|item| self.element_value(item, elem)).collect();
         Code::atom(format!("{}(vec![{}])", self.runtime("from_vec"), items.join(", ")))
     }
 
@@ -196,7 +225,7 @@ impl<'a> Gen<'a> {
         }
         let handle = self.handle(array);
         let i = self.value(index, Type::Int).text;
-        let v = self.value(rhs, ty).text;
+        let v = self.element_value(rhs, ty);
         let helper = if used { "store" } else { "set" };
         format!("{}({handle}, {i}, {v})", self.runtime(helper))
     }
@@ -215,11 +244,11 @@ impl<'a> Gen<'a> {
     ) -> String {
         if !used && self.facts.in_bounds.contains(&id) && rust_order_is_same(index, Some(rhs)) {
             let k = self.position(index);
-            let v = self.value(rhs, ty).text;
+            let v = self.element_value(rhs, ty);
             return format!("{a}[{k}] = {v}");
         }
         let i = self.value(index, Type::Int).text;
-        let v = self.value(rhs, ty).text;
+        let v = self.element_value(rhs, ty);
         let put = self.runtime("put");
         let mr = self.mut_ref(a);
         if !mentions(index, name) && !mentions(rhs, name) {
@@ -372,6 +401,13 @@ impl<'a> Gen<'a> {
 
     /// The new element of `a[i] op= rhs`, written in terms of the old element `old`.
     fn element_update(&mut self, op: BinOp, ty: Type, rhs: &'a Expr, id: ExprId, old: &str) -> String {
+        if ty == Type::String && self.nullable_element(ty) {
+            // A null element shows as `null`.
+            let shown = format!("{}({old}.as_deref())", self.runtime("or_null"));
+            let mut parts = vec![Part::Arg(Code::atom(shown))];
+            self.parts(rhs, &mut parts);
+            return format!("Some({})", self.format("format!", parts).text);
+        }
         if ty == Type::String {
             let mut parts = vec![Part::Arg(Code::atom(old))];
             self.parts(rhs, &mut parts);
@@ -446,13 +482,16 @@ impl<'a> Gen<'a> {
         match builtin {
             Builtin::ArraysToString => {
                 let show = match elem {
+                    Type::String if self.nullable_element(elem) => {
+                        "|v| v.unwrap_or_else(|| String::from(\"null\"))".to_string()
+                    }
                     Type::String => "|v| v".to_string(),
                     _ => format!("|v| {}.to_string()", self.shown(elem, "v".to_string())),
                 };
                 Code::atom(format!("{}({handle}, {show})", self.runtime("to_string")))
             }
             Builtin::ArraysFill => {
-                let v = self.value(&args[1], elem).text;
+                let v = self.element_value(&args[1], elem);
                 Code::atom(format!("{}({handle}, {v})", self.runtime("fill")))
             }
             Builtin::ArraysSort => {
@@ -505,9 +544,9 @@ fn simple_index(index: &Expr) -> bool {
 }
 
 /// `a[i]` of a plain array for an index that is in bounds, where `index` is already a `usize`. A
-/// `String` is cloned, since it cannot be moved out of the `Vec`.
+/// string, array or object is cloned, since it cannot be moved out of the `Vec`.
 fn read_in_bounds(a: &str, index: &str, elem: Type) -> String {
-    let clone = if elem == Type::String { ".clone()" } else { "" };
+    let clone = if needs_clone(elem) { ".clone()" } else { "" };
     format!("{a}[{index}]{clone}")
 }
 
@@ -535,14 +574,6 @@ fn element(ty: Type) -> Type {
     match ty {
         Type::Array(elem) => *elem,
         _ => unreachable!("lowering gives arrays array types"),
-    }
-}
-
-/// The type of the innermost elements: `int` for `int[][]`.
-fn leaf(ty: Type) -> Type {
-    match ty {
-        Type::Array(elem) => leaf(*elem),
-        _ => ty,
     }
 }
 
