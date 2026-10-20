@@ -119,7 +119,9 @@ impl Arg {
             | ExprKind::SuperInit { .. }
             | ExprKind::Assign { .. }
             | ExprKind::IncDec { .. }
-            | ExprKind::Builtin(Builtin::ArraysFill | Builtin::ArraysSort, _) => effects = true,
+            | ExprKind::Builtin(Builtin::ArraysFill | Builtin::ArraysSort | Builtin::Arrays(_), _) => {
+                effects = true
+            }
             _ => {}
         });
         let name = match &e.kind {

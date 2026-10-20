@@ -42,7 +42,7 @@ fn out_of_bounds(index: i32, length: i32) -> ! {
     throw("java.lang.StringIndexOutOfBoundsException", &message)
 }
 
-fn scalar(c: u16) -> Option<char> {
+pub(super) fn scalar(c: u16) -> Option<char> {
     char::from_u32(c as u32)
 }
 

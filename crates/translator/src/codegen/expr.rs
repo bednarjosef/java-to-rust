@@ -283,6 +283,9 @@ impl<'a> Gen<'a> {
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(_)) => {
                 self.identity(*op, l, r)
             }
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Array(_)) => {
+                self.array_identity(*op, l, r)
+            }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
                 if self.faithful_box(l.ty) && r.ty == l.ty =>
             {
@@ -471,6 +474,7 @@ impl<'a> Gen<'a> {
             Builtin::ArraysToString | Builtin::ArraysFill | Builtin::ArraysSort | Builtin::ArraysCopyOf => {
                 self.arrays_builtin(builtin, args)
             }
+            Builtin::Arrays(op) => self.arrays_op(op, args),
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
                 let outer = std::mem::replace(&mut self.printing, true);
@@ -486,6 +490,7 @@ impl<'a> Gen<'a> {
             }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
             Builtin::CharNumericValue => self.char_numeric_value(args),
+            Builtin::CharDigit | Builtin::CharForDigit => self.character_radix(builtin, args),
             Builtin::Exit => {
                 let code = self.value(&args[0], Type::Int);
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
@@ -538,7 +543,14 @@ impl<'a> Gen<'a> {
             | Builtin::CharIsUpperCase
             | Builtin::CharIsLowerCase
             | Builtin::CharToUpperCase
-            | Builtin::CharToLowerCase => self.char_builtin(builtin, args, id),
+            | Builtin::CharToLowerCase
+            | Builtin::CharIsWhitespace
+            | Builtin::CharIsSpaceChar
+            | Builtin::CharIsLetterOrDigit
+            | Builtin::CharIsAlphabetic
+            | Builtin::CharIsSurrogate
+            | Builtin::CharIsHighSurrogate
+            | Builtin::CharIsLowSurrogate => self.char_builtin(builtin, args, id),
             Builtin::Native(native) => self.native(native, args, ty),
         }
     }
