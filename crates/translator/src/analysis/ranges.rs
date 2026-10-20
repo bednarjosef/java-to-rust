@@ -14,6 +14,7 @@
 //! Each arithmetic operation is checked against its type's bounds on the final fixpoint; one
 //! that stays within them on every path cannot overflow.
 
+use super::constants::static_value;
 use super::Facts;
 use crate::ast::*;
 use crate::types::binary_type;
@@ -958,7 +959,11 @@ impl<'a> Analysis<'a> {
                 }
                 other
             }
-            ExprKind::This | ExprKind::Static { .. } => other,
+            ExprKind::Static { class, name } => match static_value(self.class, *class, name) {
+                Some(v) => Interval::point(v),
+                None => other,
+            },
+            ExprKind::This => other,
             ExprKind::Field { object, .. } => {
                 self.expr(object, env);
                 other
