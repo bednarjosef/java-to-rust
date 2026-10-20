@@ -40,7 +40,9 @@ impl<'a> Gen<'a> {
         // formatted, after every operand; that is Java's order only when no operand has effects.
         let lazy = !self.effects_besides_text(e);
         let outer = std::mem::replace(&mut self.lazy_text, lazy);
+        let formatting = std::mem::replace(&mut self.formatting, true);
         self.concat_parts(e, &assigned, out);
+        self.formatting = formatting;
         self.lazy_text = outer;
     }
 
@@ -84,6 +86,12 @@ impl<'a> Gen<'a> {
             ExprKind::Float(v) => out.push(Part::Lit(java_runtime::float_to_string(*v))),
             ExprKind::Char(c) => out.push(Part::Lit(java_runtime::char_to_string(*c))),
             ExprKind::Var(name) if e.ty == Type::String => out.push(Part::Arg(Code::atom(self.local(name)))),
+            // A string field is formatted where it is, when nothing can change it first.
+            ExprKind::Field { object, .. }
+                if e.ty == Type::String && self.lazy_text && !matches!(object.ty, Type::Enum(_)) =>
+            {
+                out.push(Part::Arg(Code::atom(self.object_place(e))))
+            }
             _ => {
                 let code = self.expr(e);
                 if let Some(literal) = code.literal {
@@ -109,7 +117,7 @@ impl<'a> Gen<'a> {
             ExprKind::Binary(BinOp::Add, l, r) if e.ty == Type::String => {
                 self.effects_besides_text(l) || self.effects_besides_text(r)
             }
-            _ => null::has_effects(e),
+            _ => has_effects(e),
         }
     }
 

@@ -3,7 +3,6 @@
 //! that no `RefCell` borrow outlives the expression that made it. Static fields live in
 //! thread-local cells, which are initialized on first use.
 
-use super::null::has_effects;
 use super::*;
 
 /// What an assignment, `++` or `--` does to a field or static field.
@@ -91,7 +90,7 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Double | Type::Float => "0.0",
         Type::Boolean => "false",
         Type::String => "String::new()",
-        Type::Boxed(_) => "None",
+        Type::Boxed(_) | Type::Class(_) => "None",
         _ => unreachable!("lowering rejects fields of type {ty}"),
     }
 }
@@ -164,18 +163,6 @@ fn uses_this(stmts: &[Stmt]) -> bool {
     found
 }
 
-/// Whether a constructor starts by calling another one with `this(...)`.
-pub(super) fn delegates(m: &Method) -> bool {
-    matches!(m.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })))
-}
-
-/// Whether an expression reads or uses `this`.
-pub(super) fn mentions_this(e: &Expr) -> bool {
-    let mut found = false;
-    visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::This));
-    found
-}
-
 /// Whether two expressions are the same `this` or local.
 fn same_object(a: &Expr, b: &Expr) -> bool {
     match (&a.kind, &b.kind) {
@@ -202,6 +189,12 @@ fn changes_object(e: &Expr, object: &Expr, mutating: &HashSet<usize>) -> bool {
 }
 
 /// Whether an expression reads a field of an object of class `name` or turns one into text.
+fn reads_static(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::Static { .. }));
+    found
+}
+
 fn reads_class(e: &Expr, name: &str) -> bool {
     let of_class = |x: &Expr| matches!(x.ty, Type::Class(c) if c == name);
     let mut found = false;
@@ -258,23 +251,133 @@ impl<'a> Gen<'a> {
         self.facts.owned.contains(name) || self.facts.plain_constructors.contains(name)
     }
 
-    /// Whether the field initializers of class `t` are written into its one constructor's struct
+    /// Whether the field initializers of class `t` are written into each constructor's struct
     /// literal, rather than run by a `field_inits` method that every constructor calls.
     pub(super) fn inline_inits(&self, t: usize) -> bool {
-        let decl = &self.class.types[t];
-        let building =
-            self.class.methods.iter().filter(|m| m.is_ctor && m.class == t && !delegates(m)).count();
-        self.builds_plain(&decl.name)
-            && building == 1
-            && decl.fields.iter().filter_map(|f| f.init.as_ref()).all(|e| !mentions_this(e))
+        crate::analysis::inline_initializers(self.class, t, self.facts)
     }
 
-    /// The text of an object used for a field access: `this`, a variable, or an expression.
+    /// Whether the field `name` of class `owner` can hold null, so that it is an `Option`.
+    pub(super) fn field_nullable(&self, owner: &str, name: &str) -> bool {
+        self.facts.nullable_fields.contains(&(owner.to_string(), name.to_string()))
+    }
+
+    /// Whether a field or static field can hold null.
+    pub(super) fn place_nullable(&self, place: &Place) -> bool {
+        match place {
+            Place::Field { object, name } => {
+                matches!(object.ty, Type::Class(owner) if self.field_nullable(owner, name))
+            }
+            Place::Static { class, name } => self.facts.nullable_statics.contains(&(*class, name.clone())),
+            Place::Var(_) | Place::Index(..) => false,
+        }
+    }
+
+    /// The text of an object used for a field access or a call: `this`, a variable, or an
+    /// expression. Dereferencing a reference that may be null throws `NullPointerException`; the
+    /// result is then a `&Rc<..>` when the reference is a place, else the `Rc` itself.
     pub(super) fn object(&mut self, e: &'a Expr) -> String {
+        let (text, place) = self.object_parts(e);
+        if !(matches!(e.ty, Type::Class(_)) && self.nullable(e)) {
+            return text;
+        }
+        let non_null = self.runtime("non_null");
+        if place { format!("{non_null}({text}.as_ref())") } else { format!("{non_null}({text})") }
+    }
+
+    /// The text of a reference as it is stored, without a clone: `this`, a variable, a field, or
+    /// an expression. A reference that may be null is an `Option` here.
+    pub(super) fn object_place(&mut self, e: &'a Expr) -> String {
+        self.object_parts(e).0
+    }
+
+    /// `object_place`, and whether the text is a place that can be borrowed rather than a value.
+    fn object_parts(&mut self, e: &'a Expr) -> (String, bool) {
         match &e.kind {
-            ExprKind::This => self.this_name().to_string(),
-            ExprKind::Var(name) => self.local(name),
-            _ => self.expr(e).receiver(),
+            ExprKind::This => (self.this_name().to_string(), true),
+            ExprKind::Var(name) => (self.local(name), true),
+            ExprKind::Field { object, name } if !matches!(object.ty, Type::Enum(_)) => {
+                let field = snake_case(name);
+                let obj = self.object(object);
+                if self.is_plain(object) {
+                    (format!("{obj}.{field}"), true)
+                } else if self.guarded {
+                    // A borrow that the statement must not hold is ended inside braces, which
+                    // move the value out, so it is cloned.
+                    (format!("{{ {obj}.borrow().{field}.clone() }}"), true)
+                } else {
+                    (format!("{obj}.borrow().{field}"), true)
+                }
+            }
+            _ => (self.expr(e).receiver(), false),
+        }
+    }
+
+    /// A non-null object as an `Rc` of its own, which holds no borrow: null throws
+    /// `NullPointerException`.
+    pub(super) fn object_handle(&mut self, e: &'a Expr) -> String {
+        let text = match &e.kind {
+            ExprKind::This => "this.clone()".to_string(),
+            ExprKind::Var(v) => format!("{}.clone()", self.local(v)),
+            _ => self.expr(e).text,
+        };
+        if matches!(e.ty, Type::Class(_)) && self.nullable(e) {
+            format!("{}({text})", self.runtime("non_null"))
+        } else {
+            text
+        }
+    }
+
+    /// An object reference as an `Option<&Rc<..>>`: `None` for null.
+    fn object_option(&mut self, e: &'a Expr) -> String {
+        match &e.kind {
+            ExprKind::Null => "None".to_string(),
+            _ if self.nullable(e) => format!("{}.as_ref()", self.object_place(e)),
+            _ => format!("Some({})", self.object_ref(e)),
+        }
+    }
+
+    /// A non-null object reference as a `&Rc<..>`. A variable narrowed by a null check already is.
+    fn object_ref(&mut self, e: &'a Expr) -> String {
+        match &e.kind {
+            ExprKind::Var(name) if self.borrowed.contains(name) => self.local(name),
+            _ => format!("&{}", self.object_place(e)),
+        }
+    }
+
+    /// `a == b` and `a != b` on objects: whether they are the same object, as `Rc::ptr_eq`, or
+    /// `java::same` where either may be null.
+    pub(super) fn identity(&mut self, op: BinOp, l: &'a Expr, r: &'a Expr) -> Code {
+        let same = if self.nullable(l) || self.nullable(r) {
+            let (a, b) = (self.object_option(l), self.object_option(r));
+            format!("{}({a}, {b})", self.runtime("same"))
+        } else {
+            let (a, b) = (self.object_ref(l), self.object_ref(r));
+            format!("Rc::ptr_eq({a}, {b})")
+        };
+        if op == BinOp::Ne { Code::new(format!("!{same}"), UNARY) } else { Code::atom(same) }
+    }
+
+    /// The text of a non-null object of `e`'s class, reached through `handle`, a `&Rc<..>`: what
+    /// `object_text` gives for an object that may be null once it is not.
+    pub(super) fn handle_text(&mut self, handle: &str, e: &'a Expr) -> String {
+        let index = self.to_string_index(e);
+        let mutating = self.facts.mutating.contains(&index);
+        let obj = match () {
+            _ if self.is_plain(e) => handle.to_string(),
+            _ if mutating => format!("{handle}.borrow_mut()"),
+            _ => format!("{handle}.borrow()"),
+        };
+        if self.displays(index) {
+            if self.lazy_text && !(self.printing && !self.quiet_text(e, 0)) {
+                return obj;
+            }
+            return format!("{obj}.to_string()");
+        }
+        if self.facts.self_methods.contains(&index) {
+            format!("{obj}.{}()", self.fn_names[index])
+        } else {
+            format!("{}({handle})", self.qualified_fn(index))
         }
     }
 
@@ -282,6 +385,17 @@ impl<'a> Gen<'a> {
     pub(super) fn receiver_ref(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             ExprKind::This => self.this_name().to_string(),
+            // A variable narrowed by a null check is a reference already.
+            ExprKind::Var(name) if matches!(e.ty, Type::Class(_)) && self.borrowed.contains(name) => {
+                self.local(name)
+            }
+            ExprKind::Var(_) | ExprKind::Field { .. }
+                if matches!(e.ty, Type::Class(_)) && self.nullable(e) =>
+            {
+                let (_, place) = self.object_parts(e);
+                let text = self.object(e);
+                if place { text } else { format!("&{text}") }
+            }
             _ => format!("&{}", self.object(e)),
         }
     }
@@ -343,13 +457,14 @@ impl<'a> Gen<'a> {
         let call = |index: usize, receiver: Option<&Expr>| {
             let mut counts = (0, 0);
             let shared = receiver.is_some_and(|r| !self.is_plain(r));
+            let writes = usize::from(self.facts.writers.contains(&index));
             if receiver.is_some() && !self.facts.self_methods.contains(&index) {
-                counts = (1, 1);
+                counts = (1, writes);
             } else if shared {
                 counts = (1, usize::from(self.facts.mutating.contains(&index)));
             }
             if !self.facts.isolated.contains(&index) {
-                counts = (counts.0 + 1, counts.1 + 1);
+                counts = (counts.0 + 1, counts.1 + writes);
             }
             counts
         };
@@ -489,7 +604,7 @@ impl<'a> Gen<'a> {
             ExprKind::This | ExprKind::Var(_) => self.object(receiver),
             _ => {
                 let temp = self.temp("object");
-                let text = self.expr(receiver).text;
+                let text = self.object_handle(receiver);
                 lines.push(format!("let {temp} = {text};"));
                 names.push(temp.clone());
                 temp
@@ -571,12 +686,13 @@ impl<'a> Gen<'a> {
         {
             return None;
         }
+        let nullable = self.place_nullable(target);
         let obj = self.object(object);
         let field = snake_case(name);
         if self.is_plain(object) {
             let place = format!("{obj}.{field}");
             return Some(match how {
-                Update::Assign(value) => format!("{place} = {}", self.field_value(value, ty)),
+                Update::Assign(value) => format!("{place} = {}", self.field_value(value, ty, nullable)),
                 Update::Compound(op, value) => self.compound(op, &place, ty, value, e.id),
                 Update::Step(increment) => self.step_place(place, ty, increment, e.id),
             });
@@ -585,20 +701,91 @@ impl<'a> Gen<'a> {
         // reads ends first.
         let place = format!("{obj}.borrow_mut().{field}");
         let outer = std::mem::replace(&mut self.guarded, true);
+        let Type::Class(class) = object.ty else { unreachable!("a field of an object") };
         let text = match how {
-            Update::Assign(value) => Some(format!("{place} = {}", self.field_value(value, ty))),
-            Update::Compound(op, value) => self.in_place_op(op, ty, value, e.id).map(|symbol| {
+            Update::Assign(value) => Some(format!("{place} = {}", self.field_value(value, ty, nullable))),
+            Update::Compound(op, value) if let Some(symbol) = self.in_place_op(op, ty, value, e.id) => {
                 let v = self.value(value, if op.is_shift() { value.ty } else { ty });
-                format!("{place} {symbol} {}", v.text)
-            }),
+                Some(format!("{place} {symbol} {}", v.text))
+            }
             Update::Step(increment) if ty.is_floating() || self.no_overflow(e.id) => {
                 let one = if ty.is_floating() { "1.0" } else { "1" };
                 Some(format!("{place} {} {one}", if increment { "+=" } else { "-=" }))
             }
-            Update::Step(_) => None,
+            // Wrapping needs the old value, read through the same borrow; the right operand must
+            // not borrow an object of the class meanwhile.
+            Update::Compound(_, value) if reads_class(value, class) => None,
+            Update::Compound(..) | Update::Step(_) => {
+                let local = self.temp(&field);
+                let marked = format!("({local})");
+                let step = match how {
+                    Update::Compound(op, value) => self.compound(op, &marked, ty, value, e.id),
+                    Update::Step(increment) => self.step_place(marked.clone(), ty, increment, e.id),
+                    Update::Assign(_) => unreachable!("handled above"),
+                };
+                let step = step.replacen(&format!("{marked} ="), &format!("*{local} ="), 1);
+                // A method call dereferences by itself.
+                let step = step.replace(&format!("{marked}."), &format!("{local}."));
+                let step = step.replace(&marked, &format!("(*{local})"));
+                Some(format!("{{ let {local} = &mut {place}; {step}; }}"))
+            }
         };
         self.guarded = outer;
         text
+    }
+
+    /// An assignment, `++` or `--` to a static field evaluated for its effect, as statements:
+    /// `COUNT.set(0)`, `COUNT.with_borrow_mut(|v| *v += 1)`. `None` where the general form of
+    /// `update` is needed: a compound assignment whose right operand has effects or reads a
+    /// static, which it would do while the cell is borrowed.
+    pub(super) fn static_effect(&mut self, e: &'a Expr) -> Option<Vec<String>> {
+        let (target, how) = match &e.kind {
+            ExprKind::Assign { op: None, target, value } => (target, Update::Assign(value)),
+            ExprKind::Assign { op: Some(op), target, value } => (target, Update::Compound(*op, value)),
+            ExprKind::IncDec { target, increment, .. } => (target, Update::Step(*increment)),
+            _ => return None,
+        };
+        let Place::Static { class, name } = target else { return None };
+        let ty = e.ty;
+        if matches!(ty, Type::Boxed(_)) && !matches!(how, Update::Assign(_)) {
+            return None;
+        }
+        if let Update::Compound(_, value) = how
+            && (ty == Type::String || has_effects(value) || reads_static(value))
+        {
+            return None;
+        }
+        let cell = cell_name(&self.class.types[*class].name, name);
+        let init = self.init_call(*class);
+        let mut lines = Vec::new();
+        match how {
+            Update::Assign(value) => {
+                let nullable = self.place_nullable(target);
+                let v = self.field_value(value, ty, nullable);
+                // Java computes the value before it initializes the class to write it.
+                match init {
+                    Some(init) => {
+                        let temp = self.temp("value");
+                        lines.push(format!("let {temp} = {v};"));
+                        lines.push(init);
+                        lines.push(format!("{cell}.set({temp});"));
+                    }
+                    None => lines.push(format!("{cell}.set({v});")),
+                }
+            }
+            Update::Compound(..) | Update::Step(_) => {
+                lines.extend(init);
+                let step = match how {
+                    Update::Compound(op, value) => self.compound(op, "(v)", ty, value, e.id),
+                    Update::Step(increment) => self.step_place("(v)".to_string(), ty, increment, e.id),
+                    Update::Assign(_) => unreachable!("handled above"),
+                };
+                let step = step.replacen("(v) =", "*v =", 1).replacen("(v) ", "*v ", 1);
+                let step = step.replace("(v).", "v.").replace("(v)", "(*v)");
+                lines.push(format!("{cell}.with_borrow_mut(|v| {step});"));
+            }
+        }
+        Some(lines)
     }
 
     /// An assignment, `++` or `--` to a field or a static field, as a block that yields the value
@@ -631,11 +818,7 @@ impl<'a> Gen<'a> {
             }
             Place::Field { object, name } => {
                 let obj = self.temp("object");
-                let owned = match &object.kind {
-                    ExprKind::This => "this.clone()".to_string(),
-                    ExprKind::Var(v) => format!("{}.clone()", self.local(v)),
-                    _ => self.expr(object).text,
-                };
+                let owned = self.object_handle(object);
                 lines.push(format!("let {obj} = {owned};"));
                 Slot::Field { obj, field: snake_case(name), plain: false }
             }
@@ -654,9 +837,18 @@ impl<'a> Gen<'a> {
             Update::Step(_) => false,
         };
         let outer = std::mem::replace(&mut self.guarded, rhs);
+        let mut wrap = false;
         let result = match how {
+            Update::Assign(value) if !matches!(ty, Type::Boxed(_)) && self.place_nullable(place) => {
+                // The assignment's value is an `Option` only where the assigned value may be null.
+                let v =
+                    if self.nullable(value) { self.optional(value).text } else { self.value(value, ty).text };
+                lines.push(format!("let {new} = {v};"));
+                wrap = !self.nullable(value);
+                new.clone()
+            }
             Update::Assign(value) => {
-                let v = self.field_value(value, ty);
+                let v = self.field_value(value, ty, false);
                 lines.push(format!("let {new} = {v};"));
                 new.clone()
             }
@@ -706,6 +898,7 @@ impl<'a> Gen<'a> {
         };
         self.guarded = outer;
         let stored = if self.clones(ty) { format!("{new}.clone()") } else { new.clone() };
+        let stored = if wrap { format!("Some({stored})") } else { stored };
         if assigns {
             lines.extend(init);
         }
@@ -722,7 +915,7 @@ impl<'a> Gen<'a> {
         self.line(&format!("{}struct {name} {{", self.vis()));
         self.indent += 1;
         for f in &decl.fields {
-            let ty = self.field_ty_name(f.ty);
+            let ty = self.field_ty_name(f.ty, self.field_nullable(&decl.name, &f.name));
             self.line(&format!("{}{}: {ty},", self.vis(), snake_case(&f.name)));
         }
         self.indent -= 1;
@@ -835,7 +1028,8 @@ impl<'a> Gen<'a> {
         for f in inits {
             // The line writes a field, so a read in the value must end its `Ref` first.
             let outer = std::mem::replace(&mut self.guarded, true);
-            let value = self.field_value(f.init.as_ref().expect("filtered"), f.ty);
+            let nullable = self.field_nullable(name, &f.name);
+            let value = self.field_value(f.init.as_ref().expect("filtered"), f.ty, nullable);
             self.guarded = outer;
             let field = snake_case(&f.name);
             if by_value {
@@ -876,7 +1070,13 @@ impl<'a> Gen<'a> {
                 let fields: Vec<String> = decl
                     .fields
                     .iter()
-                    .map(|f| format!("{}: {}", snake_case(&f.name), self.placeholder(f.ty)))
+                    .map(|f| {
+                        format!(
+                            "{}: {}",
+                            snake_case(&f.name),
+                            self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name))
+                        )
+                    })
                     .collect();
                 let name = struct_name(&decl.name);
                 let fields = fields.join(", ");

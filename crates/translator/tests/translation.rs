@@ -190,7 +190,7 @@ fn null_checks_test_the_option() {
             }
         }",
     );
-    assert_contains(&rust, &["let s: Option<String> = None;", "if s.as_deref().is_none() {"]);
+    assert_contains(&rust, &["let s: Option<String> = None;", "if s.is_none() {"]);
 }
 
 #[test]
@@ -639,11 +639,11 @@ fn constructors_keep_java_order_in_their_struct_literal() {
             public static void main(String[] a) { P p = new P(5); System.out.println(p.a + p.b + p.c); }
         }",
     );
-    // `b` and `c` are taken into the literal; `a` is assigned by a call after `c`'s, but its field
-    // comes first in the literal, so it and the rest of the body run on the value.
+    // All three are taken into the literal; `a` is assigned by a call after `c`'s, but its field
+    // comes first in the literal, so the calls run first, in Java's order.
     assert_contains(
         &rust,
-        &["let mut this = P { a: 0, b: x, c: next() };", "this.a = next();", "        this\n"],
+        &["let c = next();\n        let a = next();\n        let this = P { a, b: x, c };", "        this\n"],
     );
 }
 
@@ -1247,7 +1247,7 @@ fn static_blocks_run_once_in_an_init_function_guarded_by_a_flag() {
     assert_contains(
         &rust,
         &[
-            "static HELPER__INITIALIZED: Cell<bool> = Cell::new(false);",
+            "static HELPER__INITIALIZED: Cell<bool> = const { Cell::new(false) };",
             "fn init_helper() {",
             "if HELPER__INITIALIZED.get() {",
             "fn make() -> i32 {\n    init_helper();",
@@ -1640,5 +1640,107 @@ fn a_nullable_boxed_identity_is_an_option_of_the_shared_box() {
     assert_contains(
         &rust,
         &["fn maybe(n: i32) -> Option<java::Boxed<i32>>", "let nul: Option<java::Boxed<i32>> = maybe(3);"],
+    );
+}
+
+#[test]
+fn object_fields_that_may_be_null_are_options() {
+    let rust = translate(
+        "class Node {
+            int value; Node next;
+            Node(int value, Node next) { this.value = value; this.next = next; }
+        }
+        class A {
+            static int sum(Node head) {
+                int s = 0;
+                for (Node n = head; n != null; n = n.next) s += n.value;
+                return s;
+            }
+            public static void main(String[] a) { System.out.println(sum(new Node(1, new Node(2, null)))); }
+        }",
+    );
+    // `n` is assigned in the loop, so it is not narrowed there: each use checks it.
+    assert_contains(
+        &rust,
+        &[
+            "next: Option<Rc<Node>>,",
+            "while n.is_some() {",
+            "s = s.wrapping_add(java::non_null(n.as_ref()).value);",
+            "n = java::non_null(n.as_ref()).next.clone();",
+            "fn sum(head: Rc<Node>) -> i32 {",
+            "let mut n: Option<Rc<Node>> = Some(head);",
+            "sum(Rc::new(Node::new(1, Some(Rc::new(Node::new(2, None))))))",
+        ],
+    );
+}
+
+#[test]
+fn fields_that_every_constructor_sets_are_not_options() {
+    let rust = translate(
+        "class Node { int v; Node(int v) { this.v = v; } }
+        class Edge {
+            Node from, to;
+            Edge(Node from, Node to) { this.from = from; this.to = to; }
+            int span() { return to.v - from.v; }
+        }
+        class A {
+            public static void main(String[] a) {
+                Edge e = new Edge(new Node(1), new Node(4));
+                System.out.println(e.span());
+            }
+        }",
+    );
+    assert_contains(&rust, &["from: Rc<Node>,", "to: Rc<Node>,", "Edge { from, to }"]);
+    assert_lacks(&rust, &["Option", "non_null"]);
+}
+
+#[test]
+fn objects_compare_by_identity() {
+    let rust = translate(
+        "class P { int x; P(int x) { this.x = x; } }
+        class A {
+            static P find(P p, int x) { return p.x == x ? p : null; }
+            public static void main(String[] a) {
+                P p = new P(1);
+                P q = new P(1);
+                P r = find(p, 1);
+                System.out.println(p == q);
+                System.out.println(p != r);
+                System.out.println(r == null);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::println!(\"{}\", Rc::ptr_eq(&p, &q));",
+            "java::println!(\"{}\", !java::same(Some(&p), r.as_ref()));",
+        ],
+    );
+}
+
+#[test]
+fn objects_that_may_be_null_print_as_null() {
+    let rust = translate(
+        "class P {
+            int x; P(int x) { this.x = x; }
+            public String toString() { return \"P\" + x; }
+        }
+        class A {
+            static P find(int x) { return x > 0 ? new P(x) : null; }
+            public static void main(String[] a) {
+                P p = find(1);
+                P q = find(0);
+                System.out.println(p + \" \" + q);
+                if (p != null) System.out.println(p.x);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::println!(\"{} {}\", java::or_null(p.as_ref()), java::or_null(q.as_ref()));",
+            "if let Some(p) = p.as_ref() {\n        java::println!(\"{}\", p.x);",
+        ],
     );
 }

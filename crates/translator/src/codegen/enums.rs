@@ -30,7 +30,10 @@ impl<'a> Gen<'a> {
 
     /// The value a field or cell of type `ty` holds before its initializer runs. An enum has no
     /// Java default that is not `null`, so its placeholder is its first constant.
-    pub(super) fn placeholder(&self, ty: Type) -> String {
+    pub(super) fn placeholder(&self, ty: Type, nullable: bool) -> String {
+        if nullable {
+            return "None".to_string();
+        }
         let Type::Enum(name) = ty else { return default_value(ty).to_string() };
         let class = self.class.types.iter().position(|t| t.name == name).expect("an enum type is declared");
         if self.class.types[class].enum_constants.as_deref().unwrap_or_default().is_empty() {

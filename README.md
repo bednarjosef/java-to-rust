@@ -76,8 +76,9 @@ overloading, static and instance methods, fields with initializers, static field
 (including `this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math`
 methods, `String.length`/`equals`/`charAt`, the `Character` tests and case conversions on a
 `char`, the `MIN_VALUE`/`MAX_VALUE` constants of the wrapper classes, `null` for `String`, and a
-user `toString` in `println` and string concatenation. Inheritance, interfaces, generics and
-object-typed fields are rejected with an error that names the construct and its position.
+user `toString` in `println` and string concatenation, object-typed fields and `null` objects.
+Inheritance, interfaces and generics are rejected with an error that names the construct and its
+position.
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
@@ -112,12 +113,16 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   (`java::ascii_char_at`); inside `for (int i = 0; i < s.length(); i++)` the index is also in
   bounds (`analysis/indexing.rs`), so `s.charAt(i)` is `s.as_bytes()[i as usize] as u16`. String
   parameters that are never assigned are borrowed as `&str`.
-- Nullness analysis (`analysis/nullness.rs`) finds the strings that may be null (locals,
-  parameters across calls, return values). Only those are `Option<String>`; the others stay
-  `String` or `&str`. A null check narrows the string in the branch where it is not null
-  (`if let Some(s) = s.as_deref()`, or `let Some(s) = s.as_deref() else { .. }` after an early
-  return), so no unwrap is repeated. Dereferencing a null string throws `NullPointerException`
-  through `java::non_null`, and printing or concatenating it gives `null`.
+- Nullness analysis (`analysis/nullness.rs`) finds the strings and objects that may be null
+  (locals, parameters across calls, return values, fields and static fields). Only those are
+  `Option<String>` or `Option<Rc<..>>`; the others stay `String`, `&str` or `Rc<..>`. A field is
+  not null when every constructor sets it, before anything can read it, to a value that is not
+  null. A null check narrows the value in the branch where it is not null
+  (`if let Some(s) = s.as_deref()`, `if let Some(n) = n.as_ref()`, or
+  `let Some(s) = s.as_deref() else { .. }` after an early return), so no unwrap is repeated.
+  Dereferencing null throws `NullPointerException` through `java::non_null`, and printing or
+  concatenating it gives `null` (`java::or_null`). `==` on objects compares identity:
+  `Rc::ptr_eq(&a, &b)`, or `java::same(a.as_ref(), b.as_ref())` where either may be null.
 - Arrays (`int[]`, `long[]`, `double[]`, `boolean[]`, `String[]`, and arrays of arrays) are shared
   references in the faithful form, `java::Array<T>`: a shared cell whose clones see each other's
   writes. The aliasing analysis (`analysis/arrays.rs`) finds local arrays that no other name can
@@ -137,7 +142,8 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   `this` only for its fields and for such calls, and nothing they run reaches an object of their
   class another way; a call is then `p.borrow_mut().set(2)`, with arguments that could reach the
   object bound first. Constructors build a plain value, starting from a struct literal that takes
-  in the body's leading field assignments (`P { x, y }`), and `new` shares it
+  in the body's leading field assignments (`P { x, y }`; values with effects are computed into
+  locals first where the literal's field order would change Java's order), and `new` shares it
   (`Rc::new(RefCell::new(P::new(1, 2)))`). A `toString` becomes `impl fmt::Display`, and an object
   is printed as `{p}` when its `toString` can neither print nor throw.
 

@@ -23,7 +23,7 @@ pub use character::*;
 pub use float::*;
 pub use math::*;
 pub use natives::*;
-pub use null::non_null;
+pub use null::{OrNull, non_null, or_null, same};
 pub use out::{Out, flush, out, print_chars, println_chars, write_byte};
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.

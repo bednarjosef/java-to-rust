@@ -79,9 +79,13 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The possibly-null string variable `name` as an `Option<&str>`.
-    fn option_source(&self, name: &str) -> String {
+    /// The possibly-null variable `name` of type `ty` as an `Option<&str>`, or an `Option<&Rc<..>>`
+    /// for an object.
+    fn option_source(&self, name: &str, ty: Type) -> String {
         let rust = self.local(name);
+        if matches!(ty, Type::Class(_)) {
+            return format!("{rust}.as_ref()");
+        }
         // An `Option<i32>` is `Copy` and matches as it is; a faithful box is `as_deref`'d.
         let plain_box = self.boxed.get(name).is_some_and(|&ty| !self.faithful_box(ty));
         if self.borrowed_optional.contains(name) || plain_box { rust } else { format!("{rust}.as_deref()") }
@@ -92,8 +96,13 @@ impl<'a> Gen<'a> {
         match &e.kind {
             _ if matches!(e.ty, Type::Boxed(_)) => self.expr(e).text,
             ExprKind::Null => "None::<&str>".to_string(),
-            ExprKind::Var(name) => self.option_source(name),
+            ExprKind::Var(name) => self.option_source(name, e.ty),
             ExprKind::Cast(_, inner) => self.option_ref(inner),
+            // In a format, a field is borrowed until the text is formatted, after every operand,
+            // so it is borrowed only when no operand has effects.
+            ExprKind::Field { .. } if !self.formatting || self.lazy_text => {
+                format!("{}.as_deref()", self.object_place(e))
+            }
             _ => format!("{}.as_deref()", self.expr(e).at(ATOM)),
         }
     }
@@ -110,6 +119,18 @@ impl<'a> Gen<'a> {
         let other = if matches!(l.kind, ExprKind::Null) { r } else { l };
         let is_null = if matches!(other.kind, ExprKind::Null) {
             Code::atom("true")
+        } else if self.nullable(other) {
+            let test = if matches!(op, BinOp::Ne) { "is_some" } else { "is_none" };
+            let text = match &other.kind {
+                // A variable or field is tested where it is, without a copy.
+                ExprKind::Var(_) | ExprKind::Field { .. } => format!("{}.{test}()", self.object_place(other)),
+                ExprKind::Static { class, name } if self.init_call(*class).is_none() => {
+                    let cell = cell_name(&self.class.types[*class].name, name);
+                    format!("{cell}.with_borrow(Option::{test})")
+                }
+                _ => format!("{}.{test}()", self.option_ref(other)),
+            };
+            return Code::atom(text);
         } else if self.nullable(other) {
             let option = self.option_ref(other);
             let test = if matches!(op, BinOp::Ne) { "is_some" } else { "is_none" };
@@ -168,6 +189,17 @@ impl<'a> Gen<'a> {
         if matches!(e.ty, Type::Boxed(_)) {
             return Some(Part::Arg(Code::atom(self.boxed_text(e, e.ty.unboxed()))));
         }
+        if matches!(e.ty, Type::Class(_)) {
+            // `java::or_null` shows `null`, or the object as it shows when it is not null.
+            let option = format!("{}.as_ref()", self.object_place(e));
+            let text = self.handle_text("o", e);
+            let option = match text.strip_suffix("(o)") {
+                _ if text == "o" => option,
+                Some(function) if !function.contains(['.', '(']) => format!("{option}.map({function})"),
+                _ => format!("{option}.map(|o| {text})"),
+            };
+            return Some(Part::Arg(Code::atom(format!("{}({option})", self.runtime("or_null")))));
+        }
         let text = match &e.kind {
             // An operand that assigns the variable is read before the assignment, as a copy.
             ExprKind::Var(name) if assigned.contains(name) => {
@@ -198,7 +230,7 @@ fn exits(stmt: &Stmt) -> bool {
 impl<'a> Gen<'a> {
     /// The string variable of `s == null` or `s != null`, when `s` may be null here, and whether
     /// the then-branch is the one where it is not null.
-    fn null_test_var(&self, cond: &'a Expr) -> Option<(&'a str, bool)> {
+    fn null_test_var(&self, cond: &'a Expr) -> Option<(&'a str, bool, Type)> {
         let ExprKind::Binary(op, l, r) = &cond.kind else { return None };
         if !is_null_test(*op, l, r) {
             return None;
@@ -212,7 +244,7 @@ impl<'a> Gen<'a> {
         if !self.nullable(var) {
             return None;
         }
-        Some((name.as_str(), matches!(op, BinOp::Ne)))
+        Some((name.as_str(), matches!(op, BinOp::Ne), var.ty))
     }
 
     /// `if (s != null && ..) { .. }`: see `let_chain`. And `if (s == null) .. else { .. }`: the
@@ -220,13 +252,13 @@ impl<'a> Gen<'a> {
     /// false, emitting nothing, when the `if` is of neither form, or the branch where `s` is not
     /// null does not use it (a binding that is never read would only warn), or assigns it.
     pub(super) fn narrow_if(&mut self, cond: &'a Expr, then: &'a Stmt, otherwise: Option<&'a Stmt>) -> bool {
-        if let Some((name, false)) = self.null_test_var(cond)
+        if let Some((name, false, ty)) = self.null_test_var(cond)
             && let Some(non_null) = otherwise
         {
             if assigns_stmt(non_null, name) || !mentions_stmt(non_null, name) {
                 return false;
             }
-            self.line(&format!("if let Some({}) = {} {{", self.local(name), self.option_source(name)));
+            self.line(&format!("if let Some({}) = {} {{", self.local(name), self.option_source(name, ty)));
             let narrowed = self.narrow(name);
             self.nested(non_null);
             self.unnarrow(narrowed);
@@ -261,17 +293,17 @@ impl<'a> Gen<'a> {
     ) -> Option<(String, Vec<String>)> {
         let mut parts = Vec::new();
         conjuncts(cond, &mut parts);
-        let binds: Vec<Option<&str>> = parts
+        let binds: Vec<Option<(&str, Type)>> = parts
             .iter()
             .enumerate()
             .map(|(k, part)| {
-                let (name, true) = self.null_test_var(part)? else { return None };
+                let (name, true, ty) = self.null_test_var(part)? else { return None };
                 let later = parts[k + 1..].iter().chain(exprs);
                 let assigned =
                     later.clone().any(|e| assigns(e, name)) || stmts.iter().any(|s| assigns_stmt(s, name));
                 let used =
                     later.clone().any(|e| mentions(e, name)) || stmts.iter().any(|s| mentions_stmt(s, name));
-                (used && !assigned).then_some(name)
+                (used && !assigned).then_some((name, ty))
             })
             .collect();
         if binds.iter().all(Option::is_none) {
@@ -281,8 +313,8 @@ impl<'a> Gen<'a> {
         let mut narrowed = Vec::new();
         for (part, bind) in parts.iter().zip(binds) {
             match bind {
-                Some(name) => {
-                    texts.push(format!("let Some({}) = {}", self.local(name), self.option_source(name)));
+                Some((name, ty)) => {
+                    texts.push(format!("let Some({}) = {}", self.local(name), self.option_source(name, ty)));
                     narrowed.extend(self.narrow(name));
                 }
                 None => {
@@ -319,7 +351,7 @@ impl<'a> Gen<'a> {
         let arm =
             |g: &mut Self, arm: &'a Expr| if g.nullable(e) { g.optional(arm) } else { g.value(arm, e.ty) };
         let (head, non_null, other, narrowed) = match self.null_test_var(cond) {
-            Some((name, then_non_null)) => {
+            Some((name, then_non_null, ty)) => {
                 let (non_null, other) = if then_non_null { (a, b) } else { (b, a) };
                 if assigns(non_null, name) || !mentions(non_null, name) {
                     return None;
@@ -329,13 +361,13 @@ impl<'a> Gen<'a> {
                     && let ExprKind::Str(text) = &other.kind
                     && !self.nullable(e)
                 {
-                    let source = self.option_source(name);
+                    let source = self.option_source(name, ty);
                     return Some(Code::atom(format!(
                         "{source}.unwrap_or({}).to_string()",
                         rust_string(text)
                     )));
                 }
-                let head = format!("let Some({}) = {}", self.local(name), self.option_source(name));
+                let head = format!("let Some({}) = {}", self.local(name), self.option_source(name, ty));
                 (head, non_null, other, self.narrow(name).into_iter().collect())
             }
             None => {
@@ -357,7 +389,7 @@ impl<'a> Gen<'a> {
     /// of `s`, or `None`, emitting nothing, when `stmt` is not of that form or `rest` assigns `s`.
     pub(super) fn early_null_exit(&mut self, stmt: &'a Stmt, rest: &[Stmt]) -> Option<&'a str> {
         let Stmt::If { cond, then, otherwise: None } = stmt else { return None };
-        let (name, then_non_null) = self.null_test_var(cond)?;
+        let (name, then_non_null, ty) = self.null_test_var(cond)?;
         if then_non_null
             || !exits(then)
             || assigns_any(rest, name)
@@ -365,27 +397,9 @@ impl<'a> Gen<'a> {
         {
             return None;
         }
-        self.line(&format!("let Some({}) = {} else {{", self.local(name), self.option_source(name)));
+        self.line(&format!("let Some({}) = {} else {{", self.local(name), self.option_source(name, ty)));
         self.nested(then);
         self.line("};");
         Some(name)
     }
-}
-
-/// Whether evaluating `e` can do something observable: a call, an assignment, `++` or `--`.
-pub(super) fn has_effects(e: &Expr) -> bool {
-    let mut found = false;
-    visit_expr(e, &mut |x| {
-        found |=
-            matches!(
-                x.kind,
-                ExprKind::Call { .. }
-                    | ExprKind::MethodCall { .. }
-                    | ExprKind::New { .. }
-                    | ExprKind::ThisCall { .. }
-                    | ExprKind::Assign { .. }
-                    | ExprKind::IncDec { .. }
-            ) || matches!(x.kind, ExprKind::Builtin(Builtin::Print | Builtin::Println | Builtin::Exit, _))
-    });
-    found
 }

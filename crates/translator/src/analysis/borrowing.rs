@@ -25,9 +25,13 @@ pub struct Borrowing {
     pub mutating: HashSet<usize>,
     /// Classes, by qualified name, whose constructors build a plain value.
     pub plain_constructors: HashSet<String>,
-    /// Methods and constructors that touch no object but their own `this`, directly or through
-    /// what they call.
+    /// Methods and constructors that touch no shared object but their own `this`, directly or
+    /// through what they call.
     pub isolated: HashSet<usize>,
+    /// Methods and constructors that may write a field of a shared object, directly or through
+    /// what they call, so may borrow one mutably. A constructor's writes to its own `this` do not
+    /// count: no other code can reach that object yet.
+    pub writers: HashSet<usize>,
 }
 
 pub fn borrowing(class: &Class, immutable: &HashSet<String>, owned: &HashSet<String>) -> Borrowing {
@@ -109,8 +113,25 @@ pub fn borrowing(class: &Class, immutable: &HashSet<String>, owned: &HashSet<Str
         })
         .map(|t| class.types[t].name.clone())
         .collect();
-    let isolated = (0..scans.len()).filter(|&m| reach[m].is_empty()).collect();
-    Borrowing { methods, mutating, plain_constructors, isolated }
+    // Immutable and owned objects have no `RefCell` to borrow.
+    let shared = |c: &str| !immutable.contains(c) && !owned.contains(c);
+    let isolated = (0..scans.len()).filter(|&m| !reach[m].iter().any(|c| shared(c))).collect();
+    let mut writers: HashSet<usize> = (0..scans.len())
+        .filter(|&m| {
+            (scans[m].writes_this && !class.methods[m].is_ctor && shared(class_of(m)))
+                || scans[m].writes.iter().any(|c| shared(c))
+        })
+        .collect();
+    loop {
+        let added: Vec<usize> = (0..scans.len())
+            .filter(|m| !writers.contains(m) && scans[*m].calls.iter().any(|(c, _)| writers.contains(c)))
+            .collect();
+        if added.is_empty() {
+            break;
+        }
+        writers.extend(added);
+    }
+    Borrowing { methods, mutating, plain_constructors, isolated, writers }
 }
 
 /// What one method does with objects.
@@ -124,6 +145,8 @@ struct Scan<'c> {
     this_as_value: bool,
     /// Whether it writes a field of `this`.
     writes_this: bool,
+    /// Classes whose objects' fields it writes through a handle other than `this`.
+    writes: HashSet<&'c str>,
 }
 
 fn scan<'c>(class: &'c Class, m: &Method) -> Scan<'c> {
@@ -157,6 +180,9 @@ impl<'c> Scan<'c> {
                         self.writes_this = true;
                     } else {
                         self.touch(class, object.ty);
+                        if let Type::Class(name) = object.ty {
+                            self.writes.insert(name);
+                        }
                     }
                 }
                 ExprKind::MethodCall { receiver, resolved: Some(callee), .. } => {

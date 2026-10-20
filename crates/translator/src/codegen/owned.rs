@@ -1,7 +1,6 @@
 //! Plain values: a constructor that builds its object as a plain value, as a struct literal and
 //! then a local named `this`; and owned objects, which stay plain values.
 
-use super::null::has_effects;
 use super::objects::*;
 use super::*;
 
@@ -41,56 +40,57 @@ impl<'a> Gen<'a> {
     }
 
     /// The struct literal that a constructor starts from, and the statements of its body that are
-    /// left. Effects keep Java's order: the initializers run in field order, then the body.
+    /// left. The literal holds the fields' initializers and the leading assignments of the body
+    /// (see `analysis::leading_assignments`). Effects keep Java's order, the initializers in field
+    /// order and then the assignments: when the literal's field order would change it, the values
+    /// with effects are computed into locals first.
     fn struct_literal(&mut self, m: &'a Method, initialize: bool) -> (String, &'a [Stmt]) {
         let decl = &self.class.types[m.class];
         let fields = &decl.fields;
+        let leading = crate::analysis::leading_assignments(self.class, m, self.facts);
         let mut values: Vec<Option<&'a Expr>> =
             fields.iter().map(|f| f.init.as_ref().filter(|_| !initialize)).collect();
         // The fields whose values have effects, in the order Java runs them.
         let mut effects: Vec<usize> =
             (0..fields.len()).filter(|&i| values[i].is_some_and(has_effects)).collect();
-        let mut taken = vec![false; fields.len()];
-        let mut absorbed = 0;
-        for stmt in &m.body {
-            if initialize {
-                break;
-            }
-            let Stmt::Expr(Expr {
-                kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, value },
-                ..
-            }) = stmt
-            else {
-                break;
-            };
-            if !matches!(object.kind, ExprKind::This) || mentions_this(value) {
-                break;
-            }
-            let i = fields.iter().position(|f| &f.name == name).expect("a field of the class");
-            if taken[i] || values[i].is_some_and(has_effects) {
-                break;
-            }
+        for &(i, value) in &leading {
+            values[i] = Some(value);
             if has_effects(value) {
-                if effects.last().is_some_and(|&j| j >= i) {
-                    break;
-                }
                 effects.push(i);
             }
-            values[i] = Some(value);
-            taken[i] = true;
-            absorbed += 1;
+        }
+        let in_order = effects.windows(2).all(|w| w[0] < w[1]);
+        let mut bound: Vec<Option<String>> = vec![None; fields.len()];
+        if !in_order {
+            let mut taken = Vec::new();
+            for &i in &effects {
+                let f = &fields[i];
+                let mut temp = self.temp(&snake_case(&f.name));
+                while taken.contains(&temp) {
+                    temp.push('_');
+                }
+                let value = self.field_value(
+                    values[i].expect("has a value"),
+                    f.ty,
+                    self.field_nullable(&decl.name, &f.name),
+                );
+                self.line(&format!("let {temp} = {value};"));
+                taken.push(temp.clone());
+                bound[i] = Some(temp);
+            }
         }
         // A field read in one value must not hold its borrow while a later value borrows mutably.
         let conflicts = self.conflicts(&values.iter().flatten().copied().collect::<Vec<_>>());
         let outer = std::mem::replace(&mut self.guarded, conflicts);
         let parts: Vec<String> = fields
             .iter()
-            .zip(&values)
-            .map(|(f, v)| {
+            .enumerate()
+            .map(|(i, f)| {
                 let field = snake_case(&f.name);
-                let value = match v {
-                    Some(e) => self.field_value(e, f.ty),
-                    None => self.placeholder(f.ty),
+                let value = match (&bound[i], values[i]) {
+                    (Some(temp), _) => temp.clone(),
+                    (None, Some(e)) => self.field_value(e, f.ty, self.field_nullable(&decl.name, &f.name)),
+                    (None, None) => self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name)),
                 };
                 if value == field { field } else { format!("{field}: {value}") }
             })
@@ -101,7 +101,7 @@ impl<'a> Gen<'a> {
         } else {
             format!("{} {{ {} }}", struct_name(&decl.name), parts.join(", "))
         };
-        (literal, &m.body[absorbed..])
+        (literal, &m.body[leading.len()..])
     }
 
     /// Whether a statement list changes an object that `is_obj` picks out: a field write, or a call

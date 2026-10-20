@@ -625,6 +625,35 @@ pub fn assigns_stmt(stmt: &Stmt, name: &str) -> bool {
 }
 
 /// Whether `e` reads or writes the variable `name`.
+/// Whether evaluating `e` can do something observable: a call, an assignment, `++` or `--`, a
+/// print, or a method of the native layer.
+pub fn has_effects(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| {
+        found |= matches!(
+            x.kind,
+            ExprKind::Call { .. }
+                | ExprKind::MethodCall { .. }
+                | ExprKind::New { .. }
+                | ExprKind::ThisCall { .. }
+                | ExprKind::Assign { .. }
+                | ExprKind::IncDec { .. }
+                | ExprKind::Builtin(
+                    Builtin::Print | Builtin::Println | Builtin::Exit | Builtin::Native(_),
+                    _
+                )
+        )
+    });
+    found
+}
+
+/// Whether an expression reads or uses `this`.
+pub fn mentions_this(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::This));
+    found
+}
+
 pub fn mentions(e: &Expr, name: &str) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| match &x.kind {

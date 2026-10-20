@@ -140,12 +140,9 @@ impl<'t> Lowering<'t> {
 
     fn field(&self, node: Node<'t>) -> Result<Field, Error> {
         let ty = self.ty(node, node.symbol().map_or("", |s| s.ty))?;
-        if matches!(ty, Type::Class(_)) {
-            return unsupported(node, "object fields");
-        }
         let init = node.get("initializer");
-        // Java gives these fields `null`, which is not supported yet.
-        if init.is_none() && matches!(ty, Type::String | Type::Array(_)) {
+        // Java gives these fields `null`, which is not supported yet for arrays.
+        if init.is_none() && matches!(ty, Type::Array(_)) {
             return unsupported(node, "null");
         }
         let constant = Self::is_constant(node);

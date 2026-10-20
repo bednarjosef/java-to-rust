@@ -230,6 +230,8 @@ impl<'a> Gen<'a> {
                 let rust = self.local(name);
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
+                    // An object narrowed by a null check is a reference to the `Rc`.
+                    Type::Class(_) if self.borrowed.contains(name) => Code::atom(format!("{rust}.clone()")),
                     ty if self.clones(ty) && !self.facts.moves.contains(&e.id) => {
                         Code::atom(format!("{rust}.clone()"))
                     }
@@ -266,6 +268,9 @@ impl<'a> Gen<'a> {
                 self.format("format!", parts)
             }
             ExprKind::Binary(op, l, r) if is_null_test(*op, l, r) => self.null_test(*op, l, r),
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(_)) => {
+                self.identity(*op, l, r)
+            }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
                 if self.faithful_box(l.ty) && r.ty == l.ty =>
             {
@@ -321,7 +326,10 @@ impl<'a> Gen<'a> {
                 if let Some(code) = self.narrowed_conditional(e, cond, a, b) {
                     return code;
                 }
+                // The condition of an `if` drops its temporaries before a branch runs.
+                let outer = std::mem::replace(&mut self.guarded, false);
                 let cond = self.condition(cond);
+                self.guarded = outer;
                 let (a, b) = if self.nullable(e) {
                     (self.optional(a), self.optional(b))
                 } else {

@@ -280,6 +280,7 @@ impl<'a> Gen<'a> {
                 if op.is_comparison()
                     && !l.ty.is_floating()
                     && !r.ty.is_floating()
+                    && !matches!(l.ty, Type::Class(_))
                     && !is_null_test(*op, l, r) =>
             {
                 let flipped = match op {
@@ -321,11 +322,20 @@ impl<'a> Gen<'a> {
                 let text = self.index_step(array, index, e.ty, *increment, *prefix, e.id, false);
                 self.line(&format!("{text};"));
             }
+            ExprKind::Assign { target: Place::Static { .. }, .. }
+            | ExprKind::IncDec { target: Place::Static { .. }, .. }
+                if let Some(lines) = self.static_effect(e) =>
+            {
+                for line in lines {
+                    self.line(&line);
+                }
+            }
             ExprKind::Assign { target: Place::Field { .. }, .. }
             | ExprKind::IncDec { target: Place::Field { .. }, .. }
                 if let Some(text) = self.field_effect(e) =>
             {
-                self.line(&format!("{text};"));
+                // A field updated through a borrow of its own is a block.
+                self.line(&if text.starts_with("{ let ") { text } else { format!("{text};") });
             }
             _ => {
                 let code = self.expr(e);

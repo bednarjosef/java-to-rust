@@ -52,6 +52,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         this_form: ThisForm::Shared,
         display: false,
         lazy_text: false,
+        formatting: false,
         printing: false,
         guarded: false,
         annotations: Vec::new(),
@@ -144,6 +145,8 @@ struct Gen<'a> {
     /// Whether the text being formatted shows objects through `Display`, when they are formatted
     /// rather than converted to a `String` first (see `parts`).
     lazy_text: bool,
+    /// Whether the code being written is an operand of a string concatenation.
+    formatting: bool,
     /// Whether the text being formatted is printed.
     printing: bool,
     /// Whether the statement being emitted also borrows an object mutably (see `conflicts`).

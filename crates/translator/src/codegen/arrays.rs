@@ -486,7 +486,7 @@ pub(super) fn name_part(ty: Type) -> String {
 /// before the index where Java evaluates the index first: the index has no effects, and `rhs`
 /// assigns no variable that the index reads.
 fn rust_order_is_same(index: &Expr, rhs: Option<&Expr>) -> bool {
-    if super::null::has_effects(index) {
+    if has_effects(index) {
         return false;
     }
     let Some(rhs) = rhs else { return true };

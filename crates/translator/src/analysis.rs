@@ -55,8 +55,12 @@ pub struct Facts {
     pub borrowed_optional_params: HashSet<(usize, usize)>,
     /// String variables and parameters, as (method, name), that can hold null.
     pub nullable_vars: HashSet<(usize, String)>,
-    /// Methods whose string return value can be null.
+    /// Methods whose string or object return value can be null.
     pub nullable_returns: HashSet<usize>,
+    /// String and object fields, as (class, field), that can hold null: `Option`s.
+    pub nullable_fields: HashSet<(String, String)>,
+    /// String and object static fields, as (class index, field), that can hold null.
+    pub nullable_statics: HashSet<(usize, String)>,
     /// Array locals, as (method, name), that no other name can see: plain `Vec`s. The flag says
     /// whether an element of the array is ever assigned.
     pub plain_arrays: HashMap<(usize, String), bool>,
@@ -80,6 +84,8 @@ pub struct Facts {
     pub plain_constructors: HashSet<String>,
     /// Methods and constructors that touch no object but their own, so they borrow no other.
     pub isolated: HashSet<usize>,
+    /// Methods and constructors that may borrow a shared object mutably, through what they call.
+    pub writers: HashSet<usize>,
     /// The classes, by index in `Class::types`, whose static initialization runs eagerly through
     /// an `init` function; the other classes initialize each static lazily on first access.
     pub eager_init: HashSet<usize>,
@@ -91,10 +97,6 @@ pub struct Facts {
 pub fn analyze(class: &Class) -> Facts {
     let mut facts = Facts::default();
     ranges::analyze(class, &mut facts);
-    nullness::analyze(class, &mut facts);
-    boxing::analyze(class, &mut facts);
-    borrowed_params(class, &mut facts);
-    ascii_strings(class, &mut facts);
     facts.immutable = objects::immutable_classes(class);
     facts.owned = owned::owned_classes(class, &facts.immutable);
     let borrowing = borrowing::borrowing(class, &facts.immutable, &facts.owned);
@@ -102,11 +104,56 @@ pub fn analyze(class: &Class) -> Facts {
     facts.self_methods = borrowing.methods;
     facts.plain_constructors = borrowing.plain_constructors;
     facts.isolated = borrowing.isolated;
+    facts.writers = borrowing.writers;
     facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
+    nullness::analyze(class, &mut facts);
+    boxing::analyze(class, &mut facts);
+    borrowed_params(class, &mut facts);
+    ascii_strings(class, &mut facts);
     arrays::analyze(class, &mut facts);
     indexing::analyze(class, &mut facts);
     moves::analyze(class, &mut facts);
     facts
+}
+
+/// Whether the field initializers of class `t` are written into the struct literal of each of
+/// its constructors: its constructors build a plain value, and no initializer reads `this`.
+pub fn inline_initializers(class: &Class, t: usize, facts: &Facts) -> bool {
+    let decl = &class.types[t];
+    (facts.owned.contains(&decl.name) || facts.plain_constructors.contains(&decl.name))
+        && decl.fields.iter().filter_map(|f| f.init.as_ref()).all(|e| !mentions_this(e))
+}
+
+/// The leading statements of a constructor that assign a field of `this` a value that does not
+/// read `this`, each field once: the constructor's struct literal takes them in, as (field index,
+/// value). Empty when the class's initializers are not inlined, or the constructor starts with
+/// `this(...)`. A field whose initializer has effects is never taken, as the initializer must run.
+pub fn leading_assignments<'c>(class: &Class, ctor: &'c Method, facts: &Facts) -> Vec<(usize, &'c Expr)> {
+    let decl = &class.types[ctor.class];
+    let delegates =
+        matches!(ctor.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })));
+    if delegates || !inline_initializers(class, ctor.class, facts) {
+        return Vec::new();
+    }
+    let mut out: Vec<(usize, &Expr)> = Vec::new();
+    for stmt in &ctor.body {
+        let Stmt::Expr(Expr {
+            kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, value },
+            ..
+        }) = stmt
+        else {
+            break;
+        };
+        if !matches!(object.kind, ExprKind::This) || mentions_this(value) {
+            break;
+        }
+        let i = decl.fields.iter().position(|f| &f.name == name).expect("a field of the class");
+        if out.iter().any(|&(j, _)| j == i) || decl.fields[i].init.as_ref().is_some_and(has_effects) {
+            break;
+        }
+        out.push((i, value));
+    }
+    out
 }
 
 fn borrowed_params(class: &Class, facts: &mut Facts) {

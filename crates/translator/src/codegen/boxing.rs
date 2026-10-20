@@ -282,14 +282,24 @@ impl<'a> Gen<'a> {
         if optional { Code::atom(format!("Some({})", boxed.text)) } else { boxed }
     }
 
-    /// The Rust type of a field: a boxed field is an `Option`, as its default is `null`.
-    pub(super) fn field_ty_name(&mut self, ty: Type) -> String {
-        if matches!(ty, Type::Boxed(_)) { format!("Option<{}>", self.ty_name(ty)) } else { self.ty_name(ty) }
+    /// The Rust type of a field: a boxed field is an `Option`, as its default is `null`, and so is
+    /// a `nullable` one (see `analysis::nullness`).
+    pub(super) fn field_ty_name(&mut self, ty: Type, nullable: bool) -> String {
+        if matches!(ty, Type::Boxed(_)) || nullable {
+            format!("Option<{}>", self.ty_name(ty))
+        } else {
+            self.ty_name(ty)
+        }
     }
 
-    /// A field's initial value as it is stored: `Some` of a boxed value, or `None` for `null`.
-    pub(super) fn field_value(&mut self, e: &'a Expr, ty: Type) -> String {
-        if matches!(ty, Type::Boxed(_)) { self.optional_to(e, ty).text } else { self.value(e, ty).text }
+    /// A value as a field of type `ty` stores it: `Some` of the value, or `None` for `null`, when
+    /// the field is boxed or `nullable`.
+    pub(super) fn field_value(&mut self, e: &'a Expr, ty: Type, nullable: bool) -> String {
+        if matches!(ty, Type::Boxed(_)) || nullable {
+            self.optional_to(e, ty).text
+        } else {
+            self.value(e, ty).text
+        }
     }
 
     /// `Character.getNumericValue` and the like; see `java::char_numeric_value`.

@@ -56,19 +56,33 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         for &t in &eager {
             self.line(&format!(
-                "{}static {}: Cell<bool> = Cell::new(false);",
+                "{}static {}: Cell<bool> = const {{ Cell::new(false) }};",
                 self.vis(),
                 flag(&class.types[t].name)
             ));
         }
         for (t, f) in cells {
             let init = match &f.init {
-                Some(e) if !self.facts.eager_init.contains(&t) => self.field_value(e, f.ty),
-                _ => self.placeholder(f.ty),
+                Some(e) if !self.facts.eager_init.contains(&t) => {
+                    self.field_value(e, f.ty, self.facts.nullable_statics.contains(&(t, f.name.clone())))
+                }
+                _ => self.placeholder(f.ty, self.facts.nullable_statics.contains(&(t, f.name.clone()))),
             };
             let cell = cell_name(&class.types[t].name, &f.name);
-            let ty = self.field_ty_name(f.ty);
-            self.line(&format!("{}static {cell}: RefCell<{ty}> = RefCell::new({init});", self.vis()));
+            let ty = self.field_ty_name(f.ty, self.facts.nullable_statics.contains(&(t, f.name.clone())));
+            // A literal initializer is evaluated at compile time.
+            let constant = init == "None"
+                || init == "String::new()"
+                || init.parse::<f64>().is_ok()
+                || init.trim_start_matches('-').chars().next().is_some_and(|c| c.is_ascii_digit())
+                    && init.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                || matches!(init.as_str(), "true" | "false");
+            let init = if constant {
+                format!("const {{ RefCell::new({init}) }}")
+            } else {
+                format!("RefCell::new({init})")
+            };
+            self.line(&format!("{}static {cell}: RefCell<{ty}> = {init};", self.vis()));
         }
         self.indent -= 1;
         self.line("}");
