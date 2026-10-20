@@ -503,7 +503,9 @@ impl<'a> Gen<'a> {
     }
 
     fn for_loop(&mut self, init: &'a [Stmt], cond: Option<&'a Expr>, update: &'a [Expr], body: &'a Stmt) {
-        if let Some(cond) = cond && self.element_loop(cond, body) {
+        if let Some(cond) = cond
+            && self.element_loop(cond, body)
+        {
             return;
         }
         if let Some((var, start, end)) = counting_loop(init, cond, update, body) {
