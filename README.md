@@ -131,14 +131,18 @@ and the standard ones (`Exception`, `RuntimeException`, `IllegalArgumentExceptio
 `IllegalStateException`, `UnsupportedOperationException` and the rest of
 `crates/translator/java/Standard.java`, written in Java and given to the program by the
 translator), with `getMessage`, `getCause`, `toString`, `printStackTrace` (without stack frames)
-and `getClass().getName()`. A method returns `Result<T, Throwable>` only when some caller catches
+and `getClass().getName()` and `getSimpleName()`. A method returns `Result<T, Throwable>` only when some caller catches
 what it may throw, `?` passes it on, and every other method keeps its plain signature: an exception
 that nothing catches ends the program where it is thrown, with `Exception in thread "main" ...` on
 standard error and exit code 1. A `try` is a labeled block that evaluates to a `Result`, and its
-catch clauses are a `match`. Rejected for now, by name: `finally`, try-with-resources, catching a
-failure of the runtime (a division by zero, an index out of bounds, a malformed number, a null
-dereference), a constructor or a `toString` that throws something a caller catches, and throwing
-a value that may be null. The design is in [docs/exceptions.md](docs/exceptions.md).
+catch clauses are a `match`. `finally` runs however its `try` ends: after an exception (which
+then goes on), a `return` (whose value is taken first) and a `break` or `continue` out of the
+`try`, through nested `try`s; a `return` or an exception in the `finally` replaces how the `try`
+ended. Rejected for now, by name: try-with-resources, catching a failure of the runtime (a
+division by zero, an index out of bounds, a malformed number, a null dereference) or letting a
+`finally` see one, a constructor or a `toString` that throws something a caller catches,
+throwing a value that may be null, and a `yield` or a constructor's `return` through a
+`finally`. The design is in [docs/exceptions.md](docs/exceptions.md).
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of

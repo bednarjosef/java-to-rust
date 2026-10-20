@@ -14,8 +14,12 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 /// The standard classes that are not in `java.lang`, by simple name.
-const OTHER_PACKAGES: &[(&str, &str)] =
-    &[("NoSuchElementException", "java.util"), ("ConcurrentModificationException", "java.util")];
+const OTHER_PACKAGES: &[(&str, &str)] = &[
+    ("NoSuchElementException", "java.util"),
+    ("ConcurrentModificationException", "java.util"),
+    ("IOException", "java.io"),
+    ("FileNotFoundException", "java.io"),
+];
 
 /// The package of the standard class with this simple name.
 fn package_of(simple: &str) -> &'static str {
@@ -280,10 +284,7 @@ impl<'t> Lowering<'t> {
         }
         let body = self.block(node.child("block")?)?;
         let catches = node.list("catches").map(|c| self.catch(c)).collect::<Result<_, _>>()?;
-        let finally = match node.get("finallyBlock") {
-            Some(block) => return unsupported(block, "`finally`"),
-            None => None,
-        };
+        let finally = node.get("finallyBlock").map(|block| self.block(block)).transpose()?;
         Ok(Stmt::Try { body, catches, finally })
     }
 
@@ -307,15 +308,18 @@ impl<'t> Lowering<'t> {
         Ok(Catch { types, name: param.str("name").to_string(), ty, body, pos: node.pos() })
     }
 
-    /// `o.getClass().getName()`, as `Builtin::ClassName` of `o`; `None` for any other call.
+    /// `o.getClass().getName()` or `o.getClass().getSimpleName()`, as `Builtin::ClassName` of
+    /// `o`; `None` for any other call.
     pub(super) fn class_name_call(
         &self,
         symbol: &Symbol,
         receiver: Option<Node<'t>>,
     ) -> Result<Option<ExprKind>, Error> {
-        if (symbol.owner, symbol.name) != ("java.lang.Class", "getName") {
-            return Ok(None);
-        }
+        let simple = match (symbol.owner, symbol.name) {
+            ("java.lang.Class", "getName") => false,
+            ("java.lang.Class", "getSimpleName") => true,
+            _ => return Ok(None),
+        };
         let is_get_class = |r: &Node| {
             r.kind() == "METHOD_INVOCATION"
                 && r.symbol().is_some_and(|s| s.owner == "java.lang.Object" && s.name == "getClass")
@@ -329,7 +333,7 @@ impl<'t> Lowering<'t> {
         if !matches!(object.ty, Type::Class(_)) {
             return unsupported(get_class, "getClass() of this type");
         }
-        Ok(Some(ExprKind::Builtin(Builtin::ClassName, vec![object])))
+        Ok(Some(ExprKind::Builtin(Builtin::ClassName { simple }, vec![object])))
     }
 
     /// Rejects a constructor or method of a standard class that the translator does not have,

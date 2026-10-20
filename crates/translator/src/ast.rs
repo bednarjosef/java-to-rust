@@ -569,8 +569,11 @@ pub enum Builtin {
     /// A code point method of `Character` (`toChars`, `charCount` and the like), see `CodePointOp`.
     CodePoint(CodePointOp),
     /// `o.getClass().getName()`: Java's binary name of the class of the object `o`, such as
-    /// `java.lang.IllegalStateException` or `Bank$Overdrawn`.
-    ClassName,
+    /// `java.lang.IllegalStateException` or `Bank$Overdrawn`; with `simple`,
+    /// `o.getClass().getSimpleName()`, its name in its source: `IllegalStateException`, `Overdrawn`.
+    ClassName {
+        simple: bool,
+    },
 }
 
 /// The methods of the boxed classes. The kind of the boxes comes from the types of the operands

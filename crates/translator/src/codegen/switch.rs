@@ -23,8 +23,9 @@ pub(super) enum Kind<'a> {
     Value { machine: bool, ty: Type },
     /// A labeled statement that is not a loop: a labeled Rust block, left only by its label.
     Block,
-    /// The body of a `try`, a labeled Rust block that only a failure leaves by its label: a jump
-    /// out of it to a loop must name the loop.
+    /// The body of a `try` or a `catch` clause written as a labeled Rust block, which an
+    /// exception (and, with a `finally`, a jump or a `return`) leaves by its label: a jump out of
+    /// it to a loop must name the loop.
     Try,
 }
 
@@ -191,6 +192,19 @@ impl<'a> Gen<'a> {
         self.frames.push(Frame { kind, java, name: None, at: line_start + 4 * self.indent });
     }
 
+    /// Opens a frame for a block whose header, just written, ends with its `{`, where its label
+    /// goes: `let attempt: T = {`.
+    pub(super) fn open_block(&mut self, kind: Kind<'a>) {
+        let at = self.out.len() - 2;
+        debug_assert_eq!(&self.out[at..], "{\n");
+        self.frames.push(Frame { kind, java: None, name: None, at });
+    }
+
+    /// Gives the frame at `index` the Rust label `name`, which a `break` then names.
+    pub(super) fn name_frame(&mut self, index: usize, name: &str) {
+        self.frames[index].name = Some(name.to_string());
+    }
+
     /// Closes the innermost frame, writing its label in front of its header if a jump named it.
     pub(super) fn close(&mut self) {
         let frame = self.frames.pop().expect("a frame to close");
@@ -219,6 +233,9 @@ impl<'a> Gen<'a> {
     /// A jump to the frame at `index`: a `break`, or a `continue` after the loop's own steps, or a
     /// `break` that gives the switch expression `value`.
     pub(super) fn jump(&mut self, index: usize, cont: bool, value: Option<String>) {
+        if self.jump_through_finally(index, cont) {
+            return;
+        }
         if cont {
             match self.frames[index].kind {
                 Kind::Loop(Loop::For(update)) => {
@@ -281,6 +298,10 @@ impl<'a> Gen<'a> {
         let target = self.frames.iter().rposition(|f| matches!(f.kind, Kind::Value { .. }));
         let Some(index) = target else { return self.line("break;") };
         let Kind::Value { ty, .. } = self.frames[index].kind else { unreachable!() };
+        if self.leaves_finally(index) {
+            let message = "a `yield` through a `finally` not supported yet".to_string();
+            self.rejected.get_or_insert(Error { pos: value.pos, message });
+        }
         let code = self.value(value, ty);
         self.jump(index, false, Some(code.text));
     }

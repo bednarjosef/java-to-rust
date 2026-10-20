@@ -455,9 +455,48 @@ Decisions that changed during the implementation, step by step.
 - **A local declared without a value and assigned in a live `try` body** starts at Java's
   default value under `#[allow(unused_assignments)]`; such a local of a type without a
   default value here (an object, an array) is rejected.
-- **Still rejected** (each with a message naming it): `finally` (step 4), try-with-resources
-  (step 7), constructors and `toString` methods that throw something a caller catches (step 6),
+- **Still rejected** (each with a message naming it): `finally` (step 4, now done),
+  try-with-resources (step 7), constructors and `toString` methods that throw something a caller catches (step 6),
   `throw` of a value that may be null (Java throws `NullPointerException` instead), a call of
   `main` that is caught, a static, field or enum constant initializer that throws an exception of
   the program, a program class named like a standard class it uses, and a call that throws inside
   an expression the translation writes as a closure (checked on the generated text).
+
+### Step 4: `finally`
+
+- **Three forms, the plainest that is equivalent.** A `try` that nothing leaves early (no
+  `return` or jump out of its body or `catch` clauses, and no exception of the program, which
+  the analysis records as `Facts::raising_tries`) is its body as a plain block followed by the
+  `finally`'s statements. One that only an exception leaves early is the `Result` form of
+  section 1.5, ending with `attempt?;` (or `java::or_break!`, or
+  `attempt.unwrap_or_else(java::uncaught)`). One that a `return` or a jump leaves is the
+  `java::Completion` form; whether a `return` or a jump leaves it is read off its statements.
+- **`java::Completion<T, E, J>` has the jump's type as a parameter**: a block that no jump
+  leaves has `Infallible` for `J`, one that no `return` leaves `Infallible` for `T`, so that
+  the `match` after the `finally` has only the arms that can happen (Rust 1.82's exhaustive
+  patterns allow leaving out the arms of uninhabited variants). A program without exceptions
+  has `Infallible` for `E` too, and no `Throw` arm.
+- **When neither the body nor a `catch` clause completes normally**, the `Result` form's block
+  is `Result<Infallible, Throwable>` and ends with `let Err(e) = attempt;` and the `throw`, and
+  the `Completion` form's `Normal` arm is `unreachable!`, so that the code after the `finally`
+  diverges as Java's does (a method's last statement needs no value after it).
+- **Labels are given when used**: the label of a `try` block or a `catch` clause's block is
+  written when something breaks out of it (`Gen::open_block`, `Gen::name_frame`), so that no
+  label is unused. A `catch` clause of a `try` with a `finally` is a block `'handler: { .. }` that
+  evaluates like the body, in a `let attempt = match attempt { Err(..) => 'handler: { .. },
+  other => other };`.
+- **A jump through several `finally`s** goes to the innermost one; its `match` makes the jump
+  again, which the next `finally` out intercepts, so each runs in order. The jumps of one `try`
+  are numbered in the order they are written, and the last arm is `Jump(_)`.
+- **A `return` through a `finally` takes its value first**, as Java does; a `String` variable
+  returned there is cloned rather than moved, since the `finally` may read it.
+- **A local declared without a value and assigned in the body or a `catch` clause** of a `try`
+  with a `finally` that is not a plain block starts at Java's default value, as in a live `try`
+  body.
+- **`java.io.IOException` and `java.io.FileNotFoundException`** are standard classes now, and
+  `getClass().getSimpleName()` is `Builtin::ClassName { simple: true }`, for the target program
+  `CheckedExceptions`, which step 5 (catching a malformed number) still blocks.
+- **Still rejected**: a `yield` that leaves a `try` with a `finally` (the switch expression's
+  value would have to wait for the `finally`), and a `return` of a constructor through a
+  `finally` (a constructor returns its object, which the `Completion` would have to carry).
+  A failure of the runtime under a `finally` stays rejected until step 5, as under a `catch`.

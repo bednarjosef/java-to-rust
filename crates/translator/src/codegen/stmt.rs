@@ -118,21 +118,13 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
             Stmt::For { init, cond, update, body } => self.for_loop(init, cond.as_ref(), update, body),
-            Stmt::Return(None, _) => match self.ctor_result {
-                Some(result) => self.line(&format!("return {result};")),
-                None if self.throwing => self.line("return Ok(());"),
-                None => self.line("return;"),
-            },
-            Stmt::Return(Some(value), _) => {
+            Stmt::Return(None, pos) => self.return_stmt(None, *pos),
+            Stmt::Return(Some(value), pos) => {
                 let code = self.returned(value);
-                if self.throwing {
-                    self.line(&format!("return Ok({});", code.text));
-                } else {
-                    self.line(&format!("return {};", code.text));
-                }
+                self.return_stmt(Some(code.text), *pos);
             }
             Stmt::Throw(value) => self.throw_stmt(value),
-            Stmt::Try { body, catches, .. } => self.try_stmt(stmt, body, catches),
+            Stmt::Try { body, catches, finally } => self.try_stmt(stmt, body, catches, finally.as_deref()),
             Stmt::Break => self.plain_jump(false),
             Stmt::Continue => self.plain_jump(true),
             Stmt::Switch { selector, cases } => self.switch_form(selector, cases, None),
@@ -163,9 +155,11 @@ impl<'a> Gen<'a> {
         if self.optional_return() {
             return self.optional_to(value, self.ret);
         }
+        // (A `finally` that the `return` runs may still read the variable.)
         if let ExprKind::Var(name) = &value.kind
             && value.ty == Type::String
             && !self.borrowed.contains(name)
+            && self.finallies.is_empty()
         {
             return Code::atom(self.local(name));
         }

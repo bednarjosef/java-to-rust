@@ -114,6 +114,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         uses_runtime: false,
         throwing: false,
         attempts: Vec::new(),
+        finallies: Vec::new(),
         attempt_count: 0,
         try_assigned: HashSet::new(),
         rejected: None,
@@ -254,8 +255,11 @@ struct Gen<'a> {
     uses_runtime: bool,
     /// Whether the current method returns `Result<_, Throwable>` (see `exceptions`).
     throwing: bool,
-    /// The labels of the `try` blocks around the code being written, innermost last.
-    attempts: Vec<String>,
+    /// The `try` blocks around the code being written, innermost last.
+    attempts: Vec<exceptions::Attempt>,
+    /// The `try` statements with a `finally` whose body or `catch` clauses are being written,
+    /// innermost last.
+    finallies: Vec<exceptions::Finally>,
     /// How many `try` blocks of the current method have a label.
     attempt_count: usize,
     /// The current method's locals declared without a value that a `try` block assigns (see
@@ -331,6 +335,7 @@ impl<'a> Gen<'a> {
         self.method = index;
         self.throwing = self.facts.throwing.contains(&index);
         self.attempts.clear();
+        self.finallies.clear();
         self.attempt_count = 0;
         self.try_assigned = exceptions::try_assigned(self.facts, &m.body);
         if let Some(e) = exceptions::check_try_assigned(&m.body, &self.try_assigned) {

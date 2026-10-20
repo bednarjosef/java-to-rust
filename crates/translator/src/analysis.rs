@@ -122,6 +122,9 @@ pub struct Facts {
     /// The `try` statements, by address, whose `catch` clauses catch an exception that their body
     /// may throw. The others run their body as a plain block.
     pub live_tries: HashSet<usize>,
+    /// The `try` statements, by address, whose body or `catch` clauses an exception of the
+    /// program may leave or reach (which their `finally` must see).
+    pub raising_tries: HashSet<usize>,
 }
 
 impl Facts {

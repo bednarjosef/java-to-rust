@@ -264,7 +264,6 @@ impl Census {
                     "TRY" if node["resources"].as_array().is_some_and(|r| !r.is_empty()) => {
                         scan.feature("try-with-resources", node)
                     }
-                    "TRY" if !node["finallyBlock"].is_null() => scan.feature("finally", node),
                     "INSTANCE_OF" => scan.feature("instanceof", node),
                     "TYPE_CAST" if !is_primitive(ty) => scan.feature("reference casts", node),
                     "ENHANCED_FOR_LOOP" if !text(&node["expression"], "javaType").ends_with(']') => {

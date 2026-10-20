@@ -56,11 +56,12 @@ pub(crate) fn die(e: impl fmt::Display) -> ! {
 
 /// How a `try` block with a `finally` ended, which the code after the `finally` acts on: it
 /// completed normally, returned a value, jumped out (a `break` or `continue`, numbered by the
-/// translation), or threw.
-pub enum Completion<T, E> {
+/// translation), or threw. A block that cannot return or jump has `Infallible` for `T` or `J`,
+/// so that a `match` on it needs no arm for them.
+pub enum Completion<T, E, J = usize> {
     Normal,
     Return(T),
-    Jump(usize),
+    Jump(J),
     Throw(E),
 }
 
@@ -76,7 +77,7 @@ impl<T, E> Thrown<E> for Result<T, E> {
     }
 }
 
-impl<T, E> Thrown<E> for Completion<T, E> {
+impl<T, E, J> Thrown<E> for Completion<T, E, J> {
     fn thrown(e: E) -> Self {
         Completion::Throw(e)
     }

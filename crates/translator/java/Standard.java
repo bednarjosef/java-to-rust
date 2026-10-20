@@ -1,7 +1,7 @@
 // The standard exception classes as the translator provides them: the constructors and the
 // methods of `Throwable` that a translation can reproduce, in the subset of Java the translator
 // supports. `build.rs` prints their syntax tree with `JavaTree`, and lowering gives each class
-// its real package (`java.lang` or `java.util`) and adds the classes a program uses to it (see
+// its real package (`java.lang`, `java.util` or `java.io`) and adds the classes a program uses to it (see
 // `lower/exceptions.rs`). Stack traces, suppressed exceptions and serialization are left out;
 // `cause` is null where Java's field holds the object itself to mean "not set yet", which only
 // `initCause` tells apart.
@@ -310,5 +310,31 @@ class ConcurrentModificationException extends RuntimeException {
 
     public ConcurrentModificationException(String message, Throwable cause) {
         super(message, cause);
+    }
+}
+
+class IOException extends Exception {
+    public IOException() {
+    }
+
+    public IOException(String message) {
+        super(message);
+    }
+
+    public IOException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public IOException(Throwable cause) {
+        super(cause);
+    }
+}
+
+class FileNotFoundException extends IOException {
+    public FileNotFoundException() {
+    }
+
+    public FileNotFoundException(String s) {
+        super(s);
     }
 }

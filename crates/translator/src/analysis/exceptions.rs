@@ -42,7 +42,8 @@ enum Raise {
     Runtime(&'static str),
 }
 
-/// A `try` around a point, whose body the point is in: what its `catch` clauses catch.
+/// A `try` around a point, whose body or one of whose `catch` clauses the point is in: what its
+/// `catch` clauses catch (nothing, for a point in a `catch` clause).
 #[derive(Clone)]
 struct Frame {
     /// The address of the `try` statement.
@@ -148,14 +149,24 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     let groups: Vec<usize> = throwing.iter().flat_map(|&m| h.group(m)).collect();
     throwing.extend(groups);
 
-    // The failures of the runtime that something would see, and the `try`s that catch something.
+    // The failures of the runtime that something would see, the `try`s that catch something,
+    // and those that an exception of the program leaves.
     let mut live_tries = HashSet::new();
+    let mut raising_tries = HashSet::new();
     for (m, method) in class.methods.iter().enumerate() {
         for p in &points[m] {
             for k in raised(p, &escapes) {
                 let catcher = p.frames.iter().rev().find(|f| f.catches.iter().any(|&t| matches(&k, t)));
                 if let Some(f) = catcher {
                     live_tries.insert(f.id);
+                }
+                if matches!(k, Kind::Class(_)) {
+                    for f in p.frames.iter().rev() {
+                        raising_tries.insert(f.id);
+                        if f.catches.iter().any(|&t| matches(&k, t)) {
+                            break;
+                        }
+                    }
                 }
                 let Kind::Runtime(name) = k else { continue };
                 if !matches!(p.raise, Raise::Runtime(_)) {
@@ -243,6 +254,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
 
     facts.throwing = throwing;
     facts.live_tries = live_tries;
+    facts.raising_tries = raising_tries;
     Ok(())
 }
 
@@ -302,11 +314,18 @@ fn stmt_points(
                 stmt_points(class, facts, m, b, frames, out);
             }
             frames.pop();
+            // What a `catch` clause throws leaves the `try`, through its `finally`.
+            frames.push(Frame {
+                id: s as *const Stmt as usize,
+                catches: Vec::new(),
+                finally: finally.is_some(),
+            });
             for catch in catches {
                 for b in &catch.body {
                     stmt_points(class, facts, m, b, frames, out);
                 }
             }
+            frames.pop();
             for b in finally.iter().flatten() {
                 stmt_points(class, facts, m, b, frames, out);
             }
@@ -430,7 +449,7 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
 fn text_objects(x: &Expr) -> Vec<&Expr> {
     let is_object = |a: &&Expr| matches!(a.ty, Type::Class(_));
     match &x.kind {
-        ExprKind::Builtin(Builtin::ClassName, _) => Vec::new(),
+        ExprKind::Builtin(Builtin::ClassName { .. }, _) => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
             [&**l, &**r].into_iter().filter(is_object).collect()
@@ -587,7 +606,7 @@ fn runtime_failures(class: &Class, facts: &Facts, m: usize, x: &Expr) -> Vec<(&'
             | Builtin::EnumName
             | Builtin::EnumCompareTo
             | Builtin::Exit
-            | Builtin::ClassName => {}
+            | Builtin::ClassName { .. } => {}
             Builtin::StringLength | Builtin::StringEquals => {
                 if args.first().is_some_and(null) {
                     out.push((NPE, "this call"));

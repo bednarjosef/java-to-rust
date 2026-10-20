@@ -2796,6 +2796,79 @@ fn catch_clauses_match_in_order_and_a_try_that_catches_nothing_is_a_block() {
 }
 
 #[test]
+fn a_finally_runs_after_the_block_and_then_the_exception_goes_on() {
+    let rust = translate(
+        "class A {
+            static int log = 0;
+            static void withdraw(int amount) {
+                try {
+                    if (amount > 100) throw new IllegalStateException(\"too much\");
+                    System.out.println(amount);
+                } finally {
+                    log++;
+                }
+            }
+            public static void main(String[] a) {
+                try { withdraw(500); } catch (IllegalStateException e) { System.out.println(e.getMessage()); }
+                try { System.out.println(1); } finally { System.out.println(2); }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn withdraw(amount: i32) -> Result<(), Throwable> {",
+            "let attempt: Result<(), Throwable> = 'attempt: {",
+            "break 'attempt Err(Throwable::IllegalStateException(",
+            "attempt?;",
+        ],
+    );
+    // A `try` that nothing leaves early is its block, then the `finally`.
+    assert_contains(&rust, &["{\n        java::println!(\"1\");\n    }\n    java::println!(\"2\");"]);
+}
+
+#[test]
+fn a_return_or_a_jump_through_a_finally_happens_after_it() {
+    let rust = translate(
+        "class A {
+            static int find(int[] values, int target) {
+                try {
+                    for (int i = 0; i < values.length; i++) {
+                        if (values[i] == target) return i;
+                    }
+                    return -1;
+                } finally {
+                    System.out.println(\"searched\");
+                }
+            }
+            public static void main(String[] a) {
+                System.out.println(find(new int[] {4, 5}, 5));
+                for (int i = 0; i < 5; i++) {
+                    try {
+                        if (i == 1) continue;
+                        if (i == 3) break;
+                        System.out.println(i);
+                    } finally {
+                        System.out.println(\"after \" + i);
+                    }
+                }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "let attempt: java::Completion<i32, std::convert::Infallible, std::convert::Infallible> = 'attempt: {",
+            "break 'attempt java::Completion::Return(i);",
+            "java::Completion::Return(value) => {\n            return value;\n        }",
+            "break 'attempt java::Completion::Jump(0);",
+            "java::Completion::Jump(0) => {\n                continue;",
+            "java::Completion::Jump(_) => {\n                break;",
+        ],
+    );
+}
+
+#[test]
 fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
     let err = reject(
@@ -2817,10 +2890,22 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     assert!(err.contains("throwing a value that may be null not supported yet"), "{err}");
     let err = reject(
         "class A { public static void main(String[] a) {
-            try { System.out.println(1); } finally { System.out.println(2); }
+            int n = switch (a.length) {
+                case 0 -> { try { yield 1; } finally { System.out.println(2); } }
+                default -> 3;
+            };
+            System.out.println(n);
         } }",
     );
-    assert!(err.contains("`finally` not supported yet"), "{err}");
+    assert!(err.contains("a `yield` through a `finally` not supported yet"), "{err}");
+    let err = reject(
+        "class P {
+            int x;
+            P(int x) { try { if (x < 0) return; this.x = x; } finally { System.out.println(\"built\"); } }
+        }
+        class A { public static void main(String[] a) { System.out.println(new P(1).x); } }",
+    );
+    assert!(err.contains("a `return` of a constructor through a `finally` not supported yet"), "{err}");
     let err = reject(
         "class P {
             P(int x) { if (x < 0) throw new IllegalArgumentException(\"negative\"); }
