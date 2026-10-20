@@ -128,11 +128,35 @@ pub fn analyze(class: &Class) -> Facts {
 }
 
 /// Whether the field initializers of class `t` are written into the struct literal of each of
-/// its constructors: its constructors build a plain value, and no initializer reads `this`.
+/// its constructors: its constructors build a plain value, and the initializers use `this` only
+/// to read fields that earlier initializers set.
 pub fn inline_initializers(class: &Class, t: usize, facts: &Facts) -> bool {
     let decl = &class.types[t];
     (facts.owned.contains(&decl.name) || facts.plain_constructors.contains(&decl.name))
-        && decl.fields.iter().filter_map(|f| f.init.as_ref()).all(|e| !mentions_this(e))
+        && decl
+            .fields
+            .iter()
+            .enumerate()
+            .all(|(i, f)| f.init.as_ref().is_none_or(|e| reads_earlier_fields(decl, i, e)))
+}
+
+/// Whether the initializer `e` of field `i` uses `this` only to read fields declared before it
+/// that have initializers: those have their initial values then, which a constructor computes
+/// into locals first.
+pub fn reads_earlier_fields(decl: &TypeDecl, i: usize, e: &Expr) -> bool {
+    let mut allowed = HashSet::new();
+    let mut selves = Vec::new();
+    visit_expr(e, &mut |x| match &x.kind {
+        ExprKind::This => selves.push(x.id),
+        ExprKind::Field { object, name }
+            if matches!(object.kind, ExprKind::This)
+                && decl.fields[..i].iter().any(|f| &f.name == name && f.init.is_some()) =>
+        {
+            allowed.insert(object.id);
+        }
+        _ => {}
+    });
+    selves.iter().all(|id| allowed.contains(id))
 }
 
 /// The leading statements of a constructor that assign a field of `this` a value that does not

@@ -42,45 +42,85 @@ impl<'a> Gen<'a> {
     /// The struct literal that a constructor starts from, and the statements of its body that are
     /// left. The literal holds the fields' initializers and the leading assignments of the body
     /// (see `analysis::leading_assignments`). Effects keep Java's order, the initializers in field
-    /// order and then the assignments: when the literal's field order would change it, the values
-    /// with effects are computed into locals first.
+    /// order and then the assignments: an initializer that a later one reads, or that has effects
+    /// when a later one reads a field, is computed into a local first, and so is every value with
+    /// effects when the literal's field order would change their order.
     fn struct_literal(&mut self, m: &'a Method, initialize: bool) -> (String, &'a [Stmt]) {
         let decl = &self.class.types[m.class];
         let fields = &decl.fields;
         let leading = crate::analysis::leading_assignments(self.class, m, self.facts);
-        let mut values: Vec<Option<&'a Expr>> =
+        let inits: Vec<Option<&'a Expr>> =
             fields.iter().map(|f| f.init.as_ref().filter(|_| !initialize)).collect();
+        // The fields that a later initializer reads.
+        let read: Vec<bool> = fields
+            .iter()
+            .map(|f| {
+                inits.iter().flatten().any(|e| {
+                    let mut found = false;
+                    visit_expr(e, &mut |x| {
+                        found |= matches!(&x.kind, ExprKind::Field { object, name }
+                            if matches!(object.kind, ExprKind::This) && *name == f.name)
+                    });
+                    found
+                })
+            })
+            .collect();
+        let sequential = read.iter().any(|&r| r);
+        let mut bound: Vec<Option<String>> = vec![None; fields.len()];
+        let mut taken = Vec::new();
+        let bind = |g: &mut Self, i: usize, value: &'a Expr, taken: &mut Vec<String>| {
+            let f = &fields[i];
+            let mut temp = g.temp(&snake_case(&f.name));
+            while taken.contains(&temp) {
+                temp.push('_');
+            }
+            let nullable = g.field_nullable(&decl.name, &f.name);
+            if !nullable && (f.ty.is_numeric() || f.ty == Type::Boolean) {
+                // A number's type cannot come from the literal it starts as.
+                let code = g.value(value, f.ty);
+                let annotation = if code.untyped { format!(": {}", rust_type(f.ty)) } else { String::new() };
+                g.line(&format!("let {temp}{annotation} = {};", code.text));
+            } else {
+                let text = g.field_value(value, f.ty, nullable);
+                g.line(&format!("let {temp} = {text};"));
+            }
+            taken.push(temp.clone());
+            temp
+        };
+        let mut values = inits.clone();
+        if sequential {
+            // Every initializer that is read or has effects is computed in field order, first.
+            for i in 0..fields.len() {
+                if let Some(init) = inits[i]
+                    && (read[i] || has_effects(init))
+                {
+                    let local = bind(self, i, init, &mut taken);
+                    if read[i] {
+                        self.field_locals.insert(fields[i].name.clone(), local.clone());
+                    }
+                    bound[i] = Some(local);
+                }
+            }
+        }
         // The fields whose values have effects, in the order Java runs them.
         let mut effects: Vec<usize> =
-            (0..fields.len()).filter(|&i| values[i].is_some_and(has_effects)).collect();
+            (0..fields.len()).filter(|&i| bound[i].is_none() && values[i].is_some_and(has_effects)).collect();
         for &(i, value) in &leading {
             values[i] = Some(value);
+            bound[i] = None;
             if has_effects(value) {
                 effects.push(i);
             }
         }
-        let in_order = effects.windows(2).all(|w| w[0] < w[1]);
-        let mut bound: Vec<Option<String>> = vec![None; fields.len()];
-        if !in_order {
-            let mut taken = Vec::new();
+        if !effects.windows(2).all(|w| w[0] < w[1]) {
             for &i in &effects {
-                let f = &fields[i];
-                let mut temp = self.temp(&snake_case(&f.name));
-                while taken.contains(&temp) {
-                    temp.push('_');
-                }
-                let value = self.field_value(
-                    values[i].expect("has a value"),
-                    f.ty,
-                    self.field_nullable(&decl.name, &f.name),
-                );
-                self.line(&format!("let {temp} = {value};"));
-                taken.push(temp.clone());
-                bound[i] = Some(temp);
+                bound[i] = Some(bind(self, i, values[i].expect("has a value"), &mut taken));
             }
         }
         // A field read in one value must not hold its borrow while a later value borrows mutably.
-        let conflicts = self.conflicts(&values.iter().flatten().copied().collect::<Vec<_>>());
+        let unbound: Vec<&Expr> =
+            (0..fields.len()).filter(|&i| bound[i].is_none()).filter_map(|i| values[i]).collect();
+        let conflicts = self.conflicts(&unbound);
         let outer = std::mem::replace(&mut self.guarded, conflicts);
         let parts: Vec<String> = fields
             .iter()
@@ -88,7 +128,7 @@ impl<'a> Gen<'a> {
             .map(|(i, f)| {
                 let field = snake_case(&f.name);
                 let value = match (&bound[i], values[i]) {
-                    (Some(temp), _) => temp.clone(),
+                    (Some(local), _) => local.clone(),
                     (None, Some(e)) => self.field_value(e, f.ty, self.field_nullable(&decl.name, &f.name)),
                     (None, None) => self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name)),
                 };
@@ -96,6 +136,7 @@ impl<'a> Gen<'a> {
             })
             .collect();
         self.guarded = outer;
+        self.field_locals.clear();
         let literal = if parts.is_empty() {
             format!("{} {{}}", struct_name(&decl.name))
         } else {

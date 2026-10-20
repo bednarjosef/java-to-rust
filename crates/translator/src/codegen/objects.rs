@@ -296,6 +296,11 @@ impl<'a> Gen<'a> {
         match &e.kind {
             ExprKind::This => (self.this_name().to_string(), true),
             ExprKind::Var(name) => (self.local(name), true),
+            ExprKind::Field { object, name }
+                if matches!(object.kind, ExprKind::This) && self.field_locals.contains_key(name) =>
+            {
+                (self.field_locals[name].clone(), true)
+            }
             ExprKind::Field { object, name } if !matches!(object.ty, Type::Enum(_)) => {
                 let field = snake_case(name);
                 let obj = self.object(object);
@@ -535,8 +540,13 @@ impl<'a> Gen<'a> {
         if matches!(object.ty, Type::Enum(_)) {
             return self.enum_field(object, name);
         }
-        let obj = self.object(object);
         let clone = if self.clones(ty) { ".clone()" } else { "" };
+        if matches!(object.kind, ExprKind::This)
+            && let Some(local) = self.field_locals.get(name)
+        {
+            return Code::atom(format!("{local}{clone}"));
+        }
+        let obj = self.object(object);
         if self.is_plain(object) {
             return Code::atom(format!("{obj}.{}{clone}", snake_case(name)));
         }

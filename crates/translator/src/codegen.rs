@@ -54,6 +54,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         lazy_text: false,
         formatting: false,
         chars: false,
+        field_locals: HashMap::new(),
         printing: false,
         guarded: false,
         annotations: Vec::new(),
@@ -150,6 +151,9 @@ struct Gen<'a> {
     formatting: bool,
     /// Whether the switch being written matches its `char` selector as a Rust `char`.
     chars: bool,
+    /// The locals that hold the fields that a constructor's initializers computed first, by
+    /// Java field name: the later initializers read them there.
+    field_locals: HashMap<String, String>,
     /// Whether the text being formatted is printed.
     printing: bool,
     /// Whether the statement being emitted also borrows an object mutably (see `conflicts`).
