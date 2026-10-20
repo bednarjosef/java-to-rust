@@ -124,14 +124,19 @@ impl<'a> Gen<'a> {
         if self.holds_value(c) { "*o" } else { "o.clone()" }
     }
 
-    /// The class of the object, or the enum of the constant, that `e` is, and its handle or value.
-    fn variant_value(&mut self, e: &'a Expr) -> (usize, String) {
-        if let Type::Enum(name) = e.ty {
-            let c = self.class.type_index(name).expect("an enum of the program");
-            return (c, self.expr(e).text);
+    /// The class of the object, or the enum of the constant, that `e` is: the variant it becomes.
+    fn value_class(&self, e: &Expr) -> usize {
+        match e.ty {
+            Type::Enum(name) => self.class.type_index(name).expect("an enum of the program"),
+            _ => self.struct_class(e).expect("an object has a class type"),
         }
-        let c = self.struct_class(e).expect("an object has a class type");
-        (c, self.object_handle(e))
+    }
+
+    /// The variant's class of `e` (see `value_class`) and its handle or value.
+    fn variant_value(&mut self, e: &'a Expr) -> (usize, String) {
+        let c = self.value_class(e);
+        let text = if self.holds_value(c) { self.expr(e).text } else { self.object_handle(e) };
+        (c, text)
     }
 
     /// The Rust type of the object of concrete class `c` that its variant holds.
@@ -224,7 +229,7 @@ impl<'a> Gen<'a> {
                     )
                 }
                 None => {
-                    let c = self.struct_class(value).expect("an object has a class type");
+                    let c = self.value_class(value);
                     format!("{option}.map({})", self.variant(t, c))
                 }
             });
@@ -235,10 +240,7 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}.{}()", self.object(value), self.to_name(t)))
             }
             None => {
-                let c = match value.ty {
-                    Type::Enum(name) => self.class.type_index(name).expect("an enum of the program"),
-                    _ => self.struct_class(value).expect("an object has a class type"),
-                };
+                let c = self.value_class(value);
                 let v = self.expr(value).text;
                 Code::atom(format!("{}({v})", self.variant(t, c)))
             }

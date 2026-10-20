@@ -1,0 +1,18 @@
+look
+go west
+go north
+take book
+take key
+take sword
+inventory
+go east
+go south
+go east
+take gold
+  GO   WEST
+score
+dance
+go north
+go east
+look
+quit

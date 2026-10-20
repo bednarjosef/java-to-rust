@@ -1,0 +1,10 @@
+(ada, 36) swapped (36, ada)
+equal pairs: true false
+hash equal: true
+box boxes length 7
+size 3 peek z
+iterated zyx
+z y x 
+caught: pop from empty stack
+points (3, 9) total 8
+swap of swap: (3, 9)

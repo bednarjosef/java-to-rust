@@ -190,6 +190,32 @@ impl<'a> Gen<'a> {
                     _ => call(self, "from_units", vec![chars]),
                 }
             }
+            StringOp::GetBytes => {
+                let s = self.text_ref(&args[0]);
+                let charset = match args.get(1) {
+                    Some(charset) => self.charset_arg(charset),
+                    None => format!("{}::Utf8", self.runtime("Charset")),
+                };
+                call(self, "get_bytes", vec![s, charset])
+            }
+            StringOp::FromBytes => {
+                let bytes = self.slice_of(&args[0]);
+                match args.get(1..) {
+                    Some([offset, length, charset]) => {
+                        let (offset, length) = (self.int_arg(offset), self.int_arg(length));
+                        let charset = self.charset_arg(charset);
+                        call(self, "new_string_range", vec![bytes, offset, length, charset])
+                    }
+                    Some([charset]) => {
+                        let charset = self.charset_arg(charset);
+                        call(self, "new_string", vec![bytes, charset])
+                    }
+                    _ => {
+                        let charset = format!("{}::Utf8", self.runtime("Charset"));
+                        call(self, "new_string", vec![bytes, charset])
+                    }
+                }
+            }
             StringOp::Identity if self.nullable(&args[0]) => {
                 Code::atom(format!("{}.to_string()", self.deref(&args[0])))
             }

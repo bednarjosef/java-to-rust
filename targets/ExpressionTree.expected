@@ -1,0 +1,11 @@
+a: ((2 * x) + -y) = 15
+b: arithmetic error: / by zero
+c: error: undefined variable z
+d: --(x + 0) = 6
+d simplified: x = 6
+simplified c: z
+simplified d: x
+c with z: (0 + (1 * z)) = 11
+c simplified with z: z = 11
+equal nums: true false
+hash of 9: 9

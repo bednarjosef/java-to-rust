@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 mod boxing;
 mod character;
+mod charsets;
 mod code;
 mod code_point;
 mod dispatch;
@@ -36,6 +37,7 @@ use null::is_null_test;
 use primitives::*;
 use switch::{Frame, Kind};
 
+mod array_writes;
 mod arrays;
 mod java_arrays;
 mod modules;

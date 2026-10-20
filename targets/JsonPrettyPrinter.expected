@@ -1,0 +1,19 @@
+{
+  "name": "Widget \"Pro\"",
+  "price": 12.5,
+  "count": 3,
+  "tags": [
+    "tools",
+    "metal"
+  ],
+  "meta": {
+    "active": true,
+    "note": null,
+    "dims": []
+  }
+}
+keys: name, price, count, tags, meta
+error at 5: expected , or ] at offset 5
+error at 5: expected colon at offset 5
+error at 7: unexpected character '@' at offset 7
+error at 5: unterminated string at offset 5

@@ -34,7 +34,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
         let mut on_expr = |m: usize, e: &Expr| {
             visit_expr(e, &mut |x| match &x.kind {
                 ExprKind::Assign { op: None, target, value }
-                    if x.ty.is_reference() && maybe_null(facts, m, value) =>
+                    if nullable_type(x.ty) && maybe_null(facts, m, value) =>
                 {
                     match target {
                         Place::Var(name) => vars.push((m, name.clone())),
@@ -77,7 +77,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             for stmt in &method.body {
                 let mut on_stmt = |s: &Stmt| match s {
                     Stmt::Local { ty, name, init: Some(init), .. }
-                        if ty.is_reference() && maybe_null(facts, m, init) =>
+                        if nullable_type(*ty) && maybe_null(facts, m, init) =>
                     {
                         declared.push((m, name.clone()));
                     }
@@ -92,9 +92,10 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 visit_stmt(stmt, &mut |e| on_expr(m, e), &mut on_stmt);
             }
         }
-        // Field initializers run outside any method: `new T[n]` there leaves elements null too.
-        for decl in &class.types {
-            for init in decl.fields.iter().chain(&decl.statics).filter_map(|f| f.init.as_ref()) {
+        // Field initializers run in every object's constructor: a `new String[2]` there leaves
+        // its strings null too.
+        for f in class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics)) {
+            if let Some(init) = &f.init {
                 on_expr(usize::MAX, init);
             }
         }
@@ -180,10 +181,16 @@ pub fn nullable_var(facts: &Facts, m: usize, name: &str) -> bool {
     facts.nullable_vars.contains(&(m, name.to_string()))
 }
 
+/// The types whose values can be null: references, and enums, which are only ever null in a local
+/// (see `lower::enum_nulls`).
+pub fn nullable_type(ty: Type) -> bool {
+    ty.is_reference() || matches!(ty, Type::Enum(_))
+}
+
 /// Whether `e`, evaluated in method `m`, can produce null.
 pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
-    // Only references, and the null literal, can be null.
-    if !e.ty.is_reference() {
+    // Only references, enums and the null literal can be null.
+    if !nullable_type(e.ty) {
         return false;
     }
     match &e.kind {

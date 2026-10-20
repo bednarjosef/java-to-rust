@@ -1,0 +1,10 @@
+delivered 7 events, counter 2
+  lambda #1 orders for ada total 50
+  audit saw #1 orders for ada total 50
+  lambda #2 orders for grace total 250
+  audit saw #2 orders for grace total 250
+  big order from grace
+  payment problem: card expired
+error 4: blocked: fraud
+after cancel delivered 0, errors 1
+last event: #6 orders for linus total 7 topic orders

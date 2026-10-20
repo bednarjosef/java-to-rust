@@ -44,6 +44,11 @@ One run of `python3 scripts/benchmark.py` (five runs per side, medians). Times i
 
 NodeList does not compile. See below.
 
+The table predates the StringBuild and Statics changes in "Causes" below. Those changes are not
+measured yet: the benchmark script was not run on this branch. To measure them, run
+`python3 scripts/benchmark.py StringBuild Statics` (the two changed cases), then
+`python3 scripts/benchmark.py` for the full table and the check that nothing got slower.
+
 A second run, taken earlier when the machine was less loaded, gave the same order of slowdowns
 with different absolute numbers: BinaryTrees 7.82, Collatz 0.90, Interpreter 5.65, Mandelbrot
 0.55, MatrixMultiply 58.40, NBody 0.65, Sieve 2.00, SortMillion 3.88, Statics 4.49, StringBuild
@@ -57,15 +62,21 @@ Read from the generated Rust under `target/benchmarks/<Name>/crate/src/main.rs`.
   `java::get(&java::get(&c, i), j)`. The outer `get` clones the row's array handle (an `Rc`),
   and each access borrows its `RefCell` and checks the bounds. A multiply-add is therefore two
   borrows, two checks, and a refcount change, in the innermost loop.
-- **StringBuild (31x).** `s.charAt(i)` becomes `java::char_at`, which calls
-  `encode_utf16().nth(i)` (runtime `character.rs:27`), so each access walks the string. The loop
-  condition `i < s.length()` calls `java::string_length`, which is `encode_utf16().count()`
-  (runtime `lib.rs:157`), so each iteration walks it again. Both are linear in the length, so the
-  scan is quadratic. `ascii_char_at` has a byte-indexed fast path, but the translator does not
-  choose it, because a `char` is not proven to be ASCII.
-- **Statics (3.2x).** Each static field is a `thread_local!` `RefCell`, reached through
+- **StringBuild (31x).** Before the fix, `s.charAt(i)` became `java::char_at`, which calls
+  `encode_utf16().nth(i)` (runtime `character.rs:27`), so each access walked the string. The loop
+  condition `i < s.length()` called `java::string_length`, which is `encode_utf16().count()`
+  (runtime `lib.rs:157`), so each iteration walked it again. Both are linear in the length, so the
+  scan was quadratic. The string is built from `(char) (...)` casts, which the translator could
+  not prove ASCII. The range analysis now records each `(char)` cast whose value stays in
+  `0..=0x7f` (`analysis/ranges.rs`). A string made only of such casts is ASCII, so `charAt` is
+  `s.as_bytes()[i] as u16` and `length()` is `s.len()`. A string that may hold a non-ASCII unit
+  keeps the UTF-16 walk, which is still linear per access. Not measured yet.
+- **Statics (3.2x).** Each static field was a `thread_local!` `RefCell`, reached through
   `with_borrow` and `with_borrow_mut`. `next()` reads and writes the state several times per
-  call, so each access pays a thread-local lookup and a borrow.
+  call, so each access paid a thread-local lookup and a borrow. A primitive static (`int`,
+  `long`, `char`, `boolean`, and the other primitives, never null) is now a `Cell`, read with
+  `get` and written with `set`, which needs no borrow flag. Compound updates copy the value to a
+  local and store it. Other statics stay `RefCell`. Not measured yet.
 - **BinaryTrees (8x).** `count(node: Option<Rc<..>>)` clones the `left` and `right` handles on
   every call (a refcount increment and decrement each), and checks for `null` at every access.
   Allocation goes through `Rc`. Not profiled; these are read from the code.

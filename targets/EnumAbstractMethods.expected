@@ -1,0 +1,20 @@
+ADD + ordinal 0 apply(7, 3) = 10 cents 100
+SUB - ordinal 1 apply(7, 3) = 4 cents 100
+MUL * ordinal 2 apply(7, 3) = 21 cents 200
+DIV / ordinal 3 apply(7, 3) = 2 cents 300
+POW ^ ordinal 4 apply(7, 3) = 343 cents 250
+valueOf MUL: 42
+valueOf failed: No enum constant EnumAbstractMethods.Operation.MOD
+compare DIV to ADD: 3
+declaring class is enum: true
+rpn 3 4 + 2 * = 14
+rpn 2 10 ^ 1 - = 1023
+rpn error: division by zero in DIV
+hours: {MON=9, WED=6, SAT=2}
+total hours: 17
+weekend: [SAT, SUN] complement: [MON, TUE, WED, THU, FRI]
+range: [TUE, WED, THU]
+FRI is work
+SAT is rest
+TUE is work
+usage: {ADD=5, MUL=2} pow priced 250

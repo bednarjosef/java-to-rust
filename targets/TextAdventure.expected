@@ -1,0 +1,38 @@
+hall: a dusty hall with a faded rug. You see: lamp. Exits: [north]
+> look
+hall: a dusty hall with a faded rug. You see: lamp. Exits: [north]
+> go west
+You cannot go west.
+> go north
+library: shelves reach the ceiling. You see: key, book. Exits: [east, south]
+> take book
+Taken: book
+> take key
+Taken: key
+> take sword
+There is no sword here.
+> inventory
+You carry: book, key
+> go east
+vault: a cold room full of gold. Exits: [west]
+> go south
+You cannot go south.
+> go east
+You cannot go east.
+> take gold
+There is no gold here.
+> GO   WEST
+library: shelves reach the ceiling. Exits: [east, south]
+> score
+Score: 30
+> dance
+I do not understand 'dance'.
+> go north
+You cannot go north.
+> go east
+vault: a cold room full of gold. Exits: [west]
+> look
+vault: a cold room full of gold. Exits: [west]
+> quit
+Turns taken: 18
+Final score: 50
