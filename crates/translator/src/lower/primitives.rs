@@ -64,19 +64,36 @@ impl<'t> Lowering<'t> {
     }
 
     /// `Character.isDigit(c)` and the like, on a `char`; the overloads that take a code point
-    /// (an `int`) are not supported.
-    pub(super) fn character_method(&self, node: Node, name: &str, signature: &str) -> Result<Builtin, Error> {
-        let builtin = match name {
-            "isDigit" => Builtin::CharIsDigit,
-            "isLetter" => Builtin::CharIsLetter,
-            "isUpperCase" => Builtin::CharIsUpperCase,
-            "isLowerCase" => Builtin::CharIsLowerCase,
-            "toUpperCase" => Builtin::CharToUpperCase,
-            "toLowerCase" => Builtin::CharToLowerCase,
-            "getNumericValue" => Builtin::CharNumericValue,
+    /// (an `int`) are not supported. `isAlphabetic` has only the code point overload, which a
+    /// `char` argument selects by widening, so it takes that form for a `char` only.
+    pub(super) fn character_method(
+        &self,
+        node: Node,
+        name: &str,
+        signature: &str,
+        char_arg: bool,
+    ) -> Result<Builtin, Error> {
+        let (builtin, params) = match name {
+            "isDigit" => (Builtin::CharIsDigit, "(char)"),
+            "isLetter" => (Builtin::CharIsLetter, "(char)"),
+            "isUpperCase" => (Builtin::CharIsUpperCase, "(char)"),
+            "isLowerCase" => (Builtin::CharIsLowerCase, "(char)"),
+            "toUpperCase" => (Builtin::CharToUpperCase, "(char)"),
+            "toLowerCase" => (Builtin::CharToLowerCase, "(char)"),
+            "getNumericValue" => (Builtin::CharNumericValue, "(char)"),
+            "isWhitespace" => (Builtin::CharIsWhitespace, "(char)"),
+            "isSpaceChar" => (Builtin::CharIsSpaceChar, "(char)"),
+            "isLetterOrDigit" => (Builtin::CharIsLetterOrDigit, "(char)"),
+            "isAlphabetic" => (Builtin::CharIsAlphabetic, "(int)"),
+            "isSurrogate" => (Builtin::CharIsSurrogate, "(char)"),
+            "isHighSurrogate" => (Builtin::CharIsHighSurrogate, "(char)"),
+            "isLowSurrogate" => (Builtin::CharIsLowSurrogate, "(char)"),
+            "digit" => (Builtin::CharDigit, "(char,int)"),
+            "forDigit" => (Builtin::CharForDigit, "(int,int)"),
             _ => return unsupported(node, &format!("method `Character.{name}`")),
         };
-        if !signature.starts_with("(char)") {
+        let supported = signature.starts_with(params) && (params != "(int)" || char_arg);
+        if !supported {
             return unsupported(node, &format!("`Character.{name}` on a code point"));
         }
         Ok(builtin)

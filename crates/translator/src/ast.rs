@@ -446,6 +446,16 @@ pub enum Builtin {
     CharIsLowerCase,
     CharToUpperCase,
     CharToLowerCase,
+    CharIsWhitespace,
+    CharIsSpaceChar,
+    CharIsLetterOrDigit,
+    CharIsAlphabetic,
+    CharIsSurrogate,
+    CharIsHighSurrogate,
+    CharIsLowSurrogate,
+    /// `Character.digit(char, int)`, and `Character.forDigit(int, int)`, which makes a `char`.
+    CharDigit,
+    CharForDigit,
     /// A method of the native layer: `System.arraycopy`, `Math.sin` and the like.
     Native(Native),
     /// `e.ordinal()`; the receiver is the first argument.

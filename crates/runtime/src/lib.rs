@@ -12,6 +12,7 @@ use std::fmt;
 
 mod boxed;
 mod character;
+mod character_classes;
 mod exact;
 pub mod fdlibm;
 mod float;
@@ -21,6 +22,7 @@ mod null;
 mod out;
 pub use boxed::*;
 pub use character::*;
+pub use character_classes::*;
 pub use exact::*;
 pub use float::*;
 pub use math::*;
