@@ -21,7 +21,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 let mut on_expr = |e: &Expr| {
                     visit_expr(e, &mut |x| match &x.kind {
                         ExprKind::Assign { op: None, target: Place::Var(target), value }
-                            if x.ty == Type::String && maybe_null(facts, m, value) =>
+                            if x.ty.is_reference() && maybe_null(facts, m, value) =>
                         {
                             vars.push((m, target.clone()));
                         }
@@ -36,8 +36,8 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                     })
                 };
                 let mut on_stmt = |s: &Stmt| match s {
-                    Stmt::Local { ty: Type::String, name, init: Some(init), .. }
-                        if maybe_null(facts, m, init) =>
+                    Stmt::Local { ty, name, init: Some(init), .. }
+                        if ty.is_reference() && maybe_null(facts, m, init) =>
                     {
                         declared.push((m, name.clone()));
                     }
@@ -66,8 +66,8 @@ pub fn nullable_var(facts: &Facts, m: usize, name: &str) -> bool {
 
 /// Whether `e`, evaluated in method `m`, can produce null.
 pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
-    // Only strings, and the null literal, can be null.
-    if !matches!(e.ty, Type::String | Type::Null) {
+    // Only references, and the null literal, can be null.
+    if !e.ty.is_reference() {
         return false;
     }
     match &e.kind {

@@ -6,11 +6,10 @@ use crate::analysis::{maybe_null, nullable_var};
 
 /// Whether `l == r` or `l != r` compares a string with the `null` literal.
 pub(super) fn is_null_test(op: BinOp, l: &Expr, r: &Expr) -> bool {
-    let string_or_null = |e: &Expr| matches!(e.ty, Type::String | Type::Null);
     matches!(op, BinOp::Eq | BinOp::Ne)
         && (matches!(l.kind, ExprKind::Null) || matches!(r.kind, ExprKind::Null))
-        && string_or_null(l)
-        && string_or_null(r)
+        && l.ty.is_reference()
+        && r.ty.is_reference()
 }
 
 impl<'a> Gen<'a> {
@@ -28,12 +27,12 @@ impl<'a> Gen<'a> {
 
     /// Whether the variable or parameter `name` of method `method`, of type `ty`, is an `Option`.
     pub(super) fn optional_var(&self, method: usize, ty: Type, name: &str) -> bool {
-        ty == Type::String && nullable_var(self.facts, method, name)
+        ty.is_reference() && nullable_var(self.facts, method, name)
     }
 
     /// Whether the current method returns an `Option<String>`.
     pub(super) fn optional_return(&self) -> bool {
-        self.ret == Type::String && self.facts.nullable_returns.contains(&self.method)
+        self.ret.is_reference() && self.facts.nullable_returns.contains(&self.method)
     }
 
     /// `e` as an `Option<String>`: a possibly-null value as it is, any other string in `Some`.
@@ -41,7 +40,7 @@ impl<'a> Gen<'a> {
         if self.nullable(e) {
             return self.expr(e);
         }
-        let value = self.value(e, Type::String);
+        let value = self.value(e, e.ty);
         Code::atom(format!("Some({})", value.text))
     }
 
@@ -120,7 +119,7 @@ impl<'a> Gen<'a> {
         if matches!(e.kind, ExprKind::Null) {
             return Some(Part::Lit("null".to_string()));
         }
-        if e.ty != Type::String || !self.nullable(e) {
+        if !e.ty.is_reference() || !self.nullable(e) {
             return None;
         }
         let text = match &e.kind {
@@ -202,7 +201,11 @@ impl<'a> Gen<'a> {
     pub(super) fn early_null_exit(&mut self, stmt: &'a Stmt, rest: &[Stmt]) -> Option<&'a str> {
         let Stmt::If { cond, then, otherwise: None } = stmt else { return None };
         let (name, then_non_null) = self.null_test_var(cond)?;
-        if then_non_null || !exits(then) || assigns_any(rest, name) || !rest.iter().any(|s| mentions_stmt(s, name)) {
+        if then_non_null
+            || !exits(then)
+            || assigns_any(rest, name)
+            || !rest.iter().any(|s| mentions_stmt(s, name))
+        {
             return None;
         }
         let rust = self.local(name);
