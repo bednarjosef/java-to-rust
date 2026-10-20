@@ -7,7 +7,15 @@ impl<'t> Lowering<'t> {
     /// `new T[n][m]`, or an initializer such as `{1, 2}` and `new int[] {1, 2}`.
     pub(super) fn new_array(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         if node.get("initializers").is_some() {
-            let items = node.list("initializers").map(|item| self.expr(item)).collect::<Result<_, _>>()?;
+            // Each element converts to the element type, as an assignment to it would.
+            let element = match self.ty(node, node.java_type())? {
+                Type::Array(element) => *element,
+                _ => Type::Void,
+            };
+            let items = node
+                .list("initializers")
+                .map(|item| Ok(self.convert(self.expr(item)?, element)))
+                .collect::<Result<_, Error>>()?;
             return Ok(ExprKind::ArrayLit(items));
         }
         let sizes = node.list("dimensions").map(|d| self.expr(d)).collect::<Result<Vec<_>, _>>()?;

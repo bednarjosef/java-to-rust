@@ -50,7 +50,6 @@ pub fn lower_program<'t>(
         .collect::<Result<_, _>>()?;
     let hierarchy = Hierarchy::new(&types, &methods);
     let class = Class { name: main.to_string(), types, methods, hierarchy };
-    lowering.check_hierarchy(&class).map_err(|e| (None, e))?;
     Ok(class)
 }
 

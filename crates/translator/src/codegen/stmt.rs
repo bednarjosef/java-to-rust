@@ -176,10 +176,18 @@ impl<'a> Gen<'a> {
         self.nested(body);
         self.indent += 1;
         for u in update {
-            self.effect(u);
+            self.update_effect(u);
         }
         self.indent -= 1;
         self.close();
+    }
+
+    /// An update expression of a `for` loop, a statement of its own.
+    pub(super) fn update_effect(&mut self, u: &'a Expr) {
+        let conflicts = self.conflicts(&[u]) || self.reassigns_through_borrow(u);
+        let outer = std::mem::replace(&mut self.guarded, conflicts);
+        self.effect(u);
+        self.guarded = outer;
     }
 
     pub(super) fn for_loop(

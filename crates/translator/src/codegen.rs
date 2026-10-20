@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 mod boxing;
 mod character;
 mod code;
+mod dispatch;
 mod enums;
 mod expr;
 mod math;
@@ -25,6 +26,7 @@ mod switch;
 mod text;
 
 use code::*;
+use dispatch::{Need, Needs};
 use expr::Operand;
 use names::*;
 use null::is_null_test;
@@ -44,13 +46,32 @@ use boxing::boxed_locals;
 use objects::*;
 
 pub fn generate(class: &Class, facts: &Facts) -> String {
+    // The enums of class types get the items that the code uses, which writing the code finds:
+    // the program is written again until it asks for no item that was not written.
+    let mut wanted = Needs::new();
+    loop {
+        let (text, needs) = generate_with(class, facts, &wanted);
+        if needs.is_subset(&wanted) {
+            return text;
+        }
+        wanted.extend(needs);
+    }
+}
+
+/// The program, with the enum items `wanted`, and the enum items that it uses.
+fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs) {
     let live = live_types(class, facts);
     let modules = modules::enter(class);
     let homes: Vec<Home> = (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect();
+    let (fn_names, group_names) = method_names(class, &homes);
     let mut g = Gen {
         class,
         facts,
-        fn_names: method_names(class, &homes),
+        fn_names,
+        group_names,
+        live: live.clone(),
+        wanted: wanted.clone(),
+        needs: std::cell::RefCell::new(Needs::new()),
         homes,
         super_targets: super_targets(class),
         this_struct: 0,
@@ -82,10 +103,16 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         uses_runtime: false,
     };
     if modules.is_some() {
-        return g.program(&live);
+        let text = g.program(&live);
+        return (text, g.needs.take());
     }
     for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
         g.type_items(index);
+    }
+    for t in 0..class.types.len() {
+        if wanted.contains(&Need::Enum(t)) {
+            g.type_enum_items(t);
+        }
     }
     // An enum is never built with `new`, so it is emitted whether or not a `new` names it.
     for index in (0..class.types.len()).filter(|&t| class.types[t].enum_constants.is_some()) {
@@ -105,7 +132,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
     if !uses.is_empty() {
         header.push_str(&(uses.join("\n") + "\n"));
     }
-    header + &g.out
+    (header + &g.out, g.needs.take())
 }
 
 /// How `this` is written in the code being generated.
@@ -117,6 +144,8 @@ enum ThisForm {
     SelfRef,
     /// `this`, the plain value that a constructor is building.
     Local,
+    /// `self`, the value of a type's enum, in a method of the enum.
+    Enum,
 }
 
 /// The innermost enclosing loop, which decides how `continue` is translated.
@@ -140,6 +169,14 @@ struct Gen<'a> {
     facts: &'a Facts,
     /// Where each method is emitted (see `analysis::hierarchy`).
     homes: Vec<Home>,
+    /// The name of each override group (by group id): the name of its dispatchers.
+    group_names: HashMap<usize, String>,
+    /// Which classes have a struct (see `live_types`).
+    live: Vec<bool>,
+    /// The enum items to write, which an earlier pass found used (see `generate`).
+    wanted: Needs,
+    /// The enum items that the code written so far uses.
+    needs: std::cell::RefCell<Needs>,
     /// The methods that a `super.m(...)` call names, which run although a subclass overrides them.
     super_targets: HashSet<usize>,
     /// The class (index into `Class::types`) whose struct `this` is in the code being written:
@@ -262,12 +299,12 @@ impl<'a> Gen<'a> {
         self.facts.no_overflow.contains(&id)
     }
 
-    fn method(&mut self, index: usize) {
+    /// Sets up the state for writing method `index`: its locals and the forms of its parameters.
+    fn enter_method(&mut self, index: usize) {
         let m = &self.class.methods[index];
         self.ret = m.ret;
         self.method = index;
         self.name_locals(m);
-        let start = self.out.len();
         self.int_receiver = false;
         self.double_receiver = false;
         self.borrowed = (0..m.params.len())
@@ -281,30 +318,17 @@ impl<'a> Gen<'a> {
             .filter(|&i| self.facts.borrowed_optional_params.contains(&(index, i)))
             .map(|i| m.params[i].name.clone())
             .collect();
-        let name = &self.class.types[m.class].name;
-        self.this_struct = match self.homes[index] {
-            Home::Class(c) | Home::Fields(c) | Home::Enum(c) => c,
-            Home::Free | Home::Nowhere => m.class,
-        };
-        let is_enum = self.class.types[m.class].enum_constants.is_some();
-        let borrows = !m.is_static && !m.is_ctor && (is_enum || self.facts.self_methods.contains(&index));
-        self.display = borrows && !is_enum && self.displays(index);
-        self.this_form = if borrows { ThisForm::SelfRef } else { ThisForm::Shared };
-        let mut params = Vec::new();
-        if borrows && is_enum {
-            // An enum is a `Copy` value, so its methods take `self` by value.
-            params.push("self".to_string());
-        } else if borrows {
-            params.push(if self.facts.mutating.contains(&index) { "&mut self" } else { "&self" }.to_string());
-        } else if !m.is_static && !m.is_ctor {
-            params.push(format!("this: {}", self.this_type()));
-        }
-        let typed: Vec<String> = m
-            .params
+    }
+
+    /// The parameters of method `index` with their Rust types, `mut` where the body assigns
+    /// one and `mutable` allows it.
+    fn typed_params(&mut self, index: usize, mutable: bool) -> Vec<String> {
+        let m = &self.class.methods[index];
+        m.params
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let mutable = if assigns_any(&m.body, &p.name) { "mut " } else { "" };
+                let mutable = if mutable && assigns_any(&m.body, &p.name) { "mut " } else { "" };
                 let ty = if self.borrowed_optional.contains(&p.name) {
                     "Option<&str>".to_string()
                 } else if self.optional_var(index, p.ty, &p.name) {
@@ -320,9 +344,15 @@ impl<'a> Gen<'a> {
                 };
                 format!("{mutable}{}: {ty}", self.local(&p.name))
             })
-            .collect();
-        params.extend(typed);
-        let ret = if m.is_ctor && self.builds_plain(name) {
+            .collect()
+    }
+
+    /// The return type of method `index` as it is written after its parameters: ` -> T`, or
+    /// nothing.
+    fn ret_text(&mut self, index: usize) -> String {
+        let m = &self.class.methods[index];
+        let name = &self.class.types[m.class].name;
+        if m.is_ctor && self.builds_plain(name) {
             format!(" -> {}", self.struct_of(m.class))
         } else if m.is_ctor {
             format!(" -> {}", self.object_type(name))
@@ -332,7 +362,41 @@ impl<'a> Gen<'a> {
             format!(" -> Option<{}>", self.ty_name(m.ret))
         } else {
             format!(" -> {}", self.ty_name(m.ret))
+        }
+    }
+
+    fn method(&mut self, index: usize) {
+        let m = &self.class.methods[index];
+        self.enter_method(index);
+        let start = self.out.len();
+        let name = &self.class.types[m.class].name;
+        self.this_struct = match self.homes[index] {
+            Home::Class(c) | Home::Fields(c) | Home::Enum(c) => c,
+            Home::Free | Home::Nowhere => m.class,
         };
+        let is_enum = self.class.types[m.class].enum_constants.is_some();
+        let on_enum = matches!(self.homes[index], Home::Enum(_)) && !m.is_ctor;
+        let borrows =
+            !m.is_static && !m.is_ctor && !on_enum && (is_enum || self.facts.self_methods.contains(&index));
+        self.display = borrows && !is_enum && self.displays(index);
+        self.this_form = match () {
+            _ if on_enum => ThisForm::Enum,
+            _ if borrows => ThisForm::SelfRef,
+            _ => ThisForm::Shared,
+        };
+        let mut params = Vec::new();
+        if borrows && is_enum {
+            // An enum is a `Copy` value, so its methods take `self` by value.
+            params.push("self".to_string());
+        } else if borrows {
+            params.push(if self.facts.mutating.contains(&index) { "&mut self" } else { "&self" }.to_string());
+        } else if on_enum {
+            params.push("&self".to_string());
+        } else if !m.is_static && !m.is_ctor {
+            params.push(format!("this: {}", self.this_type()));
+        }
+        params.extend(self.typed_params(index, true));
+        let ret = self.ret_text(index);
         if self.display {
             self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
         } else {

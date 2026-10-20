@@ -61,8 +61,11 @@ fn unique_in(base: String, first: &mut HashSet<String>, second: &mut HashSet<Str
 /// Instance methods are named within their class tree, one name per override group, so that every
 /// implementation of a method has the name its calls use. A superclass's method emitted in the
 /// `impl` of a subclass that overrides it (where only `super` calls reach it) gets the name of its
-/// class appended: `describe_in_shape`.
-pub(super) fn method_names(class: &Class, homes: &[Home]) -> Vec<String> {
+/// class appended: `describe_in_shape`. So does a body emitted on the enum of a type when a class
+/// under the type overrides it, since the enum's dispatcher has the method's name, and a
+/// `toString` there, since `to_string` is the enum's `Display`. Also returns the name of each
+/// override group, by group id.
+pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashMap<usize, String>) {
     let h = &class.hierarchy;
     // Each class has its own `impl`, so names only need to be unique within their class tree.
     let mut used = vec![HashSet::new(); class.types.len()];
@@ -120,14 +123,23 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> Vec<String> {
     }
     for i in 0..class.methods.len() {
         let m = &class.methods[i];
-        let Home::Class(c) = homes[i] else { continue };
-        let shadowed = c != m.class
-            && (0..class.methods.len()).any(|o| o != i && homes[o] == Home::Class(c) && names[o] == names[i]);
+        let shadowed = match homes[i] {
+            Home::Class(c) => {
+                c != m.class
+                    && (0..class.methods.len())
+                        .any(|o| o != i && homes[o] == Home::Class(c) && names[o] == names[i])
+            }
+            Home::Enum(t) => {
+                (m.name == "toString" && m.params.is_empty())
+                    || h.concretes(t).into_iter().any(|c| h.implementation(i, c) != Some(i))
+            }
+            _ => false,
+        };
         if shadowed {
             let simple = class.types[m.class].name.rsplit(['.', '$']).next().unwrap_or_default();
             let base = format!("{}_in_{}", names[i], snake_case(simple));
             names[i] = unique(base, &mut used[h.root(m.class)]);
         }
     }
-    names
+    (names, group_names)
 }

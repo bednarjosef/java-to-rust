@@ -1365,3 +1365,40 @@ Decisions that changed during the implementation, milestone by milestone.
   `super` cases are in `corpus/features/SuperCalls.java`. `corpus/programs/Ledger.java` has two
   class trees (accounts and reports, the report a template method); it avoids `StringBuilder` and
   exceptions, which other work adds.
+
+### Milestone 2
+
+- No `variants`, `single`, `dispatched` or `conversions` facts: `hierarchy::rep` decides per type
+  whether its values are one class's object or an enum, and the generator finds which enum items
+  the code uses (`base()`, `base_mut()`, each dispatcher, each body emitted on an enum, each
+  `to_x()` conversion, `Display`) while it writes the code (`codegen/dispatch.rs`, `Need`). It
+  writes the program again with those items until no new one is asked for, which takes two or
+  three passes. An enum gets only the dispatchers that some call uses, so it has no dead code.
+- The variants of an enum are the classes under the type that are not owned and have a struct:
+  instantiated, or the type of something. A variant is named after its class's simple name
+  (`Shape::Circle`), with the outer classes' names when two variants of one enum share it.
+- A dispatcher arm whose class runs a body emitted on the enum of a type *below* the enum's type
+  wraps the object in that type's enum (`Binary::Add(o.clone()).eval()`) instead of converting the
+  whole value, which would be a downcast for the other variants.
+- When every variant runs the body emitted on the enum itself, a call names that body and no
+  dispatcher is generated. A `toString` emitted on an enum is always `to_string_in_<type>`, since
+  `to_string` is the enum's `Display`, and `x.toString()` on an enum is `x.to_string()`.
+- `==` on enum values is `&a == &b`, and with a value that may be null `a.as_ref() == Some(&b)`;
+  both through the identity `PartialEq`. `base_mut()` exists only for a mutable family.
+- An override that returns a value of another representation than the method it overrides (a
+  covariant return of an enum type's subclass) is rejected: "covariant return types not supported
+  yet". Dispatchers forward results unchanged.
+- Lowering converts the elements of array initializers and of packed varargs to the element type;
+  milestone 1 converted only the other places of section 0's list.
+- The nullness analysis now also looks at field initializers, where `new T[n]` leaves the elements
+  null (this fixed `known-failures/StringArrayFieldInitializer.java`).
+- A variable mentioned twice in one statement is not moved there, since Rust keeps the temporaries
+  of the statement (a `Ref` of a field read, the references `format_args!` takes) alive to its
+  end; a mention in the condition of `?:` does not count, as an `if` drops its condition's
+  temporaries before a branch runs. A `for` loop's update is guarded like a statement, so
+  `at = at.next` scopes its borrow there too.
+- Survey: "inheritance" is gone; a class that extends a class outside the sources is reported as
+  "extending classes outside the sources", and "super calls" is no longer a feature.
+- Corpus: `corpus/features/{Dispatch,Identity,Families,ObjectLevelInheritance,
+  InheritedFieldUpdates}.java`, `corpus/programs/{Shapes,Expressions}.java` and
+  `corpus/projects/zoo` (packages `zoo.animals`, `zoo.keep`, `zoo.app`).

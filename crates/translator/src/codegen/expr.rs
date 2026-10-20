@@ -141,7 +141,7 @@ impl<'a> Gen<'a> {
             {
                 return format!("{name} += {}", self.str_ref(value));
             }
-            if matches!(value.ty, Type::Class(_)) {
+            if matches!(value.ty, Type::Class(_)) && self.enum_of(value).is_none() {
                 let index = self.to_string_index(value);
                 return format!("{name} += &{}", self.method_call(value, index, &[]).text);
             }
@@ -253,7 +253,7 @@ impl<'a> Gen<'a> {
                 }
             }
             ExprKind::This if matches!(e.ty, Type::Enum(_)) => Code::atom(self.this_name()),
-            ExprKind::This => Code::atom("this.clone()"),
+            ExprKind::This => Code::atom(format!("{}.clone()", self.this_name())),
             ExprKind::EnumConstant { class, ordinal } => Code::atom(self.constant_path(*class, *ordinal)),
             ExprKind::Field { object, name } => self.field_read(object, name, e.ty),
             ExprKind::Static { class, name } => self.static_read(*class, name, e.ty),
@@ -341,6 +341,9 @@ impl<'a> Gen<'a> {
             ExprKind::Length(array) => self.length(array),
             ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
+            ExprKind::Cast(to @ Type::Class(_), value) if matches!(value.ty, Type::Class(_)) => {
+                self.class_cast(*to, value)
+            }
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
                 if let Some(code) = self.narrowed_conditional(e, cond, a, b) {
@@ -369,6 +372,8 @@ impl<'a> Gen<'a> {
                 if self.class.methods[index].is_static {
                     let args = self.call_args(index, args).join(", ");
                     Code::atom(format!("{}({args})", self.static_fn(index)))
+                } else if !*is_super && let Some(t) = self.enum_of(receiver) {
+                    self.enum_call(t, receiver, index, args)
                 } else {
                     let target = self.dispatch(receiver, index, *is_super);
                     self.method_call(receiver, target, args)

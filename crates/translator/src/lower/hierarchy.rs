@@ -126,21 +126,4 @@ impl<'t> Lowering<'t> {
             _ => None,
         }
     }
-
-    /// Rejects what this translation of class hierarchies does not support yet: a type with
-    /// several concrete classes under it.
-    pub(super) fn check_hierarchy(&self, class: &Class) -> Result<(), Error> {
-        for (t, decl) in class.types.iter().enumerate() {
-            if class.hierarchy.has_subtypes(t) && class.hierarchy.concretes(t).len() > 1 {
-                return error(
-                    self.types[t].node.pos(),
-                    format!(
-                        "class hierarchies where `{}` has several concrete classes not supported yet",
-                        decl.name
-                    ),
-                );
-            }
-        }
-        Ok(())
-    }
 }

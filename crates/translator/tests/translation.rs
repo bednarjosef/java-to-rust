@@ -665,6 +665,173 @@ fn superclass_static_initialization_runs_first() {
     assert_contains(&rust, &["fn init_sub() {", "    init_base();\n    SUB_OTHER.set(make(\"sub\"));"]);
 }
 
+const TREE: &str = "
+    abstract class Base {
+        String name;
+        int uses;
+        Base(String name) { this.name = name; }
+        String getName() { uses++; return name; }
+        abstract double area();
+        public String toString() { return name + \":\" + area(); }
+    }
+    class Circle extends Base {
+        final double r;
+        Circle(double r) { super(\"circle\"); this.r = r; }
+        double area() { return 3.0 * r * r; }
+        public String toString() { return \"C\" + super.toString(); }
+    }
+    class Rect extends Base {
+        double w, h;
+        Rect(double w, double h) { super(\"rect\"); this.w = w; this.h = h; }
+        double area() { return w * h; }
+    }
+    class A { public static void main(String[] a) {
+        Circle c = new Circle(1.5);
+        Base b = c;
+        Base r = new Rect(2, 3);
+        System.out.println(b.area() + r.area() + \" \" + b.getName() + \" \" + (b == r) + \" \" + b.name);
+        System.out.println(b == c);
+        Base last = c;
+        System.out.println(r + \" \" + last);
+    } }";
+
+#[test]
+fn a_type_with_several_concrete_classes_is_an_enum() {
+    let rust = translate(TREE);
+    assert_contains(
+        &rust,
+        &[
+            "#[derive(Clone)]\nenum Base {\n    Circle(Rc<RefCell<Circle>>),\n    Rect(Rc<RefCell<Rect>>),\n}",
+            "    fn area(&self) -> f64 {
+        match self {
+            Base::Circle(o) => o.borrow().area(),
+            Base::Rect(o) => o.borrow().area(),
+        }
+    }",
+            "fn base(&self) -> Ref<'_, BaseFields> {",
+            "Base::Circle(o) => Ref::map(o.borrow(), |o| &o.base),",
+            // A method that only touches the fields runs on the fields struct of each object.
+            "Base::Circle(o) => o.borrow_mut().base.get_name(),",
+            "b.base().name",
+        ],
+    );
+    assert_lacks(&rust, &["dyn ", "Box<"]);
+}
+
+#[test]
+fn inherited_bodies_that_dispatch_live_on_the_enum() {
+    let rust = translate(TREE);
+    assert_contains(
+        &rust,
+        &[
+            "impl Base {",
+            "fn to_string_in_base(&self) -> String {",
+            "format!(\"{}:{}\", self.base().name.clone(), java::Double(self.area()))",
+            // `super.toString()` wraps the subclass's object in the enum to call the body there.
+            "Base::Circle(this.clone()).to_string_in_base()",
+            "impl fmt::Display for Base {",
+            "Base::Rect(_) => f.write_str(&self.to_string_in_base()),",
+        ],
+    );
+}
+
+#[test]
+fn upcasts_wrap_the_handle() {
+    let rust = translate(TREE);
+    assert_contains(
+        &rust,
+        &[
+            "let b = Base::Circle(c.clone());",
+            "let r = Base::Rect(Rc::new(RefCell::new(Rect::new(2.0, 3.0))));",
+        ],
+    );
+    // The last use of `c` moves it into the enum.
+    assert_contains(&rust, &["let last = Base::Circle(c);"]);
+}
+
+#[test]
+fn enum_identity_is_pointer_equality() {
+    let rust = translate(TREE);
+    assert_contains(
+        &rust,
+        &[
+            "impl PartialEq for Base {",
+            "(Base::Circle(a), Base::Circle(b)) => Rc::ptr_eq(a, b),",
+            "_ => false,",
+            "&b == &r",
+            "&b == &Base::Circle(c.clone())",
+        ],
+    );
+}
+
+#[test]
+fn an_immutable_family_has_no_refcell() {
+    let rust = translate(
+        "abstract class N { final int v; N(int v) { this.v = v; } abstract int eval(); }
+        class Leaf extends N { Leaf(int v) { super(v); } int eval() { return v; } }
+        class Twice extends N { final N inner; Twice(N inner) { super(0); this.inner = inner; } int eval() { return 2 * inner.eval() + inner.v; } }
+        class A { public static void main(String[] a) {
+            N n = new Twice(new Twice(new Leaf(3)));
+            System.out.println(n.eval() + n.v);
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "enum N {\n    Leaf(Rc<Leaf>),\n    Twice(Rc<Twice>),\n}",
+            "fn base(&self) -> &NFields {",
+            "N::Leaf(o) => o.eval(),",
+            "self.inner.base().v",
+        ],
+    );
+    assert_lacks(&rust, &["RefCell", "borrow"]);
+}
+
+#[test]
+fn a_class_that_is_never_upcast_stays_a_plain_value_beside_its_siblings() {
+    let rust = translate(
+        "abstract class Shape { int moves; abstract int sides(); void move() { moves++; } }
+        class Square extends Shape { int sides() { return 4; } }
+        class Tri extends Shape { int sides() { return 3; } }
+        class A { public static void main(String[] a) {
+            Shape s = new Square();
+            Tri t = new Tri();
+            t.move();
+            System.out.println(s.sides() + t.sides() + t.moves);
+        } }",
+    );
+    // `Tri` is only ever a `Tri`, so it is an owned value; only `Square` is a `Shape`.
+    assert_contains(&rust, &["let mut t = Tri::new();", "t.base.move_();", "t.base.moves"]);
+    // With one class left, the type is that class: no enum.
+    assert_contains(&rust, &["let s = Rc::new(RefCell::new(Square::new()));"]);
+    assert_lacks(&rust, &["enum Shape"]);
+}
+
+#[test]
+fn a_class_that_is_upcast_is_shared() {
+    let rust = translate(
+        "abstract class Shape { abstract int sides(); }
+        class Square extends Shape { int sides() { return 4; } }
+        class Tri extends Shape { int sides() { return 3; } }
+        class A {
+            static int total(Shape a, Shape b) { return a.sides() + b.sides(); }
+            public static void main(String[] a) {
+                Square s = new Square();
+                Tri t = new Tri();
+                System.out.println(total(s, t) + s.sides());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "enum Shape {\n    Square(Rc<Square>),\n    Tri(Rc<Tri>),\n}",
+            "let s = Rc::new(Square::new());",
+            "total(&Shape::Square(s.clone()), &Shape::Tri(t))",
+        ],
+    );
+}
+
 #[test]
 fn immutable_objects_are_shared_without_a_refcell() {
     let rust = translate(

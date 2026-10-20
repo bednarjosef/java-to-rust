@@ -98,8 +98,14 @@ pub(super) fn use_lines(code: &str) -> Vec<String> {
     if code.match_indices("Cell<").any(|(i, _)| !code[..i].ends_with("Ref")) {
         std.push_str("use std::cell::Cell;\n");
     }
+    if code.contains("Ref<'_") {
+        std.push_str("use std::cell::Ref;\n");
+    }
     if code.contains("RefCell") {
         std.push_str("use std::cell::RefCell;\n");
+    }
+    if code.contains("RefMut<'_") {
+        std.push_str("use std::cell::RefMut;\n");
     }
     if code.contains("impl fmt::Display") {
         std.push_str("use std::fmt;\n");
@@ -133,7 +139,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The whole program as nested modules, one per package, with `fn main` at the crate root.
-    pub(super) fn program(mut self, live: &[bool]) -> String {
+    pub(super) fn program(&mut self, live: &[bool]) -> String {
         let class = self.class;
         let mut packages = BTreeSet::new();
         for t in &class.types {
@@ -157,6 +163,11 @@ impl<'a> Gen<'a> {
         for (index, decl) in class.types.iter().enumerate() {
             if live[index] && decl.package == package {
                 self.type_items(index);
+            }
+        }
+        for (index, decl) in class.types.iter().enumerate() {
+            if self.wanted.contains(&Need::Enum(index)) && decl.package == package {
+                self.type_enum_items(index);
             }
         }
         self.statics();

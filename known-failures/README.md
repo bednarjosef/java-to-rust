@@ -21,7 +21,3 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
   `toString`. Java prints `slot null`; the translator rejects it with "printing an object without
   toString not supported yet". The value is always null, so the class's own printing is never
   needed.
-- `StringArrayFieldInitializer.java`: `String[] items = new String[2];` as a field initializer of
-  a class. Java prints `pen null 1`; rustc fails with E0308 "mismatched types" (the generated
-  `filled(2, None)` gives `Option`s where `String` is expected). The same array assigned in a
-  constructor translates.

@@ -98,10 +98,12 @@ common methods of `String` (searching, slicing, case, trimming, replacing, compa
 `split`/`replaceAll`/`matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf`,
 `new String(char[])`), `StringBuilder`, `String.format`/`formatted`/`printf` and the bit and radix
 methods of `Integer` and `Long` (`toHexString`, `bitCount`, `numberOfLeadingZeros`,
-`toString(v, radix)`, ...), all hand-written in the runtime with Java's exact results. Superclasses
-(abstract or not) with one concrete class under each type translate: `extends`, abstract methods,
-`super(...)` and `super.m(...)`. Interfaces, class trees with several concrete classes and
-generics are rejected with an error that names the construct and its position. So
+`toString(v, radix)`, ...), all hand-written in the runtime with Java's exact results. Class
+trees of the program's own classes translate, abstract or not and of any depth: `extends`,
+abstract methods, overriding and virtual calls, `super(...)` and `super.m(...)`, upcasts, `==` on
+objects of a class tree, and printing through the class's `toString`. Interfaces, `instanceof`,
+casts between class types, `Object` and generics are rejected with an error that names the
+construct and its position. So
 are `Float.parseFloat` and `Float.valueOf(String)` (Rust's `f32` parsing differs from Java's
 grammar), `Character.toChars` (it returns a `char[]`), and the `int` code-point overloads of the
 `Character` methods, except `isAlphabetic` on a `char`.
@@ -229,9 +231,20 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   the concrete class, where `this` is the whole object, a superclass's method that the subclass
   overrides under a name of its own for `super` calls (`withdraw_in_account`). Where every value of
   a type is an object of one concrete class, a value of the type is that class's object, so an
-  upcast changes nothing. The methods of an override group share what the analyses decide about
-  their parameters and results, as a call may run any of them. A superclass's static
-  initialization runs before its subclass's.
+  upcast changes nothing. A type that objects of several classes can be is an enum named after it
+  (`codegen/dispatch.rs`), with a variant per class holding that class's object
+  (`Shape::Circle(Rc<RefCell<Circle>>)`): a call on it is a method of the enum that matches the
+  variant and calls what that class runs, a field is read through `base()`, which borrows the
+  fields struct from whichever object it is (`s.base().name`), `==` is `PartialEq` comparing the
+  objects' identity, and `Display` shows each object as its class does. A body inherited from the
+  type that needs the whole object is a method of the enum (`to_string_in_shape(&self)`), and an
+  upcast wraps the object in its variant (`Shape::Circle(c.clone())`) or converts one enum to
+  another (`d.to_animal()`). The enum gets only the methods that the program calls. A class whose
+  objects are never used as a value of a supertype stays out of the enum and can stay an owned
+  value; the classes of one tree are immutable together or not at all, so `base()` has one type.
+  The methods of an override group share what the analyses decide about their parameters and
+  results, as a call may run any of them. A superclass's static initialization runs before its
+  subclass's.
 
 Whole programs (`program.rs`) spread over files and packages translate too: javac compiles all
 of them in one run, with the source roots as its source path, and a reachability pass over its

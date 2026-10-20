@@ -214,7 +214,7 @@ impl<'a> Gen<'a> {
             match self.frames[index].kind {
                 Kind::Loop(Loop::For(update)) => {
                     for u in update {
-                        self.effect(u);
+                        self.update_effect(u);
                     }
                 }
                 Kind::Loop(Loop::DoWhile(cond)) => {

@@ -19,6 +19,8 @@ enum Slot {
         obj: String,
         field: String,
         plain: bool,
+        /// Whether the object is a value of an enum, whose fields are borrowed with `base()`.
+        on_enum: bool,
     },
     Static {
         cell: String,
@@ -29,11 +31,12 @@ impl Slot {
     fn read(&self, clone: bool) -> String {
         let copy = !clone;
         match self {
-            Slot::Field { obj, field, plain: true } => {
+            Slot::Field { obj, field, plain: true, .. } => {
                 format!("{obj}.{field}{}", if copy { "" } else { ".clone()" })
             }
-            Slot::Field { obj, field, plain: false } => {
-                format!("{obj}.borrow().{field}{}", if copy { "" } else { ".clone()" })
+            Slot::Field { obj, field, plain: false, on_enum } => {
+                let borrow = if *on_enum { ".base()" } else { ".borrow()" };
+                format!("{obj}{borrow}.{field}{}", if copy { "" } else { ".clone()" })
             }
             Slot::Static { cell } => {
                 format!("{cell}.with_borrow({})", if copy { "|v| *v" } else { "|v| v.clone()" })
@@ -43,8 +46,11 @@ impl Slot {
 
     fn write(&self, value: &str) -> String {
         match self {
-            Slot::Field { obj, field, plain: true } => format!("{obj}.{field} = {value};"),
-            Slot::Field { obj, field, plain: false } => format!("{obj}.borrow_mut().{field} = {value};"),
+            Slot::Field { obj, field, plain: true, .. } => format!("{obj}.{field} = {value};"),
+            Slot::Field { obj, field, plain: false, on_enum } => {
+                let borrow = if *on_enum { ".base_mut()" } else { ".borrow_mut()" };
+                format!("{obj}{borrow}.{field} = {value};")
+            }
             Slot::Static { cell } => format!("{cell}.with_borrow_mut(|v| *v = {value});"),
         }
     }
@@ -313,6 +319,12 @@ impl<'a> Gen<'a> {
 
     /// The Rust type of an object of class `name`: a plain value for an owned class.
     pub(super) fn object_type(&self, name: &str) -> String {
+        if let Some(t) = self.class.type_index(name)
+            && let hierarchy::Rep::Enum(t) = hierarchy::rep(self.class, self.facts, t)
+        {
+            self.need(Need::Enum(t));
+            return struct_name(&self.class.types[t].name);
+        }
         let name = self.rep_name(name);
         let structure = match self.class.type_index(name) {
             Some(t) => self.struct_of(t),
@@ -330,6 +342,9 @@ impl<'a> Gen<'a> {
     /// Whether `e` is an object whose fields are read and written without a `RefCell`: an object of
     /// an immutable class or of an owned class, or `this` when it is borrowed or being built.
     pub(super) fn is_plain(&self, e: &Expr) -> bool {
+        if self.enum_of(e).is_some() {
+            return false;
+        }
         if matches!(e.kind, ExprKind::This) && self.this_form != ThisForm::Shared {
             return true;
         }
@@ -354,7 +369,7 @@ impl<'a> Gen<'a> {
 
     /// The class whose struct an object expression is: `this`'s in the code being written, else
     /// the class whose objects represent the expression's type.
-    fn struct_class(&self, object: &Expr) -> Option<usize> {
+    pub(super) fn struct_class(&self, object: &Expr) -> Option<usize> {
         if matches!(object.kind, ExprKind::This) {
             return Some(self.this_struct);
         }
@@ -364,6 +379,9 @@ impl<'a> Gen<'a> {
     /// The path of field `name` from the struct of `object`: `name`, or through the fields
     /// structs of superclasses that the struct embeds, `base.name`.
     pub(super) fn field_path(&self, object: &Expr, name: &str) -> String {
+        if let Some(t) = self.enum_of(object) {
+            return self.enum_field_path(t, object.ty, name);
+        }
         let field = snake_case(name);
         let (Some(s), Some(owner)) = (self.struct_class(object), self.class.field_owner(object.ty, name))
         else {
@@ -375,7 +393,8 @@ impl<'a> Gen<'a> {
     /// The method that a call of `resolved` on `receiver` runs: the one it names for `super.m()`,
     /// else the implementation of the class whose objects the receiver is.
     pub(super) fn dispatch(&self, receiver: &Expr, resolved: usize, is_super: bool) -> usize {
-        if is_super || self.class.methods[resolved].is_static {
+        // A call on an enum is its dispatcher's (see `dispatch`), which counts as the method it names.
+        if is_super || self.class.methods[resolved].is_static || self.enum_of(receiver).is_some() {
             return resolved;
         }
         // A method on a fields struct calls only methods that nothing overrides.
@@ -425,7 +444,7 @@ impl<'a> Gen<'a> {
     /// The name of `this` in the code being written: `self` in a method that borrows its object,
     /// else `this`.
     pub(super) fn this_name(&self) -> &'static str {
-        if self.this_form == ThisForm::SelfRef { "self" } else { "this" }
+        if matches!(self.this_form, ThisForm::SelfRef | ThisForm::Enum) { "self" } else { "this" }
     }
 
     /// Whether the constructors of class `name` build a plain value, which `new` then shares.
@@ -488,7 +507,14 @@ impl<'a> Gen<'a> {
             ExprKind::Field { object, name } if !matches!(object.ty, Type::Enum(_)) => {
                 let field = self.field_path(object, name);
                 let obj = self.object(object);
-                if self.is_plain(object) {
+                if let Some(t) = self.enum_of(object) {
+                    let borrow = self.enum_borrow(t, false);
+                    if self.guarded && !self.immutable_enum(t) {
+                        (format!("{{ {obj}{borrow}.{field}.clone() }}"), true)
+                    } else {
+                        (format!("{obj}{borrow}.{field}"), true)
+                    }
+                } else if self.is_plain(object) {
                     (format!("{obj}.{field}"), true)
                 } else if self.guarded {
                     // A borrow that the statement must not hold is ended inside braces, which
@@ -515,7 +541,7 @@ impl<'a> Gen<'a> {
     pub(super) fn object_handle(&mut self, e: &'a Expr) -> String {
         let e = self.peel(e);
         let text = match &e.kind {
-            ExprKind::This => "this.clone()".to_string(),
+            ExprKind::This => format!("{}.clone()", self.this_name()),
             ExprKind::Var(v) => format!("{}.clone()", self.local(v)),
             _ => self.expr(e).text,
         };
@@ -550,6 +576,9 @@ impl<'a> Gen<'a> {
     /// `a == b` and `a != b` on objects: whether they are the same object, as `Rc::ptr_eq`, or
     /// `java::same` where either may be null.
     pub(super) fn identity(&mut self, op: BinOp, l: &'a Expr, r: &'a Expr) -> Code {
+        if self.enum_of(l).is_some() || self.enum_of(r).is_some() {
+            return self.enum_identity(op, l, r);
+        }
         let same = if self.nullable(l) || self.nullable(r) {
             let (a, b) = (self.object_option(l), self.object_option(r));
             format!("{}({a}, {b})", self.runtime("same"))
@@ -563,6 +592,9 @@ impl<'a> Gen<'a> {
     /// The text of a non-null object of `e`'s class, reached through `handle`, a `&Rc<..>`: what
     /// `object_text` gives for an object that may be null once it is not.
     pub(super) fn handle_text(&mut self, handle: &str, e: &'a Expr) -> String {
+        if let Some(t) = self.enum_of(e) {
+            return self.enum_text(t, handle.to_string());
+        }
         let index = self.to_string_index(e);
         let mutating = self.facts.mutating.contains(&index);
         let obj = match () {
@@ -650,7 +682,7 @@ impl<'a> Gen<'a> {
 
     /// Whether an assignment to a local reads the local's old object through a `RefCell` borrow,
     /// as `t = t.left` does: the borrow would outlive the assignment that drops the old object.
-    fn reassigns_through_borrow(&self, e: &Expr) -> bool {
+    pub(super) fn reassigns_through_borrow(&self, e: &Expr) -> bool {
         let ExprKind::Assign { target: Place::Var(name), value, .. } = &e.kind else {
             return false;
         };
@@ -712,6 +744,10 @@ impl<'a> Gen<'a> {
             _ => (0, 0),
         };
         for object in converted_objects(x) {
+            if let Some(t) = self.enum_of(object) {
+                counts = (counts.0 + 1, counts.1 + usize::from(self.enum_text_writes(t)));
+                continue;
+            }
             let (b, m) = call(self.to_string_index(object), Some(object));
             counts = (counts.0 + b, counts.1 + m);
         }
@@ -728,9 +764,13 @@ impl<'a> Gen<'a> {
     /// the statement: a field read, or a call of a method that borrows its object.
     fn holds_borrow(&self, a: &Expr) -> bool {
         match &a.kind {
-            ExprKind::Field { object, .. } => !self.is_plain(object),
+            ExprKind::Field { object, .. } => match self.enum_of(object) {
+                Some(t) => !self.immutable_enum(t),
+                None => !self.is_plain(object),
+            },
             ExprKind::MethodCall { receiver, .. } => {
-                self.target(a).is_some_and(|index| self.facts.self_methods.contains(&index))
+                self.enum_of(receiver).is_none()
+                    && self.target(a).is_some_and(|index| self.facts.self_methods.contains(&index))
                     && !self.is_plain(receiver)
             }
             _ => false,
@@ -741,7 +781,10 @@ impl<'a> Gen<'a> {
     /// of the struct whose `impl` has it.
     pub(super) fn qualified_fn(&self, index: usize) -> String {
         let owner = match self.homes[index] {
-            Home::Class(c) | Home::Fields(c) | Home::Enum(c) => c,
+            Home::Enum(t) => {
+                return format!("{}::{}", struct_name(&self.class.types[t].name), self.fn_names[index]);
+            }
+            Home::Class(c) | Home::Fields(c) => c,
             Home::Free | Home::Nowhere => self.class.methods[index].class,
         };
         format!("{}::{}", self.struct_of(owner), self.fn_names[index])
@@ -762,7 +805,15 @@ impl<'a> Gen<'a> {
         if self.is_plain(object) {
             return Code::atom(format!("{obj}.{}{clone}", self.field_path(object, name)));
         }
-        let read = format!("{obj}.borrow().{}{clone}", self.field_path(object, name));
+        let borrow = match self.enum_of(object) {
+            Some(t) if self.immutable_enum(t) => {
+                let borrow = self.enum_borrow(t, false);
+                return Code::atom(format!("{obj}{borrow}.{}{clone}", self.field_path(object, name)));
+            }
+            Some(t) => self.enum_borrow(t, false),
+            None => ".borrow()",
+        };
+        let read = format!("{obj}{borrow}.{}{clone}", self.field_path(object, name));
         // The `Ref` lives to the end of the statement, so it is scoped with braces only when the
         // statement also borrows mutably; otherwise the braces would be noise.
         Code::atom(if self.guarded { format!("{{ {read} }}") } else { read })
@@ -786,19 +837,28 @@ impl<'a> Gen<'a> {
     pub(super) fn new_object(&mut self, ctor: usize, args: &'a [Expr]) -> Code {
         let args = self.call_args(ctor, args).join(", ");
         let call = format!("{}({args})", self.qualified_fn(ctor));
-        let name = &self.class.types[self.class.methods[ctor].class].name;
-        Code::atom(if self.facts.owned.contains(name) || !self.builds_plain(name) {
+        let c = self.class.methods[ctor].class;
+        let name = &self.class.types[c].name;
+        let object = if self.facts.owned.contains(name) || !self.builds_plain(name) {
             call
         } else if self.facts.immutable.contains(name) {
             format!("Rc::new({call})")
         } else {
             format!("Rc::new(RefCell::new({call}))")
+        };
+        // An object of a class with subclasses is a value of the class's enum.
+        Code::atom(match self.enum_for(c) {
+            Some(t) => format!("{}({object})", self.variant(t, c)),
+            None => object,
         })
     }
 
     /// `receiver.name(args)`, a call of an instance method. A method that borrows its object is
     /// called with method syntax, on a shared object through `borrow()` or `borrow_mut()`.
     pub(super) fn method_call(&mut self, receiver: &'a Expr, index: usize, args: &'a [Expr]) -> Code {
+        if let Some(code) = self.inherited_call(receiver, index, args) {
+            return code;
+        }
         if !self.facts.self_methods.contains(&index) {
             let mut all = vec![self.receiver_ref(receiver)];
             all.extend(self.call_args(index, args));
@@ -866,6 +926,10 @@ impl<'a> Gen<'a> {
     /// The text of an object, which Java gets from its class's `toString` (lowering rejects classes
     /// without one).
     pub(super) fn object_text(&mut self, e: &'a Expr) -> Code {
+        if let Some(t) = self.enum_of(e) {
+            let obj = self.object(e);
+            return Code::atom(self.enum_text(t, obj));
+        }
         let index = self.to_string_index(e);
         if !self.displays(index) {
             return self.text_call(e, index);
@@ -943,7 +1007,11 @@ impl<'a> Gen<'a> {
         }
         // The right operand runs before the field is borrowed, and the borrow of every field it
         // reads ends first.
-        let place = format!("{obj}.borrow_mut().{field}");
+        let borrow = match self.enum_of(object) {
+            Some(t) => self.enum_borrow(t, true),
+            None => ".borrow_mut()",
+        };
+        let place = format!("{obj}{borrow}.{field}");
         let outer = std::mem::replace(&mut self.guarded, true);
         let Type::Class(class) = object.ty else { unreachable!("a field of an object") };
         let text = match how {
@@ -978,7 +1046,7 @@ impl<'a> Gen<'a> {
                 } else {
                     let handle = self.temp("object");
                     let value = self.object_handle(object);
-                    (format!("let {handle} = {value}; "), format!("{handle}.borrow_mut().{field}"))
+                    (format!("let {handle} = {value}; "), format!("{handle}{borrow}.{field}"))
                 };
                 Some(format!("{{ {bind}let {local} = &mut {place}; {step}; }}"))
             }
@@ -1083,13 +1151,26 @@ impl<'a> Gen<'a> {
             Place::Field { object, name } if self.is_plain(object) => {
                 // Only a constructor writes a field of an immutable class, through its own `this`;
                 // an owned object's fields are written by its methods.
-                Slot::Field { obj: self.object(object), field: self.field_path(object, name), plain: true }
+                Slot::Field {
+                    obj: self.object(object),
+                    field: self.field_path(object, name),
+                    plain: true,
+                    on_enum: false,
+                }
             }
             Place::Field { object, name } => {
                 let obj = self.temp("object");
                 let owned = self.object_handle(object);
                 lines.push(format!("let {obj} = {owned};"));
-                Slot::Field { obj, field: self.field_path(object, name), plain: false }
+                let on_enum = match self.enum_of(object) {
+                    Some(t) => {
+                        self.need(Need::Base(t));
+                        self.need(Need::BaseMut(t));
+                        true
+                    }
+                    None => false,
+                };
+                Slot::Field { obj, field: self.field_path(object, name), plain: false, on_enum }
             }
             Place::Static { class, name } => {
                 Slot::Static { cell: cell_name(&self.class.types[*class].name, name) }
@@ -1290,6 +1371,9 @@ impl<'a> Gen<'a> {
     /// may format it in the middle of the printed line: its `toString` returns a concatenation of
     /// constants, variables and fields that cannot throw.
     fn quiet_text(&self, e: &Expr, depth: usize) -> bool {
+        if self.enum_of(e).is_some() {
+            return false;
+        }
         let index = self.to_string_index(e);
         let m = &self.class.methods[index];
         depth < 4

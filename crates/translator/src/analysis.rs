@@ -176,6 +176,19 @@ fn validate(class: &Class, facts: &Facts) -> Result<(), Error> {
                     .to_string(),
         });
     }
+    // A dispatcher returns what the method it dispatches returns; an override that returns a
+    // value of another representation would need its result converted.
+    let rep = |ty: Type| class.class_index(ty).map(|t| hierarchy::rep(class, facts, t));
+    for m in &class.methods {
+        for &o in &m.overrides {
+            if m.ret != class.methods[o].ret && rep(m.ret) != rep(class.methods[o].ret) {
+                return Err(Error {
+                    pos: m.pos,
+                    message: "covariant return types not supported yet".to_string(),
+                });
+            }
+        }
+    }
     Ok(())
 }
 

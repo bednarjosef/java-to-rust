@@ -52,7 +52,6 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
     }
     let hierarchy = Hierarchy::new(&types, &methods);
     let class = Class { name: first.str("simpleName").to_string(), types, methods, hierarchy };
-    lowering.check_hierarchy(&class)?;
     enums::check_nulls(&class)?;
     Ok(class)
 }

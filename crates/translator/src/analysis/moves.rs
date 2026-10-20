@@ -196,7 +196,15 @@ impl Walk {
                 self.expr(r);
             }
             ExprKind::Conditional(c, a, b) => {
+                // An `if` drops the temporaries of its condition before a branch runs, so a
+                // branch may move what the condition reads; a null test narrows the variable
+                // instead, which keeps it borrowed.
+                let outer = self.statement;
+                if !mentions_null(c) {
+                    self.statement = usize::MAX - self.uses.len();
+                }
                 self.expr(c);
+                self.statement = outer;
                 self.expr(a);
                 self.expr(b);
             }
@@ -231,4 +239,11 @@ impl Walk {
             Place::Static { .. } => {}
         }
     }
+}
+
+/// Whether an expression compares something with `null`.
+fn mentions_null(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::Null));
+    found
 }

@@ -192,8 +192,10 @@ impl Census {
         if !reach.classes.contains(&class) {
             return;
         }
-        let header: BTreeMap<&'static str, String> =
-            class_features(decl, outer).into_iter().map(|f| (f, place(&origin.file, decl))).collect();
+        let header: BTreeMap<&'static str, String> = class_features(decl, outer, &self.declared)
+            .into_iter()
+            .map(|f| (f, place(&origin.file, decl)))
+            .collect();
         for member in members(decl) {
             let kind = text(member, "kind");
             let reached = match kind {
@@ -266,9 +268,6 @@ impl Census {
                         scan.feature("for-each over collections", node)
                     }
                     "BINDING_PATTERN" | "RECORD_PATTERN" => scan.feature("patterns", node),
-                    "METHOD_INVOCATION" if text(&node["methodSelect"]["expression"], "name") == "super" => {
-                        scan.feature("super calls", node)
-                    }
                     _ => {}
                 }
                 // javac names an anonymous class `<anonymous Sink>`: that is not a generic type.
@@ -515,7 +514,7 @@ fn piece_kind(member: &Value) -> &'static str {
 }
 
 /// The unsupported features of a class declaration, which every piece of its code shares.
-fn class_features(decl: &Value, outer: Option<&Value>) -> BTreeSet<&'static str> {
+fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String>) -> BTreeSet<&'static str> {
     let mut features = BTreeSet::new();
     let kind = text(decl, "kind");
     match kind {
@@ -527,8 +526,12 @@ fn class_features(decl: &Value, outer: Option<&Value>) -> BTreeSet<&'static str>
     if !decl["implementsClause"].as_array().is_none_or(Vec::is_empty) {
         features.insert("interfaces");
     }
-    if kind == "CLASS" && (!decl["extendsClause"].is_null() || has_flag(decl, "ABSTRACT")) {
-        features.insert("inheritance");
+    // Class trees of the program's own classes translate; a superclass from elsewhere does not.
+    if kind == "CLASS" && !decl["extendsClause"].is_null() {
+        let superclass = text(&decl["extendsClause"], "javaType");
+        if !declared.contains(superclass.split('<').next().unwrap_or(superclass)) {
+            features.insert("extending classes outside the sources");
+        }
     }
     if !decl["typeParameters"].as_array().is_none_or(Vec::is_empty) {
         features.insert("generic classes");
