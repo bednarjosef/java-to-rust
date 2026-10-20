@@ -3,10 +3,12 @@
 //! resolved every name and call, so lowering only maps them onto the supported subset. Anything
 //! outside it is reported as an error naming the construct.
 
+mod code_point;
 mod enums;
 mod objects;
 mod statics;
 mod strings;
+mod unsigned;
 
 use crate::ast::*;
 use objects::{MethodInfo, TypeInfo};
@@ -524,6 +526,12 @@ impl<'t> Lowering<'t> {
             ("java.lang.String", _) => return self.string_call(node, &symbol, receiver, args),
             ("java.lang.StringBuilder" | "java.lang.AbstractStringBuilder" | "java.lang.CharSequence", _) => {
                 return self.builder_call(node, &symbol, receiver, args);
+            }
+            (owner, name) if unsigned::is_unsigned_method(owner, name) => {
+                self.unsigned_call(node, &symbol, &args)?
+            }
+            (owner, name) if code_point::is_code_point_method(owner, name, &args) => {
+                self.code_point_call(node, &symbol, &args)?
             }
             (owner, name) if boxing::boxed_type(owner).is_some() && boxing::is_boxed_method(name) => {
                 self.boxed_call(node, &symbol, &mut args, receiver)?

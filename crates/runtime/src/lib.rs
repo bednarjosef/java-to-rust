@@ -15,12 +15,15 @@ mod builder;
 mod character;
 mod character_classes;
 mod character_tables;
+mod code_point;
 mod exact;
 mod fd;
 pub mod fdlibm;
 mod float;
+mod float_parse;
 pub mod format;
 mod integer;
+mod integer_parse;
 mod java_arrays;
 mod math;
 mod natives;
@@ -29,15 +32,22 @@ mod out;
 pub mod regex;
 pub mod string;
 mod system;
+mod unsigned;
 pub use boxed::*;
 pub use builder::{StringBuilder, same_builder};
 pub use character::*;
 pub use character_classes::*;
+pub use code_point::{
+    char_count, code_point_string, high_surrogate, is_bmp_code_point, is_supplementary_code_point,
+    is_valid_code_point, low_surrogate, to_chars, to_code_point,
+};
 pub use exact::*;
 pub use fd::*;
 pub use float::*;
+pub use float_parse::{parse_double, parse_float};
 pub use format::{Arg, format};
 pub use integer::*;
+pub use integer_parse::parse_radix;
 pub use java_arrays::*;
 pub use math::*;
 pub use natives::*;
@@ -46,6 +56,9 @@ pub use out::{Out, flush, out, print_chars, println_chars, write_byte};
 pub use regex::{matches_all, replace_all, replace_first, split};
 pub use string::*;
 pub use system::*;
+pub use unsigned::{
+    compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,
+};
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
 pub struct Double(pub f64);

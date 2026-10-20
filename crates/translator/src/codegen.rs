@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 mod boxing;
 mod character;
 mod code;
+mod code_point;
 mod enums;
 mod expr;
 mod files;
@@ -23,6 +24,7 @@ mod stmt;
 mod strings;
 mod switch;
 mod text;
+mod unsigned;
 
 use code::*;
 use expr::Operand;

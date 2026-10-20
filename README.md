@@ -89,7 +89,12 @@ methods (`floorDiv`, `floorMod`, the `*Exact` integer methods that throw on over
 `rint`, `clamp`, `copySign`, `hypot`, `fma`, `ulp`, `nextUp`/`nextDown`, `max`/`min` on every
 type, and the rest of the common ones; `StrictMath` the same), `Double`/`Float` and `Boolean`
 methods (`isNaN`, `isInfinite`, `isFinite`, `compare`, `sum`, `max`/`min`, `parseDouble`,
-`parseBoolean`, `logicalAnd`/`logicalOr`/`logicalXor`), the
+`parseBoolean`, `logicalAnd`/`logicalOr`/`logicalXor`), `Double.parseDouble`, `Float.parseFloat` and the `valueOf`
+of both with Java's grammar and rounding (whitespace, suffixes, hexadecimal floats), `Integer` and
+`Long` parsing with a radix, the unsigned methods of `Integer`, `Long`, `Byte` and `Short`
+(`divideUnsigned`, `remainderUnsigned`, `compareUnsigned`, `toUnsignedString`, `parseUnsignedInt`,
+`toUnsignedLong`, `toUnsignedInt`), the code point methods of `Character` (`toChars`, `toString(int)`,
+`charCount`, `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint` and the rest), the
 `Character` tests (`isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`,
 `digit`, `forDigit`, `getNumericValue`), and case conversions on a `char`, the `MIN_VALUE`/`MAX_VALUE`
 and `MIN_NORMAL` constants of the wrapper classes, `null` for `String`, and a user `toString` in
@@ -100,9 +105,8 @@ common methods of `String` (searching, slicing, case, trimming, replacing, compa
 methods of `Integer` and `Long` (`toHexString`, `bitCount`, `numberOfLeadingZeros`,
 `toString(v, radix)`, ...), all hand-written in the runtime with Java's exact results. Inheritance,
 interfaces and generics are rejected with an error that names the construct and its position. So
-are `Float.parseFloat` and `Float.valueOf(String)` (Rust's `f32` parsing differs from Java's
-grammar), `Character.toChars` (it returns a `char[]`), and the `int` code-point overloads of the
-`Character` methods, except `isAlphabetic` on a `char`.
+are the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and the like),
+`Character.toChars(int, char[], int)`, and the unsigned and parse methods with other argument counts.
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of

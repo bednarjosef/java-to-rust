@@ -3,12 +3,16 @@
 
 use std::fmt;
 
+mod code_point;
 mod java_arrays;
 mod natives;
 mod strings;
+mod unsigned;
+pub use code_point::*;
 pub use java_arrays::*;
 pub use natives::*;
 pub use strings::*;
+pub use unsigned::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
@@ -498,6 +502,10 @@ pub enum Builtin {
     /// A bit or radix method of `Integer` or `Long` (see `BitsOp`), with the primitive of the
     /// class.
     Bits(BitsOp, Type),
+    /// An unsigned method of `Integer`, `Long`, `Byte` or `Short`, see `UnsignedOp`.
+    Unsigned(UnsignedOp, Type),
+    /// A code point method of `Character` (`toChars`, `charCount` and the like), see `CodePointOp`.
+    CodePoint(CodePointOp),
 }
 
 /// The methods of the boxed classes. The kind of the boxes comes from the types of the operands
@@ -507,6 +515,9 @@ pub enum BoxedOp {
     /// `Integer.parseInt(s)` and the other `parseX`: the primitive of the result's kind, read from
     /// a string. `Integer.valueOf(s)` is the same, boxed.
     Parse,
+    /// `Integer.parseInt(s, radix)`, `Long.parseLong(s, radix)` and `Integer.valueOf(s, radix)`:
+    /// the same, read in the radix given as the second argument.
+    ParseRadix,
     /// `Integer.valueOf(i)`: the boxed kind of the result, from its primitive argument.
     Box,
     /// `x.intValue()` and the other `xValue()`: the result's primitive, from the receiver.
@@ -698,6 +709,11 @@ pub fn has_effects(e: &Expr) -> bool {
                     Builtin::Print | Builtin::Println | Builtin::Exit | Builtin::Native(_),
                     _
                 )
+                | ExprKind::Builtin(
+                    Builtin::Unsigned(UnsignedOp::Divide | UnsignedOp::Remainder | UnsignedOp::Parse, _),
+                    _
+                )
+                | ExprKind::Builtin(Builtin::CodePoint(CodePointOp::ToChars | CodePointOp::ToString), _)
         ) || matches!(x.kind, ExprKind::Builtin(Builtin::Builder(op), _) if op.mutates())
     });
     found

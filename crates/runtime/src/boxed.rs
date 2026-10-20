@@ -77,75 +77,6 @@ pub fn parse_number<T: std::str::FromStr>(s: &str) -> T {
         .unwrap_or_else(|_| throw("java.lang.NumberFormatException", &format!("For input string: \"{s}\"")))
 }
 
-/// `Double.parseDouble`, which reads Java's grammar: surrounding white space is trimmed, `NaN`
-/// and `Infinity` are accepted, a `d` or `f` suffix is allowed, and so are hexadecimal floats.
-pub fn parse_double(s: &str) -> f64 {
-    let trimmed = s.trim_matches(|c: char| c <= ' ');
-    if trimmed.is_empty() {
-        throw("java.lang.NumberFormatException", "empty String");
-    }
-    java_double(trimmed).unwrap_or_else(|| {
-        throw("java.lang.NumberFormatException", &format!("For input string: \"{trimmed}\""))
-    })
-}
-
-fn java_double(s: &str) -> Option<f64> {
-    let (negative, body) = match s.as_bytes().first() {
-        Some(b'-') => (true, &s[1..]),
-        Some(b'+') => (false, &s[1..]),
-        _ => (false, s),
-    };
-    let magnitude = if body == "NaN" {
-        f64::NAN
-    } else if body == "Infinity" {
-        f64::INFINITY
-    } else if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
-        hex_float(hex)?
-    } else {
-        decimal_float(body)?
-    };
-    Some(if negative { -magnitude } else { magnitude })
-}
-
-/// A decimal floating-point literal without its sign, such as `1.5e3d`.
-fn decimal_float(s: &str) -> Option<f64> {
-    let s = s.strip_suffix(['f', 'F', 'd', 'D']).unwrap_or(s);
-    let (mantissa, exponent) = match s.find(['e', 'E']) {
-        Some(i) => (&s[..i], Some(&s[i + 1..])),
-        None => (s, None),
-    };
-    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let digits = |t: &str| t.bytes().all(|b| b.is_ascii_digit());
-    let mantissa_ok = digits(int) && digits(frac) && !(int.is_empty() && frac.is_empty());
-    let exponent_ok = exponent.is_none_or(|e| {
-        let e = e.strip_prefix(['+', '-']).unwrap_or(e);
-        !e.is_empty() && digits(e)
-    });
-    if mantissa_ok && exponent_ok { s.parse().ok() } else { None }
-}
-
-/// A hexadecimal floating-point literal without its `0x`, such as `1.8p1f`: the binary exponent
-/// after `p` is required.
-fn hex_float(s: &str) -> Option<f64> {
-    let s = s.strip_suffix(['f', 'F', 'd', 'D']).unwrap_or(s);
-    let (mantissa, exponent) = s.split_once(['p', 'P'])?;
-    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    if int.is_empty() && frac.is_empty() {
-        return None;
-    }
-    let mut value = 0.0;
-    for d in int.chars() {
-        value = value * 16.0 + d.to_digit(16)? as f64;
-    }
-    let mut scale = 1.0 / 16.0;
-    for d in frac.chars() {
-        value += d.to_digit(16)? as f64 * scale;
-        scale /= 16.0;
-    }
-    let exponent: i32 = exponent.parse().ok()?;
-    Some(value * 2f64.powi(exponent))
-}
-
 /// `Long.hashCode`, which is `Integer.hashCode` of the value's high and low halves mixed.
 pub fn long_hash(v: i64) -> i32 {
     (v ^ ((v as u64) >> 32) as i64) as i32
@@ -213,6 +144,7 @@ pub fn double_equals(a: f64, b: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::float_parse::parse_double;
 
     #[test]
     fn valueof_caches_small_values() {
@@ -256,13 +188,6 @@ mod tests {
             assert_eq!(parse_double(text), java, "{text:?}");
         }
         assert!(parse_double("NaN").is_nan());
-    }
-
-    #[test]
-    fn rejects_what_java_rejects() {
-        for text in ["1_0", "0x10", "1e", "Infinity1", "infinity", "nan", "1.2.3", "."] {
-            assert!(java_double(text).is_none(), "{text:?}");
-        }
     }
 
     #[test]
