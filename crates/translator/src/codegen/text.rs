@@ -486,12 +486,7 @@ impl<'a> Gen<'a> {
             let s = self.text_ref(&args[0]);
             let radix = self.int_arg(&args[1]);
             let f = self.runtime("parse_radix");
-            let text = format!("{f}({s}, {radix}, {bits})");
-            return if kind == Type::Long {
-                Code::atom(text)
-            } else {
-                Code::new(format!("{text} as i32"), AS)
-            };
+            return Code::atom(format!("{f}::<{rust}>(Some({s}), {radix})"));
         }
         let v = self.value(&args[0], kind);
         let recv = self.recv(&v, kind);

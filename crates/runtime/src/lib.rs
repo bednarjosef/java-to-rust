@@ -15,11 +15,15 @@ mod builder;
 mod character;
 mod character_classes;
 mod character_tables;
+mod code_point;
 mod exact;
+mod fd;
 pub mod fdlibm;
 mod float;
+mod float_parse;
 pub mod format;
 mod integer;
+mod integer_parse;
 mod java_arrays;
 mod math;
 mod natives;
@@ -27,14 +31,23 @@ mod null;
 mod out;
 pub mod regex;
 pub mod string;
+mod system;
+mod unsigned;
 pub use boxed::*;
 pub use builder::{StringBuilder, same_builder};
 pub use character::*;
 pub use character_classes::*;
+pub use code_point::{
+    char_count, code_point_string, high_surrogate, is_bmp_code_point, is_supplementary_code_point,
+    is_valid_code_point, low_surrogate, to_chars, to_code_point,
+};
 pub use exact::*;
+pub use fd::*;
 pub use float::*;
+pub use float_parse::{parse_double, parse_float};
 pub use format::{Arg, format};
 pub use integer::*;
+pub use integer_parse::parse_radix;
 pub use java_arrays::*;
 pub use math::*;
 pub use natives::*;
@@ -42,6 +55,10 @@ pub use null::{OrNull, non_null, or_null, same};
 pub use out::{Out, flush, out, print_chars, println_chars, write_byte};
 pub use regex::{matches_all, replace_all, replace_first, split};
 pub use string::*;
+pub use system::*;
+pub use unsigned::{
+    compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,
+};
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
 pub struct Double(pub f64);
@@ -89,19 +106,22 @@ fn layout(sign: &str, (digits, exp): (String, i32)) -> String {
 
 /// The decimal digits and exponent Java picks for a positive finite `d`: the shortest decimal
 /// that rounds to `d`, except that when one digit would do, Java takes the closest decimal of
-/// at most two digits (so `Double.MIN_VALUE` prints as `4.9E-324`, not `5.0E-324`).
+/// at most two digits (so `Double.MIN_VALUE` prints as `4.9E-324`, not `5.0E-324`). Among
+/// decimals of that length, Java takes the closest to `d`, and of two equally close, the one
+/// with an even last digit (so `1100000.25f` prints as `1100000.2`).
 pub(crate) fn shortest_digits<T: fmt::LowerExp + std::str::FromStr + PartialEq>(d: T) -> (String, i32) {
     let split = |s: String| {
         let (mantissa, exp) = s.split_once('e').expect("{:e} output has an exponent");
         (mantissa.replace('.', ""), exp.parse::<i32>().expect("exponent is an integer"))
     };
     let (digits, exp) = split(format!("{d:e}"));
-    if digits.len() == 1 {
-        let two = format!("{d:.1e}");
-        if two.parse::<T>().ok() == Some(d) {
-            let (two_digits, two_exp) = split(two);
-            return (two_digits.trim_end_matches('0').to_string(), two_exp);
-        }
+    // Exact formatting rounds to the closest decimal of the given length, ties to even. It is
+    // Java's choice whenever it still rounds to `d`; the shortest form is not always it.
+    let len = digits.len().max(2);
+    let closest = format!("{d:.*e}", len - 1);
+    if closest.parse::<T>().ok() == Some(d) {
+        let (closest_digits, closest_exp) = split(closest);
+        return (closest_digits.trim_end_matches('0').to_string(), closest_exp);
     }
     (digits, exp)
 }
@@ -191,6 +211,12 @@ pub fn throw(class: &str, message: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ties_between_shortest_decimals_take_the_even_digit() {
+        // 2^49 + 0.25 is exactly between ...312.2 and ...312.3 at 16 digits.
+        assert_eq!(double_to_string(f64::from_bits(0x4300_0000_0000_0002)), "5.629499534213122E14");
+    }
 
     #[test]
     fn doubles_print_like_java() {

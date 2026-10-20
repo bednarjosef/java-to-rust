@@ -89,7 +89,12 @@ methods (`floorDiv`, `floorMod`, the `*Exact` integer methods that throw on over
 `rint`, `clamp`, `copySign`, `hypot`, `fma`, `ulp`, `nextUp`/`nextDown`, `max`/`min` on every
 type, and the rest of the common ones; `StrictMath` the same), `Double`/`Float` and `Boolean`
 methods (`isNaN`, `isInfinite`, `isFinite`, `compare`, `sum`, `max`/`min`, `parseDouble`,
-`parseBoolean`, `logicalAnd`/`logicalOr`/`logicalXor`), the
+`parseBoolean`, `logicalAnd`/`logicalOr`/`logicalXor`), `Double.parseDouble`, `Float.parseFloat` and the `valueOf`
+of both with Java's grammar and rounding (whitespace, suffixes, hexadecimal floats), `Integer` and
+`Long` parsing with a radix, the unsigned methods of `Integer`, `Long`, `Byte` and `Short`
+(`divideUnsigned`, `remainderUnsigned`, `compareUnsigned`, `toUnsignedString`, `parseUnsignedInt`,
+`toUnsignedLong`, `toUnsignedInt`), the code point methods of `Character` (`toChars`, `toString(int)`,
+`charCount`, `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint` and the rest), the
 `Character` tests (`isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`,
 `digit`, `forDigit`, `getNumericValue`), and case conversions on a `char`, the `MIN_VALUE`/`MAX_VALUE`
 and `MIN_NORMAL` constants of the wrapper classes, `null` for `String`, and a user `toString` in
@@ -104,9 +109,8 @@ abstract methods, overriding and virtual calls, `super(...)` and `super.m(...)`,
 objects of a class tree, and printing through the class's `toString`. Interfaces, `instanceof`,
 casts between class types, `Object` and generics are rejected with an error that names the
 construct and its position. So
-are `Float.parseFloat` and `Float.valueOf(String)` (Rust's `f32` parsing differs from Java's
-grammar), `Character.toChars` (it returns a `char[]`), and the `int` code-point overloads of the
-`Character` methods, except `isAlphabetic` on a `char`.
+are the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and the like),
+`Character.toChars(int, char[], int)`, and the unsigned and parse methods with other argument counts.
 The design of the object model, and what is still to come, is in
 [docs/object-model.md](docs/object-model.md).
 
@@ -292,6 +296,20 @@ delegates to fdlibm. HotSpot replaces `Math.sin`, `cos`, `tan`, `exp`, `log`, `p
 platform libm), which agree with it on all but about 0.1 percent of arguments, and
 `Math.log10` is computed correctly rounded, as HotSpot's is. `System.out` is buffered
 (`java::println!`), several times faster than `println!` for programs that print a lot.
+
+`System.getProperty` is answered at run time for the keys whose values do not depend on the JVM:
+`line.separator`, `file.separator`, `path.separator`, `user.dir`, `user.home`, `user.name`,
+`java.io.tmpdir`, `os.name` and `os.arch`. Any other key gives null, or the default given; a key
+the JVM sets itself (`java.version`, `java.vendor`, ...) is rejected at translation. The memory
+figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
+JVM's, and `gc()` does nothing. `Runtime.halt` flushes the output and exits without shutdown
+hooks. `Thread.sleep` (both forms), `onSpinWait` and `yield` are the platform's. The runtime's
+descriptor table (`fd.rs`) backs the `FileInputStream`, `FileOutputStream` and `FileDescriptor`
+natives: stdin has its own buffered reader, stdout writes through the buffered `System.out` so
+its order is kept with `println`, stderr is written as it is (unbuffered, like Java's), and files
+are opened by path. Translated
+programs cannot reach these natives yet: the JDK classes that call them need the object model to
+give each stream its descriptor.
 
 Translation never runs the program; it only compiles it. Starting javac costs about half a
 second per run; building the translator needs `javac` (JDK 21 or newer) on PATH.

@@ -499,6 +499,8 @@ impl<'a> Gen<'a> {
                 self.enum_builtin(builtin, args, ty)
             }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
+            Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty),
+            Builtin::CodePoint(op) => self.code_point_builtin(op, args),
             Builtin::CharNumericValue => self.char_numeric_value(args),
             Builtin::CharDigit | Builtin::CharForDigit => self.character_radix(builtin, args),
             Builtin::Exit => {

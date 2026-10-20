@@ -28,14 +28,12 @@ pub fn is_alphabetic(c: u16) -> bool {
     scalar(c).is_some_and(char::is_alphabetic)
 }
 
-/// Java's `Character.digit(char, int)`: the value of `c` in `radix`, or -1. Fullwidth letters
-/// and digits count as Java does.
+/// Java's `Character.digit(char, int)`: the value of `c` in `radix`, or -1. Decimal digits of
+/// every script count, as do Latin and fullwidth letters, as in Java.
 pub fn digit(c: u16, radix: i32) -> i32 {
     let value = match i32::from(c) {
-        c @ 0x30..=0x39 => c - 0x30,
         c @ 0x41..=0x5A => c - 0x41 + 10,
         c @ 0x61..=0x7A => c - 0x61 + 10,
-        c @ 0xFF10..=0xFF19 => c - 0xFF10,
         c @ 0xFF21..=0xFF3A => c - 0xFF21 + 10,
         c @ 0xFF41..=0xFF5A => c - 0xFF41 + 10,
         _ if is_digit(c) => numeric_value(c),
@@ -89,6 +87,9 @@ mod tests {
         assert_eq!(digit(b'8' as u16, 8), -1);
         assert_eq!(digit(b'0' as u16, 1), -1);
         assert_eq!(digit(0xFF21, 16), 10);
+        assert_eq!(digit(0x0669, 10), 9);
+        assert_eq!(digit(0x0E59, 10), 9);
+        assert_eq!(digit(0x0669, 9), -1);
         assert_eq!(for_digit(11, 16), b'b' as u16);
         assert_eq!(for_digit(36, 36), 0);
         assert_eq!(for_digit(0, 37), 0);
