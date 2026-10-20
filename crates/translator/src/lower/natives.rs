@@ -20,8 +20,11 @@ impl<'t> Lowering<'t> {
             .and_then(|r| r.symbol())
             .filter(|s| s.kind == "FIELD" && s.owner == "java.lang.System")
             .map(|s| s.name);
-        // `Runtime.getRuntime()` as the receiver: `Runtime` has no state of its own.
-        let on_runtime = receiver.and_then(|r| r.symbol()).is_some_and(|s| s.name == "getRuntime");
+        // A `Runtime` with no state of its own: the receiver is `Runtime.getRuntime()` or a name
+        // that holds one, and neither needs evaluating.
+        let on_runtime = receiver.is_some_and(|r| {
+            r.kind() == "IDENTIFIER" || r.symbol().is_some_and(|s| s.name == "getRuntime")
+        });
         let native = match (symbol.owner, symbol.name) {
             // `StrictMath` gives the same results as `Math` for these.
             ("java.lang.StrictMath", "abs") => return Ok(Some(Builtin::MathAbs)),
