@@ -48,23 +48,28 @@ pub(super) struct Frame<'a> {
 
 /// Whether a case's statements always leave the switch (so they do not fall into the next case).
 fn leaves(body: &[Stmt]) -> bool {
-    matches!(
-        body.last(),
-        Some(
-            Stmt::Break
-                | Stmt::Continue
-                | Stmt::Return(..)
-                | Stmt::BreakLabel(_)
-                | Stmt::ContinueLabel(_)
-                | Stmt::Yield(_)
-        )
-    )
+    match body.last() {
+        Some(Stmt::Block(inner)) => leaves(inner),
+        last => matches!(
+            last,
+            Some(
+                Stmt::Break
+                    | Stmt::Continue
+                    | Stmt::Return(..)
+                    | Stmt::BreakLabel(_)
+                    | Stmt::ContinueLabel(_)
+                    | Stmt::Yield(_)
+            )
+        ),
+    }
 }
 
 /// A case's statements without the `break` that ends an arrow case or a case that leaves anyway.
 fn strip(body: &[Stmt]) -> &[Stmt] {
     match body.split_last() {
         Some((Stmt::Break, rest)) => rest,
+        // `case x: { ...; break; }` is the statements of its braces.
+        Some((Stmt::Block(inner), [])) => strip(inner),
         _ => body,
     }
 }
@@ -372,6 +377,22 @@ impl<'a> Gen<'a> {
     fn matched(&mut self, text: &str, cases: &'a [Case], tail: bool) {
         let chars = std::mem::take(&mut self.chars);
         let exhaustive = std::mem::take(&mut self.exhaustive);
+        // One label, and nothing for any other value: `if let`, as clippy's `single_match` asks.
+        let nothing_else = match cases.iter().find(|c| is_default(c)) {
+            Some(default) => strip(&default.body).is_empty(),
+            None => !exhaustive,
+        };
+        let labeled: Vec<&Case> = cases.iter().filter(|c| !is_default(c)).collect();
+        if let [case] = labeled.as_slice()
+            && nothing_else
+        {
+            self.line(&format!("if let {} = {text} {{", self.pattern(case, chars)));
+            self.indent += 1;
+            self.stmts(strip(&case.body), tail);
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
         self.line(&format!("match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {

@@ -38,6 +38,29 @@ impl<'a> Gen<'a> {
         self.guarded = outer;
     }
 
+    /// Whether the last two statements of a function body are `T x = e;` and `return x;`, with
+    /// `T` the return type and a primitive. Then `e` is the function's value. Primitives only: a
+    /// reference local may be a shared or optional one, which the declaration handles itself.
+    pub(super) fn folds_into_return(&self, stmts: &[Stmt]) -> bool {
+        let [.., Stmt::Local { ty, name, init: Some(_), .. }, Stmt::Return(Some(value), _)] = stmts else {
+            return false;
+        };
+        *ty == self.ret && !ty.is_reference() && matches!(&value.kind, ExprKind::Var(v) if v == name)
+    }
+
+    /// The initializer `e` of `T x = e;`, which `folds_into_return` found before `return x;`,
+    /// written as the function's value.
+    pub(super) fn tail_local(&mut self, stmt: &'a Stmt) {
+        let Stmt::Local { init: Some(value), .. } = stmt else {
+            unreachable!("folds_into_return only finds a local with an initializer")
+        };
+        let conflicts = self.stmt_conflicts(stmt);
+        let outer = std::mem::replace(&mut self.guarded, conflicts);
+        let code = self.returned(value);
+        self.line(&code.text);
+        self.guarded = outer;
+    }
+
     /// The body of an `if` or a loop. In tail position (`tail`), a branch that is the value of
     /// the function is written as its tail expression.
     pub(super) fn nested_in(&mut self, stmt: &'a Stmt, tail: bool) {

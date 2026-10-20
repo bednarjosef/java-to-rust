@@ -92,7 +92,7 @@ fn returns_that_end_a_function_become_its_value() {
             if (n > 0) { int m = n * 2; return m; } else { if (n == 0) { return 7; } else { return -1; } }
         } }",
     );
-    assert_contains(&nested, &["        m\n", "} else if n == 0 {"]);
+    assert_contains(&nested, &["        n.wrapping_mul(2)\n", "} else if n == 0 {"]);
     assert!(!nested.contains("return"), "{nested}");
     let partial = translate("class A { static int partial(int n) { if (n > 0) { return 1; } return 2; } }");
     assert_contains(&partial, &["        return 1;\n    }\n    2\n}"]);
@@ -110,6 +110,14 @@ fn returns_that_end_a_function_become_its_value() {
         } }",
     );
     assert_contains(&open, &["            return String::from(\"Mon\");\n"]);
+}
+
+#[test]
+fn a_primitive_local_returned_at_the_end_is_the_value() {
+    let twice = translate("class A { static int twice(int n) { int r = n + n; return r; } }");
+    assert!(!twice.contains("let r") && !twice.contains("return"), "{twice}");
+    let text = translate("class A { static String text() { String t = \"a\"; return t; } }");
+    assert_contains(&text, &["    let t = String::from(\"a\");\n"]);
 }
 
 #[test]
@@ -1495,7 +1503,10 @@ fn arrow_switch_expression_is_a_match_that_yields_a_value() {
             }
         }",
     );
-    assert_contains(&rust, &["let r = {", "match s {", "100 => {", "-4 => {", "let t = s as i32 * 3;"]);
+    assert_contains(
+        &rust,
+        &["fn code(s: i16) -> i32 {\n    {\n", "match s {", "100 => {", "-4 => {", "let t = s as i32 * 3;"],
+    );
     assert_lacks(&rust, &["'sw"]);
 }
 
