@@ -22,6 +22,9 @@ pub enum Type {
     Class(&'static str),
     /// The type of `null`.
     Null,
+    /// A boxed primitive such as `Integer` (`Type::boxed(Type::Int)`), which holds that primitive
+    /// in an object of its own.
+    Boxed(&'static Type),
 }
 
 impl Type {
@@ -62,9 +65,22 @@ impl Type {
         Type::Class(name)
     }
 
+    /// The boxed type of a primitive, such as `Integer` for `int`.
+    pub fn boxed(primitive: Type) -> Type {
+        Type::Boxed(intern(primitive))
+    }
+
+    /// The primitive that a boxed type holds, and the type itself for any other type.
+    pub fn unboxed(self) -> Type {
+        match self {
+            Type::Boxed(primitive) => *primitive,
+            _ => self,
+        }
+    }
+
     /// Whether values of this type are references (and so can be `null`).
     pub fn is_reference(self) -> bool {
-        matches!(self, Type::String | Type::Array(_) | Type::Class(_) | Type::Null)
+        matches!(self, Type::String | Type::Array(_) | Type::Class(_) | Type::Null | Type::Boxed(_))
     }
 
     /// The wider of two integer types.
@@ -108,6 +124,16 @@ impl fmt::Display for Type {
             Type::Array(element) => write!(f, "{element}[]"),
             Type::Class(name) => f.write_str(name),
             Type::Null => f.write_str("null"),
+            Type::Boxed(primitive) => f.write_str(match primitive {
+                Type::Int => "Integer",
+                Type::Char => "Character",
+                Type::Boolean => "Boolean",
+                Type::Long => "Long",
+                Type::Double => "Double",
+                Type::Byte => "Byte",
+                Type::Short => "Short",
+                _ => "Float",
+            }),
         }
     }
 }

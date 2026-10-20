@@ -15,6 +15,7 @@ impl<'a> Gen<'a> {
                 format!("{}<{elem}>", self.runtime("Array"))
             }
             Type::Class(name) => self.object_type(name),
+            Type::Boxed(primitive) => rust_type(*primitive).to_string(),
             _ => rust_type(ty).to_string(),
         }
     }
