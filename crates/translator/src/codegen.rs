@@ -41,10 +41,17 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         }
     }
     let mut uses = Vec::new();
-    if live.iter().any(|&l| l) {
-        uses.push("use std::cell::RefCell;\nuse std::rc::Rc;\n");
-    } else if class.types.iter().any(|t| !t.statics.is_empty()) {
-        uses.push("use std::cell::RefCell;\n");
+    // Immutable objects are shared as `Rc` alone; statics and mutable objects also need `RefCell`.
+    let refcell = class
+        .types
+        .iter()
+        .zip(&live)
+        .any(|(t, &l)| (l && !facts.immutable.contains(&t.name)) || !t.statics.is_empty());
+    match (live.iter().any(|&l| l), refcell) {
+        (true, true) => uses.push("use std::cell::RefCell;\nuse std::rc::Rc;\n"),
+        (true, false) => uses.push("use std::rc::Rc;\n"),
+        (false, true) => uses.push("use std::cell::RefCell;\n"),
+        (false, false) => {}
     }
     if g.uses_runtime {
         uses.push("use java_runtime as java;\n");
@@ -340,22 +347,23 @@ impl<'a> Gen<'a> {
             .filter(|&i| self.facts.borrowed_params.contains(&(index, i)))
             .map(|i| m.params[i].name.clone())
             .collect();
-        let owner = class_type(&self.class.types[m.class].name);
+        let name = &self.class.types[m.class].name;
+        let owner = self.this_type(name);
         let mut params = Vec::new();
         if !m.is_static && !m.is_ctor {
-            params.push(format!("this: &{owner}"));
+            params.push(format!("this: {owner}"));
         }
         for p in &m.params {
             let mutable = if assigns_any(&m.body, &p.name) { "mut " } else { "" };
-            let ty = if self.borrowed.contains(&p.name) { "&str".to_string() } else { rust_class_type(p.ty) };
+            let ty = if self.borrowed.contains(&p.name) { "&str".to_string() } else { self.rust_type(p.ty) };
             params.push(format!("{mutable}{}: {ty}", self.local(&p.name)));
         }
         let ret = if m.is_ctor {
-            format!(" -> {owner}")
+            format!(" -> {}", class_type(name, self.facts.immutable.contains(name)))
         } else if m.ret == Type::Void {
             String::new()
         } else {
-            format!(" -> {}", rust_class_type(m.ret))
+            format!(" -> {}", self.rust_type(m.ret))
         };
         self.line(&format!("fn {}({}){ret} {{", self.fn_names[index], params.join(", ")));
         self.indent += 1;
@@ -578,11 +586,11 @@ impl<'a> Gen<'a> {
         let mutable = if mutable { "mut " } else { "" };
         let rust = self.local(name);
         match init {
-            None => self.line(&format!("let {mutable}{rust}: {};", rust_class_type(ty))),
+            None => self.line(&format!("let {mutable}{rust}: {};", self.rust_type(ty))),
             Some(init) => {
                 let code = self.value(init, ty);
                 let annotation = if code.untyped {
-                    self.annotation(ty, format!(": {}", rust_class_type(ty)))
+                    self.annotation(ty, format!(": {}", self.rust_type(ty)))
                 } else {
                     String::new()
                 };

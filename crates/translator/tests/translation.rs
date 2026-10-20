@@ -145,7 +145,7 @@ fn string_building_appends_in_place() {
 #[test]
 fn field_reads_are_braced_only_beside_a_mutable_borrow() {
     let rust = translate(
-        "class P { int x; int y = x + 1; }
+        "class P { int x; int y = x + 1; void set(int v) { x = v; } }
         class A { public static void main(String[] a) {
             P p = new P();
             System.out.println(p.x);
@@ -158,7 +158,7 @@ fn field_reads_are_braced_only_beside_a_mutable_borrow() {
 #[test]
 fn field_read_arguments_beside_a_call_bind_in_a_let() {
     let rust = translate(
-        "class P { int x; }
+        "class P { int x; void set(int v) { x = v; } }
         class A {
             static int f(int v) { return v + 1; }
             public static void main(String[] a) { P p = new P(); System.out.println(f(p.x)); }
@@ -191,4 +191,40 @@ fn printing_an_object_without_to_string_is_rejected() {
     )
     .expect_err("printing an object without toString must be rejected");
     assert!(err.to_string().contains("printing an object without toString not supported yet"), "{err}");
+}
+
+#[test]
+fn immutable_objects_are_shared_without_a_refcell() {
+    let rust = translate(
+        "class P { int x; int y = x + 1; P(int x) { this.x = x; } int sum() { return x + y; } }
+        class A { public static void main(String[] a) { P p = new P(3); System.out.println(p.sum() + p.x); } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "struct P {",
+            "impl P {",
+            "fn field_inits(this: &mut P) {",
+            "this.y = this.x.wrapping_add(1);",
+            "fn new(x: i32) -> Rc<P> {",
+            "let mut obj = P { x: 0, y: 0 };",
+            "let this = &mut obj;",
+            "P::field_inits(this);",
+            "this.x = value;",
+            "Rc::new(obj)",
+            "fn sum(this: &P) -> i32 {",
+            "P::sum(&p)",
+            "p.x",
+        ],
+    );
+    assert_lacks(&rust, &["RefCell", "borrow"]);
+}
+
+#[test]
+fn an_object_written_outside_its_constructor_keeps_its_refcell() {
+    let rust = translate(
+        "class P { int x; void set(int v) { x = v; } }
+        class A { public static void main(String[] a) { P p = new P(); p.set(2); } }",
+    );
+    assert_contains(&rust, &["Rc<RefCell<P>>", "fn set(this: &Rc<RefCell<P>>, v: i32)"]);
 }

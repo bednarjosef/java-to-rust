@@ -6,10 +6,13 @@
 //!   instead of `wrapping_add` and `java::div` (see `ranges`).
 //! - Strings that are always ASCII have a `len()` equal to Java's UTF-16 `length()`.
 //! - String parameters that a method never assigns are borrowed as `&str`.
+//! - Classes whose objects never change after construction are shared without a `RefCell`
+//!   (see `objects`).
 //!
 //! The facts form a table keyed by expression id. An expression without a fact gets the faithful
 //! default translation, so a weaker analysis only makes the output plainer, never wrong.
 
+mod objects;
 mod ranges;
 
 use crate::ast::*;
@@ -27,6 +30,8 @@ pub struct Facts {
     pub ascii_length: HashSet<ExprId>,
     /// String parameters, as (method, parameter) indexes, that are never assigned.
     pub borrowed_params: HashSet<(usize, usize)>,
+    /// The classes whose objects never change after construction, by qualified name.
+    pub immutable: HashSet<String>,
 }
 
 pub fn analyze(class: &Class) -> Facts {
@@ -34,6 +39,7 @@ pub fn analyze(class: &Class) -> Facts {
     ranges::analyze(class, &mut facts);
     borrowed_params(class, &mut facts);
     ascii_strings(class, &mut facts);
+    facts.immutable = objects::immutable_classes(class);
     facts
 }
 

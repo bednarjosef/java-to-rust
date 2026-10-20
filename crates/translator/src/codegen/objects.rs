@@ -14,15 +14,25 @@ pub(super) enum Update<'a> {
 
 /// A field or static field that an update reads and writes.
 enum Slot {
-    Field { obj: String, field: String },
-    Static { cell: String },
+    /// A field of an object; `plain` when the object is an immutable class's `this` in its constructor.
+    Field {
+        obj: String,
+        field: String,
+        plain: bool,
+    },
+    Static {
+        cell: String,
+    },
 }
 
 impl Slot {
     fn read(&self, ty: Type) -> String {
         let copy = !needs_clone(ty);
         match self {
-            Slot::Field { obj, field } => {
+            Slot::Field { obj, field, plain: true } => {
+                format!("{obj}.{field}{}", if copy { "" } else { ".clone()" })
+            }
+            Slot::Field { obj, field, plain: false } => {
                 format!("{obj}.borrow().{field}{}", if copy { "" } else { ".clone()" })
             }
             Slot::Static { cell } => {
@@ -33,7 +43,8 @@ impl Slot {
 
     fn write(&self, value: &str) -> String {
         match self {
-            Slot::Field { obj, field } => format!("{obj}.borrow_mut().{field} = {value};"),
+            Slot::Field { obj, field, plain: true } => format!("{obj}.{field} = {value};"),
+            Slot::Field { obj, field, plain: false } => format!("{obj}.borrow_mut().{field} = {value};"),
             Slot::Static { cell } => format!("{cell}.with_borrow_mut(|v| *v = {value});"),
         }
     }
@@ -49,9 +60,14 @@ pub(super) fn struct_name(name: &str) -> String {
     name.replace('.', "_")
 }
 
-/// The Rust type of an object of a class.
-pub(super) fn class_type(name: &str) -> String {
-    format!("Rc<RefCell<{}>>", struct_name(name))
+/// The Rust type of an object of a class. An immutable class's objects never change, so they need
+/// no `RefCell` to be shared.
+pub(super) fn class_type(name: &str, immutable: bool) -> String {
+    if immutable {
+        format!("Rc<{}>", struct_name(name))
+    } else {
+        format!("Rc<RefCell<{}>>", struct_name(name))
+    }
 }
 
 /// The thread-local cell that holds a static field.
@@ -91,14 +107,6 @@ pub(super) fn live_types(class: &Class) -> Vec<bool> {
         }
     }
     live
-}
-
-/// The Rust type of a value of any type, including objects.
-pub(super) fn rust_class_type(ty: Type) -> String {
-    match ty {
-        Type::Class(name) => class_type(name),
-        _ => rust_type(ty).to_string(),
-    }
 }
 
 /// The part of an overloaded method's name that a parameter type contributes.
@@ -163,6 +171,28 @@ fn uses_this(stmts: &[Stmt]) -> bool {
 }
 
 impl<'a> Gen<'a> {
+    /// The Rust type of a value of any type, including objects.
+    pub(super) fn rust_type(&self, ty: Type) -> String {
+        match ty {
+            Type::Class(name) => class_type(name, self.facts.immutable.contains(name)),
+            _ => rust_type(ty).to_string(),
+        }
+    }
+
+    /// Whether `e` is an object of an immutable class, whose fields are read without a `RefCell`.
+    pub(super) fn is_immutable(&self, e: &Expr) -> bool {
+        matches!(e.ty, Type::Class(name) if self.facts.immutable.contains(name))
+    }
+
+    /// The type of `this` in a method of class `name`: a reference to the object.
+    pub(super) fn this_type(&self, name: &str) -> String {
+        if self.facts.immutable.contains(name) {
+            format!("&{}", struct_name(name))
+        } else {
+            format!("&{}", class_type(name, false))
+        }
+    }
+
     /// The text of an object used for a field access: `this`, a variable, or an expression.
     pub(super) fn object(&mut self, e: &'a Expr) -> String {
         match &e.kind {
@@ -213,6 +243,9 @@ impl<'a> Gen<'a> {
     pub(super) fn field_read(&mut self, object: &'a Expr, name: &str, ty: Type) -> Code {
         let obj = self.object(object);
         let clone = if needs_clone(ty) { ".clone()" } else { "" };
+        if self.is_immutable(object) {
+            return Code::atom(format!("{obj}.{}{clone}", snake_case(name)));
+        }
         let read = format!("{obj}.borrow().{}{clone}", snake_case(name));
         // The `Ref` lives to the end of the statement, so it is scoped with braces only when the
         // statement also borrows mutably; otherwise the braces would be noise.
@@ -278,6 +311,10 @@ impl<'a> Gen<'a> {
     ) -> Code {
         let mut lines = Vec::new();
         let slot = match place {
+            Place::Field { object, name } if self.is_immutable(object) => {
+                // Only a constructor writes a field of an immutable class, through its own `this`.
+                Slot::Field { obj: self.object(object), field: snake_case(name), plain: true }
+            }
             Place::Field { object, name } => {
                 let obj = self.temp("object");
                 let owned = match &object.kind {
@@ -286,7 +323,7 @@ impl<'a> Gen<'a> {
                     _ => self.expr(object).text,
                 };
                 lines.push(format!("let {obj} = {owned};"));
-                Slot::Field { obj, field: snake_case(name) }
+                Slot::Field { obj, field: snake_case(name), plain: false }
             }
             Place::Static { class, name } => {
                 Slot::Static { cell: cell_name(&self.class.types[*class].name, name) }
@@ -351,7 +388,7 @@ impl<'a> Gen<'a> {
         self.line(&format!("struct {name} {{"));
         self.indent += 1;
         for f in &decl.fields {
-            self.line(&format!("{}: {},", snake_case(&f.name), rust_class_type(f.ty)));
+            self.line(&format!("{}: {},", snake_case(&f.name), self.rust_type(f.ty)));
         }
         self.indent -= 1;
         self.line("}");
@@ -376,15 +413,27 @@ impl<'a> Gen<'a> {
         if inits.is_empty() {
             return;
         }
+        let name = &class.types[index].name;
+        let immutable = self.facts.immutable.contains(name);
         self.gap();
-        self.line(&format!("fn field_inits(this: &{}) {{", class_type(&class.types[index].name)));
+        let this = if immutable {
+            format!("&mut {}", struct_name(name))
+        } else {
+            format!("&{}", class_type(name, false))
+        };
+        self.line(&format!("fn field_inits(this: {this}) {{"));
         self.indent += 1;
         for f in inits {
             // The line writes a field, so a read in the value must end its `Ref` first.
             let outer = std::mem::replace(&mut self.guarded, true);
             let value = self.value(f.init.as_ref().expect("filtered"), f.ty).text;
             self.guarded = outer;
-            self.line(&format!("this.borrow_mut().{} = {value};", snake_case(&f.name)));
+            let field = snake_case(&f.name);
+            if immutable {
+                self.line(&format!("this.{field} = {value};"));
+            } else {
+                self.line(&format!("this.borrow_mut().{field} = {value};"));
+            }
         }
         self.indent -= 1;
         self.line("}");
@@ -406,7 +455,7 @@ impl<'a> Gen<'a> {
                     None => default_value(f.ty).to_string(),
                 };
                 let cell = cell_name(&decl.name, &f.name);
-                let ty = rust_class_type(f.ty);
+                let ty = self.rust_type(f.ty);
                 self.line(&format!("static {cell}: RefCell<{ty}> = RefCell::new({init});"));
             }
         }
@@ -427,6 +476,8 @@ impl<'a> Gen<'a> {
             _ => (None, &m.body[..]),
         };
         let initialize = delegate.is_none() && decl.fields.iter().any(|f| f.init.is_some());
+        let immutable = self.facts.immutable.contains(&decl.name);
+        let mutable = initialize || uses_this(rest);
         match delegate {
             Some((args, index)) => {
                 let args = self.call_args(index, args).join(", ");
@@ -439,17 +490,25 @@ impl<'a> Gen<'a> {
                     .map(|f| format!("{}: {}", snake_case(&f.name), default_value(f.ty)))
                     .collect();
                 let name = struct_name(&decl.name);
-                self.line(&format!("let obj = Rc::new(RefCell::new({name} {{ {} }}));", fields.join(", ")));
+                let fields = fields.join(", ");
+                if immutable {
+                    let mut_kw = if mutable { "mut " } else { "" };
+                    self.line(&format!("let {mut_kw}obj = {name} {{ {fields} }};"));
+                } else {
+                    self.line(&format!("let obj = Rc::new(RefCell::new({name} {{ {fields} }}));"));
+                }
             }
         }
-        if initialize || uses_this(rest) {
-            self.line("let this = &obj;");
+        // An immutable object is built in place and shared only once it is complete.
+        let this = if immutable { "&mut obj" } else { "&obj" };
+        if mutable {
+            self.line(&format!("let this = {this};"));
         }
         if initialize {
             self.line(&format!("{}::field_inits(this);", struct_name(&decl.name)));
         }
         self.stmts(rest, false);
-        self.line("obj");
+        self.line(if immutable { "Rc::new(obj)" } else { "obj" });
     }
 
     /// A blank line before an item, unless the output is empty or a line of an item is last.
