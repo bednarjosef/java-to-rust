@@ -47,6 +47,23 @@ public class Registry {
         return n;
     }
 
+    public boolean contains(Object o) {
+        for (int i = 0; i < count; i++) {
+            if (animals[i].equals(o)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // A label for each animal: its name while it is hungry, its meals once it has eaten twice.
+    public Object label(int i) {
+        if (animals[i].meals() < 2) {
+            return animals[i].name();
+        }
+        return animals[i].meals();
+    }
+
     public void print() {
         for (int i = 0; i < count; i++) {
             System.out.println("  " + animals[i]);

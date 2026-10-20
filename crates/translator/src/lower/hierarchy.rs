@@ -56,9 +56,10 @@ impl<'t> Lowering<'t> {
             Some(p) => return unsupported(p, "record patterns"),
             None => None,
         };
-        if !matches!(value.ty, Type::Class(_) | Type::Enum(_))
-            || !matches!(ty, Type::Class(_) | Type::Enum(_))
-        {
+        // `Object` may also hold a string or a box.
+        let target = matches!(ty, Type::Class(_) | Type::Enum(_))
+            || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_)));
+        if !matches!(value.ty, Type::Class(_) | Type::Enum(_)) || !target {
             return unsupported(node, "instanceof on these types");
         }
         Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
@@ -129,8 +130,12 @@ impl<'t> Lowering<'t> {
     /// `e` as a value of type `to`: an object of one class type that Java uses as another (an
     /// upcast) gets a `Cast`, which the generator turns into the conversion.
     pub(super) fn convert(&self, e: Expr, to: Type) -> Expr {
-        // An enum that implements an interface is converted to it too.
+        // An enum that implements an interface is converted to it too, and any value but null
+        // to `Object`.
         let differs = match (e.ty, to) {
+            (_, Type::Class(b)) if b == OBJECT => {
+                !matches!(e.ty, Type::Null | Type::Void) && !Self::is_object(e.ty)
+            }
             (Type::Class(a) | Type::Enum(a), Type::Class(b)) => a != b,
             _ => false,
         };
@@ -144,6 +149,12 @@ impl<'t> Lowering<'t> {
     /// The operands of `==` or `!=` on objects of two class types, the one of the subclass
     /// converted to the other's type.
     pub(super) fn convert_operands(&self, left: Expr, right: Expr) -> (Expr, Expr) {
+        if Self::is_object(left.ty) && right.ty != Type::Null {
+            return (left, self.convert(right, Type::class(OBJECT)));
+        }
+        if Self::is_object(right.ty) && left.ty != Type::Null {
+            return (self.convert(left, Type::class(OBJECT)), right);
+        }
         let (Some(a), Some(b)) = (self.class_of(left.ty), self.class_of(right.ty)) else {
             return (left, right);
         };

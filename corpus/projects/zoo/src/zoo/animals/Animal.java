@@ -26,6 +26,17 @@ public abstract class Animal {
         return name;
     }
 
+    // Two animals are equal when they have the same name and make the same sound.
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof Animal other && other.name.equals(name) && other.sound().equals(sound());
+    }
+
+    @Override
+    public int hashCode() {
+        return name.hashCode() * 31 + legs();
+    }
+
     public String toString() {
         return name + " (" + sound() + ", " + legs() + " legs, " + meals + " meals)";
     }

@@ -603,19 +603,38 @@ impl<'a> Gen<'a> {
         if let Some(t) = self.enum_of(e) {
             return self.enum_text(t, handle.to_string());
         }
-        let index = self.to_string_index(e);
-        let mutating = self.facts.mutating.contains(&index);
-        let obj = match () {
-            _ if self.is_plain(e) => handle.to_string(),
-            _ if mutating => format!("{handle}.borrow_mut()"),
-            _ => format!("{handle}.borrow()"),
+        let Some(index) = self.to_string_index(e) else {
+            let c = self.struct_class(e).expect("an object has a class type");
+            let hash = match self.hash_index(c) {
+                Some(i) => self.handle_call(handle, e, i),
+                None => format!("{}({})", self.runtime("address_hash"), self.address(c, handle)),
+            };
+            return self.default_text(c, hash);
         };
         if self.displays(index) {
+            let obj = self.handle_object(handle, e, index);
             if self.lazy_text && !(self.printing && !self.quiet_text(e, 0)) {
                 return obj;
             }
             return format!("{obj}.to_string()");
         }
+        self.handle_call(handle, e, index)
+    }
+
+    /// The object of `e`'s class reached through `handle`, borrowed for method `index` to be
+    /// called on it.
+    fn handle_object(&self, handle: &str, e: &Expr, index: usize) -> String {
+        match () {
+            _ if self.is_plain(e) => handle.to_string(),
+            _ if self.facts.mutating.contains(&index) => format!("{handle}.borrow_mut()"),
+            _ => format!("{handle}.borrow()"),
+        }
+    }
+
+    /// A call of method `index`, without arguments, on the object of `e`'s class that `handle`
+    /// reaches.
+    fn handle_call(&mut self, handle: &str, e: &'a Expr, index: usize) -> String {
+        let obj = self.handle_object(handle, e, index);
         if self.facts.self_methods.contains(&index) {
             format!("{obj}.{}{}()", self.method_path(e, index), self.fn_names[index])
         } else {
@@ -756,16 +775,25 @@ impl<'a> Gen<'a> {
                 counts = (counts.0 + 1, counts.1 + usize::from(self.enum_text_writes(t)));
                 continue;
             }
-            let (b, m) = call(self.to_string_index(object), Some(object));
-            counts = (counts.0 + b, counts.1 + m);
+            if let Some(index) = self.text_index(object) {
+                let (b, m) = call(index, Some(object));
+                counts = (counts.0 + b, counts.1 + m);
+            }
         }
         counts
     }
 
-    /// The index of the `toString` method of an object's class.
-    pub(super) fn to_string_index(&self, e: &Expr) -> usize {
+    /// The index of the `toString` method of an object's class, if the class has one.
+    pub(super) fn to_string_index(&self, e: &Expr) -> Option<usize> {
         let t = self.struct_class(e).expect("an object has a class type");
-        hierarchy::to_string_impl(self.class, t).expect("lowering checks that the class has toString")
+        hierarchy::to_string_impl(self.class, t)
+    }
+
+    /// The method of the program that turning an object into text runs: its class's `toString`,
+    /// or the `hashCode` that `Object`'s calls.
+    fn text_index(&self, e: &Expr) -> Option<usize> {
+        let t = self.struct_class(e).expect("an object has a class type");
+        self.to_string_index(e).or_else(|| self.hash_index(t))
     }
 
     /// Whether `a` reads a shared object through a `RefCell` borrow that would live to the end of
@@ -945,7 +973,17 @@ impl<'a> Gen<'a> {
             let obj = self.object(e);
             return Code::atom(self.enum_text(t, obj));
         }
-        let index = self.to_string_index(e);
+        let Some(index) = self.to_string_index(e) else {
+            let c = self.struct_class(e).expect("an object has a class type");
+            let hash = match self.hash_index(c) {
+                Some(i) => self.method_call(e, i, &[]).text,
+                None => {
+                    let address = self.receiver_address(e, c);
+                    format!("{}({address})", self.runtime("address_hash"))
+                }
+            };
+            return Code::atom(self.default_text(c, hash));
+        };
         if !self.displays(index) {
             return self.text_call(e, index);
         }
@@ -1401,7 +1439,7 @@ impl<'a> Gen<'a> {
         if self.enum_of(e).is_some() {
             return false;
         }
-        let index = self.to_string_index(e);
+        let Some(index) = self.to_string_index(e) else { return false };
         let m = &self.class.methods[index];
         depth < 4
             && self.displays(index)

@@ -1494,3 +1494,56 @@ Decisions that changed during the implementation, milestone by milestone.
   Interpreter.java` (a parser, evaluator, simplifier and printer over a node tree, by patterns),
   and `Loans.bookPages`/`discs`/`first` in `corpus/projects/library` (patterns on array
   elements that may be null, a cast across packages).
+
+`Object` came second:
+
+- `Object` is not a `Type::Object` but a synthetic interface type of the program, `OBJECT`
+  (`lower/object.rs`), which every type without a superclass implements, so the machinery of
+  interfaces (the enum over the classes whose values flow into it, conversions, dispatchers,
+  `as_x`, `instanceof`) covers it unchanged. Strings and the eight boxes are types of kind
+  `TypeKind::Runtime` beside it, whose variants hold the plain value (`Object::String(String)`,
+  `Object::Integer(i32)`); a primitive converted to `Object` becomes its box's variant. Lowering
+  adds these types only to a program that mentions `java.lang.Object` (other than the implicit
+  `super()`), so other programs translate exactly as before.
+- `equals(Object)` and `hashCode()` are two synthetic abstract methods of `Object`, appended after
+  the program's methods, which the program's own `equals(Object)` and `hashCode()` override (the
+  plan had one synthetic method per type and call). A variant whose class overrides neither gets
+  an arm in the dispatcher: identity (`Rc::ptr_eq`, `java::address_hash`) for an object, value
+  equality and Java's hash for a string or a box (`Double`/`Float` compare `to_bits`, as
+  `Double.equals` does), and for an enum's constant `==` and its ordinal (Java's hash is an
+  identity hash, which no program can depend on). The same call on a single class without an enum
+  is the identity directly (`identity_call`). `String.equals(Object)` and `Integer.equals(Object)`
+  with an argument of `Object` are `Object`'s `equals` on the receiver converted to `Object`.
+  `Object.toString()` is `Builtin::ObjectText`, the enum's `Display`.
+- The identity hash is the address of the class's struct (`java::address_hash` of
+  `RefCell::as_ptr`, `Rc::as_ptr` or `ptr::from_ref`), not of the `Rc`, so that a method that
+  borrows the object (`self: &Point`) hashes the same object as code that holds its handle;
+  `System.identityHashCode` and the inherited `hashCode()` that existed before use it too (the
+  plan's `java::object_hash`).
+- A class without `toString` prints as `java::default_text("Point", hash)` (its binary name, `@`
+  and the hash in hexadecimal), with the class's own `hashCode` when it has one, in an enum's
+  `Display` and for a plain class alike. `check_text` and the rejection "printing an object
+  without toString" are gone, which fixes the known failure `NullObjectConcat.java`; printing an
+  array was never routed through `check_text` and is unchanged.
+- `new Object()` stays rejected (the plan accepted it as a sentinel): it needs a variant of its own
+  and is mostly a lock, which needs `synchronized`. `class_name()` waits for `getClass()`, which
+  stays rejected ("reflection"); so does an array as an `Object` ("an array as an `Object` value",
+  until milestone 5).
+- `==` between two `Object`s is rejected only when both sides may be strings or boxes (`Object`'s
+  variants include a runtime type and neither side is a conversion from the program's own type),
+  because a string or a box in an `Object` is a value whose identity is not kept. The shortcut
+  `a == b || a.equals(b)` (`Objects.equals`) is accepted: its result is `equals`'s either way.
+- Two analyses had to learn about the new sources of values: a string bound by a pattern
+  (`o instanceof String s`) is not known to be ASCII, and the generator's nullness of a cast
+  follows its operand, which a null check may have narrowed.
+- Survey: an `Object` value is no longer a feature, nor a test or cast from `Object` to the
+  program's types, strings and boxes; `getClass()` is "reflection" and `Object`'s other methods
+  (`clone`, `wait`, `notify`) are "methods of Object". The free share goes from 20.3% to 22.5%
+  (library 377 to 420 pieces).
+- Corpus: `corpus/features/ObjectValues.java` (strings, boxes, enums and objects as `Object`s,
+  typed tests and casts, a field and a parameter of `Object`, identity of a class without
+  `equals`, a failing cast that exits 1), `corpus/features/EqualsHashCode.java` (`equals` and
+  `hashCode` through interfaces and an abstract class, `Object[]` of mixed values, the default
+  `toString`), `corpus/features/NullObjectConcat.java` (moved from the known failures),
+  `corpus/programs/PropertyBag.java` (a settings store of `Object` values with typed getters),
+  and `equals`, `hashCode`, `contains(Object)` and an `Object` label in `corpus/projects/zoo`.

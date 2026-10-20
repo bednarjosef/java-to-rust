@@ -129,6 +129,7 @@ impl<'a> Gen<'a> {
                 },
                 _ => stmt,
             };
+            // An `if` that `narrow_if` writes is nested in the `else`.
             if let Stmt::If { cond, then, otherwise: next } = stmt
                 && !self.narrows_else(cond, next.as_deref())
             {

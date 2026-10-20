@@ -133,9 +133,18 @@ a class that calls `compareTo` directly. Between the program's own types, `insta
 `matches!` on the type's enum, a pattern `x instanceof Circle c` binds `c` with `if let`, a let
 chain, `let .. else` (for `if (!(x instanceof Circle c)) return ..;`) or `is_some_and`, and a
 downcast or a cast across interfaces is checked, throwing `ClassCastException` when it fails. A
-pattern variable read anywhere else is rejected. `Object`, other interfaces of the JDK
-(`Runnable`, `Comparable` as a type), lambdas and generics are rejected with an error that names
-the construct and its position. So
+pattern variable read anywhere else is rejected. `Object` is an enum too, with a variant for each
+of the program's classes and enums whose values become `Object`s and one for each string or box
+(`Object::String(..)`, `Object::Integer(5)`), so `Object` variables, fields, parameters, arrays
+and varargs translate, with `instanceof` and casts to the program's types, `String` and the boxes.
+The program's `equals(Object)` and `hashCode()` override `Object`'s; a class without them
+compares and hashes its identity, and a string or a box its value. A class without `toString`
+prints as Java's `Object.toString` does, its binary name and its hash code in hexadecimal
+(`Point@1b6d3586`). `getClass()` (reflection), an array as an `Object`, and `==` between two
+`Object`s that may both be strings or boxes (whose identity the translation does not keep, except
+in the shortcut `a == b || a.equals(b)`) are rejected. Other interfaces of the JDK (`Runnable`,
+`Comparable` as a type), lambdas and generics are rejected with an error that names the construct
+and its position. So
 are the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and the like),
 `Character.toChars(int, char[], int)`, and the unsigned and parse methods with other argument counts.
 The design of the object model, and what is still to come, is in
@@ -343,7 +352,7 @@ The native layer, the JDK methods that bottom out in the JVM, is hand-written in
 (`natives.rs`, `math.rs`, `fdlibm/`, `out.rs`) and recognised by owner and name
 (`lower/natives.rs`): `System.arraycopy` (between shared or plain arrays, overlap as through a
 temporary, bounds checked first), the `Double` and `Float` bit conversions, `Math` and
-`StrictMath`, `System.identityHashCode` and an inherited `hashCode()` (derived from the `Rc`'s
+`StrictMath`, `System.identityHashCode` and an inherited `hashCode()` (derived from the object's
 address: stable for the object's life, but like Java's different on every run), the clocks,
 `availableProcessors`, the line separator, `System.err` and `System.out.write`/`flush`.
 `StrictMath` is a port of fdlibm 5.3 and matches Java bit for bit; so does `Math` where HotSpot

@@ -177,6 +177,7 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
     nullness::analyze(class, &mut facts);
     patterns::check_enum_casts(class, &facts)?;
+    patterns::check_object_values(class, &facts)?;
     boxing::analyze(class, &mut facts);
     borrowed_params(class, &mut facts);
     facts.borrowed_objects = borrowed_objects(class, &facts);
@@ -223,11 +224,13 @@ fn validate(class: &Class, facts: &Facts) -> Result<(), Error> {
         }
     }
     // An enum may implement an interface's method with one that every enum has; the dispatcher
-    // knows `name()`, `ordinal()` and `toString()`.
+    // knows `name()`, `ordinal()` and `toString()`, and `Object`'s methods.
     for e in (0..class.types.len()).filter(|&e| class.types[e].kind == TypeKind::Enum) {
         for (m, method) in class.methods.iter().enumerate() {
-            let builtin =
-                matches!(method.name.as_str(), "name" | "ordinal" | "toString") && method.params.is_empty();
+            // `Object`'s `equals` and `hashCode` are the constant's identity.
+            let builtin = matches!(method.name.as_str(), "name" | "ordinal" | "toString")
+                && method.params.is_empty()
+                || class.types[method.class].name == OBJECT;
             if method.is_abstract
                 && class.hierarchy.is_subtype(e, method.class)
                 && class.hierarchy.implementation(m, e).is_none()
@@ -402,6 +405,9 @@ fn used_as_value(e: &Expr, name: &str, borrowed: &HashSet<(usize, usize)>) -> bo
         ExprKind::MethodCall { receiver, .. } if is_name(receiver) => {
             allowed.insert(receiver.id);
         }
+        ExprKind::InstanceOf { value, .. } if is_name(value) => {
+            allowed.insert(value.id);
+        }
         ExprKind::Binary(BinOp::Eq | BinOp::Ne | BinOp::Add, l, r) => {
             allowed.extend([l, r].into_iter().filter(|o| is_name(o)).map(|o| o.id));
         }
@@ -521,6 +527,10 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
                             if !non_ascii.ascii(class, m, x) {
                                 vars.push((m, target.clone()));
                             }
+                        }
+                        // A string that a pattern binds is any string an `Object` holds.
+                        ExprKind::InstanceOf { ty: Type::String, binding: Some(name), .. } => {
+                            vars.push((m, name.clone()));
                         }
                         ExprKind::Call { args, resolved: Some(callee), .. }
                         | ExprKind::MethodCall { args, resolved: Some(callee), .. }

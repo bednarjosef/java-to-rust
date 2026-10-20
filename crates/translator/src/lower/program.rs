@@ -54,6 +54,12 @@ pub fn lower_program<'t>(
     packages.resize(lowering.types.len(), String::new());
     lowering.entry = lowering.type_index(main);
     let unit = |t: usize| (unit_of[t] != usize::MAX).then_some(unit_of[t]);
+    let decls: Vec<Node> = units
+        .iter()
+        .flat_map(|u| Node(u).list("typeDecls"))
+        .filter(|d| reach.classes.contains(&crate::program::class_name(d.0)))
+        .collect();
+    lowering.plan_object(&decls);
     let mut types = Vec::new();
     for (t, package) in packages.into_iter().enumerate() {
         let mut decl = lowering.type_decl(t).map_err(|e| (unit(t), e))?;
@@ -63,7 +69,9 @@ pub fn lower_program<'t>(
     let mut methods: Vec<Method> = (0..lowering.methods.len())
         .map(|m| lowering.method(m).map_err(|e| (unit(lowering.methods[m].owner), e)))
         .collect::<Result<_, _>>()?;
+    lowering.object_methods(&mut methods);
     lowering.finish_types(&mut types, &mut methods).map_err(|(t, e)| (unit(t), e))?;
+    lowering.object_types(&mut types);
     let hierarchy = Hierarchy::new(&types, &methods);
     let raised = lowering.raised_objects(&types, &methods);
     let class = Class { name: main.to_string(), types, methods, hierarchy, raised };
