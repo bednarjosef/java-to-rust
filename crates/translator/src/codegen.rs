@@ -23,6 +23,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         annotations: Vec::new(),
         fn_names: method_names(class),
         locals: HashMap::new(),
+        elements: HashMap::new(),
         out: String::new(),
         indent: 0,
         loops: Vec::new(),
@@ -247,6 +248,8 @@ struct Gen<'a> {
     fn_names: Vec<String>,
     /// Java local variable names to Rust names, for the current method.
     locals: HashMap<String, String>,
+    /// Reads of elements that a for-each-style loop has bound to a variable, by expression.
+    elements: HashMap<ExprId, String>,
     out: String,
     indent: usize,
     loops: Vec<Loop<'a>>,
@@ -500,6 +503,11 @@ impl<'a> Gen<'a> {
     }
 
     fn for_loop(&mut self, init: &'a [Stmt], cond: Option<&'a Expr>, update: &'a [Expr], body: &'a Stmt) {
+        if let Some(cond) = cond {
+            if self.element_loop(cond, body) {
+                return;
+            }
+        }
         if let Some((var, start, end)) = counting_loop(init, cond, update, body) {
             let ty = start.ty.max_integral(end.ty);
             let start = self.value(start, ty);

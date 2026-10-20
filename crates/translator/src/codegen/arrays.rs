@@ -93,6 +93,9 @@ impl<'a> Gen<'a> {
 
     /// `a[i]` as a value.
     pub(super) fn index(&mut self, id: ExprId, array: &'a Expr, index: &'a Expr) -> Code {
+        if let Some(item) = self.elements.get(&id) {
+            return Code::atom(item.clone());
+        }
         if let Some((_, a)) = self.plain_of(array) {
             let i = self.value(index, Type::Int).text;
             if self.facts.in_bounds.contains(&id) {
@@ -287,6 +290,25 @@ impl<'a> Gen<'a> {
     }
 
     /// `for (T x : a) body`. The array is read one element at a time, as Java reads it.
+    /// A counting loop over a plain array whose body only reads its elements becomes
+    /// `for x in a.iter().cloned()`, and each `a[i]` in the body becomes `x`. Returns false when
+    /// the loop is not one of those, or its elements are not plain values.
+    pub(super) fn element_loop(&mut self, cond: &'a Expr, body: &'a Stmt) -> bool {
+        let Some(reads) = self.facts.element_loops.get(&cond.id).cloned() else { return false };
+        let ExprKind::Binary(_, _, end) = &cond.kind else { return false };
+        let ExprKind::Length(array) = &end.kind else { return false };
+        if element(array.ty).is_reference() {
+            return false;
+        }
+        let Some((_, a)) = self.plain_of(array) else { return false };
+        let item = self.fresh_name(&["item", "element", "value"]);
+        self.elements.extend(reads.into_iter().map(|id| (id, item.to_string())));
+        self.line(&format!("for {item} in {a}.iter().cloned() {{"));
+        self.loop_body(Loop::Plain, body, &[]);
+        self.line("}");
+        true
+    }
+
     pub(super) fn for_each(&mut self, name: &str, array: &'a Expr, body: &'a Stmt) {
         let mutable = if assigns_any(std::slice::from_ref(body), name) { "mut " } else { "" };
         let var = self.local(name);

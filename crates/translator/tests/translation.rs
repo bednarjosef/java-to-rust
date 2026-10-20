@@ -225,3 +225,33 @@ fn arrays_passed_twice_in_one_call_are_shared() {
     );
     assert_lacks(&rust, &["Vec<i32>", "&mut ["]);
 }
+
+#[test]
+fn counting_loops_that_only_read_elements_become_iterators() {
+    let rust = translate(
+        "class A { public static void main(String[] args) {
+            int[] a = new int[4];
+            for (int i = 0; i < a.length; i++) { a[i] = i * 3; }
+            int s = 0;
+            for (int i = 0; i < a.length; i++) { s += a[i]; }
+            System.out.println(s);
+        } }",
+    );
+    assert_contains(&rust, &["for item in a.iter().cloned() {", "s = s.wrapping_add(item);"]);
+    assert_lacks(&rust, &["s.wrapping_add(a["]);
+}
+
+#[test]
+fn element_loops_that_write_or_use_the_index_stay_indexed() {
+    let rust = translate(
+        "class A { public static void main(String[] args) {
+            int[] a = new int[4];
+            int s = 0;
+            for (int i = 0; i < a.length; i++) { s += a[i]; a[i] = 1; }
+            for (int i = 0; i < a.length; i++) { s += a[i] + i; }
+            System.out.println(s);
+        } }",
+    );
+    assert_contains(&rust, &["while i < a.len() as i32 {"]);
+    assert_lacks(&rust, &["a.iter().cloned()"]);
+}
