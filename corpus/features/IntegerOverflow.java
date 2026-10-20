@@ -1,0 +1,52 @@
+public class IntegerOverflow {
+    public static void main(String[] args) {
+        int a = Integer.MAX_VALUE;
+        int b = Integer.MIN_VALUE;
+        System.out.println(a + 1);
+        System.out.println(b - 1);
+        System.out.println(a * 2);
+        System.out.println(b * -1);
+        System.out.println(b / -1);
+        System.out.println(b % -1);
+        System.out.println(-b);
+        System.out.println(a * a);
+        long la = Long.MAX_VALUE;
+        long lb = Long.MIN_VALUE;
+        System.out.println(la + 1);
+        System.out.println(lb - 1);
+        System.out.println(lb / -1L);
+        System.out.println(lb % -1L);
+        System.out.println(la * la);
+        System.out.println(-lb);
+        int x = a;
+        x += 10;
+        System.out.println(x);
+        x -= 2147483647;
+        System.out.println(x);
+        x *= 3;
+        System.out.println(x);
+        x /= -7;
+        System.out.println(x);
+        x %= 5;
+        System.out.println(x);
+        x <<= 33;
+        System.out.println(x);
+        x >>= -1;
+        System.out.println(x);
+        x >>>= 3;
+        System.out.println(x);
+        long y = 1;
+        y <<= 65;
+        System.out.println(y);
+        y += Integer.MAX_VALUE;
+        System.out.println(y);
+        int i = Integer.MAX_VALUE;
+        long widened = i + 1;
+        System.out.println(widened);
+        long wide2 = i + 1L;
+        System.out.println(wide2);
+        System.out.println(Integer.MIN_VALUE == -Integer.MIN_VALUE);
+        System.out.println((-7) / 2 + " " + (-7) % 2 + " " + 7 % -3);
+        System.out.println(-7.5 % 2);
+    }
+}

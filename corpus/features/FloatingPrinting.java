@@ -1,0 +1,56 @@
+public class FloatingPrinting {
+    public static void main(String[] args) {
+        System.out.println(1.0E10);
+        System.out.println(1.0E-5);
+        System.out.println(100.0);
+        System.out.println(-0.0);
+        System.out.println(0.0 / 0);
+        System.out.println(1.0 / 0);
+        System.out.println(-1.0 / 0);
+        System.out.println(Float.MIN_VALUE);
+        System.out.println(Double.MIN_VALUE);
+        System.out.println(Float.MAX_VALUE);
+        System.out.println(Double.MAX_VALUE);
+        System.out.println(0.1f + 0.2f);
+        System.out.println(0.1 + 0.2);
+        System.out.println(1e7);
+        System.out.println(1e-3);
+        System.out.println(1e-4);
+        System.out.println(123456789.0);
+        System.out.println(1234567.0f);
+        System.out.println(12345678.0f);
+        System.out.println(1.0f / 3);
+        System.out.println(1.0 / 3);
+        System.out.println(2.0f / 3 * 3);
+        System.out.println(100.0f * 1.1f);
+        System.out.println(9.999999999999999E22);
+        System.out.println(5e-324);
+        System.out.println(4.9e-324 / 2);
+        System.out.println(3.0f);
+        System.out.println(-2.5e-7f);
+        float fz = -0.0f;
+        System.out.println(fz);
+        System.out.println(fz * 0);
+        System.out.println(0.0 == -0.0);
+        System.out.println(Double.NaN == Double.NaN);
+        System.out.println(Float.NaN != Float.NaN);
+        System.out.println(Math.sqrt(-1));
+        System.out.println(Math.pow(2, 0.5));
+        System.out.println(Math.abs(-0.0));
+        System.out.println(Math.max(-0.0, 0.0));
+        System.out.println(Math.min(-0.0, 0.0));
+        System.out.println(Math.floor(-0.5));
+        System.out.println(Math.round(-2.5));
+        System.out.println(Math.round(2.5f));
+        System.out.println(Math.round(1e20));
+        System.out.println(Math.ceil(-0.2));
+        System.out.println(Math.abs(Integer.MIN_VALUE));
+        System.out.println(Math.abs(-5L));
+        System.out.println(Math.max(3, 7L));
+        System.out.println(Math.min(2.5f, 1));
+        System.out.println(Math.hypot(3, 4));
+        System.out.println(Math.signum(-3.0f));
+        System.out.println(Math.floorMod(-7, 3));
+        System.out.println(Math.floorDiv(-7, 2));
+    }
+}
