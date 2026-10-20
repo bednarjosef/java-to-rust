@@ -224,11 +224,11 @@ impl<'a> Gen<'a> {
         if let Some((name, a)) = self.plain_of(array) {
             return self.plain_set(id, (name, &a), index, ty, rhs, used);
         }
-        let handle = self.handle(array);
+        let (binding, handle) = self.write_handle(array, has_effects(index) || has_effects(rhs));
         let i = self.value(index, Type::Int).text;
         let v = self.element_value(rhs, ty);
         let helper = if used { "store" } else { "set" };
-        format!("{}({handle}, {i}, {v})", self.runtime(helper))
+        Self::bound_write(binding, format!("{}({handle}, {i}, {v})", self.runtime(helper)))
     }
 
     /// `a[i] = v` on a plain array: `put`, or a plain assignment where the index is in bounds.
@@ -307,11 +307,11 @@ impl<'a> Gen<'a> {
                 "{{ let {slot} = {i}; let {old} = {at}(&{a}, {slot}); let {value} = {new}; {put}({mr}, {slot}, {value}) }}"
             );
         }
-        let handle = self.handle(array);
+        let (binding, handle) = self.write_handle(array, has_effects(index) || has_effects(rhs));
         let i = self.value(index, Type::Int).text;
         let old = self.fresh_name(&["old", "previous", "before"]);
         let new = self.element_update(op, ty, rhs, id, old);
-        format!("{}({handle}, {i}, |{old}| {new})", self.runtime("update"))
+        Self::bound_write(binding, format!("{}({handle}, {i}, |{old}| {new})", self.runtime("update")))
     }
 
     /// `a[i]++`, `--a[i]` and the like. As a statement (`used` false) on a plain array, it is
@@ -363,12 +363,12 @@ impl<'a> Gen<'a> {
                 "{{ let {slot} = {i}; let {old} = {at}(&{a}, {slot}); {put}({mr}, {slot}, {new}); {old} }}"
             );
         }
-        let handle = self.handle(array);
+        let (binding, handle) = self.write_handle(array, has_effects(index));
         let i = self.value(index, Type::Int).text;
         let old = self.fresh_name(&["old", "previous", "before"]);
         let new = self.step_value(ty, increment, id, old);
         let helper = if prefix { "update" } else { "post_update" };
-        format!("{}({handle}, {i}, |{old}| {new})", self.runtime(helper))
+        Self::bound_write(binding, format!("{}({handle}, {i}, |{old}| {new})", self.runtime(helper)))
     }
 
     /// `slot op= rhs` where Rust's compound assignment does what Java's does.
@@ -423,7 +423,7 @@ impl<'a> Gen<'a> {
 
     /// A name for a temporary, the first of `candidates` that no local or method of the program
     /// already uses, since the code the temporary is bound around may use those.
-    fn fresh_name(&self, candidates: &[&'static str]) -> &'static str {
+    pub(super) fn fresh_name(&self, candidates: &[&'static str]) -> &'static str {
         let taken = |name: &str| {
             self.locals.values().any(|local| local == name) || self.fn_names.iter().any(|f| f == name)
         };

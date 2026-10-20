@@ -5,11 +5,6 @@ Minimal programs that the translator gets wrong, though the feature is in the su
 pass. Java's output is what `java File.java` prints. When a failure is fixed, move its file into
 `corpus/features/` with the fixed behaviour.
 
-- `ArrayStoreFromMethodCall.java`: `memory[slot] = pop();` in a method of a nested class, where
-  `pop` changes a field of the same object. Java prints `1`; rustc fails with E0502 "cannot
-  borrow `*self` as mutable because it is also borrowed as immutable" (the generated
-  `java::set(&self.memory, slot, self.pop())` borrows `self` twice). Storing the value in a local
-  first avoids it.
 - `BlockExpressionBeforeCast.java`: `return (sChar++);` in a `double` method, where `sChar` is a
   `char` static. Java prints `65.0`; the translated block is taken as a statement, so the `as f64`
   after it does not parse: rustc fails with "expected expression, found `as`". The fuzzer's
