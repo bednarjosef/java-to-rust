@@ -227,7 +227,7 @@ def main():
     args = ap.parse_args()
 
     started = time.monotonic()
-    text = args.program.read_text()
+    text = args.program.read_text(encoding='utf-8')
     if not args.no_build:
         fuzzrun.build_translator()
     runner = fuzzrun.Runner(args.jobs, keep=False)
@@ -240,7 +240,7 @@ def main():
     reducer = Reducer(runner, signature, args.jobs, args.max_tests)
     reduced = reducer.reduce(text)
     out = args.out or args.program.with_name('Reduced.java')
-    out.write_text(reduced)
+    out.write_text(reduced, encoding='utf-8')
     seconds = time.monotonic() - started
     print(f'reduced to {len(reduced.splitlines())} lines in {reducer.tests} tests, '
           f'{seconds:.0f} s: {out}')
