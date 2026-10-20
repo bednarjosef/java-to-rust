@@ -234,6 +234,7 @@ impl<'a> Gen<'a> {
         match kind {
             Type::Boolean => Code::atom(format!("{}({text})", self.runtime("parse_boolean"))),
             Type::Double => Code::atom(format!("{}({text})", self.runtime("parse_double"))),
+            Type::Float => Code::atom(format!("{}({text})", self.runtime("parse_float"))),
             _ => Code::atom(format!("{}::<{}>({text})", self.runtime("parse_number"), rust_type(kind))),
         }
     }

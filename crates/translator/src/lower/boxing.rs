@@ -28,6 +28,7 @@ pub(super) fn is_boxed_method(name: &str) -> bool {
         "parseInt"
             | "parseLong"
             | "parseDouble"
+            | "parseFloat"
             | "parseBoolean"
             | "valueOf"
             | "toString"
@@ -86,7 +87,9 @@ impl<'t> Lowering<'t> {
         let op = match (name, symbol.is_static) {
             ("max", true) => return Ok(Builtin::MathMax),
             ("min", true) => return Ok(Builtin::MathMin),
-            ("parseInt" | "parseLong" | "parseDouble" | "parseBoolean", true) => BoxedOp::Parse,
+            ("parseInt" | "parseLong" | "parseDouble" | "parseFloat" | "parseBoolean", true) => {
+                BoxedOp::Parse
+            }
             ("valueOf", true) if args.first().is_some_and(|a| a.ty == Type::String) => BoxedOp::Parse,
             ("valueOf", true) => BoxedOp::Box,
             ("toString" | "hashCode", true) => {
@@ -136,8 +139,8 @@ impl<'t> Lowering<'t> {
             return unsupported(node, &format!("the overload of `{name}` with {} arguments", args.len()));
         }
         let kind = boxed_type(symbol.owner).expect("a boxed method").unboxed();
-        // Rust's float parsing differs from Java's grammar, and no `Character` parses a string.
-        if matches!(op, BoxedOp::Parse) && matches!(kind, Type::Float | Type::Char) {
+        // No `Character` parses a string.
+        if matches!(op, BoxedOp::Parse) && matches!(kind, Type::Char) {
             return unsupported(node, &format!("`{}.{name}` of a string", symbol.owner));
         }
         Ok(Builtin::Boxed(op, kind))
