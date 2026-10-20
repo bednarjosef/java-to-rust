@@ -103,7 +103,8 @@ fn arms(cases: &[Case]) -> Vec<&Case> {
 }
 
 /// The Rust pattern of a case's labels; a case with a `default` label matches everything else.
-fn pattern(case: &Case) -> String {
+/// With `chars`, the selector is an `Option<char>` and the labels are char literals.
+fn pattern(case: &Case, chars: bool) -> String {
     if is_default(case) {
         return "_".to_string();
     }
@@ -111,11 +112,26 @@ fn pattern(case: &Case) -> String {
         .labels
         .iter()
         .filter_map(|l| match l {
+            CaseLabel::Value(Expr { kind: ExprKind::Char(c), .. }) if chars => {
+                Some(super::primitives::rust_char(*c).expect("char cases are scalar values"))
+            }
             CaseLabel::Value(e) => Some(literal(e)),
             CaseLabel::Default => None,
         })
         .collect();
-    values.join(" | ")
+    if chars { format!("Some({})", values.join(" | ")) } else { values.join(" | ") }
+}
+
+/// Whether a switch on a `char` matches Rust chars: every label is a char that is a Unicode
+/// scalar value, so `char::from_u32` of the selector is `Some` of the label exactly when the
+/// selector equals it, and a lone surrogate, `None`, matches only the default.
+fn char_cases(selector: &Expr, cases: &[Case]) -> bool {
+    selector.ty == Type::Char
+        && cases.iter().flat_map(|c| &c.labels).all(|l| match l {
+            CaseLabel::Value(Expr { kind: ExprKind::Char(c), .. }) => char::from_u32(u32::from(*c)).is_some(),
+            CaseLabel::Value(_) => false,
+            CaseLabel::Default => true,
+        })
 }
 
 /// A case label's value: lowering keeps only literals, which are numbers or strings.
@@ -267,8 +283,12 @@ impl<'a> Gen<'a> {
     /// A switch statement, or a switch expression when `value` is its type.
     pub(super) fn switch_form(&mut self, selector: &'a Expr, cases: &'a [Case], value: Option<Type>) {
         let labeled = self.pending.is_some();
+        self.chars = char_cases(selector, cases);
         let falls = cases.split_last().is_some_and(|(_, init)| init.iter().any(|c| !leaves(&c.body)));
-        let text = if selector.ty != Type::String {
+        let text = if self.chars {
+            let c = self.value(selector, Type::Char).text;
+            format!("char::from_u32(u32::from({c}))")
+        } else if selector.ty != Type::String {
             self.value(selector, selector.ty).typed()
         } else if self.nullable(selector) {
             // `deref` is a `&str` that throws on null.
@@ -312,10 +332,11 @@ impl<'a> Gen<'a> {
 
     /// No case falls through and none leaves early: `match`, with `_ => {}` when there is no default.
     fn matched(&mut self, text: &str, cases: &'a [Case]) {
+        let chars = std::mem::take(&mut self.chars);
         self.line(&format!("match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {
-            self.line(&format!("{} => {{", pattern(case)));
+            self.line(&format!("{} => {{", pattern(case, chars)));
             self.indent += 1;
             self.stmts(strip(&case.body), false);
             self.indent -= 1;
@@ -330,6 +351,7 @@ impl<'a> Gen<'a> {
 
     /// Some case leaves early: a labeled block around the `match`, which the `break`s name.
     fn block(&mut self, text: &str, cases: &'a [Case], value: Option<Type>) {
+        let chars = std::mem::take(&mut self.chars);
         self.line("{");
         let kind = match value {
             Some(ty) => Kind::Value { machine: false, ty },
@@ -340,7 +362,7 @@ impl<'a> Gen<'a> {
         self.line(&format!("match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {
-            self.line(&format!("{} => {{", pattern(case)));
+            self.line(&format!("{} => {{", pattern(case, chars)));
             self.indent += 1;
             let body = if value.is_some() { &case.body[..] } else { strip(&case.body) };
             self.stmts(body, false);
@@ -360,11 +382,12 @@ impl<'a> Gen<'a> {
     /// A switch expression whose every case ends with its value: a `match` whose arms are those
     /// values.
     fn value_match(&mut self, text: &str, cases: &'a [Case], ty: Type) {
+        let chars = std::mem::take(&mut self.chars);
         self.line(&format!("match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {
             let Some((Stmt::Yield(value), init)) = case.body.split_last() else { unreachable!() };
-            self.line(&format!("{} => {{", pattern(case)));
+            self.line(&format!("{} => {{", pattern(case, chars)));
             self.indent += 1;
             self.stmts(init, false);
             let code = self.value(value, ty);
@@ -379,13 +402,14 @@ impl<'a> Gen<'a> {
     /// Some case falls into the next: a state machine. `case` is the index of the case to run; a
     /// case that does not leave sets it to the next one, and the loop runs the cases in order.
     fn machine(&mut self, text: &str, cases: &'a [Case], value: Option<Type>) {
+        let chars = std::mem::take(&mut self.chars);
         self.line("{");
         self.indent += 1;
         self.line(&format!("let mut case: usize = match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {
             let index = cases.iter().position(|c| std::ptr::eq(c, case)).unwrap_or(0);
-            self.line(&format!("{} => {index},", pattern(case)));
+            self.line(&format!("{} => {index},", pattern(case, chars)));
         }
         if !cases.iter().any(is_default) {
             self.line(&format!("_ => {},", cases.len()));

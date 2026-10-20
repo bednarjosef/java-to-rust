@@ -20,7 +20,7 @@ pub(super) fn involves_primitive(from: Type, to: Type) -> bool {
 }
 
 /// A Rust char literal for a code unit, if it is a Unicode scalar value: `'a'`, `'\n'`.
-fn rust_char(c: u16) -> Option<String> {
+pub(super) fn rust_char(c: u16) -> Option<String> {
     char::from_u32(c as u32).map(|c| format!("{c:?}"))
 }
 

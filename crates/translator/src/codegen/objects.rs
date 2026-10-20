@@ -770,7 +770,8 @@ impl<'a> Gen<'a> {
             return None;
         }
         if let Update::Compound(_, value) = how
-            && (ty == Type::String || has_effects(value) || reads_static(value))
+            && ty != Type::String
+            && (has_effects(value) || reads_static(value))
         {
             return None;
         }
@@ -791,6 +792,15 @@ impl<'a> Gen<'a> {
                     }
                     None => lines.push(format!("{cell}.set({v});")),
                 }
+            }
+            // The old string and then the right operand are formatted, in Java's order.
+            Update::Compound(_, value) if ty == Type::String => {
+                lines.extend(init);
+                let old = Slot::Static { cell: cell.clone() }.read(true);
+                let mut parts = vec![Part::Arg(Code::atom(old))];
+                self.parts(value, &mut parts);
+                let text = self.format("format!", parts).text;
+                lines.push(format!("{cell}.set({text});"));
             }
             Update::Compound(..) | Update::Step(_) => {
                 lines.extend(init);

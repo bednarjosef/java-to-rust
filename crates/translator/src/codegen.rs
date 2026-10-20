@@ -53,6 +53,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         display: false,
         lazy_text: false,
         formatting: false,
+        chars: false,
         printing: false,
         guarded: false,
         annotations: Vec::new(),
@@ -147,6 +148,8 @@ struct Gen<'a> {
     lazy_text: bool,
     /// Whether the code being written is an operand of a string concatenation.
     formatting: bool,
+    /// Whether the switch being written matches its `char` selector as a Rust `char`.
+    chars: bool,
     /// Whether the text being formatted is printed.
     printing: bool,
     /// Whether the statement being emitted also borrows an object mutably (see `conflicts`).
@@ -353,14 +356,16 @@ impl<'a> Gen<'a> {
 
 /// A borrow scoped with braces, `{ x.borrow().f }`, is a function argument of its own in a
 /// guarded statement, where rustc's unused_braces lint would ask to drop braces that end the
-/// borrow; there it is written `{ let value = x.borrow().f; value }`. Text in string literals is
-/// left alone.
+/// borrow; there it is written `{ let value = x.borrow().f; value }`. The lint leaves the
+/// arguments of a macro alone, and so does this. Text in string literals is left alone.
 fn scoped_arguments(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     let mut in_string = false;
     let mut escaped = false;
+    // For each open parenthesis, whether it holds a macro's arguments.
+    let mut parens: Vec<bool> = Vec::new();
     while i < bytes.len() {
         let c = bytes[i];
         if escaped {
@@ -370,7 +375,14 @@ fn scoped_arguments(text: &str) -> String {
             in_string = c != b'"';
         } else if c == b'"' {
             in_string = true;
-        } else if (text[..i].ends_with('(') || text[..i].ends_with(", ")) && text[i..].starts_with("{ ") {
+        } else if c == b'(' {
+            parens.push(text[..i].ends_with('!'));
+        } else if c == b')' {
+            parens.pop();
+        } else if parens.last() == Some(&false)
+            && (text[..i].ends_with('(') || text[..i].ends_with(", "))
+            && text[i..].starts_with("{ ")
+        {
             // A block with no braces or quotes inside, followed by the end of the argument.
             if let Some(len) = text[i + 2..].find(['{', '}', '"'])
                 && text[i + 2 + len..].starts_with('}')
