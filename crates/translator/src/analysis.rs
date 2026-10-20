@@ -84,6 +84,20 @@ impl NonAscii {
 
 fn ascii_strings(class: &Class, facts: &mut Facts) {
     let mut non_ascii = NonAscii::default();
+    // Field initializers are not walked below and have no method's variables to look up, so
+    // every parameter that a call in one reaches may be non-ASCII.
+    let initializers = class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics));
+    for init in initializers.filter_map(|f| f.init.as_ref()) {
+        visit_expr(init, &mut |x| match &x.kind {
+            ExprKind::Call { args, resolved: Some(callee), .. }
+            | ExprKind::MethodCall { args, resolved: Some(callee), .. }
+            | ExprKind::ThisCall { args, resolved: Some(callee) }
+            | ExprKind::New { args, ctor: Some(callee), .. } => {
+                non_ascii.params.extend((0..args.len()).map(|i| (*callee, i)));
+            }
+            _ => {}
+        });
+    }
     loop {
         let mut vars = Vec::new();
         let mut declared = Vec::new();
@@ -98,7 +112,10 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
                                 vars.push((m, target.clone()));
                             }
                         }
-                        ExprKind::Call { args, resolved: Some(callee), .. } => {
+                        ExprKind::Call { args, resolved: Some(callee), .. }
+                        | ExprKind::MethodCall { args, resolved: Some(callee), .. }
+                        | ExprKind::ThisCall { args, resolved: Some(callee) }
+                        | ExprKind::New { args, ctor: Some(callee), .. } => {
                             for (i, arg) in args.iter().enumerate() {
                                 if !non_ascii.ascii(class, m, arg) {
                                     params.push((*callee, i));

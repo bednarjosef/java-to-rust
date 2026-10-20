@@ -3,21 +3,21 @@
 //! resolved every name and call, so lowering only maps them onto the supported subset. Anything
 //! outside it is reported as an error naming the construct.
 
+mod objects;
+
 use crate::ast::*;
+use objects::{MethodInfo, TypeInfo};
 use serde_json::Value;
 use std::cell::Cell;
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
-    let mut classes = unit.list("typeDecls").filter(|n| n.kind() != "EMPTY_STATEMENT");
-    let Some(class) = classes.next() else { return error(unit.pos(), "no class found") };
-    if let Some(extra) = classes.next() {
-        return unsupported(extra, "more than one class");
-    }
-    if class.kind() != "CLASS" {
-        return unsupported(class, &kind_words(class.kind()));
-    }
-    Lowering { next_id: Cell::new(0), class: class.str("simpleName"), methods: Vec::new() }.class(class)
+    let decls: Vec<Node> = unit.list("typeDecls").filter(|n| n.kind() != "EMPTY_STATEMENT").collect();
+    let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
+    let lowering = Lowering::declare(&decls)?;
+    let types = (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
+    let methods = (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
+    Ok(Class { name: first.str("simpleName").to_string(), types, methods })
 }
 
 /// A node of javac's tree.
@@ -96,52 +96,38 @@ fn kind_words(kind: &str) -> String {
 
 struct Lowering<'t> {
     next_id: Cell<ExprId>,
-    class: &'t str,
-    /// Name and javac signature of each method of the class, in the order of `Class::methods`.
-    methods: Vec<(&'t str, &'t str)>,
+    /// Index of the class whose members are being lowered: `this` and unqualified names refer to it.
+    current: Cell<usize>,
+    /// Whether the method being lowered is a constructor, which cannot `return` early.
+    in_ctor: Cell<bool>,
+    /// Every class of the file, in the order of `Class::types`.
+    types: Vec<TypeInfo<'t>>,
+    /// Every method and constructor of every class, in the order of `Class::methods`.
+    methods: Vec<MethodInfo<'t>>,
 }
 
 impl<'t> Lowering<'t> {
-    fn class(mut self, node: Node<'t>) -> Result<Class, Error> {
-        if node.get("extendsClause").is_some()
-            || node.list("implementsClause").next().is_some()
-            || node.list("typeParameters").next().is_some()
-        {
-            return unsupported(node, "generic classes, inheritance and interfaces");
-        }
-        let mut members = Vec::new();
-        for member in node.list("members") {
-            match member.kind() {
-                "METHOD" if member.str("name") == "<init>" => {
-                    if !is_default_constructor(member) {
-                        return unsupported(member, "constructors");
-                    }
-                }
-                "METHOD" => members.push(member),
-                "VARIABLE" => return unsupported(member, "fields"),
-                "BLOCK" => return unsupported(member, "initializer blocks"),
-                "CLASS" | "INTERFACE" | "ENUM" | "RECORD" => return unsupported(member, "nested classes"),
-                kind => return unsupported(member, &kind_words(kind)),
-            }
-        }
-        self.methods = members.iter().map(|m| (m.str("name"), m.symbol().map_or("", |s| s.ty))).collect();
-        let methods = members.into_iter().map(|m| self.method(m)).collect::<Result<_, _>>()?;
-        Ok(Class { name: self.class.to_string(), methods })
-    }
-
-    fn method(&self, node: Node<'t>) -> Result<Method, Error> {
-        if !node.has_flag("STATIC") {
-            return unsupported(node, "instance methods");
-        }
+    fn method(&self, index: usize) -> Result<Method, Error> {
+        let info = &self.methods[index];
+        let node = info.node;
+        self.current.set(info.owner);
+        self.in_ctor.set(node.str("name") == "<init>");
         if node.list("typeParameters").next().is_some() {
             return unsupported(node, "generic methods");
         }
+        let is_ctor = node.str("name") == "<init>";
+        let is_static = node.has_flag("STATIC");
         let name = node.str("name").to_string();
-        let ret_node = node.child("returnType")?;
-        let ret = self.ty(ret_node, ret_node.java_type())?;
+        let ret = if is_ctor {
+            Type::Void
+        } else {
+            let ret_node = node.child("returnType")?;
+            self.ty(ret_node, ret_node.java_type())?
+        };
         let params: Vec<Node> = node.list("parameters").collect();
         let param_type = |p: Node<'t>| p.symbol().map_or("", |s| s.ty);
         let is_main = name == "main"
+            && is_static
             && ret == Type::Void
             && params.len() == 1
             && param_type(params[0]) == "java.lang.String[]";
@@ -154,7 +140,18 @@ impl<'t> Lowering<'t> {
                 .collect::<Result<_, Error>>()?
         };
         let Some(body) = node.get("body") else { return unsupported(node, "methods without a body") };
-        Ok(Method { name, params, ret, body: self.block(body)?, is_main, pos: node.pos() })
+        let body = self.block(body)?;
+        Ok(Method {
+            name,
+            params,
+            ret,
+            body,
+            is_main,
+            is_static,
+            is_ctor,
+            class: info.owner,
+            pos: node.pos(),
+        })
     }
 
     /// The supported type named by javac's `name` for it.
@@ -166,6 +163,7 @@ impl<'t> Lowering<'t> {
             "boolean" => Ok(Type::Boolean),
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
+            _ if self.type_index(name).is_some() => Ok(Type::class(name)),
             "char" | "float" | "byte" | "short" => unsupported(node, name),
             "<nulltype>" => unsupported(node, "null"),
             _ if name.ends_with("[]") || name.ends_with("...") => unsupported(node, "arrays"),
@@ -176,6 +174,10 @@ impl<'t> Lowering<'t> {
     fn block(&self, node: Node<'t>) -> Result<Vec<Stmt>, Error> {
         let mut out = Vec::new();
         for stmt in node.list("statements") {
+            // Every class extends `Object`, whose constructor does nothing.
+            if is_super_call(stmt) {
+                continue;
+            }
             self.stmt_into(stmt, &mut out)?;
         }
         Ok(out)
@@ -234,6 +236,7 @@ impl<'t> Lowering<'t> {
                 Stmt::For { init, cond, update, body }
             }
             "RETURN" => match node.get("expression") {
+                _ if self.in_ctor.get() => return unsupported(node, "`return` in a constructor"),
                 Some(value) => Stmt::Return(Some(self.expr(value)?), node.pos()),
                 None => Stmt::Return(None, node.pos()),
             },
@@ -265,7 +268,7 @@ impl<'t> Lowering<'t> {
             "CHAR_LITERAL" => return unsupported(node, "char"),
             "FLOAT_LITERAL" => return unsupported(node, "float"),
             "NULL_LITERAL" => return unsupported(node, "null"),
-            "IDENTIFIER" => ExprKind::Var(self.local(node)?),
+            "IDENTIFIER" => self.name(node)?,
             // javac folds the minus sign into integer literals only; fold it into doubles too.
             "UNARY_MINUS" if node.child("expression")?.kind() == "DOUBLE_LITERAL" => {
                 ExprKind::Double(-self.number::<f64>(node.child("expression")?)?)
@@ -306,9 +309,9 @@ impl<'t> Lowering<'t> {
                 Box::new(self.expr(node.child("falseExpression")?)?),
             ),
             "METHOD_INVOCATION" => self.call(node)?,
-            "NEW_CLASS" => return unsupported(node, "objects"),
+            "NEW_CLASS" => self.new_object(node)?,
             "NEW_ARRAY" | "ARRAY_ACCESS" => return unsupported(node, "arrays"),
-            "MEMBER_SELECT" => return unsupported(node, "fields"),
+            "MEMBER_SELECT" => self.select(node)?,
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => return unsupported(node, "lambdas"),
             "INSTANCE_OF" => return unsupported(node, "instanceof"),
             "SWITCH_EXPRESSION" => return unsupported(node, "switch"),
@@ -341,17 +344,19 @@ impl<'t> Lowering<'t> {
             Some(s) if matches!(s.kind, "LOCAL_VARIABLE" | "PARAMETER" | "EXCEPTION_PARAMETER") => {
                 Ok(node.str("name").to_string())
             }
-            Some(s) if s.kind == "FIELD" => unsupported(node, "fields"),
             _ => unsupported(node, &format!("the name `{}` here", node.str("name"))),
         }
     }
 
     /// What `=`, `+=`, `++` and the like assign.
-    fn target(&self, node: Node) -> Result<Place, Error> {
+    fn target(&self, node: Node<'t>) -> Result<Place, Error> {
+        if let Some(place) = self.field_place(node)? {
+            return Ok(place);
+        }
         match node.kind() {
             "IDENTIFIER" => Ok(Place::Var(self.local(node)?)),
             "ARRAY_ACCESS" => unsupported(node, "arrays"),
-            _ => unsupported(node, "assignment to anything but a local variable"),
+            _ => unsupported(node, "assignment to anything but a variable or field"),
         }
     }
 
@@ -359,6 +364,9 @@ impl<'t> Lowering<'t> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
         let mut args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+        if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
+            return Ok(ExprKind::ThisCall { args, resolved: self.method_index(&symbol) });
+        }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
         let system_out = receiver
             .and_then(|r| r.symbol())
@@ -380,9 +388,17 @@ impl<'t> Lowering<'t> {
                 args.insert(0, self.expr(receiver)?);
                 if symbol.name == "length" { Builtin::StringLength } else { Builtin::StringEquals }
             }
-            (owner, name) if owner == self.class && symbol.is_static => {
-                let resolved = self.methods.iter().position(|&(n, sig)| n == name && sig == symbol.ty);
-                return Ok(ExprKind::Call { name: name.to_string(), args, resolved });
+            _ if self.type_index(symbol.owner).is_some() => {
+                let name = symbol.name.to_string();
+                let resolved = self.method_index(&symbol);
+                if symbol.is_static {
+                    return Ok(ExprKind::Call { name, args, resolved });
+                }
+                let receiver = match receiver {
+                    Some(r) => self.expr(r)?,
+                    None => self.this(node),
+                };
+                return Ok(ExprKind::MethodCall { receiver: Box::new(receiver), name, args, resolved });
             }
             (owner, name) => return unsupported(node, &format!("method `{owner}.{name}`")),
         };
@@ -390,15 +406,13 @@ impl<'t> Lowering<'t> {
     }
 }
 
-/// The constructor javac adds to a class that declares none: `{ super(); }`.
-fn is_default_constructor(node: Node) -> bool {
-    let body: Vec<Node> = node.get("body").into_iter().flat_map(|b| b.list("statements")).collect();
-    node.list("parameters").next().is_none()
-        && matches!(&body[..], [stmt] if stmt.get("expression").is_some_and(|call| {
-            call.kind() == "METHOD_INVOCATION"
-                && call.list("arguments").next().is_none()
-                && call.get("methodSelect").is_some_and(|s| s.str("name") == "super")
-        }))
+/// `super();`, which javac writes into every constructor that does not call another one.
+fn is_super_call(stmt: Node) -> bool {
+    stmt.get("expression").is_some_and(|call| {
+        call.kind() == "METHOD_INVOCATION"
+            && call.list("arguments").next().is_none()
+            && call.get("methodSelect").is_some_and(|s| s.str("name") == "super")
+    })
 }
 
 fn binary_op(node: Node, kind: &str) -> Result<BinOp, Error> {

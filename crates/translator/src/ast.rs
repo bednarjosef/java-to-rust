@@ -95,18 +95,43 @@ pub struct Pos {
     pub column: usize,
 }
 
+/// The translated file: its classes, and every method and constructor of all of them in one list,
+/// so that analyses can refer to any of them by index.
 pub struct Class {
+    /// The class that declares `main`, which names the program.
     pub name: String,
+    pub types: Vec<TypeDecl>,
     pub methods: Vec<Method>,
 }
 
+/// A class of the file: its fields. Methods and constructors are in `Class::methods`.
+pub struct TypeDecl {
+    pub name: String,
+    /// Instance fields, in declaration order.
+    pub fields: Vec<Field>,
+    /// Static fields, in declaration order.
+    pub statics: Vec<Field>,
+}
+
+pub struct Field {
+    pub name: String,
+    pub ty: Type,
+    pub init: Option<Expr>,
+    pub pos: Pos,
+}
+
 pub struct Method {
+    /// `<init>` for a constructor.
     pub name: String,
     pub params: Vec<Param>,
     pub ret: Type,
     pub body: Vec<Stmt>,
     /// `public static void main(String[] args)`, the program's entry point.
     pub is_main: bool,
+    pub is_static: bool,
+    pub is_ctor: bool,
+    /// The index of the declaring class in `Class::types`.
+    pub class: usize,
     pub pos: Pos,
 }
 
@@ -172,13 +197,28 @@ pub enum ExprKind {
     },
     /// A call of a library method such as `System.out.println` or `Math.max`.
     Builtin(Builtin, Vec<Expr>),
+    /// `this`: the object an instance method or constructor runs on.
+    This,
+    /// `object.name`, an instance field.
+    Field { object: Box<Expr>, name: String },
+    /// `Class.name`, a static field; `class` indexes `Class::types`.
+    Static { class: usize, name: String },
+    /// `new C(args)`; `ctor` is the chosen constructor, an index into `Class::methods`.
+    New { class: usize, args: Vec<Expr>, ctor: Option<usize> },
+    /// `receiver.name(args)`, a call of an instance method; `resolved` as for `Call`.
+    MethodCall { receiver: Box<Expr>, name: String, args: Vec<Expr>, resolved: Option<usize> },
+    /// `this(args)`, a constructor calling another constructor of its class.
+    ThisCall { args: Vec<Expr>, resolved: Option<usize> },
 }
 
 /// What an assignment, `++` or `--` writes to.
-#[derive(Clone, Debug, PartialEq)]
 pub enum Place {
     /// A local variable or parameter.
     Var(String),
+    /// `object.name`.
+    Field { object: Box<Expr>, name: String },
+    /// `Class.name`; `class` indexes `Class::types`.
+    Static { class: usize, name: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -392,7 +432,14 @@ pub fn visit_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn
 pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     f(e);
     match &e.kind {
-        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::Assign { value: x, .. } => visit_expr(x, f),
+        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::Field { object: x, .. } => {
+            visit_expr(x, f)
+        }
+        ExprKind::Assign { target, value, .. } => {
+            visit_place(target, f);
+            visit_expr(value, f);
+        }
+        ExprKind::IncDec { target, .. } => visit_place(target, f),
         ExprKind::Binary(_, l, r) => {
             visit_expr(l, f);
             visit_expr(r, f);
@@ -402,9 +449,21 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             visit_expr(a, f);
             visit_expr(b, f);
         }
-        ExprKind::Call { args, .. } | ExprKind::Builtin(_, args) => {
+        ExprKind::MethodCall { receiver, args, .. } => {
+            visit_expr(receiver, f);
             args.iter().for_each(|a| visit_expr(a, f))
         }
+        ExprKind::Call { args, .. }
+        | ExprKind::Builtin(_, args)
+        | ExprKind::New { args, .. }
+        | ExprKind::ThisCall { args, .. } => args.iter().for_each(|a| visit_expr(a, f)),
         _ => {}
+    }
+}
+
+/// Calls `f` on every expression inside the place (the object of a field place).
+fn visit_place(place: &Place, f: &mut dyn FnMut(&Expr)) {
+    if let Place::Field { object, .. } = place {
+        visit_expr(object, f);
     }
 }

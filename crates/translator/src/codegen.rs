@@ -4,11 +4,15 @@
 //! overflow, a divisor that cannot be zero, a counting `for` loop, a string parameter that is
 //! only read) that form is used instead.
 
+mod objects;
+
 use crate::analysis::Facts;
 use crate::ast::*;
+use objects::*;
 use std::collections::{HashMap, HashSet};
 
 pub fn generate(class: &Class, facts: &Facts) -> String {
+    let live = live_types(class);
     let mut g = Gen {
         class,
         facts,
@@ -25,15 +29,28 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         ret: Type::Void,
         uses_runtime: false,
     };
+    for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
+        g.type_items(index);
+    }
+    g.statics();
     for i in 0..class.methods.len() {
-        if i > 0 {
-            g.out.push('\n');
+        if class.methods[i].is_static {
+            g.gap();
+            g.method(i);
         }
-        g.method(i);
+    }
+    let mut uses = Vec::new();
+    if live.iter().any(|&l| l) {
+        uses.push("use std::cell::RefCell;\nuse std::rc::Rc;\n");
+    } else if class.types.iter().any(|t| !t.statics.is_empty()) {
+        uses.push("use std::cell::RefCell;\n");
+    }
+    if g.uses_runtime {
+        uses.push("use java_runtime as java;\n");
     }
     let mut header = format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name);
-    if g.uses_runtime {
-        header.push_str("use java_runtime as java;\n\n");
+    if !uses.is_empty() {
+        header.push_str(&(uses.join("\n") + "\n"));
     }
     header + &g.out
 }
@@ -197,14 +214,15 @@ fn method_names(class: &Class) -> Vec<String> {
             if m.is_main {
                 return "main".to_string();
             }
-            let mut base = snake_case(&m.name);
-            let overloaded = class.methods.iter().filter(|o| o.name == m.name).count() > 1;
-            if overloaded {
+            // Constructors are named inside their class's `impl`, so they need not be unique.
+            let overloads = class.methods.iter().filter(|o| o.name == m.name && o.class == m.class).count();
+            let mut base = if m.is_ctor { "new".to_string() } else { snake_case(&m.name) };
+            if overloads > 1 {
                 for p in &m.params {
-                    base = format!("{base}_{}", rust_type(p.ty).to_lowercase());
+                    base = format!("{base}_{}", type_suffix(p.ty));
                 }
             }
-            unique(base, &mut used)
+            if m.is_ctor { base } else { unique(base, &mut used) }
         })
         .collect()
 }
@@ -318,19 +336,30 @@ impl<'a> Gen<'a> {
             .filter(|&i| self.facts.borrowed_params.contains(&(index, i)))
             .map(|i| m.params[i].name.clone())
             .collect();
-        let params: Vec<String> = m
-            .params
-            .iter()
-            .map(|p| {
-                let mutable = if assigns_any(&m.body, &p.name) { "mut " } else { "" };
-                let ty = if self.borrowed.contains(&p.name) { "&str" } else { rust_type(p.ty) };
-                format!("{mutable}{}: {ty}", self.local(&p.name))
-            })
-            .collect();
-        let ret = if m.ret == Type::Void { String::new() } else { format!(" -> {}", rust_type(m.ret)) };
+        let owner = class_type(&self.class.types[m.class].name);
+        let mut params = Vec::new();
+        if !m.is_static && !m.is_ctor {
+            params.push(format!("this: &{owner}"));
+        }
+        for p in &m.params {
+            let mutable = if assigns_any(&m.body, &p.name) { "mut " } else { "" };
+            let ty = if self.borrowed.contains(&p.name) { "&str".to_string() } else { rust_class_type(p.ty) };
+            params.push(format!("{mutable}{}: {ty}", self.local(&p.name)));
+        }
+        let ret = if m.is_ctor {
+            format!(" -> {owner}")
+        } else if m.ret == Type::Void {
+            String::new()
+        } else {
+            format!(" -> {}", rust_class_type(m.ret))
+        };
         self.line(&format!("fn {}({}){ret} {{", self.fn_names[index], params.join(", ")));
         self.indent += 1;
-        self.stmts(&m.body, true);
+        if m.is_ctor {
+            self.constructor(m);
+        } else {
+            self.stmts(&m.body, true);
+        }
         self.indent -= 1;
         self.line("}");
         self.resolve_annotations(start);
@@ -537,11 +566,11 @@ impl<'a> Gen<'a> {
         let mutable = if mutable { "mut " } else { "" };
         let rust = self.local(name);
         match init {
-            None => self.line(&format!("let {mutable}{rust}: {};", rust_type(ty))),
+            None => self.line(&format!("let {mutable}{rust}: {};", rust_class_type(ty))),
             Some(init) => {
                 let code = self.value(init, ty);
                 let annotation = if code.untyped {
-                    self.annotation(ty, format!(": {}", rust_type(ty)))
+                    self.annotation(ty, format!(": {}", rust_class_type(ty)))
                 } else {
                     String::new()
                 };
@@ -743,9 +772,16 @@ impl<'a> Gen<'a> {
                 let rust = self.local(name);
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
-                    Type::String => Code::atom(format!("{rust}.clone()")),
+                    ty if needs_clone(ty) => Code::atom(format!("{rust}.clone()")),
                     _ => Code::atom(rust),
                 }
+            }
+            ExprKind::This => Code::atom("this.clone()"),
+            ExprKind::Field { object, name } => self.field_read(object, name, e.ty),
+            ExprKind::Static { class, name } => self.static_read(*class, name, e.ty),
+            ExprKind::New { args, ctor, .. } => {
+                let ctor = ctor.expect("constructors are resolved by the checker");
+                self.new_object(ctor, args)
             }
             ExprKind::Unary(op, operand) => {
                 let code = self.value(operand, e.ty);
@@ -793,22 +829,30 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Call { args, resolved, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
-                let params = &self.class.methods[index].params;
-                let args: Vec<String> = args
-                    .iter()
-                    .zip(params)
-                    .enumerate()
-                    .map(|(i, (a, p))| {
-                        if self.facts.borrowed_params.contains(&(index, i)) {
-                            self.str_ref(a)
-                        } else {
-                            self.value(a, p.ty).text
-                        }
-                    })
-                    .collect();
-                Code::atom(format!("{}({})", self.fn_names[index], args.join(", ")))
+                let args = self.call_args(index, args).join(", ");
+                Code::atom(format!("{}({args})", self.fn_names[index]))
             }
+            ExprKind::MethodCall { receiver, args, resolved, .. } => {
+                let index = resolved.expect("calls are resolved by the checker");
+                if self.class.methods[index].is_static {
+                    let args = self.call_args(index, args).join(", ");
+                    Code::atom(format!("{}({args})", self.fn_names[index]))
+                } else {
+                    self.method_call(receiver, index, args)
+                }
+            }
+            ExprKind::ThisCall { .. } => unreachable!("lowering keeps `this(...)` first in a constructor"),
             ExprKind::Builtin(builtin, args) => self.builtin(*builtin, args, e.ty, e.id),
+            ExprKind::Assign { op, target, value } => {
+                let how = match op {
+                    None => Update::Assign(value),
+                    Some(op) => Update::Compound(*op, value),
+                };
+                self.update(target, e.ty, how, e.id, false)
+            }
+            ExprKind::IncDec { target, increment, prefix } => {
+                self.update(target, e.ty, Update::Step(*increment), e.id, *prefix)
+            }
         }
     }
 
