@@ -22,9 +22,8 @@ impl<'t> Lowering<'t> {
             .map(|s| s.name);
         // A `Runtime` with no state of its own: the receiver is `Runtime.getRuntime()` or a name
         // that holds one, and neither needs evaluating.
-        let on_runtime = receiver.is_some_and(|r| {
-            r.kind() == "IDENTIFIER" || r.symbol().is_some_and(|s| s.name == "getRuntime")
-        });
+        let on_runtime = receiver
+            .is_some_and(|r| r.kind() == "IDENTIFIER" || r.symbol().is_some_and(|s| s.name == "getRuntime"));
         let native = match (symbol.owner, symbol.name) {
             // `StrictMath` gives the same results as `Math` for these.
             ("java.lang.StrictMath", "abs") => return Ok(Some(Builtin::MathAbs)),
