@@ -303,3 +303,19 @@ fn fold(literal: Literal, to: Type) -> Code {
     }
     Code::literal(folded)
 }
+
+/// `-x` or `~x` of a literal as a literal, the way Java computes it: `-(3)` is the literal `-3`,
+/// whose type a cast such as `-3 as u16` would otherwise take, and `-(4294967296L)` keeps the
+/// type of its operand.
+pub(super) fn fold_unary(op: UnOp, literal: Literal) -> Option<Literal> {
+    Some(match (op, literal) {
+        (UnOp::Plus, _) => literal,
+        (UnOp::Neg, Literal::Int(v)) => Literal::Int(v.wrapping_neg()),
+        (UnOp::Neg, Literal::Long(v)) => Literal::Long(v.wrapping_neg()),
+        (UnOp::Neg, Literal::Double(v)) => Literal::Double(-v),
+        (UnOp::Neg, Literal::Float(v)) => Literal::Float(-v),
+        (UnOp::BitNot, Literal::Int(v)) => Literal::Int(!v),
+        (UnOp::BitNot, Literal::Long(v)) => Literal::Long(!v),
+        _ => return None,
+    })
+}

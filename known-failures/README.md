@@ -5,21 +5,19 @@ Minimal programs that the translator gets wrong, though the feature is in the su
 pass. Java's output is what `java File.java` prints. When a failure is fixed, move its file into
 `corpus/features/` with the fixed behaviour.
 
-- `BlockExpressionBeforeCast.java`: `return (sChar++);` in a `double` method, where `sChar` is a
-  `char` static. Java prints `65.0`; the translated block is taken as a statement, so the `as f64`
-  after it does not parse: rustc fails with "expected expression, found `as`". The fuzzer's
-  seeds hit the same parse error after a block with `>=`, `==`, `!=`, `/`, `%`, `^`, `>` and `+`
-  (not reduced separately).
-- `FloatIncrementValue.java`: `System.out.println(++sFloat);` on a `float` static. Java prints
-  `2.5`; rustc fails with E0599 "no method named `wrapping_add` found for type `f32`" (the
-  increment is translated with integer wrapping arithmetic, which `f32` lacks).
-- `NegatedCharCast.java`: `sInt *= ((char)((-(3))));`, a negative int cast to `char`. Java prints
-  `65533`; rustc fails with E0600 "cannot apply unary operator `-` to type `u16`".
-- `NegatedLongLiteral.java`: `System.out.println(-(4294967296L));`. Java prints
-  `-4294967296`; rustc fails with "literal out of range for `i32`": a `long` literal under a unary
-  operator is typed as `i32`. `~(9223372036854775807L)` fails the same way, and
-  `(byte)(~(9223372036854775807L))` fails with "literal out of range for `i8`".
+- `LoneSurrogateCompareTo.java`: `"😀x".substring(1)`, which starts with a lone low
+  surrogate, compared with `compareTo`. Java prints `2 -56772 -30747`; the translation prints
+  `2 -3 26022`: the length is right, but `java::compare_to` sees the lone surrogate as `?` (63)
+  instead of the code unit 0xDE00. The strings fuzzer's seeds 18, 51 and 396 (of 600) differ this
+  way.
 - `NullObjectConcat.java`: `"slot " + slots[0]` where `slots` is a `Node[]` and `Node` has no
   `toString`. Java prints `slot null`; the translator rejects it with "printing an object without
   toString not supported yet". The value is always null, so the class's own printing is never
   needed.
+- `StringContainsCharSequence.java`: `"a\\b".replace("ab", "abc").contains(...)` with a `split`
+  element as the argument. Java prints nothing; the translator rejects it with "type
+  `java.lang.CharSequence` not supported yet", since `replace` with string arguments and
+  `contains` both take a `CharSequence` in Java.
+- `StringFormatObject.java`: `String.format("<%d|%s|%5.2f>", ...)` with an `int`, a `String` and a
+  `double` argument. Java prints `<0|😀x| 0.00>`; the translator rejects it with "Object not supported
+  yet", because `String.format` takes `Object...` and its varargs are not translated.
