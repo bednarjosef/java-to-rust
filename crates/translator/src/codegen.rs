@@ -41,6 +41,7 @@ mod modules;
 mod natives;
 mod objects;
 mod owned;
+mod plain_arrays;
 mod sync;
 
 use arrays::name_part;
@@ -319,6 +320,8 @@ impl<'a> Gen<'a> {
             String::new()
         } else if self.optional_return() {
             format!(" -> Option<{}>", self.ty_name(m.ret))
+        } else if self.facts.owned_returns.contains(&index) {
+            format!(" -> {}", self.plain_ty(m.ret))
         } else {
             format!(" -> {}", self.ty_name(m.ret))
         };

@@ -151,6 +151,9 @@ impl<'a> Gen<'a> {
         if self.optional_return() {
             return self.optional_to(value, self.ret);
         }
+        if self.facts.owned_returns.contains(&self.method) {
+            return Code::atom(self.owned(value));
+        }
         if let ExprKind::Var(name) = &value.kind
             && value.ty == Type::String
             && !self.borrowed.contains(name)
@@ -245,7 +248,7 @@ impl<'a> Gen<'a> {
             return self.optional_local(name, ty, init, mutable);
         }
         if let Some(written) = self.plain(name) {
-            self.plain_local(ty, name, init, written);
+            self.plain_local(ty, name, init, written || mutable);
             return;
         }
         let mutable = if mutable { "mut " } else { "" };
@@ -305,6 +308,13 @@ impl<'a> Gen<'a> {
     /// An expression evaluated for its effect, as a statement.
     pub(super) fn effect(&mut self, e: &'a Expr) {
         match &e.kind {
+            // A plain array takes over the array it is given.
+            ExprKind::Assign { op: None, target: Place::Var(target), value }
+                if self.plain(target).is_some() =>
+            {
+                let value = self.owned(value);
+                self.line(&format!("{} = {value};", self.local(target)));
+            }
             ExprKind::Assign { op, target: Place::Var(target), value } => {
                 let text = self.assignment(*op, target, e.ty, value, e.id);
                 self.line(&format!("{text};"));

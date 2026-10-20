@@ -867,7 +867,15 @@ impl<'a> Analysis<'a> {
                 env.insert(target.clone(), Var { ty: var.ty, range });
                 if *prefix { range } else { current }
             }
-            ExprKind::NewArray(items) | ExprKind::ArrayLit(items) => {
+            ExprKind::NewArray(sizes) => {
+                // A size's values are kept like an index's: one that is never negative needs no check.
+                for size in sizes {
+                    let range = self.expr(size, env);
+                    self.indexed(size.id, range);
+                }
+                other
+            }
+            ExprKind::ArrayLit(items) => {
                 for item in items {
                     self.expr(item, env);
                 }

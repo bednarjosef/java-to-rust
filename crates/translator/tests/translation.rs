@@ -939,7 +939,7 @@ fn a_last_use_moves_instead_of_cloning() {
             }
         }",
     );
-    assert_contains(&rust, &["    made\n", "let b: java::Array<i32> = a;"]);
+    assert_contains(&rust, &["    made\n", "let b: Vec<i32> = a;"]);
     assert_lacks(&rust, &["made.clone()", "a.clone()"]);
 }
 
