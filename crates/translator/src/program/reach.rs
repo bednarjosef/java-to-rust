@@ -25,8 +25,14 @@ pub struct Reach {
     pub initialized: HashSet<String>,
     /// Classes whose objects are created: one of their constructors is reachable.
     pub instantiated: HashSet<String>,
+    /// Classes that an instantiated class is or extends or implements, directly or not: the classes
+    /// whose instance methods can run.
+    pub live: HashSet<String>,
     pub methods: HashSet<MethodKey>,
     pub fields: HashSet<FieldKey>,
+    /// Methods that reachable code calls but that are not among the sources: those of the
+    /// classes the runtime provides (see `RUNTIME_CLASSES`), and any that are missing.
+    pub external: HashSet<MethodKey>,
 }
 
 impl Reach {
@@ -50,6 +56,66 @@ impl Reach {
 /// string concatenation, collections) calls on its objects.
 const OBJECT_METHODS: &[(&str, &str)] =
     &[("toString", "()java.lang.String"), ("equals", "(java.lang.Object)boolean"), ("hashCode", "()int")];
+
+/// The classes that the runtime provides and the translator maps to it, such as `String` and
+/// `System`: their sources are never read, even when a library root has them, as their code
+/// reaches deep into the JVM.
+pub const RUNTIME_CLASSES: &[&str] = &[
+    "java.io.PrintStream",
+    "java.lang.Boolean",
+    "java.lang.Byte",
+    "java.lang.Character",
+    "java.lang.Class",
+    "java.lang.ClassLoader",
+    "java.lang.Double",
+    "java.lang.Enum",
+    "java.lang.Float",
+    "java.lang.Integer",
+    "java.lang.Long",
+    "java.lang.Math",
+    "java.lang.Number",
+    "java.lang.Object",
+    "java.lang.Runtime",
+    "java.lang.Short",
+    "java.lang.StrictMath",
+    "java.lang.String",
+    "java.lang.StringBuilder",
+    "java.lang.System",
+    "java.lang.Thread",
+    "java.lang.ref.PhantomReference",
+    "java.lang.ref.Reference",
+    "java.lang.ref.ReferenceQueue",
+    "java.lang.ref.SoftReference",
+    "java.lang.ref.WeakReference",
+    "java.util.Arrays",
+    "sun.util.logging.PlatformLogger",
+];
+
+/// What is not translated, by the prefix of qualified class names, with the feature it is:
+/// reachability stops there, as at the runtime's classes, and the survey counts its use. Library
+/// code reaches these on paths that only its data rules out, such as `TreeMap.addAll` reading
+/// from a stream that is null there.
+pub const UNTRANSLATED: &[(&str, &str)] = &[
+    ("java.io.ObjectInputStream", "serialization"),
+    ("java.io.ObjectOutputStream", "serialization"),
+    ("java.io.ObjectStreamClass", "serialization"),
+    ("java.lang.invoke.", "reflection"),
+    ("java.lang.reflect.", "reflection"),
+    ("java.security.", "security"),
+    ("jdk.internal.reflect.", "reflection"),
+    ("sun.security.", "security"),
+];
+
+/// The feature that the class with qualified name `class` belongs to, if it is not translated.
+pub fn untranslated(class: &str) -> Option<&'static str> {
+    UNTRANSLATED.iter().find(|(prefix, _)| class.starts_with(prefix)).map(|&(_, feature)| feature)
+}
+
+/// Whether reachability stops at the class with qualified name `class`: the runtime provides it,
+/// or it is not translated.
+pub fn outside(class: &str) -> bool {
+    RUNTIME_CLASSES.contains(&class) || untranslated(class).is_some()
+}
 
 /// The node kinds of class declarations, and the symbol kinds of classes.
 pub const CLASS_KINDS: &[&str] = &["CLASS", "INTERFACE", "ENUM", "RECORD", "ANNOTATION_TYPE"];
@@ -91,6 +157,13 @@ struct Walk<'t> {
     classes: HashMap<String, (&'t Value, Option<String>)>,
     methods: HashMap<MethodKey, &'t Value>,
     fields: HashMap<FieldKey, &'t Value>,
+    /// The direct supertypes of each class.
+    supertypes: HashMap<String, Vec<String>>,
+    /// The methods that override each method, as javac reports them.
+    overriders: HashMap<MethodKey, Vec<MethodKey>>,
+    /// Overriders of reached methods whose class is not live yet, by that class: they become
+    /// reachable when it is.
+    waiting: HashMap<String, Vec<MethodKey>>,
     work: Vec<Item>,
     reach: Reach,
 }
@@ -101,11 +174,23 @@ impl<'t> Walk<'t> {
             return;
         }
         let class = class_name(decl);
+        if outside(&class) {
+            return;
+        }
         for member in members(decl) {
             let name = text(member, "name").to_string();
             match text(member, "kind") {
                 "METHOD" => {
-                    self.methods.insert((class.clone(), name, symbol_type(member).to_string()), member);
+                    let key = (class.clone(), name, symbol_type(member).to_string());
+                    for overridden in member["symbol"]["overrides"].as_array().into_iter().flatten() {
+                        let overridden = (
+                            text(overridden, "owner").to_string(),
+                            key.1.clone(),
+                            text(overridden, "type").to_string(),
+                        );
+                        self.overriders.entry(overridden).or_default().push(key.clone());
+                    }
+                    self.methods.insert(key, member);
                 }
                 "VARIABLE" => {
                     self.fields.insert((class.clone(), name), member);
@@ -113,6 +198,24 @@ impl<'t> Walk<'t> {
                 _ => self.declare(member, Some(&class)),
             }
         }
+        let mut supertypes: Vec<String> = ["extendsClause", "implementsClause"]
+            .iter()
+            .flat_map(|header| match &decl[header] {
+                Value::Array(items) => items.iter().collect(),
+                one => vec![one],
+            })
+            .filter_map(supertype)
+            .collect();
+        let implicit = match text(decl, "kind") {
+            "ENUM" => Some("java.lang.Enum"),
+            "RECORD" => Some("java.lang.Record"),
+            "CLASS" if decl["extendsClause"].is_null() && class != "java.lang.Object" => {
+                Some("java.lang.Object")
+            }
+            _ => None,
+        };
+        supertypes.extend(implicit.map(str::to_string));
+        self.supertypes.insert(class.clone(), supertypes);
         self.classes.insert(class, (decl, outer.map(str::to_string)));
     }
 
@@ -175,7 +278,15 @@ impl<'t> Walk<'t> {
     }
 
     fn method(&mut self, key: MethodKey) {
-        let Some(&node) = self.methods.get(&key) else { return };
+        let Some(&node) = self.methods.get(&key) else {
+            // What overrides a method of the runtime, such as `Object.toString`, can still run.
+            if self.reach.external.insert(key.clone()) {
+                for overrider in self.overriders(&key) {
+                    self.work.push(Item::Method(overrider));
+                }
+            }
+            return;
+        };
         if !self.reach.methods.insert(key.clone()) {
             return;
         }
@@ -187,6 +298,7 @@ impl<'t> Walk<'t> {
             self.work.push(Item::Init(class.clone()));
         }
         if is_ctor && self.reach.instantiated.insert(class.clone()) {
+            self.live(class.clone());
             let decl = self.classes[&class].0;
             self.initializers(decl, &class, false);
             // Library code calls these on any object, as string conversion calls `toString`.
@@ -203,12 +315,32 @@ impl<'t> Walk<'t> {
     }
 
     /// The methods that a call of the instance method `method` may run instead of it: those that
-    /// override it in instantiated subclasses. Classes cannot extend others or implement
-    /// interfaces yet, so there are none. When they can, this is the hook: return the overriders
-    /// of `method` in every instantiated subclass, and when a class becomes instantiated, also
-    /// reach its overriders of the instance methods reached so far.
-    fn overriders(&self, _method: &MethodKey) -> Vec<MethodKey> {
-        Vec::new()
+    /// override it in live classes. Those in classes that are not live yet wait until they are.
+    fn overriders(&mut self, method: &MethodKey) -> Vec<MethodKey> {
+        let mut now = Vec::new();
+        for overrider in self.overriders.get(method).cloned().unwrap_or_default() {
+            if self.reach.live.contains(&overrider.0) {
+                now.push(overrider);
+            } else {
+                self.waiting.entry(overrider.0.clone()).or_default().push(overrider);
+            }
+        }
+        now
+    }
+
+    /// Makes a class live, and its supertypes: the overriders that waited for one become
+    /// reachable.
+    fn live(&mut self, class: String) {
+        let mut work = vec![class];
+        while let Some(class) = work.pop() {
+            if !self.reach.live.insert(class.clone()) {
+                continue;
+            }
+            for overrider in self.waiting.remove(&class).unwrap_or_default() {
+                self.work.push(Item::Method(overrider));
+            }
+            work.extend(self.supertypes.get(&class).cloned().unwrap_or_default());
+        }
     }
 
     fn field(&mut self, key: FieldKey) {
@@ -224,9 +356,11 @@ impl<'t> Walk<'t> {
     }
 
     /// Makes every declaration that a node of this subtree refers to reachable. Local and
-    /// anonymous classes inside are scanned whole, which over-approximates.
+    /// anonymous classes inside are scanned whole, which over-approximates. Annotations are
+    /// skipped: without reflection they do nothing at run time.
     fn scan(&mut self, value: &'t Value) {
         match value {
+            Value::Object(_) if matches!(text(value, "kind"), "ANNOTATION" | "TYPE_ANNOTATION") => {}
             Value::Object(fields) => {
                 for (field, child) in fields {
                     if field == "symbol" {
@@ -262,23 +396,43 @@ pub fn class_name(decl: &Value) -> String {
     strip_arguments(symbol_type(decl))
 }
 
-fn strip_arguments(ty: &str) -> String {
-    ty.split('<').next().unwrap_or(ty).to_string()
+/// The qualified name of the class that a type in a class header names: `List<E>` names
+/// `java.util.List`.
+fn supertype(ty: &Value) -> Option<String> {
+    match text(ty, "kind") {
+        "PARAMETERIZED_TYPE" => supertype(&ty["type"]),
+        _ => ty["symbol"]["type"].as_str().map(strip_arguments),
+    }
 }
 
-fn members(decl: &Value) -> impl Iterator<Item = &Value> {
+/// A type without its type arguments: `java.util.ArrayList<E>.Itr` is `java.util.ArrayList.Itr`.
+fn strip_arguments(ty: &str) -> String {
+    let mut depth = 0;
+    ty.chars()
+        .filter(|&c| {
+            match c {
+                '<' => depth += 1,
+                '>' => depth -= 1,
+                _ => return depth == 0,
+            }
+            false
+        })
+        .collect()
+}
+
+pub(super) fn members(decl: &Value) -> impl Iterator<Item = &Value> {
     decl["members"].as_array().into_iter().flatten()
 }
 
-fn text<'v>(node: &'v Value, field: &str) -> &'v str {
+pub(super) fn text<'v>(node: &'v Value, field: &str) -> &'v str {
     node[field].as_str().unwrap_or("")
 }
 
-fn symbol_type(node: &Value) -> &str {
+pub(super) fn symbol_type(node: &Value) -> &str {
     text(&node["symbol"], "type")
 }
 
-fn has_flag(node: &Value, flag: &str) -> bool {
+pub(super) fn has_flag(node: &Value, flag: &str) -> bool {
     node["modifiers"]["flags"].as_array().is_some_and(|f| f.iter().any(|x| x == flag))
 }
 

@@ -1792,3 +1792,49 @@ fn object_parameters_used_only_through_are_borrowed() {
         &["fn twice(b: &Rc<RefCell<Box>>) {", "twice(&x);", "fn keep(b: Rc<RefCell<Box>>)"],
     );
 }
+
+#[test]
+fn strings_with_unpaired_surrogates_are_rejected() {
+    let err = java_to_rust::translate(
+        "class A { public static void main(String[] args) { System.out.println(\"a\\uD800b\".length()); } }",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("a string with an unpaired surrogate not supported yet"), "{err}");
+}
+
+#[test]
+fn the_survey_follows_calls_to_the_classes_whose_objects_are_created() {
+    let dir = write_sources(
+        "survey",
+        &[(
+            "Main.java",
+            "@interface Tag {}
+            interface Shape { int area(); }
+            class Square implements Shape { public int area() { return 4; } }
+            class Circle implements Shape { public int area() { return 3; } }
+            class Box<T> { class Inner { int size() { return 1; } } }
+            @Tag public class Main {
+                static Square unused() { return new Square(); }
+                public static void main(String[] args) {
+                    Shape s = new Circle();
+                    Square none = null;
+                    System.out.println(s.area() + new Box<String>().new Inner().size());
+                }
+            }",
+        )],
+    );
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let report = java_to_rust::survey_program(&program).unwrap_or_else(|e| panic!("survey failed: {e}"));
+    // `Circle.area` runs for `s.area()`; `Square` is named but never created, and the annotation
+    // does nothing.
+    assert_contains(
+        &report,
+        &[
+            "Reachable from Main: 6 classes (3 instantiated), 7 methods",
+            "  Circle: interfaces\n",
+            "  Box.Inner: inner classes\n",
+            "  Shape: interfaces\n",
+        ],
+    );
+    assert_lacks(&report, &["Square:", "Tag"]);
+}

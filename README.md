@@ -162,6 +162,25 @@ become nested modules in one output file (`com.example.util` is `mod com { pub(c
 root, such as `crate::com::example::util::Counter::new(..)`, and items in packages are
 `pub(crate)`. A program without packages is written like a single file.
 
+Reachability dispatches calls as Java does: javac lists the methods each method overrides, and a
+call of an instance method also reaches its overriders in every class that an instantiated class
+is, extends or implements. It stops at the classes that the runtime provides (`String`,
+`StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`, the `java.lang.ref`
+references; `RUNTIME_CLASSES`), whose sources reach deep into the JVM, and at what is not
+translated: reflection, method handles, serialization and security (`UNTRANSLATED`). Library code
+reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
+`comparableClassFor` and parallel streams reach threads: without the boundary, a program that puts
+one entry into a `HashMap` reaches 3,268 classes of java.base; with it, 59. Annotations reach
+nothing.
+
+`--survey` prints what the code reachable from `main` uses that is not supported yet instead of
+translating it: per feature (interfaces, inheritance, generic classes, exceptions, lambdas, ...)
+the classes and pieces of code (methods, field initializers, initializer blocks) that use it and
+those it alone blocks, the order of features that frees the most code at each step, the methods
+of the runtime's classes that are called, and the native methods reached
+(`program/survey.rs`). It is a syntactic census, so it misses the narrower rejections of the
+lowering.
+
 The native layer, the JDK methods that bottom out in the JVM, is hand-written in the runtime
 (`natives.rs`, `math.rs`, `fdlibm/`, `out.rs`) and recognised by owner and name
 (`lower/natives.rs`): `System.arraycopy` (between shared or plain arrays, overlap as through a
@@ -184,6 +203,7 @@ cargo run -p java-to-rust -- Program.java                 # print the Rust trans
 cargo run -p java-to-rust -- Program.java --crate out/    # write a Cargo project
 cargo run -p java-to-rust -- --main com.example.Main --source src/ [--library jdk-src/] [-o out.rs | --crate out/]
 cargo run -p java-to-rust -- --main Main A.java B.java    # a program given as files
+cargo run -p java-to-rust -- --survey --main Main --source src/ --library jdk-src/java.base
 cargo test                                                # needs a JDK: runs corpus/ on both
 ```
 

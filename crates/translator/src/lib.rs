@@ -11,7 +11,7 @@ pub mod program;
 pub mod types;
 
 pub use ast::Error;
-pub use program::{Program, ProgramError, translate_program};
+pub use program::{Program, ProgramError, survey_program, translate_program};
 
 /// Translates one Java source file into the source of a Rust program that uses the
 /// `java-runtime` crate.

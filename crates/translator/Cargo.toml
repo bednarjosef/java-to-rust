@@ -6,5 +6,6 @@ license.workspace = true
 description = "Translates Java source code into Rust source code"
 
 [dependencies]
-serde_json = "1"
+serde = "1"
+serde_json = { version = "1", features = ["unbounded_depth"] }
 java-runtime = { path = "../runtime" }

@@ -110,7 +110,7 @@ impl<'t> Node<'t> {
             is_static: s.0["static"].as_bool().unwrap_or(false),
             varargs: s.0["varargs"].as_bool().unwrap_or(false),
             ty: s.str("type"),
-            constant: s.0.get("constant").map(|_| s.str("constant")),
+            constant: s.0.get("constant").and_then(Value::as_str),
         })
     }
 
@@ -315,7 +315,10 @@ impl<'t> Lowering<'t> {
             "LONG_LITERAL" => ExprKind::Long(self.number(node)?),
             "DOUBLE_LITERAL" => ExprKind::Double(self.number(node)?),
             "BOOLEAN_LITERAL" => ExprKind::Bool(node.0["value"] == true),
-            "STRING_LITERAL" => ExprKind::Str(node.str("value").to_string()),
+            "STRING_LITERAL" => match node.0["value"].as_str() {
+                Some(text) => ExprKind::Str(text.to_string()),
+                None => return unsupported(node, "a string with an unpaired surrogate"),
+            },
             "CHAR_LITERAL" => self.char_literal(node)?,
             "FLOAT_LITERAL" => self.float_literal(node)?,
             "NULL_LITERAL" => ExprKind::Null,

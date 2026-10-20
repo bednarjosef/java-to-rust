@@ -4,6 +4,7 @@
 //! and only what is reachable from `main` is lowered and translated.
 
 mod reach;
+mod survey;
 
 pub use reach::{Reach, class_name};
 
@@ -54,6 +55,28 @@ fn fail(message: String) -> ProgramError {
 /// Translates a whole program into the source of one Rust program that uses the `java-runtime`
 /// crate.
 pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
+    let tree = compile(program)?;
+    let units: Vec<&Value> = tree["units"].as_array().into_iter().flatten().collect();
+    let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
+    let reach = reach::reach(&trees, &program.main).map_err(fail)?;
+    let class = lower::lower_program(&trees, &reach, &program.main).map_err(|(unit, error)| {
+        ProgramError { file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string), error }
+    })?;
+    let facts = analysis::analyze(&class);
+    Ok(codegen::generate(&class, &facts))
+}
+
+/// The survey of what the code reachable from the program's `main` uses that the translator does
+/// not support yet, as a text report (see `survey`).
+pub fn survey_program(program: &Program) -> Result<String, ProgramError> {
+    let tree = compile(program)?;
+    let trees: Vec<&Value> = tree["units"].as_array().into_iter().flatten().map(|u| &u["tree"]).collect();
+    let reach = reach::reach(&trees, &program.main).map_err(fail)?;
+    Ok(survey::survey(&trees, &reach, &program.main))
+}
+
+/// javac's trees of the program, with those of the library classes it uses.
+fn compile(program: &Program) -> Result<Value, ProgramError> {
     let mut files = program.files.clone();
     for root in &program.sources {
         java_files(root, &mut files).map_err(|e| fail(format!("{}: {e}", root.display())))?;
@@ -64,16 +87,7 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
         return Err(fail("no Java source files given".into()));
     }
     let sourcepath: Vec<PathBuf> = program.sources.iter().chain(&program.libraries).cloned().collect();
-    let tree =
-        javac::program_tree(&files, &sourcepath).map_err(|(file, error)| ProgramError { file, error })?;
-    let units: Vec<&Value> = tree["units"].as_array().into_iter().flatten().collect();
-    let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
-    let reach = reach::reach(&trees, &program.main).map_err(fail)?;
-    let class = lower::lower_program(&trees, &reach, &program.main).map_err(|(unit, error)| {
-        ProgramError { file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string), error }
-    })?;
-    let facts = analysis::analyze(&class);
-    Ok(codegen::generate(&class, &facts))
+    javac::program_tree(&files, &sourcepath).map_err(|(file, error)| ProgramError { file, error })
 }
 
 /// Adds every `.java` file under `dir`, in a stable order.

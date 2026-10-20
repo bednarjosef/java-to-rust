@@ -7,6 +7,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import javax.lang.model.element.*;
 import javax.lang.model.type.TypeMirror;
+import javax.lang.model.util.Elements;
+import javax.lang.model.util.Types;
 import javax.tools.*;
 
 /**
@@ -20,7 +22,8 @@ import javax.tools.*;
  * <p>The tree is dumped generically: every node is an object with its {@code kind} (the name of
  * {@link Tree.Kind}), its position, and one field per getter of the node's interface, named after
  * the getter ({@code getLeftOperand} gives {@code leftOperand}). Expressions also get
- * {@code javaType}; names, calls, {@code new}, and declarations get {@code symbol}.
+ * {@code javaType}; names, calls, {@code new}, and declarations get {@code symbol}, and a method's
+ * symbol lists the methods it {@code overrides}.
  */
 public class JavaTree {
     public static void main(String[] args) throws Exception {
@@ -45,6 +48,8 @@ public class JavaTree {
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         JavacTask task = (JavacTask) compiler.getTask(null, null, diagnostics,
                 List.of("-proc:none", "-Xlint:none", "-XDshould-stop.at=FLOW"), null, List.of(file));
+        elements = task.getElements();
+        types = task.getTypes();
         Iterable<? extends CompilationUnitTree> units = task.parse();
         task.analyze();
         boolean failed = false;
@@ -101,6 +106,8 @@ public class JavaTree {
             }
         });
         List<CompilationUnitTree> units = new ArrayList<>();
+        elements = task.getElements();
+        types = task.getTypes();
         task.parse().forEach(units::add);
         task.analyze();
         boolean failed = false;
@@ -136,6 +143,9 @@ public class JavaTree {
         stdout.print(out);
         stdout.flush();
     }
+
+    private static Elements elements;
+    private static Types types;
 
     private final Trees trees;
     private final CompilationUnitTree unit;
@@ -194,7 +204,7 @@ public class JavaTree {
             Element element = trees.getElement(path);
             if (element != null) {
                 out.append(",\"symbol\":");
-                symbol(element, out);
+                symbol(element, tree instanceof MethodTree, out);
             }
         }
         Class<?> type = tree.getKind().asInterface();
@@ -249,7 +259,7 @@ public class JavaTree {
         return true;
     }
 
-    private void symbol(Element e, StringBuilder out) {
+    private void symbol(Element e, boolean declaration, StringBuilder out) {
         out.append("{\"kind\":");
         string(e.getKind().name(), out);
         out.append(",\"name\":");
@@ -266,6 +276,9 @@ public class JavaTree {
         }
         out.append(",\"type\":");
         string(e.asType().toString(), out);
+        if (declaration && e.getKind() == ElementKind.METHOD && owner instanceof TypeElement t) {
+            overrides((ExecutableElement) e, t, out);
+        }
         // The value of a constant variable, as text: javac's compile-time constant.
         if (e instanceof VariableElement v && v.getConstantValue() != null) {
             Object c = v.getConstantValue();
@@ -275,7 +288,47 @@ public class JavaTree {
         out.append('}');
     }
 
+    /** The methods of the supertypes of {@code owner} that {@code m} overrides. */
+    private void overrides(ExecutableElement m, TypeElement owner, StringBuilder out) {
+        List<TypeMirror> work = new ArrayList<>(types.directSupertypes(owner.asType()));
+        Set<Element> seen = new HashSet<>();
+        String mark = ",\"overrides\":[";
+        boolean any = false;
+        while (!work.isEmpty()) {
+            Element type = types.asElement(work.remove(work.size() - 1));
+            if (!(type instanceof TypeElement superclass) || !seen.add(superclass)) {
+                continue;
+            }
+            work.addAll(types.directSupertypes(superclass.asType()));
+            for (Element member : superclass.getEnclosedElements()) {
+                if (member instanceof ExecutableElement x && member.getKind() == ElementKind.METHOD
+                        && x.getSimpleName().equals(m.getSimpleName()) && elements.overrides(m, x, owner)) {
+                    out.append(any ? "," : mark);
+                    any = true;
+                    out.append("{\"owner\":");
+                    string(superclass.getQualifiedName().toString(), out);
+                    out.append(",\"type\":");
+                    string(x.asType().toString(), out);
+                    out.append('}');
+                }
+            }
+        }
+        if (any) {
+            out.append(']');
+        }
+    }
+
     private static void string(String s, StringBuilder out) {
+        if (unpaired(s)) {
+            // JSON strings cannot hold an unpaired surrogate, so such a string is written as its
+            // UTF-16 code units.
+            out.append('[');
+            for (int i = 0; i < s.length(); i++) {
+                out.append(i == 0 ? "" : ",").append((int) s.charAt(i));
+            }
+            out.append(']');
+            return;
+        }
         out.append('"');
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
@@ -286,7 +339,7 @@ public class JavaTree {
                 case '\r' -> out.append("\\r");
                 case '\t' -> out.append("\\t");
                 default -> {
-                    if (c < 0x20 || Character.isSurrogate(c)) {
+                    if (c < 0x20) {
                         out.append(String.format("\\u%04x", (int) c));
                     } else {
                         out.append(c);
@@ -295,5 +348,18 @@ public class JavaTree {
             }
         }
         out.append('"');
+    }
+
+    /** Whether {@code s} has a surrogate that is not part of a pair: it is not well-formed UTF-16. */
+    private static boolean unpaired(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isHighSurrogate(c) && i + 1 < s.length() && Character.isLowSurrogate(s.charAt(i + 1))) {
+                i++;
+            } else if (Character.isSurrogate(c)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

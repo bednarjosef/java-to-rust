@@ -17,6 +17,7 @@ name = "java-to-rust"
 version = "0.1.0"
 dependencies = [
  "java-runtime",
+ "serde",
  "serde_json",
 ]
 

@@ -51,7 +51,7 @@ pub fn tree(source: &str) -> Result<Value, Error> {
             },
         );
     }
-    serde_json::from_slice(&output.stdout).map_err(|e| fail(format!("unreadable javac tree: {e}")))
+    parse(&output.stdout).map_err(|e| fail(format!("unreadable javac tree: {e}")))
 }
 
 /// Runs javac once on all the files of a program, with `sourcepath` (the roots that classes are
@@ -86,5 +86,15 @@ pub fn program_tree(files: &[PathBuf], sourcepath: &[PathBuf]) -> Result<Value, 
         }
         return Err(fail(stderr.trim().to_string()));
     }
-    serde_json::from_slice(&output.stdout).map_err(|e| fail(format!("unreadable javac tree: {e}")))
+    parse(&output.stdout).map_err(|e| fail(format!("unreadable javac tree: {e}")))
+}
+
+/// Reads javac's JSON without serde_json's nesting limit: real code nests deeper than it allows,
+/// in long chains of `+` or `else if`, so the caller runs on a large stack instead.
+fn parse(json: &[u8]) -> serde_json::Result<Value> {
+    let mut reader = serde_json::Deserializer::from_slice(json);
+    reader.disable_recursion_limit();
+    let value = serde::Deserialize::deserialize(&mut reader)?;
+    reader.end()?;
+    Ok(value)
 }
