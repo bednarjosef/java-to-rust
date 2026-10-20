@@ -194,21 +194,29 @@ impl<'a> Gen<'a> {
         {
             return;
         }
-        if let Some((var, start, end)) = counting_loop(init, cond, update, body) {
-            // `counting_loop` checks that the bound has the loop variable's type.
-            let ty = end.ty;
-            let start = self.value(start, ty);
-            let end = self.value(end, ty);
+        if let Some(counted) = counting(init, cond, update, body) {
+            let ty = counted.ty;
+            let start = self.value(counted.from, ty);
+            let end = self.value(counted.to, ty);
             let mut used = false;
-            visit_stmt(body, &mut |e| used |= mentions(e, var), &mut |_| {});
-            let var = if used { self.local(var) } else { "_".to_string() };
+            visit_stmt(body, &mut |e| used |= mentions(e, counted.var), &mut |_| {});
+            let var = if used { self.local(counted.var) } else { "_".to_string() };
             let start_text = if used && start.untyped && end.untyped {
                 let suffix = self.annotation(ty, rust_type(ty).to_string());
                 if suffix == rust_type(ty) { start.typed() } else { format!("{}{suffix}", start.text) }
             } else {
                 start.at(ADD + 1)
             };
-            self.line(&format!("for {var} in {start_text}..{} {{", end.at(ADD + 1)));
+            let range =
+                format!("{start_text}{}{}", if counted.inclusive { "..=" } else { ".." }, end.at(ADD + 1));
+            let range = if counted.descending {
+                format!("({range}).rev()")
+            } else if counted.step > 1 {
+                format!("({range}).step_by({})", counted.step)
+            } else {
+                range
+            };
+            self.line(&format!("for {var} in {range} {{"));
             self.loop_body(Loop::Plain, body, &[]);
             self.line("}");
             return;

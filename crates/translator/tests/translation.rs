@@ -34,6 +34,51 @@ fn counters_in_counting_loops_use_plain_arithmetic() {
 }
 
 #[test]
+fn counting_loops_with_steps_and_inclusive_bounds_become_ranges() {
+    let rust = translate(
+        "class A { public static void main(String[] a) {
+            String s = \"abc\";
+            for (int i = 0; i < 10; i += 3) { System.out.println(i); }
+            for (int i = s.length() - 1; i >= 0; i--) { System.out.println(s.charAt(i)); }
+            for (int i = 0; i <= 5; i++) { System.out.println(i); }
+            for (long i = 1; i <= 5; i++) { System.out.println(i); }
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "for i in (0..10).step_by(3) {",
+            "for i in (0..s.len() as i32).rev() {",
+            "for i in 0..=5 {",
+            "for i in 1i64..=5 {",
+        ],
+    );
+}
+
+#[test]
+fn counting_loops_that_could_change_or_wrap_stay_while_loops() {
+    let changed = translate(
+        "class A { public static void main(String[] a) {
+            int n = 4;
+            for (int i = 0; i < n; i++) { n = 2; }
+        } }",
+    );
+    assert_contains(&changed, &["while i < n {"]);
+    let assigned = translate(
+        "class A { public static void main(String[] a) {
+            for (int i = 0; i < 10; i++) { i += 2; }
+        } }",
+    );
+    assert_contains(&assigned, &["while i < 10 {"]);
+    let max = translate(
+        "class A { public static void main(String[] a) {
+            for (int i = 0; i <= Integer.MAX_VALUE; i++) { if (i == 5) break; }
+        } }",
+    );
+    assert_contains(&max, &["while i <= 2147483647 {"]);
+}
+
+#[test]
 fn trial_division_is_plain() {
     let rust = translate(
         "class A {
