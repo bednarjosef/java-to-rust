@@ -736,3 +736,53 @@ fn floats_are_f32_and_print_like_java() {
         ],
     );
 }
+
+#[test]
+fn static_final_constants_are_consts_read_without_a_cell() {
+    let rust = translate(
+        "class A {
+            static final int LIMIT = 10;
+            static final String NAME = \"a\";
+            public static void main(String[] args) {
+                System.out.println(LIMIT + NAME);
+            }
+        }",
+    );
+    assert_contains(&rust, &["const A_LIMIT: i32 = 10;", "const A_NAME: &str = \"a\";"]);
+    assert_lacks(&rust, &["A_LIMIT: RefCell", "A_NAME: RefCell", "A_LIMIT.with"]);
+}
+
+#[test]
+fn static_blocks_run_once_in_an_init_function_guarded_by_a_flag() {
+    let rust = translate(
+        "class Helper {
+            static int made;
+            static { made = 10; }
+            static int make() { return made; }
+        }
+        public class A {
+            public static void main(String[] args) { System.out.println(Helper.make()); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "static HELPER__INITIALIZED: Cell<bool> = Cell::new(false);",
+            "fn init_helper() {",
+            "if HELPER__INITIALIZED.get() {",
+            "fn make() -> i32 {\n    init_helper();",
+        ],
+    );
+}
+
+#[test]
+fn static_initializers_without_effects_stay_lazy() {
+    let rust = translate(
+        "class A {
+            static int base = 4;
+            static int doubled = base * 2;
+            public static void main(String[] args) { System.out.println(doubled); }
+        }",
+    );
+    assert_lacks(&rust, &["fn init_a()", "INITIALIZED"]);
+}
