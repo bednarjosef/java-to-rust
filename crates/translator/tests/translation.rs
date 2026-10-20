@@ -167,3 +167,28 @@ fn field_read_arguments_beside_a_call_bind_in_a_let() {
     assert_contains(&rust, &["f({ let value = p.borrow().x; value })"]);
     assert_lacks(&rust, &["f({ p.borrow()"]);
 }
+
+#[test]
+fn objects_print_through_their_to_string() {
+    let rust = translate(
+        "class P { int x; public String toString() { return \"P\" + x; } }
+        class A { public static void main(String[] a) {
+            P p = new P();
+            System.out.println(p);
+            String s = \"p=\";
+            s += p;
+        } }",
+    );
+    assert_contains(&rust, &["println!(\"{}\", P::to_string(&p));", "s += &P::to_string(&p);"]);
+    assert_lacks(&rust, &["P::to_string(&p).to_string()"]);
+}
+
+#[test]
+fn printing_an_object_without_to_string_is_rejected() {
+    let err = java_to_rust::translate(
+        "class P { int x; }
+        class A { public static void main(String[] a) { System.out.println(new P()); } }",
+    )
+    .expect_err("printing an object without toString must be rejected");
+    assert!(err.to_string().contains("printing an object without toString not supported yet"), "{err}");
+}

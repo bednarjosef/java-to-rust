@@ -86,6 +86,25 @@ impl<'t> Lowering<'t> {
         })
     }
 
+    /// Whether a class declares `public String toString()`, the text that printing and
+    /// concatenation use for its objects.
+    pub(super) fn has_to_string(&self, class: &str) -> bool {
+        self.methods.iter().any(|m| {
+            self.types[m.owner].name == class && m.name == "toString" && m.sig == "()java.lang.String"
+        })
+    }
+
+    /// Rejects printing or concatenating an object whose class has no `toString`: Java would print
+    /// a hash code there, which is not supported.
+    pub(super) fn check_text(&self, node: Node<'t>, ty: Type) -> Result<(), Error> {
+        match ty {
+            Type::Class(name) if !self.has_to_string(name) => {
+                unsupported(node, "printing an object without toString")
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The declaration of a class: its instance fields and static fields, in source order.
     pub(super) fn type_decl(&self, index: usize) -> Result<TypeDecl, Error> {
         self.current.set(index);

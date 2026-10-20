@@ -204,9 +204,10 @@ fn unique(base: String, used: &mut HashSet<String>) -> String {
 /// Rust names for the class's methods. Overloads get their parameter types appended, since Rust
 /// has no overloading: `print(int)` and `print(double)` become `print_i32` and `print_f64`.
 fn method_names(class: &Class) -> Vec<String> {
-    let mut used = HashSet::new();
-    if class.methods.iter().any(|m| m.is_main) {
-        used.insert("main".to_string());
+    // Each class has its own `impl`, so names only need to be unique within their class.
+    let mut used = vec![HashSet::new(); class.types.len()];
+    for m in class.methods.iter().filter(|m| m.is_main) {
+        used[m.class].insert("main".to_string());
     }
     class
         .methods
@@ -223,7 +224,7 @@ fn method_names(class: &Class) -> Vec<String> {
                     base = format!("{base}_{}", type_suffix(p.ty));
                 }
             }
-            if m.is_ctor { base } else { unique(base, &mut used) }
+            if m.is_ctor { base } else { unique(base, &mut used[m.class]) }
         })
         .collect()
 }
@@ -712,6 +713,10 @@ impl<'a> Gen<'a> {
             if parts.len() == 1 {
                 match parts.pop().expect("one part") {
                     Part::Lit(text) => return format!("{name} += {}", rust_string(&text)),
+                    // An object's text is already a `String`.
+                    Part::Arg(code) if matches!(value.ty, Type::Class(_)) => {
+                        return format!("{name} += &{}", code.text);
+                    }
                     Part::Arg(code) => {
                         let ty = if value.ty == Type::Double { Type::Void } else { value.ty };
                         return format!("{name} += &{}.to_string()", self.recv(&code, ty));
@@ -1058,6 +1063,7 @@ impl<'a> Gen<'a> {
 
     fn concat_parts(&mut self, e: &'a Expr, assigned: &HashSet<String>, out: &mut Vec<Part>) {
         match &e.kind {
+            _ if matches!(e.ty, Type::Class(_)) => out.push(Part::Arg(self.object_text(e))),
             ExprKind::Binary(BinOp::Add, l, r) if e.ty == Type::String => {
                 self.concat_parts(l, assigned, out);
                 self.concat_parts(r, assigned, out);

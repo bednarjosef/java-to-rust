@@ -294,11 +294,18 @@ impl<'t> Lowering<'t> {
                 target: self.target(node.child("variable")?)?,
                 value: Box::new(self.expr(node.child("expression")?)?),
             },
-            kind if kind.ends_with("_ASSIGNMENT") => ExprKind::Assign {
-                op: Some(binary_op(node, kind.trim_end_matches("_ASSIGNMENT"))?),
-                target: self.target(node.child("variable")?)?,
-                value: Box::new(self.expr(node.child("expression")?)?),
-            },
+            kind if kind.ends_with("_ASSIGNMENT") => {
+                let op = binary_op(node, kind.trim_end_matches("_ASSIGNMENT"))?;
+                let value = self.expr(node.child("expression")?)?;
+                if op == BinOp::Add {
+                    self.check_text(node, value.ty)?;
+                }
+                ExprKind::Assign {
+                    op: Some(op),
+                    target: self.target(node.child("variable")?)?,
+                    value: Box::new(value),
+                }
+            }
             "TYPE_CAST" => ExprKind::Cast(
                 self.ty(node, node.java_type())?,
                 Box::new(self.expr(node.child("expression")?)?),
@@ -323,6 +330,10 @@ impl<'t> Lowering<'t> {
                 if left.ty == Type::String && right.ty == Type::String && matches!(op, BinOp::Eq | BinOp::Ne)
                 {
                     return error(node.pos(), "== on strings compares references; not supported yet");
+                }
+                if op == BinOp::Add && (left.ty == Type::String || right.ty == Type::String) {
+                    self.check_text(node, left.ty)?;
+                    self.check_text(node, right.ty)?;
                 }
                 ExprKind::Binary(op, Box::new(left), Box::new(right))
             }
@@ -402,6 +413,9 @@ impl<'t> Lowering<'t> {
             }
             (owner, name) => return unsupported(node, &format!("method `{owner}.{name}`")),
         };
+        if let (Builtin::Println | Builtin::Print, Some(arg)) = (&builtin, args.first()) {
+            self.check_text(node, arg.ty)?;
+        }
         Ok(ExprKind::Builtin(builtin, args))
     }
 }

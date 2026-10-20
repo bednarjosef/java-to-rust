@@ -122,9 +122,18 @@ pub(super) fn borrows_mut(e: &Expr) -> bool {
                 | ExprKind::MethodCall { .. }
                 | ExprKind::New { .. }
                 | ExprKind::ThisCall { .. }
-        )
+        ) || converts_object(x);
     });
     found
+}
+
+/// Whether an expression turns an object into text, which runs the object's `toString`.
+fn converts_object(x: &Expr) -> bool {
+    match &x.kind {
+        ExprKind::Builtin(_, args) => args.iter().any(|a| matches!(a.ty, Type::Class(_))),
+        ExprKind::Binary(_, l, r) => matches!(l.ty, Type::Class(_)) || matches!(r.ty, Type::Class(_)),
+        _ => false,
+    }
 }
 
 /// Whether the expressions that a statement evaluates itself borrow mutably; the expressions of
@@ -227,6 +236,21 @@ impl<'a> Gen<'a> {
         let mut all = vec![self.receiver_ref(receiver)];
         all.extend(self.call_args(index, args));
         Code::atom(format!("{}({})", self.qualified_fn(index), all.join(", ")))
+    }
+
+    /// The text of an object, which Java gets from its class's `toString` (lowering rejects classes
+    /// without one).
+    pub(super) fn object_text(&mut self, e: &'a Expr) -> Code {
+        let Type::Class(name) = e.ty else { unreachable!("an object has a class type") };
+        let index = self
+            .class
+            .methods
+            .iter()
+            .position(|m| {
+                self.class.types[m.class].name == name && m.name == "toString" && m.params.is_empty()
+            })
+            .expect("lowering checks that the class has toString");
+        Code::atom(format!("{}({})", self.qualified_fn(index), self.receiver_ref(e)))
     }
 
     /// A name for a temporary that no Java local or function of this method uses.
