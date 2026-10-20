@@ -1,8 +1,8 @@
 //! Lowering of enums. An enum's values are a Rust enum with one variant per constant. Its fields
-//! are final and set by its constructor, so each field is a function of the constant: the
-//! constructor's arguments are pure expressions, which are computed wherever a field is read.
-//! Anything outside that (a constructor with side effects, mutable fields, `null` enum values) is
-//! rejected.
+//! are set only by its initializers and constructor, so each field is a function of the constant:
+//! the constructor's arguments and the initializers are pure expressions, which are computed
+//! wherever a field is read. Anything outside that (a constructor with side effects, a field
+//! assigned elsewhere, `null` enum values) is rejected.
 
 use super::*;
 
@@ -110,14 +110,11 @@ impl<'t> Lowering<'t> {
         let mut constants = Vec::new();
         for member in self.types[class].node.list("members").filter(|m| is_enum_constant(*m)) {
             let init = member.child("initializer")?;
-            if init.get("classBody").is_some() {
-                return unsupported(member, "enum constants with bodies");
-            }
             let args: Vec<Expr> = init.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
             if let Some(arg) = args.iter().find(|a| !pure(a, false)) {
                 return error(arg.pos, "enum constant arguments that are not constants");
             }
-            let ctor = init.symbol().and_then(|s| self.method_index(&s)).map(|c| &methods[c]);
+            let ctor = init.symbol().and_then(|s| self.enum_constructor(class, &s)).map(|c| &methods[c]);
             let params = ctor.map_or(Vec::new(), |c| c.params.iter().map(|p| p.name.as_str()).collect());
             let bound: Vec<(&str, &Expr)> = params.into_iter().zip(&args).collect();
             let mut values = Vec::new();
@@ -131,10 +128,18 @@ impl<'t> Lowering<'t> {
                         _ => None,
                     })
                 });
-                let Some(value) = assigned else {
-                    return error(member.pos(), "enum constructors that do not set every field");
+                // The constructor runs after the initializer, so its value is the one that stays.
+                let value = match (assigned, &field.init) {
+                    (Some(value), _) => subst(value, &bound),
+                    (None, Some(init)) if pure(init, false) => subst(init, &[]),
+                    (None, Some(init)) => {
+                        return error(init.pos, "enum field initializers that are not constants");
+                    }
+                    (None, None) => {
+                        return error(member.pos(), "enum constructors that do not set every field");
+                    }
                 };
-                values.push(subst(value, &bound));
+                values.push(value);
             }
             constants.push(EnumConstant { name: member.str("name").to_string(), values });
         }
@@ -143,26 +148,29 @@ impl<'t> Lowering<'t> {
 
     /// Checks an enum's members and constructors against what the translation supports.
     pub(super) fn check_enum(&self, index: usize, methods: &[Method]) -> Result<(), Error> {
-        let node = self.types[index].node;
-        let method_names: Vec<&str> =
-            node.list("members").filter(|m| m.kind() == "METHOD").map(|m| m.str("name")).collect();
-        for member in node.list("members") {
-            match member.kind() {
-                "VARIABLE" if is_enum_constant(member) => {}
-                "VARIABLE" if member.has_flag("STATIC") => {}
-                "VARIABLE" if member.get("initializer").is_some() => {
-                    return unsupported(member, "enum fields with initializers");
-                }
-                "VARIABLE" if !member.has_flag("FINAL") => {
-                    return unsupported(member, "enum fields that are not final");
-                }
-                "VARIABLE" if method_names.contains(&member.str("name")) => {
-                    return unsupported(member, "an enum field and method with the same name");
-                }
-                "METHOD" if member.str("name") == "toString" => {
-                    return unsupported(member, "toString in an enum");
-                }
-                _ => {}
+        let ty = Type::enum_type(&self.types[index].name);
+        // A field that is not final is still one value per constant if only the constructor sets it.
+        for m in methods.iter().filter(|m| !(m.is_ctor && m.class == index)) {
+            let mut assigned = None;
+            for stmt in &m.body {
+                visit_stmt(
+                    stmt,
+                    &mut |e| {
+                        visit_expr(e, &mut |x| match &x.kind {
+                            ExprKind::Assign { target: Place::Field { object, .. }, .. }
+                            | ExprKind::IncDec { target: Place::Field { object, .. }, .. }
+                                if object.ty == ty =>
+                            {
+                                assigned = assigned.or(Some(x.pos));
+                            }
+                            _ => {}
+                        })
+                    },
+                    &mut |_| {},
+                );
+            }
+            if let Some(pos) = assigned {
+                return error(pos, "assigning an enum field outside its constructor not supported yet");
             }
         }
         for m in methods.iter().filter(|m| m.class == index && m.is_ctor) {

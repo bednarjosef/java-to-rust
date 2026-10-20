@@ -76,6 +76,15 @@ impl<'a> Gen<'a> {
             }
             // An enum prints through its `Display`, which is its name.
             _ if matches!(e.ty, Type::Enum(_)) => out.push(Part::Arg(self.expr(e))),
+            // A builder shows its text as it is when it is converted, before later operands run.
+            _ if e.ty == Type::StringBuilder => {
+                let sb = self.builder_recv(e);
+                out.push(Part::Arg(Code::atom(if self.lazy_text {
+                    sb
+                } else {
+                    format!("{sb}.to_string()")
+                })));
+            }
             _ if matches!(e.ty, Type::Boxed(_)) => {
                 let kind = e.ty.unboxed();
                 let value = self.value(e, kind);

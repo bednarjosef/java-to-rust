@@ -83,7 +83,7 @@ impl<'a> Gen<'a> {
     /// for an object.
     fn option_source(&self, name: &str, ty: Type) -> String {
         let rust = self.local(name);
-        if matches!(ty, Type::Class(_)) {
+        if matches!(ty, Type::Class(_) | Type::StringBuilder) {
             return format!("{rust}.as_ref()");
         }
         // An `Option<i32>` is `Copy` and matches as it is; a faithful box is `as_deref`'d.
@@ -95,6 +95,7 @@ impl<'a> Gen<'a> {
     pub(super) fn option_ref(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             _ if matches!(e.ty, Type::Boxed(_)) => self.expr(e).text,
+            _ if e.ty == Type::StringBuilder => self.builder_option(e),
             ExprKind::Null => "None::<&str>".to_string(),
             ExprKind::Var(name) => self.option_source(name, e.ty),
             ExprKind::Cast(_, inner) => self.option_ref(inner),
@@ -150,7 +151,8 @@ impl<'a> Gen<'a> {
     }
 
     /// `a.equals(b)` where one of the strings may be null: a null receiver throws, and a null
-    /// argument is simply not equal.
+    /// argument is simply not equal. The operands are bound by a `match`, which keeps a
+    /// temporary they borrow (an array element read by `java::at`) alive to the end of the test.
     pub(super) fn equals_optional(&mut self, args: &'a [Expr]) -> Code {
         // Java evaluates the argument before the call throws on a null receiver.
         if self.nullable(&args[0]) && has_effects(&args[1]) {
@@ -161,13 +163,13 @@ impl<'a> Gen<'a> {
             } else {
                 (self.value(&args[1], Type::String).text, format!("{non_null}(receiver_) == other_"))
             };
-            return Code::atom(format!("{{ let receiver_ = {receiver}; let other_ = {other}; {test} }}"));
+            return Code::atom(format!("match ({receiver}, {other}) {{ (receiver_, other_) => {test} }}"));
         }
         let receiver = if self.nullable(&args[0]) { self.deref(&args[0]) } else { self.str_value(&args[0]) };
         if self.nullable(&args[1]) {
             let option = self.option_ref(&args[1]);
             let text =
-                format!("({{ let receiver_ = {receiver}; {option}.is_some_and(|o| o == receiver_) }})");
+                format!("(match {receiver} {{ receiver_ => {option}.is_some_and(|o| o == receiver_) }})");
             return Code::atom(text);
         }
         let other = self.str_value(&args[1]);
@@ -193,6 +195,15 @@ impl<'a> Gen<'a> {
         }
         if matches!(e.ty, Type::Boxed(_)) {
             return Some(Part::Arg(Code::atom(self.boxed_text(e, e.ty.unboxed()))));
+        }
+        if e.ty == Type::StringBuilder {
+            let option = self.builder_option(e);
+            let text = format!("{}({option})", self.runtime("or_null"));
+            return Some(Part::Arg(Code::atom(if self.lazy_text {
+                text
+            } else {
+                format!("{text}.to_string()")
+            })));
         }
         if matches!(e.ty, Type::Class(_)) {
             // `java::or_null` shows `null`, or the object as it shows when it is not null.

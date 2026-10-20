@@ -7,6 +7,7 @@ mod enums;
 mod hierarchy;
 mod objects;
 mod statics;
+mod strings;
 
 use crate::ast::*;
 use objects::{MethodInfo, TypeInfo};
@@ -15,6 +16,8 @@ use std::cell::Cell;
 
 mod arrays;
 mod boxing;
+mod constant_bodies;
+mod initializers;
 mod java_arrays;
 mod natives;
 mod primitives;
@@ -42,6 +45,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         methods.push(lowering.clinit(index)?);
     }
     for index in (0..types.len()).filter(|&t| lowering.types[t].node.kind() == "ENUM") {
+        lowering.constant_bodies(index, &mut methods)?;
         lowering.check_enum(index, &methods)?;
         let constants = lowering.enum_constants(index, &types[index].fields, &methods)?;
         types[index].enum_constants = Some(constants);
@@ -187,12 +191,19 @@ impl<'t> Lowering<'t> {
                 .map(|p| Ok(Param { name: p.str("name").to_string(), ty: self.ty(p, param_type(p))? }))
                 .collect::<Result<_, Error>>()?
         };
-        let is_abstract = node.get("body").is_none() && node.has_flag("ABSTRACT");
+        // An abstract method of an enum is implemented by the constants' bodies, which
+        // `constant_bodies` makes its body.
+        let abstract_in_enum =
+            node.has_flag("ABSTRACT") && self.enum_index(&self.types[info.owner].name).is_some();
+        let is_abstract = node.get("body").is_none() && node.has_flag("ABSTRACT") && !abstract_in_enum;
         let mut body = match node.get("body") {
             Some(body) => self.block(body)?,
-            None if is_abstract => Vec::new(),
+            None if abstract_in_enum || is_abstract => Vec::new(),
             None => return unsupported(node, "methods without a body"),
         };
+        if is_ctor {
+            self.run_initializer_blocks(info.owner, &mut body)?;
+        }
         if let Some(param) = args_param.filter(|p| reads_name(&body, p.str("name"))) {
             body.insert(0, self.args_decl(param));
         }
@@ -223,6 +234,7 @@ impl<'t> Lowering<'t> {
             "boolean" => Ok(Type::Boolean),
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
+            "java.lang.StringBuilder" => Ok(Type::StringBuilder),
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
@@ -230,6 +242,10 @@ impl<'t> Lowering<'t> {
             _ if self.enum_index(name).is_some() => Ok(Type::enum_type(name)),
             _ if self.type_index(name).is_some() => Ok(Type::class(name)),
             "<nulltype>" => Ok(Type::Null),
+            // `this` in the body of an enum constant, which is the constant.
+            _ if name.starts_with("<anonymous ") && self.enum_index(&name[11..name.len() - 1]).is_some() => {
+                Ok(Type::enum_type(&name[11..name.len() - 1]))
+            }
             _ if name.ends_with("[]") => Ok(Type::array(self.ty(node, &name[..name.len() - 2])?)),
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
             "java.lang.Object" => unsupported(node, "Object"),
@@ -397,7 +413,10 @@ impl<'t> Lowering<'t> {
                 )
             }
             "METHOD_INVOCATION" => self.call(node)?,
-            "NEW_CLASS" => self.new_object(node)?,
+            "NEW_CLASS" => match self.new_text(node)? {
+                Some(kind) => kind,
+                None => self.new_object(node)?,
+            },
             "NEW_ARRAY" => self.new_array(node)?,
             "ARRAY_ACCESS" => {
                 let (array, index) = self.index(node)?;
@@ -434,7 +453,11 @@ impl<'t> Lowering<'t> {
                 ExprKind::Binary(op, Box::new(left), Box::new(right))
             }
         };
-        let ty = self.ty(node, node.java_type())?;
+        // `printf` returns its stream, which the translation has no type for; it is a statement.
+        let ty = match kind {
+            ExprKind::Builtin(Builtin::Print, _) if node.kind() == "METHOD_INVOCATION" => Type::Void,
+            _ => self.ty(node, node.java_type())?,
+        };
         let id = self.next_id.get();
         self.next_id.set(id + 1);
         Ok(Expr { kind, pos: node.pos(), ty, id })
@@ -490,9 +513,18 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.enum_call(node, &symbol, receiver, &mut args)? {
             return Ok(kind);
         }
+        if let Some(builtin) = self.bits_call(&symbol, &args) {
+            return Ok(ExprKind::Builtin(builtin, args));
+        }
+        if let Some(kind) = self.constant_body_call(node, &symbol, receiver, &mut args)? {
+            return Ok(kind);
+        }
         let builtin = match (symbol.owner, symbol.name) {
             ("java.io.PrintStream", "println") if system_out => Builtin::Println,
             ("java.io.PrintStream", "print") if system_out => Builtin::Print,
+            ("java.io.PrintStream", "printf" | "format") if system_out => {
+                return self.printf_call(node, args);
+            }
             ("java.lang.System", "exit") => Builtin::Exit,
             ("java.lang.Math", "abs") => Builtin::MathAbs,
             ("java.lang.Math", "max") => Builtin::MathMax,
@@ -500,10 +532,9 @@ impl<'t> Lowering<'t> {
             ("java.lang.Math", "sqrt") => Builtin::MathSqrt,
             ("java.lang.Math", "pow") => Builtin::MathPow,
             ("java.util.Arrays", name) => return self.arrays_call(node, name, args),
-            ("java.lang.String", "length" | "equals") => {
-                if symbol.name == "equals" && !matches!(args[0].ty, Type::String | Type::Null) {
-                    return unsupported(node, "equals with an argument that is not a String");
-                }
+            ("java.lang.String", "length" | "equals")
+                if symbol.name == "length" || matches!(args[0].ty, Type::String | Type::Null) =>
+            {
                 let receiver = receiver.expect("an instance method has a receiver");
                 args.insert(0, self.expr(receiver)?);
                 if symbol.name == "length" { Builtin::StringLength } else { Builtin::StringEquals }
@@ -512,6 +543,10 @@ impl<'t> Lowering<'t> {
                 let receiver = receiver.expect("an instance method has a receiver");
                 args.insert(0, self.expr(receiver)?);
                 Builtin::StringCharAt
+            }
+            ("java.lang.String", _) => return self.string_call(node, &symbol, receiver, args),
+            ("java.lang.StringBuilder" | "java.lang.AbstractStringBuilder" | "java.lang.CharSequence", _) => {
+                return self.builder_call(node, &symbol, receiver, args);
             }
             (owner, name) if boxing::boxed_type(owner).is_some() && boxing::is_boxed_method(name) => {
                 self.boxed_call(node, &symbol, &mut args, receiver)?

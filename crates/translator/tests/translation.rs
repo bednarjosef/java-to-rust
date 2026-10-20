@@ -440,7 +440,9 @@ fn equals_on_null_evaluates_its_argument_first() {
     );
     assert_contains(
         &rust,
-        &["let receiver_ = n.as_deref(); let other_ = noisy(\"y\"); java::non_null(receiver_) == other_"],
+        &[
+            "match (n.as_deref(), noisy(\"y\")) { (receiver_, other_) => java::non_null(receiver_) == other_ }",
+        ],
     );
 }
 
@@ -1444,22 +1446,6 @@ fn an_enum_field_is_an_accessor_that_matches_on_self() {
 }
 
 #[test]
-fn an_enum_with_a_field_that_is_not_final_is_rejected() {
-    let error = java_to_rust::translate(
-        "public class A {
-            enum Planet {
-                MERCURY(3.0);
-                private double mass;
-                Planet(double mass) { this.mass = mass; }
-            }
-            public static void main(String[] args) { }
-        }",
-    )
-    .expect_err("a mutable enum field is rejected");
-    assert!(error.to_string().contains("enum fields that are not final"), "{error}");
-}
-
-#[test]
 fn an_enum_field_set_first_by_every_constructor_needs_no_initializer() {
     let rust = translate(
         "public class A {
@@ -2130,4 +2116,216 @@ fn survey_json_writes_the_census_to_the_file_given() {
     let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
     assert_eq!(written["main"], "app.Main");
     assert!(written["pieces"].as_array().is_some_and(|p| !p.is_empty()), "{written}");
+}
+
+#[test]
+fn an_enum_field_assigned_outside_its_constructor_is_rejected() {
+    let error = java_to_rust::translate(
+        "public class A {
+            enum Planet {
+                MERCURY(3.0);
+                private double mass;
+                Planet(double mass) { this.mass = mass; }
+                void grow() { mass += 1; }
+            }
+            public static void main(String[] args) { Planet.MERCURY.grow(); }
+        }",
+    )
+    .expect_err("an enum field that changes is rejected");
+    assert!(
+        error.to_string().contains("assigning an enum field outside its constructor not supported yet"),
+        "{error}"
+    );
+}
+
+#[test]
+fn enum_constant_bodies_become_arms_of_the_enum_method() {
+    let rust = translate(
+        "public class A {
+            enum Op {
+                PLUS { int apply(int x, int y) { return x + y; } },
+                NEG { int apply(int a, int b) { return -a; } };
+                abstract int apply(int a, int b);
+            }
+            public static void main(String[] args) { System.out.println(Op.PLUS.apply(1, 2) + Op.NEG.apply(3, 0)); }
+        }",
+    );
+    // The arms name the parameters as the override does.
+    assert_contains(
+        &rust,
+        &[
+            "fn apply(self, a: i32, b: i32) -> i32 {\n        match self {",
+            "AOp::Plus => {\n                let x = a;",
+        ],
+    );
+    let error = java_to_rust::translate(
+        "public class A {
+            enum Op { PLUS { public String toString() { return \"+\"; } } }
+            public static void main(String[] args) { System.out.println(Op.PLUS); }
+        }",
+    )
+    .expect_err("a body that overrides a method the enum does not declare is rejected");
+    assert!(
+        error.to_string().contains("a method of an enum constant's body that overrides none of the enum's"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_enum_field_with_a_method_of_its_name_gets_another_accessor() {
+    let rust = translate(
+        "public class A {
+            enum Planet {
+                MERCURY(3.0), VENUS(4.0);
+                private double mass;
+                private int rings = 0;
+                Planet(double mass) { this.mass = mass; }
+                double mass() { return mass; }
+                public String toString() { return \"planet \" + name(); }
+            }
+            public static void main(String[] args) { System.out.println(Planet.VENUS.mass() + \" \" + Planet.MERCURY); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn mass_field(self) -> f64 {",
+            "fn mass(self) -> f64 {\n        self.mass_field()\n    }",
+            "fn rings(self) -> i32 {",
+            "f.write_str(&Self::to_string(*self))",
+        ],
+    );
+}
+
+#[test]
+fn string_builders_chain_and_are_shared_handles() {
+    let rust = translate(
+        "class A {
+            static void fill(StringBuilder sb) { sb.append(1).append(',').append(\"x\"); }
+            public static void main(String[] a) {
+                StringBuilder sb = new StringBuilder();
+                fill(sb);
+                StringBuilder same = sb.append(2);
+                System.out.println(sb.length() + \" \" + same);
+            }
+        }",
+    );
+    // A chain is Rust's chain of `&Self`; only where the builder is a value is the handle cloned.
+    assert_contains(
+        &rust,
+        &[
+            "fn fill(sb: java::StringBuilder)",
+            "sb.append(1).append_char(',' as u16).append_str(\"x\");",
+            "let sb = java::StringBuilder::new();",
+            "fill(sb.clone());",
+            "let same = sb.append(2).clone();",
+        ],
+    );
+}
+
+#[test]
+fn string_methods_call_the_runtime_with_borrowed_text() {
+    let rust = translate(
+        "class A {
+            static int count(String text, String part) {
+                return text.isEmpty() || !text.contains(part) ? 0 : text.split(part).length;
+            }
+            public static void main(String[] a) {
+                String s = \"a,b\";
+                System.out.println(s.substring(1) + s.indexOf(',') + count(s, \",\") + s.toUpperCase());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "text.is_empty() || !text.contains(part)",
+            "java::split(text, part, 0)",
+            "java::substring_from(&s, 1)",
+            "java::index_of_char(&s, ',' as i32, 0)",
+            "java::uppercase(&s)",
+        ],
+    );
+}
+
+#[test]
+fn format_arguments_keep_their_java_types() {
+    let rust = translate(
+        "class A { public static void main(String[] a) {
+            long big = 1L << 40;
+            System.out.printf(\"%d %s %.2f%n\", big, \"x\", 1.5);
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::print!(\"{}\", java::format(\"%d %s %.2f%n\", &[java::Arg::Long(big), java::Arg::Str(\"x\"), \
+           java::Arg::Double(1.5)]));",
+        ],
+    );
+}
+
+#[test]
+fn unsupported_regular_expressions_and_formats_are_rejected() {
+    let cases = [
+        (
+            "\"axb\".split(\"(?=x)\").length",
+            "lookaround, flags and named groups in the regular expression \"(?=x)\" not supported yet",
+        ),
+        (
+            "\"ab\".replaceAll(\"\\\\bb\", \"c\").length()",
+            "the escape \\b in the regular expression \"\\bb\" not supported yet",
+        ),
+        ("String.format(\"%tY\", 5L).length()", "dates in a format (%t) not supported yet: \"%tY\""),
+    ];
+    for (expr, message) in cases {
+        let java =
+            format!("class A {{ public static void main(String[] a) {{ System.out.println({expr}); }} }}");
+        let err = java_to_rust::translate(&java).expect_err("must be rejected");
+        assert!(err.to_string().contains(message), "{err}");
+    }
+    // A malformed pattern is not rejected: it throws when the program runs, as in Java.
+    translate(
+        "class A { public static void main(String[] a) { System.out.println(\"a(b\".split(\"(\").length); } }",
+    );
+}
+
+#[test]
+fn constant_case_labels_and_enum_switches_match_directly() {
+    let rust = translate(
+        "class A {
+            static final int LIMIT = 10;
+            enum Dir { UP, DOWN }
+            static int f(int n) {
+                switch (n) { case LIMIT: return 1; case LIMIT + 1: return 2; default: return 0; }
+            }
+            static String g(Dir d) {
+                switch (d) { case UP: return \"up\"; case DOWN: return \"down\"; }
+                return \"\";
+            }
+            public static void main(String[] a) { System.out.println(f(3) + g(Dir.UP) + g(Dir.DOWN)); }
+        }",
+    );
+    // A constant of the selector's type is matched by name, a folded expression as a literal, and
+    // a switch naming every constant of an enum has no `_` arm.
+    assert_contains(&rust, &["A_LIMIT => {", "11 => {", "ADir::Up => {", "ADir::Down => {"]);
+    assert_lacks(&rust, &["_ => {}"]);
+}
+
+#[test]
+fn initializer_blocks_run_in_constructors() {
+    let rust = translate(
+        "class C { int n; { n = 3; } C() {} C(int k) { this(); n += k; } }
+        class A { public static void main(String[] a) { System.out.println(new C(2).n); } }",
+    );
+    // The block becomes part of the struct literal of `C()`; `C(int)` runs it through `C()`.
+    assert_contains(&rust, &["C { n: 3 }", "let mut this = C::new();"]);
+    let err = java_to_rust::translate(
+        "class C { { System.out.println(1); } int n = 2; }
+        class A { public static void main(String[] a) { System.out.println(new C().n); } }",
+    )
+    .expect_err("a field initializer after a block must be rejected");
+    assert!(
+        err.to_string().contains("a field initializer after an instance initializer block not supported yet")
+    );
 }

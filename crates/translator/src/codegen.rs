@@ -22,6 +22,7 @@ mod statics;
 mod stmt;
 mod strings;
 mod switch;
+mod text;
 
 use code::*;
 use expr::Operand;
@@ -63,6 +64,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         lazy_text: false,
         formatting: false,
         chars: false,
+        exhaustive: false,
         field_locals: HashMap::new(),
         ctor_result: None,
         printing: false,
@@ -167,6 +169,8 @@ struct Gen<'a> {
     formatting: bool,
     /// Whether the switch being written matches its `char` selector as a Rust `char`.
     chars: bool,
+    /// Whether the cases of the switch being written cover every value of its enum selector.
+    exhaustive: bool,
     /// The locals that hold the fields that a constructor's initializers computed first, by
     /// Java field name: the later initializers read them there.
     field_locals: HashMap<String, String>,

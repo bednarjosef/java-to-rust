@@ -1,11 +1,10 @@
 //! The `Character` tests and conversions that Rust's `char` does not have under Java's names:
 //! white space, the radix digits, and the surrogates.
 //!
-//! The whitespace and space tests are exact: they list Java's code points. `digit` is exact for
-//! the ASCII and fullwidth digits and letters, and for the Latin-1 range. Elsewhere it returns -1,
-//! so a decimal digit beyond Latin-1 is not a digit here (see `character.rs`).
+//! The whitespace and space tests list Java's code points. `digit` takes the ASCII and fullwidth
+//! letters as Java does, and the decimal digits from the tables in `character.rs`.
 
-use super::character::scalar;
+use super::character::{numeric_value, scalar};
 use super::{is_digit, is_letter};
 
 /// Java's `Character.isWhitespace(char)`: the white space of the ASCII controls and the Unicode
@@ -39,6 +38,7 @@ pub fn digit(c: u16, radix: i32) -> i32 {
         c @ 0xFF10..=0xFF19 => c - 0xFF10,
         c @ 0xFF21..=0xFF3A => c - 0xFF21 + 10,
         c @ 0xFF41..=0xFF5A => c - 0xFF41 + 10,
+        _ if is_digit(c) => numeric_value(c),
         _ => return -1,
     };
     if (2..=36).contains(&radix) && value < radix { value } else { -1 }

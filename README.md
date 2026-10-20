@@ -61,6 +61,15 @@ projects together with their own unit tests, and randomly generated programs tha
 corner cases nobody writes by hand. The whole corpus runs on every change, and a table per
 program shows what a change improved or broke.
 
+## Performance
+
+`benchmarks/` holds programs that run for seconds on Java: sieve, Collatz, n-body, Mandelbrot,
+matrix multiply, sorting a million ints, binary trees, a linked list, string building, statics and
+a bytecode interpreter. They are kept out of `corpus/` because the corpus test runs every program
+there. `python3 scripts/benchmark.py` checks that each translation prints what Java prints, then
+times both sides (median of five wall-clock runs, JVM start-up included) and prints a table.
+`docs/performance.md` has the table from one run and the causes of the slow cases.
+
 ## First milestone
 
 Level 1 end to end for a subset of Java: classes, interfaces, inheritance, generics, the common
@@ -71,24 +80,31 @@ translates, compiles and matches Java's output.
 
 A first end-to-end pipeline for a small subset: several classes with locals of every primitive
 type (`byte`, `short`, `char`, `int`, `long`, `float`, `double`, `boolean`) and `String`,
-arithmetic, `if`, `while`, `do`, `for`, `break`, `continue`, the conditional operator,
-overloading, static and instance methods, fields with initializers, static fields, constructors
-(including `this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math`
+arithmetic, `if`, `while`, `do`, `for`, `break`, `continue`, the conditional operator, `switch`
+statements and expressions on integers, chars, strings and enums (case labels may be constant
+expressions, which are folded as javac folds them), overloading, static and instance methods,
+fields with initializers, instance initializer blocks, static fields, constructors (including
+`this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math`
 methods (`floorDiv`, `floorMod`, the `*Exact` integer methods that throw on overflow, `round`,
 `rint`, `clamp`, `copySign`, `hypot`, `fma`, `ulp`, `nextUp`/`nextDown`, `max`/`min` on every
 type, and the rest of the common ones; `StrictMath` the same), `Double`/`Float` and `Boolean`
 methods (`isNaN`, `isInfinite`, `isFinite`, `compare`, `sum`, `max`/`min`, `parseDouble`,
-`parseBoolean`, `logicalAnd`/`logicalOr`/`logicalXor`), `String.length`/`equals`/`charAt`, the
+`parseBoolean`, `logicalAnd`/`logicalOr`/`logicalXor`), the
 `Character` tests (`isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`,
 `digit`, `forDigit`, `getNumericValue`), and case conversions on a `char`, the `MIN_VALUE`/`MAX_VALUE`
 and `MIN_NORMAL` constants of the wrapper classes, `null` for `String`, and a user `toString` in
-`println` and string concatenation, object-typed fields and `null` objects, and superclasses
-(abstract or not) with one concrete class under each type: `extends`, abstract methods,
+`println` and string concatenation, object-typed fields and `null` objects. Strings have the
+common methods of `String` (searching, slicing, case, trimming, replacing, comparing,
+`split`/`replaceAll`/`matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf`,
+`new String(char[])`), `StringBuilder`, `String.format`/`formatted`/`printf` and the bit and radix
+methods of `Integer` and `Long` (`toHexString`, `bitCount`, `numberOfLeadingZeros`,
+`toString(v, radix)`, ...), all hand-written in the runtime with Java's exact results. Superclasses
+(abstract or not) with one concrete class under each type translate: `extends`, abstract methods,
 `super(...)` and `super.m(...)`. Interfaces, class trees with several concrete classes and
-generics are rejected with an error that names the construct and its position. So are
-`Float.parseFloat` and `Float.valueOf(String)` (Rust's `f32` parsing differs from Java's grammar),
-`Character.toChars` (it returns a `char[]`), and the `int` code-point overloads of the `Character`
-methods, except `isAlphabetic` on a `char`.
+generics are rejected with an error that names the construct and its position. So
+are `Float.parseFloat` and `Float.valueOf(String)` (Rust's `f32` parsing differs from Java's
+grammar), `Character.toChars` (it returns a `char[]`), and the `int` code-point overloads of the
+`Character` methods, except `isAlphabetic` on a `char`.
 The design of the object model, and what is still to come, is in
 [docs/object-model.md](docs/object-model.md).
 
@@ -113,6 +129,34 @@ concatenated (as Java's UTF-8 output prints it), even where Java would later pai
 and `isDigit` use Rust's Unicode tables, which are not Java's general categories, so they can
 differ from Java there; `Character.digit` recognises only ASCII and fullwidth letters and digits,
 so it can differ from Java on other decimal digits.
+
+The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`, `charAt` agree on
+`"né😀e"`), and throw what Java throws (`StringIndexOutOfBoundsException` with Java's message).
+`toUpperCase` and `toLowerCase` are the root-locale mappings. A `StringBuilder` is a
+`java::StringBuilder`, a shared handle to UTF-16 units like an array: every variable, field and
+parameter that holds the builder sees it change, `reverse` keeps surrogate pairs in order, and a
+chain is Rust's chain (`sb.append_str("a").append(1)`), the handle cloned only where the builder
+is used as a value. `split`, `replaceAll`, `replaceFirst` and `matches` run a small backtracking
+regular expression engine with a literal fast path: literals and escapes, `.`, `\d \s \w` and their
+negations, sets and ranges, groups, alternation, `^ $` and greedy and lazy quantifiers. What it
+lacks (lookaround, flags, backreferences, `\b`, `\p{..}`, possessive quantifiers, set
+intersections) is rejected when the pattern is a constant and throws
+`UnsupportedOperationException` when it is not; a malformed pattern throws
+`PatternSyntaxException` as in Java. `String.format` is Java's `Formatter` in the US locale for
+`%b %h %s %c %d %o %x %e %f %g %n %%` with argument indexes, flags, width and precision, and rounds
+floating point half up from the shortest decimal as Java does (`%.1f` of `0.15` is `0.2`, where
+C's `printf` gives `0.1`); `%t` and `%a` are rejected in a constant format. A format argument
+keeps its Java type (`java::Arg::Long(n)`), so a mismatch throws
+`IllegalFormatConversionException` as in Java.
+
+An enum is a `Copy` Rust `enum` with a variant per constant. Its fields hold one value per
+constant, given by its field initializers and constructor with constant arguments, so each field
+is an accessor that matches on `self` (named `mass_field` when the enum has a method `mass`); a
+field that is not final is accepted as long as only the constructor sets it. An enum's own
+`toString` is its `Display`, while `name()` stays the constant's name. A constant with a body
+(`PLUS { int apply(int a, int b) { return a + b; } }`) overrides the enum's methods, so each
+overridden method becomes a `match self` with an arm per overriding constant and the enum's own
+body (if it is not abstract) for the rest.
 
 The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b` is
 `java::rem(a, b)`. The first analyses decide where plain Rust means the same:

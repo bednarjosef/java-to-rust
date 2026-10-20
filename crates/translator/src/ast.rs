@@ -7,8 +7,10 @@ mod hierarchy;
 mod java_arrays;
 mod natives;
 pub use hierarchy::*;
+mod strings;
 pub use java_arrays::*;
 pub use natives::*;
+pub use strings::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
@@ -34,6 +36,8 @@ pub enum Type {
     /// A boxed primitive such as `Integer` (`Type::boxed(Type::Int)`), which holds that primitive
     /// in an object of its own.
     Boxed(&'static Type),
+    /// `java.lang.StringBuilder`, a shared and mutable text (`java::StringBuilder`).
+    StringBuilder,
 }
 
 impl Type {
@@ -98,7 +102,15 @@ impl Type {
     /// Whether values of this type are references (and so can be `null`). An enum value is not:
     /// Rust's enum is a plain value, and `null` enums are rejected.
     pub fn is_reference(self) -> bool {
-        matches!(self, Type::String | Type::Array(_) | Type::Class(_) | Type::Null | Type::Boxed(_))
+        matches!(
+            self,
+            Type::String
+                | Type::Array(_)
+                | Type::Class(_)
+                | Type::Null
+                | Type::Boxed(_)
+                | Type::StringBuilder
+        )
     }
 
     /// The wider of two integer types.
@@ -156,6 +168,7 @@ impl fmt::Display for Type {
             Type::Array(element) => write!(f, "{element}[]"),
             Type::Class(name) | Type::Enum(name) => f.write_str(name),
             Type::Null => f.write_str("null"),
+            Type::StringBuilder => f.write_str("StringBuilder"),
             Type::Boxed(primitive) => f.write_str(match primitive {
                 Type::Int => "Integer",
                 Type::Char => "Character",
@@ -509,6 +522,16 @@ pub enum Builtin {
     /// A method of a boxed class (`Integer.parseInt`, `x.intValue()`), see `BoxedOp`, with the
     /// primitive of the boxed class it belongs to (`Type::Int` for `Integer`).
     Boxed(BoxedOp, Type),
+    /// A method of `String`, see `StringOp`.
+    String(StringOp),
+    /// A method of `StringBuilder`, see `BuilderOp`.
+    Builder(BuilderOp),
+    /// `String.format(format, args...)` and `format.formatted(args...)`: the format, then the
+    /// arguments.
+    Format,
+    /// A bit or radix method of `Integer` or `Long` (see `BitsOp`), with the primitive of the
+    /// class.
+    Bits(BitsOp, Type),
 }
 
 /// The methods of the boxed classes. The kind of the boxes comes from the types of the operands
@@ -710,7 +733,7 @@ pub fn has_effects(e: &Expr) -> bool {
                     Builtin::Print | Builtin::Println | Builtin::Exit | Builtin::Native(_),
                     _
                 )
-        )
+        ) || matches!(x.kind, ExprKind::Builtin(Builtin::Builder(op), _) if op.mutates())
     });
     found
 }

@@ -1,7 +1,9 @@
 //! `java.util.Arrays` on arrays of primitives and strings, and `clone()` of arrays. Each element
 //! type says how Java compares, hashes and tests it equal, so one function serves every type.
 
-use crate::{Array, bool_hash, double_compare, double_hash, float_hash, from_vec, len, long_hash, throw};
+use crate::{
+    Array, bool_hash, double_compare, double_hash, float_hash, from_vec, len, long_hash, string_hash, throw,
+};
 use std::cmp::Ordering;
 
 /// What `java.util.Arrays` does with an element: Java's `compareTo`, `equals` and `hashCode`.
@@ -107,11 +109,6 @@ impl<T: JavaElement> JavaElement for Option<T> {
 /// `String.compareTo`: the UTF-16 code units, in order.
 pub fn compare_strings(a: &str, b: &str) -> Ordering {
     a.encode_utf16().cmp(b.encode_utf16())
-}
-
-/// `String.hashCode`: over the UTF-16 code units.
-pub fn string_hash(s: &str) -> i32 {
-    s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
 }
 
 /// Java's `rangeCheck` for the methods that take a range `from..to` of an array of `len` elements.

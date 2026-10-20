@@ -196,10 +196,7 @@ pub fn bool_compare(a: bool, b: bool) -> i32 {
 /// `Character.getNumericValue` for ASCII: the value of a digit or a letter in base 36, and -1 for
 /// anything else.
 pub fn char_numeric_value(c: u16) -> i32 {
-    match u8::try_from(c).ok().and_then(|b| char::from(b).to_digit(36)) {
-        Some(v) => v as i32,
-        None => -1,
-    }
+    crate::character::numeric_value(c)
 }
 
 /// `Boolean.parseBoolean`: true for `true` in any case, and false for anything else, null included.

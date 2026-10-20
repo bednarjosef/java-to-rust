@@ -53,7 +53,7 @@ impl Slot {
 /// Whether values of this type are owned heap data or shared arrays or objects, which are cloned
 /// when read.
 pub(super) fn needs_clone(ty: Type) -> bool {
-    matches!(ty, Type::String | Type::Array(_) | Type::Class(_))
+    matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(_))
 }
 
 /// The Rust name of a class: its name in its package without the dots (`Outer.Inner` is
@@ -80,6 +80,7 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Double | Type::Float => "0.0",
         Type::Boolean => "false",
         Type::String => "String::new()",
+        Type::StringBuilder => "java::StringBuilder::new()",
         Type::Boxed(_) | Type::Class(_) => "None",
         _ => unreachable!("lowering rejects fields of type {ty}"),
     }
