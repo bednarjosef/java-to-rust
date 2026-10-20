@@ -263,6 +263,9 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Unary(op, operand) => {
                 let code = self.value(operand, e.ty);
+                if let Some(literal) = code.literal.and_then(|lit| fold_unary(*op, lit)) {
+                    return Code::literal(literal);
+                }
                 match (op, e.ty) {
                     (UnOp::Plus, _) => code,
                     (UnOp::Neg, Type::Double | Type::Float) => {

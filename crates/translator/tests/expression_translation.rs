@@ -50,3 +50,21 @@ fn a_float_static_steps_by_one_without_wrapping() {
     assert_contains(&rust, &["let value = old + 1.0;"]);
     assert_lacks(&rust, &["wrapping"]);
 }
+
+#[test]
+fn a_unary_operator_on_a_literal_gives_a_literal() {
+    let rust = translate(
+        "class A {
+            static int n = 1;
+            static byte b = 3;
+            public static void main(String[] a) {
+                n *= (char) (-(3));
+                long big = -(4294967296L) + n;
+                int shifted = n >>> ~9223372036854775807L;
+                System.out.println(n + \" \" + big + \" \" + shifted + \" \" + ((-32) + b));
+            }
+        }",
+    );
+    assert_contains(&rust, &["wrapping_mul(65533)", "-4294967296i64", "(-32i32).wrapping_add("]);
+    assert_lacks(&rust, &["-3 as u16", "!9223372036854775807", "(-32).wrapping_add("]);
+}

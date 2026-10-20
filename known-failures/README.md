@@ -24,12 +24,6 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
 - `MinCursorLeft.java`: a `while (t.left != null) t = t.left;` loop over a mutable class.
   Java prints `1`; rustc fails with E0506 "cannot assign to `t` because it is borrowed". Loops
   over classes that are never assigned after construction translate (their `Rc` is plain).
-- `NegatedCharCast.java`: `sInt *= ((char)((-(3))));`, a negative int cast to `char`. Java prints
-  `65533`; rustc fails with E0600 "cannot apply unary operator `-` to type `u16`".
-- `NegatedLongLiteral.java`: `System.out.println(-(4294967296L));`. Java prints
-  `-4294967296`; rustc fails with "literal out of range for `i32`": a `long` literal under a unary
-  operator is typed as `i32`. `~(9223372036854775807L)` fails the same way, and
-  `(byte)(~(9223372036854775807L))` fails with "literal out of range for `i8`".
 - `NullEnumVariable.java`: a local `Level best = null;` of an enum type. Java prints `none` then
   `HIGH`; the translator rejects it with "null enums not supported yet" (null objects are in the
   supported subset).
