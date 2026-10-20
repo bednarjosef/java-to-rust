@@ -8,6 +8,10 @@ use crate::analysis::Facts;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
+mod arrays;
+
+use arrays::name_part;
+
 pub fn generate(class: &Class, facts: &Facts) -> String {
     let mut g = Gen {
         class,
@@ -201,7 +205,7 @@ fn method_names(class: &Class) -> Vec<String> {
             let overloaded = class.methods.iter().filter(|o| o.name == m.name).count() > 1;
             if overloaded {
                 for p in &m.params {
-                    base = format!("{base}_{}", rust_type(p.ty).to_lowercase());
+                    base = format!("{base}_{}", name_part(p.ty));
                 }
             }
             unique(base, &mut used)
@@ -323,11 +327,12 @@ impl<'a> Gen<'a> {
             .iter()
             .map(|p| {
                 let mutable = if assigns_any(&m.body, &p.name) { "mut " } else { "" };
-                let ty = if self.borrowed.contains(&p.name) { "&str" } else { rust_type(p.ty) };
+                let ty =
+                    if self.borrowed.contains(&p.name) { "&str".to_string() } else { self.ty_name(p.ty) };
                 format!("{mutable}{}: {ty}", self.local(&p.name))
             })
             .collect();
-        let ret = if m.ret == Type::Void { String::new() } else { format!(" -> {}", rust_type(m.ret)) };
+        let ret = if m.ret == Type::Void { String::new() } else { format!(" -> {}", self.ty_name(m.ret)) };
         self.line(&format!("fn {}({}){ret} {{", self.fn_names[index], params.join(", ")));
         self.indent += 1;
         self.stmts(&m.body, true);
@@ -386,6 +391,7 @@ impl<'a> Gen<'a> {
                 self.local_decl(*ty, name, init.as_ref(), assigns_any(rest, name));
             }
             Stmt::Expr(e) => self.effect(e),
+            Stmt::ForEach { name, array, body, .. } => self.for_each(name, array, body),
             Stmt::If { cond, then, otherwise } => {
                 let cond_text = self.condition(cond);
                 self.line(&format!("if {cond_text} {{"));
@@ -537,11 +543,16 @@ impl<'a> Gen<'a> {
         let mutable = if mutable { "mut " } else { "" };
         let rust = self.local(name);
         match init {
-            None => self.line(&format!("let {mutable}{rust}: {};", rust_type(ty))),
+            None => {
+                let ty_text = self.ty_name(ty);
+                self.line(&format!("let {mutable}{rust}: {ty_text};"));
+            }
             Some(init) => {
                 let code = self.value(init, ty);
-                let annotation = if code.untyped {
-                    self.annotation(ty, format!(": {}", rust_type(ty)))
+                // An array's element type cannot be inferred from `from_vec(vec![])`, so it is always written.
+                let annotation = if code.untyped || matches!(ty, Type::Array(_)) {
+                    let ty_text = self.ty_name(ty);
+                    self.annotation(ty, format!(": {ty_text}"))
                 } else {
                     String::new()
                 };
@@ -588,6 +599,18 @@ impl<'a> Gen<'a> {
             }
             ExprKind::IncDec { target: Place::Var(target), increment, .. } => {
                 let text = self.step(target, e.ty, *increment, e.id);
+                self.line(&format!("{text};"));
+            }
+            ExprKind::Assign { op: None, target: Place::Index(array, index), value } => {
+                let text = self.index_set(array, index, e.ty, value, false);
+                self.line(&format!("{text};"));
+            }
+            ExprKind::Assign { op: Some(op), target: Place::Index(array, index), value } => {
+                let text = self.index_update(*op, array, index, e.ty, value, e.id);
+                self.line(&format!("{text};"));
+            }
+            ExprKind::IncDec { target: Place::Index(array, index), increment, prefix } => {
+                let text = self.index_step(array, index, e.ty, *increment, *prefix, e.id);
                 self.line(&format!("{text};"));
             }
             _ => {
@@ -743,7 +766,7 @@ impl<'a> Gen<'a> {
                 let rust = self.local(name);
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
-                    Type::String => Code::atom(format!("{rust}.clone()")),
+                    Type::String | Type::Array(_) => Code::atom(format!("{rust}.clone()")),
                     _ => Code::atom(rust),
                 }
             }
@@ -782,6 +805,19 @@ impl<'a> Gen<'a> {
                     Code::new(format!("{{ let {old} = {name}; {text}; {old} }}"), LOWEST)
                 }
             }
+            ExprKind::Assign { op: None, target: Place::Index(array, index), value } => {
+                Code::atom(self.index_set(array, index, e.ty, value, true))
+            }
+            ExprKind::Assign { op: Some(op), target: Place::Index(array, index), value } => {
+                Code::atom(self.index_update(*op, array, index, e.ty, value, e.id))
+            }
+            ExprKind::IncDec { target: Place::Index(array, index), increment, prefix } => {
+                Code::atom(self.index_step(array, index, e.ty, *increment, *prefix, e.id))
+            }
+            ExprKind::Index(array, index) => self.index(array, index),
+            ExprKind::Length(array) => self.length(array),
+            ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
+            ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
                 let cond = self.condition(cond);
@@ -907,6 +943,9 @@ impl<'a> Gen<'a> {
 
     fn builtin(&mut self, builtin: Builtin, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
         match builtin {
+            Builtin::ArraysToString | Builtin::ArraysFill | Builtin::ArraysSort | Builtin::ArraysCopyOf => {
+                self.arrays_builtin(builtin, args)
+            }
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
                 if let Some(arg) = args.first() {
@@ -1144,7 +1183,7 @@ fn has_continue(body: &Stmt) -> bool {
 fn collect_locals(stmts: &[Stmt], out: &mut Vec<String>) {
     for stmt in stmts {
         visit_stmt(stmt, &mut |_| {}, &mut |s| {
-            if let Stmt::Local { name, .. } = s {
+            if let Stmt::Local { name, .. } | Stmt::ForEach { name, .. } = s {
                 out.push(name.clone());
             }
         });

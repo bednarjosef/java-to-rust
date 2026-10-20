@@ -116,12 +116,39 @@ pub struct Param {
 }
 
 pub enum Stmt {
-    Local { ty: Type, name: String, init: Option<Expr>, pos: Pos },
+    Local {
+        ty: Type,
+        name: String,
+        init: Option<Expr>,
+        pos: Pos,
+    },
     Expr(Expr),
-    If { cond: Expr, then: Box<Stmt>, otherwise: Option<Box<Stmt>> },
-    While { cond: Expr, body: Box<Stmt> },
-    DoWhile { body: Box<Stmt>, cond: Expr },
-    For { init: Vec<Stmt>, cond: Option<Expr>, update: Vec<Expr>, body: Box<Stmt> },
+    If {
+        cond: Expr,
+        then: Box<Stmt>,
+        otherwise: Option<Box<Stmt>>,
+    },
+    While {
+        cond: Expr,
+        body: Box<Stmt>,
+    },
+    DoWhile {
+        body: Box<Stmt>,
+        cond: Expr,
+    },
+    For {
+        init: Vec<Stmt>,
+        cond: Option<Expr>,
+        update: Vec<Expr>,
+        body: Box<Stmt>,
+    },
+    /// `for (ty name : array) body`, over the elements of an array.
+    ForEach {
+        ty: Type,
+        name: String,
+        array: Expr,
+        body: Box<Stmt>,
+    },
     Return(Option<Expr>, Pos),
     Break,
     Continue,
@@ -162,6 +189,14 @@ pub enum ExprKind {
         prefix: bool,
     },
     Cast(Type, Box<Expr>),
+    /// `new T[d1][d2]...` with the given sizes; `ty` is the full array type.
+    NewArray(Vec<Expr>),
+    /// `{a, b, c}` or `new T[] {a, b, c}`; `ty` is the array type.
+    ArrayLit(Vec<Expr>),
+    /// `a[i]`.
+    Index(Box<Expr>, Box<Expr>),
+    /// `a.length`.
+    Length(Box<Expr>),
     Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
     /// A call of one of the class's static methods; `resolved` is the index of the chosen
     /// overload in `Class::methods`, set by the checker.
@@ -175,10 +210,11 @@ pub enum ExprKind {
 }
 
 /// What an assignment, `++` or `--` writes to.
-#[derive(Clone, Debug, PartialEq)]
 pub enum Place {
     /// A local variable or parameter.
     Var(String),
+    /// An array element `a[i]`.
+    Index(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,6 +231,14 @@ pub enum Builtin {
     StringLength,
     /// `s.equals(t)`; the receiver is the first argument.
     StringEquals,
+    /// `Arrays.toString(a)`.
+    ArraysToString,
+    /// `Arrays.fill(a, v)`.
+    ArraysFill,
+    /// `Arrays.sort(a)` for an array of a primitive type.
+    ArraysSort,
+    /// `Arrays.copyOf(a, n)`.
+    ArraysCopyOf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -383,6 +427,10 @@ pub fn visit_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn
             update.iter().for_each(&mut *on_expr);
             visit_stmt(body, on_expr, on_stmt);
         }
+        Stmt::ForEach { array, body, .. } => {
+            on_expr(array);
+            visit_stmt(body, on_expr, on_stmt);
+        }
         Stmt::Block(stmts) => stmts.iter().for_each(|s| visit_stmt(s, on_expr, on_stmt)),
         Stmt::Return(None, _) | Stmt::Break | Stmt::Continue => {}
     }
@@ -392,11 +440,17 @@ pub fn visit_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn
 pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     f(e);
     match &e.kind {
-        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::Assign { value: x, .. } => visit_expr(x, f),
-        ExprKind::Binary(_, l, r) => {
+        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::Length(x) => visit_expr(x, f),
+        ExprKind::Assign { target, value, .. } => {
+            visit_place(target, f);
+            visit_expr(value, f);
+        }
+        ExprKind::IncDec { target, .. } => visit_place(target, f),
+        ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) => {
             visit_expr(l, f);
             visit_expr(r, f);
         }
+        ExprKind::NewArray(items) | ExprKind::ArrayLit(items) => items.iter().for_each(|a| visit_expr(a, f)),
         ExprKind::Conditional(c, a, b) => {
             visit_expr(c, f);
             visit_expr(a, f);
@@ -406,5 +460,13 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             args.iter().for_each(|a| visit_expr(a, f))
         }
         _ => {}
+    }
+}
+
+/// Calls `f` on the expressions inside a place, such as `a` and `i` in `a[i]`.
+pub fn visit_place(place: &Place, f: &mut dyn FnMut(&Expr)) {
+    if let Place::Index(array, index) = place {
+        visit_expr(array, f);
+        visit_expr(index, f);
     }
 }

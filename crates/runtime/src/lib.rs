@@ -2,6 +2,10 @@
 //! printing doubles the way Java does, integer division that throws `ArithmeticException`,
 //! Java's `Math` rules and uncaught exceptions.
 
+mod array;
+
+pub use array::*;
+
 use std::fmt;
 use std::io::Write;
 
