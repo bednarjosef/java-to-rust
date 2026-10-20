@@ -68,3 +68,38 @@ fn a_unary_operator_on_a_literal_gives_a_literal() {
     assert_contains(&rust, &["wrapping_mul(65533)", "-4294967296i64", "(-32i32).wrapping_add("]);
     assert_lacks(&rust, &["-3 as u16", "!9223372036854775807", "(-32).wrapping_add("]);
 }
+
+#[test]
+fn float_literal_arithmetic_is_written_as_float() {
+    let rust = translate(
+        "class A { public static void main(String[] a) {
+            System.out.println((double) (2.0f / 3));
+            System.out.println(0.1f + 0.2f == 0.3f);
+        } }",
+    );
+    assert_contains(&rust, &["(2.0f32 / 3.0) as f64", "0.1f32 + 0.2 == 0.3"]);
+}
+
+#[test]
+fn a_conditional_of_literals_has_its_type_written_where_inference_would_choose() {
+    let rust = translate(
+        "class A {
+            static boolean flag = true;
+            public static void main(String[] a) {
+                boolean b = flag;
+                System.out.println((short) (b ? 64 : 1234567890123L));
+                System.out.println(b ? 3000000000L : 1L);
+                System.out.println(Math.abs(b ? -2.5 : 3.0) + \" \" + (b ? 1 : 2));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "(if b { 64i64 } else { 1234567890123i64 }) as i16",
+            "if b { 3000000000i64 } else { 1i64 }",
+            "(if b { -2.5f64 } else { 3.0f64 }).abs()",
+            "if b { 1 } else { 2 }",
+        ],
+    );
+}
