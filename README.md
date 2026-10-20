@@ -72,8 +72,8 @@ translates, compiles and matches Java's output.
 A first end-to-end pipeline for a small subset: one class of static methods with `int`, `long`,
 `double`, `boolean` and `String` locals, arithmetic, `if`, `while`, `do`, `for`, `break`,
 `continue`, the conditional operator, overloading, `System.out.print`/`println`, `System.exit`,
-a few `Math` methods and `String.length`/`equals`. Anything else is rejected with an error that
-names the construct and its position.
+a few `Math` methods and `String.length`/`equals`, and `null` for `String`. Anything else is
+rejected with an error that names the construct and its position.
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
@@ -92,6 +92,12 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   stays in range uses `+`, `-`, `*`, and division by a provably nonzero divisor uses `/` and `%`.
 - Strings that are only ever ASCII use `len()` for `length()`; string parameters that are never
   assigned are borrowed as `&str`.
+- Nullness analysis (`analysis/nullness.rs`) finds the strings that may be null (locals,
+  parameters across calls, return values). Only those are `Option<String>`; the others stay
+  `String` or `&str`. A null check narrows the string in the branch where it is not null
+  (`if let Some(s) = s.as_deref()`, or `let Some(s) = s.as_deref() else { .. }` after an early
+  return), so no unwrap is repeated. Dereferencing a null string throws `NullPointerException`
+  through `java::non_null`, and printing or concatenating it gives `null`.
 
 Translation never runs the program; it only compiles it. Starting javac costs about half a
 second per file; building the translator needs `javac` (JDK 21 or newer) on PATH.
