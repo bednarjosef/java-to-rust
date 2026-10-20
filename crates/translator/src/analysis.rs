@@ -96,6 +96,8 @@ pub struct Facts {
     /// The classes, by index in `Class::types`, whose static initialization runs eagerly through
     /// an `init` function; the other classes initialize each static lazily on first access.
     pub eager_init: HashSet<usize>,
+    /// The static methods and constructors that run their class's `init` when they start.
+    pub entry_init: HashSet<usize>,
     /// The boxed kinds (`Type::Boxed` of the primitive) whose identity `==` observes: their boxes
     /// are shared objects. Every other boxed kind is its primitive value.
     pub faithful_boxes: HashSet<Type>,
@@ -113,6 +115,7 @@ pub fn analyze(class: &Class) -> Facts {
     facts.isolated = borrowing.isolated;
     facts.writers = borrowing.writers;
     facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
+    facts.entry_init = statics::entry_inits(class, &facts.eager_init);
     nullness::analyze(class, &mut facts);
     boxing::analyze(class, &mut facts);
     borrowed_params(class, &mut facts);

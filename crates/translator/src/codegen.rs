@@ -313,7 +313,7 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         if m.name == "<clinit>" {
             self.init_guard(name);
-        } else if self.facts.eager_init.contains(&m.class) && (m.is_static || m.is_ctor) {
+        } else if self.facts.entry_init.contains(&index) {
             self.line(&format!("{}();", statics::init_name(name)));
         }
         if m.is_ctor {
