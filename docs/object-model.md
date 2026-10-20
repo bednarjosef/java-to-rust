@@ -1448,3 +1448,49 @@ Decisions that changed during the implementation, milestone by milestone.
   ComparableImpl}.java`, `corpus/programs/{Simulation,Tokenizer}.java` and
   `corpus/projects/library` (packages `library.items`, `library.desk`, `library.app`, with an
   interface, its constant and static method, a `Comparable` class and an enum implementing it).
+
+### Milestone 4
+
+`instanceof`, casts and patterns between the program's own types came first, before `Object`:
+
+- A pattern variable is an owned value, not a reference into the tested value: the enum of the
+  tested type gets `fn as_circle(&self) -> Option<Rc<Circle>>` (`Need::Narrow`), and
+  `x instanceof Circle c` binds `c` from `x.as_circle()` (`Option<Rc<..>>` cloned out of the
+  variant). The plan's `if let Shape::Circle(c) = &s` would make `c` a reference that the rest of
+  the generator does not know how to read (a narrowed object is a `&Rc<..>` only for null tests
+  today), and a binding to a type with an enum of its own (`o instanceof Base b`) needs the
+  converting form anyway; one form covers both. The cost is an `Rc` clone per successful test.
+- Where the variable is bound: an operand of an `&&` chain (a let chain in an `if`, an `else if`,
+  a `while` or a `?:`; `is_some_and(|c| ..)` in any other expression), `if (!(x instanceof C c))
+  .. else ..` (`if let` with the branches swapped) and `if (!(x instanceof C c)) <leave>;`
+  (`let .. else`). `analysis::patterns` rejects a read of a pattern variable anywhere else (for
+  example `!(x instanceof C c) || c.v == 0`, a `for` condition, or after a `while (!(..))`) with
+  "a pattern variable used here not supported yet". The plan's recognition of
+  `if (!(o instanceof Rect)) return; Rect r = (Rect) o;` as a `let .. else` is not done: the
+  cast is a checked `as_rect()` of its own, which is correct and only one `match` slower.
+- Casts: `(Circle) s` is `java::cast(s.as_circle(), "Circle")`, a runtime function that returns
+  the value or throws `java.lang.ClassCastException` (`java::cast_failed`), instead of a
+  generated `to_circle()` with a failing arm. The message names only the target class (`cannot
+  be cast to class Shapes$Circle`): naming the object's class needs a `class_name()` per enum,
+  which waits for `getClass()`. A cast whose operand's class is known and is not below the
+  target always fails, and is written as that failure. A cast or test to a supertype is the
+  implicit upcast that already existed.
+- A cast of a value that may be null to a Java enum (`(Suit) item` where `item` may be null) is
+  rejected ("casting a value that may be null to an enum not supported yet"): an enum is an
+  `Option` only in a local assigned `null` (`lower::enum_nulls`), and the cast would make one
+  anywhere.
+- `flows` has an edge for a pattern's binding, as for a cast: a class whose objects are bound by
+  a pattern to a type becomes a variant of that type's enum.
+- `else if` conditions are let chains too (they were plain conditions), so
+  `if (s instanceof Circle c) .. else if (s instanceof Rect r) ..` binds in every branch; an
+  `else if` that `narrow_if` writes (a negated pattern with an else branch, or `s == null` with
+  one) is nested instead.
+- Survey: an `instanceof` between declared types (with a binding pattern) and a cast between
+  declared types are no longer features; the rest is "instanceof on types outside the sources"
+  and "reference casts". Record patterns and patterns in `switch` stay "patterns". The free share
+  stays 20.3%: in the JDK the tests and casts are on `Object` and generic values.
+- Corpus: `corpus/features/InstanceOf.java` (every form above, nullable operands, `this`, a
+  test that is statically false, and a failing cast that exits 1), `corpus/programs/
+  Interpreter.java` (a parser, evaluator, simplifier and printer over a node tree, by patterns),
+  and `Loans.bookPages`/`discs`/`first` in `corpus/projects/library` (patterns on array
+  elements that may be null, a cast across packages).

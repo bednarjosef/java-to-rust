@@ -46,7 +46,7 @@ fn pure(e: &Expr, index: usize, assigned: &HashSet<&str>, decl: &TypeDecl) -> bo
                 && (assigned.contains(name.as_str())
                     || decl.statics.iter().any(|f| f.name == *name && f.constant))
         }
-        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) => recur(x),
+        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::InstanceOf { value: x, .. } => recur(x),
         // Integer division can divide by zero, which throws.
         ExprKind::Binary(op, l, r) => !matches!(op, BinOp::Div | BinOp::Rem) && recur(l) && recur(r),
         ExprKind::Conditional(c, a, b) => recur(c) && recur(a) && recur(b),

@@ -24,5 +24,6 @@ public class Main {
         System.out.println(loans.has(big) + " " + loans.has(new Book("Atlas", 640)) + " " + loans.has(Room.GROUP)
                 + " " + loans.has(Room.QUIET));
         System.out.println(Item.LOAN_DAYS + " " + Item.fine(Room.QUIET, 5));
+        System.out.println(loans.bookPages() + " pages, " + loans.discs() + " disc, first " + loans.first().title());
     }
 }

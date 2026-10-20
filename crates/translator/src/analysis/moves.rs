@@ -187,8 +187,14 @@ impl Walk {
                 self.expr(value);
             }
             ExprKind::IncDec { target, .. } => self.place(target),
+            // A pattern's variable is in scope where the test has passed, after it.
+            ExprKind::InstanceOf { value, binding: Some(name), .. } => {
+                self.expr(value);
+                self.declare(name);
+            }
             ExprKind::Unary(_, x)
             | ExprKind::Cast(_, x)
+            | ExprKind::InstanceOf { value: x, .. }
             | ExprKind::Length(x)
             | ExprKind::Field { object: x, .. } => self.expr(x),
             ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) => {

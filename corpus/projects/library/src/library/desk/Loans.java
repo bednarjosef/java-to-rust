@@ -1,5 +1,7 @@
 package library.desk;
 
+import library.items.Book;
+import library.items.Disc;
 import library.items.Item;
 
 public class Loans {
@@ -31,6 +33,31 @@ public class Loans {
             sb.append('\n');
         }
         return sb.toString();
+    }
+
+    public int bookPages() {
+        int total = 0;
+        for (int i = 0; i < count; i++) {
+            if (items[i] instanceof Book book) {
+                total += book.pages();
+            }
+        }
+        return total;
+    }
+
+    public int discs() {
+        int n = 0;
+        for (int i = 0; i < count; i++) {
+            if (!(items[i] instanceof Disc)) {
+                continue;
+            }
+            n++;
+        }
+        return n;
+    }
+
+    public Book first() {
+        return (Book) items[0];
     }
 
     public boolean has(Item item) {

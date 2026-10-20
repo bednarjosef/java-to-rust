@@ -262,8 +262,27 @@ impl Census {
                         scan.feature("local classes", node)
                     }
                     "TRY" | "THROW" => scan.feature("exceptions", node),
-                    "INSTANCE_OF" => scan.feature("instanceof", node),
-                    "TYPE_CAST" if !is_primitive(ty) => scan.feature("reference casts", node),
+                    // Tests and casts between the program's own classes translate; a pattern
+                    // binding its variable is part of the test.
+                    "INSTANCE_OF" => {
+                        let value = text(&node["expression"], "javaType");
+                        let target = text(&node["type"], "javaType");
+                        if self.declared.contains(value) && self.declared.contains(target) {
+                            if text(&node["pattern"], "kind") == "RECORD_PATTERN" {
+                                scan.feature("patterns", node);
+                            }
+                            self.body(&node["expression"], scan);
+                            return;
+                        }
+                        scan.feature("instanceof on types outside the sources", node);
+                    }
+                    "TYPE_CAST"
+                        if !is_primitive(ty)
+                            && !(self.declared.contains(ty)
+                                && self.declared.contains(text(&node["expression"], "javaType"))) =>
+                    {
+                        scan.feature("reference casts", node)
+                    }
                     "ENHANCED_FOR_LOOP" if !text(&node["expression"], "javaType").ends_with(']') => {
                         scan.feature("for-each over collections", node)
                     }

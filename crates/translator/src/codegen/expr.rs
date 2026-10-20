@@ -282,6 +282,7 @@ impl<'a> Gen<'a> {
                 self.format("format!", parts)
             }
             ExprKind::Binary(op, l, r) if is_null_test(*op, l, r) => self.null_test(*op, l, r),
+            ExprKind::Binary(BinOp::And, ..) if let Some(code) = self.bound_and(e) => code,
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(_)) => {
                 self.identity(*op, l, r)
             }
@@ -346,6 +347,11 @@ impl<'a> Gen<'a> {
             {
                 self.class_cast(*to, value)
             }
+            // A downcast from an interface to an enum that implements it.
+            ExprKind::Cast(to @ Type::Enum(_), value) if matches!(value.ty, Type::Class(_)) => {
+                self.class_cast(*to, value)
+            }
+            ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
                 if let Some(code) = self.narrowed_conditional(e, cond, a, b) {

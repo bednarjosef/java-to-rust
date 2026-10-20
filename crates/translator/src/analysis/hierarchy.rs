@@ -122,8 +122,8 @@ pub fn variants(class: &Class, facts: &Facts, t: usize) -> Vec<usize> {
 }
 
 /// For each type, the concrete classes (and enums) whose objects become values of that type: a
-/// `new` makes an object of its class, an upcast makes the objects of its operand's type values
-/// of the target type, and an object that runs a method its class inherits is the `this` of
+/// `new` makes an object of its class, a cast (or a pattern's binding) makes the objects of its
+/// operand's type that are of the target type values of it, and an object that runs a method its class inherits is the `this` of
 /// that method, a value of the type that declares it (unless the method lives on a fields
 /// struct, which borrows only the fields). A call of an inherited method, or `super.m()`, makes
 /// the receiver a value of the type that declares the method. An enum's constants are values of
@@ -155,7 +155,8 @@ pub fn flows(class: &Class, field_level: &HashSet<usize>) -> Vec<HashSet<usize>>
     };
     let mut note = |e: &Expr, at: usize| match &e.kind {
         ExprKind::New { class: c, .. } => _ = flows[*c].insert(*c),
-        ExprKind::Cast(to, value) => {
+        // A cast, and a pattern's binding, make the value a value of the target type.
+        ExprKind::Cast(to, value) | ExprKind::InstanceOf { value, ty: to, binding: Some(_) } => {
             if let (Some(t), Some(s)) = (index(*to), index(value.ty)) {
                 edges.insert((s, t));
             }

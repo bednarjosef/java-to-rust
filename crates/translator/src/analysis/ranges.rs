@@ -917,6 +917,10 @@ impl<'a> Analysis<'a> {
                 self.place_object(target, env);
                 other
             }
+            ExprKind::InstanceOf { value, .. } => {
+                self.expr(value, env);
+                other
+            }
             ExprKind::Cast(to, x) => {
                 let v = self.expr(x, env);
                 if to.is_small() && x.ty.is_integral() {
