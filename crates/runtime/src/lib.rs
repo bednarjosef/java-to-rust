@@ -13,12 +13,14 @@ use std::fmt;
 mod boxed;
 mod character;
 mod character_classes;
+mod code_point;
 mod digits;
 mod exact;
 pub mod fdlibm;
 mod float;
 mod float_parse;
 mod integer_parse;
+mod unsigned;
 mod java_arrays;
 mod math;
 mod natives;
@@ -27,11 +29,16 @@ mod out;
 pub use boxed::*;
 pub use character::*;
 pub use character_classes::*;
+pub use code_point::{
+    char_count, code_point_string, high_surrogate, is_bmp_code_point, is_supplementary_code_point,
+    is_valid_code_point, low_surrogate, to_chars, to_code_point,
+};
 pub use digits::decimal_digit;
 pub use exact::*;
 pub use float::*;
 pub use float_parse::{parse_double, parse_float};
 pub use integer_parse::parse_radix;
+pub use unsigned::{compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string};
 pub use java_arrays::*;
 pub use math::*;
 pub use natives::*;

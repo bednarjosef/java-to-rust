@@ -24,12 +24,7 @@ pub fn parse_radix<T: TryFrom<i128>>(s: Option<&str>, radix: i32) -> T {
 /// The value of a string in `radix`, or Java's message for why it is rejected. Only the range of
 /// the target type can reject a number that is read, and `parse_radix` checks that.
 fn read(s: &str, radix: i32) -> Result<i128, String> {
-    if radix < MIN_RADIX {
-        return Err(format!("radix {radix} less than Character.MIN_RADIX"));
-    }
-    if radix > MAX_RADIX {
-        return Err(format!("radix {radix} greater than Character.MAX_RADIX"));
-    }
+    check_radix(radix)?;
     let units: Vec<u16> = s.encode_utf16().collect();
     let (negative, digits) = match units.first() {
         Some(&c) if c == u16::from(b'-') => (true, &units[1..]),
@@ -50,8 +45,19 @@ fn read(s: &str, radix: i32) -> Result<i128, String> {
     Ok(if negative { -value } else { value })
 }
 
+/// Java's check of the radix of the parse methods, with the message it throws.
+pub(crate) fn check_radix(radix: i32) -> Result<(), String> {
+    if radix < MIN_RADIX {
+        return Err(format!("radix {radix} less than Character.MIN_RADIX"));
+    }
+    if radix > MAX_RADIX {
+        return Err(format!("radix {radix} greater than Character.MAX_RADIX"));
+    }
+    Ok(())
+}
+
 /// Java's `NumberFormatException.forInputString`, which names the radix unless it is 10.
-fn for_input(s: &str, radix: i32) -> String {
+pub(crate) fn for_input(s: &str, radix: i32) -> String {
     let radix = if radix == 10 { String::new() } else { format!(" under radix {radix}") };
     format!("For input string: \"{s}\"{radix}")
 }

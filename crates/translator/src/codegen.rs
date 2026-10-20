@@ -15,12 +15,14 @@ mod enums;
 mod expr;
 mod math;
 mod names;
+mod code_point;
 mod null;
 mod primitives;
 mod statics;
 mod stmt;
 mod strings;
 mod switch;
+mod unsigned;
 
 use code::*;
 use expr::Operand;

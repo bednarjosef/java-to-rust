@@ -6,6 +6,8 @@
 mod enums;
 mod objects;
 mod statics;
+mod code_point;
+mod unsigned;
 
 use crate::ast::*;
 use objects::{MethodInfo, TypeInfo};
@@ -482,6 +484,12 @@ impl<'t> Lowering<'t> {
                 let receiver = receiver.expect("an instance method has a receiver");
                 args.insert(0, self.expr(receiver)?);
                 Builtin::StringCharAt
+            }
+            (owner, name) if unsigned::is_unsigned_method(owner, name) => {
+                self.unsigned_call(node, &symbol, &args)?
+            }
+            (owner, name) if code_point::is_code_point_method(owner, name, &args) => {
+                self.code_point_call(node, &symbol, &args)?
             }
             (owner, name) if boxing::boxed_type(owner).is_some() && boxing::is_boxed_method(name) => {
                 self.boxed_call(node, &symbol, &mut args, receiver)?

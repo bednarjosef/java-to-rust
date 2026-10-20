@@ -3,10 +3,14 @@
 
 use std::fmt;
 
+mod code_point;
 mod java_arrays;
 mod natives;
+mod unsigned;
+pub use code_point::*;
 pub use java_arrays::*;
 pub use natives::*;
+pub use unsigned::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
@@ -475,6 +479,10 @@ pub enum Builtin {
     /// A method of a boxed class (`Integer.parseInt`, `x.intValue()`), see `BoxedOp`, with the
     /// primitive of the boxed class it belongs to (`Type::Int` for `Integer`).
     Boxed(BoxedOp, Type),
+    /// An unsigned method of `Integer`, `Long`, `Byte` or `Short`, see `UnsignedOp`.
+    Unsigned(UnsignedOp, Type),
+    /// A code point method of `Character` (`toChars`, `charCount` and the like), see `CodePointOp`.
+    CodePoint(CodePointOp),
 }
 
 /// The methods of the boxed classes. The kind of the boxes comes from the types of the operands
@@ -676,6 +684,12 @@ pub fn has_effects(e: &Expr) -> bool {
                 | ExprKind::IncDec { .. }
                 | ExprKind::Builtin(
                     Builtin::Print | Builtin::Println | Builtin::Exit | Builtin::Native(_),
+                    _
+                ) | ExprKind::Builtin(
+                    Builtin::Unsigned(UnsignedOp::Divide | UnsignedOp::Remainder | UnsignedOp::Parse, _),
+                    _
+                ) | ExprKind::Builtin(
+                    Builtin::CodePoint(CodePointOp::ToChars | CodePointOp::ToString),
                     _
                 )
         )
