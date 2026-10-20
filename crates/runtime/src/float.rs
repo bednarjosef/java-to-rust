@@ -99,6 +99,14 @@ mod tests {
     }
 
     #[test]
+    fn ties_between_shortest_decimals_take_the_even_digit() {
+        // 1100000.25 is exactly between 1100000.2 and 1100000.3; Java prints the even one.
+        assert_eq!(float_to_string(f32::from_bits(0x4986_4702)), "1100000.2");
+        assert_eq!(float_to_string(f32::from_bits(0xc986_4702)), "-1100000.2");
+        assert_eq!(float_to_string(f32::from_bits(0x4986_4703)), "1100000.4");
+    }
+
+    #[test]
     fn max_and_min_follow_java() {
         assert!(max_f32(f32::NAN, 1.0).is_nan());
         assert!(min_f32(1.0, f32::NAN).is_nan());
