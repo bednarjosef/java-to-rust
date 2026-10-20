@@ -42,6 +42,7 @@ impl<'t> Lowering<'t> {
             methods: Vec::new(),
             reach: None,
             entry: None,
+            standard: exceptions::Standard::default(),
         }
     }
 
@@ -158,11 +159,13 @@ impl<'t> Lowering<'t> {
             "INTERFACE" => TypeKind::Interface,
             _ => TypeKind::Class,
         };
+        // A standard exception class has objects only if the program creates them.
+        let unused_standard = self.standard.has(name) && !self.standard.instantiated.contains(name);
         Ok(TypeDecl {
             name: self.types[index].name.clone(),
             package: String::new(),
             kind,
-            is_abstract: kind == TypeKind::Interface || node.has_flag("ABSTRACT"),
+            is_abstract: kind == TypeKind::Interface || node.has_flag("ABSTRACT") || unused_standard,
             extends: self.superclass(index)?,
             implements: self.interfaces(index)?,
             fields,
@@ -253,6 +256,7 @@ impl<'t> Lowering<'t> {
         };
         let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let args = self.packed_args(node, &symbol, args)?;
+        self.check_standard_member(node, &symbol)?;
         let ctor = self.method_index(&symbol);
         let args = self.convert_args(ctor, args)?;
         Ok(ExprKind::New { class, args, ctor })

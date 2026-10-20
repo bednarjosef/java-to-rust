@@ -421,3 +421,43 @@ with step 3.
 ## 4. Deviations
 
 Decisions that changed during the implementation, step by step.
+
+### Step 3: `throw`, `try`/`catch`
+
+- **The standard classes are Java source**, `crates/translator/java/Standard.java` (package
+  `standard`), rather than syntax trees built by hand: `build.rs` prints its tree with
+  `JavaTree` at build time, and lowering renames the package to the real one (`java.lang`, or
+  `java.util` for `NoSuchElementException` and `ConcurrentModificationException`) and declares
+  the classes and members that the program uses, with the members those use. A class is abstract
+  unless the program creates its objects. The table of section 1.2 is that file.
+- **Pass-through classes keep their fields structs** (`IllegalArgumentException { base:
+  RuntimeExceptionFields }`, which embeds `ExceptionFields`, which embeds `ThrowableFields`)
+  instead of embedding `ThrowableFields` directly (section 0.4): it is the object model's
+  ordinary layout and costs nothing at run time.
+- **No `From<java::Exception>` yet**: the runtime's failures are not values until step 5, so
+  catching one is rejected wherever the analysis finds that a `catch` would see it (with the
+  operation named: "catching the `ArithmeticException` that this division may throw").
+  Operations of the library are classified per builtin (`library_failure` in
+  `analysis/exceptions.rs`); one whose failures are not known exactly counts as throwing any
+  standard class.
+- **`throw` where nothing catches** is `java::throw_uncaught(e)`, a function that does not
+  return, and a call of a method that throws is `call.unwrap_or_else(java::uncaught)` there.
+  `Throwable` then gets its `Display`, which is its `toString`.
+- **A `try` body that cannot complete normally** is a block of `Result<Infallible, Throwable>`:
+  a `return` inside it is Rust's own `return`, and the `match` has no `Ok` arm, instead of the
+  `Ok(v)` arm of section 1.5.
+- **A `catch` of a class of the program with an enum of its own** converts the matched
+  `Throwable` with an inline `match` of the arm's variants (`let e = match caught {
+  Throwable::A(o) => AppError::A(o), .. }`), or with the one variant directly; a `catch` type
+  under which nothing that the body throws falls is not written. The flows of the object model
+  make every exception class a value of `Throwable`, and the values of `Throwable` under a
+  `catch` type values of that type, so the enums have the variants the arms need.
+- **A local declared without a value and assigned in a live `try` body** starts at Java's
+  default value under `#[allow(unused_assignments)]`; such a local of a type without a
+  default value here (an object, an array) is rejected.
+- **Still rejected** (each with a message naming it): `finally` (step 4), try-with-resources
+  (step 7), constructors and `toString` methods that throw something a caller catches (step 6),
+  `throw` of a value that may be null (Java throws `NullPointerException` instead), a call of
+  `main` that is caught, a static, field or enum constant initializer that throws an exception of
+  the program, a program class named like a standard class it uses, and a call that throws inside
+  an expression the translation writes as a closure (checked on the generated text).

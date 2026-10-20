@@ -2684,3 +2684,150 @@ fn interfaces_outside_the_program_are_rejected_except_comparable() {
     );
     assert_contains(&rust, &["fn compare_to(&self, o: &Rc<V>) -> i32 {"]);
 }
+
+#[test]
+fn a_method_whose_exception_is_caught_returns_a_result() {
+    let rust = translate(
+        "class Missing extends Exception { Missing(String m) { super(m); } }
+        class A {
+            static int find(int[] xs, int x) throws Missing {
+                for (int i = 0; i < xs.length; i++) { if (xs[i] == x) return i; }
+                throw new Missing(\"no \" + x);
+            }
+            static int twice(int[] xs, int x) throws Missing { return find(xs, x) * 2; }
+            public static void main(String[] a) {
+                int[] xs = {4, 5};
+                try {
+                    System.out.println(twice(xs, 5));
+                    System.out.println(twice(xs, 6));
+                } catch (Missing e) {
+                    System.out.println(e.getMessage());
+                }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn find(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
+            "Err(Throwable::Missing(Rc::new(",
+            "fn twice(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
+            "find(xs, x)?",
+            "let attempt: Result<(), Throwable> = 'attempt: {",
+            "java::or_break!(twice(&xs, 5), 'attempt)",
+            "Err(Throwable::Missing(e)) => {",
+        ],
+    );
+}
+
+#[test]
+fn an_exception_that_nothing_catches_ends_the_program_where_it_is_thrown() {
+    let rust = translate(
+        "class A {
+            static int check(int x) {
+                if (x < 0) throw new IllegalArgumentException(\"negative: \" + x);
+                return x;
+            }
+            public static void main(String[] a) {
+                System.out.println(check(3));
+                System.out.println(check(-3));
+            }
+        }",
+    );
+    // Nothing observes the exception, so `check` keeps its plain signature.
+    assert_contains(
+        &rust,
+        &["fn check(x: i32) -> i32 {", "java::throw_uncaught(Throwable::IllegalArgumentException("],
+    );
+    assert_lacks(&rust, &["Result<", "'attempt"]);
+}
+
+#[test]
+fn a_call_outside_any_try_of_a_method_that_throws_ends_the_program_on_failure() {
+    let rust = translate(
+        "class A {
+            static int check(int x) {
+                if (x < 0) throw new IllegalStateException(\"negative\");
+                return x;
+            }
+            public static void main(String[] a) {
+                try { check(-1); } catch (IllegalStateException e) { System.out.println(\"caught\"); }
+                System.out.println(check(-2));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["fn check(x: i32) -> Result<i32, Throwable> {", "check(-2).unwrap_or_else(java::uncaught)"],
+    );
+}
+
+#[test]
+fn catch_clauses_match_in_order_and_a_try_that_catches_nothing_is_a_block() {
+    let rust = translate(
+        "class A {
+            static void run(int x) {
+                if (x == 1) throw new IllegalArgumentException(\"one\");
+                if (x == 2) throw new IllegalStateException(\"two\");
+                if (x == 3) throw new UnsupportedOperationException(\"three\");
+            }
+            public static void main(String[] a) {
+                for (int i = 0; i < 4; i++) {
+                    try {
+                        run(i);
+                    } catch (IllegalStateException e) {
+                        System.out.println(\"state \" + e.getMessage());
+                    } catch (RuntimeException e) {
+                        System.out.println(\"other \" + e);
+                    }
+                }
+                try { System.out.println(\"quiet\"); } catch (RuntimeException e) { System.out.println(\"never\"); }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "Err(Throwable::IllegalStateException(e)) => {",
+            "Err(e @ (Throwable::IllegalArgumentException(_) | Throwable::UnsupportedOperationException(_))) => {",
+        ],
+    );
+    assert_lacks(&rust, &["'attempt2"]);
+}
+
+#[test]
+fn exceptions_the_translation_cannot_reproduce_are_rejected() {
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
+    let err = reject(
+        "class A { public static void main(String[] a) {
+            int d = a.length;
+            try { System.out.println(10 / d); } catch (ArithmeticException e) { System.out.println(\"zero\"); }
+        } }",
+    );
+    assert!(
+        err.contains("catching the `ArithmeticException` that this division may throw not supported yet"),
+        "{err}"
+    );
+    let err = reject(
+        "class A { public static void main(String[] a) {
+            RuntimeException e = a.length > 0 ? new RuntimeException() : null;
+            throw e;
+        } }",
+    );
+    assert!(err.contains("throwing a value that may be null not supported yet"), "{err}");
+    let err = reject(
+        "class A { public static void main(String[] a) {
+            try { System.out.println(1); } finally { System.out.println(2); }
+        } }",
+    );
+    assert!(err.contains("`finally` not supported yet"), "{err}");
+    let err = reject(
+        "class P {
+            P(int x) { if (x < 0) throw new IllegalArgumentException(\"negative\"); }
+        }
+        class A { public static void main(String[] a) {
+            try { new P(-1); } catch (IllegalArgumentException e) { System.out.println(\"caught\"); }
+        } }",
+    );
+    assert!(err.contains("constructors that throw an exception that is caught not supported yet"), "{err}");
+}

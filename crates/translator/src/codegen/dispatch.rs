@@ -213,6 +213,10 @@ impl<'a> Gen<'a> {
         if matches!(value.kind, ExprKind::Null) {
             return Code::atom("None");
         }
+        // A new object becomes a value of the target's enum directly.
+        if let ExprKind::New { ctor: Some(ctor), args, .. } = &value.kind {
+            return self.new_object_as(*ctor, args, Some(t));
+        }
         let from = self.enum_of(value);
         if from == Some(t) {
             return self.expr(value);

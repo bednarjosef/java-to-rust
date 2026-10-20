@@ -18,6 +18,7 @@
 mod arrays;
 mod borrowing;
 mod boxing;
+mod exceptions;
 pub mod hierarchy;
 mod indexing;
 mod moves;
@@ -115,6 +116,12 @@ pub struct Facts {
     /// The class that declares each field visible in each class: (class, field) to class, by
     /// qualified name.
     pub field_owners: HashMap<(String, String), String>,
+    /// The methods and constructors that return `Result<_, Throwable>`: some caller observes an
+    /// exception that may escape them (see `exceptions`).
+    pub throwing: HashSet<usize>,
+    /// The `try` statements, by address, whose `catch` clauses catch an exception that their body
+    /// may throw. The others run their body as a plain block.
+    pub live_tries: HashSet<usize>,
 }
 
 impl Facts {
@@ -145,6 +152,10 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     facts.field_level = hierarchy::field_level(class, &reach.reach, &facts.immutable, &facts.fields_structs);
     facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
     facts.flows = hierarchy::flows(class, &facts.field_level);
+    // An exception is converted to `Throwable` when it is thrown, so it is never a plain value.
+    if let Some(throwable) = class.type_index("java.lang.Throwable") {
+        facts.owned.retain(|c| class.type_index(c).is_none_or(|t| !class.hierarchy.is_subtype(t, throwable)));
+    }
     let borrowing = borrowing::borrowing(class, &facts, &reach);
     facts.mutating = borrowing.mutating;
     facts.self_methods = borrowing.methods;
@@ -162,6 +173,7 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     arrays::analyze(class, &mut facts);
     indexing::analyze(class, &mut facts);
     moves::analyze(class, &mut facts);
+    exceptions::analyze(class, &mut facts)?;
     Ok(facts)
 }
 

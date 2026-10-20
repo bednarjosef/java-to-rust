@@ -79,6 +79,7 @@ impl<'t> Lowering<'t> {
             return Ok(None);
         }
         let Some(symbol) = call.symbol() else { return unsupported(call, "this `super` call") };
+        self.check_standard_member(call, &symbol)?;
         let args: Vec<Expr> = call.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let args = self.packed_args(call, &symbol, args)?;
         let resolved = self.method_index(&symbol);

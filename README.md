@@ -124,6 +124,22 @@ are the `int` code-point overloads of the other `Character` tests (`isLetter(int
 The design of the object model, and what is still to come, is in
 [docs/object-model.md](docs/object-model.md).
 
+Exceptions are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching and
+multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
+`super(message)`, `super(message, cause)`, fields, and overrides of `getMessage` and `toString`)
+and the standard ones (`Exception`, `RuntimeException`, `IllegalArgumentException`,
+`IllegalStateException`, `UnsupportedOperationException` and the rest of
+`crates/translator/java/Standard.java`, written in Java and given to the program by the
+translator), with `getMessage`, `getCause`, `toString`, `printStackTrace` (without stack frames)
+and `getClass().getName()`. A method returns `Result<T, Throwable>` only when some caller catches
+what it may throw, `?` passes it on, and every other method keeps its plain signature: an exception
+that nothing catches ends the program where it is thrown, with `Exception in thread "main" ...` on
+standard error and exit code 1. A `try` is a labeled block that evaluates to a `Result`, and its
+catch clauses are a `match`. Rejected for now, by name: `finally`, try-with-resources, catching a
+failure of the runtime (a division by zero, an index out of bounds, a malformed number, a null
+dereference), a constructor or a `toString` that throws something a caller catches, and throwing
+a value that may be null. The design is in [docs/exceptions.md](docs/exceptions.md).
+
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
 every expression and the declaration every name and call refers to. `lower.rs` maps that tree onto

@@ -245,7 +245,7 @@ fn mentions_stmt(stmt: &Stmt, name: &str) -> bool {
 /// Whether `stmt` always leaves the block it is in.
 fn exits(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Return(..) | Stmt::Break | Stmt::Continue => true,
+        Stmt::Return(..) | Stmt::Break | Stmt::Continue | Stmt::Throw(_) => true,
         Stmt::Block(stmts) => stmts.last().is_some_and(exits),
         _ => false,
     }

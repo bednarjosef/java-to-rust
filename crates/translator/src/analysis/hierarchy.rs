@@ -149,6 +149,26 @@ pub fn flows(class: &Class, field_level: &HashSet<usize>) -> Vec<HashSet<usize>>
             }
         }
     }
+    // Every exception may be thrown, which makes it a `Throwable`, and a `catch` clause makes the
+    // `Throwable`s under the classes it names values of those classes.
+    if let Some(throwable) = class.type_index("java.lang.Throwable") {
+        for t in (0..n).filter(|&t| t != throwable && h.is_subtype(t, throwable)) {
+            edges.insert((t, throwable));
+        }
+        for m in &class.methods {
+            for s in &m.body {
+                visit_stmt(s, &mut |_| {}, &mut |s| {
+                    if let Stmt::Try { catches, .. } = s {
+                        for catch in catches {
+                            for &t in catch.types.iter().chain(&class.class_index(catch.ty)) {
+                                edges.insert((throwable, t));
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
     let index = |ty: Type| match ty {
         Type::Class(name) | Type::Enum(name) => class.type_index(name),
         _ => None,
@@ -207,6 +227,14 @@ pub fn flows(class: &Class, field_level: &HashSet<usize>) -> Vec<HashSet<usize>>
 
 /// How values of class type `t` are represented.
 pub fn rep(class: &Class, facts: &Facts, t: usize) -> Rep {
+    // A thrown value is a `Throwable`, which `catch` clauses match by class; a standard class
+    // that several classes extend is one too, rather than an enum of its own.
+    if let Some(throwable) = class.type_index("java.lang.Throwable")
+        && (t == throwable
+            || (crate::lower::is_standard(&class.types[t].name) && variants(class, facts, t).len() > 1))
+    {
+        return Rep::Enum(throwable);
+    }
     if class.hierarchy.is_concrete(t) && !class.hierarchy.has_subtypes(t) {
         return Rep::Object(t);
     }

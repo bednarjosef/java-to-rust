@@ -23,6 +23,9 @@ pub(super) enum Kind<'a> {
     Value { machine: bool, ty: Type },
     /// A labeled statement that is not a loop: a labeled Rust block, left only by its label.
     Block,
+    /// The body of a `try`, a labeled Rust block that only a failure leaves by its label: a jump
+    /// out of it to a loop must name the loop.
+    Try,
 }
 
 impl Kind<'_> {
@@ -31,7 +34,7 @@ impl Kind<'_> {
         match self {
             Kind::Loop(_) => true,
             Kind::Switch { machine } | Kind::Value { machine, .. } => machine,
-            Kind::Block => false,
+            Kind::Block | Kind::Try => false,
         }
     }
 }
@@ -57,6 +60,7 @@ fn leaves(body: &[Stmt]) -> bool {
                 | Stmt::BreakLabel(_)
                 | Stmt::ContinueLabel(_)
                 | Stmt::Yield(_)
+                | Stmt::Throw(_)
         )
     )
 }
@@ -77,6 +81,11 @@ fn breaks_out(stmt: &Stmt) -> bool {
         Stmt::Block(stmts) => stmts.iter().any(breaks_out),
         Stmt::If { then, otherwise, .. } => breaks_out(then) || otherwise.as_deref().is_some_and(breaks_out),
         Stmt::Labeled { body, .. } => !is_breakable(body) && breaks_out(body),
+        Stmt::Try { body, catches, finally } => {
+            body.iter().any(breaks_out)
+                || catches.iter().any(|c| c.body.iter().any(breaks_out))
+                || finally.iter().flatten().any(breaks_out)
+        }
         _ => false,
     }
 }

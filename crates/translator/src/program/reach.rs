@@ -115,7 +115,13 @@ pub fn untranslated(class: &str) -> Option<&'static str> {
 /// Whether reachability stops at the class with qualified name `class`: the runtime provides it,
 /// or it is not translated.
 pub fn outside(class: &str) -> bool {
-    RUNTIME_CLASSES.contains(&class) || untranslated(class).is_some()
+    provided(class) || untranslated(class).is_some()
+}
+
+/// Whether the translator provides the class with qualified name `class`: one of the runtime's
+/// classes, or a standard exception class (see `lower::exceptions`).
+pub fn provided(class: &str) -> bool {
+    RUNTIME_CLASSES.contains(&class) || crate::lower::is_standard(class)
 }
 
 /// The node kinds of class declarations, and the symbol kinds of classes.

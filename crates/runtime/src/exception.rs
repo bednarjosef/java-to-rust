@@ -43,6 +43,11 @@ pub fn uncaught<T>(e: impl fmt::Display) -> T {
     die(e)
 }
 
+/// `throw e` where nothing catches what is thrown: the program ends as `uncaught` describes.
+pub fn throw_uncaught(e: impl fmt::Display) -> ! {
+    die(e)
+}
+
 pub(crate) fn die(e: impl fmt::Display) -> ! {
     crate::flush();
     eprintln!("Exception in thread \"main\" {e}");

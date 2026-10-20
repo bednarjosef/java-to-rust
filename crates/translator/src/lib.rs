@@ -18,5 +18,5 @@ pub use program::{Program, ProgramError, survey_program, translate_program};
 pub fn translate(java: &str) -> Result<String, Error> {
     let class = lower::lower(&javac::tree(java)?)?;
     let facts = analysis::analyze(&class)?;
-    Ok(codegen::generate(&class, &facts))
+    codegen::generate(&class, &facts)
 }
