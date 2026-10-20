@@ -440,7 +440,9 @@ fn equals_on_null_evaluates_its_argument_first() {
     );
     assert_contains(
         &rust,
-        &["let receiver_ = n.as_deref(); let other_ = noisy(\"y\"); java::non_null(receiver_) == other_"],
+        &[
+            "match (n.as_deref(), noisy(\"y\")) { (receiver_, other_) => java::non_null(receiver_) == other_ }",
+        ],
     );
 }
 

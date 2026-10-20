@@ -38,14 +38,6 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
 - `NullOnlyClass.java`: a class that is only used as the type of a null local (`Named n = null;`,
   never constructed). Java prints `true`; rustc fails with E0425 "cannot find type
   `NullOnlyClassNamed` in this scope" because the class is not emitted.
-- `SwitchOnEnum.java`: `switch (op)` on an enum with `case ADD:` labels. Java prints `sub`; the
-  translator rejects it with "a switch on this type not supported yet" (switches on `int`,
-  `char`, `String` and `ordinal()` translate).
-- `StringArrayElementEqualsLoopVar.java`: `seen[k].equals(w)` in a loop over a `String[]` with
-  `w` the for-each variable, where `seen` is `new String[3]` and `k < distinct` with `distinct` a
-  mutable local. Java prints `distinct 0`; rustc fails with E0716 "temporary value dropped while
-  borrowed" at the `equals` (the `as_deref` borrow of the element outlives its temporary). With a
-  literal argument, or a literal bound, it translates.
 - `StringArrayFieldInitializer.java`: `String[] items = new String[2];` as a field initializer of
   a class. Java prints `pen null 1`; rustc fails with E0308 "mismatched types" (the generated
   `filled(2, None)` gives `Option`s where `String` is expected). The same array assigned in a

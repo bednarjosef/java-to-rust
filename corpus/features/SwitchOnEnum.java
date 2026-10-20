@@ -1,3 +1,4 @@
+// `switch (op)` on an enum with `case ADD:` labels and no default.
 public class SwitchOnEnum {
     enum Op { ADD, SUB }
     public static void main(String[] args) {

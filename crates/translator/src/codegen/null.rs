@@ -151,7 +151,8 @@ impl<'a> Gen<'a> {
     }
 
     /// `a.equals(b)` where one of the strings may be null: a null receiver throws, and a null
-    /// argument is simply not equal.
+    /// argument is simply not equal. The operands are bound by a `match`, which keeps a
+    /// temporary they borrow (an array element read by `java::at`) alive to the end of the test.
     pub(super) fn equals_optional(&mut self, args: &'a [Expr]) -> Code {
         // Java evaluates the argument before the call throws on a null receiver.
         if self.nullable(&args[0]) && has_effects(&args[1]) {
@@ -162,13 +163,13 @@ impl<'a> Gen<'a> {
             } else {
                 (self.value(&args[1], Type::String).text, format!("{non_null}(receiver_) == other_"))
             };
-            return Code::atom(format!("{{ let receiver_ = {receiver}; let other_ = {other}; {test} }}"));
+            return Code::atom(format!("match ({receiver}, {other}) {{ (receiver_, other_) => {test} }}"));
         }
         let receiver = if self.nullable(&args[0]) { self.deref(&args[0]) } else { self.str_value(&args[0]) };
         if self.nullable(&args[1]) {
             let option = self.option_ref(&args[1]);
             let text =
-                format!("({{ let receiver_ = {receiver}; {option}.is_some_and(|o| o == receiver_) }})");
+                format!("(match {receiver} {{ receiver_ => {option}.is_some_and(|o| o == receiver_) }})");
             return Code::atom(text);
         }
         let other = self.str_value(&args[1]);
