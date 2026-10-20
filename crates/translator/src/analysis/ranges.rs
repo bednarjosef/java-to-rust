@@ -16,7 +16,7 @@
 
 use super::Facts;
 use crate::ast::*;
-use crate::check::binary_type;
+use crate::types::binary_type;
 use std::collections::{HashMap, HashSet};
 
 pub fn analyze(class: &Class, facts: &mut Facts) {

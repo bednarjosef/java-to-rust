@@ -75,9 +75,10 @@ A first end-to-end pipeline for a small subset: one class of static methods with
 a few `Math` methods and `String.length`/`equals`. Anything else is rejected with an error that
 names the construct and its position.
 
-The pieces: [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) parses the source
-(`crates/translator/src/parse.rs`), the checker gives every expression its Java type and resolves
-overloads (`check.rs`), the analyses prove facts about the program (`analysis.rs`), and the
+The pieces: javac compiles the source (parse and attribute only) through a small Java program,
+`crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
+every expression and the declaration every name and call refers to. `lower.rs` maps that tree onto
+the supported subset (`ast.rs`), the analyses prove facts about the program (`analysis.rs`), and the
 generator writes Rust (`codegen.rs`) that uses the runtime crate (`crates/runtime`) for what Rust
 lacks: Java's double printing, integer division that throws, and `Math.max`/`min` on NaN.
 
@@ -92,7 +93,8 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
 - Strings that are only ever ASCII use `len()` for `length()`; string parameters that are never
   assigned are borrowed as `&str`.
 
-Translation never runs the program; it only reads the source.
+Translation never runs the program; it only compiles it. Starting javac costs about half a
+second per file; building the translator needs `javac` (JDK 21 or newer) on PATH.
 
 ```
 cargo run -p java-to-rust -- Program.java                 # print the Rust translation

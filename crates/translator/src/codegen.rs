@@ -624,7 +624,7 @@ impl<'a> Gen<'a> {
             BinOp::Shl => "<<=",
             _ => ">>=",
         };
-        let result = crate::check::binary_type(op, ty, value.ty).expect("checked");
+        let result = crate::types::binary_type(op, ty, value.ty).expect("checked");
         let simple = match op {
             // Double arithmetic has no traps, and the result is already a double.
             _ if ty == Type::Double => {
@@ -633,7 +633,7 @@ impl<'a> Gen<'a> {
             BinOp::Add | BinOp::Sub | BinOp::Mul => result == ty && self.no_overflow(id),
             BinOp::Div | BinOp::Rem => result == ty && self.safe_division(id, value),
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
-                ty == Type::Boolean || (ty.is_integral() && crate::check::promote(ty, value.ty) == ty)
+                ty == Type::Boolean || (ty.is_integral() && crate::types::promote(ty, value.ty) == ty)
             }
             // Shifting by a constant in range cannot overflow.
             BinOp::Shl | BinOp::Shr => ty.is_integral() && in_shift_range(value, ty),
@@ -821,7 +821,7 @@ impl<'a> Gen<'a> {
         // Comparisons promote their operands; other operators work in the result type, except
         // that a shift distance keeps its own type.
         let operand_type = if op.is_comparison() && l.ty.is_numeric() {
-            crate::check::promote(l.ty, r.ty)
+            crate::types::promote(l.ty, r.ty)
         } else if op.is_comparison() {
             l.ty
         } else {
