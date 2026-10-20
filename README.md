@@ -124,6 +124,12 @@ C's `printf` gives `0.1`); `%t` and `%a` are rejected in a constant format. A fo
 keeps its Java type (`java::Arg::Long(n)`), so a mismatch throws
 `IllegalFormatConversionException` as in Java.
 
+An enum is a `Copy` Rust `enum` with a variant per constant. Its fields hold one value per
+constant, given by its field initializers and constructor with constant arguments, so each field
+is an accessor that matches on `self` (named `mass_field` when the enum has a method `mass`); a
+field that is not final is accepted as long as only the constructor sets it. An enum's own
+`toString` is its `Display`, while `name()` stays the constant's name.
+
 The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b` is
 `java::rem(a, b)`. The first analyses decide where plain Rust means the same:
 

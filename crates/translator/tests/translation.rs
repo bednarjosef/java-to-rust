@@ -1312,19 +1312,49 @@ fn an_enum_field_is_an_accessor_that_matches_on_self() {
 }
 
 #[test]
-fn an_enum_with_a_field_that_is_not_final_is_rejected() {
+fn an_enum_field_assigned_outside_its_constructor_is_rejected() {
     let error = java_to_rust::translate(
         "public class A {
             enum Planet {
                 MERCURY(3.0);
                 private double mass;
                 Planet(double mass) { this.mass = mass; }
+                void grow() { mass += 1; }
             }
-            public static void main(String[] args) { }
+            public static void main(String[] args) { Planet.MERCURY.grow(); }
         }",
     )
-    .expect_err("a mutable enum field is rejected");
-    assert!(error.to_string().contains("enum fields that are not final"), "{error}");
+    .expect_err("an enum field that changes is rejected");
+    assert!(
+        error.to_string().contains("assigning an enum field outside its constructor not supported yet"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_enum_field_with_a_method_of_its_name_gets_another_accessor() {
+    let rust = translate(
+        "public class A {
+            enum Planet {
+                MERCURY(3.0), VENUS(4.0);
+                private double mass;
+                private int rings = 0;
+                Planet(double mass) { this.mass = mass; }
+                double mass() { return mass; }
+                public String toString() { return \"planet \" + name(); }
+            }
+            public static void main(String[] args) { System.out.println(Planet.VENUS.mass() + \" \" + Planet.MERCURY); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn mass_field(self) -> f64 {",
+            "fn mass(self) -> f64 {\n        self.mass_field()\n    }",
+            "fn rings(self) -> i32 {",
+            "f.write_str(&Self::to_string(*self))",
+        ],
+    );
 }
 
 #[test]

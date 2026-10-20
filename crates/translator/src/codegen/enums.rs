@@ -1,7 +1,8 @@
 //! Code generation for enums. An enum is a Rust `enum` with one variant per constant, which is a
 //! `Copy` value. Each field is an accessor method that matches on `self` and returns the value the
 //! constant has (lowering computed it, see `lower/enums.rs`). Instance methods take `self` by value,
-//! and `Display` prints the name, as Java's default `toString` does.
+//! and `Display` prints the name, as Java's default `toString` does, or what the enum's own
+//! `toString` gives.
 
 use super::*;
 
@@ -44,8 +45,31 @@ impl<'a> Gen<'a> {
 
     /// The value of an enum's field, read from `self`: `planet.mass()`.
     pub(super) fn enum_field(&mut self, object: &'a Expr, name: &str) -> Code {
+        let Type::Enum(enum_name) = object.ty else { unreachable!("an enum field of an enum") };
+        let class = self.class.types.iter().position(|t| t.name == enum_name).expect("a declared enum");
+        let accessor = self.accessor(class, name);
         let obj = self.object(object);
-        Code::atom(format!("{obj}.{}()", snake_case(name)))
+        Code::atom(format!("{obj}.{accessor}()"))
+    }
+
+    /// The name of the accessor of field `name` of enum `class`: the field's name, unless a method
+    /// of the enum has it (`double mass() { return mass; }`).
+    fn accessor(&self, class: usize, name: &str) -> String {
+        let accessor = snake_case(name);
+        let taken = (0..self.class.methods.len())
+            .any(|i| self.class.methods[i].class == class && self.fn_names[i] == accessor);
+        if taken { format!("{accessor}_field") } else { accessor }
+    }
+
+    /// The method of enum `class` that is its own `toString`, if it declares one.
+    fn enum_to_string(&self, class: usize) -> Option<usize> {
+        self.class.methods.iter().position(|m| {
+            m.class == class
+                && m.name == "toString"
+                && m.params.is_empty()
+                && !m.is_static
+                && m.ret == Type::String
+        })
     }
 
     /// The `enum` and its `impl` for an enum class: the variants, an accessor for each field,
@@ -70,7 +94,8 @@ impl<'a> Gen<'a> {
         for (f, field) in decl.fields.iter().enumerate() {
             let ty = self.ty_name(field.ty);
             self.gap();
-            self.line(&format!("fn {}(self) -> {ty} {{", snake_case(&field.name)));
+            let accessor = self.accessor(index, &field.name);
+            self.line(&format!("fn {accessor}(self) -> {ty} {{"));
             self.indent += 1;
             self.line("match self {");
             self.indent += 1;
@@ -127,7 +152,12 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
         self.indent += 1;
-        self.line("write!(f, \"{}\", self.enum_name())");
+        match self.enum_to_string(index) {
+            // The path names the enum's own method: on `&self`, `ToString::to_string` would be
+            // found first, which is this `Display`.
+            Some(m) => self.line(&format!("f.write_str(&Self::{}(*self))", self.fn_names[m])),
+            None => self.line("write!(f, \"{}\", self.enum_name())"),
+        }
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
