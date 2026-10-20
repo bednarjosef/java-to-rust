@@ -3,7 +3,9 @@
 
 use std::fmt;
 
+mod java_arrays;
 mod natives;
+pub use java_arrays::*;
 pub use natives::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -437,6 +439,8 @@ pub enum Builtin {
     ArraysSort,
     /// `Arrays.copyOf(a, n)`.
     ArraysCopyOf,
+    /// The other `java.util.Arrays` methods and `clone()`, see `ArraysOp`.
+    Arrays(ArraysOp),
     /// `s.charAt(i)`; the receiver is the first argument.
     StringCharAt,
     /// `Character.isDigit(char)` and the other `Character` methods on a `char`.

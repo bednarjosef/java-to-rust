@@ -5,12 +5,6 @@ Minimal programs that the translator gets wrong, though the feature is in the su
 pass. Java's output is what `java File.java` prints. When a failure is fixed, move its file into
 `corpus/features/` with the fixed behaviour.
 
-- `ArraysEqualsInts.java`: `Arrays.equals` on an `int[]`. Java prints `true`; the translator
-  rejects it with "`Arrays.equals` on this array not supported yet". Arrays given to
-  `java.util.Arrays` are part of the supported subset.
-- `ArraysSortStrings.java`: `Arrays.sort` on a `String[]`. Java prints `[apple, fig, pear] 3`; the
-  translator rejects it with "`Arrays.sort` on this array not supported yet". (`Arrays.sort` on an
-  `int[]` translates.)
 - `CompoundThroughNullableField.java`: `h.box.v += 10` where `h.box` is a field that may be null,
   in a class whose fields are assigned after construction. Java prints `true`; rustc fails with
   E0716 "temporary value dropped while borrowed".

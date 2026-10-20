@@ -46,7 +46,7 @@ impl<'t> Lowering<'t> {
             ("fill", 2) if printable => Builtin::ArraysFill,
             ("sort", 1) if elem.is_numeric() => Builtin::ArraysSort,
             ("copyOf", 2) if primitive && args[1].ty == Type::Int => Builtin::ArraysCopyOf,
-            _ => return unsupported(node, &format!("`Arrays.{name}` on this array")),
+            _ => return self.java_arrays_call(node, name, args),
         };
         Ok(ExprKind::Builtin(builtin, args))
     }
