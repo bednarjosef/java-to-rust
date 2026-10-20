@@ -56,9 +56,11 @@ pub(super) fn needs_clone(ty: Type) -> bool {
     matches!(ty, Type::String | Type::Array(_) | Type::Class(_))
 }
 
-/// The Rust name of a class: its qualified Java name with the dots replaced.
+/// The Rust name of a class: its name in its package with the dots replaced, after the path of its
+/// module when that is not the module being written (see `modules`).
 pub(super) fn struct_name(name: &str) -> String {
-    name.replace('.', "_")
+    let (path, local) = modules::split(name);
+    path + &local.replace('.', "_")
 }
 
 /// The Rust type of an object of a class. An immutable class's objects never change, so they need
@@ -73,7 +75,8 @@ pub(super) fn class_type(name: &str, immutable: bool) -> String {
 
 /// The thread-local cell that holds a static field.
 pub(super) fn cell_name(class: &str, field: &str) -> String {
-    format!("{}_{}", struct_name(class), snake_case(field)).to_uppercase()
+    let (path, local) = modules::split(class);
+    path + &format!("{}_{}", local.replace('.', "_"), snake_case(field)).to_uppercase()
 }
 
 /// The value a field has before its constructor runs: Java's default, or a placeholder that the
@@ -404,11 +407,11 @@ impl<'a> Gen<'a> {
         let decl = &class.types[index];
         let name = struct_name(&decl.name);
         self.gap();
-        self.line(&format!("struct {name} {{"));
+        self.line(&format!("{}struct {name} {{", self.vis()));
         self.indent += 1;
         for f in &decl.fields {
             let ty = self.ty_name(f.ty);
-            self.line(&format!("{}: {ty},", snake_case(&f.name)));
+            self.line(&format!("{}{}: {ty},", self.vis(), snake_case(&f.name)));
         }
         self.indent -= 1;
         self.line("}");
@@ -463,14 +466,13 @@ impl<'a> Gen<'a> {
 
     /// The thread-local cells of all static fields, initialized lazily on first use.
     pub(super) fn statics(&mut self) {
-        let class = self.class;
-        if class.types.iter().all(|t| t.statics.is_empty()) {
+        if self.module_types().all(|t| t.statics.is_empty()) {
             return;
         }
         self.gap();
         self.line("thread_local! {");
         self.indent += 1;
-        for decl in &class.types {
+        for decl in self.module_types() {
             for f in &decl.statics {
                 let init = match &f.init {
                     Some(e) => self.value(e, f.ty).text,
@@ -478,7 +480,7 @@ impl<'a> Gen<'a> {
                 };
                 let cell = cell_name(&decl.name, &f.name);
                 let ty = self.ty_name(f.ty);
-                self.line(&format!("static {cell}: RefCell<{ty}> = RefCell::new({init});"));
+                self.line(&format!("{}static {cell}: RefCell<{ty}> = RefCell::new({init});", self.vis()));
             }
         }
         self.indent -= 1;

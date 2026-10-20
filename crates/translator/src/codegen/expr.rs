@@ -283,13 +283,13 @@ impl<'a> Gen<'a> {
             ExprKind::Call { args, resolved, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
                 let args = self.call_args(index, args).join(", ");
-                Code::atom(format!("{}({args})", self.fn_names[index]))
+                Code::atom(format!("{}({args})", self.static_fn(index)))
             }
             ExprKind::MethodCall { receiver, args, resolved, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
                 if self.class.methods[index].is_static {
                     let args = self.call_args(index, args).join(", ");
-                    Code::atom(format!("{}({args})", self.fn_names[index]))
+                    Code::atom(format!("{}({args})", self.static_fn(index)))
                 } else {
                     self.method_call(receiver, index, args)
                 }

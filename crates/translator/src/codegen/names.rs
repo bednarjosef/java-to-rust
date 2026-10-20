@@ -43,13 +43,28 @@ pub(super) fn unique(base: String, used: &mut HashSet<String>) -> String {
     name
 }
 
+/// `unique` among the names of two scopes, and taken in both.
+fn unique_in(base: String, first: &mut HashSet<String>, second: &mut HashSet<String>) -> String {
+    let mut name = base.clone();
+    let mut n = 2;
+    while first.contains(&name) || second.contains(&name) {
+        name = format!("{base}_{n}");
+        n += 1;
+    }
+    first.insert(name.clone());
+    second.insert(name.clone());
+    name
+}
+
 /// Rust names for the class's methods. Overloads get their parameter types appended, since Rust
 /// has no overloading: `print(int)` and `print(double)` become `print_i32` and `print_f64`.
 pub(super) fn method_names(class: &Class) -> Vec<String> {
     // Each class has its own `impl`, so names only need to be unique within their class.
     let mut used = vec![HashSet::new(); class.types.len()];
+    let mut module_used: HashMap<&str, HashSet<String>> = HashMap::new();
     for m in class.methods.iter().filter(|m| m.is_main) {
         used[m.class].insert("main".to_string());
+        module_used.entry(class.types[m.class].package.as_str()).or_default().insert("main".to_string());
     }
     class
         .methods
@@ -66,7 +81,15 @@ pub(super) fn method_names(class: &Class) -> Vec<String> {
                     base = format!("{base}_{}", name_part(p.ty));
                 }
             }
-            if m.is_ctor { base } else { unique(base, &mut used[m.class]) }
+            if m.is_ctor {
+                base
+            } else if m.is_static {
+                // Static methods are functions of their package's module, shared by its classes.
+                let module = module_used.entry(class.types[m.class].package.as_str()).or_default();
+                unique_in(base, &mut used[m.class], module)
+            } else {
+                unique(base, &mut used[m.class])
+            }
         })
         .collect()
 }

@@ -12,7 +12,9 @@ use std::cell::Cell;
 
 mod arrays;
 mod primitives;
+mod program;
 use arrays::{is_array_length, reads_name};
+pub use program::lower_program;
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
@@ -108,6 +110,10 @@ struct Lowering<'t> {
     types: Vec<TypeInfo<'t>>,
     /// Every method and constructor of every class, in the order of `Class::methods`.
     methods: Vec<MethodInfo<'t>>,
+    /// In a whole program, what is reachable from `main`: only that is lowered.
+    reach: Option<&'t crate::program::Reach>,
+    /// In a whole program, the class whose `main` is the entry point; in a file, every `main` is.
+    entry: Option<usize>,
 }
 
 impl<'t> Lowering<'t> {
@@ -134,7 +140,8 @@ impl<'t> Lowering<'t> {
             && is_static
             && ret == Type::Void
             && params.len() == 1
-            && param_type(params[0]) == "java.lang.String[]";
+            && param_type(params[0]) == "java.lang.String[]"
+            && self.entry.is_none_or(|entry| entry == info.owner);
         let args_param = is_main.then(|| params[0]);
         let params = if is_main {
             Vec::new()

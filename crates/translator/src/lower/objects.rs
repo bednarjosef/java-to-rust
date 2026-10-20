@@ -25,20 +25,27 @@ impl<'t> Lowering<'t> {
     /// Collects every class of the file, nested static classes after their outer class, and every
     /// method and constructor, so that a use can refer to any of them before it is lowered.
     pub(super) fn declare(decls: &[Node<'t>]) -> Result<Self, Error> {
-        let mut lowering = Lowering {
-            next_id: Cell::new(0),
-            current: Cell::new(0),
-            in_ctor: Cell::new(false),
-            types: Vec::new(),
-            methods: Vec::new(),
-        };
+        let mut lowering = Lowering::empty();
         for decl in decls {
             lowering.declare_type(*decl, None)?;
         }
         Ok(lowering)
     }
 
-    fn declare_type(&mut self, node: Node<'t>, outer: Option<&str>) -> Result<(), Error> {
+    pub(super) fn empty() -> Self {
+        Lowering {
+            next_id: Cell::new(0),
+            current: Cell::new(0),
+            in_ctor: Cell::new(false),
+            types: Vec::new(),
+            methods: Vec::new(),
+            reach: None,
+            entry: None,
+        }
+    }
+
+    /// Declares a class, named `outer.Name` inside `outer` (a class or a package).
+    pub(super) fn declare_type(&mut self, node: Node<'t>, outer: Option<&str>) -> Result<(), Error> {
         if node.kind() != "CLASS" {
             return unsupported(node, &kind_words(node.kind()));
         }
@@ -55,7 +62,8 @@ impl<'t> Lowering<'t> {
         };
         let index = self.types.len();
         self.types.push(TypeInfo { name: name.clone(), node });
-        for member in node.list("members") {
+        let members: Vec<Node<'t>> = node.list("members").filter(|m| self.keeps(*m, &name)).collect();
+        for member in members {
             match member.kind() {
                 "METHOD" => self.methods.push(MethodInfo {
                     owner: index,
@@ -110,11 +118,12 @@ impl<'t> Lowering<'t> {
         self.current.set(index);
         let node = self.types[index].node;
         let (mut fields, mut statics) = (Vec::new(), Vec::new());
-        for member in node.list("members").filter(|m| m.kind() == "VARIABLE") {
+        let name = &self.types[index].name;
+        for member in node.list("members").filter(|m| m.kind() == "VARIABLE" && self.keeps(*m, name)) {
             let field = self.field(member)?;
             if member.has_flag("STATIC") { statics.push(field) } else { fields.push(field) }
         }
-        Ok(TypeDecl { name: self.types[index].name.clone(), fields, statics })
+        Ok(TypeDecl { name: self.types[index].name.clone(), package: String::new(), fields, statics })
     }
 
     fn field(&self, node: Node<'t>) -> Result<Field, Error> {

@@ -24,6 +24,10 @@ import javax.tools.*;
  */
 public class JavaTree {
     public static void main(String[] args) throws Exception {
+        if (args.length > 0 && args[0].equals("--program")) {
+            program(Arrays.asList(args).subList(1, args.length));
+            return;
+        }
         String name = args.length > 0 ? args[0] : "Main.java";
         String source = new String(System.in.readAllBytes(), StandardCharsets.UTF_8);
         JavaFileObject file = new SimpleJavaFileObject(URI.create("string:///" + name), JavaFileObject.Kind.SOURCE) {
@@ -58,6 +62,76 @@ public class JavaTree {
         StringBuilder out = new StringBuilder();
         dumper.node(new TreePath(unit), out);
         out.append('\n');
+        PrintStream stdout = new PrintStream(new FileOutputStream(FileDescriptor.out), false, StandardCharsets.UTF_8);
+        stdout.print(out);
+        stdout.flush();
+    }
+
+    /**
+     * Whole-program mode: {@code java JavaTree --program [--sourcepath PATH] FILE...} compiles all
+     * the files in one javac run, loading the other classes they use from the source path, and
+     * prints {@code {"units":[{"file":...,"tree":...},...]}}: the files given, in order, then every
+     * unit javac loaded from the source path and attributed. Compile errors are printed as
+     * {@code FILE:LINE:COLUMN: message}.
+     */
+    private static void program(List<String> args) throws Exception {
+        List<String> options = new ArrayList<>(List.of("-proc:none", "-Xlint:none", "-XDshould-stop.at=FLOW"));
+        List<File> files = new ArrayList<>();
+        for (int i = 0; i < args.size(); i++) {
+            if (args.get(i).equals("--sourcepath") && i + 1 < args.size()) {
+                options.add("-sourcepath");
+                options.add(args.get(++i));
+            } else {
+                files.add(new File(args.get(i)));
+            }
+        }
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
+        StandardJavaFileManager fileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8);
+        JavacTask task = (JavacTask) compiler.getTask(null, fileManager, diagnostics, options, null,
+                fileManager.getJavaFileObjectsFromFiles(files));
+        // Units that javac loads from the source path are attributed too, but only reported here.
+        Set<CompilationUnitTree> analyzed = new LinkedHashSet<>();
+        task.addTaskListener(new TaskListener() {
+            @Override
+            public void finished(TaskEvent e) {
+                if (e.getKind() == TaskEvent.Kind.ANALYZE) {
+                    analyzed.add(e.getCompilationUnit());
+                }
+            }
+        });
+        List<CompilationUnitTree> units = new ArrayList<>();
+        task.parse().forEach(units::add);
+        task.analyze();
+        boolean failed = false;
+        for (Diagnostic<? extends JavaFileObject> d : diagnostics.getDiagnostics()) {
+            if (d.getKind() == Diagnostic.Kind.ERROR) {
+                String file = d.getSource() == null ? "" : d.getSource().getName();
+                System.err.println(file + ":" + d.getLineNumber() + ":" + d.getColumnNumber() + ": " + d.getMessage(Locale.ROOT));
+                failed = true;
+            }
+        }
+        if (failed) {
+            System.exit(1);
+        }
+        for (CompilationUnitTree unit : analyzed) {
+            if (!units.contains(unit)) {
+                units.add(unit);
+            }
+        }
+        Trees trees = Trees.instance(task);
+        StringBuilder out = new StringBuilder("{\"units\":[");
+        for (CompilationUnitTree unit : units) {
+            if (unit != units.get(0)) {
+                out.append(',');
+            }
+            out.append("{\"file\":");
+            string(unit.getSourceFile().getName(), out);
+            out.append(",\"tree\":");
+            new JavaTree(trees, unit).node(new TreePath(unit), out);
+            out.append('}');
+        }
+        out.append("]}\n");
         PrintStream stdout = new PrintStream(new FileOutputStream(FileDescriptor.out), false, StandardCharsets.UTF_8);
         stdout.print(out);
         stdout.flush();

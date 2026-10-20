@@ -23,6 +23,7 @@ use null::is_null_test;
 use primitives::*;
 
 mod arrays;
+mod modules;
 mod objects;
 mod owned;
 
@@ -31,6 +32,7 @@ use objects::*;
 
 pub fn generate(class: &Class, facts: &Facts) -> String {
     let live = live_types(class);
+    let modules = modules::enter(class);
     let mut g = Gen {
         class,
         facts,
@@ -51,6 +53,9 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         ret: Type::Void,
         uses_runtime: false,
     };
+    if modules.is_some() {
+        return g.program(&live);
+    }
     for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
         g.type_items(index);
     }
@@ -244,7 +249,7 @@ impl<'a> Gen<'a> {
         } else {
             format!(" -> {}", self.ty_name(m.ret))
         };
-        self.line(&format!("fn {}({}){ret} {{", self.fn_names[index], params.join(", ")));
+        self.line(&format!("{}fn {}({}){ret} {{", self.vis(), self.fn_names[index], params.join(", ")));
         self.indent += 1;
         if m.is_ctor {
             self.constructor(m);
