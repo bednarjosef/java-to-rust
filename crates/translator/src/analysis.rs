@@ -319,6 +319,23 @@ impl NonAscii {
             }
             ExprKind::Call { resolved: Some(callee), .. } => !self.returns.contains(callee),
             ExprKind::Conditional(_, a, b) => self.ascii(class, m, a) && self.ascii(class, m, b),
+            // Slicing, trimming, case mapping, repeating and replacing ASCII text gives ASCII.
+            ExprKind::Builtin(
+                Builtin::String(
+                    StringOp::Substring
+                    | StringOp::Trim
+                    | StringOp::Strip
+                    | StringOp::StripLeading
+                    | StringOp::StripTrailing
+                    | StringOp::ToUpperCase
+                    | StringOp::ToLowerCase
+                    | StringOp::Repeat
+                    | StringOp::Concat
+                    | StringOp::Replace
+                    | StringOp::Identity,
+                ),
+                args,
+            ) => args.iter().all(|a| self.ascii(class, m, a)),
             _ => false,
         }
     }
