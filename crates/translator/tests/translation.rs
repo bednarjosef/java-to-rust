@@ -141,3 +141,54 @@ fn string_building_appends_in_place() {
     );
     assert_contains(&rust, &["let mut s = String::new();", "s += &i.to_string();", "s += \",\";"]);
 }
+
+#[test]
+fn strings_that_are_never_null_stay_plain() {
+    let rust = translate(
+        "class A {
+            static String twice(String s) { return s + s; }
+            public static void main(String[] a) {
+                String s = \"ab\";
+                System.out.println(twice(s));
+            }
+        }",
+    );
+    assert_contains(&rust, &["fn twice(s: &str) -> String"]);
+    assert_lacks(&rust, &["Option"]);
+}
+
+#[test]
+fn strings_that_may_be_null_are_options() {
+    let rust = translate(
+        "class A {
+            static String find(int n) { return n > 2 ? \"big\" : null; }
+            public static void main(String[] a) {
+                String s = find(3);
+                System.out.println(s);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn find(n: i32) -> Option<String>",
+            "let s: Option<String> = find(3);",
+            "s.as_deref().unwrap_or(\"null\")",
+        ],
+    );
+}
+
+#[test]
+fn null_checks_test_the_option() {
+    let rust = translate(
+        "class A {
+            public static void main(String[] a) {
+                String s = null;
+                if (s == null) {
+                    System.out.println(\"none\");
+                }
+            }
+        }",
+    );
+    assert_contains(&rust, &["let s: Option<String> = None;", "if s.as_deref().is_none() {"]);
+}

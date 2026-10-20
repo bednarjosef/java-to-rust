@@ -167,7 +167,7 @@ impl<'t> Lowering<'t> {
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
             "char" | "float" | "byte" | "short" => unsupported(node, name),
-            "<nulltype>" => unsupported(node, "null"),
+            "<nulltype>" => Ok(Type::Null),
             _ if name.ends_with("[]") || name.ends_with("...") => unsupported(node, "arrays"),
             _ => unsupported(node, &format!("type `{name}`")),
         }
@@ -264,7 +264,7 @@ impl<'t> Lowering<'t> {
             "STRING_LITERAL" => ExprKind::Str(node.str("value").to_string()),
             "CHAR_LITERAL" => return unsupported(node, "char"),
             "FLOAT_LITERAL" => return unsupported(node, "float"),
-            "NULL_LITERAL" => return unsupported(node, "null"),
+            "NULL_LITERAL" => ExprKind::Null,
             "IDENTIFIER" => ExprKind::Var(self.local(node)?),
             // javac folds the minus sign into integer literals only; fold it into doubles too.
             "UNARY_MINUS" if node.child("expression")?.kind() == "DOUBLE_LITERAL" => {
@@ -373,7 +373,7 @@ impl<'t> Lowering<'t> {
             ("java.lang.Math", "sqrt") => Builtin::MathSqrt,
             ("java.lang.Math", "pow") => Builtin::MathPow,
             ("java.lang.String", "length" | "equals") => {
-                if symbol.name == "equals" && args[0].ty != Type::String {
+                if symbol.name == "equals" && !matches!(args[0].ty, Type::String | Type::Null) {
                     return unsupported(node, "equals with an argument that is not a String");
                 }
                 let receiver = receiver.expect("an instance method has a receiver");

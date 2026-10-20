@@ -5,15 +5,18 @@
 //!   which divisions can neither divide by zero nor overflow; those use Rust's plain operators
 //!   instead of `wrapping_add` and `java::div` (see `ranges`).
 //! - Strings that are always ASCII have a `len()` equal to Java's UTF-16 `length()`.
-//! - String parameters that a method never assigns are borrowed as `&str`.
+//! - String parameters that a method never assigns and that are never null are borrowed as `&str`.
 //!
 //! The facts form a table keyed by expression id. An expression without a fact gets the faithful
 //! default translation, so a weaker analysis only makes the output plainer, never wrong.
 
+mod nullness;
 mod ranges;
 
 use crate::ast::*;
 use std::collections::HashSet;
+
+pub use nullness::{maybe_null, nullable_var};
 
 #[derive(Default)]
 pub struct Facts {
@@ -27,11 +30,16 @@ pub struct Facts {
     pub ascii_length: HashSet<ExprId>,
     /// String parameters, as (method, parameter) indexes, that are never assigned.
     pub borrowed_params: HashSet<(usize, usize)>,
+    /// String variables and parameters, as (method, name), that can hold null.
+    pub nullable_vars: HashSet<(usize, String)>,
+    /// Methods whose string return value can be null.
+    pub nullable_returns: HashSet<usize>,
 }
 
 pub fn analyze(class: &Class) -> Facts {
     let mut facts = Facts::default();
     ranges::analyze(class, &mut facts);
+    nullness::analyze(class, &mut facts);
     borrowed_params(class, &mut facts);
     ascii_strings(class, &mut facts);
     facts
@@ -40,7 +48,8 @@ pub fn analyze(class: &Class) -> Facts {
 fn borrowed_params(class: &Class, facts: &mut Facts) {
     for (m, method) in class.methods.iter().enumerate() {
         for (i, p) in method.params.iter().enumerate() {
-            if p.ty == Type::String && !assigns_any(&method.body, &p.name) {
+            if p.ty == Type::String && !assigns_any(&method.body, &p.name) && !nullable_var(facts, m, &p.name)
+            {
                 facts.borrowed_params.insert((m, i));
             }
         }

@@ -8,6 +8,9 @@ use crate::analysis::Facts;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
+mod null;
+use null::is_null_test;
+
 pub fn generate(class: &Class, facts: &Facts) -> String {
     let mut g = Gen {
         class,
@@ -323,11 +326,23 @@ impl<'a> Gen<'a> {
             .iter()
             .map(|p| {
                 let mutable = if assigns_any(&m.body, &p.name) { "mut " } else { "" };
-                let ty = if self.borrowed.contains(&p.name) { "&str" } else { rust_type(p.ty) };
+                let ty = if self.optional_var(index, p.ty, &p.name) {
+                    "Option<String>"
+                } else if self.borrowed.contains(&p.name) {
+                    "&str"
+                } else {
+                    rust_type(p.ty)
+                };
                 format!("{mutable}{}: {ty}", self.local(&p.name))
             })
             .collect();
-        let ret = if m.ret == Type::Void { String::new() } else { format!(" -> {}", rust_type(m.ret)) };
+        let ret = if m.ret == Type::Void {
+            String::new()
+        } else if self.optional_return() {
+            " -> Option<String>".to_string()
+        } else {
+            format!(" -> {}", rust_type(m.ret))
+        };
         self.line(&format!("fn {}({}){ret} {{", self.fn_names[index], params.join(", ")));
         self.indent += 1;
         self.stmts(&m.body, true);
@@ -457,6 +472,9 @@ impl<'a> Gen<'a> {
     /// The value of a `return`: a string variable is moved out rather than copied, since the
     /// method ends.
     fn returned(&mut self, value: &'a Expr) -> Code {
+        if self.optional_return() {
+            return self.optional(value);
+        }
         if let ExprKind::Var(name) = &value.kind
             && value.ty == Type::String
             && !self.borrowed.contains(name)
@@ -534,6 +552,9 @@ impl<'a> Gen<'a> {
     }
 
     fn local_decl(&mut self, ty: Type, name: &str, init: Option<&'a Expr>, mutable: bool) {
+        if self.optional_var(self.method, ty, name) {
+            return self.optional_local(name, init, mutable);
+        }
         let mutable = if mutable { "mut " } else { "" };
         let rust = self.local(name);
         match init {
@@ -561,7 +582,10 @@ impl<'a> Gen<'a> {
         match &cond.kind {
             ExprKind::Unary(UnOp::Not, inner) => return self.condition(inner),
             ExprKind::Binary(op, l, r)
-                if op.is_comparison() && l.ty != Type::Double && r.ty != Type::Double =>
+                if op.is_comparison()
+                    && l.ty != Type::Double
+                    && r.ty != Type::Double
+                    && !is_null_test(*op, l, r) =>
             {
                 let flipped = match op {
                     BinOp::Eq => BinOp::Ne,
@@ -608,7 +632,12 @@ impl<'a> Gen<'a> {
     ) -> String {
         let name = self.local(target);
         let Some(op) = op else {
-            return format!("{name} = {}", self.value(value, ty).text);
+            let value = if self.optional_var(self.method, ty, target) {
+                self.optional(value)
+            } else {
+                self.value(value, ty)
+            };
+            return format!("{name} = {}", value.text);
         };
         if ty == Type::String {
             return self.append(&name, target, value);
@@ -663,8 +692,14 @@ impl<'a> Gen<'a> {
 
     /// `s += value` on a string.
     fn append(&mut self, name: &str, target: &str, value: &'a Expr) -> String {
+        if self.optional_var(self.method, Type::String, target) {
+            return self.append_optional(name, value);
+        }
         if !mentions(value, target) {
-            if value.ty == Type::String && matches!(value.kind, ExprKind::Str(_) | ExprKind::Var(_)) {
+            if value.ty == Type::String
+                && matches!(value.kind, ExprKind::Str(_) | ExprKind::Var(_))
+                && !self.nullable(value)
+            {
                 return format!("{name} += {}", self.str_ref(value));
             }
             let mut parts = Vec::new();
@@ -759,11 +794,13 @@ impl<'a> Gen<'a> {
                     (UnOp::Not | UnOp::BitNot, _) => Code::new(format!("!{}", code.at(UNARY)), UNARY),
                 }
             }
+            ExprKind::Null => Code::atom("None"),
             ExprKind::Binary(BinOp::Add, ..) if e.ty == Type::String => {
                 let mut parts = Vec::new();
                 self.parts(e, &mut parts);
                 self.format("format!", parts)
             }
+            ExprKind::Binary(op, l, r) if is_null_test(*op, l, r) => self.null_test(*op, l, r),
             ExprKind::Binary(op, l, r) => {
                 let (l, r) = (self.operand(l), self.operand(r));
                 self.binary(*op, l, r, e.ty, e.id)
@@ -785,8 +822,11 @@ impl<'a> Gen<'a> {
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
                 let cond = self.condition(cond);
-                let a = self.value(a, e.ty);
-                let b = self.value(b, e.ty);
+                let (a, b) = if self.nullable(e) {
+                    (self.optional(a), self.optional(b))
+                } else {
+                    (self.value(a, e.ty), self.value(b, e.ty))
+                };
                 let mut code = Code::new(format!("if {cond} {{ {} }} else {{ {} }}", a.text, b.text), LOWEST);
                 code.untyped = a.untyped && b.untyped;
                 code
@@ -801,6 +841,8 @@ impl<'a> Gen<'a> {
                     .map(|(i, (a, p))| {
                         if self.facts.borrowed_params.contains(&(index, i)) {
                             self.str_ref(a)
+                        } else if self.optional_var(index, p.ty, &p.name) {
+                            self.optional(a).text
                         } else {
                             self.value(a, p.ty).text
                         }
@@ -948,20 +990,17 @@ impl<'a> Gen<'a> {
             // UTF-16 length and UTF-8 length agree on ASCII text.
             Builtin::StringLength if self.facts.ascii_length.contains(&id) => {
                 let s = match &args[0].kind {
+                    _ if self.nullable(&args[0]) => self.deref(&args[0]),
                     ExprKind::Str(_) | ExprKind::Var(_) => self.str_value(&args[0]),
                     _ => self.expr(&args[0]).at(ATOM),
                 };
                 Code::new(format!("{s}.len() as i32"), AS)
             }
             Builtin::StringLength => {
-                let s = self.str_ref(&args[0]);
+                let s = if self.nullable(&args[0]) { self.deref(&args[0]) } else { self.str_ref(&args[0]) };
                 Code::atom(format!("{}({})", self.runtime("string_length"), s))
             }
-            Builtin::StringEquals => {
-                let a = Code::atom(self.str_value(&args[0]));
-                let b = Code::atom(self.str_value(&args[1]));
-                infix("==", CMP, &a, &b)
-            }
+            Builtin::StringEquals => self.equals_optional(args),
         }
     }
 
@@ -1002,6 +1041,9 @@ impl<'a> Gen<'a> {
     }
 
     fn concat_parts(&mut self, e: &'a Expr, assigned: &HashSet<String>, out: &mut Vec<Part>) {
+        if let Some(part) = self.null_part(e, assigned) {
+            return out.push(part);
+        }
         match &e.kind {
             ExprKind::Binary(BinOp::Add, l, r) if e.ty == Type::String => {
                 self.concat_parts(l, assigned, out);
