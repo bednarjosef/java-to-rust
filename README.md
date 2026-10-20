@@ -134,15 +134,30 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   `new` into a local that only calls or prints it) is a plain value: its methods take `&self` or
   `&mut self`, and a call on it uses method syntax so that `p.set(p.x + 1)` borrows as Rust allows.
 
+Whole programs (`program.rs`) spread over files and packages translate too: javac compiles all
+of them in one run, with the source roots as its source path, and a reachability pass over its
+trees (`program/reach.rs`) starts at `main` and follows every resolved call, `new`, field access
+and type, so only the classes, methods, constructors and fields that `main` can reach are lowered
+and translated. Library roots (`--library`, meant for the JDK's own sources) are only on the
+source path: javac reads a file from them when the program uses one of its classes. Packages
+become nested modules in one output file (`com.example.util` is `mod com { pub(crate) mod example
+{ pub(crate) mod util { .. } } }`); a class of another package is named by its path from the crate
+root, such as `crate::com::example::util::Counter::new(..)`, and items in packages are
+`pub(crate)`. A program without packages is written like a single file.
+
 Translation never runs the program; it only compiles it. Starting javac costs about half a
-second per file; building the translator needs `javac` (JDK 21 or newer) on PATH.
+second per run; building the translator needs `javac` (JDK 21 or newer) on PATH.
 
 ```
 cargo run -p java-to-rust -- Program.java                 # print the Rust translation
 cargo run -p java-to-rust -- Program.java --crate out/    # write a Cargo project
+cargo run -p java-to-rust -- --main com.example.Main --source src/ [--library jdk-src/] [-o out.rs | --crate out/]
+cargo run -p java-to-rust -- --main Main A.java B.java    # a program given as files
 cargo test                                                # needs a JDK: runs corpus/ on both
 ```
 
 The corpus test runs every program in `corpus/` with `java`, translates and builds it with
 overflow checks on (so a wrong "cannot overflow" fact panics), and compares standard output and
-exit code. `crates/translator/tests/translation.rs` pins down what the output looks like.
+exit code. A multi-file program is a directory of `corpus/projects/` with a source root `src/`
+and a file `main` that names the main class; it runs on Java after `javac`.
+`crates/translator/tests/translation.rs` pins down what the output looks like.
