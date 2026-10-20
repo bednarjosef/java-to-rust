@@ -6,10 +6,12 @@
 //!   instead of `wrapping_add` and `java::div` (see `ranges`).
 //! - Strings that are always ASCII have a `len()` equal to Java's UTF-16 `length()`.
 //! - String parameters that a method never assigns are borrowed as `&str`.
+//! - Array locals that no other name can see are plain `Vec`s (see `arrays`).
 //!
 //! The facts form a table keyed by expression id. An expression without a fact gets the faithful
 //! default translation, so a weaker analysis only makes the output plainer, never wrong.
 
+mod arrays;
 mod ranges;
 
 use crate::ast::*;
@@ -27,6 +29,10 @@ pub struct Facts {
     pub ascii_length: HashSet<ExprId>,
     /// String parameters, as (method, parameter) indexes, that are never assigned.
     pub borrowed_params: HashSet<(usize, usize)>,
+    /// Array locals, as (method, name), that no other name can see: plain `Vec`s.
+    pub plain_arrays: HashSet<(usize, String)>,
+    /// `a[i]` expressions that a counting loop over the plain array `a` proves in bounds.
+    pub in_bounds: HashSet<ExprId>,
 }
 
 pub fn analyze(class: &Class) -> Facts {
@@ -34,6 +40,7 @@ pub fn analyze(class: &Class) -> Facts {
     ranges::analyze(class, &mut facts);
     borrowed_params(class, &mut facts);
     ascii_strings(class, &mut facts);
+    arrays::analyze(class, &mut facts);
     facts
 }
 
