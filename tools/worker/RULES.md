@@ -19,7 +19,10 @@ their own branches at the same time; the lead merges the branches.
   `src/codegen.rs` write plain Rust where it means the same as Java. Without a fact, codegen
   writes the faithful translation. A weaker analysis only makes output plainer, never wrong.
   `codegen.rs` holds the `Gen` state and methods; `codegen/` splits the rest: `code.rs` (Rust
-  text with precedence, type names), `names.rs`, `stmt.rs`, `expr.rs`, `strings.rs`.
+  text with precedence, type names), `names.rs`, `stmt.rs`, `expr.rs`, `strings.rs`, `null.rs`,
+  `arrays.rs`, `objects.rs` and `owned.rs` (classes, fields, constructors, statics),
+  `primitives.rs` (byte, short, char, float). `lower/` and `analysis/` have files per feature
+  the same way. `analysis/ranges.rs` is the range analysis behind plain arithmetic.
 - `crates/runtime` (`use java_runtime as java;` in generated code) holds what Rust lacks.
 - Tests: `crates/translator/tests/corpus.rs` runs every program in `corpus/` on Java and as
   translated Rust and requires identical stdout and exit code; Java is the expected output, so
@@ -39,7 +42,10 @@ their own branches at the same time; the lead merges the branches.
   shows no aliasing can be observed.
 - Shared types are already in `ast.rs`: `Type::Array`, `Type::Class`, `Type::Null`
   (`Type::array(t)`, `Type::class(name)`, `is_reference()`), and assignment targets are a
-  `Place` enum (only `Place::Var` so far). Extend these; do not replace them.
+  `Place` enum (`Var`, `Index`, `Field`, `Static`). Extend these; do not replace them.
+- Other features change at the same time as yours (the lead is reworking how arrays and
+  objects are represented). Keep your changes to existing functions small and local, so that
+  they merge.
 
 ## Working with the others
 - Put new code in new files where you can: `src/lower/<feature>.rs`, `src/codegen/<feature>.rs`
