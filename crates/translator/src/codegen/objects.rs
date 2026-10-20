@@ -3,8 +3,8 @@
 //! that no `RefCell` borrow outlives the expression that made it. Static fields live in
 //! thread-local cells, which are initialized on first use.
 
-use super::*;
 use super::statics::is_cell;
+use super::*;
 
 /// What an assignment, `++` or `--` does to a field or static field.
 pub(super) enum Update<'a> {
@@ -16,16 +16,9 @@ pub(super) enum Update<'a> {
 /// A field or static field that an update reads and writes.
 enum Slot {
     /// A field of an object; `plain` when the object is an immutable class's `this` in its constructor.
-    Field {
-        obj: String,
-        field: String,
-        plain: bool,
-    },
+    Field { obj: String, field: String, plain: bool },
     /// A static field: a `Cell` when `plain`, else a `RefCell`.
-    Static {
-        cell: String,
-        plain: bool,
-    },
+    Static { cell: String, plain: bool },
 }
 
 impl Slot {

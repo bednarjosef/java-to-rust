@@ -22,7 +22,14 @@ fn flag(class: &str) -> String {
 pub(super) fn is_cell(ty: Type) -> bool {
     matches!(
         ty,
-        Type::Int | Type::Long | Type::Double | Type::Byte | Type::Short | Type::Char | Type::Float | Type::Boolean
+        Type::Int
+            | Type::Long
+            | Type::Double
+            | Type::Byte
+            | Type::Short
+            | Type::Char
+            | Type::Float
+            | Type::Boolean
     )
 }
 

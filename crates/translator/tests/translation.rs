@@ -847,7 +847,12 @@ fn primitive_statics_are_cells_and_other_statics_stay_ref_cells() {
     );
     assert_contains(
         &rust,
-        &["static A_COUNT: Cell<i32> = const { Cell::new(0) };", "A_COUNT.get()", "A_COUNT.set(value);", "static A_NAME: RefCell<"],
+        &[
+            "static A_COUNT: Cell<i32> = const { Cell::new(0) };",
+            "A_COUNT.get()",
+            "A_COUNT.set(value);",
+            "static A_NAME: RefCell<",
+        ],
     );
     assert_lacks(&rust, &["A_COUNT.with_borrow"]);
 }
