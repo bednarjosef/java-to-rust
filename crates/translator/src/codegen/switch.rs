@@ -450,9 +450,7 @@ impl<'a> Gen<'a> {
             let Some((Stmt::Yield(value), init)) = case.body.split_last() else { unreachable!() };
             self.line(&format!("{} => {{", self.pattern(case, chars)));
             self.indent += 1;
-            self.stmts(init, false);
-            let code = self.value(value, ty);
-            self.line(&code.text);
+            self.yielded(init, value, ty);
             self.indent -= 1;
             self.line("}");
         }

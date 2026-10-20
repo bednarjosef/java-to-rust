@@ -61,6 +61,29 @@ impl<'a> Gen<'a> {
         self.guarded = outer;
     }
 
+    /// The statements of a case of a switch expression, then its value. `T x = e; yield x;`, with
+    /// `T` the switch's type and a primitive, is the value `e`, as `tail_local` makes it for a
+    /// function.
+    pub(super) fn yielded(&mut self, init: &'a [Stmt], value: &'a Expr, ty: Type) {
+        if let Some((last @ Stmt::Local { ty: local, name, init: Some(folded), .. }, rest)) =
+            init.split_last()
+            && *local == ty
+            && !ty.is_reference()
+            && matches!(&value.kind, ExprKind::Var(v) if v == name)
+        {
+            self.stmts(rest, false);
+            let conflicts = self.stmt_conflicts(last);
+            let outer = std::mem::replace(&mut self.guarded, conflicts);
+            let code = self.value(folded, ty);
+            self.line(&code.text);
+            self.guarded = outer;
+            return;
+        }
+        self.stmts(init, false);
+        let code = self.value(value, ty);
+        self.line(&code.text);
+    }
+
     /// The body of an `if` or a loop. In tail position (`tail`), a branch that is the value of
     /// the function is written as its tail expression.
     pub(super) fn nested_in(&mut self, stmt: &'a Stmt, tail: bool) {

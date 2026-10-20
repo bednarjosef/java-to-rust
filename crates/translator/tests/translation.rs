@@ -1517,7 +1517,12 @@ fn arrow_switch_expression_is_a_match_that_yields_a_value() {
     );
     assert_contains(
         &rust,
-        &["fn code(s: i16) -> i32 {\n    {\n", "match s {", "100 => {", "-4 => {", "let t = s as i32 * 3;"],
+        &[
+            "fn code(s: i16) -> i32 {\n    {\n",
+            "match s {",
+            "100 => {",
+            "-4 => {\n                s as i32 * 3\n",
+        ],
     );
     assert_lacks(&rust, &["'sw"]);
 }
