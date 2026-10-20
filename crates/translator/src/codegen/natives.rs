@@ -180,7 +180,7 @@ impl<'a> Gen<'a> {
     }
 
     /// An array as a `&[T]` for reading: a plain array borrowed, a shared one through its cell.
-    fn slice_of(&mut self, e: &'a Expr) -> String {
+    pub(super) fn slice_of(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             ExprKind::Var(name) if self.plain(name).is_some() => self.borrowed_arg(e, false),
             _ => format!("&{}.borrow()", self.array_receiver(e)),

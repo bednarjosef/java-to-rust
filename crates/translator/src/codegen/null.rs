@@ -83,7 +83,7 @@ impl<'a> Gen<'a> {
     /// for an object.
     fn option_source(&self, name: &str, ty: Type) -> String {
         let rust = self.local(name);
-        if matches!(ty, Type::Class(_)) {
+        if matches!(ty, Type::Class(_) | Type::StringBuilder) {
             return format!("{rust}.as_ref()");
         }
         // An `Option<i32>` is `Copy` and matches as it is; a faithful box is `as_deref`'d.
@@ -95,6 +95,7 @@ impl<'a> Gen<'a> {
     pub(super) fn option_ref(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             _ if matches!(e.ty, Type::Boxed(_)) => self.expr(e).text,
+            _ if e.ty == Type::StringBuilder => self.builder_option(e),
             ExprKind::Null => "None::<&str>".to_string(),
             ExprKind::Var(name) => self.option_source(name, e.ty),
             ExprKind::Cast(_, inner) => self.option_ref(inner),
@@ -193,6 +194,15 @@ impl<'a> Gen<'a> {
         }
         if matches!(e.ty, Type::Boxed(_)) {
             return Some(Part::Arg(Code::atom(self.boxed_text(e, e.ty.unboxed()))));
+        }
+        if e.ty == Type::StringBuilder {
+            let option = self.builder_option(e);
+            let text = format!("{}({option})", self.runtime("or_null"));
+            return Some(Part::Arg(Code::atom(if self.lazy_text {
+                text
+            } else {
+                format!("{text}.to_string()")
+            })));
         }
         if matches!(e.ty, Type::Class(_)) {
             // `java::or_null` shows `null`, or the object as it shows when it is not null.

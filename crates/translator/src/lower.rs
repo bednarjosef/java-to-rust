@@ -6,6 +6,7 @@
 mod enums;
 mod objects;
 mod statics;
+mod strings;
 
 use crate::ast::*;
 use objects::{MethodInfo, TypeInfo};
@@ -210,6 +211,7 @@ impl<'t> Lowering<'t> {
             "boolean" => Ok(Type::Boolean),
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
+            "java.lang.StringBuilder" => Ok(Type::StringBuilder),
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
@@ -373,7 +375,10 @@ impl<'t> Lowering<'t> {
                 Box::new(self.expr(node.child("falseExpression")?)?),
             ),
             "METHOD_INVOCATION" => self.call(node)?,
-            "NEW_CLASS" => self.new_object(node)?,
+            "NEW_CLASS" => match self.new_text(node)? {
+                Some(kind) => kind,
+                None => self.new_object(node)?,
+            },
             "NEW_ARRAY" => self.new_array(node)?,
             "ARRAY_ACCESS" => {
                 let (array, index) = self.index(node)?;
@@ -405,7 +410,11 @@ impl<'t> Lowering<'t> {
                 ExprKind::Binary(op, Box::new(left), Box::new(right))
             }
         };
-        let ty = self.ty(node, node.java_type())?;
+        // `printf` returns its stream, which the translation has no type for; it is a statement.
+        let ty = match kind {
+            ExprKind::Builtin(Builtin::Print, _) if node.kind() == "METHOD_INVOCATION" => Type::Void,
+            _ => self.ty(node, node.java_type())?,
+        };
         let id = self.next_id.get();
         self.next_id.set(id + 1);
         Ok(Expr { kind, pos: node.pos(), ty, id })
@@ -459,9 +468,15 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.enum_call(node, &symbol, receiver, &mut args)? {
             return Ok(kind);
         }
+        if let Some(builtin) = self.bits_call(&symbol, &args) {
+            return Ok(ExprKind::Builtin(builtin, args));
+        }
         let builtin = match (symbol.owner, symbol.name) {
             ("java.io.PrintStream", "println") if system_out => Builtin::Println,
             ("java.io.PrintStream", "print") if system_out => Builtin::Print,
+            ("java.io.PrintStream", "printf" | "format") if system_out => {
+                return self.printf_call(node, args);
+            }
             ("java.lang.System", "exit") => Builtin::Exit,
             ("java.lang.Math", "abs") => Builtin::MathAbs,
             ("java.lang.Math", "max") => Builtin::MathMax,
@@ -469,10 +484,9 @@ impl<'t> Lowering<'t> {
             ("java.lang.Math", "sqrt") => Builtin::MathSqrt,
             ("java.lang.Math", "pow") => Builtin::MathPow,
             ("java.util.Arrays", name) => return self.arrays_call(node, name, args),
-            ("java.lang.String", "length" | "equals") => {
-                if symbol.name == "equals" && !matches!(args[0].ty, Type::String | Type::Null) {
-                    return unsupported(node, "equals with an argument that is not a String");
-                }
+            ("java.lang.String", "length" | "equals")
+                if symbol.name == "length" || matches!(args[0].ty, Type::String | Type::Null) =>
+            {
                 let receiver = receiver.expect("an instance method has a receiver");
                 args.insert(0, self.expr(receiver)?);
                 if symbol.name == "length" { Builtin::StringLength } else { Builtin::StringEquals }
@@ -481,6 +495,10 @@ impl<'t> Lowering<'t> {
                 let receiver = receiver.expect("an instance method has a receiver");
                 args.insert(0, self.expr(receiver)?);
                 Builtin::StringCharAt
+            }
+            ("java.lang.String", _) => return self.string_call(node, &symbol, receiver, args),
+            ("java.lang.StringBuilder" | "java.lang.AbstractStringBuilder" | "java.lang.CharSequence", _) => {
+                return self.builder_call(node, &symbol, receiver, args);
             }
             (owner, name) if boxing::boxed_type(owner).is_some() && boxing::is_boxed_method(name) => {
                 self.boxed_call(node, &symbol, &mut args, receiver)?

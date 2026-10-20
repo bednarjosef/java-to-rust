@@ -231,7 +231,9 @@ impl<'a> Gen<'a> {
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
                     // An object narrowed by a null check is a reference to the `Rc`.
-                    Type::Class(_) if self.borrowed.contains(name) => Code::atom(format!("{rust}.clone()")),
+                    Type::Class(_) | Type::StringBuilder if self.borrowed.contains(name) => {
+                        Code::atom(format!("{rust}.clone()"))
+                    }
                     ty if self.clones(ty) && !self.facts.moves.contains(&e.id) => {
                         Code::atom(format!("{rust}.clone()"))
                     }
@@ -270,6 +272,9 @@ impl<'a> Gen<'a> {
             ExprKind::Binary(op, l, r) if is_null_test(*op, l, r) => self.null_test(*op, l, r),
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(_)) => {
                 self.identity(*op, l, r)
+            }
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if l.ty == Type::StringBuilder => {
+                self.builder_identity(*op, l, r)
             }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
                 if self.faithful_box(l.ty) && r.ty == l.ty =>
@@ -525,6 +530,15 @@ impl<'a> Gen<'a> {
             | Builtin::CharToUpperCase
             | Builtin::CharToLowerCase => self.char_builtin(builtin, args, id),
             Builtin::Native(native) => self.native(native, args, ty),
+            Builtin::String(op) => self.string_builtin(op, args),
+            // A chained call gives `&Self`; as a value, the builder is another handle to it.
+            Builtin::Builder(op) if op.chains() => {
+                let code = self.builder_call(op, args);
+                Code::atom(format!("{}.clone()", code.text))
+            }
+            Builtin::Builder(op) => self.builder_call(op, args),
+            Builtin::Format => self.format_builtin(args),
+            Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args),
         }
     }
 }

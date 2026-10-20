@@ -74,9 +74,14 @@ type (`byte`, `short`, `char`, `int`, `long`, `float`, `double`, `boolean`) and 
 arithmetic, `if`, `while`, `do`, `for`, `break`, `continue`, the conditional operator,
 overloading, static and instance methods, fields with initializers, static fields, constructors
 (including `this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math`
-methods, `String.length`/`equals`/`charAt`, the `Character` tests and case conversions on a
-`char`, the `MIN_VALUE`/`MAX_VALUE` constants of the wrapper classes, `null` for `String`, and a
-user `toString` in `println` and string concatenation, object-typed fields and `null` objects.
+methods, the `Character` tests and case conversions on a `char`, the `MIN_VALUE`/`MAX_VALUE`
+constants of the wrapper classes, `null` for `String`, and a user `toString` in `println` and
+string concatenation, object-typed fields and `null` objects. Strings have the common methods of
+`String` (searching, slicing, case, trimming, replacing, comparing, `split`/`replaceAll`/`matches`,
+`join`, `repeat`, `hashCode`, `toCharArray`, `valueOf`, `new String(char[])`), `StringBuilder`,
+`String.format`/`formatted`/`printf` and the bit and radix methods of `Integer` and `Long`
+(`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), all hand-written
+in the runtime with Java's exact results.
 Inheritance, interfaces and generics are rejected with an error that names the construct and its
 position.
 
@@ -97,6 +102,25 @@ keeps the same bits, so they become `b = b.wrapping_add(x as i8)` and `b = b.wra
 Strings are Rust strings, so a lone surrogate `char` turns into `?` when it is printed or
 concatenated (as Java's UTF-8 output prints it), even where Java would later pair it up. The
 `Character` methods are exact on Latin-1 and use Rust's Unicode tables beyond it.
+
+The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`, `charAt` agree on
+`"né😀e"`), and throw what Java throws (`StringIndexOutOfBoundsException` with Java's message).
+`toUpperCase` and `toLowerCase` are the root-locale mappings. A `StringBuilder` is a
+`java::StringBuilder`, a shared handle to UTF-16 units like an array: every variable, field and
+parameter that holds the builder sees it change, `reverse` keeps surrogate pairs in order, and a
+chain is Rust's chain (`sb.append_str("a").append(1)`), the handle cloned only where the builder
+is used as a value. `split`, `replaceAll`, `replaceFirst` and `matches` run a small backtracking
+regular expression engine with a literal fast path: literals and escapes, `.`, `\d \s \w` and their
+negations, sets and ranges, groups, alternation, `^ $` and greedy and lazy quantifiers. What it
+lacks (lookaround, flags, backreferences, `\b`, `\p{..}`, possessive quantifiers, set
+intersections) is rejected when the pattern is a constant and throws
+`UnsupportedOperationException` when it is not; a malformed pattern throws
+`PatternSyntaxException` as in Java. `String.format` is Java's `Formatter` in the US locale for
+`%b %h %s %c %d %o %x %e %f %g %n %%` with argument indexes, flags, width and precision, and rounds
+floating point half up from the shortest decimal as Java does (`%.1f` of `0.15` is `0.2`, where
+C's `printf` gives `0.1`); `%t` and `%a` are rejected in a constant format. A format argument
+keeps its Java type (`java::Arg::Long(n)`), so a mismatch throws
+`IllegalFormatConversionException` as in Java.
 
 The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b` is
 `java::rem(a, b)`. The first analyses decide where plain Rust means the same:

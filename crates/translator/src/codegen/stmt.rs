@@ -340,6 +340,11 @@ impl<'a> Gen<'a> {
                 // A field updated through a borrow of its own is a block.
                 self.line(&if text.starts_with("{ let ") { text } else { format!("{text};") });
             }
+            // A chained builder call is made for its effect on the builder.
+            ExprKind::Builtin(Builtin::Builder(op), args) if op.chains() => {
+                let code = self.builder_call(*op, args);
+                self.line(&format!("{};", code.text));
+            }
             _ => {
                 let code = self.expr(e);
                 self.line(&format!("{};", code.text));

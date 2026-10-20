@@ -19,6 +19,7 @@ mod statics;
 mod stmt;
 mod strings;
 mod switch;
+mod text;
 
 use code::*;
 use expr::Operand;

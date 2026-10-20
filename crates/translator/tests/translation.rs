@@ -1838,3 +1838,96 @@ fn the_survey_follows_calls_to_the_classes_whose_objects_are_created() {
     );
     assert_lacks(&report, &["Square:", "Tag"]);
 }
+
+#[test]
+fn string_builders_chain_and_are_shared_handles() {
+    let rust = translate(
+        "class A {
+            static void fill(StringBuilder sb) { sb.append(1).append(',').append(\"x\"); }
+            public static void main(String[] a) {
+                StringBuilder sb = new StringBuilder();
+                fill(sb);
+                StringBuilder same = sb.append(2);
+                System.out.println(sb.length() + \" \" + same);
+            }
+        }",
+    );
+    // A chain is Rust's chain of `&Self`; only where the builder is a value is the handle cloned.
+    assert_contains(
+        &rust,
+        &[
+            "fn fill(sb: java::StringBuilder)",
+            "sb.append(1).append_char(',' as u16).append_str(\"x\");",
+            "let sb = java::StringBuilder::new();",
+            "fill(sb.clone());",
+            "let same = sb.append(2).clone();",
+        ],
+    );
+}
+
+#[test]
+fn string_methods_call_the_runtime_with_borrowed_text() {
+    let rust = translate(
+        "class A {
+            static int count(String text, String part) {
+                return text.isEmpty() || !text.contains(part) ? 0 : text.split(part).length;
+            }
+            public static void main(String[] a) {
+                String s = \"a,b\";
+                System.out.println(s.substring(1) + s.indexOf(',') + count(s, \",\") + s.toUpperCase());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "text.is_empty() || !text.contains(part)",
+            "java::split(text, part, 0)",
+            "java::substring_from(&s, 1)",
+            "java::index_of_char(&s, ',' as i32, 0)",
+            "java::uppercase(&s)",
+        ],
+    );
+}
+
+#[test]
+fn format_arguments_keep_their_java_types() {
+    let rust = translate(
+        "class A { public static void main(String[] a) {
+            long big = 1L << 40;
+            System.out.printf(\"%d %s %.2f%n\", big, \"x\", 1.5);
+        } }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::print!(\"{}\", java::format(\"%d %s %.2f%n\", &[java::Arg::Long(big), java::Arg::Str(\"x\"), \
+           java::Arg::Double(1.5)]));",
+        ],
+    );
+}
+
+#[test]
+fn unsupported_regular_expressions_and_formats_are_rejected() {
+    let cases = [
+        (
+            "\"axb\".split(\"(?=x)\").length",
+            "lookaround, flags and named groups in the regular expression \"(?=x)\" not supported yet",
+        ),
+        (
+            "\"ab\".replaceAll(\"\\\\bb\", \"c\").length()",
+            "the escape \\b in the regular expression \"\\bb\" not supported yet",
+        ),
+        ("String.format(\"%tY\", 5L).length()", "dates in a format (%t) not supported yet: \"%tY\""),
+    ];
+    for (expr, message) in cases {
+        let java =
+            format!("class A {{ public static void main(String[] a) {{ System.out.println({expr}); }} }}");
+        let err = java_to_rust::translate(&java).expect_err("must be rejected");
+        assert!(err.to_string().contains(message), "{err}");
+    }
+    // A malformed pattern is not rejected: it throws when the program runs, as in Java.
+    translate(
+        "class A { public static void main(String[] a) { System.out.println(\"a(b\".split(\"(\").length); } }",
+    );
+}
