@@ -62,10 +62,7 @@ const NAMES: &[(&[&str], Charset)] = &[
         Charset::Latin1,
     ),
     (&["UTF-16", "UTF_16", "utf16", "unicode", "UnicodeBig"], Charset::Utf16),
-    (
-        &["UTF-16BE", "UTF_16BE", "UnicodeBigUnmarked", "X-UTF-16BE", "ISO-10646-UCS-2"],
-        Charset::Utf16Be,
-    ),
+    (&["UTF-16BE", "UTF_16BE", "UnicodeBigUnmarked", "X-UTF-16BE", "ISO-10646-UCS-2"], Charset::Utf16Be),
     (&["UTF-16LE", "UTF_16LE", "UnicodeLittleUnmarked", "X-UTF-16LE"], Charset::Utf16Le),
 ];
 
@@ -109,7 +106,9 @@ impl Charset {
         let bytes: Vec<u8> = bytes.iter().map(|&b| b as u8).collect();
         match self {
             Charset::Utf8 => decode_utf8(&bytes),
-            Charset::UsAscii => bytes.iter().map(|&b| if b < 0x80 { b as char } else { REPLACEMENT }).collect(),
+            Charset::UsAscii => {
+                bytes.iter().map(|&b| if b < 0x80 { b as char } else { REPLACEMENT }).collect()
+            }
             Charset::Latin1 => bytes.iter().map(|&b| b as char).collect(),
             Charset::Utf16 => decode_utf16(&bytes, true, true),
             Charset::Utf16Be => decode_utf16(&bytes, true, false),
@@ -181,7 +180,8 @@ fn decode_utf8(src: &[u8]) -> String {
                     sp -= 3;
                     sp += malformed3_length(src, sp);
                 } else {
-                    let code = (u32::from(b1 & 0x0F) << 12) | (u32::from(b2 & 0x3F) << 6) | u32::from(b3 & 0x3F);
+                    let code =
+                        (u32::from(b1 & 0x0F) << 12) | (u32::from(b2 & 0x3F) << 6) | u32::from(b3 & 0x3F);
                     out.push(if (0xD800..=0xDFFF).contains(&code) { REPLACEMENT } else { scalar(code) });
                 }
                 continue;

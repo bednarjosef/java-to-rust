@@ -29,13 +29,19 @@ impl<'t> Lowering<'t> {
                     && symbol.owner == "java.nio.charset.Charset"
                     && symbol.name == "forName" =>
             {
-                let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+                let args: Vec<Expr> =
+                    node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
                 if args.len() != 1 {
                     return unsupported(node, "this overload of `Charset.forName`");
                 }
                 ExprKind::Builtin(Builtin::Charset(CharsetOp::ForName), args)
             }
-            _ => return unsupported(node, "this `Charset`, other than a `StandardCharsets` constant or `Charset.forName`"),
+            _ => {
+                return unsupported(
+                    node,
+                    "this `Charset`, other than a `StandardCharsets` constant or `Charset.forName`",
+                );
+            }
         };
         let id = self.next_id.get();
         self.next_id.set(id + 1);

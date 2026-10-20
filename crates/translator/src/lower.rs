@@ -533,7 +533,13 @@ impl<'t> Lowering<'t> {
                 Builtin::String(StringOp::GetBytes)
             }
             ("java.lang.String", _) => return self.string_call(node, &symbol, receiver, args),
-            ("java.lang.StringBuilder" | "java.lang.StringBuffer" | "java.lang.AbstractStringBuilder" | "java.lang.CharSequence", _) => {
+            (
+                "java.lang.StringBuilder"
+                | "java.lang.StringBuffer"
+                | "java.lang.AbstractStringBuilder"
+                | "java.lang.CharSequence",
+                _,
+            ) => {
                 return self.builder_call(node, &symbol, receiver, args);
             }
             (owner, name) if unsigned::is_unsigned_method(owner, name) => {
