@@ -37,6 +37,7 @@ impl<'t> Lowering<'t> {
             next_id: Cell::new(0),
             current: Cell::new(0),
             in_ctor: Cell::new(false),
+            ret: Cell::new(Type::Void),
             types: Vec::new(),
             methods: Vec::new(),
             reach: None,
@@ -49,11 +50,11 @@ impl<'t> Lowering<'t> {
         if node.kind() != "CLASS" && node.kind() != "ENUM" {
             return unsupported(node, &kind_words(node.kind()));
         }
-        if node.get("extendsClause").is_some()
-            || node.list("implementsClause").next().is_some()
-            || node.list("typeParameters").next().is_some()
-        {
-            return unsupported(node, "generic classes, inheritance and interfaces");
+        if node.list("typeParameters").next().is_some() {
+            return unsupported(node, "generic classes");
+        }
+        if node.list("implementsClause").next().is_some() {
+            return unsupported(node, "interfaces");
         }
         let simple = node.str("simpleName");
         let name = match outer {
@@ -96,12 +97,29 @@ impl<'t> Lowering<'t> {
         })
     }
 
-    /// Whether a class declares `public String toString()`, the text that printing and
-    /// concatenation use for its objects.
+    /// Whether every object of class type `class` has a `public String toString()` of the program,
+    /// declared by its class or inherited, the text that printing and concatenation use for it.
     pub(super) fn has_to_string(&self, class: &str) -> bool {
-        self.methods.iter().any(|m| {
-            self.types[m.owner].name == class && m.name == "toString" && m.sig == "()java.lang.String"
-        })
+        let Some(t) = self.type_index(class) else { return false };
+        let declares = |c: usize, with_body: bool| {
+            self.methods.iter().any(|m| {
+                m.owner == c
+                    && m.name == "toString"
+                    && m.sig == "()java.lang.String"
+                    && (!with_body || m.node.get("body").is_some())
+            })
+        };
+        let inherits = |c: usize, with_body: bool| {
+            std::iter::successors(Some(c), |&a| self.superclass(a).ok().flatten())
+                .any(|a| declares(a, with_body))
+        };
+        let concrete =
+            |c: usize| self.types[c].node.kind() == "CLASS" && !self.types[c].node.has_flag("ABSTRACT");
+        let mut objects = (0..self.types.len()).filter(|&c| concrete(c) && self.is_subclass(c, t)).peekable();
+        if objects.peek().is_none() {
+            return inherits(t, false);
+        }
+        objects.all(|c| inherits(c, true))
     }
 
     /// Rejects printing or concatenating an object whose class has no `toString`: Java would print
@@ -126,12 +144,28 @@ impl<'t> Lowering<'t> {
             .filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m) && self.keeps(*m, name))
         {
             let field = self.field(member)?;
+            // A subclass's struct holds its superclass's fields as `base`.
+            if !member.has_flag("STATIC")
+                && field.name.eq_ignore_ascii_case("base")
+                && self.superclass(index)?.is_some()
+            {
+                return unsupported(member, "a field named `base` in a subclass");
+            }
             if member.has_flag("STATIC") { statics.push(field) } else { fields.push(field) }
         }
         // An enum's constants need its constructors, which `lower` lowers after this.
+        let kind = match node.kind() {
+            "ENUM" => TypeKind::Enum,
+            "INTERFACE" => TypeKind::Interface,
+            _ => TypeKind::Class,
+        };
         Ok(TypeDecl {
             name: self.types[index].name.clone(),
             package: String::new(),
+            kind,
+            is_abstract: kind == TypeKind::Interface || node.has_flag("ABSTRACT"),
+            extends: self.superclass(index)?,
+            implements: Vec::new(),
             fields,
             statics,
             enum_constants: None,
@@ -147,7 +181,7 @@ impl<'t> Lowering<'t> {
             let kind = self.constant_literal(node, ty, text)?;
             Some(self.synth(kind, node.pos(), ty))
         } else {
-            init.map(|i| self.expr(i)).transpose()?
+            init.map(|i| Ok::<_, Error>(self.convert(self.expr(i)?, ty))).transpose()?
         };
         Ok(Field { name: node.str("name").to_string(), ty, init, constant, pos: node.pos() })
     }
@@ -220,7 +254,9 @@ impl<'t> Lowering<'t> {
         };
         let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let args = self.packed_args(node, &symbol, args)?;
-        Ok(ExprKind::New { class, args, ctor: self.method_index(&symbol) })
+        let ctor = self.method_index(&symbol);
+        let args = self.convert_args(ctor, args)?;
+        Ok(ExprKind::New { class, args, ctor })
     }
 
     /// `this` of the class whose members are being lowered.

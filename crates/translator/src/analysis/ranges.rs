@@ -263,7 +263,7 @@ impl<'a> Analysis<'a> {
         let mut live = is_root.clone();
         let mut todo: Vec<usize> = (0..n).filter(|&m| is_root[m]).collect();
         while let Some(m) = todo.pop() {
-            for c in callees(&self.class.methods[m]) {
+            for c in callees(self.class, &self.class.methods[m]) {
                 if !live[c] {
                     live[c] = true;
                     todo.push(c);
@@ -282,8 +282,10 @@ impl<'a> Analysis<'a> {
         while let Some(m) = (0..n).find(|&m| dirty[m]) {
             dirty[m] = false;
             let returned = self.returns[m];
-            let params: Vec<(usize, Vec<Interval>)> =
-                callees(&self.class.methods[m]).into_iter().map(|c| (c, self.params[c].clone())).collect();
+            let params: Vec<(usize, Vec<Interval>)> = callees(self.class, &self.class.methods[m])
+                .into_iter()
+                .map(|c| (c, self.params[c].clone()))
+                .collect();
             self.method(m);
             for (c, before) in params {
                 if self.params[c] != before {
@@ -754,18 +756,27 @@ impl<'a> Analysis<'a> {
     }
 
     /// Records the argument values that reach `callee`, and returns its result range.
+    /// A call of a method runs any method of its override group, so the arguments reach all of
+    /// them and the result is any of theirs.
     fn call(&mut self, args: &[Expr], callee: usize, ty: Type, env: &mut Env) -> Interval {
         let values: Vec<Interval> = args.iter().map(|a| self.expr(a, env)).collect();
+        let group = self.class.hierarchy.group(callee);
         if self.update_summaries {
-            self.reached[callee] = true;
-            for (i, p) in self.class.methods[callee].params.iter().enumerate() {
-                if p.ty.is_integral() {
-                    let v = convert(values[i], args[i].ty, p.ty);
-                    self.params[callee][i] = self.params[callee][i].join(v);
+            for &g in &group {
+                self.reached[g] = true;
+                for (i, p) in self.class.methods[g].params.iter().enumerate() {
+                    if p.ty.is_integral() {
+                        let v = convert(values[i], args[i].ty, p.ty);
+                        self.params[g][i] = self.params[g][i].join(v);
+                    }
                 }
             }
         }
-        if ty.is_integral() { self.returns[callee] } else { Interval::full(Type::Long) }
+        if ty.is_integral() {
+            group.iter().fold(EMPTY, |r, &g| r.join(self.returns[g]))
+        } else {
+            Interval::full(Type::Long)
+        }
     }
 
     fn expr(&mut self, e: &Expr, env: &mut Env) -> Interval {
@@ -932,8 +943,11 @@ impl<'a> Analysis<'a> {
                 self.call(args, callee, ty, env)
             }
             ExprKind::New { args, ctor: Some(callee), .. }
-            | ExprKind::ThisCall { args, resolved: Some(callee) } => self.call(args, *callee, ty, env),
-            ExprKind::New { args, .. } | ExprKind::ThisCall { args, .. } => {
+            | ExprKind::ThisCall { args, resolved: Some(callee) }
+            | ExprKind::SuperInit { args, resolved: Some(callee) } => self.call(args, *callee, ty, env),
+            ExprKind::New { args, .. }
+            | ExprKind::ThisCall { args, .. }
+            | ExprKind::SuperInit { args, .. } => {
                 for a in args {
                     self.expr(a, env);
                 }
@@ -1243,24 +1257,26 @@ fn literals(method: &Method) -> Vec<i128> {
 }
 
 /// The methods that `method` calls.
-fn callees(method: &Method) -> Vec<usize> {
+fn callees(class: &Class, method: &Method) -> Vec<usize> {
     let mut out = Vec::new();
     for stmt in &method.body {
-        visit_stmt(stmt, &mut |e| visit_expr(e, &mut |x| out.extend(callee_of(x))), &mut |_| {});
+        visit_stmt(stmt, &mut |e| visit_expr(e, &mut |x| out.extend(callee_of(class, x))), &mut |_| {});
     }
     out.sort_unstable();
     out.dedup();
     out
 }
 
-/// The method that a call or constructor call (`new`, `this(...)`) invokes, if resolved.
-fn callee_of(e: &Expr) -> Option<usize> {
+/// The methods that a call or constructor call (`new`, `this(...)`, `super(...)`) may run: the
+/// whole override group of the resolved method, whose summaries are shared.
+fn callee_of(class: &Class, e: &Expr) -> Vec<usize> {
     match e.kind {
-        ExprKind::Call { resolved, .. }
-        | ExprKind::MethodCall { resolved, .. }
-        | ExprKind::ThisCall { resolved, .. } => resolved,
-        ExprKind::New { ctor, .. } => ctor,
-        _ => None,
+        ExprKind::Call { resolved: Some(m), .. }
+        | ExprKind::MethodCall { resolved: Some(m), .. }
+        | ExprKind::ThisCall { resolved: Some(m), .. }
+        | ExprKind::SuperInit { resolved: Some(m), .. }
+        | ExprKind::New { ctor: Some(m), .. } => class.hierarchy.group(m),
+        _ => Vec::new(),
     }
 }
 
@@ -1270,7 +1286,7 @@ fn initializer_callees(class: &Class) -> Vec<usize> {
     for t in &class.types {
         for f in t.fields.iter().chain(&t.statics) {
             if let Some(init) = &f.init {
-                visit_expr(init, &mut |x| out.extend(callee_of(x)));
+                visit_expr(init, &mut |x| out.extend(callee_of(class, x)));
             }
         }
     }
@@ -1281,7 +1297,7 @@ fn initializer_callees(class: &Class) -> Vec<usize> {
 fn callers(class: &Class) -> Vec<Vec<usize>> {
     let mut out = vec![Vec::new(); class.methods.len()];
     for (m, method) in class.methods.iter().enumerate() {
-        for c in callees(method) {
+        for c in callees(class, method) {
             out[c].push(m);
         }
     }

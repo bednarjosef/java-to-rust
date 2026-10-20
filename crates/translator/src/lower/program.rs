@@ -45,10 +45,13 @@ pub fn lower_program<'t>(
         decl.package = package;
         types.push(decl);
     }
-    let methods = (0..lowering.methods.len())
+    let methods: Vec<Method> = (0..lowering.methods.len())
         .map(|m| lowering.method(m).map_err(|e| (Some(unit_of[lowering.methods[m].owner]), e)))
         .collect::<Result<_, _>>()?;
-    Ok(Class { name: main.to_string(), types, methods })
+    let hierarchy = Hierarchy::new(&types, &methods);
+    let class = Class { name: main.to_string(), types, methods, hierarchy };
+    lowering.check_hierarchy(&class).map_err(|e| (None, e))?;
+    Ok(class)
 }
 
 /// A package name such as `com.example` from its tree, a chain of selects.

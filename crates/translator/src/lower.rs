@@ -4,6 +4,7 @@
 //! outside it is reported as an error naming the construct.
 
 mod enums;
+mod hierarchy;
 mod objects;
 mod statics;
 
@@ -44,7 +45,9 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let constants = lowering.enum_constants(index, &types[index].fields, &methods)?;
         types[index].enum_constants = Some(constants);
     }
-    let class = Class { name: first.str("simpleName").to_string(), types, methods };
+    let hierarchy = Hierarchy::new(&types, &methods);
+    let class = Class { name: first.str("simpleName").to_string(), types, methods, hierarchy };
+    lowering.check_hierarchy(&class)?;
     enums::check_nulls(&class)?;
     Ok(class)
 }
@@ -135,6 +138,8 @@ struct Lowering<'t> {
     current: Cell<usize>,
     /// Whether the method being lowered is a constructor, which cannot `return` early.
     in_ctor: Cell<bool>,
+    /// The return type of the method being lowered, which a returned value is converted to.
+    ret: Cell<Type>,
     /// Every class of the file, in the order of `Class::types`.
     types: Vec<TypeInfo<'t>>,
     /// Every method and constructor of every class, in the order of `Class::methods`.
@@ -163,6 +168,7 @@ impl<'t> Lowering<'t> {
             let ret_node = node.child("returnType")?;
             self.ty(ret_node, ret_node.java_type())?
         };
+        self.ret.set(ret);
         let params: Vec<Node> = node.list("parameters").collect();
         let param_type = |p: Node<'t>| p.symbol().map_or("", |s| s.ty);
         let is_main = name == "main"
@@ -180,8 +186,12 @@ impl<'t> Lowering<'t> {
                 .map(|p| Ok(Param { name: p.str("name").to_string(), ty: self.ty(p, param_type(p))? }))
                 .collect::<Result<_, Error>>()?
         };
-        let Some(body) = node.get("body") else { return unsupported(node, "methods without a body") };
-        let mut body = self.block(body)?;
+        let is_abstract = node.get("body").is_none() && node.has_flag("ABSTRACT");
+        let mut body = match node.get("body") {
+            Some(body) => self.block(body)?,
+            None if is_abstract => Vec::new(),
+            None => return unsupported(node, "methods without a body"),
+        };
         if let Some(param) = args_param.filter(|p| reads_name(&body, p.str("name"))) {
             body.insert(0, self.args_decl(param));
         }
@@ -195,6 +205,8 @@ impl<'t> Lowering<'t> {
             is_ctor,
             class: info.owner,
             pos: node.pos(),
+            is_abstract,
+            overrides: self.overrides(node),
         })
     }
 
@@ -227,8 +239,8 @@ impl<'t> Lowering<'t> {
     fn block(&self, node: Node<'t>) -> Result<Vec<Stmt>, Error> {
         let mut out = Vec::new();
         for stmt in node.list("statements") {
-            // Every class extends `Object`, whose constructor does nothing.
             if is_super_call(stmt) {
+                out.extend(self.super_init(stmt)?);
                 continue;
             }
             self.stmt_into(stmt, &mut out)?;
@@ -253,7 +265,7 @@ impl<'t> Lowering<'t> {
             "VARIABLE" => {
                 let ty = self.ty(node, node.symbol().map_or("", |s| s.ty))?;
                 let init = match node.get("initializer") {
-                    Some(v) => Some(self.expr(v)?),
+                    Some(v) => Some(self.convert(self.expr(v)?, ty)),
                     None => None,
                 };
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
@@ -292,7 +304,9 @@ impl<'t> Lowering<'t> {
                 Stmt::For { init, cond, update, body }
             }
             "RETURN" => match node.get("expression") {
-                Some(value) => Stmt::Return(Some(self.expr(value)?), node.pos()),
+                Some(value) => {
+                    Stmt::Return(Some(self.convert(self.expr(value)?, self.ret.get())), node.pos())
+                }
                 None => Stmt::Return(None, node.pos()),
             },
             "BREAK" | "CONTINUE" => switch::jump(node),
@@ -349,7 +363,9 @@ impl<'t> Lowering<'t> {
             "ASSIGNMENT" => ExprKind::Assign {
                 op: None,
                 target: self.target(node.child("variable")?)?,
-                value: Box::new(self.expr(node.child("expression")?)?),
+                value: Box::new(
+                    self.convert(self.expr(node.child("expression")?)?, self.ty(node, node.java_type())?),
+                ),
             },
             kind if kind.ends_with("_ASSIGNMENT") => {
                 let op = binary_op(node, kind.trim_end_matches("_ASSIGNMENT"))?;
@@ -363,15 +379,22 @@ impl<'t> Lowering<'t> {
                     value: Box::new(value),
                 }
             }
-            "TYPE_CAST" => ExprKind::Cast(
-                self.ty(node, node.java_type())?,
-                Box::new(self.expr(node.child("expression")?)?),
-            ),
-            "CONDITIONAL_EXPRESSION" => ExprKind::Conditional(
-                Box::new(self.expr(node.child("condition")?)?),
-                Box::new(self.expr(node.child("trueExpression")?)?),
-                Box::new(self.expr(node.child("falseExpression")?)?),
-            ),
+            "TYPE_CAST" => {
+                let ty = self.ty(node, node.java_type())?;
+                let value = self.expr(node.child("expression")?)?;
+                if matches!(ty, Type::Class(_)) && ty != value.ty && value.ty != Type::Null {
+                    return unsupported(node, "casts between class types");
+                }
+                ExprKind::Cast(ty, Box::new(value))
+            }
+            "CONDITIONAL_EXPRESSION" => {
+                let ty = self.ty(node, node.java_type())?;
+                ExprKind::Conditional(
+                    Box::new(self.expr(node.child("condition")?)?),
+                    Box::new(self.convert(self.expr(node.child("trueExpression")?)?, ty)),
+                    Box::new(self.convert(self.expr(node.child("falseExpression")?)?, ty)),
+                )
+            }
             "METHOD_INVOCATION" => self.call(node)?,
             "NEW_CLASS" => self.new_object(node)?,
             "NEW_ARRAY" => self.new_array(node)?,
@@ -402,6 +425,11 @@ impl<'t> Lowering<'t> {
                     self.check_text(node, left.ty)?;
                     self.check_text(node, right.ty)?;
                 }
+                let (left, right) = if matches!(op, BinOp::Eq | BinOp::Ne) {
+                    self.convert_operands(left, right)
+                } else {
+                    (left, right)
+                };
                 ExprKind::Binary(op, Box::new(left), Box::new(right))
             }
         };
@@ -447,7 +475,9 @@ impl<'t> Lowering<'t> {
         let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
-            return Ok(ExprKind::ThisCall { args, resolved: self.method_index(&symbol) });
+            let resolved = self.method_index(&symbol);
+            let args = self.convert_args(resolved, args)?;
+            return Ok(ExprKind::ThisCall { args, resolved });
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {
@@ -489,14 +519,21 @@ impl<'t> Lowering<'t> {
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);
+                let args = self.convert_args(resolved, args)?;
                 if symbol.is_static {
                     return Ok(ExprKind::Call { name, args, resolved });
                 }
+                let is_super = receiver.is_some_and(|r| r.kind() == "IDENTIFIER" && r.str("name") == "super");
                 let receiver = match receiver {
+                    Some(r) if is_super => {
+                        let ty = self.ty(r, r.java_type())?;
+                        self.synth(ExprKind::This, r.pos(), ty)
+                    }
                     Some(r) => self.expr(r)?,
                     None => self.this(node),
                 };
-                return Ok(ExprKind::MethodCall { receiver: Box::new(receiver), name, args, resolved });
+                let receiver = Box::new(receiver);
+                return Ok(ExprKind::MethodCall { receiver, name, args, resolved, is_super });
             }
             (owner, name) => return unsupported(node, &format!("method `{owner}.{name}`")),
         };
@@ -507,12 +544,11 @@ impl<'t> Lowering<'t> {
     }
 }
 
-/// `super();`, which javac writes into every constructor that does not call another one.
+/// `super(...)`, which javac writes into every constructor that does not call another one.
 fn is_super_call(stmt: Node) -> bool {
     stmt.get("expression").is_some_and(|call| {
         call.kind() == "METHOD_INVOCATION"
-            && call.list("arguments").next().is_none()
-            && call.get("methodSelect").is_some_and(|s| s.str("name") == "super")
+            && call.get("methodSelect").is_some_and(|s| s.kind() == "IDENTIFIER" && s.str("name") == "super")
     })
 }
 

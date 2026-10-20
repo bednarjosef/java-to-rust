@@ -356,16 +356,19 @@ impl<'a> Gen<'a> {
                 let args = self.call_args(index, args).join(", ");
                 Code::atom(format!("{}({args})", self.static_fn(index)))
             }
-            ExprKind::MethodCall { receiver, args, resolved, .. } => {
+            ExprKind::MethodCall { receiver, args, resolved, is_super, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
                 if self.class.methods[index].is_static {
                     let args = self.call_args(index, args).join(", ");
                     Code::atom(format!("{}({args})", self.static_fn(index)))
                 } else {
-                    self.method_call(receiver, index, args)
+                    let target = self.dispatch(receiver, index, *is_super);
+                    self.method_call(receiver, target, args)
                 }
             }
-            ExprKind::ThisCall { .. } => unreachable!("lowering keeps `this(...)` first in a constructor"),
+            ExprKind::ThisCall { .. } | ExprKind::SuperInit { .. } => {
+                unreachable!("lowering keeps `this(...)` and `super(...)` first in a constructor")
+            }
             ExprKind::Builtin(builtin, args) => self.builtin(*builtin, args, e.ty, e.id),
         }
     }

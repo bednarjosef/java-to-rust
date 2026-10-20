@@ -190,6 +190,7 @@ impl Walk {
             | ExprKind::Builtin(_, args)
             | ExprKind::New { args, .. }
             | ExprKind::ThisCall { args, .. }
+            | ExprKind::SuperInit { args, .. }
             | ExprKind::NewArray(args)
             | ExprKind::ArrayLit(args) => args.iter().for_each(|a| self.expr(a)),
             // Anything else: its variables count as mentioned, none of them as a last use.

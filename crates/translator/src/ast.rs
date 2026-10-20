@@ -3,7 +3,9 @@
 
 use std::fmt;
 
+mod hierarchy;
 mod natives;
+pub use hierarchy::*;
 pub use natives::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -180,6 +182,16 @@ pub struct Class {
     pub name: String,
     pub types: Vec<TypeDecl>,
     pub methods: Vec<Method>,
+    /// Subtypes and overriders, computed from the types and methods (see `hierarchy`).
+    pub hierarchy: Hierarchy,
+}
+
+/// What kind of type a declaration is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeKind {
+    Class,
+    Interface,
+    Enum,
 }
 
 /// A class of the file: its fields. Methods and constructors are in `Class::methods`.
@@ -187,6 +199,14 @@ pub struct TypeDecl {
     pub name: String,
     /// The class's package, such as `com.example`; empty for the unnamed package.
     pub package: String,
+    pub kind: TypeKind,
+    /// An abstract class or an interface, which has no objects of its own.
+    pub is_abstract: bool,
+    /// The superclass, an index into `Class::types`; `None` for a class that extends `Object`,
+    /// interfaces and enums.
+    pub extends: Option<usize>,
+    /// The interfaces a class implements or an interface extends, indexes into `Class::types`.
+    pub implements: Vec<usize>,
     /// Instance fields, in declaration order.
     pub fields: Vec<Field>,
     /// Static fields, in declaration order.
@@ -225,6 +245,11 @@ pub struct Method {
     /// The index of the declaring class in `Class::types`.
     pub class: usize,
     pub pos: Pos,
+    /// A method without a body: abstract, or an interface method that is not a default method.
+    pub is_abstract: bool,
+    /// The methods of the program that this one overrides, as javac lists them (indexes into
+    /// `Class::methods`).
+    pub overrides: Vec<usize>,
 }
 
 pub struct Param {
@@ -377,15 +402,24 @@ pub enum ExprKind {
         args: Vec<Expr>,
         ctor: Option<usize>,
     },
-    /// `receiver.name(args)`, a call of an instance method; `resolved` as for `Call`.
+    /// `receiver.name(args)`, a call of an instance method; `resolved` as for `Call`. A call
+    /// runs the implementation of the receiver's class (see `Hierarchy::targets`), except
+    /// `super.name(args)` (`is_super`), whose receiver is `this` and which runs `resolved`.
     MethodCall {
         receiver: Box<Expr>,
         name: String,
         args: Vec<Expr>,
         resolved: Option<usize>,
+        is_super: bool,
     },
     /// `this(args)`, a constructor calling another constructor of its class.
     ThisCall {
+        args: Vec<Expr>,
+        resolved: Option<usize>,
+    },
+    /// `super(args)`, the first statement of a constructor of a class whose superclass is in
+    /// the program: it builds the superclass's part of the object.
+    SuperInit {
         args: Vec<Expr>,
         resolved: Option<usize>,
     },
@@ -649,6 +683,7 @@ pub fn has_effects(e: &Expr) -> bool {
                 | ExprKind::MethodCall { .. }
                 | ExprKind::New { .. }
                 | ExprKind::ThisCall { .. }
+                | ExprKind::SuperInit { .. }
                 | ExprKind::Assign { .. }
                 | ExprKind::IncDec { .. }
                 | ExprKind::Builtin(
@@ -760,7 +795,8 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         ExprKind::Call { args, .. }
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }
-        | ExprKind::ThisCall { args, .. } => args.iter().for_each(|a| visit_expr(a, f)),
+        | ExprKind::ThisCall { args, .. }
+        | ExprKind::SuperInit { args, .. } => args.iter().for_each(|a| visit_expr(a, f)),
         ExprKind::Switch { selector, cases } => {
             visit_expr(selector, f);
             for case in cases {

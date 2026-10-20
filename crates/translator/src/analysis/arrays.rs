@@ -20,7 +20,16 @@ use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
 pub(super) fn analyze(class: &Class, facts: &mut Facts) {
-    let scans: Vec<Scan> = class.methods.iter().map(scan).collect();
+    let mut scans: Vec<Scan> = class.methods.iter().map(scan).collect();
+    // A call may run any method of its override group, which all take their arrays alike.
+    for s in &mut scans {
+        let calls = std::mem::take(&mut s.calls);
+        for call in calls {
+            for g in class.hierarchy.group(call.callee) {
+                s.calls.push(Call { callee: g, args: call.args.clone() });
+            }
+        }
+    }
     // A shared array lent to a call is borrowed from its cell until the call returns; a field
     // holding an array would be another way to reach that cell meanwhile.
     let lend_shared = class
@@ -49,7 +58,10 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
         }
         for (i, p) in method.params.iter().enumerate() {
             if borrowed.contains(&(m, i)) {
-                facts.borrowed_arrays.insert((m, i), written[m].contains(&p.name));
+                let group = class.hierarchy.group(m);
+                let any_written = written[m].contains(&p.name)
+                    || group.iter().any(|&g| written[g].contains(&class.methods[g].params[i].name));
+                facts.borrowed_arrays.insert((m, i), any_written);
             }
         }
     }
@@ -71,11 +83,13 @@ struct Scan {
 }
 
 /// A call and what each argument is.
+#[derive(Clone)]
 struct Call {
     callee: usize,
     args: Vec<Arg>,
 }
 
+#[derive(Clone)]
 struct Arg {
     /// The variable the argument is, if it is one.
     name: Option<String>,
@@ -102,6 +116,7 @@ impl Arg {
             | ExprKind::MethodCall { .. }
             | ExprKind::New { .. }
             | ExprKind::ThisCall { .. }
+            | ExprKind::SuperInit { .. }
             | ExprKind::Assign { .. }
             | ExprKind::IncDec { .. }
             | ExprKind::Builtin(Builtin::ArraysFill | Builtin::ArraysSort, _) => effects = true,
@@ -204,7 +219,8 @@ impl Uses {
             ExprKind::Call { args, resolved: Some(callee), .. }
             | ExprKind::MethodCall { args, resolved: Some(callee), .. }
             | ExprKind::New { args, ctor: Some(callee), .. }
-            | ExprKind::ThisCall { args, resolved: Some(callee) } => {
+            | ExprKind::ThisCall { args, resolved: Some(callee) }
+            | ExprKind::SuperInit { args, resolved: Some(callee) } => {
                 for a in args.iter().filter(|a| matches!(a.kind, ExprKind::Var(_))) {
                     self.good.insert(a.id);
                 }
@@ -270,6 +286,15 @@ fn solve(
                     }
                 }
             }
+        }
+        // The methods of an override group borrow a parameter together or not at all.
+        let unaligned: Vec<(usize, usize)> = borrowed
+            .iter()
+            .copied()
+            .filter(|&(m, i)| class.hierarchy.group(m).iter().any(|&g| !borrowed.contains(&(g, i))))
+            .collect();
+        for key in unaligned {
+            changed |= borrowed.remove(&key);
         }
         for (m, scan) in scans.iter().enumerate() {
             for (i, name) in &scan.params {

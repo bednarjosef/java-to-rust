@@ -531,6 +531,138 @@ fn printing_an_object_without_to_string_is_rejected() {
     assert!(err.to_string().contains("printing an object without toString not supported yet"), "{err}");
 }
 
+const SHAPES: &str = "
+    abstract class Shape {
+        private final String name;
+        protected int moves;
+        Shape(String name) { this.name = name; }
+        String name() { return name; }
+        void move() { moves++; }
+        abstract double area();
+        String describe() { return name + \" \" + area(); }
+    }
+    class Circle extends Shape {
+        private final double radius;
+        Circle(double radius) { super(\"circle\"); this.radius = radius; }
+        @Override double area() { return 3.0 * radius * radius; }
+    }
+    class A { public static void main(String[] a) {
+        Circle c = new Circle(2.0);
+        Shape s = c;
+        s.move();
+        System.out.println(s.name() + \" \" + c.describe() + \" \" + (s == c));
+    } }";
+
+#[test]
+fn superclass_fields_are_embedded() {
+    let rust = translate(SHAPES);
+    assert_contains(
+        &rust,
+        &[
+            "struct ShapeFields {\n    name: String,\n    moves: i32,\n}",
+            "struct Circle {\n    base: ShapeFields,\n    radius: f64,\n}",
+        ],
+    );
+    // A value of the superclass's type is the one class's object that it can be.
+    assert_contains(&rust, &["let s = c.clone();", "Rc::ptr_eq(&s, &c)"]);
+    assert_lacks(&rust, &["struct Shape {", "dyn "]);
+}
+
+#[test]
+fn inherited_field_methods_live_on_the_fields_struct() {
+    let rust = translate(SHAPES);
+    assert_contains(
+        &rust,
+        &[
+            "impl ShapeFields {",
+            "fn name(&self) -> String {",
+            "fn move_(&mut self) {",
+            "s.borrow_mut().base.move_();",
+        ],
+    );
+    // `describe` calls `area`, which a subclass implements, so it runs on the subclass's object.
+    assert_contains(
+        &rust,
+        &["impl Circle {", "fn describe(&self) -> String {", "self.base.name", "self.area()"],
+    );
+}
+
+#[test]
+fn abstract_methods_are_not_emitted() {
+    let rust = translate(SHAPES);
+    assert_eq!(rust.matches("fn area(").count(), 1, "{rust}");
+}
+
+#[test]
+fn a_subclass_constructor_initializes_the_superclass_first() {
+    let rust = translate(SHAPES);
+    assert_contains(
+        &rust,
+        &["fn new(name: &str) -> ShapeFields {", "Circle { base: ShapeFields::new(\"circle\"), radius }"],
+    );
+}
+
+#[test]
+fn super_calls_are_non_virtual() {
+    let rust = translate(
+        "abstract class Account {
+            long cents;
+            boolean withdraw(long amount) { if (amount > available()) return false; cents -= amount; return true; }
+            void deposit(long amount) { cents += amount; }
+            abstract long available();
+        }
+        class Checking extends Account {
+            int withdrawals;
+            @Override long available() { return cents + 100; }
+            @Override boolean withdraw(long amount) { boolean done = super.withdraw(amount); if (done) withdrawals++; return done; }
+            @Override void deposit(long amount) { super.deposit(amount + 1); }
+        }
+        class A { public static void main(String[] a) {
+            Checking c = new Checking();
+            Account x = c;
+            x.deposit(5);
+            System.out.println(x.withdraw(50) + \" \" + c.cents + \" \" + c.withdrawals);
+        } }",
+    );
+    // The superclass's `withdraw` needs the whole object (it calls `available`), so it is emitted
+    // for the subclass under a name of its own; its `deposit` lives on the fields struct.
+    assert_contains(
+        &rust,
+        &[
+            "let done = self.withdraw_in_account(amount);",
+            "fn withdraw_in_account(&mut self, amount: i64) -> bool {",
+            "self.base.deposit(amount.wrapping_add(1));",
+        ],
+    );
+}
+
+#[test]
+fn a_superclass_constructor_that_leaks_this_is_rejected() {
+    let err = java_to_rust::translate(
+        "abstract class Base { int x; Base() { x = size(); } abstract int size(); }
+        class Impl extends Base { @Override int size() { return 3; } }
+        class A { public static void main(String[] a) { System.out.println(new Impl().x); } }",
+    )
+    .expect_err("a superclass constructor that calls an overridable method must be rejected");
+    assert!(err.to_string().contains("call overridable methods not supported yet"), "{err}");
+}
+
+#[test]
+fn superclass_static_initialization_runs_first() {
+    let rust = translate(
+        "abstract class Base {
+            static final String NAME = make(\"base\");
+            static String make(String s) { System.out.println(s); return s; }
+        }
+        class Sub extends Base {
+            static String other = make(\"sub\");
+            String both() { return NAME + other; }
+        }
+        class A { public static void main(String[] a) { System.out.println(new Sub().both()); } }",
+    );
+    assert_contains(&rust, &["fn init_sub() {", "    init_base();\n    SUB_OTHER.set(make(\"sub\"));"]);
+}
+
 #[test]
 fn immutable_objects_are_shared_without_a_refcell() {
     let rust = translate(

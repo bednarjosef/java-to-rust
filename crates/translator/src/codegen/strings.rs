@@ -69,8 +69,8 @@ impl<'a> Gen<'a> {
         match &e.kind {
             _ if matches!(e.ty, Type::Class(_)) => out.push(Part::Arg(self.object_text(e))),
             // `x.toString()` shows `x` like concatenating it does.
-            ExprKind::MethodCall { receiver, resolved: Some(index), args, .. }
-                if args.is_empty() && self.displays(*index) =>
+            ExprKind::MethodCall { receiver, resolved: Some(_), args, is_super: false, .. }
+                if args.is_empty() && self.target(e).is_some_and(|t| self.displays(t)) =>
             {
                 out.push(Part::Arg(self.object_text(receiver)))
             }
@@ -125,8 +125,8 @@ impl<'a> Gen<'a> {
     /// Whether an expression has effects other than the `toString` calls of objects it shows.
     fn effects_besides_text(&self, e: &Expr) -> bool {
         match &e.kind {
-            ExprKind::MethodCall { receiver, resolved: Some(index), args, .. }
-                if args.is_empty() && self.displays(*index) =>
+            ExprKind::MethodCall { receiver, resolved: Some(_), args, is_super: false, .. }
+                if args.is_empty() && self.target(e).is_some_and(|t| self.displays(t)) =>
             {
                 self.effects_besides_text(receiver)
             }

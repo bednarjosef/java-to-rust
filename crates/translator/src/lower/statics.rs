@@ -92,6 +92,8 @@ impl<'t> Lowering<'t> {
             is_ctor: false,
             class: index,
             pos: node.pos(),
+            is_abstract: false,
+            overrides: Vec::new(),
         })
     }
 }

@@ -76,9 +76,11 @@ overloading, static and instance methods, fields with initializers, static field
 (including `this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math`
 methods, `String.length`/`equals`/`charAt`, the `Character` tests and case conversions on a
 `char`, the `MIN_VALUE`/`MAX_VALUE` constants of the wrapper classes, `null` for `String`, and a
-user `toString` in `println` and string concatenation, object-typed fields and `null` objects.
-Inheritance, interfaces and generics are rejected with an error that names the construct and its
-position.
+user `toString` in `println` and string concatenation, object-typed fields and `null` objects,
+and superclasses (abstract or not) with one concrete class under each type: `extends`, abstract
+methods, `super(...)` and `super.m(...)`. Interfaces, class trees with several concrete classes
+and generics are rejected with an error that names the construct and its position. The design of
+the object model, and what is still to come, is in [docs/object-model.md](docs/object-model.md).
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
@@ -150,6 +152,17 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   is printed as `{p}` when its `toString` can neither print nor throw. An object parameter that
   the method only uses through (fields, calls, comparison, printing, or passing it on to such a
   parameter) is a `&Rc<..>` that the caller lends.
+- Class hierarchies (`ast/hierarchy.rs`, `analysis/hierarchy.rs`). A class with subclasses keeps
+  its fields in a struct of its own, `ShapeFields`, which the struct of each subclass embeds as
+  `base` (`Circle { base: ShapeFields::new("circle"), radius }`), and its constructors build that
+  struct. Its methods that use the object only for its fields and for calls of such methods that
+  nothing overrides live on that struct (`c.borrow_mut().base.move_()`); the others are emitted for
+  the concrete class, where `this` is the whole object, a superclass's method that the subclass
+  overrides under a name of its own for `super` calls (`withdraw_in_account`). Where every value of
+  a type is an object of one concrete class, a value of the type is that class's object, so an
+  upcast changes nothing. The methods of an override group share what the analyses decide about
+  their parameters and results, as a call may run any of them. A superclass's static
+  initialization runs before its subclass's.
 
 Whole programs (`program.rs`) spread over files and packages translate too: javac compiles all
 of them in one run, with the source roots as its source path, and a reachability pass over its

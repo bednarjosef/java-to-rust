@@ -1326,3 +1326,42 @@ numbers written into the commit message.
 ## 5. Deviations from the plan
 
 Decisions that changed during the implementation, milestone by milestone.
+
+### Milestone 1
+
+- `super.m(args)` is not a new `SuperCall` kind: it is a `MethodCall` with `is_super: true` whose
+  receiver is a synthesized `this` of the superclass's type, so every analysis that already
+  handles calls on `this` sees it without change. Fields get no `owner` in the AST either: the
+  declaring class follows from the receiver's static type and the hierarchy
+  (`Hierarchy::field_owner`), and `Facts::field_owners` maps (class, field) to it for the keys
+  of `nullable_fields`.
+- A class with subclasses gets a fields struct not only when it declares instance fields, but
+  also when it has objects of its own, when it embeds an ancestor's fields struct, or when one of
+  its constructors does something. A superclass without fields whose constructor prints is then
+  an empty `BaseFields {}` that its constructor builds, which needs no special `init_new`
+  function; a superclass without a fields struct has a constructor that does nothing, and only
+  the effects of the arguments of `super(...)` are written, as statements.
+- A field-level method may also call field-level methods through `super`, and it must not reach
+  an object of its class tree through another handle while it runs (unless the tree is
+  immutable): it borrows the fields struct for the whole call, like a method of today's classes
+  that takes `&self`. Methods that are not field-level are emitted in the concrete class's
+  `impl`, under their own name; `_in_<class>` is appended only when the concrete class (or a
+  class between) overrides them, so that `super` calls reach them.
+- Instance methods are named once per override group within a class tree, so that every
+  implementation has the name its callers use; overload suffixes count the groups of a name in
+  the tree.
+- An owned class (a plain value) is never one with subclasses, and never one whose objects run an
+  inherited method that is not field-level, since such a method takes the object as a value.
+- `analysis::analyze` returns a `Result`: the rejection of a superclass constructor that is not
+  a plain-value builder needs the borrowing analysis.
+- An inherited field-level `toString` becomes the `Display` of the superclass's fields struct;
+  the concrete class's `Display` delegates to it (`fmt::Display::fmt(&self.base, f)`).
+- A field named `base` in a subclass is rejected ("a field named `base` in a subclass"): it
+  would clash with the embedded fields struct.
+- `mutating` and `writers` are spread over override groups and `isolated` holds only for whole
+  groups, which keeps the `&mut self` choice and the borrow-conflict counts right for a call that
+  may run any member of a group.
+- `corpus/features/SuperInit.java` is `corpus/features/SuperclassConstructors.java`, and the
+  `super` cases are in `corpus/features/SuperCalls.java`. `corpus/programs/Ledger.java` has two
+  class trees (accounts and reports, the report a template method); it avoids `StringBuilder` and
+  exceptions, which other work adds.

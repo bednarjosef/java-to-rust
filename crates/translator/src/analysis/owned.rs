@@ -8,9 +8,18 @@ use std::collections::HashSet;
 
 /// Finds the owned classes among those that are not immutable (immutable objects are shared), by
 /// qualified name.
-pub fn owned_classes(class: &Class, immutable: &HashSet<String>) -> HashSet<String> {
+pub fn owned_classes(
+    class: &Class,
+    immutable: &HashSet<String>,
+    field_level: &HashSet<usize>,
+) -> HashSet<String> {
     (0..class.types.len())
-        .filter(|&t| !immutable.contains(&class.types[t].name) && is_owned(class, t))
+        .filter(|&t| {
+            !immutable.contains(&class.types[t].name)
+                && !class.hierarchy.has_subtypes(t)
+                && !runs_inherited_object_code(class, t, field_level)
+                && is_owned(class, t)
+        })
         .map(|t| class.types[t].name.clone())
         .collect()
 }
@@ -43,6 +52,53 @@ fn is_owned(class: &Class, t: usize) -> bool {
     !uses.bad
         && uses.locals.is_disjoint(&uses.assigned)
         && uses.typed.iter().all(|id| uses.news.contains(id) || uses.receivers.contains(id))
+}
+
+/// Whether an object of class `t` runs a method of a superclass that needs the whole object
+/// (one that does not live on the superclass's fields struct, see `hierarchy::field_level`): such
+/// a method takes the object as a value of the superclass's type, which a plain value cannot be.
+fn runs_inherited_object_code(class: &Class, t: usize, field_level: &HashSet<usize>) -> bool {
+    let h = &class.hierarchy;
+    let inherited =
+        |m: usize| class.methods[m].class != t && !class.methods[m].is_static && !field_level.contains(&m);
+    let shown = |a: &Expr| is_class(a.ty, &class.types[t].name);
+    // Turning the object into text runs its `toString`.
+    let text_inherited = super::hierarchy::to_string_impl(class, t).is_some_and(inherited);
+    let mut found = false;
+    let mut scan = |e: &Expr, in_t: bool| {
+        visit_expr(e, &mut |x| match &x.kind {
+            ExprKind::MethodCall { receiver, resolved: Some(r), is_super, .. } => {
+                let target = if *is_super { Some(*r) } else { h.implementation(*r, t) };
+                if ((shown(receiver) && !*is_super) || (*is_super && in_t)) && target.is_some_and(inherited) {
+                    found = true;
+                }
+            }
+            ExprKind::Builtin(Builtin::Print | Builtin::Println, args)
+                if text_inherited && args.iter().any(shown) =>
+            {
+                found = true;
+            }
+            ExprKind::Binary(BinOp::Add, l, r)
+                if text_inherited && x.ty == Type::String && (shown(l) || shown(r)) =>
+            {
+                found = true;
+            }
+            _ => {}
+        })
+    };
+    for m in &class.methods {
+        for s in &m.body {
+            visit_stmt(s, &mut |e| scan(e, m.class == t), &mut |_| {});
+        }
+    }
+    for d in &class.types {
+        for f in d.fields.iter().chain(&d.statics) {
+            if let Some(init) = &f.init {
+                scan(init, false);
+            }
+        }
+    }
+    found
 }
 
 fn is_class(ty: Type, name: &str) -> bool {

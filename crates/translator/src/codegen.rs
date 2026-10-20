@@ -5,6 +5,7 @@
 //! only read) that form is used instead.
 
 use crate::analysis::Facts;
+use crate::analysis::hierarchy::{self, Home};
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
@@ -39,11 +40,16 @@ use boxing::boxed_locals;
 use objects::*;
 
 pub fn generate(class: &Class, facts: &Facts) -> String {
-    let live = live_types(class);
+    let live = live_types(class, facts);
     let modules = modules::enter(class);
+    let homes: Vec<Home> = (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect();
     let mut g = Gen {
         class,
         facts,
+        fn_names: method_names(class, &homes),
+        homes,
+        super_targets: super_targets(class),
+        this_struct: 0,
         method: 0,
         borrowed: HashSet::new(),
         borrowed_optional: HashSet::new(),
@@ -59,7 +65,6 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         printing: false,
         guarded: false,
         annotations: Vec::new(),
-        fn_names: method_names(class),
         locals: HashMap::new(),
         boxed: HashMap::new(),
         elements: HashMap::new(),
@@ -128,6 +133,13 @@ enum Part {
 struct Gen<'a> {
     class: &'a Class,
     facts: &'a Facts,
+    /// Where each method is emitted (see `analysis::hierarchy`).
+    homes: Vec<Home>,
+    /// The methods that a `super.m(...)` call names, which run although a subclass overrides them.
+    super_targets: HashSet<usize>,
+    /// The class (index into `Class::types`) whose struct `this` is in the code being written:
+    /// the class of the `impl` that the method is emitted in.
+    this_struct: usize,
     /// The index of the current method.
     method: usize,
     /// The current method's string variables that are `&str`: borrowed parameters, and
@@ -263,6 +275,10 @@ impl<'a> Gen<'a> {
             .map(|i| m.params[i].name.clone())
             .collect();
         let name = &self.class.types[m.class].name;
+        self.this_struct = match self.homes[index] {
+            Home::Class(c) | Home::Fields(c) | Home::Enum(c) => c,
+            Home::Free | Home::Nowhere => m.class,
+        };
         let is_enum = self.class.types[m.class].enum_constants.is_some();
         let borrows = !m.is_static && !m.is_ctor && (is_enum || self.facts.self_methods.contains(&index));
         self.display = borrows && !is_enum && self.displays(index);
@@ -274,7 +290,7 @@ impl<'a> Gen<'a> {
         } else if borrows {
             params.push(if self.facts.mutating.contains(&index) { "&mut self" } else { "&self" }.to_string());
         } else if !m.is_static && !m.is_ctor {
-            params.push(format!("this: {}", self.this_type(name)));
+            params.push(format!("this: {}", self.this_type()));
         }
         let typed: Vec<String> = m
             .params
@@ -300,7 +316,7 @@ impl<'a> Gen<'a> {
             .collect();
         params.extend(typed);
         let ret = if m.is_ctor && self.builds_plain(name) {
-            format!(" -> {}", struct_name(name))
+            format!(" -> {}", self.struct_of(m.class))
         } else if m.is_ctor {
             format!(" -> {}", self.object_type(name))
         } else if m.ret == Type::Void {
@@ -320,8 +336,15 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         if m.name == "<clinit>" {
             self.init_guard(name);
-        } else if self.facts.entry_init.contains(&index) {
-            self.line(&format!("{}();", statics::init_name(name)));
+            // Java initializes the superclass first.
+            let superclass = self.class.hierarchy.superclass(m.class);
+            if let Some(s) = superclass.and_then(|s| self.facts.init_class(self.class, s)) {
+                self.line(&format!("{}();", statics::init_name(&self.class.types[s].name)));
+            }
+        } else if self.facts.entry_init.contains(&index)
+            && let Some(t) = self.facts.init_class(self.class, m.class)
+        {
+            self.line(&format!("{}();", statics::init_name(&self.class.types[t].name)));
         }
         if m.is_ctor {
             self.constructor(m);
