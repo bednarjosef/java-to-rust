@@ -11,9 +11,11 @@ pub use slice::*;
 use std::fmt;
 use std::io::Write;
 
+mod boxed;
 mod character;
 mod float;
 mod null;
+pub use boxed::*;
 pub use character::*;
 pub use float::*;
 pub use null::non_null;
