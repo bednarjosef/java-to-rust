@@ -128,7 +128,10 @@ An enum is a `Copy` Rust `enum` with a variant per constant. Its fields hold one
 constant, given by its field initializers and constructor with constant arguments, so each field
 is an accessor that matches on `self` (named `mass_field` when the enum has a method `mass`); a
 field that is not final is accepted as long as only the constructor sets it. An enum's own
-`toString` is its `Display`, while `name()` stays the constant's name.
+`toString` is its `Display`, while `name()` stays the constant's name. A constant with a body
+(`PLUS { int apply(int a, int b) { return a + b; } }`) overrides the enum's methods, so each
+overridden method becomes a `match self` with an arm per overriding constant and the enum's own
+body (if it is not abstract) for the rest.
 
 The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b` is
 `java::rem(a, b)`. The first analyses decide where plain Rust means the same:

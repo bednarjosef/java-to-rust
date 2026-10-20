@@ -1332,6 +1332,39 @@ fn an_enum_field_assigned_outside_its_constructor_is_rejected() {
 }
 
 #[test]
+fn enum_constant_bodies_become_arms_of_the_enum_method() {
+    let rust = translate(
+        "public class A {
+            enum Op {
+                PLUS { int apply(int x, int y) { return x + y; } },
+                NEG { int apply(int a, int b) { return -a; } };
+                abstract int apply(int a, int b);
+            }
+            public static void main(String[] args) { System.out.println(Op.PLUS.apply(1, 2) + Op.NEG.apply(3, 0)); }
+        }",
+    );
+    // The arms name the parameters as the override does.
+    assert_contains(
+        &rust,
+        &[
+            "fn apply(self, a: i32, b: i32) -> i32 {\n        match self {",
+            "AOp::Plus => {\n                let x = a;",
+        ],
+    );
+    let error = java_to_rust::translate(
+        "public class A {
+            enum Op { PLUS { public String toString() { return \"+\"; } } }
+            public static void main(String[] args) { System.out.println(Op.PLUS); }
+        }",
+    )
+    .expect_err("a body that overrides a method the enum does not declare is rejected");
+    assert!(
+        error.to_string().contains("a method of an enum constant's body that overrides none of the enum's"),
+        "{error}"
+    );
+}
+
+#[test]
 fn an_enum_field_with_a_method_of_its_name_gets_another_accessor() {
     let rust = translate(
         "public class A {

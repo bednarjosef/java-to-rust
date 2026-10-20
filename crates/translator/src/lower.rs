@@ -15,6 +15,7 @@ use std::cell::Cell;
 
 mod arrays;
 mod boxing;
+mod constant_bodies;
 mod initializers;
 mod natives;
 mod primitives;
@@ -42,6 +43,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         methods.push(lowering.clinit(index)?);
     }
     for index in (0..types.len()).filter(|&t| lowering.types[t].node.kind() == "ENUM") {
+        lowering.constant_bodies(index, &mut methods)?;
         lowering.check_enum(index, &methods)?;
         let constants = lowering.enum_constants(index, &types[index].fields, &methods)?;
         types[index].enum_constants = Some(constants);
@@ -182,8 +184,15 @@ impl<'t> Lowering<'t> {
                 .map(|p| Ok(Param { name: p.str("name").to_string(), ty: self.ty(p, param_type(p))? }))
                 .collect::<Result<_, Error>>()?
         };
-        let Some(body) = node.get("body") else { return unsupported(node, "methods without a body") };
-        let mut body = self.block(body)?;
+        // An abstract method of an enum is implemented by the constants' bodies, which
+        // `constant_bodies` makes its body.
+        let abstract_in_enum =
+            node.has_flag("ABSTRACT") && self.enum_index(&self.types[info.owner].name).is_some();
+        let mut body = match node.get("body") {
+            Some(body) => self.block(body)?,
+            None if abstract_in_enum => Vec::new(),
+            None => return unsupported(node, "methods without a body"),
+        };
         if is_ctor {
             self.run_initializer_blocks(info.owner, &mut body)?;
         }
@@ -223,6 +232,10 @@ impl<'t> Lowering<'t> {
             _ if self.enum_index(name).is_some() => Ok(Type::enum_type(name)),
             _ if self.type_index(name).is_some() => Ok(Type::class(name)),
             "<nulltype>" => Ok(Type::Null),
+            // `this` in the body of an enum constant, which is the constant.
+            _ if name.starts_with("<anonymous ") && self.enum_index(&name[11..name.len() - 1]).is_some() => {
+                Ok(Type::enum_type(&name[11..name.len() - 1]))
+            }
             _ if name.ends_with("[]") => Ok(Type::array(self.ty(node, &name[..name.len() - 2])?)),
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
             "java.lang.Object" => unsupported(node, "Object"),
@@ -474,6 +487,9 @@ impl<'t> Lowering<'t> {
         }
         if let Some(builtin) = self.bits_call(&symbol, &args) {
             return Ok(ExprKind::Builtin(builtin, args));
+        }
+        if let Some(kind) = self.constant_body_call(node, &symbol, receiver, &mut args)? {
+            return Ok(kind);
         }
         let builtin = match (symbol.owner, symbol.name) {
             ("java.io.PrintStream", "println") if system_out => Builtin::Println,

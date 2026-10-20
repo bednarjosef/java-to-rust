@@ -110,14 +110,11 @@ impl<'t> Lowering<'t> {
         let mut constants = Vec::new();
         for member in self.types[class].node.list("members").filter(|m| is_enum_constant(*m)) {
             let init = member.child("initializer")?;
-            if init.get("classBody").is_some() {
-                return unsupported(member, "enum constants with bodies");
-            }
             let args: Vec<Expr> = init.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
             if let Some(arg) = args.iter().find(|a| !pure(a, false)) {
                 return error(arg.pos, "enum constant arguments that are not constants");
             }
-            let ctor = init.symbol().and_then(|s| self.method_index(&s)).map(|c| &methods[c]);
+            let ctor = init.symbol().and_then(|s| self.enum_constructor(class, &s)).map(|c| &methods[c]);
             let params = ctor.map_or(Vec::new(), |c| c.params.iter().map(|p| p.name.as_str()).collect());
             let bound: Vec<(&str, &Expr)> = params.into_iter().zip(&args).collect();
             let mut values = Vec::new();
