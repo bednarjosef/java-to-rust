@@ -68,6 +68,35 @@ impl<'a> Gen<'a> {
                 let chars = self.slice_of(&args[0]);
                 call(self, if newline { "println_chars" } else { "print_chars" }, vec![chars])
             }
+            Native::SystemProperty(key) => call(self, "system_property", vec![rust_string(key)]),
+            Native::TotalMemory => call(self, "total_memory", vec![]),
+            Native::FreeMemory => call(self, "free_memory", vec![]),
+            Native::MaxMemory => call(self, "max_memory", vec![]),
+            Native::Gc => call(self, "gc", vec![]),
+            Native::Halt => {
+                let status = self.value(&args[0], Type::Int).text;
+                call(self, "halt", vec![status])
+            }
+            Native::Sleep { nanos: false } => {
+                let millis = self.value(&args[0], Type::Long).text;
+                call(self, "sleep", vec![millis])
+            }
+            Native::Sleep { nanos: true } => {
+                let millis = self.value(&args[0], Type::Long).text;
+                let nanos = self.value(&args[1], Type::Int).text;
+                call(self, "sleep_nanos", vec![millis, nanos])
+            }
+            Native::OnSpinWait => call(self, "on_spin_wait", vec![]),
+            Native::ThreadYield => call(self, "thread_yield", vec![]),
+            Native::FileOpenRead
+            | Native::FileOpenWrite
+            | Native::FileRead
+            | Native::FileReadBytes
+            | Native::FileAvailable
+            | Native::FileSkip
+            | Native::FileClose
+            | Native::FileWrite
+            | Native::FileWriteBytes => self.file_native(native, args),
         }
     }
 
@@ -191,7 +220,7 @@ impl<'a> Gen<'a> {
     }
 
     /// A shared array as the receiver of `borrow()`: a variable as it is, without a clone.
-    fn array_receiver(&mut self, e: &'a Expr) -> String {
+    pub(super) fn array_receiver(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             ExprKind::Var(name) => self.local(name),
             _ => self.expr(e).receiver(),

@@ -13,8 +13,10 @@ mod boxing;
 mod character;
 mod code;
 mod dispatch;
+mod code_point;
 mod enums;
 mod expr;
+mod files;
 mod math;
 mod names;
 mod null;
@@ -24,6 +26,7 @@ mod stmt;
 mod strings;
 mod switch;
 mod text;
+mod unsigned;
 
 use code::*;
 use dispatch::{Need, Needs};

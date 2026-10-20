@@ -129,6 +129,10 @@ impl<'a> Gen<'a> {
                 let code = self.parse(kind, &args[0]);
                 self.box_code_if_boxed(code, kind, ty)
             }
+            BoxedOp::ParseRadix => {
+                let code = self.parse_radix(kind, &args[0], &args[1]);
+                self.box_code_if_boxed(code, kind, ty)
+            }
             BoxedOp::Box => {
                 let code = self.value(&args[0], kind);
                 self.box_code(code, kind)
@@ -234,8 +238,18 @@ impl<'a> Gen<'a> {
         match kind {
             Type::Boolean => Code::atom(format!("{}({text})", self.runtime("parse_boolean"))),
             Type::Double => Code::atom(format!("{}({text})", self.runtime("parse_double"))),
+            Type::Float => Code::atom(format!("{}({text})", self.runtime("parse_float"))),
             _ => Code::atom(format!("{}::<{}>({text})", self.runtime("parse_number"), rust_type(kind))),
         }
+    }
+
+    /// `Integer.parseInt(s, radix)` for an integer `kind`: the string is passed as an `Option`, so
+    /// that a null string is the runtime's `NumberFormatException`, as in Java.
+    fn parse_radix(&mut self, kind: Type, text: &'a Expr, radix: &'a Expr) -> Code {
+        let text =
+            if self.nullable(text) { self.option_ref(text) } else { format!("Some({})", self.str_ref(text)) };
+        let radix = self.value(radix, Type::Int);
+        Code::atom(format!("{}::<{}>({text}, {})", self.runtime("parse_radix"), rust_type(kind), radix.text))
     }
 
     /// `a == b` for two primitives of `kind`, for `equals`: `Double.equals` compares bits.
