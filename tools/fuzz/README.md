@@ -61,8 +61,10 @@ programs, so each build only recompiles `main.rs`.
 ## What it covers
 
 - Primitive locals and static fields of every numeric type and `boolean`, `char`, `byte`, `short`
-- Every binary, unary, shift and compound-assignment operator, and `++`/`--` in expressions
-- Casts between primitives, ternaries, `Math.abs`, `Math.min`, `Math.max`, `Math.floorMod`
+- Every binary, unary, shift and compound-assignment operator; `=`, compound assignments and
+  `++`/`--` in expressions, on variables and on array elements
+- Casts between primitives, ternaries (some with branches of two types), `Math.abs`, `Math.min`,
+  `Math.max`, `Math.floorMod`
 - String concatenation of mixed types printed with `System.out.println`, and a `String` accumulator
 - `if`, `while`, `do`, `for`, `switch` with fall-through and `break`, labeled `break`/`continue`
 - Methods with parameters and return values, recursion with a depth bound

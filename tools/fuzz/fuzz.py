@@ -57,6 +57,13 @@ LITERALS = {
     'boolean': ['true', 'false'],
 }
 
+# Int constants that each small type can hold, for conditionals of that type.
+SMALL_CONSTANTS = {
+    'byte': ['0', '7', '-3', '127', '-128'],
+    'short': ['0', '300', '-300', '32767', '-32768'],
+    'char': ['0', '65', '97', '65535'],
+}
+
 # Statement kinds with their weights. The last three nest blocks and need a depth to spare.
 STATEMENTS = {
     'decl': 6, 'assign': 8, 'incr': 2, 'store': 4, 'array': 3, 'print': 8, 'acc': 2,
@@ -189,7 +196,10 @@ class Gen(StringGen):
         elif kind == 'cast':
             text = f'(({t})({self.expr(self.pick(NUMERIC), d - 1)}))'
         elif kind == 'ternary':
-            text = f'({self.bool_expr(d - 1)} ? {self.expr(t, d - 1)} : {self.expr(t, d - 1)})'
+            # Mixed branches have the promoted type, or the small type of the other branch where
+            # one is an int constant that it holds; either way a value of type `t`.
+            a, b = self.operands(t) if self.chance(0.4) else (t, t)
+            text = f'({self.bool_expr(d - 1)} ? {self.expr(a, d - 1)} : {self.expr(b, d - 1)})'
         elif kind == 'math':
             if self.chance(0.3):
                 text = f'Math.abs({self.expr(t, d - 1)})'
@@ -214,7 +224,12 @@ class Gen(StringGen):
         if kind == 'cast':
             text = f'(({t})({self.expr(self.pick(NUMERIC), d - 1)}))'
         elif kind == 'ternary':
-            text = f'({self.bool_expr(d - 1)} ? {self.expr(t, d - 1)} : {self.expr(t, d - 1)})'
+            a, b = self.expr(t, d - 1), self.expr(t, d - 1)
+            if self.chance(0.4):
+                # An int constant that `t` holds keeps the conditional of type `t`.
+                b = self.pick(SMALL_CONSTANTS[t])
+                a, b = (b, a) if self.chance(0.5) else (a, b)
+            text = f'({self.bool_expr(d - 1)} ? {a} : {b})'
         elif kind == 'side':
             text = self.side(t, d)
         elif kind == 'element':
@@ -282,14 +297,22 @@ class Gen(StringGen):
         return a, b
 
     def side(self, t, d):
-        """An assignment or increment of a writable variable, as an expression."""
-        names = self.visible(t, True)
-        if not names:
-            return None
-        n = self.pick(names)
+        """An assignment or increment of a writable variable or an array element, as an
+        expression."""
+        arrays = self.visible(t + '[]')
+        if arrays and self.chance(0.3):
+            a = self.pick(arrays)
+            n = f'{a}[Math.floorMod({self.expr("int", d - 1)}, {a}.length)]'
+        else:
+            names = self.visible(t, True)
+            if not names:
+                return None
+            n = self.pick(names)
         if t != 'boolean' and self.chance(0.4):
             op = self.pick(['++', '--'])
             return f'({op}{n})' if self.chance(0.5) else f'({n}{op})'
+        if self.chance(0.2):
+            return f'({n} = {self.source(t, d - 1)})'
         return f'({self.compound(n, t, d - 1)})'
 
     def compound(self, target, t, d):

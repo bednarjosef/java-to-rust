@@ -1,6 +1,6 @@
 import java.util.Arrays;
 
-public class Prog {
+public class IndexedIncrementReadsArray {
     static char sChar = '~';
     static double[] aDouble = new double[6];
     public static void main(String[] args) {
@@ -14,5 +14,9 @@ public class Prog {
                 }
             }
         }
+        int[] counts = new int[] {sChar, 2};
+        counts[Math.floorMod(sChar, counts.length)]++;
+        counts[counts.length - 1]--;
+        System.out.println(a5[0] + " " + counts[0] + " " + counts[1]);
     }
 }
