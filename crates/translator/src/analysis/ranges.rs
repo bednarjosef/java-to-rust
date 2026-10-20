@@ -619,7 +619,7 @@ impl<'a> Analysis<'a> {
         match &e.kind {
             ExprKind::Int(v) => Interval::point(*v as i128),
             ExprKind::Long(v) => Interval::point(*v as i128),
-            ExprKind::Double(_) | ExprKind::Bool(_) | ExprKind::Str(_) => other,
+            ExprKind::Double(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Null => other,
             ExprKind::Var(name) => env.get(name).map_or(Interval::full(ty), |v| v.range),
             ExprKind::Unary(op, x) => {
                 let v = self.expr(x, env);

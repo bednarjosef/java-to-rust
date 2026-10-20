@@ -29,7 +29,12 @@ impl<'a> Gen<'a> {
     ) -> String {
         let name = self.local(target);
         let Some(op) = op else {
-            return format!("{name} = {}", self.value(value, ty).text);
+            let value = if self.optional_var(self.method, ty, target) {
+                self.optional(value)
+            } else {
+                self.value(value, ty)
+            };
+            return format!("{name} = {}", value.text);
         };
         if ty == Type::String {
             return self.append(&name, target, value);
@@ -84,8 +89,14 @@ impl<'a> Gen<'a> {
 
     /// `s += value` on a string.
     pub(super) fn append(&mut self, name: &str, target: &str, value: &'a Expr) -> String {
+        if self.optional_var(self.method, Type::String, target) {
+            return self.append_optional(name, value);
+        }
         if !mentions(value, target) {
-            if value.ty == Type::String && matches!(value.kind, ExprKind::Str(_) | ExprKind::Var(_)) {
+            if value.ty == Type::String
+                && matches!(value.kind, ExprKind::Str(_) | ExprKind::Var(_))
+                && !self.nullable(value)
+            {
                 return format!("{name} += {}", self.str_ref(value));
             }
             let mut parts = Vec::new();
@@ -180,11 +191,13 @@ impl<'a> Gen<'a> {
                     (UnOp::Not | UnOp::BitNot, _) => Code::new(format!("!{}", code.at(UNARY)), UNARY),
                 }
             }
+            ExprKind::Null => Code::atom("None"),
             ExprKind::Binary(BinOp::Add, ..) if e.ty == Type::String => {
                 let mut parts = Vec::new();
                 self.parts(e, &mut parts);
                 self.format("format!", parts)
             }
+            ExprKind::Binary(op, l, r) if is_null_test(*op, l, r) => self.null_test(*op, l, r),
             ExprKind::Binary(op, l, r) => {
                 let (l, r) = (self.operand(l), self.operand(r));
                 self.binary(*op, l, r, e.ty, e.id)
@@ -206,8 +219,11 @@ impl<'a> Gen<'a> {
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
                 let cond = self.condition(cond);
-                let a = self.value(a, e.ty);
-                let b = self.value(b, e.ty);
+                let (a, b) = if self.nullable(e) {
+                    (self.optional(a), self.optional(b))
+                } else {
+                    (self.value(a, e.ty), self.value(b, e.ty))
+                };
                 let mut code = Code::new(format!("if {cond} {{ {} }} else {{ {} }}", a.text, b.text), LOWEST);
                 code.untyped = a.untyped && b.untyped;
                 code
@@ -222,6 +238,8 @@ impl<'a> Gen<'a> {
                     .map(|(i, (a, p))| {
                         if self.facts.borrowed_params.contains(&(index, i)) {
                             self.str_ref(a)
+                        } else if self.optional_var(index, p.ty, &p.name) {
+                            self.optional(a).text
                         } else {
                             self.value(a, p.ty).text
                         }
@@ -369,20 +387,17 @@ impl<'a> Gen<'a> {
             // UTF-16 length and UTF-8 length agree on ASCII text.
             Builtin::StringLength if self.facts.ascii_length.contains(&id) => {
                 let s = match &args[0].kind {
+                    _ if self.nullable(&args[0]) => self.deref(&args[0]),
                     ExprKind::Str(_) | ExprKind::Var(_) => self.str_value(&args[0]),
                     _ => self.expr(&args[0]).at(ATOM),
                 };
                 Code::new(format!("{s}.len() as i32"), AS)
             }
             Builtin::StringLength => {
-                let s = self.str_ref(&args[0]);
+                let s = if self.nullable(&args[0]) { self.deref(&args[0]) } else { self.str_ref(&args[0]) };
                 Code::atom(format!("{}({})", self.runtime("string_length"), s))
             }
-            Builtin::StringEquals => {
-                let a = Code::atom(self.str_value(&args[0]));
-                let b = Code::atom(self.str_value(&args[1]));
-                infix("==", CMP, &a, &b)
-            }
+            Builtin::StringEquals => self.equals_optional(args),
         }
     }
 }

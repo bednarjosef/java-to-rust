@@ -141,3 +141,118 @@ fn string_building_appends_in_place() {
     );
     assert_contains(&rust, &["let mut s = String::new();", "s += &i.to_string();", "s += \",\";"]);
 }
+
+#[test]
+fn strings_that_are_never_null_stay_plain() {
+    let rust = translate(
+        "class A {
+            static String twice(String s) { return s + s; }
+            public static void main(String[] a) {
+                String s = \"ab\";
+                System.out.println(twice(s));
+            }
+        }",
+    );
+    assert_contains(&rust, &["fn twice(s: &str) -> String"]);
+    assert_lacks(&rust, &["Option"]);
+}
+
+#[test]
+fn strings_that_may_be_null_are_options() {
+    let rust = translate(
+        "class A {
+            static String find(int n) { return n > 2 ? \"big\" : null; }
+            public static void main(String[] a) {
+                String s = find(3);
+                System.out.println(s);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn find(n: i32) -> Option<String>",
+            "let s: Option<String> = find(3);",
+            "s.as_deref().unwrap_or(\"null\")",
+        ],
+    );
+}
+
+#[test]
+fn null_checks_test_the_option() {
+    let rust = translate(
+        "class A {
+            public static void main(String[] a) {
+                String s = null;
+                if (s == null) {
+                    System.out.println(\"none\");
+                }
+            }
+        }",
+    );
+    assert_contains(&rust, &["let s: Option<String> = None;", "if s.as_deref().is_none() {"]);
+}
+
+#[test]
+fn dereferencing_a_maybe_null_parameter_throws() {
+    let rust = translate(
+        "class A {
+            static int size(String s) { return s.length(); }
+            public static void main(String[] a) {
+                System.out.println(size(null));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["fn size(s: Option<String>) -> i32", "java::non_null(s.as_deref()).len() as i32"],
+    );
+    assert_lacks(&rust, &["unwrap()"]);
+}
+
+#[test]
+fn a_null_check_binds_the_string_in_its_branch() {
+    let rust = translate(
+        "class A {
+            static int size(String s) { if (s != null) { return s.length(); } return -1; }
+            public static void main(String[] a) { System.out.println(size(null)); }
+        }",
+    );
+    assert_contains(&rust, &["if let Some(s) = s.as_deref() {", "s.len() as i32"]);
+    assert_lacks(&rust, &["non_null"]);
+}
+
+#[test]
+fn an_early_return_on_null_binds_the_rest_of_the_block() {
+    let rust = translate(
+        "class A {
+            static int size(String s) { if (s == null) return -1; return s.length(); }
+            public static void main(String[] a) { System.out.println(size(null)); }
+        }",
+    );
+    assert_contains(&rust, &["let Some(s) = s.as_deref() else {", "return -1;", "s.len() as i32"]);
+    assert_lacks(&rust, &["non_null"]);
+}
+
+#[test]
+fn a_null_check_whose_branch_does_not_read_the_string_does_not_bind_it() {
+    let rust = translate(
+        "class A {
+            static int count(String s) { int n = 0; if (s != null) n++; return n; }
+            public static void main(String[] a) { System.out.println(count(null)); }
+        }",
+    );
+    assert_contains(&rust, &["if !s.as_deref().is_none() {"]);
+    assert_lacks(&rust, &["if let Some(s)"]);
+}
+
+#[test]
+fn a_branch_that_assigns_the_string_does_not_narrow_it() {
+    let rust = translate(
+        "class A {
+            static int f(String s) { if (s != null) { s = null; return 1; } return s == null ? 2 : 3; }
+            public static void main(String[] a) { System.out.println(f(\"a\")); }
+        }",
+    );
+    assert_lacks(&rust, &["if let Some(s)", "let Some(s)"]);
+}

@@ -40,6 +40,9 @@ impl<'a> Gen<'a> {
     }
 
     pub(super) fn concat_parts(&mut self, e: &'a Expr, assigned: &HashSet<String>, out: &mut Vec<Part>) {
+        if let Some(part) = self.null_part(e, assigned) {
+            return out.push(part);
+        }
         match &e.kind {
             ExprKind::Binary(BinOp::Add, l, r) if e.ty == Type::String => {
                 self.concat_parts(l, assigned, out);

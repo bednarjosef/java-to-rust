@@ -146,6 +146,8 @@ pub enum ExprKind {
     Double(f64),
     Bool(bool),
     Str(String),
+    /// The `null` literal; its type is `Type::Null` until it meets a reference type.
+    Null,
     Var(String),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),

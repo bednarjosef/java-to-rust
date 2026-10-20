@@ -11,11 +11,13 @@ use std::collections::{HashMap, HashSet};
 mod code;
 mod expr;
 mod names;
+mod null;
 mod stmt;
 mod strings;
 
 use code::*;
 use names::*;
+use null::is_null_test;
 
 pub fn generate(class: &Class, facts: &Facts) -> String {
     let mut g = Gen {
@@ -161,11 +163,23 @@ impl<'a> Gen<'a> {
             .iter()
             .map(|p| {
                 let mutable = if assigns_any(&m.body, &p.name) { "mut " } else { "" };
-                let ty = if self.borrowed.contains(&p.name) { "&str" } else { rust_type(p.ty) };
+                let ty = if self.optional_var(index, p.ty, &p.name) {
+                    "Option<String>"
+                } else if self.borrowed.contains(&p.name) {
+                    "&str"
+                } else {
+                    rust_type(p.ty)
+                };
                 format!("{mutable}{}: {ty}", self.local(&p.name))
             })
             .collect();
-        let ret = if m.ret == Type::Void { String::new() } else { format!(" -> {}", rust_type(m.ret)) };
+        let ret = if m.ret == Type::Void {
+            String::new()
+        } else if self.optional_return() {
+            " -> Option<String>".to_string()
+        } else {
+            format!(" -> {}", rust_type(m.ret))
+        };
         self.line(&format!("fn {}({}){ret} {{", self.fn_names[index], params.join(", ")));
         self.indent += 1;
         self.stmts(&m.body, true);

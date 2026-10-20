@@ -18,8 +18,15 @@ impl<'a> Gen<'a> {
     /// The statements of a block. In a function body (`tail`), a final `return x;` becomes the
     /// tail expression `x`.
     pub(super) fn stmts(&mut self, stmts: &'a [Stmt], tail: bool) {
+        let mut narrowed = Vec::new();
         for (i, stmt) in stmts.iter().enumerate() {
             let rest = &stmts[i + 1..];
+            if let Some(name) = self.early_null_exit(stmt, rest) {
+                if self.borrowed.insert(name.to_string()) {
+                    narrowed.push(name);
+                }
+                continue;
+            }
             match stmt {
                 Stmt::Return(Some(value), _) if tail && rest.is_empty() => {
                     let code = self.returned(value);
@@ -27,6 +34,9 @@ impl<'a> Gen<'a> {
                 }
                 _ => self.stmt(stmt, rest),
             }
+        }
+        for name in narrowed {
+            self.borrowed.remove(name);
         }
     }
 
@@ -49,6 +59,9 @@ impl<'a> Gen<'a> {
             }
             Stmt::Expr(e) => self.effect(e),
             Stmt::If { cond, then, otherwise } => {
+                if self.narrow_if(cond, then, otherwise.as_deref()) {
+                    return;
+                }
                 let cond_text = self.condition(cond);
                 self.line(&format!("if {cond_text} {{"));
                 self.nested(then);
@@ -119,6 +132,9 @@ impl<'a> Gen<'a> {
     /// The value of a `return`: a string variable is moved out rather than copied, since the
     /// method ends.
     pub(super) fn returned(&mut self, value: &'a Expr) -> Code {
+        if self.optional_return() {
+            return self.optional(value);
+        }
         if let ExprKind::Var(name) = &value.kind
             && value.ty == Type::String
             && !self.borrowed.contains(name)
@@ -202,6 +218,9 @@ impl<'a> Gen<'a> {
     }
 
     pub(super) fn local_decl(&mut self, ty: Type, name: &str, init: Option<&'a Expr>, mutable: bool) {
+        if self.optional_var(self.method, ty, name) {
+            return self.optional_local(name, init, mutable);
+        }
         let mutable = if mutable { "mut " } else { "" };
         let rust = self.local(name);
         match init {
@@ -229,7 +248,10 @@ impl<'a> Gen<'a> {
         match &cond.kind {
             ExprKind::Unary(UnOp::Not, inner) => return self.condition(inner),
             ExprKind::Binary(op, l, r)
-                if op.is_comparison() && l.ty != Type::Double && r.ty != Type::Double =>
+                if op.is_comparison()
+                    && l.ty != Type::Double
+                    && r.ty != Type::Double
+                    && !is_null_test(*op, l, r) =>
             {
                 let flipped = match op {
                     BinOp::Eq => BinOp::Ne,
