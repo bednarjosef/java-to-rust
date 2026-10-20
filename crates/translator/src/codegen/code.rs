@@ -125,6 +125,12 @@ impl Code {
         if self.literal.is_some() || self.untyped { self.typed_at(AS) } else { self.at(AS) }
     }
 
+    /// The text as an argument whose type a generic parameter leaves to inference, such as the
+    /// value of `append`: a literal whose type inference would not choose has it written.
+    pub(super) fn generic_arg(&self) -> String {
+        if self.literal.is_some_and(|literal| !literal.inferred()) { self.typed() } else { self.text.clone() }
+    }
+
     /// The text as the receiver of a method call.
     pub(super) fn receiver(&self) -> String {
         self.typed_at(ATOM)

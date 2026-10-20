@@ -133,3 +133,15 @@ fn a_cast_variable_in_a_concatenation_is_read_before_a_later_operand_assigns_it(
     );
     assert_contains(&rust, &["{ count }, { count -= 1; count }"]);
 }
+
+#[test]
+fn a_long_literal_appended_to_a_builder_has_its_type_written() {
+    let rust = translate(
+        "class A { public static void main(String[] a) {
+            StringBuilder sb = new StringBuilder();
+            sb.insert(0, 4294967296L).append(7);
+            System.out.println(sb);
+        } }",
+    );
+    assert_contains(&rust, &["sb.insert(0, 4294967296i64).append(7);"]);
+}
