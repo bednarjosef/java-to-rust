@@ -799,6 +799,65 @@ fn char_at_on_text_that_may_not_be_ascii_counts_utf16_units() {
 }
 
 #[test]
+fn string_built_from_ascii_char_casts_indexes_bytes() {
+    let rust = translate(
+        "class A {
+            static String letters(int n) {
+                String s = \"\";
+                for (int i = 0; i < n; i++) { s = s + (char) ('a' + (i * 7 + i / 3) % 26); }
+                return s;
+            }
+            static int count(String s, char target) {
+                int count = 0;
+                for (int i = 0; i < s.length(); i++) { if (s.charAt(i) == target) count++; }
+                return count;
+            }
+            public static void main(String[] a) { System.out.println(count(letters(4000), 'a')); }
+        }",
+    );
+    assert_contains(&rust, &["for i in 0..s.len() as i32 {", "s.as_bytes()[i as usize] as u16"]);
+    assert_lacks(&rust, &["java::char_at", "java::string_length"]);
+}
+
+#[test]
+fn char_cast_that_may_leave_ascii_keeps_utf16_units() {
+    let rust = translate(
+        "class A {
+            static String wide(int n) {
+                String s = \"\";
+                for (int i = 0; i < n; i++) { s = s + (char) (200 + i); }
+                return s;
+            }
+            public static void main(String[] a) { System.out.println(wide(4).charAt(1)); }
+        }",
+    );
+    assert_contains(&rust, &["java::char_at(&wide(4), 1)"]);
+    assert_lacks(&rust, &["as_bytes"]);
+}
+
+#[test]
+fn primitive_statics_are_cells_and_other_statics_stay_ref_cells() {
+    let rust = translate(
+        "class A {
+            static int count;
+            static String name = \"x\";
+            static void bump() { count += 2; name += count; }
+            public static void main(String[] a) { bump(); System.out.println(count); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "static A_COUNT: Cell<i32> = const { Cell::new(0) };",
+            "A_COUNT.get()",
+            "A_COUNT.set(value);",
+            "static A_NAME: RefCell<",
+        ],
+    );
+    assert_lacks(&rust, &["A_COUNT.with_borrow"]);
+}
+
+#[test]
 fn floats_are_f32_and_print_like_java() {
     let rust = translate(
         "class A {
@@ -1010,8 +1069,8 @@ fn classes_with_one_name_in_two_packages() {
             "crate::com::shop::model::Item::new_string_i32(\"apple\", 3)",
             "crate::com::shop::legacy::Item::new(7)",
             "crate::com::shop::model::RegistryEntry::new(4)",
-            "crate::com::shop::model::REGISTRY_CREATED.with_borrow(|v| *v)",
-            "pub(crate) static COUNTER_HITS: RefCell<i32>",
+            "crate::com::shop::model::REGISTRY_CREATED.get()",
+            "pub(crate) static COUNTER_HITS: Cell<i32>",
         ],
     );
 }
