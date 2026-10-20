@@ -53,7 +53,7 @@ impl Slot {
 /// Whether values of this type are owned heap data or shared arrays or objects, which are cloned
 /// when read.
 pub(super) fn needs_clone(ty: Type) -> bool {
-    matches!(ty, Type::String | Type::Array(_) | Type::Class(_))
+    matches!(ty, Type::String | Type::Array(_) | Type::Class(_) | Type::Boxed(_))
 }
 
 /// The Rust name of a class: its qualified Java name with the dots replaced.
@@ -84,6 +84,7 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Double | Type::Float => "0.0",
         Type::Boolean => "false",
         Type::String => "String::new()",
+        Type::Boxed(_) => "None",
         _ => unreachable!("lowering rejects fields of type {ty}"),
     }
 }
@@ -224,7 +225,7 @@ impl<'a> Gen<'a> {
                 } else if self.facts.borrowed_optional_params.contains(&(index, i)) {
                     self.option_arg(a)
                 } else if self.optional_var(index, p.ty, &p.name) {
-                    self.optional(a).text
+                    self.optional_to(a, p.ty).text
                 } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {
                     self.borrowed_arg(a, written)
                 } else if self.guarded
@@ -360,9 +361,25 @@ impl<'a> Gen<'a> {
         let outer = std::mem::replace(&mut self.guarded, rhs);
         let result = match how {
             Update::Assign(value) => {
-                let v = self.value(value, ty).text;
+                let v = self.field_value(value, ty);
                 lines.push(format!("let {new} = {v};"));
                 new.clone()
+            }
+            Update::Compound(op, value) if matches!(ty, Type::Boxed(_)) => {
+                lines.push(format!("let {old} = {};", slot.read(ty)));
+                let right = self.operand(value);
+                let stored = self.boxed_result(op, ty, Code::atom(old.clone()), true, right, id);
+                lines.push(format!("let {new} = {};", stored.text));
+                format!("{}({new})", self.runtime("non_null"))
+            }
+            Update::Step(increment) if matches!(ty, Type::Boxed(_)) => {
+                lines.push(format!("let {old} = {};", slot.read(ty)));
+                let op = if increment { BinOp::Add } else { BinOp::Sub };
+                let one = Operand { code: Code::literal(Literal::Int(1)), ty: Type::Int };
+                let stored = self.boxed_result(op, ty, Code::atom(old.clone()), true, one, id);
+                lines.push(format!("let {new} = {};", stored.text));
+                let value = if prefix { new.clone() } else { old.clone() };
+                format!("{}({value})", self.runtime("non_null"))
             }
             Update::Compound(_, value) if ty == Type::String => {
                 let mut parts = vec![Part::Arg(Code::atom(slot.read(ty)))];
@@ -372,7 +389,7 @@ impl<'a> Gen<'a> {
             }
             Update::Compound(op, value) => {
                 lines.push(format!("let {old} = {};", slot.read(ty)));
-                let rty = crate::types::binary_type(op, ty, value.ty).expect("checked");
+                let rty = crate::types::binary_type(op, ty, value.ty.unboxed()).expect("checked");
                 let right = self.operand(value);
                 let code = self.binary(op, Operand { code: Code::atom(old.clone()), ty }, right, rty, id);
                 lines.push(format!("let {new} = {};", self.convert(code, rty, ty).text));
@@ -407,7 +424,7 @@ impl<'a> Gen<'a> {
         self.line(&format!("struct {name} {{"));
         self.indent += 1;
         for f in &decl.fields {
-            let ty = self.ty_name(f.ty);
+            let ty = self.field_ty_name(f.ty);
             self.line(&format!("{}: {ty},", snake_case(&f.name)));
         }
         self.indent -= 1;
@@ -448,7 +465,7 @@ impl<'a> Gen<'a> {
         for f in inits {
             // The line writes a field, so a read in the value must end its `Ref` first.
             let outer = std::mem::replace(&mut self.guarded, true);
-            let value = self.value(f.init.as_ref().expect("filtered"), f.ty).text;
+            let value = self.field_value(f.init.as_ref().expect("filtered"), f.ty);
             self.guarded = outer;
             let field = snake_case(&f.name);
             if by_value {
@@ -473,11 +490,11 @@ impl<'a> Gen<'a> {
         for decl in &class.types {
             for f in &decl.statics {
                 let init = match &f.init {
-                    Some(e) => self.value(e, f.ty).text,
+                    Some(e) => self.field_value(e, f.ty),
                     None => default_value(f.ty).to_string(),
                 };
                 let cell = cell_name(&decl.name, &f.name);
-                let ty = self.ty_name(f.ty);
+                let ty = self.field_ty_name(f.ty);
                 self.line(&format!("static {cell}: RefCell<{ty}> = RefCell::new({init});"));
             }
         }

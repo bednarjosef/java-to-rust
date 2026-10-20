@@ -362,6 +362,34 @@ pub enum Builtin {
     CharIsLowerCase,
     CharToUpperCase,
     CharToLowerCase,
+    /// `Character.getNumericValue(c)`: the digit value of a letter or digit, or -1.
+    CharNumericValue,
+    /// A method of a boxed class (`Integer.parseInt`, `x.intValue()`), see `BoxedOp`, with the
+    /// primitive of the boxed class it belongs to (`Type::Int` for `Integer`).
+    Boxed(BoxedOp, Type),
+}
+
+/// The methods of the boxed classes. The kind of the boxes comes from the types of the operands
+/// and of the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoxedOp {
+    /// `Integer.parseInt(s)` and the other `parseX`: the primitive of the result's kind, read from
+    /// a string. `Integer.valueOf(s)` is the same, boxed.
+    Parse,
+    /// `Integer.valueOf(i)`: the boxed kind of the result, from its primitive argument.
+    Box,
+    /// `x.intValue()` and the other `xValue()`: the result's primitive, from the receiver.
+    Unbox,
+    /// `Integer.toString(i)` or `x.toString()`.
+    ToString,
+    /// `Integer.compare(a, b)` or `x.compareTo(y)`.
+    Compare,
+    /// `Integer.hashCode(i)` or `x.hashCode()`.
+    HashCode,
+    /// `x.equals(y)`.
+    Equals,
+    /// `Integer.sum(a, b)`.
+    Sum,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

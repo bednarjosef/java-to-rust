@@ -8,6 +8,7 @@ use crate::analysis::Facts;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
+mod boxing;
 mod code;
 mod expr;
 mod names;
@@ -223,7 +224,7 @@ impl<'a> Gen<'a> {
                 let ty = if self.borrowed_optional.contains(&p.name) {
                     "Option<&str>".to_string()
                 } else if self.optional_var(index, p.ty, &p.name) {
-                    "Option<String>".to_string()
+                    format!("Option<{}>", self.ty_name(p.ty))
                 } else if self.borrowed.contains(&p.name) {
                     "&str".to_string()
                 } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {
@@ -240,7 +241,7 @@ impl<'a> Gen<'a> {
         } else if m.ret == Type::Void {
             String::new()
         } else if self.optional_return() {
-            " -> Option<String>".to_string()
+            format!(" -> Option<{}>", self.ty_name(m.ret))
         } else {
             format!(" -> {}", self.ty_name(m.ret))
         };

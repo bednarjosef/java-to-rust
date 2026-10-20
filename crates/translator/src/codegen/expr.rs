@@ -39,6 +39,10 @@ impl<'a> Gen<'a> {
         if ty == Type::String {
             return self.append(&name, target, value);
         }
+        if matches!(ty, Type::Boxed(_)) {
+            let right = self.operand(value);
+            return self.boxed_update(op, target, ty, right, id);
+        }
         if let Some(text) = self.primitive_assignment(op, &name, ty, value, id) {
             return text;
         }
@@ -54,7 +58,7 @@ impl<'a> Gen<'a> {
             BinOp::Shl => "<<=",
             _ => ">>=",
         };
-        let result = crate::types::binary_type(op, ty, value.ty).expect("checked");
+        let result = crate::types::binary_type(op, ty, value.ty.unboxed()).expect("checked");
         let simple = match op {
             // Double arithmetic has no traps, and the result is already a double.
             _ if ty == Type::Double => {
@@ -63,7 +67,8 @@ impl<'a> Gen<'a> {
             BinOp::Add | BinOp::Sub | BinOp::Mul => result == ty && self.no_overflow(id),
             BinOp::Div | BinOp::Rem => result == ty && self.safe_division(id, value),
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
-                ty == Type::Boolean || (ty.is_integral() && crate::types::promote(ty, value.ty) == ty)
+                ty == Type::Boolean
+                    || (ty.is_integral() && crate::types::promote(ty, value.ty.unboxed()) == ty)
             }
             // Shifting by a constant in range cannot overflow.
             BinOp::Shl | BinOp::Shr => ty.is_integral() && in_shift_range(value, ty),
@@ -126,6 +131,11 @@ impl<'a> Gen<'a> {
 
     /// `x += 1` or `x -= 1` as a Rust statement.
     pub(super) fn step(&mut self, target: &str, ty: Type, increment: bool, id: ExprId) -> String {
+        if matches!(ty, Type::Boxed(_)) {
+            let op = if increment { BinOp::Add } else { BinOp::Sub };
+            let one = Operand { code: Code::literal(Literal::Int(1)), ty: Type::Int };
+            return self.boxed_update(op, target, ty, one, id);
+        }
         let name = self.local(target);
         if ty.is_floating() || self.no_overflow(id) {
             let one = if ty.is_floating() { "1.0" } else { "1" };
@@ -140,12 +150,16 @@ impl<'a> Gen<'a> {
 
     /// `e` as a value of type `ty`, applying Java's widening conversions.
     pub(super) fn value(&mut self, e: &'a Expr, ty: Type) -> Code {
+        if matches!(e.ty, Type::Boxed(_)) || matches!(ty, Type::Boxed(_)) {
+            return self.boxing_value(e, ty);
+        }
         let code = self.expr(e);
         self.convert(code, e.ty, ty)
     }
 
     pub(super) fn operand(&mut self, e: &'a Expr) -> Operand {
-        Operand { code: self.expr(e), ty: e.ty }
+        let ty = e.ty.unboxed();
+        Operand { code: self.value(e, ty), ty }
     }
 
     /// Converts between numeric types, folding conversions of literals.
@@ -189,7 +203,7 @@ impl<'a> Gen<'a> {
                 let rust = self.local(name);
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
-                    ty if needs_clone(ty) => Code::atom(format!("{rust}.clone()")),
+                    ty if needs_clone(ty) || self.faithful_box(ty) => Code::atom(format!("{rust}.clone()")),
                     _ => Code::atom(rust),
                 }
             }
@@ -221,6 +235,11 @@ impl<'a> Gen<'a> {
                 self.format("format!", parts)
             }
             ExprKind::Binary(op, l, r) if is_null_test(*op, l, r) => self.null_test(*op, l, r),
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
+                if self.faithful_box(l.ty) && r.ty == l.ty =>
+            {
+                self.boxed_identity(*op, l, r)
+            }
             ExprKind::Binary(op, l, r) => {
                 let (l, r) = (self.operand(l), self.operand(r));
                 self.binary(*op, l, r, e.ty, e.id)
@@ -405,6 +424,8 @@ impl<'a> Gen<'a> {
                 let mac = if builtin == Builtin::Println { "println!" } else { "print!" };
                 self.format(mac, parts)
             }
+            Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
+            Builtin::CharNumericValue => self.char_numeric_value(args),
             Builtin::Exit => {
                 let code = self.value(&args[0], Type::Int);
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))

@@ -722,7 +722,8 @@ impl<'a> Analysis<'a> {
                 let range = match op {
                     None => convert(v, value.ty, var.ty),
                     Some(op) => {
-                        let result = binary_type(*op, var.ty, value.ty).expect("checked");
+                        // A boxed value is unboxed before the operation.
+                        let result = binary_type(*op, var.ty, value.ty.unboxed()).expect("checked");
                         let step = match (op, &value.kind) {
                             (BinOp::Add, ExprKind::Int(k)) if *k >= 0 => Some(*k as i128),
                             (BinOp::Add, ExprKind::Long(k)) if *k >= 0 => Some(*k as i128),
