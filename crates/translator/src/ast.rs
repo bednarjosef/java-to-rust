@@ -685,13 +685,12 @@ pub fn has_effects(e: &Expr) -> bool {
                 | ExprKind::Builtin(
                     Builtin::Print | Builtin::Println | Builtin::Exit | Builtin::Native(_),
                     _
-                ) | ExprKind::Builtin(
+                )
+                | ExprKind::Builtin(
                     Builtin::Unsigned(UnsignedOp::Divide | UnsignedOp::Remainder | UnsignedOp::Parse, _),
                     _
-                ) | ExprKind::Builtin(
-                    Builtin::CodePoint(CodePointOp::ToChars | CodePointOp::ToString),
-                    _
                 )
+                | ExprKind::Builtin(Builtin::CodePoint(CodePointOp::ToChars | CodePointOp::ToString), _)
         )
     });
     found

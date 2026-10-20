@@ -25,12 +25,19 @@ impl<'a> Gen<'a> {
     }
 
     /// The unsigned methods of `Integer`, `Long`, `Byte` and `Short`, for `op` on `kind`.
-    pub(super) fn unsigned_builtin(&mut self, op: UnsignedOp, kind: Type, args: &'a [Expr], ty: Type) -> Code {
+    pub(super) fn unsigned_builtin(
+        &mut self,
+        op: UnsignedOp,
+        kind: Type,
+        args: &'a [Expr],
+        ty: Type,
+    ) -> Code {
         match op {
             UnsignedOp::Divide | UnsignedOp::Remainder => {
                 let a = self.unsigned_operand(&args[0], kind);
                 let b = self.unsigned_operand(&args[1], kind);
-                let function = if op == UnsignedOp::Divide { "divide_unsigned" } else { "remainder_unsigned" };
+                let function =
+                    if op == UnsignedOp::Divide { "divide_unsigned" } else { "remainder_unsigned" };
                 Code::new(format!("{}({a}, {b}) as {}", self.runtime(function), rust_type(kind)), AS)
             }
             UnsignedOp::Compare => {
@@ -48,21 +55,31 @@ impl<'a> Gen<'a> {
             }
             UnsignedOp::Parse => {
                 let text = &args[0];
-                let text =
-                    if self.nullable(text) { self.option_ref(text) } else { format!("Some({})", self.str_ref(text)) };
+                let text = if self.nullable(text) {
+                    self.option_ref(text)
+                } else {
+                    format!("Some({})", self.str_ref(text))
+                };
                 let radix = match args.get(1) {
                     Some(radix) => self.value(radix, Type::Int).text,
                     None => "10".to_string(),
                 };
                 let bits = if kind == Type::Long { 64 } else { 32 };
                 Code::new(
-                    format!("{}({text}, {radix}, {bits}) as {}", self.runtime("parse_unsigned"), rust_type(kind)),
+                    format!(
+                        "{}({text}, {radix}, {bits}) as {}",
+                        self.runtime("parse_unsigned"),
+                        rust_type(kind)
+                    ),
                     AS,
                 )
             }
             UnsignedOp::Widen => {
                 let value = self.value(&args[0], kind);
-                Code::new(format!("{} as {} as {}", value.cast_operand(), unsigned_type(kind), rust_type(ty)), AS)
+                Code::new(
+                    format!("{} as {} as {}", value.cast_operand(), unsigned_type(kind), rust_type(ty)),
+                    AS,
+                )
             }
         }
     }

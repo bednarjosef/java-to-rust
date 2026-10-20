@@ -3,10 +3,10 @@
 //! resolved every name and call, so lowering only maps them onto the supported subset. Anything
 //! outside it is reported as an error naming the construct.
 
+mod code_point;
 mod enums;
 mod objects;
 mod statics;
-mod code_point;
 mod unsigned;
 
 use crate::ast::*;

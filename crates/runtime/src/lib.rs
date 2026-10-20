@@ -20,12 +20,12 @@ pub mod fdlibm;
 mod float;
 mod float_parse;
 mod integer_parse;
-mod unsigned;
 mod java_arrays;
 mod math;
 mod natives;
 mod null;
 mod out;
+mod unsigned;
 pub use boxed::*;
 pub use character::*;
 pub use character_classes::*;
@@ -38,12 +38,14 @@ pub use exact::*;
 pub use float::*;
 pub use float_parse::{parse_double, parse_float};
 pub use integer_parse::parse_radix;
-pub use unsigned::{compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string};
 pub use java_arrays::*;
 pub use math::*;
 pub use natives::*;
 pub use null::{OrNull, non_null, or_null, same};
 pub use out::{Out, flush, out, print_chars, println_chars, write_byte};
+pub use unsigned::{
+    compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,
+};
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
 pub struct Double(pub f64);

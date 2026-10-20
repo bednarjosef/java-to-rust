@@ -25,7 +25,13 @@ fn code_point_methods_call_the_runtime_on_the_code_point() {
     );
     assert_contains(
         &rust,
-        &["to_chars(128512)", "char_count(128512)", "to_code_point(", "high_surrogate(128512)", "is_supplementary_code_point(65536)"],
+        &[
+            "to_chars(128512)",
+            "char_count(128512)",
+            "to_code_point(",
+            "high_surrogate(128512)",
+            "is_supplementary_code_point(65536)",
+        ],
     );
 }
 

@@ -11,15 +11,26 @@ pub(super) fn is_code_point_method(owner: &str, name: &str, args: &[Expr]) -> bo
     }
     match name {
         "toString" => args.len() == 1 && args[0].ty != Type::Char,
-        "toChars" | "charCount" | "toCodePoint" | "highSurrogate" | "lowSurrogate" | "isValidCodePoint"
-        | "isBmpCodePoint" | "isSupplementaryCodePoint" => true,
+        "toChars"
+        | "charCount"
+        | "toCodePoint"
+        | "highSurrogate"
+        | "lowSurrogate"
+        | "isValidCodePoint"
+        | "isBmpCodePoint"
+        | "isSupplementaryCodePoint" => true,
         _ => false,
     }
 }
 
 impl<'t> Lowering<'t> {
     /// A call of a code point method, see `is_code_point_method`.
-    pub(super) fn code_point_call(&self, node: Node<'t>, symbol: &Symbol<'t>, args: &[Expr]) -> Result<Builtin, Error> {
+    pub(super) fn code_point_call(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        args: &[Expr],
+    ) -> Result<Builtin, Error> {
         let name = symbol.name;
         let op = match name {
             "toChars" => CodePointOp::ToChars,

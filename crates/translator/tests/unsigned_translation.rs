@@ -22,10 +22,7 @@ fn unsigned_division_reads_the_operands_as_unsigned() {
             System.out.println(Integer.divideUnsigned(x, 7) + Long.remainderUnsigned(y, 3L));
         } }",
     );
-    assert_contains(
-        &rust,
-        &["divide_unsigned(x as u32 as u64, 7", "remainder_unsigned(y as u64, 3"],
-    );
+    assert_contains(&rust, &["divide_unsigned(x as u32 as u64, 7", "remainder_unsigned(y as u64, 3"]);
 }
 
 #[test]
@@ -35,7 +32,10 @@ fn unsigned_parsing_passes_the_width_of_the_type() {
             System.out.println(Integer.parseUnsignedInt(\"ff\", 16) + Long.parseUnsignedLong(\"7\"));
         } }",
     );
-    assert_contains(&rust, &["parse_unsigned(Some(\"ff\"), 16, 32) as i32", "parse_unsigned(Some(\"7\"), 10, 64) as i64"]);
+    assert_contains(
+        &rust,
+        &["parse_unsigned(Some(\"ff\"), 16, 32) as i32", "parse_unsigned(Some(\"7\"), 10, 64) as i64"],
+    );
 }
 
 #[test]
