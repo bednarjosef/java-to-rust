@@ -7,7 +7,7 @@
 //! type keeps the same low bits, so that is `c.wrapping_add(1)`, and `c + 1` where the range
 //! analysis shows the result fits.
 
-use super::expr::Operand;
+use super::expr::{Operand, writes_inside};
 use super::*;
 use crate::types::{integral_bounds, narrow, promote};
 
@@ -176,6 +176,9 @@ impl<'a> Gen<'a> {
         id: ExprId,
     ) -> Option<String> {
         let compound = format!("{}=", op.java());
+        if writes_inside(value) {
+            return None;
+        }
         if ty == Type::Float {
             // `f += d` on a double rounds once, after the addition.
             if value.ty == Type::Double {

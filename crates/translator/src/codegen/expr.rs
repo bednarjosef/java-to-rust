@@ -17,12 +17,24 @@ pub(super) fn in_shift_range(e: &Expr, ty: Type) -> bool {
     }
 }
 
+/// Whether `e` assigns or steps a variable, field or array element. Rust evaluates the right side
+/// of a primitive `x op= e` before reading `x`, where Java reads `x` first, so such an `e` cannot
+/// go in a Rust compound assignment.
+pub(super) fn writes_inside(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::Assign { .. } | ExprKind::IncDec { .. }));
+    found
+}
+
 impl<'a> Gen<'a> {
     /// `target = value` or `target op= value` as a Rust statement, without the semicolon.
     /// The Rust compound assignment operator (`+=`) that does what Java's `x op= value` does on a
     /// variable of type `ty`, if there is one: no promotion to a wider type, and no overflow,
     /// division by zero or shift out of range to handle.
     pub(super) fn in_place_op(&self, op: BinOp, ty: Type, value: &Expr, id: ExprId) -> Option<&'static str> {
+        if writes_inside(value) {
+            return None;
+        }
         let symbol = match op {
             BinOp::Add => "+=",
             BinOp::Sub => "-=",
