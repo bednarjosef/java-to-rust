@@ -44,15 +44,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
     let mut methods: Vec<Method> =
         (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
-    for index in (0..types.len()).filter(|&t| lowering.has_static_init(t)) {
-        methods.push(lowering.clinit(index)?);
-    }
-    for index in (0..types.len()).filter(|&t| lowering.types[t].node.kind() == "ENUM") {
-        lowering.constant_bodies(index, &mut methods)?;
-        lowering.check_enum(index, &methods)?;
-        let constants = lowering.enum_constants(index, &types[index].fields, &methods)?;
-        types[index].enum_constants = Some(constants);
-    }
+    lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
     let hierarchy = Hierarchy::new(&types, &methods);
     let class = Class { name: first.str("simpleName").to_string(), types, methods, hierarchy };
     enums::check_nulls(&class)?;
@@ -124,7 +116,14 @@ impl<'t> Node<'t> {
         })
     }
 
+    /// Whether the declaration has a modifier. `STATIC` comes from the declaration's symbol when it
+    /// has one, which also knows the implicit modifier of an interface's fields and nested types.
     fn has_flag(self, flag: &str) -> bool {
+        if flag == "STATIC"
+            && let Some(s) = self.get("symbol").and_then(|s| s.0["static"].as_bool())
+        {
+            return s;
+        }
         self.get("modifiers")
             .is_some_and(|m| m.0["flags"].as_array().is_some_and(|f| f.iter().any(|x| x == flag)))
     }
@@ -158,6 +157,23 @@ struct Lowering<'t> {
 }
 
 impl<'t> Lowering<'t> {
+    /// What lowering adds once every declared method is lowered, for a file and a whole program
+    /// alike: the `<clinit>` of each class with static initialization, and each enum's constant
+    /// bodies and constants. An error comes with the index of the type it is in.
+    fn finish_types(&self, types: &mut [TypeDecl], methods: &mut Vec<Method>) -> Result<(), (usize, Error)> {
+        for index in (0..types.len()).filter(|&t| self.has_static_init(t)) {
+            methods.push(self.clinit(index).map_err(|e| (index, e))?);
+        }
+        for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
+            let in_type = |e| (index, e);
+            self.constant_bodies(index, methods).map_err(in_type)?;
+            self.check_enum(index, methods).map_err(in_type)?;
+            let constants = self.enum_constants(index, &types[index].fields, methods).map_err(in_type)?;
+            types[index].enum_constants = Some(constants);
+        }
+        Ok(())
+    }
+
     fn method(&self, index: usize) -> Result<Method, Error> {
         let info = &self.methods[index];
         let node = info.node;
@@ -197,7 +213,10 @@ impl<'t> Lowering<'t> {
         // `constant_bodies` makes its body.
         let abstract_in_enum =
             node.has_flag("ABSTRACT") && self.enum_index(&self.types[info.owner].name).is_some();
-        let is_abstract = node.get("body").is_none() && node.has_flag("ABSTRACT") && !abstract_in_enum;
+        let in_interface = self.types[info.owner].node.kind() == "INTERFACE";
+        let is_abstract = node.get("body").is_none()
+            && (node.has_flag("ABSTRACT") || in_interface && !is_static)
+            && !abstract_in_enum;
         let mut body = match node.get("body") {
             Some(body) => self.block(body)?,
             None if abstract_in_enum || is_abstract => Vec::new(),
@@ -573,7 +592,13 @@ impl<'t> Lowering<'t> {
                 if symbol.is_static {
                     return Ok(ExprKind::Call { name, args, resolved });
                 }
-                let is_super = receiver.is_some_and(|r| r.kind() == "IDENTIFIER" && r.str("name") == "super");
+                // `super.m()`, or `Iface.super.m()` for a default method of an interface.
+                let is_super = receiver.is_some_and(|r| {
+                    r.kind() == "IDENTIFIER" && r.str("name") == "super"
+                        || r.kind() == "MEMBER_SELECT"
+                            && r.str("identifier") == "super"
+                            && self.types[self.current.get()].node.kind() != "INTERFACE"
+                });
                 let receiver = match receiver {
                     Some(r) if is_super => {
                         let ty = self.ty(r, r.java_type())?;

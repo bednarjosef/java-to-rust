@@ -123,9 +123,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
     }
     g.statics();
     for i in 0..class.methods.len() {
-        let m = &class.methods[i];
-        let emit = if m.name == "<clinit>" { facts.eager_init.contains(&m.class) } else { m.is_static };
-        if emit {
+        if g.emitted_free(i) {
             g.gap();
             g.method(i);
         }
@@ -323,15 +321,15 @@ impl<'a> Gen<'a> {
             .collect();
     }
 
-    /// The parameters of method `index` with their Rust types, `mut` where the body assigns
-    /// one and `mutable` allows it.
-    fn typed_params(&mut self, index: usize, mutable: bool) -> Vec<String> {
+    /// The parameters of method `index` with their Rust types. For the method's own body
+    /// (`body`), a parameter that it assigns is `mut` and one that it ignores is `_x`.
+    fn typed_params(&mut self, index: usize, body: bool) -> Vec<String> {
         let m = &self.class.methods[index];
         m.params
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let mutable = if mutable && assigns_any(&m.body, &p.name) { "mut " } else { "" };
+                let mutable = if body && assigns_any(&m.body, &p.name) { "mut " } else { "" };
                 let ty = if self.borrowed_optional.contains(&p.name) {
                     "Option<&str>".to_string()
                 } else if self.optional_var(index, p.ty, &p.name) {
@@ -345,7 +343,14 @@ impl<'a> Gen<'a> {
                 } else {
                     self.ty_name(p.ty)
                 };
-                format!("{mutable}{}: {ty}", self.local(&p.name))
+                // A body that ignores a parameter (a default that overrides replace) names it `_x`.
+                let mut used = !body;
+                for s in &m.body {
+                    visit_stmt(s, &mut |e| used |= mentions(e, &p.name), &mut |_| {});
+                }
+                let name = self.local(&p.name);
+                let name = if used { name } else { format!("_{}", name.trim_start_matches("r#")) };
+                format!("{mutable}{name}: {ty}")
             })
             .collect()
     }
@@ -368,6 +373,13 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Whether method `index` is a function of its class's module: a static method, or the
+    /// `init` of a class whose static initialization runs eagerly.
+    fn emitted_free(&self, index: usize) -> bool {
+        let m = &self.class.methods[index];
+        if m.name == "<clinit>" { self.facts.eager_init.contains(&m.class) } else { m.is_static }
+    }
+
     fn method(&mut self, index: usize) {
         let m = &self.class.methods[index];
         self.enter_method(index);
@@ -377,7 +389,7 @@ impl<'a> Gen<'a> {
             Home::Class(c) | Home::Fields(c) | Home::Enum(c) => c,
             Home::Free | Home::Nowhere => m.class,
         };
-        let is_enum = self.class.types[m.class].enum_constants.is_some();
+        let is_enum = self.class.types[self.this_struct].enum_constants.is_some();
         let on_enum = matches!(self.homes[index], Home::Enum(_)) && !m.is_ctor;
         let borrows =
             !m.is_static && !m.is_ctor && !on_enum && (is_enum || self.facts.self_methods.contains(&index));

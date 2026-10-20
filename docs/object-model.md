@@ -1402,3 +1402,49 @@ Decisions that changed during the implementation, milestone by milestone.
 - Corpus: `corpus/features/{Dispatch,Identity,Families,ObjectLevelInheritance,
   InheritedFieldUpdates}.java`, `corpus/programs/{Shapes,Expressions}.java` and
   `corpus/projects/zoo` (packages `zoo.animals`, `zoo.keep`, `zoo.app`).
+
+### Milestone 3
+
+- The variants of a type's enum are no longer every concrete class under it that is not owned,
+  but those whose objects become values of the type (`hierarchy::flows`, a fact): a `new`, an
+  upcast (`Cast`) from a type whose values they are, a call of a method the type declares on a
+  receiver of a subtype, `super.m()`, and running a method of the type that is not field-level
+  (its `this` is a value of the type). This is the plan's "variants(T)" fixpoint; milestone 2 had
+  left it out, and interfaces made it matter: a class implementing an interface is usually the
+  superclass of classes that are only ever used through the interface, and without it its type
+  became an enum with variants that nothing constructs (rustc's dead-code warning). Such a class
+  is now a plain struct again (`Rect` beside `Square`).
+- `Comparable` is not a runtime interface with String, box and enum variants in this milestone:
+  a class may implement `Comparable<T>` and calls `compareTo` directly, but `Comparable` as a type
+  (`Comparable[]`, a parameter) is rejected (`type java.lang.Comparable<..>`), as are the other
+  JDK interfaces ("implementing `java.lang.Runnable` not supported yet"). Runtime variants come
+  with `Object` in milestone 4, which needs the same machinery; `comparable_dispatches_to_strings`
+  and the `Comparable[]` half of `ComparableImpl.java` move there.
+- An interface with exactly one implementing *class* is that class's object, as in milestone 1.
+  An interface whose only implementor is a Java enum is still an enum with one variant
+  (`Coded::Color(Color)`): everywhere else a value of a class type is an object (`Option<Rc<..>>`
+  for null, identity through `Rc::ptr_eq`), and the one-variant enum keeps that true.
+- Java enums are concrete types of the hierarchy (`Hierarchy::concretes` includes them) and never
+  owned-filtered; the variant holds the `Copy` constant, compares with `==`, displays through the
+  enum's `Display`, converts with `*o` instead of `o.clone()`, and calls its methods as `o.m()`
+  (they take `self`). A default method of an interface whose only variant is a class lives in that
+  class's `impl`; for an enum, in the enum's `impl` with `self` by value.
+- An interface method that an enum implements with a method every enum has (`name()`,
+  `ordinal()`, `toString()`) dispatches to `o.enum_name()`, `*o as i32` or the enum's `Display`;
+  any other method of `java.lang.Enum` doing so is rejected in `validate`.
+- `X.super.m()` in a class is a `super` call of the default method `m` of interface `X`.
+- javac does not mark an interface's fields `static` or its methods `abstract` in the tree, so
+  `STATIC` comes from the declaration's symbol (lowering and reachability) and a method of an
+  interface without a body is abstract.
+- A parameter that a method's body never mentions is named `_x`, so a default that overrides
+  replace (`default boolean isSymbol(char c) { return false; }`) has no unused-variable warning.
+- Whole programs now get what single files had: each class's `<clinit>`, enum constants (and
+  constant bodies), and the enum items in their package's module (`lower::finish_types`); before,
+  an enum in a project panicked in the generator.
+- Survey: "interfaces" is gone; implementing a generic interface is "generic classes", and
+  implementing an interface that is not in the sources is "implementing interfaces outside the
+  sources". Free share: 12.1% to 20.3%.
+- Corpus: `corpus/features/{Interfaces,InterfaceDefaults,EnumsImplementingInterfaces,
+  ComparableImpl}.java`, `corpus/programs/{Simulation,Tokenizer}.java` and
+  `corpus/projects/library` (packages `library.items`, `library.desk`, `library.app`, with an
+  interface, its constant and static method, a `Comparable` class and an enum implementing it).

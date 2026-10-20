@@ -170,9 +170,14 @@ impl<'a> Gen<'a> {
                 self.type_enum_items(index);
             }
         }
+        for (index, decl) in class.types.iter().enumerate() {
+            if decl.enum_constants.is_some() && decl.package == package {
+                self.enum_items(index);
+            }
+        }
         self.statics();
         for (index, m) in class.methods.iter().enumerate() {
-            if m.is_static && class.types[m.class].package == package {
+            if self.emitted_free(index) && class.types[m.class].package == package {
                 self.gap();
                 self.method(index);
             }

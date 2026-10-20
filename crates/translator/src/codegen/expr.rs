@@ -341,7 +341,9 @@ impl<'a> Gen<'a> {
             ExprKind::Length(array) => self.length(array),
             ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
-            ExprKind::Cast(to @ Type::Class(_), value) if matches!(value.ty, Type::Class(_)) => {
+            ExprKind::Cast(to @ Type::Class(_), value)
+                if matches!(value.ty, Type::Class(_) | Type::Enum(_)) =>
+            {
                 self.class_cast(*to, value)
             }
             ExprKind::Cast(ty, value) => self.value(value, *ty),

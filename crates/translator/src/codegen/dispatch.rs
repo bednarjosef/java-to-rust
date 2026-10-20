@@ -84,7 +84,11 @@ impl<'a> Gen<'a> {
 
     /// The concrete classes whose objects the enum of type `t` holds, in `Class::types` order.
     pub(super) fn enum_variants(&self, t: usize) -> Vec<usize> {
-        hierarchy::variants(self.class, self.facts, t).into_iter().filter(|&c| self.live[c]).collect()
+        // An enum's constants exist without `new`.
+        hierarchy::variants(self.class, self.facts, t)
+            .into_iter()
+            .filter(|&c| self.live[c] || self.holds_value(c))
+            .collect()
     }
 
     /// The path of the variant of class `c` in the enum of `t`: `Shape::Circle`. A variant is
@@ -108,8 +112,33 @@ impl<'a> Gen<'a> {
         format!("to_{}", snake_case(simple).trim_end_matches('_'))
     }
 
+    /// Whether the variant of `c` holds a value of an enum that implements the type, which is
+    /// `Copy`, rather than a shared object.
+    pub(super) fn holds_value(&self, c: usize) -> bool {
+        self.class.types[c].kind == TypeKind::Enum
+    }
+
+    /// The value that the variant of `c` bound to `o` holds, as a value of its own: `*o` for an
+    /// enum's constant, `o.clone()` for an object.
+    fn held(&self, c: usize) -> &'static str {
+        if self.holds_value(c) { "*o" } else { "o.clone()" }
+    }
+
+    /// The class of the object, or the enum of the constant, that `e` is, and its handle or value.
+    fn variant_value(&mut self, e: &'a Expr) -> (usize, String) {
+        if let Type::Enum(name) = e.ty {
+            let c = self.class.type_index(name).expect("an enum of the program");
+            return (c, self.expr(e).text);
+        }
+        let c = self.struct_class(e).expect("an object has a class type");
+        (c, self.object_handle(e))
+    }
+
     /// The Rust type of the object of concrete class `c` that its variant holds.
     fn payload(&self, c: usize) -> String {
+        if self.holds_value(c) {
+            return struct_name(&self.class.types[c].name);
+        }
         let structure = self.struct_of(c);
         if self.facts.immutable.contains(&self.class.types[c].name) {
             format!("Rc<{structure}>")
@@ -166,8 +195,7 @@ impl<'a> Gen<'a> {
                 format!("{}.{}()", self.object(e), self.to_name(t))
             }
             None => {
-                let c = self.struct_class(e).expect("an object has a class type");
-                let handle = self.object_handle(e);
+                let (c, handle) = self.variant_value(e);
                 format!("{}({handle})", self.variant(t, c))
             }
         }
@@ -207,7 +235,10 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}.{}()", self.object(value), self.to_name(t)))
             }
             None => {
-                let c = self.struct_class(value).expect("an object has a class type");
+                let c = match value.ty {
+                    Type::Enum(name) => self.class.type_index(name).expect("an enum of the program"),
+                    _ => self.struct_class(value).expect("an object has a class type"),
+                };
                 let v = self.expr(value).text;
                 Code::atom(format!("{}({v})", self.variant(t, c)))
             }
@@ -272,8 +303,10 @@ impl<'a> Gen<'a> {
     /// The name of the method of the enum of `t` that a call of `resolved` calls: the body
     /// itself when every variant runs the one the enum has, else the dispatcher.
     fn dispatch_name(&self, t: usize, resolved: usize) -> String {
+        let h = &self.class.hierarchy;
         if let [only] = self.enum_targets(t, resolved)[..]
             && self.homes[only] == Home::Enum(t)
+            && self.enum_variants(t).into_iter().all(|c| h.implementation(resolved, c).is_some())
         {
             self.need(Need::Body(only));
             return self.fn_names[only].clone();
@@ -442,7 +475,9 @@ impl<'a> Gen<'a> {
         let target = struct_name(&self.class.types[to].name);
         self.line(&format!("{}fn {}(&self) -> {target} {{", self.vis(), self.to_name(to)));
         self.indent += 1;
-        self.match_arms(t, &variants, &|g: &mut Self, c| (format!("{}(o.clone())", g.variant(to, c)), true));
+        self.match_arms(t, &variants, &|g: &mut Self, c| {
+            (format!("{}({})", g.variant(to, c), g.held(c)), true)
+        });
         self.indent -= 1;
         self.line("}");
     }
@@ -456,8 +491,11 @@ impl<'a> Gen<'a> {
         // The signature is that of the group's method declared nearest above the type; the
         // analyses give every method of a group the same one.
         let members = h.group(group);
-        let Some(r) =
-            chain.iter().find_map(|&a| members.iter().copied().find(|&m| self.class.methods[m].class == a))
+        let above = |m: &usize| h.is_subtype(t, self.class.methods[*m].class);
+        let Some(r) = chain
+            .iter()
+            .find_map(|&a| members.iter().copied().find(|&m| self.class.methods[m].class == a))
+            .or_else(|| members.iter().copied().find(above))
         else {
             return;
         };
@@ -473,12 +511,22 @@ impl<'a> Gen<'a> {
         let all: String = params.iter().map(|p| format!(", {p}")).collect();
         self.line(&format!("{}fn {name}(&self{all}){ret} {{", self.vis()));
         self.indent += 1;
-        self.match_arms(t, &variants, &|g: &mut Self, c| {
-            let i = g.class.hierarchy.implementation(r, c).expect("a concrete class implements its methods");
-            g.arm_call(t, c, i, &args)
+        self.match_arms(t, &variants, &|g: &mut Self, c| match g.class.hierarchy.implementation(r, c) {
+            Some(i) => g.arm_call(t, c, i, &args),
+            None => (g.enum_builtin_arm(r), true),
         });
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// The arm for an enum's constant bound to `o` whose method `r` is one that every enum has,
+    /// which `lower` checks: `name()`, `toString()` or `ordinal()`.
+    fn enum_builtin_arm(&self, r: usize) -> String {
+        match self.class.methods[r].name.as_str() {
+            "ordinal" => "*o as i32".to_string(),
+            "name" => "o.enum_name()".to_string(),
+            _ => "o.to_string()".to_string(),
+        }
     }
 
     /// The call that the dispatcher of the enum of `t` makes for an object of class `c` bound to
@@ -487,12 +535,12 @@ impl<'a> Gen<'a> {
         let name = self.fn_names[i].clone();
         let immutable = self.facts.immutable.contains(&self.class.types[c].name);
         let borrow = match () {
-            _ if immutable => "",
+            _ if immutable || self.holds_value(c) => "",
             _ if self.facts.mutating.contains(&i) => ".borrow_mut()",
             _ => ".borrow()",
         };
         match self.homes[i] {
-            Home::Class(_) if self.facts.self_methods.contains(&i) => {
+            Home::Class(_) if self.facts.self_methods.contains(&i) || self.holds_value(c) => {
                 (format!("o{borrow}.{name}({args})"), true)
             }
             Home::Class(_) => {
@@ -509,7 +557,7 @@ impl<'a> Gen<'a> {
                     (format!("self.{name}({args})"), false)
                 } else if !self.class.hierarchy.is_subtype(t, d) {
                     // A body inherited from a type below `t`: the object as a value of that type.
-                    (format!("{}(o.clone()).{name}({args})", self.variant(d, c)), true)
+                    (format!("{}({}).{name}({args})", self.variant(d, c), self.held(c)), true)
                 } else {
                     self.need(Need::Convert(t, d));
                     (format!("self.{}().{name}({args})", self.to_name(d)), false)
@@ -536,7 +584,8 @@ impl<'a> Gen<'a> {
             self.indent += 1;
             for &c in variants {
                 let v = self.variant(t, c);
-                self.line(&format!("({v}(a), {v}(b)) => Rc::ptr_eq(a, b),"));
+                let same = if self.holds_value(c) { "a == b" } else { "Rc::ptr_eq(a, b)" };
+                self.line(&format!("({v}(a), {v}(b)) => {same},"));
             }
             if variants.len() > 1 {
                 self.line("_ => false,");
@@ -559,6 +608,9 @@ impl<'a> Gen<'a> {
         self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
         self.indent += 1;
         self.match_arms(t, variants, &|g: &mut Self, c| {
+            if g.holds_value(c) {
+                return ("fmt::Display::fmt(o, f)".to_string(), true);
+            }
             let i = hierarchy::to_string_impl(g.class, c)
                 .expect("lowering checks that printed classes have toString");
             g.display_arm(t, c, i)

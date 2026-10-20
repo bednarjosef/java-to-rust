@@ -22,16 +22,35 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// Whether class `a` is class `b` or a subclass of it.
-    pub(super) fn is_subclass(&self, a: usize, b: usize) -> bool {
-        let mut at = Some(a);
-        while let Some(t) = at {
-            if t == b {
-                return true;
+    /// The program's interfaces that type `t` implements (a class or an enum) or extends (an
+    /// interface), directly. `java.lang.Comparable` is accepted and left out: a class that
+    /// implements it only declares its `compareTo`, which the program calls directly.
+    pub(super) fn interfaces(&self, t: usize) -> Result<Vec<usize>, Error> {
+        let node = self.types[t].node;
+        // javac lists the interfaces that an interface extends as its `implementsClause` too.
+        let mut out = Vec::new();
+        for clause in node.list("implementsClause") {
+            let name = clause.java_type();
+            let raw = name.split('<').next().unwrap_or(name);
+            match self.type_index(raw) {
+                Some(i) if self.types[i].node.kind() == "INTERFACE" => {
+                    if name.contains('<') {
+                        return unsupported(clause, "generic classes");
+                    }
+                    out.push(i)
+                }
+                None if raw == "java.lang.Comparable" => {}
+                _ => return unsupported(clause, &format!("implementing `{raw}`")),
             }
-            at = self.superclass(t).ok().flatten();
         }
-        false
+        Ok(out)
+    }
+
+    /// Whether type `a` is type `b` or a subtype of it, through superclasses and interfaces.
+    pub(super) fn is_subclass(&self, a: usize, b: usize) -> bool {
+        a == b
+            || self.superclass(a).ok().flatten().is_some_and(|s| self.is_subclass(s, b))
+            || self.interfaces(a).unwrap_or_default().into_iter().any(|i| self.is_subclass(i, b))
     }
 
     /// The methods of the program that a method declaration overrides, from the list javac
@@ -91,8 +110,9 @@ impl<'t> Lowering<'t> {
     /// `e` as a value of type `to`: an object of one class type that Java uses as another (an
     /// upcast) gets a `Cast`, which the generator turns into the conversion.
     pub(super) fn convert(&self, e: Expr, to: Type) -> Expr {
+        // An enum that implements an interface is converted to it too.
         let differs = match (e.ty, to) {
-            (Type::Class(a), Type::Class(b)) => a != b,
+            (Type::Class(a) | Type::Enum(a), Type::Class(b)) => a != b,
             _ => false,
         };
         if !differs {
@@ -122,7 +142,7 @@ impl<'t> Lowering<'t> {
 
     fn class_of(&self, ty: Type) -> Option<usize> {
         match ty {
-            Type::Class(name) => self.type_index(name),
+            Type::Class(name) | Type::Enum(name) => self.type_index(name),
             _ => None,
         }
     }

@@ -2114,14 +2114,10 @@ fn the_survey_follows_calls_to_the_classes_whose_objects_are_created() {
     // does nothing.
     assert_contains(
         &report,
-        &[
-            "Reachable from Main: 6 classes (3 instantiated), 7 methods",
-            "  Circle: interfaces\n",
-            "  Box.Inner: inner classes\n",
-            "  Shape: interfaces\n",
-        ],
+        &["Reachable from Main: 6 classes (3 instantiated), 7 methods", "  Box.Inner: inner classes\n"],
     );
-    assert_lacks(&report, &["Square:", "Tag"]);
+    // The program's own interfaces translate.
+    assert_lacks(&report, &["Square:", "Tag", "interfaces"]);
 }
 
 /// The survey of a program, which must not fail.
@@ -2495,4 +2491,137 @@ fn initializer_blocks_run_in_constructors() {
     assert!(
         err.to_string().contains("a field initializer after an instance initializer block not supported yet")
     );
+}
+
+const INTERFACES: &str = "
+    interface Shape {
+        int UNKNOWN = -1;
+        double area();
+        default String kind() { return \"shape\"; }
+        default String describe() { return kind() + \" \" + area(); }
+        static Shape larger(Shape a, Shape b) { return a.area() >= b.area() ? a : b; }
+    }
+    class Circle implements Shape {
+        final double r;
+        Circle(double r) { this.r = r; }
+        public double area() { return 3.0 * r * r; }
+        public String kind() { return \"circle\"; }
+    }
+    class Rect implements Shape {
+        double w, h;
+        Rect(double w, double h) { this.w = w; this.h = h; }
+        public double area() { return w * h; }
+    }
+    class Square extends Rect {
+        Square(double s) { super(s, s); }
+    }
+    enum Color implements Shape {
+        RED, BLUE;
+        public double area() { return ordinal(); }
+    }
+    interface Named { String name(); default String hello(int times) { return \"hello \" + name(); } }
+    class Person implements Named {
+        public String name() { return \"ann\"; }
+    }
+    class A { public static void main(String[] a) {
+        Rect r = new Rect(2, 3);
+        Shape s = Shape.larger(new Circle(1), r);
+        Shape sq = new Square(2);
+        Shape c = Color.BLUE;
+        System.out.println(s.describe() + \" \" + sq.describe() + \" \" + c.describe() + \" \" + (s == r)
+            + \" \" + (c == Color.BLUE) + \" \" + Shape.UNKNOWN);
+        Named n = new Person();
+        System.out.println(n.hello(2) + \" \" + r.area());
+    } }";
+
+#[test]
+fn an_interface_is_an_enum_over_its_implementors() {
+    let rust = translate(INTERFACES);
+    assert_contains(
+        &rust,
+        &[
+            "#[derive(Clone)]\nenum Shape {\n    Circle(Rc<Circle>),\n    Rect(Rc<RectFields>),\n    Square(Rc<Square>),\n    Color(Color),\n}",
+            "            Shape::Square(o) => o.base.area(),\n            Shape::Color(o) => o.area(),",
+            "Shape::Circle(Rc::new(Circle::new(1.0))), Shape::Rect(r.clone())",
+            "&s == &Shape::Rect(r.clone())",
+        ],
+    );
+}
+
+#[test]
+fn default_methods_live_on_the_interface_enum() {
+    let rust = translate(INTERFACES);
+    // `kind` is overridden in one class, so the enum has a dispatcher and the default body under
+    // its own name; every class runs `describe` itself, which the enum has once.
+    assert_contains(
+        &rust,
+        &[
+            "            Shape::Circle(o) => o.kind(),\n            Shape::Rect(_) => self.kind_in_shape(),",
+            "    fn kind_in_shape(&self) -> String {\n        String::from(\"shape\")\n    }",
+            "    fn describe(&self) -> String {\n        format!(\"{} {}\", self.kind(), java::Double(self.area()))\n    }",
+        ],
+    );
+}
+
+#[test]
+fn interface_statics_are_free_functions_and_consts() {
+    let rust = translate(INTERFACES);
+    assert_contains(
+        &rust,
+        &["const SHAPE_UNKNOWN: i32 = -1;\n\nfn larger(a: Shape, b: Shape) -> Shape {", "{SHAPE_UNKNOWN}"],
+    );
+}
+
+#[test]
+fn an_enum_constant_implements_an_interface() {
+    let rust = translate(INTERFACES);
+    // The variant holds the constant itself, which is `Copy`; equal constants are the same.
+    assert_contains(
+        &rust,
+        &[
+            "    Color(Color),",
+            "(Shape::Color(a), Shape::Color(b)) => a == b,",
+            "let c = Shape::Color(Color::Blue);",
+            "    fn area(self) -> f64 {",
+        ],
+    );
+}
+
+#[test]
+fn an_interface_with_one_implementor_is_that_class() {
+    let rust = translate(INTERFACES);
+    // `Named` has only `Person`: its default method is a method of `Person`, whose parameter the
+    // body ignores.
+    assert_contains(
+        &rust,
+        &["let n = Rc::new(Person::new());", "    fn hello(&self, _times: i32) -> String {"],
+    );
+    assert_lacks(&rust, &["enum Named"]);
+}
+
+#[test]
+fn a_class_whose_subclasses_never_become_its_values_is_not_an_enum() {
+    let rust = translate(INTERFACES);
+    // A `Square` is a `Shape` but never a `Rect`, so a `Rect` is always a `Rect` object.
+    assert_contains(&rust, &["let r = Rc::new(RectFields::new(2.0, 3.0));", "java::Double(r.area())"]);
+    assert_lacks(&rust, &["enum Rect"]);
+}
+
+#[test]
+fn interfaces_outside_the_program_are_rejected_except_comparable() {
+    let err = java_to_rust::translate(
+        "class C implements Runnable { public void run() {} }
+        class A { public static void main(String[] a) { new C().run(); } }",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("implementing `java.lang.Runnable` not supported yet"), "{err}");
+    let rust = translate(
+        "class V implements Comparable<V> {
+            final int n;
+            V(int n) { this.n = n; }
+            public int compareTo(V o) { return Integer.compare(n, o.n); }
+        }
+        class A { public static void main(String[] a) { System.out.println(new V(1).compareTo(new V(2))); } }",
+    );
+    assert_contains(&rust, &["fn compare_to(&self, o: &Rc<V>) -> i32 {"]);
 }

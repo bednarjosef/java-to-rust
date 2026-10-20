@@ -45,11 +45,13 @@ pub fn lower_program<'t>(
         decl.package = package;
         types.push(decl);
     }
-    let methods: Vec<Method> = (0..lowering.methods.len())
+    let mut methods: Vec<Method> = (0..lowering.methods.len())
         .map(|m| lowering.method(m).map_err(|e| (Some(unit_of[lowering.methods[m].owner]), e)))
         .collect::<Result<_, _>>()?;
+    lowering.finish_types(&mut types, &mut methods).map_err(|(t, e)| (Some(unit_of[t]), e))?;
     let hierarchy = Hierarchy::new(&types, &methods);
     let class = Class { name: main.to_string(), types, methods, hierarchy };
+    enums::check_nulls(&class).map_err(|e| (None, e))?;
     Ok(class)
 }
 
