@@ -40,6 +40,8 @@ impl<'a> Gen<'a> {
             Native::IdentityHash => {
                 let object = match &args[0].kind {
                     ExprKind::Var(name) => format!("&{}", self.local(name)),
+                    // `this` is already a reference to the `Rc`.
+                    ExprKind::This => self.this_name().to_string(),
                     _ => format!("&{}", self.expr(&args[0]).at(UNARY)),
                 };
                 call(self, "identity_hash", vec![object])
