@@ -18,10 +18,6 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
 - `ArraysSortStrings.java`: `Arrays.sort` on a `String[]`. Java prints `[apple, fig, pear] 3`; the
   translator rejects it with "`Arrays.sort` on this array not supported yet". (`Arrays.sort` on an
   `int[]` translates.)
-- `CharacterIsLetterOrDigit.java`: `Character.isLetterOrDigit('a')`. Java prints `true`; the
-  translator rejects it with "method `Character.isLetterOrDigit` not supported yet" (the
-  `Character` tests are in the supported subset). `Character.isWhitespace` is rejected the same
-  way, from the same match in `lower/primitives.rs`.
 - `CompoundThroughNullableField.java`: `h.box.v += 10` where `h.box` is a field that may be null,
   in a class whose fields are assigned after construction. Java prints `true`; rustc fails with
   E0716 "temporary value dropped while borrowed".
