@@ -1,7 +1,7 @@
 //! The shape of the generated Rust for expressions where Rust's grammar or type inference differs
-//! from Java's: blocks before operators, literals under unary operators, and expressions of
-//! literals whose type inference would choose. (Whether the output matches Java is checked by the
-//! corpus test.)
+//! from Java's: blocks before operators, literals under unary operators, expressions of literals
+//! whose type inference would choose, and an array borrowed while its index is computed. (Whether
+//! the output matches Java is checked by the corpus test.)
 
 fn translate(java: &str) -> String {
     java_to_rust::translate(java).unwrap_or_else(|e| panic!("translation failed: {e}"))
@@ -102,4 +102,22 @@ fn a_conditional_of_literals_has_its_type_written_where_inference_would_choose()
             "if b { 1 } else { 2 }",
         ],
     );
+}
+
+#[test]
+fn an_index_that_reads_the_array_is_bound_before_the_array_is_borrowed() {
+    let rust = translate(
+        "class A {
+            static int k = 7;
+            public static void main(String[] a) {
+                float[] w = new float[5];
+                w[Math.floorMod(k, w.length)] += 1.5f;
+                w[Math.floorMod(k, w.length)]++;
+                w[k - 7] *= 2;
+                System.out.println(w[2]);
+            }
+        }",
+    );
+    assert_contains(&rust, &["let index = java::floor_mod(", "java::modify(&mut w, index, |old|"]);
+    assert_lacks(&rust, &["java::modify(&mut w, java::floor_mod("]);
 }
