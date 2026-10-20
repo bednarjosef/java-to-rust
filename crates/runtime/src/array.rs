@@ -25,7 +25,7 @@ pub fn tabulate<T>(len: i32, make: impl FnMut(usize) -> T) -> Array<T> {
 }
 
 /// The length of an array being created; Java throws for a negative length.
-fn size(len: i32) -> usize {
+pub(crate) fn size(len: i32) -> usize {
     if len < 0 {
         throw("java.lang.NegativeArraySizeException", &len.to_string());
     }
@@ -33,7 +33,7 @@ fn size(len: i32) -> usize {
 }
 
 /// The position of element `i` in an array of `len` elements, checked the way Java checks it.
-fn position(len: usize, i: i32) -> usize {
+pub(crate) fn position(len: usize, i: i32) -> usize {
     if i < 0 || i as usize >= len {
         throw(
             "java.lang.ArrayIndexOutOfBoundsException",

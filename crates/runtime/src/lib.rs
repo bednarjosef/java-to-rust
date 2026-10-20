@@ -3,8 +3,10 @@
 //! Java's `Math` rules and uncaught exceptions.
 
 mod array;
+mod slice;
 
 pub use array::*;
+pub use slice::*;
 
 use std::fmt;
 use std::io::Write;

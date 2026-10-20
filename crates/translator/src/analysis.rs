@@ -15,7 +15,7 @@ mod arrays;
 mod ranges;
 
 use crate::ast::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 pub struct Facts {
@@ -29,8 +29,9 @@ pub struct Facts {
     pub ascii_length: HashSet<ExprId>,
     /// String parameters, as (method, parameter) indexes, that are never assigned.
     pub borrowed_params: HashSet<(usize, usize)>,
-    /// Array locals, as (method, name), that no other name can see: plain `Vec`s.
-    pub plain_arrays: HashSet<(usize, String)>,
+    /// Array locals, as (method, name), that no other name can see: plain `Vec`s. The flag says
+    /// whether an element of the array is ever assigned.
+    pub plain_arrays: HashMap<(usize, String), bool>,
     /// `a[i]` expressions that a counting loop over the plain array `a` proves in bounds.
     pub in_bounds: HashSet<ExprId>,
 }

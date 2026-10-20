@@ -1,8 +1,9 @@
 //! Array locals that no other name can see. Such an array is a plain `Vec`, not a shared
 //! `java::Array`. A local qualifies when it is declared once in its method, is a one-dimensional
-//! array, always holds a fresh array (from `new` or an initializer), and is used only through its
-//! own elements and length: `a[i]`, `a[i] = v`, `a.length` and for-each. Passing it, returning it,
-//! copying it to another variable or giving it to `java.util.Arrays` makes it shared.
+//! array, is initialised with a fresh array (from `new` or an initializer) and never assigned
+//! again, and is used only through its own elements and length: `a[i]`, `a[i] = v`, `a.length` and
+//! for-each. Passing it, returning it, copying it to another variable or giving it to
+//! `java.util.Arrays` makes it shared.
 //!
 //! A counting loop `for (int i = 0; i < a.length; i++)` over a plain array, whose body neither
 //! assigns `i` nor `a`, keeps `i` in bounds, so `a[i]` in its body needs no check.
@@ -21,14 +22,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
                 }
             });
         }
-        for name in plain {
-            facts.plain_arrays.insert((m, name));
+        for (name, written) in plain {
+            facts.plain_arrays.insert((m, name), written);
         }
     }
 }
 
-/// The array locals of `method` that are never aliased.
-fn plain_locals(method: &Method) -> HashSet<String> {
+/// The array locals of `method` that are never aliased, each with whether its elements are written.
+fn plain_locals(method: &Method) -> HashMap<String, bool> {
     let mut declared: HashMap<String, usize> = HashMap::new();
     for p in &method.params {
         *declared.entry(p.name.clone()).or_default() += 1;
@@ -36,11 +37,12 @@ fn plain_locals(method: &Method) -> HashSet<String> {
     let mut arrays = HashSet::new();
     let mut escaped = HashSet::new();
     let mut good = HashSet::new();
+    let mut written = HashSet::new();
     let mut vars = Vec::new();
     for stmt in &method.body {
         visit_stmt(
             stmt,
-            &mut |e| visit_expr(e, &mut |x| use_of(x, &mut vars, &mut good, &mut escaped)),
+            &mut |e| visit_expr(e, &mut |x| use_of(x, &mut vars, &mut good, &mut escaped, &mut written)),
             &mut |_| {},
         );
     }
@@ -49,7 +51,7 @@ fn plain_locals(method: &Method) -> HashSet<String> {
             Stmt::Local { ty, name, init, .. } => {
                 *declared.entry(name.clone()).or_default() += 1;
                 let Type::Array(elem) = ty else { return };
-                if matches!(**elem, Type::Array(_)) || init.as_ref().is_some_and(|e| !is_fresh(e)) {
+                if matches!(**elem, Type::Array(_)) || init.as_ref().is_none_or(|e| !is_fresh(e)) {
                     escaped.insert(name.clone());
                 }
                 arrays.insert(name.clone());
@@ -67,30 +69,47 @@ fn plain_locals(method: &Method) -> HashSet<String> {
             bad.insert(name);
         }
     }
-    arrays.into_iter().filter(|name| declared.get(name) == Some(&1) && !bad.contains(name)).collect()
+    arrays
+        .into_iter()
+        .filter(|name| declared.get(name) == Some(&1) && !bad.contains(name))
+        .map(|name| {
+            let is_written = written.contains(&name);
+            (name, is_written)
+        })
+        .collect()
 }
 
 /// Records one expression's use of a variable: the array of an index, length, or element
-/// assignment is a good use; any other mention of a variable is a use that may alias it.
-fn use_of(x: &Expr, vars: &mut Vec<(ExprId, String)>, good: &mut HashSet<ExprId>, escaped: &mut HashSet<String>) {
+/// assignment is a good use; any other mention of a variable is a use that may alias it, and
+/// assigning a whole array makes it a different array from the one it was declared with.
+fn use_of(
+    x: &Expr,
+    vars: &mut Vec<(ExprId, String)>,
+    good: &mut HashSet<ExprId>,
+    escaped: &mut HashSet<String>,
+    written: &mut HashSet<String>,
+) {
     match &x.kind {
         ExprKind::Var(name) => vars.push((x.id, name.clone())),
         ExprKind::Index(array, _) | ExprKind::Length(array) => {
             good.insert(array.id);
         }
-        ExprKind::Assign { target, value, .. } => match target {
-            Place::Index(array, _) => {
-                good.insert(array.id);
-            }
-            Place::Var(name) if !is_fresh(value) => {
+        ExprKind::Assign { target, .. } => match target {
+            Place::Index(array, _) => element_write(array, good, written),
+            Place::Var(name) => {
                 escaped.insert(name.clone());
             }
-            Place::Var(_) => {}
         },
-        ExprKind::IncDec { target: Place::Index(array, _), .. } => {
-            good.insert(array.id);
-        }
+        ExprKind::IncDec { target: Place::Index(array, _), .. } => element_write(array, good, written),
         _ => {}
+    }
+}
+
+/// An assignment to an element of `array`: a good use that also writes the array.
+fn element_write(array: &Expr, good: &mut HashSet<ExprId>, written: &mut HashSet<String>) {
+    good.insert(array.id);
+    if let ExprKind::Var(name) = &array.kind {
+        written.insert(name.clone());
     }
 }
 
@@ -101,7 +120,7 @@ fn is_fresh(e: &Expr) -> bool {
 
 /// For `for (int i = 0; i < a.length; i++) body` over a plain array `a`, the names `a` and `i` and
 /// the body, when `i` and `a` cannot change in the body.
-fn counting_over<'s>(s: &'s Stmt, plain: &HashSet<String>) -> Option<(&'s str, &'s str, &'s Stmt)> {
+fn counting_over<'s>(s: &'s Stmt, plain: &HashMap<String, bool>) -> Option<(&'s str, &'s str, &'s Stmt)> {
     let Stmt::For { init, cond: Some(cond), update, body } = s else { return None };
     let [Stmt::Local { name: index, init: Some(start), .. }] = init.as_slice() else { return None };
     let ExprKind::Binary(BinOp::Lt, var, end) = &cond.kind else { return None };
@@ -110,7 +129,7 @@ fn counting_over<'s>(s: &'s Stmt, plain: &HashSet<String>) -> Option<(&'s str, &
     let counts_up = matches!(update.as_slice(), [Expr { kind: ExprKind::IncDec { target: Place::Var(t), increment: true, .. }, .. }] if t == index);
     let starts_at_zero = matches!(start.kind, ExprKind::Int(0));
     let index_is_var = matches!(&var.kind, ExprKind::Var(v) if v == index);
-    if !(counts_up && starts_at_zero && index_is_var && plain.contains(array)) {
+    if !(counts_up && starts_at_zero && index_is_var && plain.contains_key(array)) {
         return None;
     }
     if assigns_stmt(body, index) || assigns_stmt(body, array) {
@@ -119,17 +138,21 @@ fn counting_over<'s>(s: &'s Stmt, plain: &HashSet<String>) -> Option<(&'s str, &
     Some((array, index, body))
 }
 
-/// Marks every `a[i]` in `body` as in bounds, where `a` is the array and `i` the loop index.
+/// Marks every `a[i]` in `body` as in bounds, where `a` is the array and `i` the loop index: a read
+/// or a plain element assignment.
 fn in_bounds(array: &str, index: &str, body: &Stmt, facts: &mut Facts) {
     visit_stmt(
         body,
         &mut |e| {
             visit_expr(e, &mut |x| {
-                if let ExprKind::Index(a, i) = &x.kind {
-                    let is = |e: &Expr, name: &str| matches!(&e.kind, ExprKind::Var(v) if v == name);
-                    if is(a, array) && is(i, index) {
+                let is = |e: &Expr, name: &str| matches!(&e.kind, ExprKind::Var(v) if v == name);
+                match &x.kind {
+                    ExprKind::Index(a, i) | ExprKind::Assign { op: None, target: Place::Index(a, i), .. }
+                        if is(a, array) && is(i, index) =>
+                    {
                         facts.in_bounds.insert(x.id);
                     }
+                    _ => {}
                 }
             })
         },
