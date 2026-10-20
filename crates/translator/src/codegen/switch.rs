@@ -102,26 +102,6 @@ fn arms(cases: &[Case]) -> Vec<&Case> {
     cases.iter().filter(|c| !is_default(c)).chain(cases.iter().filter(|c| is_default(c))).collect()
 }
 
-/// The Rust pattern of a case's labels; a case with a `default` label matches everything else.
-/// With `chars`, the selector is an `Option<char>` and the labels are char literals.
-fn pattern(case: &Case, chars: bool) -> String {
-    if is_default(case) {
-        return "_".to_string();
-    }
-    let values: Vec<String> = case
-        .labels
-        .iter()
-        .filter_map(|l| match l {
-            CaseLabel::Value(Expr { kind: ExprKind::Char(c), .. }) if chars => {
-                Some(super::primitives::rust_char(*c).expect("char cases are scalar values"))
-            }
-            CaseLabel::Value(e) => Some(literal(e)),
-            CaseLabel::Default => None,
-        })
-        .collect();
-    if chars { format!("Some({})", values.join(" | ")) } else { values.join(" | ") }
-}
-
 /// Whether a switch on a `char` matches Rust chars: every label is a char that is a Unicode
 /// scalar value, so `char::from_u32` of the selector is `Some` of the label exactly when the
 /// selector equals it, and a lone surrogate, `None`, matches only the default.
@@ -135,13 +115,21 @@ fn char_cases(selector: &Expr, cases: &[Case]) -> bool {
 }
 
 /// A case label's value: lowering keeps only literals, which are numbers or strings.
-fn literal(e: &Expr) -> String {
-    match &e.kind {
-        ExprKind::Int(i) => i.to_string(),
-        ExprKind::Char(c) => c.to_string(),
-        ExprKind::Str(s) => rust_string(s),
-        _ => unreachable!("lowering keeps only literal case labels"),
-    }
+/// Whether the cases match every value of the selector without a default: a switch on an enum
+/// that names each constant. Rust's `match` then needs no `_` arm (and warns about one).
+fn exhaustive(class: &Class, selector: &Expr, cases: &[Case]) -> bool {
+    let Type::Enum(name) = selector.ty else { return false };
+    let Some(decl) = class.types.iter().find(|t| t.name == name) else { return false };
+    let count = decl.enum_constants.as_ref().map_or(0, Vec::len);
+    let named: HashSet<usize> = cases
+        .iter()
+        .flat_map(|c| &c.labels)
+        .filter_map(|l| match l {
+            CaseLabel::Value(Expr { kind: ExprKind::EnumConstant { ordinal, .. }, .. }) => Some(*ordinal),
+            _ => None,
+        })
+        .collect();
+    named.len() == count
 }
 
 /// The number of `yield`s in the cases, including those in nested statements.
@@ -156,6 +144,37 @@ fn yield_count(cases: &[Case]) -> usize {
 }
 
 impl<'a> Gen<'a> {
+    /// The Rust pattern of a case's labels; a case with a `default` label matches everything
+    /// else. With `chars`, the selector is an `Option<char>` and the labels are char literals.
+    fn pattern(&self, case: &Case, chars: bool) -> String {
+        if is_default(case) {
+            return "_".to_string();
+        }
+        let values: Vec<String> = case
+            .labels
+            .iter()
+            .filter_map(|l| match l {
+                CaseLabel::Value(Expr { kind: ExprKind::Char(c), .. }) if chars => {
+                    Some(super::primitives::rust_char(*c).expect("char cases are scalar values"))
+                }
+                CaseLabel::Value(e) => Some(self.literal(e)),
+                CaseLabel::Default => None,
+            })
+            .collect();
+        if chars { format!("Some({})", values.join(" | ")) } else { values.join(" | ") }
+    }
+
+    fn literal(&self, e: &Expr) -> String {
+        match &e.kind {
+            ExprKind::Int(i) => i.to_string(),
+            ExprKind::Char(c) => c.to_string(),
+            ExprKind::Str(s) => rust_string(s),
+            ExprKind::EnumConstant { class, ordinal } => self.constant_path(*class, *ordinal),
+            ExprKind::Static { class, name } => cell_name(&self.class.types[*class].name, name),
+            _ => unreachable!("lowering keeps only constant case labels"),
+        }
+    }
+
     /// Opens a frame for the statement whose header was just written at the current indent.
     pub(super) fn open(&mut self, kind: Kind<'a>) {
         let line_start = self.out[..self.out.len() - 1].rfind('\n').map_or(0, |i| i + 1);
@@ -284,6 +303,7 @@ impl<'a> Gen<'a> {
     pub(super) fn switch_form(&mut self, selector: &'a Expr, cases: &'a [Case], value: Option<Type>) {
         let labeled = self.pending.is_some();
         self.chars = char_cases(selector, cases);
+        self.exhaustive = exhaustive(self.class, selector, cases);
         let falls = cases.split_last().is_some_and(|(_, init)| init.iter().any(|c| !leaves(&c.body)));
         let text = if self.chars {
             let c = self.value(selector, Type::Char).text;
@@ -333,16 +353,17 @@ impl<'a> Gen<'a> {
     /// No case falls through and none leaves early: `match`, with `_ => {}` when there is no default.
     fn matched(&mut self, text: &str, cases: &'a [Case]) {
         let chars = std::mem::take(&mut self.chars);
+        let exhaustive = std::mem::take(&mut self.exhaustive);
         self.line(&format!("match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {
-            self.line(&format!("{} => {{", pattern(case, chars)));
+            self.line(&format!("{} => {{", self.pattern(case, chars)));
             self.indent += 1;
             self.stmts(strip(&case.body), false);
             self.indent -= 1;
             self.line("}");
         }
-        if !cases.iter().any(is_default) {
+        if !cases.iter().any(is_default) && !exhaustive {
             self.line("_ => {}");
         }
         self.indent -= 1;
@@ -352,6 +373,7 @@ impl<'a> Gen<'a> {
     /// Some case leaves early: a labeled block around the `match`, which the `break`s name.
     fn block(&mut self, text: &str, cases: &'a [Case], value: Option<Type>) {
         let chars = std::mem::take(&mut self.chars);
+        let exhaustive = std::mem::take(&mut self.exhaustive);
         self.line("{");
         let kind = match value {
             Some(ty) => Kind::Value { machine: false, ty },
@@ -362,14 +384,14 @@ impl<'a> Gen<'a> {
         self.line(&format!("match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {
-            self.line(&format!("{} => {{", pattern(case, chars)));
+            self.line(&format!("{} => {{", self.pattern(case, chars)));
             self.indent += 1;
             let body = if value.is_some() { &case.body[..] } else { strip(&case.body) };
             self.stmts(body, false);
             self.indent -= 1;
             self.line("}");
         }
-        if value.is_none() && !cases.iter().any(is_default) {
+        if value.is_none() && !cases.iter().any(is_default) && !exhaustive {
             self.line("_ => {}");
         }
         self.indent -= 1;
@@ -387,7 +409,7 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         for case in arms(cases) {
             let Some((Stmt::Yield(value), init)) = case.body.split_last() else { unreachable!() };
-            self.line(&format!("{} => {{", pattern(case, chars)));
+            self.line(&format!("{} => {{", self.pattern(case, chars)));
             self.indent += 1;
             self.stmts(init, false);
             let code = self.value(value, ty);
@@ -403,15 +425,16 @@ impl<'a> Gen<'a> {
     /// case that does not leave sets it to the next one, and the loop runs the cases in order.
     fn machine(&mut self, text: &str, cases: &'a [Case], value: Option<Type>) {
         let chars = std::mem::take(&mut self.chars);
+        let exhaustive = std::mem::take(&mut self.exhaustive);
         self.line("{");
         self.indent += 1;
         self.line(&format!("let mut case: usize = match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {
             let index = cases.iter().position(|c| std::ptr::eq(c, case)).unwrap_or(0);
-            self.line(&format!("{} => {index},", pattern(case, chars)));
+            self.line(&format!("{} => {index},", self.pattern(case, chars)));
         }
-        if !cases.iter().any(is_default) {
+        if !cases.iter().any(is_default) && !exhaustive {
             self.line(&format!("_ => {},", cases.len()));
         }
         self.indent -= 1;

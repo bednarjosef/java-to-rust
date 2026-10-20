@@ -1931,3 +1931,25 @@ fn unsupported_regular_expressions_and_formats_are_rejected() {
         "class A { public static void main(String[] a) { System.out.println(\"a(b\".split(\"(\").length); } }",
     );
 }
+
+#[test]
+fn constant_case_labels_and_enum_switches_match_directly() {
+    let rust = translate(
+        "class A {
+            static final int LIMIT = 10;
+            enum Dir { UP, DOWN }
+            static int f(int n) {
+                switch (n) { case LIMIT: return 1; case LIMIT + 1: return 2; default: return 0; }
+            }
+            static String g(Dir d) {
+                switch (d) { case UP: return \"up\"; case DOWN: return \"down\"; }
+                return \"\";
+            }
+            public static void main(String[] a) { System.out.println(f(3) + g(Dir.UP) + g(Dir.DOWN)); }
+        }",
+    );
+    // A constant of the selector's type is matched by name, a folded expression as a literal, and
+    // a switch naming every constant of an enum has no `_` arm.
+    assert_contains(&rust, &["A_LIMIT => {", "11 => {", "ADir::Up => {", "ADir::Down => {"]);
+    assert_lacks(&rust, &["_ => {}"]);
+}

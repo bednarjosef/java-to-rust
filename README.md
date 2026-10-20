@@ -71,9 +71,10 @@ translates, compiles and matches Java's output.
 
 A first end-to-end pipeline for a small subset: several classes with locals of every primitive
 type (`byte`, `short`, `char`, `int`, `long`, `float`, `double`, `boolean`) and `String`,
-arithmetic, `if`, `while`, `do`, `for`, `break`, `continue`, the conditional operator,
-overloading, static and instance methods, fields with initializers, static fields, constructors
-(including `this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math`
+arithmetic, `if`, `while`, `do`, `for`, `break`, `continue`, the conditional operator, `switch`
+statements and expressions on integers, chars, strings and enums (case labels may be constant
+expressions, which are folded as javac folds them), overloading, static and instance methods,
+fields with initializers, static fields, constructors (including `this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math`
 methods, the `Character` tests and case conversions on a `char`, the `MIN_VALUE`/`MAX_VALUE`
 constants of the wrapper classes, `null` for `String`, and a user `toString` in `println` and
 string concatenation, object-typed fields and `null` objects. Strings have the common methods of
