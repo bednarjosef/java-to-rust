@@ -186,6 +186,10 @@ public class JavaTree {
             string(owner instanceof TypeElement t ? t.getQualifiedName().toString() : owner.toString(), out);
         }
         out.append(",\"static\":").append(e.getModifiers().contains(Modifier.STATIC));
+        // javac prints a varargs parameter's type as an array, so only this says it is varargs.
+        if (e instanceof ExecutableElement m && m.isVarArgs()) {
+            out.append(",\"varargs\":true");
+        }
         out.append(",\"type\":");
         string(e.asType().toString(), out);
         out.append('}');

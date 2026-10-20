@@ -38,10 +38,19 @@ impl<'a> Gen<'a> {
         if written { format!("&mut [{elem}]") } else { format!("&[{elem}]") }
     }
 
-    /// The argument for a borrowed array parameter: a borrow of the caller's plain array, or of
-    /// the contents of a shared one for the length of the call.
+    /// The argument for a borrowed array parameter: a borrow of the caller's plain array, of the
+    /// contents of a shared one for the length of the call, or of a new array literal (the packed
+    /// arguments of a varargs call), which needs no allocation.
     pub(super) fn borrowed_arg(&mut self, e: &'a Expr, written: bool) -> String {
-        let ExprKind::Var(name) = &e.kind else { unreachable!("borrowed arguments are names") };
+        let ExprKind::Var(name) = &e.kind else {
+            let ExprKind::ArrayLit(items) = &e.kind else {
+                unreachable!("borrowed arguments are names or literals")
+            };
+            let elem = element(e.ty);
+            let items: Vec<String> = items.iter().map(|item| self.value(item, elem).text).collect();
+            let mutably = if written { "mut " } else { "" };
+            return format!("&{mutably}[{}]", items.join(", "));
+        };
         let local = self.local(name);
         if self.is_borrowed(&local) {
             return local;

@@ -25,6 +25,7 @@ use primitives::*;
 mod arrays;
 mod objects;
 mod owned;
+mod sync;
 
 use arrays::name_part;
 use objects::*;

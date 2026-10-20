@@ -12,11 +12,17 @@ use std::cell::Cell;
 
 mod arrays;
 mod primitives;
+mod sync;
+mod varargs;
 use arrays::{is_array_length, reads_name};
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
-    let decls: Vec<Node> = unit.list("typeDecls").filter(|n| n.kind() != "EMPTY_STATEMENT").collect();
+    // A `;` at top level and an annotation type (`@interface`) do nothing when the program runs.
+    let decls: Vec<Node> = unit
+        .list("typeDecls")
+        .filter(|n| !matches!(n.kind(), "EMPTY_STATEMENT" | "ANNOTATION_TYPE"))
+        .collect();
     let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
     let lowering = Lowering::declare(&decls)?;
     let types = (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
@@ -34,6 +40,8 @@ struct Symbol<'t> {
     name: &'t str,
     owner: &'t str,
     is_static: bool,
+    /// Whether a method or constructor takes a variable number of arguments.
+    varargs: bool,
     /// The declared type, such as `int` or, for a method, `(int,long)double`.
     ty: &'t str,
 }
@@ -79,6 +87,7 @@ impl<'t> Node<'t> {
             name: s.str("name"),
             owner: s.str("owner"),
             is_static: s.0["static"].as_bool().unwrap_or(false),
+            varargs: s.0["varargs"].as_bool().unwrap_or(false),
             ty: s.str("type"),
         })
     }
@@ -178,7 +187,8 @@ impl<'t> Lowering<'t> {
             _ if self.type_index(name).is_some() => Ok(Type::class(name)),
             "<nulltype>" => Ok(Type::Null),
             _ if name.ends_with("[]") => Ok(Type::array(self.ty(node, &name[..name.len() - 2])?)),
-            _ if name.ends_with("...") => unsupported(node, "varargs"),
+            // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
+            "java.lang.Object" => unsupported(node, "Object"),
             _ => unsupported(node, &format!("type `{name}`")),
         }
     }
@@ -206,6 +216,9 @@ impl<'t> Lowering<'t> {
         let stmt = match node.kind() {
             "BLOCK" => Stmt::Block(self.block(node)?),
             "EMPTY_STATEMENT" => Stmt::Block(Vec::new()),
+            // Assertions are disabled by default in Java, so an `assert` does nothing at all.
+            "ASSERT" => return Ok(()),
+            "SYNCHRONIZED" => return self.synchronized(node, out),
             "VARIABLE" => {
                 let ty = self.ty(node, node.symbol().map_or("", |s| s.ty))?;
                 let init = match node.get("initializer") {
@@ -402,7 +415,8 @@ impl<'t> Lowering<'t> {
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
-        let mut args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+        let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
             return Ok(ExprKind::ThisCall { args, resolved: self.method_index(&symbol) });
         }

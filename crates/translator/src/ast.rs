@@ -310,6 +310,8 @@ pub enum Builtin {
     Println,
     Print,
     Exit,
+    /// Evaluates the lock of a `synchronized` block and throws if it is null; the value is dropped.
+    NullCheck,
     MathAbs,
     MathMax,
     MathMin,

@@ -79,6 +79,9 @@ struct Call {
 struct Arg {
     /// The variable the argument is, if it is one.
     name: Option<String>,
+    /// Whether the argument is a new array literal, such as the packed trailing arguments of a
+    /// varargs call: nobody else holds it, so any parameter may borrow it.
+    fresh: bool,
     array: bool,
     /// The variables the argument mentions.
     mentions: HashSet<String>,
@@ -108,7 +111,8 @@ impl Arg {
             ExprKind::Var(v) => Some(v.clone()),
             _ => None,
         };
-        Arg { name, array: matches!(e.ty, Type::Array(_)), mentions, effects }
+        let fresh = matches!(e.kind, ExprKind::ArrayLit(_));
+        Arg { name, fresh, array: matches!(e.ty, Type::Array(_)), mentions, effects }
     }
 }
 
@@ -295,6 +299,9 @@ impl Lending<'_> {
     /// panics if anything else borrows that cell mutably meanwhile: then no other argument may run
     /// code that could, and if the parameter is written, no other argument may be a shared array.
     fn lends(&self, m: usize, call: &Call, i: usize) -> bool {
+        if call.args[i].fresh {
+            return true;
+        }
         let Some(name) = &call.args[i].name else { return false };
         let writes = self.writes(call.callee, i);
         let others = || call.args.iter().enumerate().filter(move |(j, _)| *j != i);
