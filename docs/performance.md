@@ -19,76 +19,95 @@ measured inside the program, and it is reported in the two kernel columns.
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
 - Rust: rustc 1.99.0 (b940084d7 2026-09-28), release profile
-- Load: the machine was busy during the run. The load average was 101.8 at start (16 cores),
-  from other agents' JVMs and builds. The absolute times are inflated, and the Java side moved
-  more than the Rust side between runs (BinaryTrees on Java: 794 ms on a quieter run, 4359 ms
-  here), so read the ratios as rough.
+- Load: the machine was busy during every run, from other agents' JVMs and builds: load
+  averages between 27 and 74 on 16 cores. Times of the same binary moved by a factor of two
+  between runs (the SortMillion kernel of one binary: 995 to 1337 ms in four runs in a row), and
+  the Java side moved more than the Rust side, so read small ratios as rough. The large changes
+  below are far outside that noise.
 
 ## Results
 
-One run of `python3 scripts/benchmark.py` (five runs per side, medians). Times in milliseconds.
+One run of `python3 scripts/benchmark.py` on the `array-ownership` branch (five runs per side,
+medians, load average 72 at start). Times in milliseconds.
 
 | program        | Java ms | Rust ms | Rust/Java | Java kernel | Rust kernel | kernel ratio |
 |----------------|--------:|--------:|----------:|------------:|------------:|-------------:|
-| BinaryTrees    |    4359 |   34649 |      7.95 |           - |           - |            - |
-| Collatz        |    4524 |    1564 |      0.35 |           - |           - |            - |
-| Interpreter    |   14014 |   26334 |      1.88 |        2162 |        7341 |         3.40 |
-| Mandelbrot     |   10099 |    3611 |      0.36 |        3677 |        3607 |         0.98 |
-| MatrixMultiply |     852 |   72810 |     85.46 |         163 |       22781 |       139.76 |
-| NBody          |    6763 |    7668 |      1.13 |        1873 |        2392 |         1.28 |
+| BinaryTrees    |    1736 |    5770 |      3.32 |           - |           - |            - |
+| Collatz        |    1565 |     601 |      0.38 |           - |           - |            - |
+| Interpreter    |    1274 |    1321 |      1.04 |         390 |         430 |         1.10 |
+| Mandelbrot     |    3571 |    1179 |      0.33 |        1193 |        1177 |         0.99 |
+| MatrixMultiply |     146 |     214 |      1.47 |          31 |          66 |         2.13 |
+| NBody          |    1820 |    1858 |      1.02 |         605 |         618 |         1.02 |
 | NodeList       |       - |       - |         - |           - |           - |            - |
-| Sieve          |    3497 |    5640 |      1.61 |           - |           - |            - |
-| SortMillion    |    3010 |    4725 |      1.57 |         864 |        1718 |         1.99 |
-| Statics        |    1839 |    5796 |      3.15 |           - |           - |            - |
-| StringBuild    |     230 |    7235 |     31.46 |           - |           - |            - |
+| Sieve          |    1484 |    1060 |      0.71 |           - |           - |            - |
+| SortMillion    |    7860 |    5658 |      0.72 |        2843 |        1319 |         0.46 |
+| Statics        |    1800 |    1763 |      0.98 |           - |           - |            - |
+| StringBuild    |      33 |       2 |      0.05 |           - |           - |            - |
 
 NodeList does not compile. See below.
 
-The table predates the StringBuild and Statics changes in "Causes" below. Those changes are not
-measured yet: the benchmark script was not run on this branch. To measure them, run
-`python3 scripts/benchmark.py StringBuild Statics` (the two changed cases), then
-`python3 scripts/benchmark.py` for the full table and the check that nothing got slower.
+The four programs that use arrays most, before (main at `18ab2fb`) and after the array
+ownership work, run back to back in the same minutes:
 
-A second run, taken earlier when the machine was less loaded, gave the same order of slowdowns
-with different absolute numbers: BinaryTrees 7.82, Collatz 0.90, Interpreter 5.65, Mandelbrot
-0.55, MatrixMultiply 58.40, NBody 0.65, Sieve 2.00, SortMillion 3.88, Statics 4.49, StringBuild
-105.77. Collatz and NBody moved most, which is what load does to short runs.
+| program        | before Rust/Java | before kernel ratio | after Rust/Java | after kernel ratio |
+|----------------|-----------------:|--------------------:|----------------:|-------------------:|
+| Interpreter    |             3.74 |                1.23 |            1.06 |               1.18 |
+| MatrixMultiply |            34.92 |               76.64 |            1.41 |               2.07 |
+| Sieve          |             2.10 |                   - |            0.81 |                  - |
+| SortMillion    |             5.55 |                6.65 |            0.89 |               0.86 |
+
+An earlier pair of runs, at load 74 before and 27 after, gave MatrixMultiply kernel ratios of
+99.15 before and 8.68 after with the plain arrays alone (before the sliced loops below), and
+Sieve 0.74 before and 0.49 after.
 
 ## Causes of the slow cases
 
 Read from the generated Rust under `target/benchmarks/<Name>/crate/src/main.rs`.
 
-- **MatrixMultiply (85x; kernel 140x).** Element access `c[i][j]` becomes
-  `java::get(&java::get(&c, i), j)`. The outer `get` clones the row's array handle (an `Rc`),
-  and each access borrows its `RefCell` and checks the bounds. A multiply-add is therefore two
-  borrows, two checks, and a refcount change, in the innermost loop.
-- **StringBuild (31x).** Before the fix, `s.charAt(i)` became `java::char_at`, which calls
-  `encode_utf16().nth(i)` (runtime `character.rs:27`), so each access walked the string. The loop
-  condition `i < s.length()` called `java::string_length`, which is `encode_utf16().count()`
-  (runtime `lib.rs:157`), so each iteration walked it again. Both are linear in the length, so the
-  scan was quadratic. The string is built from `(char) (...)` casts, which the translator could
-  not prove ASCII. The range analysis now records each `(char)` cast whose value stays in
-  `0..=0x7f` (`analysis/ranges.rs`). A string made only of such casts is ASCII, so `charAt` is
-  `s.as_bytes()[i] as u16` and `length()` is `s.len()`. A string that may hold a non-ASCII unit
-  keeps the UTF-16 walk, which is still linear per access. Not measured yet.
-- **Statics (3.2x).** Each static field was a `thread_local!` `RefCell`, reached through
-  `with_borrow` and `with_borrow_mut`. `next()` reads and writes the state several times per
-  call, so each access paid a thread-local lookup and a borrow. A primitive static (`int`,
-  `long`, `char`, `boolean`, and the other primitives, never null) is now a `Cell`, read with
-  `get` and written with `set`, which needs no borrow flag. Compound updates copy the value to a
-  local and store it. Other statics stay `RefCell`. Not measured yet.
-- **BinaryTrees (8x).** `count(node: Option<Rc<..>>)` clones the `left` and `right` handles on
-  every call (a refcount increment and decrement each), and checks for `null` at every access.
-  Allocation goes through `Rc`. Not profiled; these are read from the code.
-- **Interpreter (1.9x; kernel 3.4x).** The stack and locals are plain `Vec<i32>`, which is good,
-  but every access goes through `java::at` and `java::put` (runtime `slice.rs:13,18`), which
-  check the index through the throwing path. Not profiled.
-- **Sieve (1.6x).** `java::at` and `java::put` on a `Vec<bool>` for each element, with a checked
-  index each time. Not profiled.
-- **SortMillion (1.6x; kernel 2.0x).** The sort helpers work over `java::Array`, so each element
-  access goes through the same checked borrow path. Not inspected in detail.
-Mandelbrot (0.36x, kernel 0.98x), Collatz (0.35x) and NBody (1.13x, kernel 1.28x) are at or
-faster than Java and need no change.
+- **MatrixMultiply (was 85x; kernel 140x; now 1.5x, kernel 2.1x).** Element access `c[i][j]`
+  was `java::get(&java::get(&c, i), j)`: the outer `get` cloned the row's handle (an `Rc`), and
+  each access borrowed a `RefCell` and checked the bounds. The matrices are now plain
+  `Vec<Vec<i32>>`: `create` returns its `Vec`, `multiply` borrows `a` and `b` as `&[Vec<i32>]`
+  and returns `c`, and `a = b; b = c;` moves the `Vec`s, since neither is read again before it
+  is assigned. `c = new int[n][n]` with `n = a.length` puts `c[i][j]` in bounds, so it is
+  `c[i as usize][j as usize]`. The rows of `b` have unknown lengths, so `b[k][j]` keeps Java's
+  check, but the inner loop checks it once before it starts: when `k` is a row of `b` and `n`
+  is at most the lengths of `b[k]` and `c[i]`, the loop runs over the slices
+  `&b[k][..n]` and `&mut c[i][..n]`, without a check, and vectorizes; otherwise it runs with
+  every check (see `analysis/arrays/slices.rs`). The remaining 2x against the JIT is not
+  profiled; the loop still computes with `wrapping_add` and `wrapping_mul` on `i32`.
+- **StringBuild (31x before the ASCII fix).** Before the fix, `s.charAt(i)` became
+  `java::char_at`, which calls `encode_utf16().nth(i)`, so each access walked the string. The
+  loop condition `i < s.length()` called `java::string_length`, `encode_utf16().count()`, so each
+  iteration walked it again: the scan was quadratic. The range analysis now records each
+  `(char)` cast whose value stays in `0..=0x7f` (`analysis/ranges.rs`). A string made only of
+  such casts is ASCII, so `charAt` is `s.as_bytes()[i] as u16` and `length()` is `s.len()`. A
+  string that may hold a non-ASCII unit keeps the UTF-16 walk, which is still linear per access.
+- **Statics (3.2x before the fix).** Each static field was a `thread_local!` `RefCell`, reached
+  through `with_borrow` and `with_borrow_mut`. A primitive static is now a `Cell`, read with
+  `get` and written with `set`, which needs no borrow flag. Other statics stay `RefCell`.
+- **BinaryTrees (3.3x here, 8x on a busier run).** `count(node: Option<Rc<..>>)` clones the
+  `left` and `right` handles on every call (a refcount increment and decrement each), and checks
+  for `null` at every access. Allocation goes through `Rc`. Not profiled; these are read from
+  the code.
+- **Interpreter (was 1.9x to 3.7x; now 1.0x, kernel 1.1x).** The stack and locals were already
+  plain `Vec<i32>`, but every access went through `java::at` and `java::put`, with the code
+  that builds the exception next to each access. The indexes come from the program being interpreted, so
+  they cannot be proven in range; the checks stay, but the check is now an inlined compare and
+  a branch to a `#[cold]`, `#[inline(never)]` throwing function (runtime `array.rs`), and
+  `java::at`, `put` and `modify` are `#[inline]`.
+- **Sieve (was 1.6x to 2.1x; now 0.7x to 0.8x).** `composite` is `new boolean[limit + 1]`, and
+  the bounds analysis proves both loops in range: `i * i <= limit` with `i >= 2` gives
+  `i <= limit`, `j <= limit` bounds the inner loop, and the size `limit + 1` is longer than any
+  of them. Every access is `composite[i as usize]` with no check.
+- **SortMillion (was 1.6x to 5.6x; now 0.7x to 0.9x).** `randomInts` returns a plain `Vec`,
+  and `quickSort` borrows it as `&mut [i32]`. Its indexes (`i`, `j`, the pivot) cannot be proven
+  in range, so they keep their checks, on the cheaper path. `library` is given to
+  `Arrays.sort`, so it stays a shared `java::Array`; the library helpers do not take plain
+  arrays yet.
+
+Mandelbrot (0.33x, kernel 0.99x), Collatz (0.38x) and NBody (1.02x) are at or faster than Java
+and need no change.
 
 ## NodeList: does not compile (translator bug)
 
@@ -114,6 +133,6 @@ status 1.
   take many minutes per run. They are kept small on purpose.
 - The Java times are whole-process, so programs that are short on Java include JVM start-up.
   Kernel columns exist only where a program has a warm-up loop.
-- The table is one run on a loaded machine. Re-run it on an idle machine before drawing
-  conclusions about small differences; the large ratios (MatrixMultiply, StringBuild, BinaryTrees)
+- The tables are single runs on a loaded machine. Re-run them on an idle machine before drawing
+  conclusions about small differences; the large changes (MatrixMultiply, Sieve, SortMillion)
   are far outside the noise.

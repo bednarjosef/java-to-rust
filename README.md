@@ -220,7 +220,10 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   parameter becomes `&[T]`, `&mut [T]`, `&[Vec<T>]` or `&mut [Vec<T>]` when every call can lend
   it a plain array or a row of one, a counting loop that only reads `a[i]` becomes
   `for x in a.iter().cloned()`, and a for-each over the rows of a plain array borrows them
-  (`for row in m.iter()`). Arrays of strings, objects or arrays hold
+  (`for row in m.iter()`). An innermost counting loop that reaches a plain array only at its
+  index checks once, before it starts, that the whole range is in bounds, and then runs over
+  slices with no checks (`let b_row = &b[k][..n];`); otherwise it runs with Java's checks
+  (`analysis/arrays/slices.rs`). Arrays of strings, objects or arrays hold
   `Option`s when some array of that element type may hold null (`new String[n]`,
   `new int[n][]`, or a stored value that may be null), and plain values otherwise.
 - `java.util.Arrays` on arrays of primitives and strings (`lower/java_arrays.rs`,
