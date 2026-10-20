@@ -1,7 +1,8 @@
-//! The shape of the generated Rust for expressions where Rust's grammar or type inference differs
-//! from Java's: blocks before operators, literals under unary operators, expressions of literals
-//! whose type inference would choose, and an array borrowed while its index is computed. (Whether
-//! the output matches Java is checked by the corpus test.)
+//! The shape of the generated Rust for expressions where Rust's grammar, type inference, borrows
+//! or order of evaluation differ from Java's: blocks before operators, literals under unary
+//! operators, expressions of literals whose type inference would choose, an array borrowed while
+//! its index is computed, and a variable read before a later operand assigns it. (Whether the
+//! output matches Java is checked by the corpus test.)
 
 fn translate(java: &str) -> String {
     java_to_rust::translate(java).unwrap_or_else(|e| panic!("translation failed: {e}"))
@@ -120,4 +121,15 @@ fn an_index_that_reads_the_array_is_bound_before_the_array_is_borrowed() {
     );
     assert_contains(&rust, &["let index = java::floor_mod(", "java::modify(&mut w, index, |old|"]);
     assert_lacks(&rust, &["java::modify(&mut w, java::floor_mod("]);
+}
+
+#[test]
+fn a_cast_variable_in_a_concatenation_is_read_before_a_later_operand_assigns_it() {
+    let rust = translate(
+        "class A { public static void main(String[] a) {
+            long count = 5L;
+            System.out.println(((long) count) + \" \" + (--count));
+        } }",
+    );
+    assert_contains(&rust, &["{ count }, { count -= 1; count }"]);
 }
