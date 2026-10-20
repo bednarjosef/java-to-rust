@@ -484,6 +484,12 @@ pub enum BoxedOp {
     Equals,
     /// `Integer.sum(a, b)`.
     Sum,
+    /// `Double.isNaN(d)`, `isInfinite` and `isFinite`, static or on a box: the Rust method of the
+    /// same test on the primitive, such as `is_nan`.
+    FloatTest(&'static str),
+    /// `Boolean.logicalAnd(a, b)`, `logicalOr` and `logicalXor`: `&`, `|` or `^` on both operands,
+    /// neither short-circuited.
+    Logical(BinOp),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -38,6 +38,12 @@ pub(super) fn is_boxed_method(name: &str) -> bool {
             | "sum"
             | "max"
             | "min"
+            | "isNaN"
+            | "isInfinite"
+            | "isFinite"
+            | "logicalAnd"
+            | "logicalOr"
+            | "logicalXor"
     ) || matches!(
         name,
         "intValue"
@@ -92,6 +98,12 @@ impl<'t> Lowering<'t> {
             }
             ("compare", true) => BoxedOp::Compare,
             ("sum", true) => BoxedOp::Sum,
+            ("isNaN", _) => BoxedOp::FloatTest("is_nan"),
+            ("isInfinite", _) => BoxedOp::FloatTest("is_infinite"),
+            ("isFinite", _) => BoxedOp::FloatTest("is_finite"),
+            ("logicalAnd", true) => BoxedOp::Logical(BinOp::BitAnd),
+            ("logicalOr", true) => BoxedOp::Logical(BinOp::BitOr),
+            ("logicalXor", true) => BoxedOp::Logical(BinOp::BitXor),
             (_, false) if name.ends_with("Value") => BoxedOp::Unbox,
             ("toString", false) => BoxedOp::ToString,
             ("hashCode", false) => BoxedOp::HashCode,
@@ -112,8 +124,13 @@ impl<'t> Lowering<'t> {
             args.insert(0, self.expr(receiver)?);
         }
         let expected = match op {
-            BoxedOp::Parse | BoxedOp::Box | BoxedOp::Unbox | BoxedOp::ToString | BoxedOp::HashCode => 1,
-            BoxedOp::Compare | BoxedOp::Equals | BoxedOp::Sum => 2,
+            BoxedOp::Parse
+            | BoxedOp::Box
+            | BoxedOp::Unbox
+            | BoxedOp::ToString
+            | BoxedOp::HashCode
+            | BoxedOp::FloatTest(_) => 1,
+            BoxedOp::Compare | BoxedOp::Equals | BoxedOp::Sum | BoxedOp::Logical(_) => 2,
         };
         if args.len() != expected {
             return unsupported(node, &format!("the overload of `{name}` with {} arguments", args.len()));

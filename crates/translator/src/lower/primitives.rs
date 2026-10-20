@@ -25,9 +25,10 @@ impl<'t> Lowering<'t> {
             "MAX_VALUE" => Some(max),
             _ => None,
         };
-        let floating = |max: f64, min: f64| match symbol.name {
+        let floating = |max: f64, min: f64, normal: f64| match symbol.name {
             "MAX_VALUE" => Some(max),
             "MIN_VALUE" => Some(min),
+            "MIN_NORMAL" => Some(normal),
             "NaN" => Some(f64::NAN),
             "POSITIVE_INFINITY" => Some(f64::INFINITY),
             "NEGATIVE_INFINITY" => Some(f64::NEG_INFINITY),
@@ -40,8 +41,11 @@ impl<'t> Lowering<'t> {
             // There are no byte and short literals: `(byte) -128`.
             "java.lang.Byte" => self.small_constant(Type::Byte, integer(i8::MIN as i64, i8::MAX as i64)?),
             "java.lang.Short" => self.small_constant(Type::Short, integer(i16::MIN as i64, i16::MAX as i64)?),
-            "java.lang.Float" => ExprKind::Float(floating(f32::MAX as f64, f32::from_bits(1) as f64)? as f32),
-            "java.lang.Double" => ExprKind::Double(floating(f64::MAX, f64::from_bits(1))?),
+            "java.lang.Float" => {
+                let normal = f32::MIN_POSITIVE as f64;
+                ExprKind::Float(floating(f32::MAX as f64, f32::from_bits(1) as f64, normal)? as f32)
+            }
+            "java.lang.Double" => ExprKind::Double(floating(f64::MAX, f64::from_bits(1), f64::MIN_POSITIVE)?),
             "java.lang.Math" | "java.lang.StrictMath" => ExprKind::Double(match symbol.name {
                 "PI" => std::f64::consts::PI,
                 "E" => std::f64::consts::E,
