@@ -55,8 +55,18 @@ local returned at the end is written as its value. A switch with one labelled ca
 `if let`, and a braced case body is read as its statements. On the 157 corpus programs,
 `scripts/clippy-corpus.sh` counts 201 clippy and rustc warnings in the generated code, down from
 262 before this work (`needless_return` 57 → 0, `single_match` 2 → 0, `never_loop` 1 → 0).
-What remains is mostly expression code (`eq_op`, `approx_constant`, `unused_parens`) and
-reference-typed locals (`let_and_return`), which need the nullness and aliasing work first.
+
+Expressions read the same way. Parentheses appear only where precedence needs them. `x = x op v`
+is written `x op= v` where Rust's compound assignment does the same, and a shift by a literal
+count is written with the count Java masks to. A comparison with `true` or `false` becomes the
+other operand or its negation. A range proof lets `+ - *` stand in for `wrapping_*`, for example
+when a counter is bounded by a `static final` constant. Operations that could overflow in Java
+stay wrapping. On the 184 corpus programs the expression work took the count from 216 to 197
+(`unused_parens` 7 → 0, `bool_comparison` 2 → 1, `assign_op_pattern` 7 → 3).
+
+What remains is mostly code Java itself writes (`eq_op`, `approx_constant`,
+`zero_divided_by_zero`), object and array code (`unnecessary_to_owned`), and reference-typed
+locals (`let_and_return`), which need the nullness and aliasing work first.
 
 ## Testing
 

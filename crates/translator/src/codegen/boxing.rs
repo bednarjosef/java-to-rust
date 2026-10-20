@@ -143,7 +143,7 @@ impl<'a> Gen<'a> {
             }
             BoxedOp::ToString => {
                 let code = self.value(&args[0], kind);
-                let text = self.shown(kind, code.at(ATOM));
+                let text = self.shown_arg(kind, code);
                 Code::atom(format!("{text}.to_string()"))
             }
             BoxedOp::HashCode => {
@@ -332,11 +332,20 @@ impl<'a> Gen<'a> {
         Code::atom(format!("{}({})", self.runtime("char_numeric_value"), c.text))
     }
 
+    /// `code` shown as a string by `shown`. A wrapper such as `java::Char` takes its argument
+    /// without parentheses, while the text of any other kind is a receiver, so it is an atom.
+    fn shown_arg(&mut self, kind: Type, code: Code) -> String {
+        match kind {
+            Type::Double | Type::Float | Type::Char => self.shown(kind, code.text),
+            _ => self.shown(kind, code.at(ATOM)),
+        }
+    }
+
     /// A boxed value that may be null, as the text of its string form: `null` for a null.
     pub(super) fn boxed_text(&mut self, e: &'a Expr, kind: Type) -> String {
         let option = self.expr(e).at(ATOM);
         let value = self.unbox_code(Code::atom("v_"), kind, false);
-        let shown = self.shown(kind, value.at(ATOM));
+        let shown = self.shown_arg(kind, value);
         let or_null = self.runtime("or_null");
         match shown.strip_suffix("(v_)") {
             _ if shown == "v_" => format!("{or_null}({option})"),

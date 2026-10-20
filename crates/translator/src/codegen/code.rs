@@ -170,13 +170,16 @@ pub(super) fn infix(op: &str, prec: u8, left: &Code, right: &Code) -> Code {
     // `a as i64 < b` would parse `<` as the start of generic arguments.
     let left_cast = matches!(op, "<" | "<<") && ends_with_cast(&left.text) && left.prec >= prec;
     let left_prec = if prec == CMP { CMP + 1 } else { prec };
-    let l = if left_cast { format!("({})", left.text) } else { left.left_at(left_prec) };
-    let r = right.at(prec + 1);
+    // Clippy's `precedence` lint wants arithmetic under a bitwise or shift operator in parentheses.
+    let mixed = |c: &Code| matches!(prec, SHIFT | BIT_AND | BIT_XOR | BIT_OR) && matches!(c.prec, ADD | MUL);
+    let l = if left_cast || mixed(left) { format!("({})", left.text) } else { left.left_at(left_prec) };
+    let r = if mixed(right) { format!("({})", right.text) } else { right.at(prec + 1) };
     let mut code = Code::new(format!("{l} {op} {r}"), prec);
     if left.untyped && right.untyped {
         // In `7 / 2` the type is left to inference, which defaults to `i32` and `f64`: right for
         // int and double, but a long or a float needs its type written.
-        let typed_text = format!("{} {op} {r}", left.typed_at(left_prec));
+        let left_typed = if mixed(left) { format!("({})", left.typed()) } else { left.typed_at(left_prec) };
+        let typed_text = format!("{left_typed} {op} {r}");
         if left.literal.is_some_and(|literal| !literal.inferred()) {
             code.text = typed_text;
         } else if prec != CMP {
