@@ -34,6 +34,18 @@ impl<'a> Gen<'a> {
         if !matches!(ty, Type::Int | Type::Long | Type::Double | Type::Float | Type::Boolean) {
             return None;
         }
+        if matches!(op, BinOp::Shl | BinOp::Shr) && matches!(ty, Type::Int | Type::Long) {
+            // Java masks a literal count to the width of the type, as `shift` does, so the masked
+            // count is always in range for Rust's shift assignment.
+            let bits = if ty == Type::Long { 64 } else { 32 };
+            let count = match r.kind {
+                ExprKind::Int(n) => i64::from(n),
+                ExprKind::Long(n) => n,
+                _ => return None,
+            };
+            let symbol = if *op == BinOp::Shl { "<<=" } else { ">>=" };
+            return Some(format!("{name} {symbol} {}", count & (bits - 1)));
+        }
         let symbol = self.in_place_op(*op, ty, r, value.id)?;
         let v = self.value(r, if op.is_shift() { r.ty } else { ty });
         Some(format!("{name} {symbol} {}", v.text))
