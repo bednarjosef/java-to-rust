@@ -1,0 +1,423 @@
+# Exceptions: `throw`, `try`/`catch`/`finally`, the standard exception classes
+
+This plan builds on the object model (`docs/object-model.md`) at its milestone 2: class trees
+with several concrete classes are enums. It is kept up to date as decisions change (see
+"Deviations" at the end).
+
+Decided by the user: exceptions are `Result`-based. A method that can throw returns
+`Result<T, Throwable>`, `?` propagates, and a method that cannot throw keeps its plain
+signature. Everything else is decided here.
+
+## 0. The decisions in one page
+
+1. **Exception classes are classes of the object model.** A program's own exception classes
+   (`class InsufficientFunds extends Exception`) are ordinary classes; the standard ones the
+   program uses (`Throwable`, `Exception`, `RuntimeException`, `IllegalArgumentException`, ...)
+   are *synthetic* classes that lowering adds to the program (`lower/exceptions.rs`), with
+   Java's names, the constructors the program calls and the methods of `Throwable` it calls,
+   their bodies written as small syntax trees. So the object model's machinery (fields structs,
+   enums, dispatch, `Display`, identity) applies to exceptions unchanged, and a user class that
+   overrides `getMessage` or `toString` is dispatched to like any override.
+2. **The standard classes are provided by the translator, not read from the JDK.** They are in
+   `program/reach.rs`'s `RUNTIME_CLASSES`, so reachability never reads `Throwable.java` (stack
+   traces, serialization, suppressed exceptions, natives) and a single file and a whole
+   program translate them the same way. An exception class of the JDK that the table does not
+   list is translated from its source in whole-program mode (they are small classes that call
+   `super(...)`), and rejected in a single file.
+3. **`E` is the enum `Throwable`**, the representation of `java.lang.Throwable`: one variant per
+   exception class that the program creates or that the runtime raises where the program
+   observes it. It is an enum even when it has one variant, so that it is a type of the
+   program and the runtime's failures convert into it (`impl From<java::Exception> for
+   Throwable`, which `?` uses). The other standard types with several concrete classes under
+   them (`Exception`, `RuntimeException`, ...) declare no members of their own, so they are
+   represented by `Throwable` too rather than by enums of their own: no conversions are needed
+   between them, and a `catch (RuntimeException e)` binds the value it matched as it is.
+4. **The fields of `Throwable`** are a fields struct, `ThrowableFields { message: Option<String>,
+   cause: Option<Throwable> }`, the field `cause` only when the program uses causes. A standard
+   class that declares nothing, has no objects of its own and whose constructors only pass their
+   parameters to `super(...)` has no fields struct: the struct of a class under it embeds
+   `ThrowableFields` directly (`struct InsufficientFunds { base: ThrowableFields }`), and its
+   `super(m)` builds that struct.
+5. **Which methods throw** is an analysis (`analysis/exceptions.rs`): a fixpoint over calls
+   (every implementation a virtual call may run, constructors, `this(...)`, `super(...)`) of what
+   each method may let escape, and of what the callers of each method observe. A method returns
+   `Result` exactly when some caller observes an exception that may escape it: a call inside a
+   `try` whose `catch` matches it or whose `finally` observes it, or a call in a method whose own
+   callers observe it. The methods of an override group agree.
+6. **Failures of the runtime become values only where they are observed.** Division by zero,
+   array indexes and sizes, null dereferences, parsing and the string indexes raise exceptions in
+   the runtime today by printing them and exiting (`java::throw`). That stays the translation
+   wherever no `catch` or `finally` could see the failure. Where one could, the operation uses the
+   runtime's checked form (`java::try_div(a, b)?`), which returns `Result<_, java::Exception>`. An
+   operation the runtime has no checked form for, in a place where its failure is observed, is
+   rejected.
+7. **`try` is a labeled block** that evaluates to `Result<(), Throwable>`. Inside it, a failure
+   leaves the block with `java::or_break!(call, 'attempt)` instead of `?`; the `catch` clauses are
+   a `match` on the error's variants; `finally` runs after the match on every path. `return`,
+   `break` and `continue` inside a `try` that has no `finally` are Rust's own; with a `finally`,
+   the block evaluates to `java::Completion` (normal, return, jump or throw) and the jump happens
+   after the `finally` body.
+8. **Uncaught exceptions** end the program as Java's do: `Exception in thread "main" ` and the
+   exception's `toString()` on standard error, a `Caused by: ...` line per cause, exit code 1.
+   Stack frames are not printed (they cannot match). `printStackTrace()` prints the same lines
+   without the thread prefix.
+9. **Static initializers never return `Result`**: what they throw ends the program. Java would
+   throw `ExceptionInInitializerError` at the first use instead; a program that could observe
+   that (a `catch` of it, `Error` or `Throwable`, or a `finally`) is rejected.
+10. **Rejected for now**, each with a message naming the construct: try-with-resources (needs
+    `AutoCloseable`, an interface: object model milestone 3), observing the message of a
+    `NullPointerException` the runtime raises (Java's helpful message names bytecode locals),
+    catching `StackOverflowError`, `OutOfMemoryError` or `VirtualMachineError` (the translation
+    cannot raise them), a `toString` that throws an exception someone observes (it is
+    `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace`, `initCause`,
+    `addSuppressed` and `getSuppressed`.
+
+## 1. The representation
+
+### 1.1 A program with its own exception
+
+```java
+class Bank {
+    static class InsufficientFunds extends Exception {
+        InsufficientFunds(String msg) { super(msg); }
+    }
+    static class Account {
+        long balance;
+        void withdraw(long amount) throws InsufficientFunds {
+            if (amount > balance) throw new InsufficientFunds("has only " + balance);
+            balance -= amount;
+        }
+    }
+    static void transfer(Account from, Account to, long amount) {
+        try {
+            from.withdraw(amount);
+            to.balance += amount;
+        } catch (InsufficientFunds e) {
+            System.out.println("failed: " + e.getMessage());
+        } finally {
+            System.out.println("done");
+        }
+    }
+}
+```
+
+```rust
+#[derive(Clone)]
+enum Throwable {
+    InsufficientFunds(Rc<BankInsufficientFunds>),
+}
+
+struct ThrowableFields {
+    message: Option<String>,
+}
+
+impl ThrowableFields {
+    fn new(message: Option<String>) -> ThrowableFields {
+        ThrowableFields { message }
+    }
+
+    fn get_message(&self) -> Option<String> {
+        self.message.clone()
+    }
+}
+
+struct BankInsufficientFunds {
+    base: ThrowableFields,
+}
+
+impl BankInsufficientFunds {
+    fn new(msg: String) -> BankInsufficientFunds {
+        BankInsufficientFunds { base: ThrowableFields::new(Some(msg)) }
+    }
+}
+
+impl BankAccount {
+    fn withdraw(&mut self, amount: i64) -> Result<(), Throwable> {
+        if amount > self.balance {
+            return Err(Throwable::InsufficientFunds(Rc::new(BankInsufficientFunds::new(format!(
+                "has only {}",
+                self.balance
+            )))));
+        }
+        self.balance -= amount;
+        Ok(())
+    }
+}
+
+fn transfer(from: &Rc<RefCell<BankAccount>>, to: &Rc<RefCell<BankAccount>>, amount: i64) {
+    let attempt: Result<(), Throwable> = 'attempt: {
+        java::or_break!(from.borrow_mut().withdraw(amount), 'attempt);
+        to.borrow_mut().balance += amount;
+        Ok(())
+    };
+    let attempt = match attempt {
+        Err(Throwable::InsufficientFunds(e)) => {
+            java::println!("failed: {}", java::or_null(e.base.get_message()));
+            Ok(())
+        }
+        other => other,
+    };
+    java::println!("done");
+    if let Err(e) = attempt {
+        java::uncaught(e);
+    }
+}
+```
+
+`withdraw` returns `Result` because its call in `transfer` is inside a `try` that catches what
+it throws. `transfer` does not: nothing escapes it that a caller observes, so the `Err` arm left
+after the `finally` (which cannot happen here, but the analysis does not need to know that) ends
+the program as Java's uncaught exception would. Without the `finally`, the handlers are a plain
+`match attempt { Ok(()) => {} Err(Throwable::InsufficientFunds(e)) => { .. } Err(e) => .. }`.
+
+### 1.2 The standard classes
+
+`lower/exceptions.rs` holds a table of the standard classes: their qualified name, their
+superclass, which of the four `Throwable` constructor shapes they have (`()`, `(String)`,
+`(String, Throwable)`, `(Throwable)`) and any other constructor (`(int)` of the index
+exceptions, `(Object)` of `AssertionError`, taken with a `String` argument only):
+
+```
+java.lang.Throwable
+  java.lang.Exception
+    java.lang.RuntimeException
+      java.lang.ArithmeticException, java.lang.ArrayStoreException,
+      java.lang.ClassCastException, java.lang.IllegalArgumentException
+        (java.lang.NumberFormatException), java.lang.IllegalStateException,
+      java.lang.IndexOutOfBoundsException (java.lang.ArrayIndexOutOfBoundsException,
+        java.lang.StringIndexOutOfBoundsException), java.lang.NegativeArraySizeException,
+      java.lang.NullPointerException, java.lang.UnsupportedOperationException,
+      java.util.NoSuchElementException, java.util.ConcurrentModificationException
+    java.lang.InterruptedException, java.lang.CloneNotSupportedException
+  java.lang.Error
+    java.lang.AssertionError
+```
+
+Before the program's methods are lowered, lowering scans javac's tree for every symbol and type
+that names one of these classes, and declares the synthetic class for each one named, with its
+superclasses. A synthetic class is abstract unless the program creates its objects (`new`) or
+the runtime may raise it (section 3), so the enum of `Throwable` only has the variants it
+needs. Of each class it declares the constructors the program calls (and those that the
+runtime's failures and `super(...)` chains need), and of `Throwable` the methods the program
+calls, with the methods those call: `getMessage`, `getLocalizedMessage`, `getCause`,
+`toString`, `printStackTrace()`. Their bodies:
+
+```java
+Throwable(String message) { this.message = message; }
+Throwable(String message, Throwable cause) { this.message = message; this.cause = cause; }
+Throwable(Throwable cause) { this.message = cause == null ? null : cause.toString(); this.cause = cause; }
+String getMessage() { return message; }
+String getLocalizedMessage() { return getMessage(); }
+Throwable getCause() { return cause; }
+String toString() { String m = getLocalizedMessage(); return m != null ? <class name> + ": " + m : <class name>; }
+void printStackTrace() { System.err.println(this); for (Throwable c = getCause(); c != null; c = c.getCause()) System.err.println("Caused by: " + c); }
+```
+
+and every other standard constructor is `X(params) { super(params); }`. `<class name>` is a new
+builtin, `Builtin::ClassName`: Java's binary name of the object's class (`java.lang.Exception`,
+`Bank$InsufficientFunds`), a string literal for an object of a known class and the generated
+`class_name()` of an enum otherwise. Java's `cause` field starts as the object itself, meaning
+"not set yet", for `initCause`; since `initCause` is rejected, `null` is the same.
+
+The Rust names of the synthetic classes are their simple names (`IllegalArgumentException`);
+a program class whose name would clash with one the program needs is rejected.
+
+### 1.3 Values of exception types
+
+| Java type of the value | Rust |
+| --- | --- |
+| a class with one concrete class under it | that class's object, `Rc<C>` (or `Rc<RefCell<C>>` when the family is mutable) |
+| `Throwable`, and a standard class with several concrete classes under it | `Throwable` |
+| a program class with several concrete classes under it | the enum of that class, as for any class tree |
+
+`throw e` and every `Err` convert the value to `Throwable` (an upcast: the variant wrap of an
+object, `to_throwable()` from a program class's enum). A `catch` clause of type `T` matches the
+variants of the classes under `T`; it binds the variant's object when `T` has one concrete
+class (`Err(Throwable::InsufficientFunds(e))`), the matched value itself when `T` is
+represented by `Throwable` (`Err(e @ (Throwable::A(_) | Throwable::B(_)))`), and the value
+converted to `T`'s enum otherwise (`e.to_bank_error()`, a conversion whose other arms are
+unreachable). Multi-catch is one arm whose pattern is the union; a catch type no variant is
+under matches nothing and is not written. The order of the arms is the order of the clauses,
+which is Java's (the first matching clause runs).
+
+### 1.4 Methods that throw
+
+```java
+static int parse(String s) throws Bad { if (s.isEmpty()) throw new Bad("empty"); return Integer.parseInt(s); }
+```
+
+```rust
+fn parse(s: &str) -> Result<i32, Throwable> {
+    if s.is_empty() {
+        return Err(Throwable::Bad(Rc::new(Bad::new("empty"))));
+    }
+    Ok(java::try_parse_int(s)?)
+}
+```
+
+(`try_parse_int` is the checked form only if some caller observes a `NumberFormatException`;
+otherwise it stays `java::parse_int(s)`.) In a method that returns `Result`:
+
+- `return v` is `return Ok(v)`, the tail value is `Ok(v)`, and a body that can complete normally
+  ends with `Ok(())`;
+- `throw e` is `return Err(..)`;
+- a call of a method that returns `Result` is `call?`, and an operation whose failure is
+  observed is `java::try_op(..)?`.
+
+In a method that does not, a call of a method that returns `Result` (because other callers
+observe it) is `call.unwrap_or_else(java::uncaught)`: nothing that escapes here is observed,
+so the exception ends the program at once, which is what propagating it would do. `throw e`
+outside any `try` in such a method is `java::uncaught(e)`.
+
+A constructor that throws returns `Result<C, Throwable>` (its struct literal or object is the
+`Ok` value), and `new C(..)` is `C::new(..)?` inside the wrapping. `toString` methods that
+throw an observed exception are rejected: `Display::fmt` cannot return it. The dispatcher of
+an override group whose members return `Result` returns it too and forwards it unchanged.
+
+### 1.5 `try`, `catch`, `finally`
+
+The general form, for `try { B } catch (X e) { C } finally { F }` in a method that returns
+`Result`:
+
+```rust
+let attempt: Result<(), Throwable> = 'attempt: {
+    B          // a failure here: break 'attempt Err(e), through java::or_break!
+    Ok(())
+};
+let attempt = match attempt {
+    Err(Throwable::X(e)) => 'handler: {
+        C      // a failure here: break 'handler Err(e)
+        Ok(())
+    },
+    other => other,
+};
+F
+attempt?;
+```
+
+- Without a `finally`, the handlers are the arms of `match attempt`, a failure inside `C`
+  propagates as anywhere else in the method, and the last arm passes on what no clause
+  matches: `Err(e) => return Err(e)`, or `java::uncaught(e)` in a method that does not return
+  `Result`, or a break to the enclosing `try`'s label.
+- When `B` ends with `return v` (and so cannot complete normally), the block evaluates to
+  `Result<T, Throwable>` and its tail is `Ok(v)`; the `Ok(v)` arm returns `v`. This keeps the
+  common `try { return parse(s); } catch (..) { return -1; }` free of placeholders.
+- With a `finally`, a `return`, `break` or `continue` inside `B` or `C` that leaves the `try`
+  must run `F` first: the blocks then evaluate to `java::Completion<T, Throwable>`
+  (`Normal`, `Return(v)`, `Jump(n)`, `Throw(e)`), the jump is a `break 'attempt
+  java::Completion::Jump(n)`, and after `F` a `match` performs it (`return v`, `break 'outer`,
+  `continue`). When `F` itself completes abruptly (it returns, breaks or throws), that is what
+  happens and the pending completion is dropped, as in Java.
+- Rust allows no unlabeled `break` or `continue` inside a labeled block (E0695), so a jump out
+  of a `try` body always names its loop's label; the `try` is a frame of `codegen/switch.rs`
+  that is not a loop.
+- A local declared before the `try` without an initializer and assigned inside it cannot be
+  `let x;` in Rust, whose definite-initialization check does not follow the `Err` path; it is
+  declared with Java's default value instead (which no path reads).
+
+`java::or_break!(expr, 'label)` is a runtime macro: `match expr { Ok(v) => v, Err(e) => break
+'label Err(From::from(e)) }`, the `From` turning a runtime failure into `Throwable`.
+
+### 1.6 The runtime
+
+```rust
+/// An exception that the runtime raises: Java's class name and the message.
+pub struct Exception { pub class: &'static str, pub message: Option<String> }
+pub fn uncaught<T>(e: impl fmt::Display) -> T;                // prints and exits with 1
+pub enum Completion<T, E> { Normal, Return(T), Jump(usize), Throw(E) }
+macro_rules! or_break { .. }
+pub fn try_div<T: Integer>(a: T, b: T) -> Result<T, Exception>;   // and try_rem
+pub fn try_get / try_set / try_update / try_filled / try_non_null / try_parse_int / ...
+```
+
+Each checked form computes what the existing function computes, and the existing function
+becomes `try_x(..).unwrap_or_else(uncaught)` where that keeps it as fast (the exiting forms
+stay the default in generated code). The program's `impl From<java::Exception> for Throwable`
+matches on the class name and builds the variant with the message; a class with no variant
+(which the analysis rules out) ends the program as uncaught.
+
+## 2. The analysis
+
+`analysis/exceptions.rs` runs after the other analyses, since what an operation can raise
+depends on their facts (a division by a divisor the ranges prove nonzero raises nothing, an
+index the ranges prove in bounds raises nothing, a value nullness proves non-null raises no
+`NullPointerException`). The predicates are shared with the generator, so an operation is
+written with the checked form exactly when it is in the analysis's set.
+
+- **What a point raises**: `throw e` raises the concrete classes under `e`'s static type; a call
+  raises what escapes any method it may run; an operation of the runtime raises its standard
+  classes (a table per `Builtin` and per expression kind: `/` and `%` on integers
+  `ArithmeticException`, an index `ArrayIndexOutOfBoundsException`, `new T[n]`
+  `NegativeArraySizeException`, a dereference of a value that may be null
+  `NullPointerException`, `Integer.parseInt` `NumberFormatException`, `charAt` and `substring`
+  `StringIndexOutOfBoundsException`, ...). A builtin with no entry raises "anything", which is
+  rejected wherever it is observed.
+- **What escapes a method**: what its points raise, minus what an enclosing `catch` of the same
+  method catches, plus what the `catch` and `finally` bodies raise. A static initializer's
+  escapes are raised as `ExceptionInInitializerError` at the start of the methods that run it
+  (`Facts::entry_init`), which only matters for the rejection of section 0.9.
+- **What is observed at a point**: the classes under the types of the enclosing `catch`
+  clauses, everything when an enclosing `finally` observes (it does unless it only assigns
+  variables, fields and array elements with operations that cannot fail: what it does to memory
+  is then invisible once the uncaught exception ends the program), and what the callers of the
+  method observe of what escapes it (`observed(m)`). `observed(m)` is the fixpoint of: for every
+  call of `m` at point `p`, what is observed at `p` of what escapes `m`; over override groups,
+  the union of the members'.
+- **Facts**: `throwing: HashSet<usize>`, the methods (and constructors) that return `Result`;
+  `raising: HashSet<ExprId>`, the operations written with the checked form;
+  `exception_classes: HashSet<usize>`, the standard classes the runtime may raise where observed
+  (they get a variant and a `From` arm).
+
+### 2.1 Interaction with the other analyses
+
+A `?` or `break 'attempt` is a new way out of a statement. The analyses that follow the flow of
+a method must see it:
+
+- **Ranges** (`analysis/ranges.rs`): the state at the start of a `catch` is the state before the
+  `try` with every variable the `try` body assigns widened to its type's full range; after the
+  statement it is the join of the body's normal end and each `catch` body's end; `finally` runs
+  from the join of all of them, and a `finally` that assigns a variable widens it in the states
+  that `break` and `continue` carry out of the `try`. The return value of a method that returns
+  `Result` is the `Ok` value's range, as before.
+- **Nullness** is flow-insensitive, so nothing changes, except that a catch parameter is never
+  null.
+- **Moves** (`analysis/moves.rs`): a variable moved inside a `try` body is not moved again in a
+  `catch` or after the `try`; a read inside a `try` body is a last use only when nothing after
+  the statement (including the handlers and `finally`) reads it.
+- **Borrowing and ownership**: a `RefCell` borrow is a temporary of its statement, which `?`
+  and `break` drop like any other exit; nothing changes. An exception object is converted to
+  `Throwable` when thrown, so it is never owned, and exception classes are immutable unless the
+  program writes their fields after construction (then the family is mutable together).
+- **Struct-literal constructors**: a constructor that throws before its leading assignments
+  never builds the object; its struct literal is the `Ok` value.
+- **Statics**: an `init_x()` call and a lazy static's initializer use the exiting forms (see
+  0.9).
+
+## 3. Steps
+
+Each step is mergeable on its own, with tests green and the corpus extended.
+
+1. **This document.**
+2. **The runtime**: `java::Exception`, `uncaught`, `or_break!`, `Completion`, and the checked
+   forms of division, remainder, array access and creation, `non_null`, number parsing,
+   `charAt` and `substring`, with unit tests.
+3. **`throw` and `try`/`catch` with the standard classes and the program's own exception
+   classes**: the synthetic classes, the analysis, `Result` methods and `?`, handlers, uncaught
+   exceptions, `getMessage`, `toString`, catch order and subclass matching, multi-catch,
+   rethrow, nested `try`. Corpus: `features/ThrowAndCatch.java`, `features/ExceptionClasses.java`,
+   `features/CatchOrder.java`, `features/UncaughtException.java`, `programs/BankTransfers.java`.
+4. **`finally`** with the rules for `return`, `break`, `continue` and exceptions in `try`,
+   `catch` and `finally`. Corpus: `features/Finally.java`, `features/FinallyOverrides.java`.
+5. **Failures of the runtime as values**. Corpus: `features/RuntimeExceptionsCaught.java`,
+   `programs/Calculator.java`.
+6. **Causes, `getCause`, `printStackTrace`, constructors that throw**. Corpus:
+   `features/ExceptionCauses.java`, `features/ThrowingConstructors.java`.
+7. **try-with-resources**, once interfaces translate.
+
+The survey's "exceptions" feature stops counting `try` and `throw` once step 4 is in; a class
+extending a standard exception class stops counting as "extending classes outside the sources"
+with step 3.
+
+## 4. Deviations
+
+Decisions that changed during the implementation, step by step.
