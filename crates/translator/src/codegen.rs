@@ -20,6 +20,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         borrowed: HashSet::new(),
         int_receiver: false,
         double_receiver: false,
+        guarded: false,
         annotations: Vec::new(),
         fn_names: method_names(class),
         locals: HashMap::new(),
@@ -255,6 +256,8 @@ struct Gen<'a> {
     /// bare literal then get their type written (see `annotation`).
     int_receiver: bool,
     double_receiver: bool,
+    /// Whether the statement being emitted also borrows an object mutably (see `borrows_mut`).
+    guarded: bool,
     /// Placeholders for type annotations decided at the end of the method: (placeholder, type,
     /// annotation).
     annotations: Vec<(String, Type, String)>,
@@ -389,8 +392,10 @@ impl<'a> Gen<'a> {
             let rest = &stmts[i + 1..];
             match stmt {
                 Stmt::Return(Some(value), _) if tail && rest.is_empty() => {
+                    let outer = std::mem::replace(&mut self.guarded, stmt_borrows_mut(stmt));
                     let code = self.returned(value);
                     self.line(&code.text);
+                    self.guarded = outer;
                 }
                 _ => self.stmt(stmt, rest),
             }
@@ -410,6 +415,12 @@ impl<'a> Gen<'a> {
     /// One statement; `rest` holds the statements after it in the same block, where a local
     /// declared here is in scope.
     fn stmt(&mut self, stmt: &'a Stmt, rest: &'a [Stmt]) {
+        let outer = std::mem::replace(&mut self.guarded, stmt_borrows_mut(stmt));
+        self.statement(stmt, rest);
+        self.guarded = outer;
+    }
+
+    fn statement(&mut self, stmt: &'a Stmt, rest: &'a [Stmt]) {
         match stmt {
             Stmt::Local { ty, name, init, .. } => {
                 self.local_decl(*ty, name, init.as_ref(), assigns_any(rest, name));

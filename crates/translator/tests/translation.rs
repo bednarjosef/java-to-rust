@@ -141,3 +141,16 @@ fn string_building_appends_in_place() {
     );
     assert_contains(&rust, &["let mut s = String::new();", "s += &i.to_string();", "s += \",\";"]);
 }
+
+#[test]
+fn field_reads_are_braced_only_beside_a_mutable_borrow() {
+    let rust = translate(
+        "class P { int x; int y = x + 1; }
+        class A { public static void main(String[] a) {
+            P p = new P();
+            System.out.println(p.x);
+        } }",
+    );
+    assert_contains(&rust, &["println!(\"{}\", p.borrow().x);", "this.borrow_mut().y = { this.borrow().x }"]);
+    assert_lacks(&rust, &["{ p.borrow()"]);
+}

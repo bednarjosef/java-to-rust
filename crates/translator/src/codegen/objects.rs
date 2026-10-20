@@ -109,6 +109,37 @@ pub(super) fn type_suffix(ty: Type) -> String {
     }
 }
 
+/// Whether an expression writes a field or calls a method or constructor, which may borrow an
+/// object mutably while a field read of the same statement still holds its `Ref`.
+pub(super) fn borrows_mut(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| {
+        found |= matches!(
+            &x.kind,
+            ExprKind::Assign { target: Place::Field { .. }, .. }
+                | ExprKind::IncDec { target: Place::Field { .. }, .. }
+                | ExprKind::Call { .. }
+                | ExprKind::MethodCall { .. }
+                | ExprKind::New { .. }
+                | ExprKind::ThisCall { .. }
+        )
+    });
+    found
+}
+
+/// Whether the expressions that a statement evaluates itself borrow mutably; the expressions of
+/// nested statements are checked when those are emitted.
+pub(super) fn stmt_borrows_mut(stmt: &Stmt) -> bool {
+    let exprs: Vec<&Expr> = match stmt {
+        Stmt::Local { init, .. } => init.iter().collect(),
+        Stmt::Expr(e) | Stmt::Return(Some(e), _) => vec![e],
+        Stmt::If { cond, .. } | Stmt::While { cond, .. } | Stmt::DoWhile { cond, .. } => vec![cond],
+        Stmt::For { cond, update, .. } => cond.iter().chain(update.iter()).collect(),
+        Stmt::Return(None, _) | Stmt::Break | Stmt::Continue | Stmt::Block(_) => Vec::new(),
+    };
+    exprs.into_iter().any(borrows_mut)
+}
+
 /// Whether some expression of the statements is `this`, so that a constructor must bind it.
 fn uses_this(stmts: &[Stmt]) -> bool {
     let mut found = false;
@@ -166,7 +197,10 @@ impl<'a> Gen<'a> {
     pub(super) fn field_read(&mut self, object: &'a Expr, name: &str, ty: Type) -> Code {
         let obj = self.object(object);
         let clone = if needs_clone(ty) { ".clone()" } else { "" };
-        Code::atom(format!("{{ {obj}.borrow().{}{clone} }}", snake_case(name)))
+        let read = format!("{obj}.borrow().{}{clone}", snake_case(name));
+        // The `Ref` lives to the end of the statement, so it is scoped with braces only when the
+        // statement also borrows mutably; otherwise the braces would be noise.
+        Code::atom(if self.guarded { format!("{{ {read} }}") } else { read })
     }
 
     /// A value read from a static field.
@@ -230,6 +264,13 @@ impl<'a> Gen<'a> {
         };
         let old = self.temp("old");
         let new = self.temp("value");
+        // The right-hand side is computed on its own line, before the write, so only a call or a
+        // field write inside it can conflict with a field read.
+        let rhs = match &how {
+            Update::Assign(value) | Update::Compound(_, value) => borrows_mut(value),
+            Update::Step(_) => false,
+        };
+        let outer = std::mem::replace(&mut self.guarded, rhs);
         let result = match how {
             Update::Assign(value) => {
                 let v = self.value(value, ty).text;
@@ -264,6 +305,7 @@ impl<'a> Gen<'a> {
                 if prefix { new.clone() } else { old.clone() }
             }
         };
+        self.guarded = outer;
         let stored = if needs_clone(ty) { format!("{new}.clone()") } else { new.clone() };
         lines.push(slot.write(&stored));
         Code::atom(format!("{{ {} {result} }}", lines.join(" ")))
@@ -307,7 +349,10 @@ impl<'a> Gen<'a> {
         self.line(&format!("fn field_inits(this: &{}) {{", class_type(&class.types[index].name)));
         self.indent += 1;
         for f in inits {
+            // The line writes a field, so a read in the value must end its `Ref` first.
+            let outer = std::mem::replace(&mut self.guarded, true);
             let value = self.value(f.init.as_ref().expect("filtered"), f.ty).text;
+            self.guarded = outer;
             self.line(&format!("this.borrow_mut().{} = {value};", snake_case(&f.name)));
         }
         self.indent -= 1;
