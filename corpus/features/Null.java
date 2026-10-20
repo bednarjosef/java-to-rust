@@ -17,6 +17,26 @@ public class Null {
         return count;
     }
 
+    static String describe(String s) {
+        if (s != null) {
+            return "len " + s.length();
+        }
+        return "none";
+    }
+
+    static int early(String s) {
+        if (s == null) return -1;
+        return s.length() + 1;
+    }
+
+    static String otherwise(String s) {
+        if (s == null) {
+            return "nil";
+        } else {
+            return s + "!";
+        }
+    }
+
     public static void main(String[] args) {
         String s = null;
         System.out.println(s);
@@ -41,5 +61,9 @@ public class Null {
         System.out.println(s == null ? "none" : s);
         String u = countNull("a", null) > 5 ? "many" : null;
         System.out.println(u);
+        System.out.println(describe(null));
+        System.out.println(describe("abc"));
+        System.out.println(early(null) + " " + early("ab"));
+        System.out.println(otherwise(null) + " " + otherwise("q"));
     }
 }

@@ -16,6 +16,13 @@ pub(super) fn is_null_test(op: BinOp, l: &Expr, r: &Expr) -> bool {
 impl<'a> Gen<'a> {
     /// Whether `e`, in the current method, may be null, so that its Rust text is an `Option`.
     pub(super) fn nullable(&self, e: &Expr) -> bool {
+        // A variable narrowed by a null check is a `&str` there, so it is not null there. Only
+        // strings that may be null are narrowed, and those are never borrowed parameters.
+        if let ExprKind::Var(name) = &e.kind
+            && self.borrowed.contains(name)
+        {
+            return false;
+        }
         maybe_null(self.facts, self.method, e)
     }
 
@@ -124,5 +131,84 @@ impl<'a> Gen<'a> {
             _ => format!("{}.unwrap_or(\"null\")", self.option_ref(e)),
         };
         Some(Part::Arg(Code::atom(text)))
+    }
+}
+
+/// Whether `stmt` reads or writes the variable `name` anywhere inside it.
+fn mentions_stmt(stmt: &Stmt, name: &str) -> bool {
+    let mut found = false;
+    visit_stmt(stmt, &mut |e| found |= mentions(e, name), &mut |_| {});
+    found
+}
+
+/// Whether `stmt` always leaves the block it is in.
+fn exits(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(..) | Stmt::Break | Stmt::Continue => true,
+        Stmt::Block(stmts) => stmts.last().is_some_and(exits),
+        _ => false,
+    }
+}
+
+impl<'a> Gen<'a> {
+    /// The string variable of `s == null` or `s != null`, when `s` may be null here, and whether
+    /// the then-branch is the one where it is not null.
+    fn null_test_var(&self, cond: &'a Expr) -> Option<(&'a str, bool)> {
+        let ExprKind::Binary(op, l, r) = &cond.kind else { return None };
+        if !is_null_test(*op, l, r) {
+            return None;
+        }
+        let var = match (&l.kind, &r.kind) {
+            (ExprKind::Var(_), ExprKind::Null) => l,
+            (ExprKind::Null, ExprKind::Var(_)) => r,
+            _ => return None,
+        };
+        let ExprKind::Var(name) = &var.kind else { return None };
+        if !self.nullable(var) {
+            return None;
+        }
+        Some((name.as_str(), matches!(op, BinOp::Ne)))
+    }
+
+    /// `if (s != null) { .. }` or `if (s == null) .. else { .. }`: the branch where `s` is not
+    /// null binds it as `if let Some(s) = s.as_deref()`, so `s` is a `&str` there. Returns
+    /// false, emitting nothing, when the `if` is not of that form, or the branch does not use `s`
+    /// (a binding that is never read would only warn), or the branch assigns `s`.
+    pub(super) fn narrow_if(&mut self, cond: &'a Expr, then: &'a Stmt, otherwise: Option<&'a Stmt>) -> bool {
+        let Some((name, then_non_null)) = self.null_test_var(cond) else { return false };
+        let (non_null, null) = if then_non_null { (Some(then), otherwise) } else { (otherwise, Some(then)) };
+        let Some(non_null) = non_null else { return false };
+        if assigns_stmt(non_null, name) || !mentions_stmt(non_null, name) {
+            return false;
+        }
+        let rust = self.local(name);
+        self.line(&format!("if let Some({rust}) = {rust}.as_deref() {{"));
+        let added = self.borrowed.insert(name.to_string());
+        self.nested(non_null);
+        if added {
+            self.borrowed.remove(name);
+        }
+        if let Some(null) = null {
+            self.line("} else {");
+            self.nested(null);
+        }
+        self.line("}");
+        true
+    }
+
+    /// `if (s == null) return ..;` (or `break`, `continue`): the rest of the block sees `s` as
+    /// non-null, so it is bound with `let Some(s) = s.as_deref() else { .. };`. Returns the name
+    /// of `s`, or `None`, emitting nothing, when `stmt` is not of that form or `rest` assigns `s`.
+    pub(super) fn early_null_exit(&mut self, stmt: &'a Stmt, rest: &[Stmt]) -> Option<&'a str> {
+        let Stmt::If { cond, then, otherwise: None } = stmt else { return None };
+        let (name, then_non_null) = self.null_test_var(cond)?;
+        if then_non_null || !exits(then) || assigns_any(rest, name) || !rest.iter().any(|s| mentions_stmt(s, name)) {
+            return None;
+        }
+        let rust = self.local(name);
+        self.line(&format!("let Some({rust}) = {rust}.as_deref() else {{"));
+        self.nested(then);
+        self.line("};");
+        Some(name)
     }
 }

@@ -371,8 +371,15 @@ impl<'a> Gen<'a> {
     /// The statements of a block. In a function body (`tail`), a final `return x;` becomes the
     /// tail expression `x`.
     fn stmts(&mut self, stmts: &'a [Stmt], tail: bool) {
+        let mut narrowed = Vec::new();
         for (i, stmt) in stmts.iter().enumerate() {
             let rest = &stmts[i + 1..];
+            if let Some(name) = self.early_null_exit(stmt, rest) {
+                if self.borrowed.insert(name.to_string()) {
+                    narrowed.push(name);
+                }
+                continue;
+            }
             match stmt {
                 Stmt::Return(Some(value), _) if tail && rest.is_empty() => {
                     let code = self.returned(value);
@@ -380,6 +387,9 @@ impl<'a> Gen<'a> {
                 }
                 _ => self.stmt(stmt, rest),
             }
+        }
+        for name in narrowed {
+            self.borrowed.remove(name);
         }
     }
 
@@ -402,6 +412,9 @@ impl<'a> Gen<'a> {
             }
             Stmt::Expr(e) => self.effect(e),
             Stmt::If { cond, then, otherwise } => {
+                if self.narrow_if(cond, then, otherwise.as_deref()) {
+                    return;
+                }
                 let cond_text = self.condition(cond);
                 self.line(&format!("if {cond_text} {{"));
                 self.nested(then);
