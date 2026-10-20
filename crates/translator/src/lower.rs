@@ -7,6 +7,8 @@ use crate::ast::*;
 use serde_json::Value;
 use std::cell::Cell;
 
+mod primitives;
+
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
     let mut classes = unit.list("typeDecls").filter(|n| n.kind() != "EMPTY_STATEMENT");
@@ -166,7 +168,10 @@ impl<'t> Lowering<'t> {
             "boolean" => Ok(Type::Boolean),
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
-            "char" | "float" | "byte" | "short" => unsupported(node, name),
+            "byte" => Ok(Type::Byte),
+            "short" => Ok(Type::Short),
+            "char" => Ok(Type::Char),
+            "float" => Ok(Type::Float),
             "<nulltype>" => Ok(Type::Null),
             _ if name.ends_with("[]") || name.ends_with("...") => unsupported(node, "arrays"),
             _ => unsupported(node, &format!("type `{name}`")),
@@ -262,13 +267,16 @@ impl<'t> Lowering<'t> {
             "DOUBLE_LITERAL" => ExprKind::Double(self.number(node)?),
             "BOOLEAN_LITERAL" => ExprKind::Bool(node.0["value"] == true),
             "STRING_LITERAL" => ExprKind::Str(node.str("value").to_string()),
-            "CHAR_LITERAL" => return unsupported(node, "char"),
-            "FLOAT_LITERAL" => return unsupported(node, "float"),
+            "CHAR_LITERAL" => self.char_literal(node)?,
+            "FLOAT_LITERAL" => self.float_literal(node)?,
             "NULL_LITERAL" => ExprKind::Null,
             "IDENTIFIER" => ExprKind::Var(self.local(node)?),
             // javac folds the minus sign into integer literals only; fold it into doubles too.
             "UNARY_MINUS" if node.child("expression")?.kind() == "DOUBLE_LITERAL" => {
                 ExprKind::Double(-self.number::<f64>(node.child("expression")?)?)
+            }
+            "UNARY_MINUS" if node.child("expression")?.kind() == "FLOAT_LITERAL" => {
+                ExprKind::Float(-self.number::<f32>(node.child("expression")?)?)
             }
             kind @ ("UNARY_MINUS" | "UNARY_PLUS" | "LOGICAL_COMPLEMENT" | "BITWISE_COMPLEMENT") => {
                 let op = match kind {
@@ -308,7 +316,10 @@ impl<'t> Lowering<'t> {
             "METHOD_INVOCATION" => self.call(node)?,
             "NEW_CLASS" => return unsupported(node, "objects"),
             "NEW_ARRAY" | "ARRAY_ACCESS" => return unsupported(node, "arrays"),
-            "MEMBER_SELECT" => return unsupported(node, "fields"),
+            "MEMBER_SELECT" => match self.constant_field(node) {
+                Some(constant) => constant,
+                None => return unsupported(node, "fields"),
+            },
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => return unsupported(node, "lambdas"),
             "INSTANCE_OF" => return unsupported(node, "instanceof"),
             "SWITCH_EXPRESSION" => return unsupported(node, "switch"),
@@ -380,6 +391,12 @@ impl<'t> Lowering<'t> {
                 args.insert(0, self.expr(receiver)?);
                 if symbol.name == "length" { Builtin::StringLength } else { Builtin::StringEquals }
             }
+            ("java.lang.String", "charAt") => {
+                let receiver = receiver.expect("an instance method has a receiver");
+                args.insert(0, self.expr(receiver)?);
+                Builtin::StringCharAt
+            }
+            ("java.lang.Character", name) => self.character_method(node, name, symbol.ty)?,
             (owner, name) if owner == self.class && symbol.is_static => {
                 let resolved = self.methods.iter().position(|&(n, sig)| n == name && sig == symbol.ty);
                 return Ok(ExprKind::Call { name: name.to_string(), args, resolved });

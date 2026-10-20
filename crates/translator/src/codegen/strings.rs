@@ -54,8 +54,7 @@ impl<'a> Gen<'a> {
                 } else {
                     format!("{{ {} }}", self.local(name))
                 };
-                let copy =
-                    if e.ty == Type::Double { format!("{}({copy})", self.runtime("Double")) } else { copy };
+                let copy = self.shown(e.ty, copy);
                 out.push(Part::Arg(Code::atom(copy)));
             }
             ExprKind::Str(s) => out.push(Part::Lit(s.clone())),
@@ -63,19 +62,16 @@ impl<'a> Gen<'a> {
             ExprKind::Long(v) => out.push(Part::Lit(v.to_string())),
             ExprKind::Bool(v) => out.push(Part::Lit(v.to_string())),
             ExprKind::Double(v) => out.push(Part::Lit(java_runtime::double_to_string(*v))),
+            ExprKind::Float(v) => out.push(Part::Lit(java_runtime::float_to_string(*v))),
+            ExprKind::Char(c) => out.push(Part::Lit(java_runtime::char_to_string(*c))),
             ExprKind::Var(name) if e.ty == Type::String => out.push(Part::Arg(Code::atom(self.local(name)))),
             _ => {
                 let code = self.expr(e);
                 if let Some(literal) = code.literal {
                     // A constant made by folding a cast, such as `(long) 1e19`.
-                    out.push(Part::Lit(match literal {
-                        Literal::Int(v) => v.to_string(),
-                        Literal::Long(v) => v.to_string(),
-                        Literal::Double(v) => java_runtime::double_to_string(v),
-                    }));
-                } else if e.ty == Type::Double {
-                    let double = self.runtime("Double");
-                    out.push(Part::Arg(Code::atom(format!("{double}({})", code.text))));
+                    out.push(Part::Lit(literal_text(literal)));
+                } else if matches!(e.ty, Type::Double | Type::Float | Type::Char) {
+                    out.push(Part::Arg(Code::atom(self.shown(e.ty, code.text))));
                 } else {
                     out.push(Part::Arg(code));
                 }
@@ -91,8 +87,9 @@ impl<'a> Gen<'a> {
         for part in parts {
             match part {
                 Part::Lit(s) => {
-                    let quoted = rust_string(&s);
-                    template.push_str(&quoted[1..quoted.len() - 1].replace('{', "{{").replace('}', "}}"));
+                    // Braces are doubled before quoting, which writes some characters as `\u{..}`.
+                    let quoted = rust_string(&s.replace('{', "{{").replace('}', "}}"));
+                    template.push_str(&quoted[1..quoted.len() - 1]);
                 }
                 Part::Arg(code) if is_identifier(&code.text) => {
                     template.push_str(&format!("{{{}}}", code.text));

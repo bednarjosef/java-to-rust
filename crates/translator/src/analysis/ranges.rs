@@ -58,6 +58,10 @@ impl Interval {
     fn full(ty: Type) -> Interval {
         match ty {
             Type::Int => Interval { lo: i32::MIN as i128, hi: i32::MAX as i128 },
+            Type::Byte | Type::Short | Type::Char => {
+                let (lo, hi) = crate::types::integral_bounds(ty);
+                Interval { lo: lo as i128, hi: hi as i128 }
+            }
             _ => Interval { lo: i64::MIN as i128, hi: i64::MAX as i128 },
         }
     }
@@ -312,6 +316,15 @@ impl<'a> Analysis<'a> {
     fn overflowed(&mut self, id: ExprId) {
         if self.record {
             self.overflow.insert(id);
+        }
+    }
+
+    /// Records whether narrowing `v` to the small type `to` keeps every value, as for the
+    /// overflow of an operation.
+    fn narrowed(&mut self, v: Interval, to: Type, id: ExprId) {
+        self.visit(id);
+        if !v.within(Interval::full(to)) {
+            self.overflowed(id);
         }
     }
 
@@ -619,7 +632,12 @@ impl<'a> Analysis<'a> {
         match &e.kind {
             ExprKind::Int(v) => Interval::point(*v as i128),
             ExprKind::Long(v) => Interval::point(*v as i128),
-            ExprKind::Double(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Null => other,
+            ExprKind::Char(c) => Interval::point(*c as i128),
+            ExprKind::Double(_)
+            | ExprKind::Float(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Str(_)
+            | ExprKind::Null => other,
             ExprKind::Var(name) => env.get(name).map_or(Interval::full(ty), |v| v.range),
             ExprKind::Unary(op, x) => {
                 let v = self.expr(x, env);
@@ -671,6 +689,10 @@ impl<'a> Analysis<'a> {
                         } else {
                             other
                         };
+                        // `b += 1` on a byte narrows the int result back to a byte.
+                        if var.ty.is_small() && result.is_integral() {
+                            self.narrowed(r, var.ty, e.id);
+                        }
                         convert(r, result, var.ty)
                     }
                 };
@@ -687,6 +709,9 @@ impl<'a> Analysis<'a> {
             }
             ExprKind::Cast(to, x) => {
                 let v = self.expr(x, env);
+                if to.is_small() && x.ty.is_integral() {
+                    self.narrowed(v, *to, e.id);
+                }
                 convert(v, x.ty, *to)
             }
             ExprKind::Conditional(c, a, b) => {

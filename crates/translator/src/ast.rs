@@ -8,6 +8,11 @@ pub enum Type {
     Int,
     Long,
     Double,
+    Byte,
+    Short,
+    /// An unsigned 16-bit UTF-16 code unit.
+    Char,
+    Float,
     Boolean,
     String,
     Void,
@@ -21,11 +26,20 @@ pub enum Type {
 
 impl Type {
     pub fn is_numeric(self) -> bool {
-        matches!(self, Type::Int | Type::Long | Type::Double)
+        self.is_integral() || self.is_floating()
     }
 
     pub fn is_integral(self) -> bool {
-        matches!(self, Type::Int | Type::Long)
+        matches!(self, Type::Int | Type::Long | Type::Byte | Type::Short | Type::Char)
+    }
+
+    pub fn is_floating(self) -> bool {
+        matches!(self, Type::Double | Type::Float)
+    }
+
+    /// `byte`, `short` and `char`, which arithmetic promotes to `int`.
+    pub fn is_small(self) -> bool {
+        matches!(self, Type::Byte | Type::Short | Type::Char)
     }
 
     /// `element[]`. Types are small and copied everywhere, so compound ones are interned for the
@@ -55,7 +69,13 @@ impl Type {
 
     /// The wider of two integer types.
     pub fn max_integral(self, other: Type) -> Type {
-        if self == Type::Long || other == Type::Long { Type::Long } else { Type::Int }
+        if self == other {
+            self
+        } else if self == Type::Long || other == Type::Long {
+            Type::Long
+        } else {
+            Type::Int
+        }
     }
 }
 
@@ -78,6 +98,10 @@ impl fmt::Display for Type {
             Type::Int => f.write_str("int"),
             Type::Long => f.write_str("long"),
             Type::Double => f.write_str("double"),
+            Type::Byte => f.write_str("byte"),
+            Type::Short => f.write_str("short"),
+            Type::Char => f.write_str("char"),
+            Type::Float => f.write_str("float"),
             Type::Boolean => f.write_str("boolean"),
             Type::String => f.write_str("String"),
             Type::Void => f.write_str("void"),
@@ -144,6 +168,9 @@ pub enum ExprKind {
     Int(i32),
     Long(i64),
     Double(f64),
+    /// A `char` literal, as its UTF-16 code unit.
+    Char(u16),
+    Float(f32),
     Bool(bool),
     Str(String),
     /// The `null` literal; its type is `Type::Null` until it meets a reference type.
@@ -197,6 +224,15 @@ pub enum Builtin {
     StringLength,
     /// `s.equals(t)`; the receiver is the first argument.
     StringEquals,
+    /// `s.charAt(i)`; the receiver is the first argument.
+    StringCharAt,
+    /// `Character.isDigit(char)` and the other `Character` methods on a `char`.
+    CharIsDigit,
+    CharIsLetter,
+    CharIsUpperCase,
+    CharIsLowerCase,
+    CharToUpperCase,
+    CharToLowerCase,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,8 +354,10 @@ pub fn counting_loop<'e>(
 /// Whether `e` evaluates to the same value on every iteration of a loop with this body.
 pub fn stable(e: &Expr, loop_var: &str, body: &Stmt) -> bool {
     match &e.kind {
-        ExprKind::Int(_) | ExprKind::Long(_) => true,
+        ExprKind::Int(_) | ExprKind::Long(_) | ExprKind::Char(_) => true,
         ExprKind::Var(v) => v != loop_var && !assigns_stmt(body, v),
+        // Strings are immutable, so the length of a variable that is not assigned is stable.
+        ExprKind::Builtin(Builtin::StringLength, args) => stable(&args[0], loop_var, body),
         ExprKind::Unary(_, x) | ExprKind::Cast(_, x) => stable(x, loop_var, body),
         ExprKind::Binary(_, l, r) => stable(l, loop_var, body) && stable(r, loop_var, body),
         _ => false,

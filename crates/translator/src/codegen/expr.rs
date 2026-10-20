@@ -39,6 +39,9 @@ impl<'a> Gen<'a> {
         if ty == Type::String {
             return self.append(&name, target, value);
         }
+        if let Some(text) = self.primitive_assignment(op, &name, ty, value, id) {
+            return text;
+        }
         let compound = |op: BinOp| match op {
             BinOp::Add => "+=",
             BinOp::Sub => "-=",
@@ -120,8 +123,8 @@ impl<'a> Gen<'a> {
     /// `x += 1` or `x -= 1` as a Rust statement.
     pub(super) fn step(&mut self, target: &str, ty: Type, increment: bool, id: ExprId) -> String {
         let name = self.local(target);
-        if ty == Type::Double || self.no_overflow(id) {
-            let one = if ty == Type::Double { "1.0" } else { "1" };
+        if ty.is_floating() || self.no_overflow(id) {
+            let one = if ty.is_floating() { "1.0" } else { "1" };
             format!("{name} {} {one}", if increment { "+=" } else { "-=" })
         } else if increment {
             format!("{name} = {name}.wrapping_add(1)")
@@ -145,11 +148,15 @@ impl<'a> Gen<'a> {
         if from == to || !from.is_numeric() || !to.is_numeric() {
             return code;
         }
+        if involves_primitive(from, to) {
+            return self.convert_primitive(code, from, to);
+        }
         if let Some(literal) = code.literal {
             let (i, d) = match literal {
                 Literal::Int(v) => (v as i64, v as f64),
                 Literal::Long(v) => (v, v as f64),
                 Literal::Double(v) => (v as i64, v),
+                _ => unreachable!("convert_primitive converts {from} literals"),
             };
             return Code::literal(match to {
                 Type::Int => match literal {
@@ -168,6 +175,8 @@ impl<'a> Gen<'a> {
             ExprKind::Int(v) => Code::literal(Literal::Int(*v)),
             ExprKind::Long(v) => Code::literal(Literal::Long(*v)),
             ExprKind::Double(v) => Code::literal(Literal::Double(*v)),
+            ExprKind::Float(v) => Code::literal(Literal::Float(*v)),
+            ExprKind::Char(c) => Code::literal(Literal::Char(*c)),
             ExprKind::Bool(b) => Code::atom(b.to_string()),
             ExprKind::Str(s) if s.is_empty() => Code::atom("String::new()"),
             ExprKind::Str(s) => Code::atom(format!("String::from({})", rust_string(s))),
@@ -183,7 +192,9 @@ impl<'a> Gen<'a> {
                 let code = self.value(operand, e.ty);
                 match (op, e.ty) {
                     (UnOp::Plus, _) => code,
-                    (UnOp::Neg, Type::Double) => Code::new(format!("-{}", code.at(UNARY)), UNARY),
+                    (UnOp::Neg, Type::Double | Type::Float) => {
+                        Code::new(format!("-{}", code.at(UNARY)), UNARY)
+                    }
                     (UnOp::Neg, _) if self.no_overflow(e.id) => {
                         Code::new(format!("-{}", code.at(UNARY)), UNARY)
                     }
@@ -216,6 +227,7 @@ impl<'a> Gen<'a> {
                     Code::new(format!("{{ let {old} = {name}; {text}; {old} }}"), LOWEST)
                 }
             }
+            ExprKind::Cast(ty, value) if ty.is_small() => self.small_cast(*ty, value, e.id),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
                 let cond = self.condition(cond);
@@ -261,7 +273,7 @@ impl<'a> Gen<'a> {
         // Comparisons promote their operands; other operators work in the result type, except
         // that a shift distance keeps its own type.
         let operand_type = if op.is_comparison() && l.ty.is_numeric() {
-            crate::types::promote(l.ty, r.ty)
+            comparison_type(&l, &r)
         } else if op.is_comparison() {
             l.ty
         } else {
@@ -361,16 +373,17 @@ impl<'a> Gen<'a> {
             Builtin::MathAbs => {
                 let x = self.value(&args[0], ty);
                 // Math.abs(Integer.MIN_VALUE) is Integer.MIN_VALUE.
-                let method = if ty == Type::Double || self.no_overflow(id) { "abs" } else { "wrapping_abs" };
+                let method = if ty.is_floating() || self.no_overflow(id) { "abs" } else { "wrapping_abs" };
                 Code::atom(format!("{}.{method}()", self.recv(&x, ty)))
             }
             Builtin::MathMax | Builtin::MathMin => {
                 let a = self.value(&args[0], ty);
                 let b = self.value(&args[1], ty);
                 let name = if builtin == Builtin::MathMax { "max" } else { "min" };
-                if ty == Type::Double {
+                if ty.is_floating() {
                     // f64::max ignores NaN; Java's Math.max returns it.
-                    Code::atom(format!("{}({}, {})", self.runtime(name), a.text, b.text))
+                    let name = if ty == Type::Float { format!("{name}_f32") } else { name.to_string() };
+                    Code::atom(format!("{}({}, {})", self.runtime(&name), a.text, b.text))
                 } else {
                     Code::atom(format!("{}.{name}({})", self.recv(&a, ty), b.text))
                 }
@@ -398,6 +411,13 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({})", self.runtime("string_length"), s))
             }
             Builtin::StringEquals => self.equals_optional(args),
+            Builtin::StringCharAt
+            | Builtin::CharIsDigit
+            | Builtin::CharIsLetter
+            | Builtin::CharIsUpperCase
+            | Builtin::CharIsLowerCase
+            | Builtin::CharToUpperCase
+            | Builtin::CharToLowerCase => self.char_builtin(builtin, args, id),
         }
     }
 }

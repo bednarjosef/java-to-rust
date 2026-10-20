@@ -249,8 +249,8 @@ impl<'a> Gen<'a> {
             ExprKind::Unary(UnOp::Not, inner) => return self.condition(inner),
             ExprKind::Binary(op, l, r)
                 if op.is_comparison()
-                    && l.ty != Type::Double
-                    && r.ty != Type::Double
+                    && !l.ty.is_floating()
+                    && !r.ty.is_floating()
                     && !is_null_test(*op, l, r) =>
             {
                 let flipped = match op {

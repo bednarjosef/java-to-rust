@@ -12,12 +12,14 @@ mod code;
 mod expr;
 mod names;
 mod null;
+mod primitives;
 mod stmt;
 mod strings;
 
 use code::*;
 use names::*;
 use null::is_null_test;
+use primitives::*;
 
 pub fn generate(class: &Class, facts: &Facts) -> String {
     let mut g = Gen {
