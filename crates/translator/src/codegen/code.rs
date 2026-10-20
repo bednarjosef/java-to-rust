@@ -69,9 +69,32 @@ impl Code {
         }
     }
 
-    /// The text, in parentheses if it binds looser than `prec`.
+    /// The text, in parentheses if it binds looser than `prec`. From `AS` up, `prec` is that of
+    /// an operand of a cast, a method call or a prefix operator, where a block is parenthesised
+    /// too (see `left_at`).
     pub(super) fn at(&self, prec: u8) -> String {
-        if self.prec < prec { format!("({})", self.text) } else { self.text.clone() }
+        if prec >= AS {
+            self.left_at(prec)
+        } else if self.prec < prec {
+            format!("({})", self.text)
+        } else {
+            self.text.clone()
+        }
+    }
+
+    /// The text as the left operand of an operator, a cast or a method call: in parentheses if it
+    /// binds looser than `prec` or starts with a block. A block such as `{ x += 1; x }` that
+    /// starts a statement ends it, so `{ x += 1; x } as f64` does not parse as one statement.
+    pub(super) fn left_at(&self, prec: u8) -> String {
+        if self.prec < prec || self.starts_with_block() {
+            format!("({})", self.text)
+        } else {
+            self.text.clone()
+        }
+    }
+
+    fn starts_with_block(&self) -> bool {
+        self.text.starts_with('{')
     }
 
     /// The text with a type suffix on a numeric literal, so that its type does not depend on
@@ -98,7 +121,7 @@ impl Code {
     /// The text as the receiver of a method call.
     pub(super) fn receiver(&self) -> String {
         let text = self.typed();
-        if self.prec < ATOM { format!("({text})") } else { text }
+        if self.prec < ATOM || self.starts_with_block() { format!("({text})") } else { text }
     }
 }
 
@@ -126,7 +149,7 @@ pub(super) fn infix(op: &str, prec: u8, left: &Code, right: &Code) -> Code {
     // `a as i64 < b` would parse `<` as the start of generic arguments.
     let left_cast = matches!(op, "<" | "<<") && ends_with_cast(&left.text) && left.prec >= prec;
     let left_prec = if prec == CMP { CMP + 1 } else { prec };
-    let l = if left_cast { format!("({})", left.text) } else { left.at(left_prec) };
+    let l = if left_cast { format!("({})", left.text) } else { left.left_at(left_prec) };
     let r = right.at(prec + 1);
     let mut code = Code::new(format!("{l} {op} {r}"), prec);
     if left.untyped && right.untyped && left.literal.is_some() {

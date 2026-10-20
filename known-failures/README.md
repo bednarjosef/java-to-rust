@@ -10,11 +10,6 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
   borrow `*self` as mutable because it is also borrowed as immutable" (the generated
   `java::set(&self.memory, slot, self.pop())` borrows `self` twice). Storing the value in a local
   first avoids it.
-- `BlockExpressionBeforeCast.java`: `return (sChar++);` in a `double` method, where `sChar` is a
-  `char` static. Java prints `65.0`; the translated block is taken as a statement, so the `as f64`
-  after it does not parse: rustc fails with "expected expression, found `as`". The fuzzer's
-  seeds hit the same parse error after a block with `>=`, `==`, `!=`, `/`, `%`, `^`, `>` and `+`
-  (not reduced separately).
 - `CompoundThroughNullableField.java`: `h.box.v += 10` where `h.box` is a field that may be null,
   in a class whose fields are assigned after construction. Java prints `true`; rustc fails with
   E0716 "temporary value dropped while borrowed".
