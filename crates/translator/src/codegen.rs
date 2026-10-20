@@ -540,6 +540,10 @@ impl<'a> Gen<'a> {
     }
 
     fn local_decl(&mut self, ty: Type, name: &str, init: Option<&'a Expr>, mutable: bool) {
+        if let Some(written) = self.plain(name) {
+            self.plain_local(ty, name, init, written);
+            return;
+        }
         let mutable = if mutable { "mut " } else { "" };
         let rust = self.local(name);
         match init {
@@ -602,7 +606,7 @@ impl<'a> Gen<'a> {
                 self.line(&format!("{text};"));
             }
             ExprKind::Assign { op: None, target: Place::Index(array, index), value } => {
-                let text = self.index_set(array, index, e.ty, value, false);
+                let text = self.index_set(e.id, array, index, e.ty, value, false);
                 self.line(&format!("{text};"));
             }
             ExprKind::Assign { op: Some(op), target: Place::Index(array, index), value } => {
@@ -714,10 +718,10 @@ impl<'a> Gen<'a> {
         if ty == Type::Double || self.no_overflow(id) {
             let one = if ty == Type::Double { "1.0" } else { "1" };
             format!("{name} {} {one}", if increment { "+=" } else { "-=" })
-        } else if increment {
-            format!("{name} = {name}.wrapping_add(1)")
         } else {
-            format!("{name} = {name}.wrapping_sub(1)")
+            let recv = self.recv(&Code::atom(name.clone()), ty);
+            let method = if increment { "wrapping_add" } else { "wrapping_sub" };
+            format!("{name} = {recv}.{method}(1)")
         }
     }
 
@@ -806,7 +810,7 @@ impl<'a> Gen<'a> {
                 }
             }
             ExprKind::Assign { op: None, target: Place::Index(array, index), value } => {
-                Code::atom(self.index_set(array, index, e.ty, value, true))
+                Code::atom(self.index_set(e.id, array, index, e.ty, value, true))
             }
             ExprKind::Assign { op: Some(op), target: Place::Index(array, index), value } => {
                 Code::atom(self.index_update(*op, array, index, e.ty, value, e.id))
@@ -814,7 +818,7 @@ impl<'a> Gen<'a> {
             ExprKind::IncDec { target: Place::Index(array, index), increment, prefix } => {
                 Code::atom(self.index_step(array, index, e.ty, *increment, *prefix, e.id))
             }
-            ExprKind::Index(array, index) => self.index(array, index),
+            ExprKind::Index(array, index) => self.index(e.id, array, index),
             ExprKind::Length(array) => self.length(array),
             ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
