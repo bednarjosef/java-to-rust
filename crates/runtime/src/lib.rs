@@ -11,6 +11,7 @@ pub use slice::*;
 use std::fmt;
 
 mod character;
+pub mod fdlibm;
 mod float;
 mod math;
 mod natives;
