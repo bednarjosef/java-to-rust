@@ -126,10 +126,11 @@ impl<'a> Gen<'a> {
         if ty.is_floating() || self.no_overflow(id) {
             let one = if ty.is_floating() { "1.0" } else { "1" };
             format!("{name} {} {one}", if increment { "+=" } else { "-=" })
-        } else if increment {
-            format!("{name} = {name}.wrapping_add(1)")
         } else {
-            format!("{name} = {name}.wrapping_sub(1)")
+            // A method call needs the variable's type written where it is declared.
+            let receiver = self.recv(&Code::atom(name.clone()), ty);
+            let method = if increment { "wrapping_add" } else { "wrapping_sub" };
+            format!("{name} = {receiver}.{method}(1)")
         }
     }
 

@@ -90,7 +90,8 @@ fn of_type(e: &Expr, ty: Type) -> bool {
 }
 
 /// The type in which two operands are compared: their own type when they share it or one is a
-/// constant that the other's type can hold (`c == 'a'`, `b < 10`), else the promoted type.
+/// constant that the other's type can hold (`c == 'a'`, `b < 10`, `f == 0.5`), else the
+/// promoted type.
 pub(super) fn comparison_type(l: &Operand, r: &Operand) -> Type {
     let constant_fits = |o: &Operand, ty: Type| {
         let (min, max) = integral_bounds(ty);
@@ -101,11 +102,16 @@ pub(super) fn comparison_type(l: &Operand, r: &Operand) -> Type {
                 _ => false,
             })
     };
+    // A float widens exactly, so comparing it with a double that a float holds exactly is the
+    // same as comparing it with that float.
+    let exact_float = |o: &Operand, ty: Type| {
+        ty == Type::Float && matches!(o.code.literal, Some(Literal::Double(v)) if v as f32 as f64 == v)
+    };
     if l.ty == r.ty {
         l.ty
-    } else if constant_fits(r, l.ty) {
+    } else if constant_fits(r, l.ty) || exact_float(r, l.ty) {
         l.ty
-    } else if constant_fits(l, r.ty) {
+    } else if constant_fits(l, r.ty) || exact_float(l, r.ty) {
         r.ty
     } else {
         promote(l.ty, r.ty)
@@ -134,30 +140,31 @@ impl<'a> Gen<'a> {
     }
 
     /// `(ty) value` where `ty` is a small type. Addition, subtraction and multiplication of
-    /// values of that type are done in it, wrapping, or plainly when the result fits; bitwise
-    /// operations on them need no cast at all.
+    /// values of that type are done in it, wrapping, or plainly when the result fits, and so is
+    /// a division that fits and cannot throw; bitwise operations on them need no cast at all.
     pub(super) fn small_cast(&mut self, ty: Type, value: &'a Expr, id: ExprId) -> Code {
-        if let ExprKind::Binary(op, l, r) = &value.kind
-            && value.ty == Type::Int
-            && of_type(l, ty)
-            && of_type(r, ty)
-        {
-            let (a, b) = (self.value(l, ty), self.value(r, ty));
-            match op {
-                BinOp::Add | BinOp::Sub | BinOp::Mul if self.no_overflow(id) => {
-                    let prec = if *op == BinOp::Mul { MUL } else { ADD };
-                    return infix(op.java(), prec, &a, &b);
-                }
-                BinOp::Add | BinOp::Sub | BinOp::Mul => {
-                    return Code::atom(format!("{}.{}({})", self.recv(&a, ty), wrapping(*op), b.text));
-                }
-                BinOp::BitAnd => return infix("&", BIT_AND, &a, &b),
-                BinOp::BitOr => return infix("|", BIT_OR, &a, &b),
-                BinOp::BitXor => return infix("^", BIT_XOR, &a, &b),
-                _ => {}
-            }
+        let ExprKind::Binary(op, l, r) = &value.kind else { return self.value(value, ty) };
+        let fits = self.no_overflow(id);
+        let applies = match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => true,
+            // A quotient that fits cannot be `MIN / -1`.
+            BinOp::Div | BinOp::Rem => fits && self.safe_division(value.id, r),
+            _ => false,
+        };
+        if !applies || value.ty != Type::Int || !of_type(l, ty) || !of_type(r, ty) {
+            return self.value(value, ty);
         }
-        self.value(value, ty)
+        let (a, b) = (self.value(l, ty), self.value(r, ty));
+        match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul if !fits => {
+                Code::atom(format!("{}.{}({})", self.recv(&a, ty), wrapping(*op), b.text))
+            }
+            BinOp::Add | BinOp::Sub => infix(op.java(), ADD, &a, &b),
+            BinOp::Mul | BinOp::Div | BinOp::Rem => infix(op.java(), MUL, &a, &b),
+            BinOp::BitAnd => infix("&", BIT_AND, &a, &b),
+            BinOp::BitOr => infix("|", BIT_OR, &a, &b),
+            _ => infix("^", BIT_XOR, &a, &b),
+        }
     }
 
     /// `target op= value` on a `byte`, `short`, `char` or `float` variable, which Java narrows
