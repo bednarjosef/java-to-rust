@@ -18,6 +18,8 @@ their own branches at the same time; the lead merges the branches.
 - `src/analysis.rs` and `src/analysis/` prove facts (expression ids in a `Facts` table) that let
   `src/codegen.rs` write plain Rust where it means the same as Java. Without a fact, codegen
   writes the faithful translation. A weaker analysis only makes output plainer, never wrong.
+  `codegen.rs` holds the `Gen` state and methods; `codegen/` splits the rest: `code.rs` (Rust
+  text with precedence, type names), `names.rs`, `stmt.rs`, `expr.rs`, `strings.rs`.
 - `crates/runtime` (`use java_runtime as java;` in generated code) holds what Rust lacks.
 - Tests: `crates/translator/tests/corpus.rs` runs every program in `corpus/` on Java and as
   translated Rust and requires identical stdout and exit code; Java is the expected output, so
@@ -42,7 +44,7 @@ their own branches at the same time; the lead merges the branches.
 ## Working with the others
 - Put new code in new files where you can: `src/lower/<feature>.rs`, `src/codegen/<feature>.rs`
   (a second `impl Gen` block works), `src/analysis/<feature>.rs`, `crates/runtime/src/<feature>.rs`.
-  Edit shared files (`ast.rs`, `lower.rs`, `codegen.rs`, `analysis/ranges.rs`) only by adding
+  Edit shared files (`ast.rs`, `lower.rs`, `codegen.rs` and `codegen/*.rs`, `analysis/ranges.rs`) only by adding
   variants, match arms and small calls into your files. Never reformat or reorganize code you do
   not need to change. Keep each source file under 1000 lines.
 - Never edit `tools/`, `scripts/`, `.github/`, or another feature's corpus files.
