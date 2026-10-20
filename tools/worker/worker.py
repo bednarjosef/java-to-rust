@@ -10,6 +10,7 @@ and `scripts/check.sh` passes (hook.py), and a compaction threshold under 100K t
     tools/worker/worker.py start NAME BRIEF.md [--effort high] [--model MODEL] [--base REF]
     tools/worker/worker.py status            # every worker: state, commits, checklist, tokens
     tools/worker/worker.py usage [NAME]      # token usage per worker, in detail
+    tools/worker/worker.py cost TRANSCRIPT...  # tokens and API-equivalent cost of any transcript
     tools/worker/worker.py report NAME       # the worker's last message
     tools/worker/worker.py stop NAME
 """
@@ -209,10 +210,40 @@ def transcript(session_id):
     return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
 
 
+# API prices in USD per million tokens: input, output, cache read, and the prompt size above which
+# a request costs `long` times as much. Cache writes cost 1.25x input for the 5-minute cache and
+# 2x for the 1-hour one.
+PRICES = {
+    "claude-haiku-5-5": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "long_above": 100_000, "long": 5},
+    "claude-sonnet-5-5": {"input": 2.00, "output": 10.00, "cache_read": 0.20},
+    "claude-opus-5-5": {"input": 4.00, "output": 20.00, "cache_read": 0.20},
+    "claude-fable-5-1": {"input": 10.00, "output": 50.00, "cache_read": 0.25},
+}
+
+
+def cost(model, u):
+    """What one request would cost on the API, in USD."""
+    p = PRICES.get(model)
+    if not p:
+        return 0.0
+    writes = u.get("cache_creation") or {}
+    write_1h = writes.get("ephemeral_1h_input_tokens", 0)
+    write_5m = writes.get("ephemeral_5m_input_tokens", u.get("cache_creation_input_tokens", 0) - write_1h)
+    prompt = u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+    scale = p.get("long", 1) if prompt > p.get("long_above", float("inf")) else 1
+    return scale * (u.get("input_tokens", 0) * p["input"] + u.get("output_tokens", 0) * p["output"]
+                    + u.get("cache_read_input_tokens", 0) * p["cache_read"]
+                    + write_5m * 1.25 * p["input"] + write_1h * 2 * p["input"]) / 1e6
+
+
 def usage(session_id):
-    """Token usage from the session transcript. Each API request is one assistant message (its
-    content blocks are logged as separate lines with the same id, so they are counted once)."""
-    path = transcript(session_id) if session_id else None
+    return usage_of(transcript(session_id) if session_id else None)
+
+
+def usage_of(path):
+    """Token usage and API-equivalent cost from a transcript. Each API request is one assistant
+    message (its content blocks are logged as separate lines with the same id, so they are
+    counted once)."""
     requests = {}
     compactions = 0
     last_text = ""
@@ -226,11 +257,13 @@ def usage(session_id):
                 compactions += 1
             msg = e.get("message") or {}
             if e.get("type") == "assistant" and msg.get("usage"):
-                requests[msg.get("id") or len(requests)] = msg["usage"]
+                requests[msg.get("id") or len(requests)] = (msg.get("model"), msg["usage"])
                 for block in msg.get("content") or []:
                     if block.get("type") == "text" and block.get("text", "").strip():
                         last_text = block["text"]
-    u = list(requests.values())
+    usd = sum(cost(model, u) for model, u in requests.values())
+    models = sorted({model for model, _ in requests.values() if model and model in PRICES})
+    u = [u for _, u in requests.values()]
     prompt_sizes = [r.get("input_tokens", 0) + r.get("cache_read_input_tokens", 0)
                     + r.get("cache_creation_input_tokens", 0) for r in u]
     return {
@@ -245,6 +278,8 @@ def usage(session_id):
         "prompt_mean": sum(prompt_sizes) // len(prompt_sizes) if prompt_sizes else 0,
         "over_100k": sum(p > 100_000 for p in prompt_sizes),
         "last_text": last_text,
+        "usd": usd,
+        "models": models,
     }
 
 
@@ -269,7 +304,7 @@ def cmd_status(args):
     if not rows:
         print("no workers")
         return
-    totals = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
+    totals = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "usd": 0}
     for s in rows:
         sess = live.get(s["id"], {})
         state = sess.get("state") or "gone"
@@ -281,9 +316,9 @@ def cmd_status(args):
             totals[key] += u[key]
         print(f"{s['name']:<10} {state:<16} commits {commits:<3} checklist {checklist(s['worktree']):<14} "
               f"requests {u['requests']:<4} compactions {u['compactions']:<2} prompt now {k(u['prompt_last'])} "
-              f"peak {k(u['prompt_peak'])} (>100K: {u['over_100k']}) output {k(u['output'])}")
+              f"peak {k(u['prompt_peak'])} (>100K: {u['over_100k']}) output {k(u['output'])} ${u['usd']:.2f}")
     print(f"all workers: input {k(totals['input'])}, cache read {k(totals['cache_read'])}, "
-          f"cache write {k(totals['cache_write'])}, output {k(totals['output'])}")
+          f"cache write {k(totals['cache_write'])}, output {k(totals['output'])}, ${totals['usd']:.2f} at API prices")
 
 
 def cmd_usage(args):
@@ -291,13 +326,24 @@ def cmd_usage(args):
     for s in specs():
         if args.name and s["name"] != args.name:
             continue
-        u = usage(live.get(s["id"], {}).get("sessionId"))
-        print(f"{s['name']} ({s['model']}, effort {s['effort']}):")
-        print(f"  requests {u['requests']}, compactions {u['compactions']}")
-        print(f"  prompt per request: mean {k(u['prompt_mean'])}, peak {k(u['prompt_peak'])}, "
-              f"now {k(u['prompt_last'])}, over 100K {u['over_100k']} times")
-        print(f"  tokens: input {k(u['input'])}, cache read {k(u['cache_read'])}, "
-              f"cache write {k(u['cache_write'])}, output {k(u['output'])} (thinking included)")
+        print_usage(f"{s['name']} ({s['model']}, effort {s['effort']})",
+                    usage(live.get(s["id"], {}).get("sessionId")))
+
+
+def print_usage(title, u):
+    print(f"{title}:")
+    print(f"  requests {u['requests']}, compactions {u['compactions']}")
+    print(f"  prompt per request: mean {k(u['prompt_mean'])}, peak {k(u['prompt_peak'])}, "
+          f"now {k(u['prompt_last'])}, over 100K {u['over_100k']} times")
+    print(f"  tokens: input {k(u['input'])}, cache read {k(u['cache_read'])}, "
+          f"cache write {k(u['cache_write'])}, output {k(u['output'])} (thinking included)")
+    print(f"  API-equivalent cost: ${u['usd']:.2f} ({', '.join(u['models']) or 'unpriced model'})")
+
+
+def cmd_cost(args):
+    """Usage and cost of any Claude Code transcript: a subagent's, a session's."""
+    for path in args.paths:
+        print_usage(path, usage_of(Path(path)))
 
 
 def cmd_report(args):
@@ -324,12 +370,14 @@ def main():
     sub.add_parser("status")
     a = sub.add_parser("usage")
     a.add_argument("name", nargs="?")
+    a = sub.add_parser("cost")
+    a.add_argument("paths", nargs="+")
     a = sub.add_parser("report")
     a.add_argument("name")
     a = sub.add_parser("stop")
     a.add_argument("name")
     args = p.parse_args()
-    {"start": cmd_start, "status": cmd_status, "usage": cmd_usage, "report": cmd_report,
+    {"start": cmd_start, "status": cmd_status, "usage": cmd_usage, "cost": cmd_cost, "report": cmd_report,
      "stop": cmd_stop}[args.cmd](args)
 
 
