@@ -1,0 +1,12 @@
+[package]
+name = "float-check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Differential check of the runtime's float and double printing against Java"
+
+[dependencies]
+java-runtime = { path = "../../../crates/runtime" }
+
+# Not part of the translator's workspace: it has its own lock file and target directory.
+[workspace]
