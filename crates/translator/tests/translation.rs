@@ -121,6 +121,18 @@ fn a_primitive_local_returned_at_the_end_is_the_value() {
 }
 
 #[test]
+fn a_switch_with_one_label_is_if_let_and_braced_cases_are_plain() {
+    let rust = translate(
+        "class A { static void f(int n) {
+            switch (n) { case 3: System.out.println(\"three\"); break; }
+            switch (n) { case 4: { System.out.println(\"four\"); break; } default: break; }
+        } }",
+    );
+    assert_contains(&rust, &["if let 3 = n {", "if let 4 = n {"]);
+    assert_lacks(&rust, &["loop {", "match n", "break"]);
+}
+
+#[test]
 fn trial_division_is_plain() {
     let rust = translate(
         "class A {
