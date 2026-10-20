@@ -242,10 +242,17 @@ impl<'a> Analysis<'a> {
         while let Some(m) = (0..n).find(|&m| dirty[m]) {
             dirty[m] = false;
             let returned = self.returns[m];
-            let params: Vec<(usize, Vec<Interval>)> =
-                callees(&self.class.methods[m]).into_iter().map(|c| (c, self.params[c].clone())).collect();
+            let params: Vec<(usize, Vec<Interval>, bool)> = callees(&self.class.methods[m])
+                .into_iter()
+                .map(|c| (c, self.params[c].clone(), self.reached[c]))
+                .collect();
             self.method(m);
-            for (c, before) in params {
+            for (c, before, was_reached) in params {
+                // A method first called here is analyzed even when it has no integer parameters
+                // whose ranges could grow.
+                if !was_reached && self.reached[c] {
+                    dirty[c] = true;
+                }
                 if self.params[c] != before {
                     growth[c] += 1;
                     if growth[c] > 4 {
@@ -1027,6 +1034,7 @@ fn literals(method: &Method) -> Vec<i128> {
                         let v = match x.kind {
                             ExprKind::Int(v) => v as i128,
                             ExprKind::Long(v) => v as i128,
+                            ExprKind::Char(c) => c as i128,
                             _ => return,
                         };
                         out.extend([v - 1, v, v + 1, -v - 1, -v, -v + 1]);
