@@ -48,6 +48,8 @@ pub struct Facts {
     pub safe_division: HashSet<ExprId>,
     /// `String.length()` and `String.charAt` calls on strings that are always ASCII.
     pub ascii_length: HashSet<ExprId>,
+    /// `(char)` casts whose integer value the range analysis keeps within ASCII.
+    pub ascii_chars: HashSet<ExprId>,
     /// `s.charAt(i)` calls whose index is always within the string.
     pub index_in_bounds: HashSet<ExprId>,
     /// String parameters, as (method, parameter) indexes, that are never assigned.
@@ -380,6 +382,8 @@ struct NonAscii {
     vars: HashSet<(usize, String)>,
     params: HashSet<(usize, usize)>,
     returns: HashSet<usize>,
+    /// The `(char)` casts that the range analysis proves ASCII.
+    chars: HashSet<ExprId>,
 }
 
 impl NonAscii {
@@ -391,8 +395,12 @@ impl NonAscii {
     /// Whether `e`, evaluated in method `m`, is ASCII text (or not a string at all).
     fn ascii(&self, class: &Class, m: usize, e: &Expr) -> bool {
         if e.ty == Type::Char {
-            // A char is only known to be ASCII when it is a constant.
-            return matches!(e.kind, ExprKind::Char(c) if c < 0x80);
+            // A char is ASCII when it is a constant, or a cast the range analysis keeps small.
+            return match e.kind {
+                ExprKind::Char(c) => c < 0x80,
+                ExprKind::Cast(..) => self.chars.contains(&e.id),
+                _ => false,
+            };
         }
         if e.ty != Type::String {
             return true;
@@ -430,7 +438,7 @@ impl NonAscii {
 }
 
 fn ascii_strings(class: &Class, facts: &mut Facts) {
-    let mut non_ascii = NonAscii::default();
+    let mut non_ascii = NonAscii { chars: facts.ascii_chars.clone(), ..NonAscii::default() };
     // Field initializers are not walked below and have no method's variables to look up, so
     // every parameter that a call in one reaches may be non-ASCII.
     let initializers = class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics));
