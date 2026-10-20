@@ -17,6 +17,7 @@ use std::cell::Cell;
 
 mod arrays;
 mod boxing;
+mod charsets;
 mod constant_bodies;
 mod initializers;
 mod java_arrays;
@@ -228,7 +229,10 @@ impl<'t> Lowering<'t> {
             "boolean" => Ok(Type::Boolean),
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
-            "java.lang.StringBuilder" => Ok(Type::StringBuilder),
+            "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
+            "java.nio.charset.Charset" => {
+                error(node.pos(), "a `Charset` outside `getBytes` or `new String` not supported yet")
+            }
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
@@ -474,7 +478,7 @@ impl<'t> Lowering<'t> {
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
-        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+        let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
             return Ok(ExprKind::ThisCall { args, resolved: self.method_index(&symbol) });
@@ -523,8 +527,19 @@ impl<'t> Lowering<'t> {
                 args.insert(0, self.expr(receiver)?);
                 Builtin::StringCharAt
             }
+            ("java.lang.String", "getBytes") if args.len() <= 1 => {
+                let receiver = receiver.expect("an instance method has a receiver");
+                args.insert(0, self.expr(receiver)?);
+                Builtin::String(StringOp::GetBytes)
+            }
             ("java.lang.String", _) => return self.string_call(node, &symbol, receiver, args),
-            ("java.lang.StringBuilder" | "java.lang.AbstractStringBuilder" | "java.lang.CharSequence", _) => {
+            (
+                "java.lang.StringBuilder"
+                | "java.lang.StringBuffer"
+                | "java.lang.AbstractStringBuilder"
+                | "java.lang.CharSequence",
+                _,
+            ) => {
                 return self.builder_call(node, &symbol, receiver, args);
             }
             (owner, name) if unsigned::is_unsigned_method(owner, name) => {
