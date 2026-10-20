@@ -1,0 +1,11 @@
+skipped: record 3 has negative count -1
+skipped record 4: bad number
+Ada Lovelace avg  91.67 grade A
+Bob Stone avg  67.75 grade D
+Eve Park avg  98.50 grade A
+accepted 3, rejected 2
+trailing numbers total 25
+best: Eve Park with 99
+A: [Ada Lovelace, Eve Park]
+D: [Bob Stone]
+histogram A..F: [2, 0, 0, 1, 0, 0]

@@ -1,0 +1,10 @@
+maze 7x10
+shortest path: 17
+reachable cells: 46
+ended double are deques
+stack top: 25 size 5
+popped: 25 16 9 4 1
+pop on empty: null
+pop on empty throws
+line: [cy, ann, ben, dot] peekLast dot
+last one: ben* after 4

@@ -1,0 +1,13 @@
+skipped: not a triangle: 1.0, 2.0, 10.0
+circle     area=    7.07 perimeter=   9.42
+rectangle  area=   13.50 perimeter=  15.00
+square     area=    4.00 perimeter=   8.00
+triangle   area=    6.00 perimeter=  12.00
+total area 30.569
+largest: Shape[rectangle]
+rectangle is wide? false
+square is wide? false
+rectangles incl. squares: 2
+shapes created: 5
+square side via cast: 2.0
+cast failed as expected
