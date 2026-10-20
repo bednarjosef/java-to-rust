@@ -23,6 +23,7 @@ mod primitives;
 mod program;
 mod switch;
 mod sync;
+mod system;
 mod varargs;
 use arrays::{is_array_length, reads_name};
 pub use program::lower_program;
@@ -477,6 +478,9 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ThisCall { args, resolved: self.method_index(&symbol) });
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        if let Some(kind) = self.system_property_call(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {
             return Ok(ExprKind::Builtin(builtin, args));
         }

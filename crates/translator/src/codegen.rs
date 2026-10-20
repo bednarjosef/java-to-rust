@@ -13,6 +13,7 @@ mod character;
 mod code;
 mod enums;
 mod expr;
+mod files;
 mod math;
 mod names;
 mod null;
