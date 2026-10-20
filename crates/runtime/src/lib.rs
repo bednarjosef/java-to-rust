@@ -9,14 +9,19 @@ pub use array::*;
 pub use slice::*;
 
 use std::fmt;
-use std::io::Write;
 
 mod character;
 mod float;
+mod math;
+mod natives;
 mod null;
+mod out;
 pub use character::*;
 pub use float::*;
+pub use math::*;
+pub use natives::*;
 pub use null::non_null;
+pub use out::{Out, flush, out, print_chars, write_byte};
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
 pub struct Double(pub f64);
@@ -152,13 +157,13 @@ pub fn string_length(s: &str) -> i32 {
 
 /// Java's `System.exit`.
 pub fn exit(code: i32) -> ! {
-    let _ = std::io::stdout().flush();
+    flush();
     std::process::exit(code)
 }
 
 /// Ends the program the way an uncaught Java exception does.
 pub fn throw(class: &str, message: &str) -> ! {
-    let _ = std::io::stdout().flush();
+    flush();
     eprintln!("Exception in thread \"main\" {class}: {message}");
     std::process::exit(1)
 }
