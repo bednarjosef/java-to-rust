@@ -786,3 +786,64 @@ fn static_initializers_without_effects_stay_lazy() {
     );
     assert_lacks(&rust, &["fn init_a()", "INITIALIZED"]);
 }
+
+#[test]
+fn an_enum_is_a_copy_rust_enum_with_its_name_and_value_of() {
+    let rust = translate(
+        "public class A {
+            enum Color { RED, VERY_BIG }
+            public static void main(String[] args) { System.out.println(Color.valueOf(\"RED\")); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]\nenum A_Color {\n    Red,\n    VeryBig,\n}",
+            "fn enum_name(self) -> String {",
+            "A_Color::VeryBig => \"VERY_BIG\",",
+            "fn enum_value_of(name: &str) -> A_Color {",
+            "_ => java::throw(\"IllegalArgumentException\", &format!(\"No enum constant A.Color.{name}\")),",
+            "impl std::fmt::Display for A_Color {",
+            "write!(f, \"{}\", self.enum_name())",
+        ],
+    );
+}
+
+#[test]
+fn an_enum_field_is_an_accessor_that_matches_on_self() {
+    let rust = translate(
+        "public class A {
+            enum Planet {
+                MERCURY(3.0), VERY_BIG(5.5);
+                private final double mass;
+                Planet(double mass) { this.mass = mass; }
+                double scaled(double k) { return mass * k; }
+            }
+            public static void main(String[] args) { System.out.println(Planet.VERY_BIG.scaled(2.0)); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn mass(self) -> f64 {\n        match self {\n            A_Planet::Mercury => 3.0,\n            A_Planet::VeryBig => 5.5,",
+            "fn scaled(self, k: f64) -> f64 {\n        self.mass() * k",
+            "A_Planet::VeryBig.scaled(2.0)",
+        ],
+    );
+}
+
+#[test]
+fn an_enum_with_a_field_that_is_not_final_is_rejected() {
+    let error = java_to_rust::translate(
+        "public class A {
+            enum Planet {
+                MERCURY(3.0);
+                private double mass;
+                Planet(double mass) { this.mass = mass; }
+            }
+            public static void main(String[] args) { }
+        }",
+    )
+    .expect_err("a mutable enum field is rejected");
+    assert!(error.to_string().contains("enum fields that are not final"), "{error}");
+}
