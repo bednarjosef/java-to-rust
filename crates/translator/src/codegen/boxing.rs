@@ -5,10 +5,35 @@
 
 use super::*;
 
+/// The boxed types of a method's parameters and locals, by Java name. A name declared twice with
+/// different types is not handled; Java programs that do so are rare, and the last type wins.
+pub(super) fn boxed_locals(m: &Method) -> HashMap<String, Type> {
+    let mut out = HashMap::new();
+    for p in m.params.iter().filter(|p| matches!(p.ty, Type::Boxed(_))) {
+        out.insert(p.name.clone(), p.ty);
+    }
+    for stmt in &m.body {
+        visit_stmt(stmt, &mut |_| {}, &mut |s| {
+            if let Stmt::Local { ty, name, .. } | Stmt::ForEach { ty, name, .. } = s
+                && matches!(ty, Type::Boxed(_))
+            {
+                out.insert(name.clone(), *ty);
+            }
+        });
+    }
+    out
+}
+
 impl<'a> Gen<'a> {
     /// Whether the boxed type `ty` is the faithful `java::Boxed<T>`, whose identity is kept.
     pub(super) fn faithful_box(&self, ty: Type) -> bool {
         matches!(ty, Type::Boxed(_)) && self.facts.faithful_boxes.contains(&ty)
+    }
+
+    /// Whether reading a value of `ty` copies it in Rust: owned data is cloned, and so is a
+    /// faithful box, which is shared. A plain boxed value is `Copy` (or an `Option` of one).
+    pub(super) fn clones(&self, ty: Type) -> bool {
+        super::objects::needs_clone(ty) || self.faithful_box(ty)
     }
 
     /// The Rust type of the boxed type `ty`, without the `Option` that a null value adds.

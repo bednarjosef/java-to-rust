@@ -28,6 +28,7 @@ mod objects;
 mod owned;
 
 use arrays::name_part;
+use boxing::boxed_locals;
 use objects::*;
 
 pub fn generate(class: &Class, facts: &Facts) -> String {
@@ -45,6 +46,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         annotations: Vec::new(),
         fn_names: method_names(class),
         locals: HashMap::new(),
+        boxed: HashMap::new(),
         elements: HashMap::new(),
         out: String::new(),
         indent: 0,
@@ -126,6 +128,8 @@ struct Gen<'a> {
     fn_names: Vec<String>,
     /// Java local variable names to Rust names, for the current method.
     locals: HashMap<String, String>,
+    /// The boxed types of the current method's parameters and locals, by Java name.
+    boxed: HashMap<String, Type>,
     /// Reads of elements that a for-each-style loop has bound to a variable, by expression.
     elements: HashMap<ExprId, String>,
     out: String,
@@ -272,6 +276,7 @@ impl<'a> Gen<'a> {
                 entry.insert(rust);
             }
         }
+        self.boxed = boxed_locals(m);
     }
 }
 

@@ -203,7 +203,7 @@ impl<'a> Gen<'a> {
                 let rust = self.local(name);
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
-                    ty if needs_clone(ty) || self.faithful_box(ty) => Code::atom(format!("{rust}.clone()")),
+                    ty if self.clones(ty) => Code::atom(format!("{rust}.clone()")),
                     _ => Code::atom(rust),
                 }
             }

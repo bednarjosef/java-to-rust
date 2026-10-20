@@ -119,6 +119,10 @@ impl<'t> Lowering<'t> {
             return unsupported(node, &format!("the overload of `{name}` with {} arguments", args.len()));
         }
         let kind = boxed_type(symbol.owner).expect("a boxed method").unboxed();
+        // Rust's float parsing differs from Java's grammar, and no `Character` parses a string.
+        if matches!(op, BoxedOp::Parse) && matches!(kind, Type::Float | Type::Char) {
+            return unsupported(node, &format!("`{}.{name}` of a string", symbol.owner));
+        }
         Ok(Builtin::Boxed(op, kind))
     }
 }

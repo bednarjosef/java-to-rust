@@ -26,8 +26,8 @@ enum Slot {
 }
 
 impl Slot {
-    fn read(&self, ty: Type) -> String {
-        let copy = !needs_clone(ty);
+    fn read(&self, clone: bool) -> String {
+        let copy = !clone;
         match self {
             Slot::Field { obj, field, plain: true } => {
                 format!("{obj}.{field}{}", if copy { "" } else { ".clone()" })
@@ -53,7 +53,7 @@ impl Slot {
 /// Whether values of this type are owned heap data or shared arrays or objects, which are cloned
 /// when read.
 pub(super) fn needs_clone(ty: Type) -> bool {
-    matches!(ty, Type::String | Type::Array(_) | Type::Class(_) | Type::Boxed(_))
+    matches!(ty, Type::String | Type::Array(_) | Type::Class(_))
 }
 
 /// The Rust name of a class: its qualified Java name with the dots replaced.
@@ -253,7 +253,7 @@ impl<'a> Gen<'a> {
     /// A value read from a field of an object.
     pub(super) fn field_read(&mut self, object: &'a Expr, name: &str, ty: Type) -> Code {
         let obj = self.object(object);
-        let clone = if needs_clone(ty) { ".clone()" } else { "" };
+        let clone = if self.clones(ty) { ".clone()" } else { "" };
         if self.is_plain(object) {
             return Code::atom(format!("{obj}.{}{clone}", snake_case(name)));
         }
@@ -266,7 +266,7 @@ impl<'a> Gen<'a> {
     /// A value read from a static field.
     pub(super) fn static_read(&self, class: usize, name: &str, ty: Type) -> Code {
         let cell = cell_name(&self.class.types[class].name, name);
-        Code::atom(Slot::Static { cell }.read(ty))
+        Code::atom(Slot::Static { cell }.read(self.clones(ty)))
     }
 
     /// `new C(args)`, which calls the constructor that the checker chose.
@@ -366,14 +366,14 @@ impl<'a> Gen<'a> {
                 new.clone()
             }
             Update::Compound(op, value) if matches!(ty, Type::Boxed(_)) => {
-                lines.push(format!("let {old} = {};", slot.read(ty)));
+                lines.push(format!("let {old} = {};", slot.read(self.clones(ty))));
                 let right = self.operand(value);
                 let stored = self.boxed_result(op, ty, Code::atom(old.clone()), true, right, id);
                 lines.push(format!("let {new} = {};", stored.text));
                 format!("{}({new})", self.runtime("non_null"))
             }
             Update::Step(increment) if matches!(ty, Type::Boxed(_)) => {
-                lines.push(format!("let {old} = {};", slot.read(ty)));
+                lines.push(format!("let {old} = {};", slot.read(self.clones(ty))));
                 let op = if increment { BinOp::Add } else { BinOp::Sub };
                 let one = Operand { code: Code::literal(Literal::Int(1)), ty: Type::Int };
                 let stored = self.boxed_result(op, ty, Code::atom(old.clone()), true, one, id);
@@ -382,13 +382,13 @@ impl<'a> Gen<'a> {
                 format!("{}({value})", self.runtime("non_null"))
             }
             Update::Compound(_, value) if ty == Type::String => {
-                let mut parts = vec![Part::Arg(Code::atom(slot.read(ty)))];
+                let mut parts = vec![Part::Arg(Code::atom(slot.read(self.clones(ty))))];
                 self.parts(value, &mut parts);
                 lines.push(format!("let {new} = {};", self.format("format!", parts).text));
                 new.clone()
             }
             Update::Compound(op, value) => {
-                lines.push(format!("let {old} = {};", slot.read(ty)));
+                lines.push(format!("let {old} = {};", slot.read(self.clones(ty))));
                 let rty = crate::types::binary_type(op, ty, value.ty.unboxed()).expect("checked");
                 let right = self.operand(value);
                 let code = self.binary(op, Operand { code: Code::atom(old.clone()), ty }, right, rty, id);
@@ -396,7 +396,7 @@ impl<'a> Gen<'a> {
                 new.clone()
             }
             Update::Step(increment) => {
-                lines.push(format!("let {old} = {};", slot.read(ty)));
+                lines.push(format!("let {old} = {};", slot.read(self.clones(ty))));
                 let sign = if increment { "+" } else { "-" };
                 let text = if ty == Type::Double {
                     format!("{old} {sign} 1.0")
@@ -410,7 +410,7 @@ impl<'a> Gen<'a> {
             }
         };
         self.guarded = outer;
-        let stored = if needs_clone(ty) { format!("{new}.clone()") } else { new.clone() };
+        let stored = if self.clones(ty) { format!("{new}.clone()") } else { new.clone() };
         lines.push(slot.write(&stored));
         Code::atom(format!("{{ {} {result} }}", lines.join(" ")))
     }

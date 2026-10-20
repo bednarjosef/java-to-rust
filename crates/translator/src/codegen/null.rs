@@ -82,7 +82,9 @@ impl<'a> Gen<'a> {
     /// The possibly-null string variable `name` as an `Option<&str>`.
     fn option_source(&self, name: &str) -> String {
         let rust = self.local(name);
-        if self.borrowed_optional.contains(name) { rust } else { format!("{rust}.as_deref()") }
+        // An `Option<i32>` is `Copy` and matches as it is; a faithful box is `as_deref`'d.
+        let plain_box = self.boxed.get(name).is_some_and(|&ty| !self.faithful_box(ty));
+        if self.borrowed_optional.contains(name) || plain_box { rust } else { format!("{rust}.as_deref()") }
     }
 
     /// A possibly-null string as an `Option<&str>`.
