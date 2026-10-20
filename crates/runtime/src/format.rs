@@ -124,11 +124,7 @@ pub struct FormatError {
 }
 
 fn fail<T>(class: &'static str, message: impl Into<String>) -> Result<T, FormatError> {
-    Err(FormatError { class: class_name(class), message: message.into() })
-}
-
-fn class_name(class: &'static str) -> &'static str {
-    class
+    Err(FormatError { class, message: message.into() })
 }
 
 const UNKNOWN: &str = "java.util.UnknownFormatConversionException";
@@ -188,7 +184,6 @@ fn parse(format: &str) -> Result<Vec<Item>, FormatError> {
         }
         i += 1;
         let Some(&first) = chars.get(i) else { return fail(UNKNOWN, "Conversion = '%'") };
-        let start = i;
         let digits = |i: &mut usize| {
             let from = *i;
             while chars.get(*i).is_some_and(char::is_ascii_digit) {
@@ -265,7 +260,6 @@ fn parse(format: &str) -> Result<Vec<Item>, FormatError> {
         if !valid_conversion(c) {
             return fail(UNKNOWN, format!("Conversion = '{c}'"));
         }
-        let _ = start;
         i += 1;
         let mut spec = Spec { index, flags, width, precision, conversion: c };
         if c.is_ascii_uppercase() {
