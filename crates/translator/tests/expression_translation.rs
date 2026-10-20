@@ -38,3 +38,15 @@ fn a_block_before_an_operator_or_a_cast_is_parenthesised() {
     assert_contains(&rust, &["old }) as f64", "value }) == 5", "value }).wrapping_abs()"]);
     assert_lacks(&rust, &["} as f64", "} == 5", "}.wrapping_abs()"]);
 }
+
+#[test]
+fn a_float_static_steps_by_one_without_wrapping() {
+    let rust = translate(
+        "class A {
+            static float f = 1.5f;
+            public static void main(String[] a) { System.out.println(++f); }
+        }",
+    );
+    assert_contains(&rust, &["let value = old + 1.0;"]);
+    assert_lacks(&rust, &["wrapping"]);
+}

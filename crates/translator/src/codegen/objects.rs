@@ -940,7 +940,7 @@ impl<'a> Gen<'a> {
             Update::Step(increment) => {
                 lines.push(format!("let {old} = {};", slot.read(self.clones(ty))));
                 let sign = if increment { "+" } else { "-" };
-                let text = if ty == Type::Double {
+                let text = if ty.is_floating() {
                     format!("{old} {sign} 1.0")
                 } else if self.no_overflow(id) {
                     format!("{old} {sign} 1")

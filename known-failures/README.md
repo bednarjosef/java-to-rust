@@ -21,9 +21,6 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
   `Node` has a field assigned after construction. Java prints `0 1`; rustc fails with E0505
   "cannot move out of `single` because it is borrowed" (the `Ref` from the field read lives to the
   end of the statement).
-- `FloatIncrementValue.java`: `System.out.println(++sFloat);` on a `float` static. Java prints
-  `2.5`; rustc fails with E0599 "no method named `wrapping_add` found for type `f32`" (the
-  increment is translated with integer wrapping arithmetic, which `f32` lacks).
 - `MinCursorLeft.java`: a `while (t.left != null) t = t.left;` loop over a mutable class.
   Java prints `1`; rustc fails with E0506 "cannot assign to `t` because it is borrowed". Loops
   over classes that are never assigned after construction translate (their `Rc` is plain).
