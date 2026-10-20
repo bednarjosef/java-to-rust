@@ -72,7 +72,7 @@ impl NonAscii {
             ExprKind::Var(name) => !self.var(class, m, name),
             ExprKind::Binary(_, l, r) => self.ascii(class, m, l) && self.ascii(class, m, r),
             ExprKind::Assign { op: None, value, .. } => self.ascii(class, m, value),
-            ExprKind::Assign { target, value, .. } => {
+            ExprKind::Assign { target: Place::Var(target), value, .. } => {
                 !self.var(class, m, target) && self.ascii(class, m, value)
             }
             ExprKind::Call { resolved: Some(callee), .. } => !self.returns.contains(callee),
@@ -93,7 +93,7 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
             for stmt in &method.body {
                 let mut on_expr = |e: &Expr| {
                     visit_expr(e, &mut |x| match &x.kind {
-                        ExprKind::Assign { target, .. } if x.ty == Type::String => {
+                        ExprKind::Assign { target: Place::Var(target), .. } if x.ty == Type::String => {
                             if !non_ascii.ascii(class, m, x) {
                                 vars.push((m, target.clone()));
                             }

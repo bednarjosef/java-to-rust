@@ -138,6 +138,7 @@ fn rust_type(ty: Type) -> &'static str {
         Type::Boolean => "bool",
         Type::String => "String",
         Type::Void => "()",
+        Type::Array(_) | Type::Class(_) | Type::Null => unreachable!("lowering rejects {ty}"),
     }
 }
 
@@ -581,11 +582,11 @@ impl<'a> Gen<'a> {
     /// An expression evaluated for its effect, as a statement.
     fn effect(&mut self, e: &'a Expr) {
         match &e.kind {
-            ExprKind::Assign { op, target, value } => {
+            ExprKind::Assign { op, target: Place::Var(target), value } => {
                 let text = self.assignment(*op, target, e.ty, value, e.id);
                 self.line(&format!("{text};"));
             }
-            ExprKind::IncDec { target, increment, .. } => {
+            ExprKind::IncDec { target: Place::Var(target), increment, .. } => {
                 let text = self.step(target, e.ty, *increment, e.id);
                 self.line(&format!("{text};"));
             }
@@ -767,11 +768,11 @@ impl<'a> Gen<'a> {
                 let (l, r) = (self.operand(l), self.operand(r));
                 self.binary(*op, l, r, e.ty, e.id)
             }
-            ExprKind::Assign { op, target, value } => {
+            ExprKind::Assign { op, target: Place::Var(target), value } => {
                 let text = self.assignment(*op, target, e.ty, value, e.id);
                 Code::new(format!("{{ {text}; {} }}", self.read(target, e.ty)), LOWEST)
             }
-            ExprKind::IncDec { target, increment, prefix } => {
+            ExprKind::IncDec { target: Place::Var(target), increment, prefix } => {
                 let text = self.step(target, e.ty, *increment, e.id);
                 let name = self.local(target);
                 if *prefix {
@@ -991,7 +992,8 @@ impl<'a> Gen<'a> {
         // the variables it assigns are copied as they are reached.
         let mut assigned = HashSet::new();
         visit_expr(e, &mut |x| match &x.kind {
-            ExprKind::Assign { target, .. } | ExprKind::IncDec { target, .. } => {
+            ExprKind::Assign { target: Place::Var(target), .. }
+            | ExprKind::IncDec { target: Place::Var(target), .. } => {
                 assigned.insert(target.clone());
             }
             _ => {}

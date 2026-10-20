@@ -1,5 +1,5 @@
-//! The Java syntax tree the translator works on: a small typed subset of Java, lowered from the
-//! tree-sitter parse tree. The checker fills in the types (`Expr::ty`) and resolves calls.
+//! The Java syntax tree the translator works on: a typed subset of Java, lowered from javac's
+//! attributed tree (`lower.rs`), so every expression has its Java type and calls are resolved.
 
 use std::fmt;
 
@@ -11,6 +11,12 @@ pub enum Type {
     Boolean,
     String,
     Void,
+    /// An array type such as `int[]` or `String[][]`.
+    Array(&'static Type),
+    /// A class declared in the translated program, by name.
+    Class(&'static str),
+    /// The type of `null`.
+    Null,
 }
 
 impl Type {
@@ -22,22 +28,63 @@ impl Type {
         matches!(self, Type::Int | Type::Long)
     }
 
+    /// `element[]`. Types are small and copied everywhere, so compound ones are interned for the
+    /// life of the process (a few bytes per distinct type).
+    pub fn array(element: Type) -> Type {
+        Type::Array(intern(element))
+    }
+
+    pub fn class(name: &str) -> Type {
+        static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+        let mut names = NAMES.lock().unwrap();
+        let name = match names.iter().find(|n| **n == name) {
+            Some(n) => *n,
+            None => {
+                let n: &'static str = Box::leak(name.to_string().into_boxed_str());
+                names.push(n);
+                n
+            }
+        };
+        Type::Class(name)
+    }
+
+    /// Whether values of this type are references (and so can be `null`).
+    pub fn is_reference(self) -> bool {
+        matches!(self, Type::String | Type::Array(_) | Type::Class(_) | Type::Null)
+    }
+
     /// The wider of two integer types.
     pub fn max_integral(self, other: Type) -> Type {
         if self == Type::Long || other == Type::Long { Type::Long } else { Type::Int }
     }
 }
 
+fn intern(ty: Type) -> &'static Type {
+    static TYPES: std::sync::Mutex<Vec<&'static Type>> = std::sync::Mutex::new(Vec::new());
+    let mut types = TYPES.lock().unwrap();
+    match types.iter().find(|t| ***t == ty) {
+        Some(t) => t,
+        None => {
+            let t: &'static Type = Box::leak(Box::new(ty));
+            types.push(t);
+            t
+        }
+    }
+}
+
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(match self {
-            Type::Int => "int",
-            Type::Long => "long",
-            Type::Double => "double",
-            Type::Boolean => "boolean",
-            Type::String => "String",
-            Type::Void => "void",
-        })
+        match self {
+            Type::Int => f.write_str("int"),
+            Type::Long => f.write_str("long"),
+            Type::Double => f.write_str("double"),
+            Type::Boolean => f.write_str("boolean"),
+            Type::String => f.write_str("String"),
+            Type::Void => f.write_str("void"),
+            Type::Array(element) => write!(f, "{element}[]"),
+            Type::Class(name) => f.write_str(name),
+            Type::Null => f.write_str("null"),
+        }
     }
 }
 
@@ -105,12 +152,12 @@ pub enum ExprKind {
     /// `target = value`, or `target op= value` when `op` is set.
     Assign {
         op: Option<BinOp>,
-        target: String,
+        target: Place,
         value: Box<Expr>,
     },
     /// `++x`, `x++`, `--x`, `x--`.
     IncDec {
-        target: String,
+        target: Place,
         increment: bool,
         prefix: bool,
     },
@@ -125,6 +172,13 @@ pub enum ExprKind {
     },
     /// A call of a library method such as `System.out.println` or `Math.max`.
     Builtin(Builtin, Vec<Expr>),
+}
+
+/// What an assignment, `++` or `--` writes to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Place {
+    /// A local variable or parameter.
+    Var(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,10 +297,14 @@ pub fn counting_loop<'e>(
         return None;
     }
     let steps_by_one = match update {
-        [Expr { kind: ExprKind::IncDec { target, increment: true, .. }, .. }] => target == name,
-        [Expr { kind: ExprKind::Assign { op: Some(BinOp::Add), target, value }, .. }] => {
-            target == name && matches!(value.kind, ExprKind::Int(1) | ExprKind::Long(1))
+        [Expr { kind: ExprKind::IncDec { target: Place::Var(target), increment: true, .. }, .. }] => {
+            target == name
         }
+        [
+            Expr {
+                kind: ExprKind::Assign { op: Some(BinOp::Add), target: Place::Var(target), value }, ..
+            },
+        ] => target == name && matches!(value.kind, ExprKind::Int(1) | ExprKind::Long(1)),
         _ => false,
     };
     if !steps_by_one || assigns_stmt(body, name) || !stable(end, name, body) {
@@ -270,7 +328,8 @@ pub fn stable(e: &Expr, loop_var: &str, body: &Stmt) -> bool {
 pub fn assigns(e: &Expr, name: &str) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| match &x.kind {
-        ExprKind::Assign { target, .. } | ExprKind::IncDec { target, .. } => found |= target == name,
+        ExprKind::Assign { target: Place::Var(target), .. }
+        | ExprKind::IncDec { target: Place::Var(target), .. } => found |= target == name,
         _ => {}
     });
     found
@@ -290,9 +349,9 @@ pub fn assigns_stmt(stmt: &Stmt, name: &str) -> bool {
 pub fn mentions(e: &Expr, name: &str) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| match &x.kind {
-        ExprKind::Var(v) | ExprKind::Assign { target: v, .. } | ExprKind::IncDec { target: v, .. } => {
-            found |= v == name
-        }
+        ExprKind::Var(v)
+        | ExprKind::Assign { target: Place::Var(v), .. }
+        | ExprKind::IncDec { target: Place::Var(v), .. } => found |= v == name,
         _ => {}
     });
     found

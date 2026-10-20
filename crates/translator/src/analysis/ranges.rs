@@ -540,8 +540,12 @@ impl<'a> Analysis<'a> {
     fn increase(&mut self, stmt: &Stmt, name: &str, context: &Env, outer: &Stmt) -> Option<i128> {
         match stmt {
             Stmt::Expr(e) => match &e.kind {
-                ExprKind::IncDec { target, increment: true, .. } if target == name => Some(1),
-                ExprKind::Assign { op: Some(BinOp::Add), target, value } if target == name => {
+                ExprKind::IncDec { target: Place::Var(target), increment: true, .. } if target == name => {
+                    Some(1)
+                }
+                ExprKind::Assign { op: Some(BinOp::Add), target: Place::Var(target), value }
+                    if target == name =>
+                {
                     match value.kind {
                         ExprKind::Int(k) if k >= 0 => Some(k as i128),
                         ExprKind::Long(k) if k >= 0 => Some(k as i128),
@@ -649,7 +653,7 @@ impl<'a> Analysis<'a> {
                 let b = self.expr(r, env);
                 if ty.is_integral() { self.arith(*op, a, b, ty, e.id) } else { other }
             }
-            ExprKind::Assign { op, target, value } => {
+            ExprKind::Assign { op, target: Place::Var(target), value } => {
                 let v = self.expr(value, env);
                 let Some(var) = env.get(target).copied() else { return other };
                 let range = match op {
@@ -673,7 +677,7 @@ impl<'a> Analysis<'a> {
                 env.insert(target.clone(), Var { ty: var.ty, range });
                 range
             }
-            ExprKind::IncDec { target, increment, prefix } => {
+            ExprKind::IncDec { target: Place::Var(target), increment, prefix } => {
                 let Some(var) = env.get(target).copied() else { return other };
                 let current = if *increment { self.clamp(target, var.range, Some(1)) } else { var.range };
                 let op = if *increment { BinOp::Add } else { BinOp::Sub };

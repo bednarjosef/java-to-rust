@@ -346,10 +346,10 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// The local variable assigned by `=`, `+=`, `++` and the like.
-    fn target(&self, node: Node) -> Result<String, Error> {
+    /// What `=`, `+=`, `++` and the like assign.
+    fn target(&self, node: Node) -> Result<Place, Error> {
         match node.kind() {
-            "IDENTIFIER" => self.local(node),
+            "IDENTIFIER" => Ok(Place::Var(self.local(node)?)),
             "ARRAY_ACCESS" => unsupported(node, "arrays"),
             _ => unsupported(node, "assignment to anything but a local variable"),
         }
