@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Generates programs from seeds, runs each on Java and as translated Rust, and reports.
 
-    python3 tools/fuzz/run.py [--count 200] [--start 1] [--size 30] [--jobs 4]
+    python3 tools/fuzz/run.py [--count 200] [--start 1] [--size 30] [--jobs 4] [--strings]
+
+Text is read and written as UTF-8 whatever the locale, because the string features print
+non-ASCII characters. The one exception is String.format, which uses the default locale.
 
 Each program gets one status:
   match             the translation prints the same stdout and exits with the same code as Java
@@ -43,13 +46,27 @@ STATUSES = ['match', 'mismatch', 'rustc', 'translator-crash', 'rust-timeout', 'r
             'invalid', 'java-timeout', 'harness-error']
 FAILURES = ('mismatch', 'rustc', 'translator-crash', 'rust-timeout')
 REJECTION = re.compile(r'^Prog\.java:\d+:\d+: (.*)$', re.M)
+UNSUPPORTED = 'not supported yet'  # the translator's own rejections, after javac accepted
 RUSTC_ERROR = re.compile(r'^error(?:\[(E\d+)\])?: (.*)$', re.M)
 SETUP = 'public class Prog {\n    public static void main(String[] args) {\n    }\n}\n'
+UTF8 = {'encoding': 'utf-8', 'errors': 'replace'}  # for subprocess output, as text
+JAVA = ['java', '-XX:-UsePerfData', '-Dstdout.encoding=UTF-8', '-Dfile.encoding=UTF-8']
 
 
 def build_translator():
     """Builds the translator in release mode, as the translation runs need it."""
     subprocess.run(['cargo', 'build', '--release', '-p', 'java-to-rust'], cwd=ROOT, check=True)
+
+
+def compile_java(run):
+    """javac's first error for Prog.java in `run`, or '' when javac accepts the program."""
+    (run / 'classes').mkdir(exist_ok=True)
+    done = subprocess.run(['javac', '-encoding', 'UTF-8', '-d', run / 'classes', 'Prog.java'],
+                          cwd=run, capture_output=True, **UTF8, stdin=subprocess.DEVNULL,
+                          timeout=JAVA_TIMEOUT)
+    if done.returncode == 0:
+        return ''
+    return next((ln for ln in done.stderr.splitlines() if ': error: ' in ln), 'javac failed')
 
 
 def describe(java, rust):
@@ -108,28 +125,26 @@ class Runner:
     def run(self, slot, name, source):
         run = WORK / 'runs' / name
         run.mkdir(parents=True, exist_ok=True)
-        (run / 'Prog.java').write_text(source)
+        (run / 'Prog.java').write_text(source, encoding='utf-8')
         crate = self.crates / str(slot)
         finish = lambda *a, **k: self.finish(run, name, *a, **k)  # noqa: E731
 
-        # Java: the source launcher compiles and runs. A compile error is a generator bug.
-        try:
-            java = subprocess.run(['java', '-XX:-UsePerfData', 'Prog.java'], cwd=run,
-                                  capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                                  timeout=JAVA_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            return finish('java-timeout', 'Java ran past the time limit')
-        if 'error: compilation failed' in java.stderr:
-            error = next((ln for ln in java.stderr.splitlines() if ': error: ' in ln), '')
-            return finish('invalid', error)
-
-        # Translation: a rejection is the translator's own message, anything else is a crash.
+        # Translation: the translator runs javac first, so a program that compiles reaches the
+        # translation. A rejection that names an unsupported feature can only come after javac
+        # passed; any other failure may be a compile error, which is a generator bug (`invalid`).
         main_rs = crate / 'src' / 'main.rs'
-        tr = subprocess.run([TRANSLATOR, 'Prog.java', '-o', main_rs], cwd=run,
-                            capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                            timeout=TRANSLATE_TIMEOUT)
+        try:
+            tr = subprocess.run([TRANSLATOR, 'Prog.java', '-o', main_rs], cwd=run,
+                                capture_output=True, **UTF8, stdin=subprocess.DEVNULL,
+                                timeout=TRANSLATE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return finish('translator-crash', 'the translator ran past the time limit')
         if tr.returncode != 0:
             rejected = REJECTION.search(tr.stderr)
+            if not (rejected and UNSUPPORTED in rejected.group(1)):
+                error = compile_java(run)
+                if error:
+                    return finish('invalid', error)
             if rejected:
                 return finish('rejected', rejected.group(1), key=rejected.group(1))
             first = (tr.stderr.strip().splitlines() or ['no output'])[0]
@@ -137,7 +152,7 @@ class Runner:
 
         # Build: the crate is reused, so only main.rs changed since the last build.
         build = subprocess.run(['cargo', 'build', '--release', '-q'], cwd=crate,
-                               capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                               capture_output=True, **UTF8, stdin=subprocess.DEVNULL,
                                timeout=BUILD_TIMEOUT)
         if build.returncode != 0:
             error = next((m for m in RUSTC_ERROR.finditer(build.stderr)
@@ -147,18 +162,25 @@ class Runner:
             code = error.group(1) or error.group(2)[:60]
             return finish('rustc', f'{error.group(1) or ""} {error.group(2)}'.strip(), key=code)
 
-        # Run both and compare stdout and the exit code.
+        # Run the translation first: Java only runs when its output is needed for a verdict.
         package = re.search(r'^name = "(.*)"', (crate / 'Cargo.toml').read_text(), re.M).group(1)
         try:
             rust = subprocess.run([str(crate / 'target' / 'release' / package)], cwd=run,
-                                  capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                  capture_output=True, **UTF8, stdin=subprocess.DEVNULL,
                                   timeout=RUST_TIMEOUT)
         except subprocess.TimeoutExpired:
             return finish('rust-timeout', 'the translation ran past the time limit')
+
+        # Java: the source launcher compiles and runs the program; it passed javac above.
+        try:
+            java = subprocess.run(JAVA + ['Prog.java'], cwd=run, capture_output=True,
+                                  stdin=subprocess.DEVNULL, **UTF8, timeout=JAVA_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return finish('java-timeout', 'Java ran past the time limit')
         if (rust.stdout, rust.returncode) == (java.stdout, java.returncode):
             return finish('match', '')
-        (run / 'java.out').write_text(java.stdout)
-        (run / 'rust.out').write_text(rust.stdout)
+        (run / 'java.out').write_text(java.stdout, encoding='utf-8')
+        (run / 'rust.out').write_text(rust.stdout, encoding='utf-8')
         return finish('mismatch', describe(java, rust), key='')
 
 
@@ -185,6 +207,8 @@ def main():
     ap.add_argument('--start', type=int, default=1, help='first seed')
     ap.add_argument('--size', type=int, default=30, help='statements in main, per program')
     ap.add_argument('--jobs', type=int, default=4, help='programs in parallel')
+    ap.add_argument('--strings', action='store_true',
+                    help='also generate String, StringBuilder, String.format and Arrays code')
     ap.add_argument('--no-build', action='store_true', help='skip cargo build of the translator')
     args = ap.parse_args()
 
@@ -192,7 +216,8 @@ def main():
         build_translator()
     WORK.mkdir(parents=True, exist_ok=True)
     runner = Runner(args.jobs)
-    items = [(f's{seed}', fuzz.generate(seed, args.size)) for seed in range(args.start, args.start + args.count)]
+    items = [(f's{seed}', fuzz.generate(seed, args.size, strings=args.strings))
+             for seed in range(args.start, args.start + args.count)]
     results = []
     for i, result in enumerate(runner.classify_many(items), 1):
         results.append(result)

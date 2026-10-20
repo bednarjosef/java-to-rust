@@ -29,6 +29,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
         if unsound.is_empty() {
             facts.no_overflow.extend(a.visited.difference(&a.overflow));
             facts.safe_division.extend(a.visited.difference(&a.risky_division));
+            facts.ascii_chars.extend(a.chars.difference(&a.wide_chars));
             let clamp = |v: i128| v.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
             facts.index_ranges.extend(a.indexes.iter().map(|(&id, v)| (id, (clamp(v.lo), clamp(v.hi)))));
             return;
@@ -213,6 +214,9 @@ struct Analysis<'a> {
     budgets: Vec<(String, i128)>,
     no_square_narrowing: HashSet<ExprId>,
     square_narrowed: HashSet<ExprId>,
+    /// `(char)` casts, and those whose value some recorded visit leaves outside ASCII.
+    chars: HashSet<ExprId>,
+    wide_chars: HashSet<ExprId>,
     /// Where widening stops before the end of the type, for the current method: its literals
     /// and the bounds of its parameters, sorted.
     thresholds: Vec<i128>,
@@ -242,6 +246,8 @@ impl<'a> Analysis<'a> {
             budgets: Vec::new(),
             no_square_narrowing,
             square_narrowed: HashSet::new(),
+            chars: HashSet::new(),
+            wide_chars: HashSet::new(),
             thresholds: Vec::new(),
             heads: HashMap::new(),
         }
@@ -358,6 +364,16 @@ impl<'a> Analysis<'a> {
     fn overflowed(&mut self, id: ExprId) {
         if self.record {
             self.overflow.insert(id);
+        }
+    }
+
+    /// Records a `(char)` cast, and whether its value can leave ASCII (`0..=0x7f`).
+    fn char_cast(&mut self, v: Interval, id: ExprId) {
+        if self.record {
+            self.chars.insert(id);
+            if v.is_empty() || v.lo < 0 || v.hi > 0x7f {
+                self.wide_chars.insert(id);
+            }
         }
     }
 
@@ -894,6 +910,9 @@ impl<'a> Analysis<'a> {
                 let v = self.expr(x, env);
                 if to.is_small() && x.ty.is_integral() {
                     self.narrowed(v, *to, e.id);
+                }
+                if *to == Type::Char {
+                    self.char_cast(v, e.id);
                 }
                 convert(v, x.ty, *to)
             }

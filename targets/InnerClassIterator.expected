@@ -1,0 +1,11 @@
+ring contents: c d e
+iterator of ring at 0: cd
+iterator of ring at 2
+caught: ring ring exhausted
+range sum: 63
+range down: [10, 6, 2]
+[THE][QUICK][][BROWN][FOX]
+[item-1, item-4, item-9, item-16]
+evens: [12, 8, 20]
+ring get(1): d
+out of range: index 5 for size 3

@@ -1,0 +1,29 @@
+result: main:15
+commit case:
+  open main
+  main ran SELECT * FROM t
+  close main
+  transaction committed
+result: caught close failed for flaky
+broken close case:
+  open flaky
+  flaky ran SELECT 1
+  close flaky
+  finally after broken close
+result: body: refused: DROP TABLE users | suppressed: close failed for both
+body and close case:
+  open both
+  close both
+result: open failed: empty connection name
+open failure case:
+outer:8 inner:9
+nested case:
+  open outer
+  open inner
+  outer ran SELECT a
+  inner ran SELECT bb
+  close inner
+  close outer
+counted: 4
+lambda case:
+  lambda closed after 4

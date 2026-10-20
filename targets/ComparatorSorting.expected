@@ -1,0 +1,36 @@
+by last name:
+  Edsger Dijkstra (72)
+  Grace Hopper (85)
+  Alan Kay (83)
+  Barbara Liskov (85)
+  Ada Lovelace (36)
+  Alan Turing (41)
+by age, then first, then last:
+  Ada Lovelace (36)
+  Alan Turing (41)
+  Edsger Dijkstra (72)
+  Alan Kay (83)
+  Barbara Liskov (85)
+  Grace Hopper (85)
+oldest first (stable within equal ages):
+  Grace Hopper (85)
+  Barbara Liskov (85)
+  Alan Kay (83)
+  Edsger Dijkstra (72)
+  Alan Turing (41)
+  Ada Lovelace (36)
+by first-name length:
+  Ada Lovelace (36)
+  Alan Turing (41)
+  Alan Kay (83)
+  Grace Hopper (85)
+  Edsger Dijkstra (72)
+  Barbara Liskov (85)
+nulls first: [null, null, apple, fig, pear]
+nulls last: [pear, fig, apple, null, null]
+by absolute value: [0, -3, 7, 7, 15, 42]
+descending: [42, 15, 7, 7, 0, -3]
+search 15: 4
+search 16: -6
+unique people: 6
+contains Ada: true

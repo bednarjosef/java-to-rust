@@ -1,0 +1,20 @@
+Point[x=3, y=-4] equals Point[x=3, y=-4]: true, same hash: true
+plus: Point[x=4, y=-3]
+manhattan: 7
+segment: Segment[from=Point[x=0, y=0], to=Point[x=3, y=-4]] length 7
+lookup equal record: a
+labels: 2
+rejected: coordinate out of range: -2000,0
+primes has 3 values: [2, 3, 5]
+area of Circle = 12
+area of Rect = 12
+area of Group = 4
+total area = 28
+segment starts on the y axis? true ends at Point[x=3, y=-4]
+null value
+negative int -5
+int 12
+string of length 5
+diagonal point 7
+point Point[x=1, y=2]
+something else: Double

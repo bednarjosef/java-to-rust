@@ -49,6 +49,12 @@ pub enum StringOp {
     /// `s.equals(x)` where `x` is no string (a box, a builder, an enum, an array, an object): never
     /// equal, after evaluating both and throwing on a null `s`.
     EqualsOther,
+    /// `s.getBytes()`, `s.getBytes(charset)` and `s.getBytes(name)`: the receiver, then the
+    /// charset (a `Type::Charset`, or a `Type::String` naming one), or none for UTF-8.
+    GetBytes,
+    /// `new String(bytes)`, `new String(bytes, charset)` and `new String(bytes, offset, length,
+    /// charset)`: the array, then the same charset forms as `GetBytes`.
+    FromBytes,
 }
 
 /// A method of `StringBuilder`.

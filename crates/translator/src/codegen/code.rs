@@ -151,6 +151,7 @@ pub(super) fn rust_type(ty: Type) -> &'static str {
         Type::Boolean => "bool",
         Type::String => "String",
         Type::StringBuilder => "java::StringBuilder",
+        Type::Charset => "java::Charset",
         Type::Void => "()",
         // A boxed type is named by `Gen::ty_name`, which knows whether its identity is observed.
         Type::Array(_) | Type::Class(_) | Type::Enum(_) | Type::Null | Type::Boxed(_) => {

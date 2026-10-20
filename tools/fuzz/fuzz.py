@@ -6,11 +6,13 @@ small bound, and recursion counts down from a depth of at most 4. A program thro
 purpose, through the static field `zero0`, which is never assigned. Each statement is one
 line and a block opens on a line ending in `{`, so the reducer can delete whole statements.
 
-    python3 fuzz.py SEED [SIZE]     # prints the program for SEED
+    python3 fuzz.py SEED [SIZE] [--strings]     # prints the program for SEED
 """
 
 import random
 import sys
+
+from fuzz_strings import STRING_NESTING, STRING_STATEMENTS, StringGen
 
 NUMERIC = ['byte', 'short', 'char', 'int', 'long', 'float', 'double']
 INTEGRAL = ['byte', 'short', 'char', 'int', 'long']
@@ -70,15 +72,22 @@ STATEMENTS = {
 NESTING = {'if', 'loop', 'switch'}
 
 
-def generate(seed, size=30):
-    """Returns the source of `public class Prog` for `seed`, with `size` statements in main."""
-    return Gen(seed, size).program()
+def generate(seed, size=30, strings=False):
+    """Returns the source of `public class Prog` for `seed`, with `size` statements in main.
+
+    With `strings`, the programs also use String, StringBuilder, String.format and Arrays
+    (see fuzz_strings.py); without it, the programs are the same as before that option existed.
+    """
+    return Gen(seed, size, strings).program()
 
 
-class Gen:
-    def __init__(self, seed, size):
+class Gen(StringGen):
+    def __init__(self, seed, size, strings=False):
         self.r = random.Random(seed)
         self.size = size
+        self.strings = strings
+        self.kinds = {**STATEMENTS, **STRING_STATEMENTS} if strings else STATEMENTS
+        self.nesting = NESTING | STRING_NESTING
         self.count = 0
         self.out = []
         self.indent = 0
@@ -159,7 +168,9 @@ class Gen:
         """An expression that may be assigned to `t`: of that type or one widening to it."""
         return self.expr(self.pick(SOURCES[t]), d)
 
-    def num_leaf(self, t):
+    def num_leaf(self, t, d=0):
+        if self.strings and d > 0 and t in NUMERIC and self.chance(0.15):
+            return self.string_num(t, d)
         names = self.visible(t)
         if names and self.chance(0.6):
             return self.pick(names)
@@ -167,7 +178,7 @@ class Gen:
 
     def num_expr(self, t, d):
         if d <= 0 or self.chance(0.2):
-            return self.num_leaf(t)
+            return self.num_leaf(t, d)
         kind = self.pick(['arith', 'arith', 'bits', 'unary', 'cast', 'ternary', 'math', 'side',
                           'element', 'call', 'length'])
         if kind == 'bits' and t in ('float', 'double'):
@@ -203,11 +214,11 @@ class Gen:
             text = self.call(t, d)
         elif kind == 'length':
             text = self.length()
-        return text or self.num_leaf(t)
+        return text or self.num_leaf(t, d)
 
     def small_expr(self, t, d):
         if d <= 0 or self.chance(0.25):
-            return self.num_leaf(t)
+            return self.num_leaf(t, d)
         kind = self.pick(['cast', 'cast', 'ternary', 'side', 'element', 'call'])
         text = None
         if kind == 'cast':
@@ -225,7 +236,7 @@ class Gen:
             text = self.element(t, d)
         elif kind == 'call':
             text = self.call(t, d)
-        return text or self.num_leaf(t)
+        return text or self.num_leaf(t, d)
 
     def bool_expr(self, d):
         if d <= 0 or self.chance(0.2):
@@ -233,6 +244,8 @@ class Gen:
             if names and self.chance(0.6):
                 return self.pick(names)
             return self.literal('boolean')
+        if self.strings and self.chance(0.15):
+            return self.string_bool(d)
         kind = self.pick(['compare', 'compare', 'logic', 'not', 'ternary', 'side', 'element',
                           'call'])
         text = None
@@ -336,8 +349,8 @@ class Gen:
     # Statements. Each emits lines at the current indent.
 
     def stmt(self, depth):
-        kinds = [k for k in STATEMENTS if depth > 0 or k not in NESTING]
-        kind = self.r.choices(kinds, [STATEMENTS[k] for k in kinds])[0]
+        kinds = [k for k in self.kinds if depth > 0 or k not in self.nesting]
+        kind = self.r.choices(kinds, [self.kinds[k] for k in kinds])[0]
         getattr(self, 'st_' + kind)(depth)
 
     def block(self, depth, ctx=None, extra=(), head=None):
@@ -555,6 +568,8 @@ class Gen:
         self.emit('}')
 
     def program(self):
+        if self.strings:
+            self.string_header()
         self.out.append('public class Prog {')
         self.indent = 1
         self.emit('static int zero0 = 0;')
@@ -562,6 +577,8 @@ class Gen:
         for t, name in SCALAR_STATICS:
             self.emit(f'static {t} {name} = {self.literal(t)};')
             self.statics.append((name, t, True))
+        if self.strings:
+            self.string_statics()
         for t in ARRAY_ELEMS:
             name = 'a' + t.capitalize()
             if self.chance(0.5):
@@ -578,6 +595,7 @@ class Gen:
 
 
 if __name__ == '__main__':
-    seed = int(sys.argv[1])
-    size = int(sys.argv[2]) if len(sys.argv) > 2 else 30
-    sys.stdout.write(generate(seed, size))
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    seed = int(args[0])
+    size = int(args[1]) if len(args) > 1 else 30
+    sys.stdout.write(generate(seed, size, strings='--strings' in sys.argv))
