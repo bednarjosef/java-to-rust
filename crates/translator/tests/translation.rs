@@ -780,11 +780,7 @@ fn boxed_values_compared_by_identity_are_shared_boxes() {
     );
     assert_contains(
         &rust,
-        &[
-            "fn twice(x: java::Boxed<i32>) -> java::Boxed<i32>",
-            "java::box_int(100)",
-            "java::same_optional(",
-        ],
+        &["fn twice(x: java::Boxed<i32>) -> java::Boxed<i32>", "java::box_int(100)", "java::same_optional("],
     );
 }
 
@@ -802,9 +798,6 @@ fn a_nullable_boxed_identity_is_an_option_of_the_shared_box() {
     );
     assert_contains(
         &rust,
-        &[
-            "fn maybe(n: i32) -> Option<java::Boxed<i32>>",
-            "let nul: Option<java::Boxed<i32>> = maybe(3);",
-        ],
+        &["fn maybe(n: i32) -> Option<java::Boxed<i32>>", "let nul: Option<java::Boxed<i32>> = maybe(3);"],
     );
 }
