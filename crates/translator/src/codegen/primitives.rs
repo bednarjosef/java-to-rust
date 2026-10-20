@@ -107,9 +107,7 @@ pub(super) fn comparison_type(l: &Operand, r: &Operand) -> Type {
     let exact_float = |o: &Operand, ty: Type| {
         ty == Type::Float && matches!(o.code.literal, Some(Literal::Double(v)) if v as f32 as f64 == v)
     };
-    if l.ty == r.ty {
-        l.ty
-    } else if constant_fits(r, l.ty) || exact_float(r, l.ty) {
+    if l.ty == r.ty || constant_fits(r, l.ty) || exact_float(r, l.ty) {
         l.ty
     } else if constant_fits(l, r.ty) || exact_float(l, r.ty) {
         r.ty
