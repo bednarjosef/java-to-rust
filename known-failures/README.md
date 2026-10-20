@@ -13,10 +13,6 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
 - `CompoundThroughNullableField.java`: `h.box.v += 10` where `h.box` is a field that may be null,
   in a class whose fields are assigned after construction. Java prints `true`; rustc fails with
   E0716 "temporary value dropped while borrowed".
-- `CopyRowOfNewArray.java`: `new Cell[2][]` followed by `copy[0] = grid[0];` where `grid` is a
-  `Cell[][]`. Java prints `4`; rustc fails with E0308 "mismatched types" at the `new Cell[2][2]`
-  line: the rows it builds are plain arrays, but the generated type of `grid` makes its rows
-  `Option`s, because `copy[0] = grid[0]` stores a row in a nullable slot.
 - `FieldReadAndMoveInCall.java`: `depth(single.next)` and `depth(single)` in one expression, where
   `Node` has a field assigned after construction. Java prints `0 1`; rustc fails with E0505
   "cannot move out of `single` because it is borrowed" (the `Ref` from the field read lives to the

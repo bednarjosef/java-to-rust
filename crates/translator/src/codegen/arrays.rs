@@ -196,7 +196,11 @@ impl<'a> Gen<'a> {
         let last = sizes.len() - 1;
         let mut text = format!("{}(dims[{last}], {zero})", self.runtime("filled"));
         for level in (0..last).rev() {
-            text = format!("{}(dims[{level}], |_| {text})", self.runtime("tabulate"));
+            // The rows built here are elements of level `level`; they are `Some` where that
+            // element type is nullable, as the array they fill is.
+            let row =
+                if self.nullable_element(ty.element_at(level + 1)) { format!("Some({text})") } else { text };
+            text = format!("{}(dims[{level}], |_| {row})", self.runtime("tabulate"));
         }
         let check = self.runtime("check_sizes");
         Code::new(format!("{{ let dims = [{}]; {check}(&dims); {text} }}", dims.join(", ")), LOWEST)
