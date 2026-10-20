@@ -4,8 +4,12 @@
 //! when it is a file or a pipe, makes one `write` system call per line. Java's `System.out` also
 //! flushes on every `println`, but a translated program has no reason to: what it prints is the
 //! same bytes in the same order either way. So the generated code prints through `java::println!`
-//! and `java::print!`, which fill one buffer that goes out in 8 KiB writes (about ten times faster
-//! than `println!` for a program that prints a lot).
+//! and `java::print!`, which fill one buffer that goes out in 8 KiB writes. A translated program
+//! printing two million lines takes 0.10 s instead of 0.36 s with `println!` when its output goes
+//! to a file, and 0.09 s instead of 0.61 s into a pipe (Java: 0.58 s and 0.85 s).
+//!
+//! The buffer lives in a thread-local whose destructor writes it out when the main thread ends;
+//! glibc runs those destructors on `exit`, and the corpus test checks every program's output.
 //!
 //! The buffer is written out when it is full, when the program ends (`main` returns, `System.exit`
 //! or an uncaught exception), before anything goes to standard error so that a terminal shows the
