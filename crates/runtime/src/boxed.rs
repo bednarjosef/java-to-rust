@@ -202,6 +202,17 @@ pub fn char_numeric_value(c: u16) -> i32 {
     }
 }
 
+/// `Boolean.parseBoolean`: true for `true` in any case, and false for anything else, null included.
+pub fn parse_boolean(s: &str) -> bool {
+    s.eq_ignore_ascii_case("true")
+}
+
+/// `Double.equals`, which compares bits, so every NaN equals every NaN and `-0.0` differs from
+/// `0.0`. Unlike `==`, it is not the comparison of the values.
+pub fn double_equals(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +309,23 @@ mod tests {
         assert_eq!(char_numeric_value(b'z' as u16), 35);
         assert_eq!(char_numeric_value(b'7' as u16), 7);
         assert_eq!(char_numeric_value(b'-' as u16), -1);
+    }
+
+    #[test]
+    fn parses_booleans_like_java() {
+        // `Boolean.parseBoolean` results for each string, null included as "not true".
+        for (text, java) in
+            [("true", true), ("TRUE", true), ("tRuE", true), ("yes", false), ("", false), (" true", false)]
+        {
+            assert_eq!(parse_boolean(text), java, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn double_equality_compares_bits() {
+        // `Double.equals` results: NaN equals NaN, and 0.0 and -0.0 are different.
+        assert!(double_equals(f64::NAN, f64::NAN));
+        assert!(!double_equals(0.0, -0.0));
+        assert!(double_equals(1.0, 1.0));
     }
 }
