@@ -2,7 +2,8 @@
 //! the generated code reads and writes it through these helpers. They check bounds and sizes the
 //! same way as the shared arrays, so an error exits with Java's code.
 
-use crate::array::{position, size};
+use crate::Exception;
+use crate::array::{position, size, try_position, try_size};
 
 /// `new T[len]` as a `Vec`, filled with the default value `zero`.
 pub fn new_vec<T: Clone>(len: i32, zero: T) -> Vec<T> {
@@ -26,4 +27,32 @@ pub fn put<T: Clone>(a: &mut [T], i: i32, v: T) -> T {
 pub fn modify<T: Clone>(a: &mut [T], i: i32, f: impl FnOnce(T) -> T) {
     let k = position(a.len(), i);
     a[k] = f(a[k].clone());
+}
+
+/// `new T[len]` as a `Vec`, where the program observes the `NegativeArraySizeException`.
+pub fn try_new_vec<T: Clone>(len: i32, zero: T) -> Result<Vec<T>, Exception> {
+    Ok(vec![zero; try_size(len)?])
+}
+
+/// `a[i]` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_at<T: Clone>(a: &[T], i: i32) -> Result<T, Exception> {
+    Ok(a[try_position(a.len(), i)?].clone())
+}
+
+/// `a[i] = v` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_put<T: Clone>(a: &mut [T], i: i32, v: T) -> Result<T, Exception> {
+    let k = try_position(a.len(), i)?;
+    a[k] = v.clone();
+    Ok(v)
+}
+
+/// `a[i] op= v` and the like where the program observes the exceptions of the index or of `f`.
+pub fn try_modify<T: Clone>(
+    a: &mut [T],
+    i: i32,
+    f: impl FnOnce(T) -> Result<T, Exception>,
+) -> Result<(), Exception> {
+    let k = try_position(a.len(), i)?;
+    a[k] = f(a[k].clone())?;
+    Ok(())
 }

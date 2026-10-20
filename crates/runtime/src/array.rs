@@ -1,7 +1,7 @@
 //! Java arrays. An array is a shared handle to its elements: copying the handle gives a second
 //! name for the same array, as in Java, and every access is bounds-checked the way Java checks it.
 
-use crate::throw;
+use crate::{Exception, uncaught};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -26,21 +26,37 @@ pub fn tabulate<T>(len: i32, make: impl FnMut(usize) -> T) -> Array<T> {
 
 /// The length of an array being created; Java throws for a negative length.
 pub(crate) fn size(len: i32) -> usize {
+    try_size(len).unwrap_or_else(uncaught)
+}
+
+pub(crate) fn try_size(len: i32) -> Result<usize, Exception> {
     if len < 0 {
-        throw("java.lang.NegativeArraySizeException", &len.to_string());
+        return Err(Exception::new("java.lang.NegativeArraySizeException", len.to_string()));
     }
-    len as usize
+    Ok(len as usize)
 }
 
 /// The position of element `i` in an array of `len` elements, checked the way Java checks it.
 pub(crate) fn position(len: usize, i: i32) -> usize {
+    try_position(len, i).unwrap_or_else(uncaught)
+}
+
+pub(crate) fn try_position(len: usize, i: i32) -> Result<usize, Exception> {
     if i < 0 || i as usize >= len {
-        throw(
-            "java.lang.ArrayIndexOutOfBoundsException",
-            &format!("Index {i} out of bounds for length {len}"),
-        );
+        let message = format!("Index {i} out of bounds for length {len}");
+        return Err(Exception::new("java.lang.ArrayIndexOutOfBoundsException", message));
     }
-    i as usize
+    Ok(i as usize)
+}
+
+/// `new T[len]` where the program observes the `NegativeArraySizeException` of a negative length.
+pub fn try_filled<T: Clone>(len: i32, zero: T) -> Result<Array<T>, Exception> {
+    Ok(from_vec(vec![zero; try_size(len)?]))
+}
+
+/// `new T[len]` of arrays where the program observes the `NegativeArraySizeException`.
+pub fn try_tabulate<T>(len: i32, make: impl FnMut(usize) -> T) -> Result<Array<T>, Exception> {
+    Ok(from_vec((0..try_size(len)?).map(make).collect()))
 }
 
 /// `a.length`.
@@ -52,6 +68,20 @@ pub fn len<T>(a: &Array<T>) -> i32 {
 pub fn get<T: Clone>(a: &Array<T>, i: i32) -> T {
     let items = a.borrow();
     items[position(items.len(), i)].clone()
+}
+
+/// `a[i]` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_get<T: Clone>(a: &Array<T>, i: i32) -> Result<T, Exception> {
+    let items = a.borrow();
+    Ok(items[try_position(items.len(), i)?].clone())
+}
+
+/// `a[i] = v` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_set<T>(a: &Array<T>, i: i32, v: T) -> Result<(), Exception> {
+    let mut items = a.borrow_mut();
+    let i = try_position(items.len(), i)?;
+    items[i] = v;
+    Ok(())
 }
 
 /// `a[i] = v`. Java evaluates `a`, `i` and `v` before the check, and so do the arguments.
@@ -74,6 +104,29 @@ pub fn post_update<T: Clone>(a: &Array<T>, i: i32, f: impl FnOnce(T) -> T) -> T 
     let old = get(a, i);
     set(a, i, f(old.clone()));
     old
+}
+
+/// `a[i] op= ...` where the program observes the exceptions of the index or of `f` (a division
+/// by zero).
+pub fn try_update<T: Clone>(
+    a: &Array<T>,
+    i: i32,
+    f: impl FnOnce(T) -> Result<T, Exception>,
+) -> Result<T, Exception> {
+    let new = f(try_get(a, i)?)?;
+    try_set(a, i, new.clone())?;
+    Ok(new)
+}
+
+/// `a[i]++` and the like where the program observes the exceptions: returns the old element.
+pub fn try_post_update<T: Clone>(
+    a: &Array<T>,
+    i: i32,
+    f: impl FnOnce(T) -> Result<T, Exception>,
+) -> Result<T, Exception> {
+    let old = try_get(a, i)?;
+    try_set(a, i, f(old.clone())?)?;
+    Ok(old)
 }
 
 /// `Arrays.toString(a)`, with `show` formatting each element as Java does.
@@ -122,6 +175,12 @@ pub fn store<T: Clone>(a: &Array<T>, i: i32, v: T) -> T {
     v
 }
 
+/// `a[i] = v` as an expression, where the program observes the exception.
+pub fn try_store<T: Clone>(a: &Array<T>, i: i32, v: T) -> Result<T, Exception> {
+    try_set(a, i, v.clone())?;
+    Ok(v)
+}
+
 /// The elements of `a` in order, read one at a time as a for-each loop reads them. The length
 /// is fixed when the loop starts, and the loop holds its own handle, as Java's does.
 pub fn each<T: Clone>(a: Array<T>) -> impl Iterator<Item = T> {
@@ -131,7 +190,13 @@ pub fn each<T: Clone>(a: Array<T>) -> impl Iterator<Item = T> {
 
 /// Checks the sizes of a multi-dimensional `new`, before any array is allocated.
 pub fn check_sizes(dims: &[i32]) {
+    try_check_sizes(dims).unwrap_or_else(uncaught)
+}
+
+/// `check_sizes` where the program observes the `NegativeArraySizeException`.
+pub fn try_check_sizes(dims: &[i32]) -> Result<(), Exception> {
     for &d in dims {
-        size(d);
+        try_size(d)?;
     }
+    Ok(())
 }

@@ -60,33 +60,41 @@ fn index_out_of_bounds(message: String) -> ! {
 }
 
 /// Java's check of a range `[begin, end)` of a string of `length` units.
-fn check_begin_end(begin: i32, end: i32, length: usize) {
+fn check_begin_end(begin: i32, end: i32, length: usize) -> Result<(), crate::Exception> {
     if begin < 0 || begin > end || end as i64 > length as i64 {
-        index_out_of_bounds(format!("begin {begin}, end {end}, length {length}"));
+        let message = format!("Range [{begin}, {end}) out of bounds for length {length}");
+        return Err(crate::Exception::new("java.lang.StringIndexOutOfBoundsException", message));
     }
+    Ok(())
 }
 
 /// `s.substring(begin)`.
 pub fn substring_from(s: &str, begin: i32) -> String {
-    let len = length(s);
-    substring_range(s, begin, len as i32)
+    try_substring_from(s, begin).unwrap_or_else(crate::uncaught)
 }
 
 /// `s.substring(begin, end)`.
 pub fn substring(s: &str, begin: i32, end: i32) -> String {
-    substring_range(s, begin, end)
+    try_substring(s, begin, end).unwrap_or_else(crate::uncaught)
 }
 
-fn substring_range(s: &str, begin: i32, end: i32) -> String {
+/// `substring_from` where the program observes the `StringIndexOutOfBoundsException`.
+pub fn try_substring_from(s: &str, begin: i32) -> Result<String, crate::Exception> {
+    let len = length(s);
+    try_substring(s, begin, len as i32)
+}
+
+/// `substring` where the program observes the `StringIndexOutOfBoundsException`.
+pub fn try_substring(s: &str, begin: i32, end: i32) -> Result<String, crate::Exception> {
     if s.is_ascii() {
-        check_begin_end(begin, end, s.len());
-        return s[begin as usize..end as usize].to_string();
+        check_begin_end(begin, end, s.len())?;
+        return Ok(s[begin as usize..end as usize].to_string());
     }
-    check_begin_end(begin, end, length(s));
-    match (byte_offset(s, begin as usize), byte_offset(s, end as usize)) {
+    check_begin_end(begin, end, length(s))?;
+    Ok(match (byte_offset(s, begin as usize), byte_offset(s, end as usize)) {
         (Some(a), Some(b)) => s[a..b].to_string(),
         _ => from_units(&units(s)[begin as usize..end as usize]),
-    }
+    })
 }
 
 /// `s.indexOf(ch, from)`, where `ch` is a code point (a `char` widened to `int`).

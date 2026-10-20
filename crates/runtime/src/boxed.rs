@@ -1,7 +1,6 @@
 //! Boxed values (`Integer`, `Double` and the rest) and the methods of their classes: the shared
 //! objects that `==` compares, the `valueOf` cache, Java's parsing rules and hash codes.
 
-use crate::throw;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -73,8 +72,14 @@ pub fn box_bool(v: bool) -> Boxed<bool> {
 /// `Integer.parseInt`, `Long.parseLong` and the like: Rust's integer parsing reads Java's
 /// syntax for radix 10 (an optional sign, then digits and nothing else).
 pub fn parse_number<T: std::str::FromStr>(s: &str) -> T {
-    s.parse()
-        .unwrap_or_else(|_| throw("java.lang.NumberFormatException", &format!("For input string: \"{s}\"")))
+    try_parse_number(s).unwrap_or_else(crate::uncaught)
+}
+
+/// `parse_number` where the program observes the `NumberFormatException`.
+pub fn try_parse_number<T: std::str::FromStr>(s: &str) -> Result<T, crate::Exception> {
+    s.parse().map_err(|_| {
+        crate::Exception::new("java.lang.NumberFormatException", format!("For input string: \"{s}\""))
+    })
 }
 
 /// `Long.hashCode`, which is `Integer.hashCode` of the value's high and low halves mixed.

@@ -4,7 +4,7 @@
 //! rejected, while every BMP decimal digit counts. Rust's `from_str_radix` reads only ASCII digits.
 
 use crate::character_classes::digit;
-use crate::throw;
+use crate::{Exception, uncaught};
 
 const MIN_RADIX: i32 = 2;
 const MAX_RADIX: i32 = 36;
@@ -16,9 +16,15 @@ const CAP: i128 = 1 << 100;
 /// Java's `parseInt(s, radix)` for the integer type `T`, which throws `NumberFormatException` for
 /// what Java rejects. `None` is a null string.
 pub fn parse_radix<T: TryFrom<i128>>(s: Option<&str>, radix: i32) -> T {
-    let Some(s) = s else { throw("java.lang.NumberFormatException", "Cannot parse null string: null") };
-    let value = read(s, radix).unwrap_or_else(|message| throw("java.lang.NumberFormatException", &message));
-    T::try_from(value).unwrap_or_else(|_| throw("java.lang.NumberFormatException", &for_input(s, radix)))
+    try_parse_radix(s, radix).unwrap_or_else(uncaught)
+}
+
+/// `parse_radix` where the program observes the `NumberFormatException`.
+pub fn try_parse_radix<T: TryFrom<i128>>(s: Option<&str>, radix: i32) -> Result<T, Exception> {
+    let fail = |message: String| Exception::new("java.lang.NumberFormatException", message);
+    let Some(s) = s else { return Err(fail("Cannot parse null string: null".to_string())) };
+    let value = read(s, radix).map_err(fail)?;
+    T::try_from(value).map_err(|_| fail(for_input(s, radix)))
 }
 
 /// The value of a string in `radix`, or Java's message for why it is rejected. Only the range of
