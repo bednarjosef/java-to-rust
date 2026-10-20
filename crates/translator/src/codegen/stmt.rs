@@ -113,7 +113,10 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
             Stmt::For { init, cond, update, body } => self.for_loop(init, cond.as_ref(), update, body),
-            Stmt::Return(None, _) => self.line("return;"),
+            Stmt::Return(None, _) => match self.ctor_result {
+                Some(result) => self.line(&format!("return {result};")),
+                None => self.line("return;"),
+            },
             Stmt::Return(Some(value), _) => {
                 let code = self.returned(value);
                 self.line(&format!("return {};", code.text));

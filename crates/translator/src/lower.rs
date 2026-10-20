@@ -292,7 +292,6 @@ impl<'t> Lowering<'t> {
                 Stmt::For { init, cond, update, body }
             }
             "RETURN" => match node.get("expression") {
-                _ if self.in_ctor.get() => return unsupported(node, "`return` in a constructor"),
                 Some(value) => Stmt::Return(Some(self.expr(value)?), node.pos()),
                 None => Stmt::Return(None, node.pos()),
             },

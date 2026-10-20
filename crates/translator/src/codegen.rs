@@ -55,6 +55,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         formatting: false,
         chars: false,
         field_locals: HashMap::new(),
+        ctor_result: None,
         printing: false,
         guarded: false,
         annotations: Vec::new(),
@@ -154,6 +155,8 @@ struct Gen<'a> {
     /// The locals that hold the fields that a constructor's initializers computed first, by
     /// Java field name: the later initializers read them there.
     field_locals: HashMap<String, String>,
+    /// In a constructor, what a `return` gives back: the object being built.
+    ctor_result: Option<&'static str>,
     /// Whether the text being formatted is printed.
     printing: bool,
     /// Whether the statement being emitted also borrows an object mutably (see `conflicts`).

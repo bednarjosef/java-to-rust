@@ -151,6 +151,15 @@ fn converted_objects(x: &Expr) -> Vec<&Expr> {
 }
 
 /// Whether some expression of the statements is `this`, so that a constructor must bind it.
+/// A constructor's statements without a `return;` that ends them: the constructor's own end
+/// gives back the object.
+pub(super) fn without_final_return(stmts: &[Stmt]) -> &[Stmt] {
+    match stmts.split_last() {
+        Some((Stmt::Return(None, _), rest)) => rest,
+        _ => stmts,
+    }
+}
+
 fn uses_this(stmts: &[Stmt]) -> bool {
     let mut found = false;
     for stmt in stmts {
@@ -814,14 +823,20 @@ impl<'a> Gen<'a> {
             }
             Update::Compound(..) | Update::Step(_) => {
                 lines.extend(init);
+                // The closure's parameter must not hide a local that the right operand reads.
+                let v = self.temp("v");
+                let marked = format!("({v})");
                 let step = match how {
-                    Update::Compound(op, value) => self.compound(op, "(v)", ty, value, e.id),
-                    Update::Step(increment) => self.step_place("(v)".to_string(), ty, increment, e.id),
+                    Update::Compound(op, value) => self.compound(op, &marked, ty, value, e.id),
+                    Update::Step(increment) => self.step_place(marked.clone(), ty, increment, e.id),
                     Update::Assign(_) => unreachable!("handled above"),
                 };
-                let step = step.replacen("(v) =", "*v =", 1).replacen("(v) ", "*v ", 1);
-                let step = step.replace("(v).", "v.").replace("(v)", "(*v)");
-                lines.push(format!("{cell}.with_borrow_mut(|v| {step});"));
+                let step = step.replacen(&format!("{marked} ="), &format!("*{v} ="), 1);
+                let step = step.replacen(&format!("{marked} "), &format!("*{v} "), 1);
+                let step = step
+                    .replace(&format!("{marked}."), &format!("{v}."))
+                    .replace(&marked, &format!("(*{v})"));
+                lines.push(format!("{cell}.with_borrow_mut(|{v}| {step});"));
             }
         }
         Some(lines)
@@ -1135,8 +1150,11 @@ impl<'a> Gen<'a> {
         if initialize {
             self.line(&format!("{}::field_inits(this);", struct_name(&decl.name)));
         }
-        self.stmts(rest, false);
-        self.line(if immutable { "Rc::new(obj)" } else { "obj" });
+        let result = if immutable { "Rc::new(obj)" } else { "obj" };
+        self.ctor_result = Some(result);
+        self.stmts(without_final_return(rest), false);
+        self.ctor_result = None;
+        self.line(result);
     }
 
     /// A blank line before an item, unless the output is empty or a line of an item is last.

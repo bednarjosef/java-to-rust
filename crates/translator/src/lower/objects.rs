@@ -164,8 +164,13 @@ impl<'t> Lowering<'t> {
         };
         let name = symbol.name.to_string();
         if symbol.is_static {
-            if receiver.is_some_and(|r| r.symbol().is_none_or(|s| s.kind != "CLASS")) {
-                return unsupported(node, "static fields through an expression");
+            // Java evaluates an object in front of a static field and ignores it, even null;
+            // one without effects is simply dropped.
+            if let Some(r) = receiver
+                && r.symbol().is_none_or(|s| s.kind != "CLASS")
+                && has_effects(&self.expr(r)?)
+            {
+                return unsupported(node, "static fields through an expression with effects");
             }
             return Ok(Some(Place::Static { class, name }));
         }

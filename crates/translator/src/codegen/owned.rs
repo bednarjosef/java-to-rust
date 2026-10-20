@@ -26,6 +26,7 @@ impl<'a> Gen<'a> {
                 (literal, rest, initialize)
             }
         };
+        let rest = without_final_return(rest);
         if rest.is_empty() && !initialize {
             self.line(&start);
             return;
@@ -35,7 +36,9 @@ impl<'a> Gen<'a> {
         if initialize {
             self.line("this.field_inits();");
         }
+        self.ctor_result = Some("this");
         self.stmts(rest, false);
+        self.ctor_result = None;
         self.line("this");
     }
 
