@@ -79,6 +79,40 @@ fn counting_loops_that_could_change_or_wrap_stay_while_loops() {
 }
 
 #[test]
+fn returns_that_end_a_function_become_its_value() {
+    let sign = translate(
+        "class A { static String sign(int n) {
+            if (n > 0) { return \"pos\"; } else if (n < 0) { return \"neg\"; } else { return \"zero\"; }
+        } }",
+    );
+    assert_contains(&sign, &["} else if n < 0 {", "        String::from(\"zero\")\n    }\n}"]);
+    assert!(!sign.contains("return"), "{sign}");
+    let nested = translate(
+        "class A { static int nested(int n) {
+            if (n > 0) { int m = n * 2; return m; } else { if (n == 0) { return 7; } else { return -1; } }
+        } }",
+    );
+    assert_contains(&nested, &["        m\n", "} else if n == 0 {"]);
+    assert!(!nested.contains("return"), "{nested}");
+    let partial = translate("class A { static int partial(int n) { if (n > 0) { return 1; } return 2; } }");
+    assert_contains(&partial, &["        return 1;\n    }\n    2\n}"]);
+    let day = translate(
+        "class A { static String day(int d) {
+            switch (d) { case 1: return \"Mon\"; default: return \"midweek\"; }
+        } }",
+    );
+    assert_contains(&day, &["    match d {"]);
+    assert!(!day.contains("return"), "{day}");
+    let open = translate(
+        "class A { static String open(int d) {
+            switch (d) { case 1: return \"Mon\"; case 2: break; }
+            return \"none\";
+        } }",
+    );
+    assert_contains(&open, &["            return String::from(\"Mon\");\n"]);
+}
+
+#[test]
 fn trial_division_is_plain() {
     let rust = translate(
         "class A {

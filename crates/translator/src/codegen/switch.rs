@@ -299,8 +299,26 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// A switch statement, or a switch expression when `value` is its type.
-    pub(super) fn switch_form(&mut self, selector: &'a Expr, cases: &'a [Case], value: Option<Type>) {
+    /// Whether a switch, as the last statement of a function body, is the function's value: no
+    /// case falls through or leaves early, every case ends in a value, and there is a default (or
+    /// every constant of the enum), so the `match` has no `_ => {}` arm.
+    pub(super) fn tail_switch(&self, selector: &Expr, cases: &[Case]) -> bool {
+        let falls = cases.split_last().is_some_and(|(_, init)| init.iter().any(|c| !leaves(&c.body)));
+        !falls
+            && !cases.iter().any(|c| strip(&c.body).iter().any(breaks_out))
+            && arms(cases).iter().all(|c| strip(&c.body).last().is_some_and(|s| self.tail_value(s)))
+            && (cases.iter().any(is_default) || exhaustive(self.class, selector, cases))
+    }
+
+    /// A switch statement, or a switch expression when `value` is its type. `tail`: the switch is
+    /// the function's value (see `tail_switch`), and its arms end in tail expressions.
+    pub(super) fn switch_form(
+        &mut self,
+        selector: &'a Expr,
+        cases: &'a [Case],
+        value: Option<Type>,
+        tail: bool,
+    ) {
         let labeled = self.pending.is_some();
         self.chars = char_cases(selector, cases);
         self.exhaustive = exhaustive(self.class, selector, cases);
@@ -333,7 +351,7 @@ impl<'a> Gen<'a> {
         } else if labeled || value.is_some() || cases.iter().any(|c| strip(&c.body).iter().any(breaks_out)) {
             self.block(&text, cases, value);
         } else {
-            self.matched(&text, cases);
+            self.matched(&text, cases, tail);
         }
     }
 
@@ -343,7 +361,7 @@ impl<'a> Gen<'a> {
         let indent = self.indent;
         let pending = self.pending.take();
         self.indent += 1;
-        self.switch_form(selector, cases, Some(ty));
+        self.switch_form(selector, cases, Some(ty), false);
         self.indent = indent;
         self.pending = pending;
         let body = self.out.split_off(mark);
@@ -351,7 +369,7 @@ impl<'a> Gen<'a> {
     }
 
     /// No case falls through and none leaves early: `match`, with `_ => {}` when there is no default.
-    fn matched(&mut self, text: &str, cases: &'a [Case]) {
+    fn matched(&mut self, text: &str, cases: &'a [Case], tail: bool) {
         let chars = std::mem::take(&mut self.chars);
         let exhaustive = std::mem::take(&mut self.exhaustive);
         self.line(&format!("match {text} {{"));
@@ -359,7 +377,7 @@ impl<'a> Gen<'a> {
         for case in arms(cases) {
             self.line(&format!("{} => {{", self.pattern(case, chars)));
             self.indent += 1;
-            self.stmts(strip(&case.body), false);
+            self.stmts(strip(&case.body), tail);
             self.indent -= 1;
             self.line("}");
         }

@@ -24,13 +24,7 @@ impl<'a> Gen<'a> {
                 continue;
             }
             match stmt {
-                Stmt::Return(Some(value), _) if tail && rest.is_empty() => {
-                    let conflicts = self.stmt_conflicts(stmt);
-                    let outer = std::mem::replace(&mut self.guarded, conflicts);
-                    let code = self.returned(value);
-                    self.line(&code.text);
-                    self.guarded = outer;
-                }
+                _ if tail && rest.is_empty() && self.tail_value(stmt) => self.tail_stmt(stmt),
                 _ => self.stmt(stmt, rest),
             }
         }
@@ -41,12 +35,7 @@ impl<'a> Gen<'a> {
 
     /// The body of an `if` or a loop.
     pub(super) fn nested(&mut self, stmt: &'a Stmt) {
-        self.indent += 1;
-        match stmt {
-            Stmt::Block(stmts) => self.stmts(stmts, false),
-            _ => self.stmt(stmt, &[]),
-        }
-        self.indent -= 1;
+        self.nested_in(stmt, false);
     }
 
     /// One statement; `rest` holds the statements after it in the same block, where a local
@@ -65,28 +54,7 @@ impl<'a> Gen<'a> {
             }
             Stmt::Expr(e) => self.effect(e),
             Stmt::ForEach { name, array, body, .. } => self.for_each(name, array, body),
-            Stmt::If { cond, then, otherwise } => {
-                if self.narrow_if(cond, then, otherwise.as_deref()) {
-                    return;
-                }
-                let cond_text = self.condition(cond);
-                self.line(&format!("if {cond_text} {{"));
-                self.nested(then);
-                let mut otherwise = otherwise.as_deref();
-                while let Some(stmt) = otherwise {
-                    if let Stmt::If { cond, then, otherwise: next } = stmt {
-                        let cond_text = self.condition(cond);
-                        self.line(&format!("}} else if {cond_text} {{"));
-                        self.nested(then);
-                        otherwise = next.as_deref();
-                    } else {
-                        self.line("} else {");
-                        self.nested(stmt);
-                        otherwise = None;
-                    }
-                }
-                self.line("}");
-            }
+            Stmt::If { cond, then, otherwise } => self.if_stmt(cond, then, otherwise.as_deref(), false),
             Stmt::While { cond, body } => {
                 if matches!(cond.kind, ExprKind::Bool(true)) {
                     self.line("loop {");
@@ -123,7 +91,7 @@ impl<'a> Gen<'a> {
             }
             Stmt::Break => self.plain_jump(false),
             Stmt::Continue => self.plain_jump(true),
-            Stmt::Switch { selector, cases } => self.switch_form(selector, cases, None),
+            Stmt::Switch { selector, cases } => self.switch_form(selector, cases, None, false),
             Stmt::Labeled { label, body } => self.labeled(label, body),
             Stmt::BreakLabel(label) => self.labeled_jump(label, false),
             Stmt::ContinueLabel(label) => self.labeled_jump(label, true),
