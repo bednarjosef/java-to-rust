@@ -1,0 +1,11 @@
+[package]
+name = "character-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# A workspace of its own: this tool is not a member of the translator's workspace.
+[workspace]
+
+[dependencies]
+java-runtime = { path = "../../../crates/runtime" }
