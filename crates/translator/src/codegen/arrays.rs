@@ -14,6 +14,7 @@ impl<'a> Gen<'a> {
                 let elem = self.ty_name(*elem);
                 format!("{}<{elem}>", self.runtime("Array"))
             }
+            Type::Class(name) => self.object_type(name),
             _ => rust_type(ty).to_string(),
         }
     }
@@ -368,6 +369,7 @@ impl<'a> Gen<'a> {
 pub(super) fn name_part(ty: Type) -> String {
     match ty {
         Type::Array(elem) => format!("{}_array", name_part(*elem)),
+        Type::Class(name) => struct_name(name).to_lowercase(),
         _ => rust_type(ty).to_lowercase(),
     }
 }

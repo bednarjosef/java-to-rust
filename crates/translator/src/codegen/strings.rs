@@ -44,6 +44,7 @@ impl<'a> Gen<'a> {
             return out.push(part);
         }
         match &e.kind {
+            _ if matches!(e.ty, Type::Class(_)) => out.push(Part::Arg(self.object_text(e))),
             ExprKind::Binary(BinOp::Add, l, r) if e.ty == Type::String => {
                 self.concat_parts(l, assigned, out);
                 self.concat_parts(r, assigned, out);

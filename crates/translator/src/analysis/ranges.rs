@@ -226,10 +226,24 @@ impl<'a> Analysis<'a> {
 
     fn run(&mut self) {
         let n = self.class.methods.len();
-        let has_main = self.class.methods.iter().any(|m| m.is_main);
         let callers = callers(self.class);
+        // Methods that nothing calls, and callees of field initializers (not analyzed here), take
+        // any arguments. Methods reachable only through a cycle of calls from them do too, since
+        // no caller's arguments can be seen. The others get their arguments from their callers.
+        let initializers = initializer_callees(self.class);
+        let is_root: Vec<bool> = (0..n).map(|m| callers[m].is_empty() || initializers.contains(&m)).collect();
+        let mut live = is_root.clone();
+        let mut todo: Vec<usize> = (0..n).filter(|&m| is_root[m]).collect();
+        while let Some(m) = todo.pop() {
+            for c in callees(&self.class.methods[m]) {
+                if !live[c] {
+                    live[c] = true;
+                    todo.push(c);
+                }
+            }
+        }
         // A method is analyzed again when its parameter ranges or a callee's return range grew.
-        let mut dirty: Vec<bool> = self.class.methods.iter().map(|m| !has_main || m.is_main).collect();
+        let mut dirty: Vec<bool> = (0..n).map(|m| is_root[m] || !live[m]).collect();
         for m in (0..n).filter(|&m| dirty[m]) {
             self.full_params(m);
         }
@@ -262,12 +276,6 @@ impl<'a> Analysis<'a> {
                 for &c in &callers[m] {
                     dirty[c] = true;
                 }
-            }
-        }
-        // Methods that are never called still get translated; assume any arguments.
-        for m in 0..n {
-            if !self.reached[m] {
-                self.full_params(m);
             }
         }
         self.update_summaries = false;
@@ -626,6 +634,28 @@ impl<'a> Analysis<'a> {
         range
     }
 
+    /// Evaluates the object of a field place, which may itself contain calls or writes.
+    fn place_object(&mut self, place: &Place, env: &mut Env) {
+        if let Place::Field { object, .. } = place {
+            self.expr(object, env);
+        }
+    }
+
+    /// Records the argument values that reach `callee`, and returns its result range.
+    fn call(&mut self, args: &[Expr], callee: usize, ty: Type, env: &mut Env) -> Interval {
+        let values: Vec<Interval> = args.iter().map(|a| self.expr(a, env)).collect();
+        if self.update_summaries {
+            self.reached[callee] = true;
+            for (i, p) in self.class.methods[callee].params.iter().enumerate() {
+                if p.ty.is_integral() {
+                    let v = convert(values[i], args[i].ty, p.ty);
+                    self.params[callee][i] = self.params[callee][i].join(v);
+                }
+            }
+        }
+        if ty.is_integral() { self.returns[callee] } else { Interval::full(Type::Long) }
+    }
+
     fn expr(&mut self, e: &Expr, env: &mut Env) -> Interval {
         let ty = e.ty;
         let other = Interval::full(Type::Long);
@@ -724,6 +754,16 @@ impl<'a> Analysis<'a> {
                 self.expr(index, env);
                 if ty.is_integral() { Interval::full(ty) } else { other }
             }
+            // Fields and statics are not locals, so their values carry no range.
+            ExprKind::Assign { target, value, .. } => {
+                self.place_object(target, env);
+                self.expr(value, env);
+                other
+            }
+            ExprKind::IncDec { target, .. } => {
+                self.place_object(target, env);
+                other
+            }
             ExprKind::Cast(to, x) => {
                 let v = self.expr(x, env);
                 convert(v, x.ty, *to)
@@ -746,17 +786,25 @@ impl<'a> Analysis<'a> {
             }
             ExprKind::Call { args, resolved, .. } => {
                 let callee = resolved.expect("calls are resolved by the checker");
-                let values: Vec<Interval> = args.iter().map(|a| self.expr(a, env)).collect();
-                if self.update_summaries {
-                    self.reached[callee] = true;
-                    for (i, p) in self.class.methods[callee].params.iter().enumerate() {
-                        if p.ty.is_integral() {
-                            let v = convert(values[i], args[i].ty, p.ty);
-                            self.params[callee][i] = self.params[callee][i].join(v);
-                        }
-                    }
+                self.call(args, callee, ty, env)
+            }
+            ExprKind::MethodCall { receiver, args, resolved, .. } => {
+                self.expr(receiver, env);
+                let callee = resolved.expect("calls are resolved by the checker");
+                self.call(args, callee, ty, env)
+            }
+            ExprKind::New { args, ctor: Some(callee), .. }
+            | ExprKind::ThisCall { args, resolved: Some(callee) } => self.call(args, *callee, ty, env),
+            ExprKind::New { args, .. } | ExprKind::ThisCall { args, .. } => {
+                for a in args {
+                    self.expr(a, env);
                 }
-                if ty.is_integral() { self.returns[callee] } else { other }
+                other
+            }
+            ExprKind::This | ExprKind::Static { .. } => other,
+            ExprKind::Field { object, .. } => {
+                self.expr(object, env);
+                other
             }
             ExprKind::Builtin(builtin, args) => {
                 let values: Vec<Interval> = args.iter().map(|a| self.expr(a, env)).collect();
@@ -1059,20 +1107,34 @@ fn literals(method: &Method) -> Vec<i128> {
 fn callees(method: &Method) -> Vec<usize> {
     let mut out = Vec::new();
     for stmt in &method.body {
-        visit_stmt(
-            stmt,
-            &mut |e| {
-                visit_expr(e, &mut |x| {
-                    if let ExprKind::Call { resolved: Some(c), .. } = x.kind {
-                        out.push(c);
-                    }
-                })
-            },
-            &mut |_| {},
-        );
+        visit_stmt(stmt, &mut |e| visit_expr(e, &mut |x| out.extend(callee_of(x))), &mut |_| {});
     }
     out.sort_unstable();
     out.dedup();
+    out
+}
+
+/// The method that a call or constructor call (`new`, `this(...)`) invokes, if resolved.
+fn callee_of(e: &Expr) -> Option<usize> {
+    match e.kind {
+        ExprKind::Call { resolved, .. }
+        | ExprKind::MethodCall { resolved, .. }
+        | ExprKind::ThisCall { resolved, .. } => resolved,
+        ExprKind::New { ctor, .. } => ctor,
+        _ => None,
+    }
+}
+
+/// The methods called from field initializers.
+fn initializer_callees(class: &Class) -> Vec<usize> {
+    let mut out = Vec::new();
+    for t in &class.types {
+        for f in t.fields.iter().chain(&t.statics) {
+            if let Some(init) = &f.init {
+                visit_expr(init, &mut |x| out.extend(callee_of(x)));
+            }
+        }
+    }
     out
 }
 

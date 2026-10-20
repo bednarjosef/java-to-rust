@@ -8,12 +8,16 @@
 //! - String parameters that a method never assigns are borrowed: `&str`, or `Option<&str>` when
 //!   they can be null.
 //! - Array locals that no other name can see are plain `Vec`s (see `arrays`).
+//! - Classes whose objects never change after construction are shared without a `RefCell`
+//!   (see `objects`).
 //!
 //! The facts form a table keyed by expression id. An expression without a fact gets the faithful
 //! default translation, so a weaker analysis only makes the output plainer, never wrong.
 
 mod arrays;
 mod nullness;
+mod objects;
+mod owned;
 mod ranges;
 
 use crate::ast::*;
@@ -50,6 +54,12 @@ pub struct Facts {
     /// Counting loops over a plain array whose body only reads `a[i]`, keyed by the loop
     /// condition: the reads that can become elements of `for x in a.iter()`.
     pub element_loops: HashMap<ExprId, Vec<ExprId>>,
+    /// The classes whose objects never change after construction, by qualified name.
+    pub immutable: HashSet<String>,
+    /// The classes whose objects are never shared, so they are plain values, by qualified name.
+    pub owned: HashSet<String>,
+    /// The instance methods (indexes into `Class::methods`) that change their owned object.
+    pub mutating: HashSet<usize>,
 }
 
 pub fn analyze(class: &Class) -> Facts {
@@ -58,6 +68,10 @@ pub fn analyze(class: &Class) -> Facts {
     nullness::analyze(class, &mut facts);
     borrowed_params(class, &mut facts);
     ascii_strings(class, &mut facts);
+    facts.immutable = objects::immutable_classes(class);
+    let owned = owned::owned_classes(class, &facts.immutable);
+    facts.owned = owned.classes;
+    facts.mutating = owned.mutating;
     arrays::analyze(class, &mut facts);
     facts
 }
@@ -114,6 +128,20 @@ impl NonAscii {
 
 fn ascii_strings(class: &Class, facts: &mut Facts) {
     let mut non_ascii = NonAscii::default();
+    // Field initializers are not walked below and have no method's variables to look up, so
+    // every parameter that a call in one reaches may be non-ASCII.
+    let initializers = class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics));
+    for init in initializers.filter_map(|f| f.init.as_ref()) {
+        visit_expr(init, &mut |x| match &x.kind {
+            ExprKind::Call { args, resolved: Some(callee), .. }
+            | ExprKind::MethodCall { args, resolved: Some(callee), .. }
+            | ExprKind::ThisCall { args, resolved: Some(callee) }
+            | ExprKind::New { args, ctor: Some(callee), .. } => {
+                non_ascii.params.extend((0..args.len()).map(|i| (*callee, i)));
+            }
+            _ => {}
+        });
+    }
     loop {
         let mut vars = Vec::new();
         let mut declared = Vec::new();
@@ -128,7 +156,10 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
                                 vars.push((m, target.clone()));
                             }
                         }
-                        ExprKind::Call { args, resolved: Some(callee), .. } => {
+                        ExprKind::Call { args, resolved: Some(callee), .. }
+                        | ExprKind::MethodCall { args, resolved: Some(callee), .. }
+                        | ExprKind::ThisCall { args, resolved: Some(callee) }
+                        | ExprKind::New { args, ctor: Some(callee), .. } => {
                             for (i, arg) in args.iter().enumerate() {
                                 if !non_ascii.ascii(class, m, arg) {
                                     params.push((*callee, i));

@@ -69,11 +69,13 @@ translates, compiles and matches Java's output.
 
 ## Current state
 
-A first end-to-end pipeline for a small subset: one class of static methods with `int`, `long`,
-`double`, `boolean` and `String` locals, arithmetic, `if`, `while`, `do`, `for`, `break`,
-`continue`, the conditional operator, overloading, `System.out.print`/`println`, `System.exit`,
-a few `Math` methods and `String.length`/`equals`, and `null` for `String`. Anything else is
-rejected with an error that names the construct and its position.
+A first end-to-end pipeline for a small subset: several classes with `int`, `long`, `double`,
+`boolean` and `String` locals, arithmetic, `if`, `while`, `do`, `for`, `break`, `continue`, the
+conditional operator, overloading, static and instance methods, fields with initializers, static
+fields, constructors (including `this(...)`), `new`, arrays, `System.out.print`/`println`,
+`System.exit`, a few `Math` methods and `String.length`/`equals`, `null` for `String`, and a user
+`toString` in `println` and string concatenation. Inheritance, interfaces, generics and
+object-typed fields are rejected with an error that names the construct and its position.
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
@@ -107,6 +109,12 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   becomes `&[T]` or `&mut [T]` when every call passes a distinct plain array, and a counting loop
   that only reads `a[i]` becomes `for x in a.iter().cloned()`. Arrays that are returned, copied,
   or given to `java.util.Arrays` stay shared for now.
+- Objects follow the same pattern (`analysis/objects.rs`, `analysis/owned.rs`). The faithful
+  form of an object is `Rc<RefCell<C>>`, because Java references are shared and mutable. A class
+  whose objects never change after construction is shared as `Rc<C>`. A class whose objects are
+  never shared (no class-typed field, parameter or return value, and each object is created by
+  `new` into a local that only calls or prints it) is a plain value: its methods take `&self` or
+  `&mut self`, and a call on it uses method syntax so that `p.set(p.x + 1)` borrows as Rust allows.
 
 Translation never runs the program; it only compiles it. Starting javac costs about half a
 second per file; building the translator needs `javac` (JDK 21 or newer) on PATH.

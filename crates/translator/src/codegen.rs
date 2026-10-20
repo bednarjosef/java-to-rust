@@ -21,10 +21,14 @@ use names::*;
 use null::is_null_test;
 
 mod arrays;
+mod objects;
+mod owned;
 
 use arrays::name_part;
+use objects::*;
 
 pub fn generate(class: &Class, facts: &Facts) -> String {
+    let live = live_types(class);
     let mut g = Gen {
         class,
         facts,
@@ -33,6 +37,8 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         borrowed_optional: HashSet::new(),
         int_receiver: false,
         double_receiver: false,
+        owned_self: false,
+        guarded: false,
         annotations: Vec::new(),
         fn_names: method_names(class),
         locals: HashMap::new(),
@@ -43,15 +49,35 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         ret: Type::Void,
         uses_runtime: false,
     };
+    for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
+        g.type_items(index);
+    }
+    g.statics();
     for i in 0..class.methods.len() {
-        if i > 0 {
-            g.out.push('\n');
+        if class.methods[i].is_static {
+            g.gap();
+            g.method(i);
         }
-        g.method(i);
+    }
+    let mut uses = Vec::new();
+    // Owned objects are plain values and immutable ones are shared as `Rc` alone; statics and
+    // mutable objects also need `RefCell`.
+    let refcell = class.types.iter().zip(&live).any(|(t, &l)| {
+        (l && !facts.immutable.contains(&t.name) && !facts.owned.contains(&t.name)) || !t.statics.is_empty()
+    });
+    let shared = class.types.iter().zip(&live).any(|(t, &l)| l && !facts.owned.contains(&t.name));
+    match (shared, refcell) {
+        (true, true) => uses.push("use std::cell::RefCell;\nuse std::rc::Rc;\n"),
+        (true, false) => uses.push("use std::rc::Rc;\n"),
+        (false, true) => uses.push("use std::cell::RefCell;\n"),
+        (false, false) => {}
+    }
+    if g.uses_runtime {
+        uses.push("use java_runtime as java;\n");
     }
     let mut header = format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name);
-    if g.uses_runtime {
-        header.push_str("use java_runtime as java;\n\n");
+    if !uses.is_empty() {
+        header.push_str(&(uses.join("\n") + "\n"));
     }
     header + &g.out
 }
@@ -87,6 +113,10 @@ struct Gen<'a> {
     /// bare literal then get their type written (see `annotation`).
     int_receiver: bool,
     double_receiver: bool,
+    /// Whether the code being written is a method of an owned class, where `this` is `self`.
+    owned_self: bool,
+    /// Whether the statement being emitted also borrows an object mutably (see `borrows_mut`).
+    guarded: bool,
     /// Placeholders for type annotations decided at the end of the method: (placeholder, type,
     /// annotation).
     annotations: Vec<(String, Type, String)>,
@@ -174,7 +204,15 @@ impl<'a> Gen<'a> {
             .filter(|&i| self.facts.borrowed_optional_params.contains(&(index, i)))
             .map(|i| m.params[i].name.clone())
             .collect();
-        let params: Vec<String> = m
+        let name = &self.class.types[m.class].name;
+        self.owned_self = !m.is_static && !m.is_ctor && self.facts.owned.contains(name);
+        let mut params = Vec::new();
+        if self.owned_self {
+            params.push(if self.facts.mutating.contains(&index) { "&mut self" } else { "&self" }.to_string());
+        } else if !m.is_static && !m.is_ctor {
+            params.push(format!("this: {}", self.this_type(name)));
+        }
+        let typed: Vec<String> = m
             .params
             .iter()
             .enumerate()
@@ -194,7 +232,10 @@ impl<'a> Gen<'a> {
                 format!("{mutable}{}: {ty}", self.local(&p.name))
             })
             .collect();
-        let ret = if m.ret == Type::Void {
+        params.extend(typed);
+        let ret = if m.is_ctor {
+            format!(" -> {}", self.object_type(name))
+        } else if m.ret == Type::Void {
             String::new()
         } else if self.optional_return() {
             " -> Option<String>".to_string()
@@ -203,7 +244,11 @@ impl<'a> Gen<'a> {
         };
         self.line(&format!("fn {}({}){ret} {{", self.fn_names[index], params.join(", ")));
         self.indent += 1;
-        self.stmts(&m.body, true);
+        if m.is_ctor {
+            self.constructor(m);
+        } else {
+            self.stmts(&m.body, true);
+        }
         self.indent -= 1;
         self.line("}");
         self.resolve_annotations(start);

@@ -104,6 +104,10 @@ impl<'a> Gen<'a> {
             if parts.len() == 1 {
                 match parts.pop().expect("one part") {
                     Part::Lit(text) => return format!("{name} += {}", rust_string(&text)),
+                    // An object's text is already a `String`.
+                    Part::Arg(code) if matches!(value.ty, Type::Class(_)) => {
+                        return format!("{name} += &{}", code.text);
+                    }
                     Part::Arg(code) => {
                         let ty = if value.ty == Type::Double { Type::Void } else { value.ty };
                         return format!("{name} += &{}.to_string()", self.recv(&code, ty));
@@ -175,9 +179,16 @@ impl<'a> Gen<'a> {
                 let rust = self.local(name);
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
-                    Type::String | Type::Array(_) => Code::atom(format!("{rust}.clone()")),
+                    ty if needs_clone(ty) => Code::atom(format!("{rust}.clone()")),
                     _ => Code::atom(rust),
                 }
+            }
+            ExprKind::This => Code::atom("this.clone()"),
+            ExprKind::Field { object, name } => self.field_read(object, name, e.ty),
+            ExprKind::Static { class, name } => self.static_read(*class, name, e.ty),
+            ExprKind::New { args, ctor, .. } => {
+                let ctor = ctor.expect("constructors are resolved by the checker");
+                self.new_object(ctor, args)
             }
             ExprKind::Unary(op, operand) => {
                 let code = self.value(operand, e.ty);
@@ -225,6 +236,18 @@ impl<'a> Gen<'a> {
             ExprKind::IncDec { target: Place::Index(array, index), increment, prefix } => {
                 Code::atom(self.index_step(array, index, e.ty, *increment, *prefix, e.id))
             }
+            ExprKind::Assign { op, target: target @ (Place::Field { .. } | Place::Static { .. }), value } => {
+                let how = match op {
+                    None => Update::Assign(value),
+                    Some(op) => Update::Compound(*op, value),
+                };
+                self.update(target, e.ty, how, e.id, false)
+            }
+            ExprKind::IncDec {
+                target: target @ (Place::Field { .. } | Place::Static { .. }),
+                increment,
+                prefix,
+            } => self.update(target, e.ty, Update::Step(*increment), e.id, *prefix),
             ExprKind::Index(array, index) => self.index(e.id, array, index),
             ExprKind::Length(array) => self.length(array),
             ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
@@ -246,27 +269,19 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Call { args, resolved, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
-                let params = &self.class.methods[index].params;
-                let args: Vec<String> = args
-                    .iter()
-                    .zip(params)
-                    .enumerate()
-                    .map(|(i, (a, p))| {
-                        if self.facts.borrowed_params.contains(&(index, i)) {
-                            self.str_ref(a)
-                        } else if self.facts.borrowed_optional_params.contains(&(index, i)) {
-                            self.option_arg(a)
-                        } else if self.optional_var(index, p.ty, &p.name) {
-                            self.optional(a).text
-                        } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {
-                            self.borrowed_arg(a, written)
-                        } else {
-                            self.value(a, p.ty).text
-                        }
-                    })
-                    .collect();
-                Code::atom(format!("{}({})", self.fn_names[index], args.join(", ")))
+                let args = self.call_args(index, args).join(", ");
+                Code::atom(format!("{}({args})", self.fn_names[index]))
             }
+            ExprKind::MethodCall { receiver, args, resolved, .. } => {
+                let index = resolved.expect("calls are resolved by the checker");
+                if self.class.methods[index].is_static {
+                    let args = self.call_args(index, args).join(", ");
+                    Code::atom(format!("{}({args})", self.fn_names[index]))
+                } else {
+                    self.method_call(receiver, index, args)
+                }
+            }
+            ExprKind::ThisCall { .. } => unreachable!("lowering keeps `this(...)` first in a constructor"),
             ExprKind::Builtin(builtin, args) => self.builtin(*builtin, args, e.ty, e.id),
         }
     }

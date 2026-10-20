@@ -139,9 +139,13 @@ impl Uses {
                 Place::Var(name) => {
                     self.escaped.insert(name.clone());
                 }
+                Place::Field { .. } | Place::Static { .. } => {}
             },
             ExprKind::IncDec { target: Place::Index(array, _), .. } => self.element_write(array),
-            ExprKind::Call { args, resolved: Some(callee), .. } => {
+            ExprKind::Call { args, resolved: Some(callee), .. }
+            | ExprKind::MethodCall { args, resolved: Some(callee), .. }
+            | ExprKind::New { args, ctor: Some(callee), .. }
+            | ExprKind::ThisCall { args, resolved: Some(callee) } => {
                 let names = args
                     .iter()
                     .map(|a| match &a.kind {

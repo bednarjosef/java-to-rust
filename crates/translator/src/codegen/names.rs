@@ -46,9 +46,10 @@ pub(super) fn unique(base: String, used: &mut HashSet<String>) -> String {
 /// Rust names for the class's methods. Overloads get their parameter types appended, since Rust
 /// has no overloading: `print(int)` and `print(double)` become `print_i32` and `print_f64`.
 pub(super) fn method_names(class: &Class) -> Vec<String> {
-    let mut used = HashSet::new();
-    if class.methods.iter().any(|m| m.is_main) {
-        used.insert("main".to_string());
+    // Each class has its own `impl`, so names only need to be unique within their class.
+    let mut used = vec![HashSet::new(); class.types.len()];
+    for m in class.methods.iter().filter(|m| m.is_main) {
+        used[m.class].insert("main".to_string());
     }
     class
         .methods
@@ -57,14 +58,15 @@ pub(super) fn method_names(class: &Class) -> Vec<String> {
             if m.is_main {
                 return "main".to_string();
             }
-            let mut base = snake_case(&m.name);
-            let overloaded = class.methods.iter().filter(|o| o.name == m.name).count() > 1;
-            if overloaded {
+            // Constructors are named inside their class's `impl`, so they need not be unique.
+            let overloads = class.methods.iter().filter(|o| o.name == m.name && o.class == m.class).count();
+            let mut base = if m.is_ctor { "new".to_string() } else { snake_case(&m.name) };
+            if overloads > 1 {
                 for p in &m.params {
                     base = format!("{base}_{}", name_part(p.ty));
                 }
             }
-            unique(base, &mut used)
+            if m.is_ctor { base } else { unique(base, &mut used[m.class]) }
         })
         .collect()
 }

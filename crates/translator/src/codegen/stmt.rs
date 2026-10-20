@@ -29,8 +29,10 @@ impl<'a> Gen<'a> {
             }
             match stmt {
                 Stmt::Return(Some(value), _) if tail && rest.is_empty() => {
+                    let outer = std::mem::replace(&mut self.guarded, stmt_borrows_mut(stmt));
                     let code = self.returned(value);
                     self.line(&code.text);
+                    self.guarded = outer;
                 }
                 _ => self.stmt(stmt, rest),
             }
@@ -53,9 +55,15 @@ impl<'a> Gen<'a> {
     /// One statement; `rest` holds the statements after it in the same block, where a local
     /// declared here is in scope.
     pub(super) fn stmt(&mut self, stmt: &'a Stmt, rest: &'a [Stmt]) {
+        let outer = std::mem::replace(&mut self.guarded, stmt_borrows_mut(stmt));
+        self.statement(stmt, rest);
+        self.guarded = outer;
+    }
+
+    pub(super) fn statement(&mut self, stmt: &'a Stmt, rest: &'a [Stmt]) {
         match stmt {
             Stmt::Local { ty, name, init, .. } => {
-                self.local_decl(*ty, name, init.as_ref(), assigns_any(rest, name));
+                self.local_decl(*ty, name, init.as_ref(), self.local_is_mut(*ty, name, rest));
             }
             Stmt::Expr(e) => self.effect(e),
             Stmt::ForEach { name, array, body, .. } => self.for_each(name, array, body),
@@ -208,7 +216,7 @@ impl<'a> Gen<'a> {
             match stmt {
                 Stmt::Local { ty, name, init: value, .. } => {
                     // The variable is in scope in the condition, the update and the body.
-                    let mutable = assigns_any(&init[i + 1..], name)
+                    let mutable = self.local_is_mut(*ty, name, &init[i + 1..])
                         || update.iter().any(|u| assigns(u, name))
                         || cond.is_some_and(|c| assigns(c, name))
                         || assigns_stmt(body, name);
