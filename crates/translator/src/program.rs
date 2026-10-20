@@ -7,6 +7,7 @@ mod reach;
 mod survey;
 
 pub use reach::{Reach, class_name};
+pub use survey::Survey;
 
 use crate::ast::{Error, Pos};
 use crate::{analysis, codegen, javac, lower};
@@ -67,16 +68,29 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
 }
 
 /// The survey of what the code reachable from the program's `main` uses that the translator does
-/// not support yet, as a text report (see `survey`).
-pub fn survey_program(program: &Program) -> Result<String, ProgramError> {
-    let tree = compile(program)?;
-    let trees: Vec<&Value> = tree["units"].as_array().into_iter().flatten().map(|u| &u["tree"]).collect();
+/// not support yet, as a text report and as JSON (see `survey`).
+pub fn survey_program(program: &Program) -> Result<Survey, ProgramError> {
+    let files = source_files(program)?;
+    let tree = javac_tree(program, &files)?;
+    let units: Vec<&Value> = tree["units"].as_array().into_iter().flatten().collect();
+    let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     let reach = reach::reach(&trees, &program.main).map_err(fail)?;
-    Ok(survey::survey(&trees, &reach, &program.main))
+    Ok(survey::survey(&units, &reach, program, &files))
 }
 
 /// javac's trees of the program, with those of the library classes it uses.
 fn compile(program: &Program) -> Result<Value, ProgramError> {
+    javac_tree(program, &source_files(program)?)
+}
+
+fn javac_tree(program: &Program, files: &[PathBuf]) -> Result<Value, ProgramError> {
+    let sourcepath: Vec<PathBuf> = program.sources.iter().chain(&program.libraries).cloned().collect();
+    javac::program_tree(files, &sourcepath).map_err(|(file, error)| ProgramError { file, error })
+}
+
+/// The program's own files: the given files and every `.java` file under the source roots, sorted
+/// and without duplicates.
+fn source_files(program: &Program) -> Result<Vec<PathBuf>, ProgramError> {
     let mut files = program.files.clone();
     for root in &program.sources {
         java_files(root, &mut files).map_err(|e| fail(format!("{}: {e}", root.display())))?;
@@ -86,8 +100,7 @@ fn compile(program: &Program) -> Result<Value, ProgramError> {
     if files.is_empty() {
         return Err(fail("no Java source files given".into()));
     }
-    let sourcepath: Vec<PathBuf> = program.sources.iter().chain(&program.libraries).cloned().collect();
-    javac::program_tree(&files, &sourcepath).map_err(|(file, error)| ProgramError { file, error })
+    Ok(files)
 }
 
 /// Adds every `.java` file under `dir`, in a stable order.
