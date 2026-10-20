@@ -736,3 +736,144 @@ fn floats_are_f32_and_print_like_java() {
         ],
     );
 }
+
+/// Translates a multi-file program of `corpus/projects/`.
+fn translate_project(project: &str, main: &str) -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/projects").join(project);
+    let program =
+        java_to_rust::Program { main: main.into(), sources: vec![root.join("src")], ..Default::default() };
+    java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"))
+}
+
+#[test]
+fn packages_become_nested_modules() {
+    let rust = translate_project("imports", "com.example.app.Main");
+    assert_contains(
+        &rust,
+        &[
+            "fn main() {\n    crate::com::example::app::main();\n}",
+            "mod com {\n    pub(crate) mod example {\n        pub(crate) mod app {",
+            "        pub(crate) mod util {\n            use std::cell::RefCell;\n\n            use java_runtime as java;",
+            // Imported, statically imported and fully qualified names are paths from the crate root.
+            "crate::com::example::util::Counter::new(\"clicks\")",
+            "crate::com::example::util::square(7)",
+            "crate::com::example::util::NUMBERS_LIMIT.with_borrow(|v| *v)",
+            "crate::com::example::util::cube(3)",
+            // Names in the same package are not.
+            "line(\"total\", clicks.total())",
+            "x * square(x)",
+            "pub(crate) struct Counter {\n                pub(crate) name: String,",
+        ],
+    );
+}
+
+#[test]
+fn unreachable_code_is_not_translated() {
+    let rust = translate_project("pruning", "app.Main");
+    assert_contains(&rust, &["mod app {", "mod lib {", "fn greet(", "GREETER_MADE"]);
+    // The package `extra`, the unused constructor, method and fields, and the second `main`.
+    assert_lacks(&rust, &["extra", "Unused", "history", "BANNER", "cache", "fn new_", "crate::lib::main"]);
+    assert_eq!(rust.matches("fn main()").count(), 2, "the root `main` and `app::main` only");
+}
+
+#[test]
+fn classes_with_one_name_in_two_packages() {
+    let rust = translate_project("statics", "com.shop.Main");
+    assert_contains(
+        &rust,
+        &[
+            "crate::com::shop::model::Item::new_string_i32(\"apple\", 3)",
+            "crate::com::shop::legacy::Item::new(7)",
+            "crate::com::shop::model::Registry_Entry::new(4)",
+            "crate::com::shop::model::REGISTRY_CREATED.with_borrow(|v| *v)",
+            "pub(crate) static COUNTER_HITS: RefCell<i32>",
+        ],
+    );
+}
+
+/// Writes Java files into a fresh directory under the test's temporary directory.
+fn write_sources(dir: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, java) in files {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, java).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn listed_files_without_packages_stay_flat() {
+    let dir = write_sources(
+        "listed-files",
+        &[
+            (
+                "Main.java",
+                "class Main { public static void main(String[] a) { System.out.println(Util.twice(4)); } }",
+            ),
+            (
+                "Util.java",
+                "class Util { static int twice(int x) { return 2 * x; } static int unused() { return 0; } }",
+            ),
+        ],
+    );
+    let files = vec![dir.join("Main.java"), dir.join("Util.java")];
+    let program = java_to_rust::Program { main: "Main".into(), files, ..Default::default() };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["fn twice(x: i32) -> i32 {", "fn main() {\n    println!(\"{}\", twice(4));"]);
+    assert_lacks(&rust, &["mod ", "pub(crate)", "unused"]);
+}
+
+#[test]
+fn library_roots_are_read_only_where_used() {
+    let dir = write_sources(
+        "library-roots",
+        &[
+            (
+                "app/main/Main.java",
+                "package main;\nimport lib.Text;\npublic class Main {\n    public static void main(String[] a) { System.out.println(Text.shout(\"hi\")); }\n}\n",
+            ),
+            (
+                "lib/lib/Text.java",
+                "package lib;\npublic class Text {\n    public static String shout(String s) { return s + \"!\"; }\n    public static Object unused() { return new Object(); }\n}\n",
+            ),
+            // Never used, so javac never reads it: not even its syntax error is reported.
+            ("lib/lib/Broken.java", "package lib;\npublic class Broken {\n"),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "main.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &["crate::lib::shout(\"hi\")", "mod lib {", "pub(crate) fn shout(s: &str) -> String"],
+    );
+    assert_lacks(&rust, &["unused", "Broken"]);
+}
+
+#[test]
+fn program_errors_name_their_file() {
+    let dir = write_sources(
+        "program-errors",
+        &[
+            (
+                "p/Main.java",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        Other.run();\n    }\n}\n",
+            ),
+            (
+                "p/Other.java",
+                "package p;\nclass Other {\n    static void run() {\n        Object o = null;\n    }\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    let error = java_to_rust::translate_program(&program).expect_err("Object is not supported").to_string();
+    assert!(error.ends_with("Other.java:4:9: type `java.lang.Object` not supported yet"), "{error}");
+}
