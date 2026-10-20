@@ -77,6 +77,9 @@ impl<'a> Gen<'a> {
     ) -> String {
         let name = self.local(target);
         let Some(op) = op else {
+            if let Some(text) = self.self_update(&name, target, ty, value) {
+                return text;
+            }
             let value = if self.optional_var(self.method, ty, target) {
                 self.optional(value)
             } else {
@@ -303,6 +306,9 @@ impl<'a> Gen<'a> {
                 if self.faithful_box(l.ty) && r.ty == l.ty =>
             {
                 self.boxed_identity(*op, l, r)
+            }
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if bool_test(l, r).is_some() => {
+                self.bool_comparison(*op, l, r)
             }
             ExprKind::Binary(op, l, r) => {
                 let (l, r) = (self.operand(l), self.operand(r));

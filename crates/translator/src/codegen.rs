@@ -16,6 +16,7 @@ mod code_point;
 mod enums;
 mod expr;
 mod files;
+mod idiomatic;
 mod math;
 mod names;
 mod null;
@@ -30,6 +31,7 @@ mod unsigned;
 
 use code::*;
 use expr::Operand;
+use idiomatic::bool_test;
 use names::*;
 use null::is_null_test;
 use primitives::*;
