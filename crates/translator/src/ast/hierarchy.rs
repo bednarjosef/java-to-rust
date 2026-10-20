@@ -73,7 +73,10 @@ impl Hierarchy {
             interfaces: types.iter().map(|t| t.implements.clone()).collect(),
             concrete: types
                 .iter()
-                .map(|t| t.kind == TypeKind::Class && !t.is_abstract || t.kind == TypeKind::Enum)
+                .map(|t| {
+                    t.kind == TypeKind::Class && !t.is_abstract
+                        || matches!(t.kind, TypeKind::Enum | TypeKind::Runtime)
+                })
                 .collect(),
             fields: types.iter().map(|t| t.fields.iter().map(|f| f.name.clone()).collect()).collect(),
             method_class: methods.iter().map(|m| m.class).collect(),
@@ -219,6 +222,15 @@ impl Class {
     /// The index of the type with this qualified name.
     pub fn type_index(&self, name: &str) -> Option<usize> {
         self.types.iter().position(|t| t.name == name)
+    }
+
+    /// The type whose values are of type `ty`: a class or enum of the program, or a runtime class
+    /// beside `Object` (a primitive stands for its box).
+    pub fn type_of(&self, ty: Type) -> Option<usize> {
+        match ty {
+            Type::Class(name) | Type::Enum(name) => self.type_index(name),
+            _ => self.type_index(runtime_name(ty)?),
+        }
     }
 
     /// The type that a class type names.

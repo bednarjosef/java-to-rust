@@ -26,6 +26,12 @@ impl<'a> Gen<'a> {
         {
             return false;
         }
+        // A cast of a narrowed variable is not null either.
+        if let ExprKind::Cast(_, value) = &e.kind
+            && nullable_type(e.ty)
+        {
+            return self.nullable(value);
+        }
         maybe_null(self.facts, self.method, e)
     }
 

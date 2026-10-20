@@ -141,8 +141,10 @@ impl<'a> Gen<'a> {
             {
                 return format!("{name} += {}", self.str_ref(value));
             }
-            if matches!(value.ty, Type::Class(_)) && self.enum_of(value).is_none() {
-                let index = self.to_string_index(value);
+            if matches!(value.ty, Type::Class(_))
+                && self.enum_of(value).is_none()
+                && let Some(index) = self.to_string_index(value)
+            {
                 return format!("{name} += &{}", self.method_call(value, index, &[]).text);
             }
             let mut parts = Vec::new();
@@ -342,13 +344,14 @@ impl<'a> Gen<'a> {
             ExprKind::Length(array) => self.length(array),
             ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
-            ExprKind::Cast(to @ Type::Class(_), value)
-                if matches!(value.ty, Type::Class(_) | Type::Enum(_)) =>
+            // An upcast or a downcast between the program's types, or a string, a box or a
+            // primitive becoming an `Object`.
+            ExprKind::Cast(to @ Type::Class(_), value) => self.class_cast(*to, value),
+            // A downcast from an interface to an enum that implements it, or from `Object` to a
+            // string or a box.
+            ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_)), value)
+                if matches!(value.ty, Type::Class(_)) =>
             {
-                self.class_cast(*to, value)
-            }
-            // A downcast from an interface to an enum that implements it.
-            ExprKind::Cast(to @ Type::Enum(_), value) if matches!(value.ty, Type::Class(_)) => {
                 self.class_cast(*to, value)
             }
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
@@ -384,6 +387,9 @@ impl<'a> Gen<'a> {
                     self.enum_call(t, receiver, index, args)
                 } else {
                     let target = self.dispatch(receiver, index, *is_super);
+                    if self.is_object_method(target) {
+                        return self.identity_call(receiver, target, args);
+                    }
                     self.method_call(receiver, target, args)
                 }
             }
@@ -503,6 +509,7 @@ impl<'a> Gen<'a> {
                 let mac = self.runtime(if builtin == Builtin::Println { "println!" } else { "print!" });
                 self.format(&mac, parts)
             }
+            Builtin::ObjectText => self.object_to_string(&args[0]),
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty)
             }

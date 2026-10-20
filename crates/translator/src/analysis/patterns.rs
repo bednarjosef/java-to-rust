@@ -14,6 +14,7 @@
 //! in code that does not declare a `name` of its own is a read of the pattern's variable.
 
 use crate::ast::*;
+use std::collections::HashSet;
 
 pub(super) fn check(class: &Class) -> Result<(), Error> {
     for m in &class.methods {
@@ -76,6 +77,94 @@ pub(super) fn check_enum_casts(class: &Class, facts: &super::Facts) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Rejects what the `Object` enum cannot hold or compare: an array as an `Object`, and `==` or
+/// `!=` between two values of `Object` that may both be strings or boxes, whose identity Java
+/// compares and the translation does not keep (a string or a box in an `Object` is a plain value).
+pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result<(), Error> {
+    let Some(object) = class.types.iter().position(|d| d.kind == TypeKind::Interface && d.name == OBJECT)
+    else {
+        return Ok(());
+    };
+    let holds_values = super::hierarchy::variants(class, facts, object)
+        .into_iter()
+        .any(|c| class.types[c].kind == TypeKind::Runtime);
+    let may_be_value = |e: &Expr| match &e.kind {
+        ExprKind::Null => false,
+        ExprKind::Cast(Type::Class(name), inner) if *name == OBJECT => {
+            !matches!(inner.ty, Type::Class(_) | Type::Enum(_))
+        }
+        _ => matches!(e.ty, Type::Class(name) if name == OBJECT),
+    };
+    let mut shortcuts = HashSet::new();
+    for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(s, &mut |e| visit_expr(e, &mut |x| shortcuts.extend(shortcut(x))), &mut |_| {});
+        }
+    }
+    let mut found = None;
+    for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| match &x.kind {
+                        ExprKind::Cast(Type::Class(name), inner)
+                            if *name == OBJECT && matches!(inner.ty, Type::Array(_)) =>
+                        {
+                            found.get_or_insert((x.pos, "an array as an `Object` value"));
+                        }
+                        ExprKind::Binary(BinOp::Eq | BinOp::Ne, l, r)
+                            if holds_values
+                                && may_be_value(l)
+                                && may_be_value(r)
+                                && !shortcuts.contains(&x.id) =>
+                        {
+                            found.get_or_insert((
+                                x.pos,
+                                "`==` on `Object` values that may be strings or boxes",
+                            ));
+                        }
+                        _ => {}
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    match found {
+        Some((pos, what)) => Err(Error { pos, message: format!("{what} not supported yet") }),
+        None => Ok(()),
+    }
+}
+
+/// The `a == b` of `a == b || .. a.equals(b) ..`, the shortcut before an `equals` that `Objects.equals`
+/// takes: whether the identities compare equal or not, the result is what `equals` says when the
+/// values are strings or boxes.
+fn shortcut(e: &Expr) -> Option<ExprId> {
+    let ExprKind::Binary(BinOp::Or, l, r) = &e.kind else { return None };
+    let ExprKind::Binary(BinOp::Eq, a, b) = &l.kind else { return None };
+    let (ExprKind::Var(a), ExprKind::Var(b)) = (&a.kind, &b.kind) else { return None };
+    let mut equals = false;
+    visit_expr(r, &mut |x| {
+        if let ExprKind::MethodCall { receiver, name, args, .. } = &x.kind
+            && name == "equals"
+            && let (ExprKind::Var(x), [arg]) = (&receiver.kind, &args[..])
+            && let ExprKind::Var(y) = &peel(arg).kind
+        {
+            equals |= (x == a && y == b) || (x == b && y == a);
+        }
+    });
+    equals.then_some(l.id)
+}
+
+/// `e` without the conversions to `Object` that lowering adds.
+fn peel(e: &Expr) -> &Expr {
+    match &e.kind {
+        ExprKind::Cast(Type::Class(name), inner) if *name == OBJECT => peel(inner),
+        _ => e,
+    }
 }
 
 fn unsupported(pos: Pos) -> Error {

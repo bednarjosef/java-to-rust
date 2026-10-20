@@ -524,13 +524,16 @@ fn objects_whose_to_string_can_throw_are_converted_before_printing() {
 }
 
 #[test]
-fn printing_an_object_without_to_string_is_rejected() {
-    let err = java_to_rust::translate(
-        "class P { int x; }
-        class A { public static void main(String[] a) { System.out.println(new P()); } }",
-    )
-    .expect_err("printing an object without toString must be rejected");
-    assert!(err.to_string().contains("printing an object without toString not supported yet"), "{err}");
+fn a_class_without_to_string_prints_its_name_and_hash() {
+    let rust = translate(
+        "class P { int x; void bump() { x++; } }
+        class A { public static void main(String[] a) { P p = new P(); p.bump(); System.out.println(p); } }",
+    );
+    // `Object.toString`: the binary name and the identity hash, from the struct's address.
+    assert_contains(
+        &rust,
+        &["java::println!(\"{}\", java::default_text(\"P\", java::address_hash(std::ptr::from_ref(&p))));"],
+    );
 }
 
 const SHAPES: &str = "
@@ -1291,12 +1294,20 @@ fn varargs_that_escape_are_shared_arrays() {
 }
 
 #[test]
-fn object_varargs_are_rejected() {
-    let err = java_to_rust::translate(
-        "class A { static void log(String f, Object... xs) {} public static void main(String[] a) {} }",
-    )
-    .expect_err("Object varargs must be rejected");
-    assert!(err.to_string().contains("Object not supported yet"), "{err}");
+fn object_varargs_are_a_slice_of_the_object_enum() {
+    let rust = translate(
+        "class A {
+            static void log(String f, Object... xs) { System.out.println(f + xs.length + xs[1]); }
+            public static void main(String[] a) { log(\"x\", 1, \"two\"); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn log(f: &str, xs: &[Object]) {",
+            "log(\"x\", &[Object::Integer(1), Object::String(String::from(\"two\"))]);",
+        ],
+    );
 }
 
 #[test]
@@ -1455,13 +1466,13 @@ fn program_errors_name_their_file() {
             ),
             (
                 "p/Other.java",
-                "package p;\nclass Other {\n    static void run() {\n        Object o = null;\n    }\n}\n",
+                "package p;\nclass Other {\n    static void run() {\n        Thread t = null;\n    }\n}\n",
             ),
         ],
     );
     let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
-    let error = java_to_rust::translate_program(&program).expect_err("Object is not supported").to_string();
-    assert!(error.ends_with("Other.java:4:9: Object not supported yet"), "{error}");
+    let error = java_to_rust::translate_program(&program).expect_err("Thread is not supported").to_string();
+    assert!(error.ends_with("Other.java:4:9: type `java.lang.Thread` not supported yet"), "{error}");
 }
 
 #[test]
@@ -1563,7 +1574,7 @@ fn system_natives_go_through_the_runtime() {
             "java::nano_time()",
             "java::current_time_millis()",
             "java::eprintln!(\"t {t}{}\", java::line_separator());",
-            "java::identity_hash(&x) == java::identity_hash(&x)",
+            "java::address_hash(Rc::as_ptr(&x)) == java::address_hash(Rc::as_ptr(&x))",
             "java::write_byte(65);",
             "java::flush();",
             "java::available_processors()",
@@ -2718,7 +2729,8 @@ const PATTERNS: &str = "
 #[test]
 fn instanceof_is_a_match_on_the_enum() {
     let rust = translate(PATTERNS);
-    assert_contains(&rust, &["fn round(s: Shape) -> bool {\n    matches!(s, Shape::Circle(_))\n}"]);
+    // A test borrows its value.
+    assert_contains(&rust, &["fn round(s: &Shape) -> bool {\n    matches!(s, Shape::Circle(_))\n}"]);
 }
 
 #[test]
@@ -2790,4 +2802,83 @@ fn a_cast_of_a_value_that_may_be_null_to_an_enum_is_rejected() {
         err.to_string().contains("casting a value that may be null to an enum not supported yet"),
         "{err}"
     );
+}
+
+const OBJECTS: &str = "
+    class Key {
+        final int k;
+        Key(int k) { this.k = k; }
+        public boolean equals(Object o) { return o instanceof Key other && other.k == k; }
+        public int hashCode() { return k; }
+    }
+    class Plain {}
+    class M {
+        static String show(Object o) {
+            if (o instanceof String s) return s;
+            if (o instanceof Integer i) return \"int \" + i;
+            return \"other \" + o;
+        }
+        public static void main(String[] a) {
+            Object k = new Key(1);
+            Object s = \"text\";
+            Object n = 5;
+            Object p = new Plain();
+            System.out.println(k.equals(new Key(1)) + \" \" + k.hashCode() + \" \" + show(s) + show(n) + p);
+            int back = (Integer) n;
+            System.out.println(back + ((String) s).length());
+        }
+    }";
+
+#[test]
+fn object_values_are_an_enum() {
+    let rust = translate(OBJECTS);
+    // A variant per class whose objects become `Object`s, and one per runtime class.
+    assert_contains(
+        &rust,
+        &[
+            "enum Object {\n    Key(Rc<Key>),\n    Plain(Rc<Plain>),\n    String(String),\n    Integer(i32),\n}",
+            "let s = Object::String(String::from(\"text\"));",
+            "let n = Object::Integer(5);",
+            "let back = java::cast(n.as_integer(), \"java.lang.Integer\");",
+            "if let Some(s) = o.as_string() {",
+        ],
+    );
+}
+
+#[test]
+fn equals_takes_the_object_enum() {
+    let rust = translate(OBJECTS);
+    // A class's own `equals` and `hashCode` run for its variant; every other class compares and
+    // hashes its identity, and a string or a box its value.
+    assert_contains(
+        &rust,
+        &[
+            "fn equals(&self, o: &Object) -> bool {",
+            "fn equals(&self, other: &Object) -> bool {\n        match self {\n            Object::Key(o) => o.equals(other),\n            Object::Plain(o) => matches!(other, Object::Plain(b) if Rc::ptr_eq(o, b)),\n            Object::String(o) => matches!(other, Object::String(b) if o == b),",
+            "Object::Plain(o) => java::address_hash(Rc::as_ptr(o)),",
+            "Object::String(o) => java::string_hash(o),",
+            "Object::Plain(o) => f.write_str(&java::default_text(\"Plain\", java::address_hash(Rc::as_ptr(o)))),",
+        ],
+    );
+}
+
+#[test]
+fn identity_of_object_values_that_may_be_strings_is_rejected() {
+    let err = java_to_rust::translate(
+        "class M { public static void main(String[] x) { Object a = \"s\"; Object b = \"s\"; System.out.println(a == b); } }",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("`==` on `Object` values that may be strings or boxes not supported yet"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_array_as_an_object_is_rejected() {
+    let err = java_to_rust::translate(
+        "class M { public static void main(String[] x) { Object a = new int[2]; System.out.println(a); } }",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("an array as an `Object` value not supported yet"), "{err}");
 }

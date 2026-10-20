@@ -117,11 +117,10 @@ impl<'t> Lowering<'t> {
                 self.stream_native(node, receiver, args, Native::FileWriteBytes)?
             }
             ("java.io.PrintStream", name @ ("print" | "println")) if stream == Some("err") => {
-                if let Some(arg) = args.first() {
-                    if matches!(arg.ty, Type::Array(_)) {
-                        return unsupported(node, "printing an array to `System.err`");
-                    }
-                    self.check_text(node, arg.ty)?;
+                if let Some(arg) = args.first()
+                    && matches!(arg.ty, Type::Array(_))
+                {
+                    return unsupported(node, "printing an array to `System.err`");
                 }
                 Native::ErrPrint { newline: name == "println" }
             }

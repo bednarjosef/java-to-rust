@@ -7,6 +7,7 @@ mod code_point;
 mod enum_nulls;
 mod enums;
 mod hierarchy;
+mod object;
 mod objects;
 mod statics;
 mod strings;
@@ -41,12 +42,15 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         .filter(|n| !matches!(n.kind(), "EMPTY_STATEMENT" | "ANNOTATION_TYPE"))
         .collect();
     let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
-    let lowering = Lowering::declare(&decls)?;
+    let mut lowering = Lowering::declare(&decls)?;
+    lowering.plan_object(&decls);
     let mut types: Vec<TypeDecl> =
         (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
     let mut methods: Vec<Method> =
         (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
+    lowering.object_methods(&mut methods);
     lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
+    lowering.object_types(&mut types);
     let hierarchy = Hierarchy::new(&types, &methods);
     let class = Class { name: first.str("simpleName").to_string(), types, methods, hierarchy };
     enums::check_nulls(&class)?;
@@ -156,6 +160,8 @@ struct Lowering<'t> {
     reach: Option<&'t crate::program::Reach>,
     /// In a whole program, the class whose `main` is the entry point; in a file, every `main` is.
     entry: Option<usize>,
+    /// Where `Object` goes, in a program that uses it (see `object`).
+    object: Option<object::ObjectIndexes>,
 }
 
 impl<'t> Lowering<'t> {
@@ -273,6 +279,7 @@ impl<'t> Lowering<'t> {
                 Ok(Type::enum_type(&name[11..name.len() - 1]))
             }
             _ if name.ends_with("[]") => Ok(Type::array(self.ty(node, &name[..name.len() - 2])?)),
+            "java.lang.Object" if self.object.is_some() => Ok(Type::class(OBJECT)),
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
             "java.lang.Object" => unsupported(node, "Object"),
             _ => unsupported(node, &format!("type `{name}`")),
@@ -413,9 +420,6 @@ impl<'t> Lowering<'t> {
             kind if kind.ends_with("_ASSIGNMENT") => {
                 let op = binary_op(node, kind.trim_end_matches("_ASSIGNMENT"))?;
                 let value = self.expr(node.child("expression")?)?;
-                if op == BinOp::Add {
-                    self.check_text(node, value.ty)?;
-                }
                 ExprKind::Assign {
                     op: Some(op),
                     target: self.target(node.child("variable")?)?,
@@ -426,8 +430,18 @@ impl<'t> Lowering<'t> {
                 let ty = self.ty(node, node.java_type())?;
                 let value = self.expr(node.child("expression")?)?;
                 // A cast between the program's types, up, down or across: `Cast` converts as the
-                // implicit upcasts do, and checks a downcast.
-                ExprKind::Cast(ty, Box::new(value))
+                // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
+                // `Integer` and unboxes.
+                if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
+                    let boxed = self.synth(
+                        ExprKind::Cast(Type::boxed(ty), Box::new(value)),
+                        node.pos(),
+                        Type::boxed(ty),
+                    );
+                    ExprKind::Cast(ty, Box::new(boxed))
+                } else {
+                    ExprKind::Cast(ty, Box::new(value))
+                }
             }
             "CONDITIONAL_EXPRESSION" => {
                 let ty = self.ty(node, node.java_type())?;
@@ -465,10 +479,6 @@ impl<'t> Lowering<'t> {
                 if left.ty == Type::String && right.ty == Type::String && matches!(op, BinOp::Eq | BinOp::Ne)
                 {
                     return error(node.pos(), "== on strings compares references; not supported yet");
-                }
-                if op == BinOp::Add && (left.ty == Type::String || right.ty == Type::String) {
-                    self.check_text(node, left.ty)?;
-                    self.check_text(node, right.ty)?;
                 }
                 let (left, right) = if matches!(op, BinOp::Eq | BinOp::Ne) {
                     self.convert_operands(left, right)
@@ -537,6 +547,16 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ThisCall { args, resolved });
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        if symbol.owner == "java.lang.Object" && self.object.is_some() {
+            return self.object_call(node, &symbol, receiver, args);
+        }
+        if symbol.name == "equals"
+            && !symbol.is_static
+            && matches!(&args[..], [arg] if Self::is_object(arg.ty))
+            && runtime_type(symbol.owner).is_some()
+        {
+            return self.value_equals(node, receiver, args);
+        }
         if let Some(kind) = self.system_property_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
@@ -635,9 +655,6 @@ impl<'t> Lowering<'t> {
             }
             (owner, name) => return unsupported(node, &format!("method `{owner}.{name}`")),
         };
-        if let (Builtin::Println | Builtin::Print, Some(arg)) = (&builtin, args.first()) {
-            self.check_text(node, arg.ty)?;
-        }
         Ok(ExprKind::Builtin(builtin, args))
     }
 }

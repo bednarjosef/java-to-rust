@@ -39,6 +39,12 @@ pub fn lower_program<'t>(
         packages.resize(lowering.types.len(), package);
     }
     lowering.entry = lowering.type_index(main);
+    let decls: Vec<Node> = units
+        .iter()
+        .flat_map(|u| Node(u).list("typeDecls"))
+        .filter(|d| reach.classes.contains(&crate::program::class_name(d.0)))
+        .collect();
+    lowering.plan_object(&decls);
     let mut types = Vec::new();
     for (t, package) in packages.into_iter().enumerate() {
         let mut decl = lowering.type_decl(t).map_err(|e| (Some(unit_of[t]), e))?;
@@ -48,7 +54,9 @@ pub fn lower_program<'t>(
     let mut methods: Vec<Method> = (0..lowering.methods.len())
         .map(|m| lowering.method(m).map_err(|e| (Some(unit_of[lowering.methods[m].owner]), e)))
         .collect::<Result<_, _>>()?;
+    lowering.object_methods(&mut methods);
     lowering.finish_types(&mut types, &mut methods).map_err(|(t, e)| (Some(unit_of[t]), e))?;
+    lowering.object_types(&mut types);
     let hierarchy = Hierarchy::new(&types, &methods);
     let class = Class { name: main.to_string(), types, methods, hierarchy };
     enums::check_nulls(&class).map_err(|e| (None, e))?;

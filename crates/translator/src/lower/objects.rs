@@ -42,6 +42,7 @@ impl<'t> Lowering<'t> {
             methods: Vec::new(),
             reach: None,
             entry: None,
+            object: None,
         }
     }
 
@@ -91,45 +92,6 @@ impl<'t> Lowering<'t> {
         self.methods.iter().position(|m| {
             self.types[m.owner].name == symbol.owner && m.name == symbol.name && m.sig == symbol.ty
         })
-    }
-
-    /// Whether every object of class type `class` has a `public String toString()` of the program,
-    /// declared by its class or inherited, the text that printing and concatenation use for it.
-    pub(super) fn has_to_string(&self, class: &str) -> bool {
-        let Some(t) = self.type_index(class) else { return false };
-        let declares = |c: usize, with_body: bool| {
-            self.methods.iter().any(|m| {
-                m.owner == c
-                    && m.name == "toString"
-                    && m.sig == "()java.lang.String"
-                    && (!with_body || m.node.get("body").is_some())
-            })
-        };
-        let inherits = |c: usize, with_body: bool| {
-            std::iter::successors(Some(c), |&a| self.superclass(a).ok().flatten())
-                .any(|a| declares(a, with_body))
-        };
-        let kind = |c: usize| self.types[c].node.kind();
-        let concrete = |c: usize| kind(c) == "CLASS" && !self.types[c].node.has_flag("ABSTRACT");
-        let mut objects = (0..self.types.len())
-            .filter(|&c| (concrete(c) || kind(c) == "ENUM") && self.is_subclass(c, t))
-            .peekable();
-        if objects.peek().is_none() {
-            return inherits(t, false);
-        }
-        // An enum's constant prints its name, or what the enum's `toString` makes it.
-        objects.all(|c| kind(c) == "ENUM" || inherits(c, true))
-    }
-
-    /// Rejects printing or concatenating an object whose class has no `toString`: Java would print
-    /// a hash code there, which is not supported.
-    pub(super) fn check_text(&self, node: Node<'t>, ty: Type) -> Result<(), Error> {
-        match ty {
-            Type::Class(name) if !self.has_to_string(name) => {
-                unsupported(node, "printing an object without toString")
-            }
-            _ => Ok(()),
-        }
     }
 
     /// The declaration of a class: its instance fields and static fields, in source order.

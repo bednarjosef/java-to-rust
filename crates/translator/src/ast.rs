@@ -217,6 +217,40 @@ pub enum TypeKind {
     Class,
     Interface,
     Enum,
+    /// A class of the runtime whose values can be `Object`s: `String` and the boxed classes. The
+    /// program never declares one: lowering adds them with `Object` (see `OBJECT`).
+    Runtime,
+}
+
+/// The name of the type of `java.lang.Object`'s values. Lowering adds it to a program that uses
+/// `Object`, as an interface that every other type implements, with an abstract `equals` and
+/// `hashCode` that the program's own override, and the `Runtime` types beside it.
+pub const OBJECT: &str = "Object";
+
+/// The runtime classes whose values an `Object` can hold, with the Java type of those values.
+pub fn runtime_values() -> [(&'static str, Type); 9] {
+    [
+        ("java.lang.String", Type::String),
+        ("java.lang.Integer", Type::boxed(Type::Int)),
+        ("java.lang.Long", Type::boxed(Type::Long)),
+        ("java.lang.Double", Type::boxed(Type::Double)),
+        ("java.lang.Float", Type::boxed(Type::Float)),
+        ("java.lang.Short", Type::boxed(Type::Short)),
+        ("java.lang.Byte", Type::boxed(Type::Byte)),
+        ("java.lang.Character", Type::boxed(Type::Char)),
+        ("java.lang.Boolean", Type::boxed(Type::Boolean)),
+    ]
+}
+
+/// The runtime class whose values are of type `ty`, a primitive standing for its box.
+pub fn runtime_name(ty: Type) -> Option<&'static str> {
+    let ty = if ty.is_numeric() || ty == Type::Boolean { Type::boxed(ty) } else { ty };
+    runtime_values().into_iter().find(|(_, t)| *t == ty).map(|(name, _)| name)
+}
+
+/// The Java type of the values of runtime class `name`.
+pub fn runtime_type(name: &str) -> Option<Type> {
+    runtime_values().into_iter().find(|(n, _)| *n == name).map(|(_, t)| t)
 }
 
 /// A class of the file: its fields. Methods and constructors are in `Class::methods`.
@@ -526,6 +560,9 @@ pub enum Builtin {
     CharForDigit,
     /// A method of the native layer: `System.arraycopy`, `Math.sin` and the like.
     Native(Native),
+    /// `x.toString()` of `Object` on an object (the receiver is the argument): the text that
+    /// printing it shows, its class's `toString` or `Object`'s `Name@hash`.
+    ObjectText,
     /// `e.ordinal()`; the receiver is the first argument.
     EnumOrdinal,
     /// `e.name()` and `e.toString()`, which the enum's default `toString` returns as `name()`.

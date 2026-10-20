@@ -117,7 +117,10 @@ pub fn variants(class: &Class, facts: &Facts, t: usize) -> Vec<usize> {
         .concretes(t)
         .into_iter()
         .filter(|&c| facts.flows[t].contains(&c))
-        .filter(|&c| class.types[c].kind == TypeKind::Enum || !facts.owned.contains(&class.types[c].name))
+        .filter(|&c| {
+            matches!(class.types[c].kind, TypeKind::Enum | TypeKind::Runtime)
+                || !facts.owned.contains(&class.types[c].name)
+        })
         .collect()
 }
 
@@ -134,7 +137,7 @@ pub fn flows(class: &Class, field_level: &HashSet<usize>) -> Vec<HashSet<usize>>
     let mut flows: Vec<HashSet<usize>> = vec![HashSet::new(); n];
     let mut edges: HashSet<(usize, usize)> = HashSet::new();
     for (t, decl) in class.types.iter().enumerate() {
-        if decl.kind == TypeKind::Enum {
+        if matches!(decl.kind, TypeKind::Enum | TypeKind::Runtime) {
             flows[t].insert(t);
         }
     }
@@ -149,10 +152,8 @@ pub fn flows(class: &Class, field_level: &HashSet<usize>) -> Vec<HashSet<usize>>
             }
         }
     }
-    let index = |ty: Type| match ty {
-        Type::Class(name) | Type::Enum(name) => class.type_index(name),
-        _ => None,
-    };
+    // A string, a box or a primitive is a value of its runtime class, beside `Object`.
+    let index = |ty: Type| class.type_of(ty);
     let mut note = |e: &Expr, at: usize| match &e.kind {
         ExprKind::New { class: c, .. } => _ = flows[*c].insert(*c),
         // A cast, and a pattern's binding, make the value a value of the target type.

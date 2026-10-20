@@ -262,12 +262,13 @@ impl Census {
                         scan.feature("local classes", node)
                     }
                     "TRY" | "THROW" => scan.feature("exceptions", node),
-                    // Tests and casts between the program's own classes translate; a pattern
-                    // binding its variable is part of the test.
+                    // Tests and casts between the program's own classes translate, and from
+                    // `Object` to them, to strings and to boxes; a pattern binding its variable is
+                    // part of the test.
                     "INSTANCE_OF" => {
                         let value = text(&node["expression"], "javaType");
                         let target = text(&node["type"], "javaType");
-                        if self.declared.contains(value) && self.declared.contains(target) {
+                        if self.narrows(value, target) {
                             if text(&node["pattern"], "kind") == "RECORD_PATTERN" {
                                 scan.feature("patterns", node);
                             }
@@ -278,8 +279,8 @@ impl Census {
                     }
                     "TYPE_CAST"
                         if !is_primitive(ty)
-                            && !(self.declared.contains(ty)
-                                && self.declared.contains(text(&node["expression"], "javaType"))) =>
+                            && ty != "java.lang.Object"
+                            && !self.narrows(text(&node["expression"], "javaType"), ty) =>
                     {
                         scan.feature("reference casts", node)
                     }
@@ -293,9 +294,6 @@ impl Census {
                 if ty.contains('<') && !ty.starts_with('<') {
                     scan.feature("generic types", node);
                 }
-                if ty == "java.lang.Object" {
-                    scan.feature("Object values", node);
-                }
                 if matches!(kind, "METHOD_INVOCATION" | "NEW_CLASS") {
                     let symbol = &node["symbol"];
                     let owner = text(symbol, "owner");
@@ -304,6 +302,14 @@ impl Census {
                     let object_init = owner == "java.lang.Object" && name == "<init>";
                     if object_init {
                         // Nothing to report.
+                    } else if owner == "java.lang.Object"
+                        && !matches!(name, "equals" | "hashCode" | "toString")
+                    {
+                        // `getClass`, `clone`, and the monitor's `wait` and `notify`.
+                        scan.feature(
+                            if name == "getClass" { "reflection" } else { "methods of Object" },
+                            node,
+                        );
                     } else if let Some(feature) = untranslated(owner) {
                         scan.feature(feature, node);
                     } else if RUNTIME_CLASSES.contains(&owner) {
@@ -323,6 +329,16 @@ impl Census {
             Value::Array(items) => items.iter().for_each(|item| self.body(item, scan)),
             _ => {}
         }
+    }
+
+    /// Whether a test or a cast of a value of type `value` against type `target` translates:
+    /// both are the program's own types, or the value is an `Object` and the target is one of
+    /// them, a string or a box.
+    fn narrows(&self, value: &str, target: &str) -> bool {
+        let boxes = ["Boolean", "Byte", "Character", "Double", "Float", "Integer", "Long", "Short", "String"];
+        let held = target.strip_prefix("java.lang.").is_some_and(|name| boxes.contains(&name));
+        (self.declared.contains(value) || value == "java.lang.Object") && self.declared.contains(target)
+            || value == "java.lang.Object" && held
     }
 
     /// The pieces of one part of the code.

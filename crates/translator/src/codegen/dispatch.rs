@@ -138,6 +138,9 @@ impl<'a> Gen<'a> {
     /// The binary name of type `t`, as the JVM shows it: `shapes.Outer$Inner`.
     fn binary_name(&self, t: usize) -> String {
         let decl = &self.class.types[t];
+        if decl.kind == TypeKind::Runtime {
+            return decl.name.clone();
+        }
         match decl.name.strip_prefix(&decl.package).and_then(|rest| rest.strip_prefix('.')) {
             Some(rest) if !decl.package.is_empty() => format!("{}.{}", decl.package, rest.replace('.', "$")),
             _ => decl.name.replace('.', "$"),
@@ -146,16 +149,17 @@ impl<'a> Gen<'a> {
 
     /// The type of the program that a class or enum type names.
     pub(super) fn type_of(&self, ty: Type) -> Option<usize> {
-        match ty {
-            Type::Class(name) | Type::Enum(name) => self.class.type_index(name),
-            _ => None,
-        }
+        self.class.type_of(ty)
     }
 
     /// The Java type of the values of type `t`.
     fn java_type(&self, t: usize) -> Type {
         let decl = &self.class.types[t];
-        if decl.kind == TypeKind::Enum { Type::enum_type(&decl.name) } else { Type::class(&decl.name) }
+        match decl.kind {
+            TypeKind::Enum => Type::enum_type(&decl.name),
+            TypeKind::Runtime => runtime_type(&decl.name).expect("a runtime class"),
+            _ => Type::class(&decl.name),
+        }
     }
 
     /// How the value of `value`, of a class or enum type, becomes a value of class or enum type
@@ -280,35 +284,54 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// Whether the variant of `c` holds a value of an enum that implements the type, which is
-    /// `Copy`, rather than a shared object.
+    /// Whether the variant of `c` holds a value rather than a shared object of the program: the
+    /// constant of an enum that implements the type, or a string or a box in an `Object`.
     pub(super) fn holds_value(&self, c: usize) -> bool {
-        self.class.types[c].kind == TypeKind::Enum
+        matches!(self.class.types[c].kind, TypeKind::Enum | TypeKind::Runtime)
+    }
+
+    /// The Java type of the values of runtime class `c`, if it is one.
+    pub(super) fn runtime_of(&self, c: usize) -> Option<Type> {
+        (self.class.types[c].kind == TypeKind::Runtime)
+            .then(|| runtime_type(&self.class.types[c].name))
+            .flatten()
     }
 
     /// The value that the variant of `c` bound to `o` holds, as a value of its own: `*o` for an
-    /// enum's constant, `o.clone()` for an object.
+    /// enum's constant or a plain box, `o.clone()` for an object or a string.
     fn held(&self, c: usize) -> &'static str {
-        if self.holds_value(c) { "*o" } else { "o.clone()" }
+        let copied = match self.runtime_of(c) {
+            Some(ty) => ty != Type::String && !self.faithful_box(ty),
+            None => self.holds_value(c),
+        };
+        if copied { "*o" } else { "o.clone()" }
     }
 
-    /// The class of the object, or the enum of the constant, that `e` is: the variant it becomes.
-    fn value_class(&self, e: &Expr) -> usize {
+    /// The class of the object, the enum of the constant, or the runtime class of the string or
+    /// box, that `e` is: the variant it becomes.
+    pub(super) fn value_class(&self, e: &Expr) -> usize {
         match e.ty {
-            Type::Enum(name) => self.class.type_index(name).expect("an enum of the program"),
-            _ => self.struct_class(e).expect("an object has a class type"),
+            Type::Class(_) => self.struct_class(e).expect("an object has a class type"),
+            _ => self.class.type_of(e.ty).expect("a value of a type of the program or of the runtime"),
         }
     }
 
     /// The variant's class of `e` (see `value_class`) and its handle or value.
     fn variant_value(&mut self, e: &'a Expr) -> (usize, String) {
         let c = self.value_class(e);
-        let text = if self.holds_value(c) { self.expr(e).text } else { self.object_handle(e) };
+        let text = match self.runtime_of(c) {
+            Some(ty) => self.value(e, ty).text,
+            None if self.holds_value(c) => self.expr(e).text,
+            None => self.object_handle(e),
+        };
         (c, text)
     }
 
     /// The Rust type of the object of concrete class `c` that its variant holds.
-    fn payload(&self, c: usize) -> String {
+    fn payload(&mut self, c: usize) -> String {
+        if let Some(ty) = self.runtime_of(c) {
+            return self.ty_name(ty);
+        }
         if self.holds_value(c) {
             return struct_name(&self.class.types[c].name);
         }
@@ -414,7 +437,11 @@ impl<'a> Gen<'a> {
             }
             None => {
                 let c = self.value_class(value);
-                let v = self.expr(value).text;
+                // An object's last use moves its handle in.
+                let v = match self.runtime_of(c) {
+                    Some(_) => self.variant_value(value).1,
+                    None => self.expr(value).text,
+                };
                 Code::atom(format!("{}({v})", self.variant(t, c)))
             }
         }
@@ -545,7 +572,8 @@ impl<'a> Gen<'a> {
         for &c in &variants {
             let variant = self.variant(t, c);
             let short = variant.rsplit("::").next().unwrap_or_default().to_string();
-            self.line(&format!("{short}({}),", self.payload(c)));
+            let payload = self.payload(c);
+            self.line(&format!("{short}({payload}),"));
         }
         self.indent -= 1;
         self.line("}");
@@ -721,20 +749,187 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.match_arms(t, &variants, &|g: &mut Self, c| match g.class.hierarchy.implementation(r, c) {
             Some(i) => g.arm_call(t, c, i, &args),
-            None => (g.enum_builtin_arm(r), true),
+            None => (g.builtin_arm(r, c), true),
         });
         self.indent -= 1;
         self.line("}");
     }
 
-    /// The arm for an enum's constant bound to `o` whose method `r` is one that every enum has,
-    /// which `lower` checks: `name()`, `toString()` or `ordinal()`.
-    fn enum_builtin_arm(&self, r: usize) -> String {
+    /// The arm for a value of class `c` bound to `o` that runs no method of the program for
+    /// method `r`: `Object`'s `equals` or `hashCode`, or for an enum's constant a method that
+    /// every enum has, which `lower` checks: `name()`, `toString()` or `ordinal()`.
+    fn builtin_arm(&mut self, r: usize, c: usize) -> String {
+        if self.is_object_method(r) {
+            return self.object_arm(r, c);
+        }
         match self.class.methods[r].name.as_str() {
             "ordinal" => "*o as i32".to_string(),
             "name" => "o.enum_name()".to_string(),
             _ => "o.to_string()".to_string(),
         }
+    }
+
+    /// The type of `Object`, when the program uses it.
+    fn object_index(&self) -> Option<usize> {
+        self.class.types.iter().position(|d| d.kind == TypeKind::Interface && d.name == OBJECT)
+    }
+
+    /// The index of `Object`'s method `name`, when the program uses `Object`.
+    fn object_method(&self, name: &str) -> Option<usize> {
+        let t = self.object_index()?;
+        self.class.methods.iter().position(|m| m.class == t && m.name == name)
+    }
+
+    /// Whether method `r` is `Object`'s own abstract `equals` or `hashCode`.
+    pub(super) fn is_object_method(&self, r: usize) -> bool {
+        self.object_index() == Some(self.class.methods[r].class)
+    }
+
+    /// `Object`'s `equals` or `hashCode` (method `r`) for a value of class `c` bound to `o`
+    /// whose class overrides neither: identity for an object, the value's own equality and hash
+    /// for an enum's constant, a string or a box.
+    fn object_arm(&mut self, r: usize, c: usize) -> String {
+        let m = &self.class.methods[r];
+        if m.name == "hashCode" {
+            return self.value_hash(c, "o");
+        }
+        let p = &m.params[0];
+        let other = self.local(&p.name);
+        let optional = self.optional_var(r, p.ty, &p.name);
+        let place = if self.facts.borrowed_objects.contains(&(r, 0)) { other } else { format!("&{other}") };
+        let same = match self.runtime_of(c).map(Type::unboxed) {
+            Some(Type::Double | Type::Float) => "o.to_bits() == b.to_bits()",
+            _ if self.holds_value(c) => "o == b",
+            _ => "Rc::ptr_eq(o, b)",
+        };
+        self.equals_test(c, &place, optional, same)
+    }
+
+    /// Whether `place`, a reference to an `Object` (an `Option` of one when `optional`), is a
+    /// value of class `c` that binds `b` and passes `same`.
+    fn equals_test(&mut self, c: usize, place: &str, optional: bool, same: &str) -> String {
+        let Some(object) = self.object_index() else { return "false".to_string() };
+        let Some(e) = self.enum_for(object) else {
+            // Every `Object` is an object of one class.
+            if self.holds_value(c)
+                || hierarchy::rep(self.class, self.facts, object) != hierarchy::Rep::Object(c)
+            {
+                return "false".to_string();
+            }
+            return if optional {
+                format!("{place}.as_ref().is_some_and(|b| {same})")
+            } else {
+                format!("{{ let b = {place}; {same} }}")
+            };
+        };
+        if !self.enum_variants(e).contains(&c) {
+            return "false".to_string();
+        }
+        let variant = self.variant(e, c);
+        let pattern = if optional { format!("Some({variant}(b))") } else { format!("{variant}(b)") };
+        format!("matches!({place}, {pattern} if {same})")
+    }
+
+    /// The address of the object of class `c` that `handle`, a `&Rc<..>`, refers to, which is
+    /// its identity: that of the class's struct, also where `this` is a reference to it.
+    pub(super) fn address(&self, c: usize, handle: &str) -> String {
+        if self.facts.owned.contains(&self.class.types[c].name) {
+            format!("std::ptr::from_ref({handle})")
+        } else if self.facts.immutable.contains(&self.class.types[c].name) {
+            format!("Rc::as_ptr({handle})")
+        } else {
+            // A method call borrows the handle itself; `&x.as_ptr()` would be a reference to the pointer.
+            format!("{}.as_ptr()", handle.strip_prefix('&').unwrap_or(handle))
+        }
+    }
+
+    /// The address of the object of class `c` that `receiver` is (see `address`).
+    pub(super) fn receiver_address(&mut self, receiver: &'a Expr, c: usize) -> String {
+        let receiver = self.peel(receiver);
+        match receiver.kind {
+            ExprKind::This if self.this_form == ThisForm::Local => "std::ptr::from_ref(&this)".to_string(),
+            ExprKind::This if self.this_form == ThisForm::SelfRef || self.is_plain(receiver) => {
+                format!("std::ptr::from_ref({})", self.this_name())
+            }
+            _ if self.nullable(receiver) => {
+                let handle =
+                    format!("{}({}.as_ref())", self.runtime("non_null"), self.object_place(receiver));
+                self.address(c, &handle)
+            }
+            _ => {
+                let handle = self.object_ref(receiver);
+                self.address(c, &handle)
+            }
+        }
+    }
+
+    /// A call of `Object`'s `equals` or `hashCode` (method `r`) on an object of a class that
+    /// overrides neither and that no enum represents: its identity.
+    pub(super) fn identity_call(&mut self, receiver: &'a Expr, r: usize, args: &'a [Expr]) -> Code {
+        let c = self.struct_class(receiver).expect("an object has a class type");
+        let address = self.receiver_address(receiver, c);
+        if self.class.methods[r].name == "hashCode" {
+            return Code::atom(format!("{}({address})", self.runtime("address_hash")));
+        }
+        let arg = self.call_args(r, args).remove(0);
+        let p = &self.class.methods[r].params[0];
+        let optional = self.optional_var(r, p.ty, &p.name);
+        let place = if self.facts.borrowed_objects.contains(&(r, 0)) { arg } else { format!("&{arg}") };
+        // The object is found before the argument is evaluated, as Java does.
+        let temp = self.temp("address");
+        let same = format!("std::ptr::addr_eq({temp}, {})", self.address(c, "b"));
+        let test = self.equals_test(c, &place, optional, &same);
+        Code::atom(format!("{{ let {temp} = {address}; {test} }}"))
+    }
+
+    /// `Object.toString()` on a value: the `Display` of its enum.
+    pub(super) fn object_to_string(&mut self, receiver: &'a Expr) -> Code {
+        let Some(t) = self.enum_of(receiver) else { return self.object_text(receiver) };
+        self.need(Need::Display(t));
+        Code::atom(format!("{}.to_string()", self.object(receiver)))
+    }
+
+    /// The hash code of a value of class `c`, reached through `handle`, a reference to what the
+    /// variant holds, whose class does not override `hashCode`.
+    fn value_hash(&mut self, c: usize, handle: &str) -> String {
+        let Some(ty) = self.runtime_of(c) else {
+            if self.holds_value(c) {
+                // An enum's constant hashes by its identity in Java, which nothing can depend on.
+                return format!("*{handle} as i32");
+            }
+            return format!("{}({})", self.runtime("address_hash"), self.address(c, handle));
+        };
+        let value = if self.faithful_box(ty) { format!("**{handle}") } else { format!("*{handle}") };
+        let function = match ty.unboxed() {
+            Type::String => return format!("{}({handle})", self.runtime("string_hash")),
+            Type::Int => return value,
+            Type::Long => "long_hash",
+            Type::Double => "double_hash",
+            Type::Float => "float_hash",
+            Type::Boolean => "bool_hash",
+            _ => return format!("{value} as i32"),
+        };
+        format!("{}({value})", self.runtime(function))
+    }
+
+    /// The text that `Object.toString` makes for an object of class `c` bound to `o` in an arm of
+    /// the enum of `t`: the class's binary name and its hash code in hexadecimal.
+    fn default_arm_text(&mut self, t: usize, c: usize) -> String {
+        let hash = match self.hash_index(c) {
+            Some(i) => self.arm_call(t, c, i, "").0,
+            None => self.value_hash(c, "o"),
+        };
+        self.default_text(c, hash)
+    }
+
+    /// The text that `Object.toString` makes for an object of class `c` whose hash code is `hash`.
+    pub(super) fn default_text(&mut self, c: usize, hash: String) -> String {
+        format!("{}({}, {hash})", self.runtime("default_text"), rust_string(&self.binary_name(c)))
+    }
+
+    /// The `hashCode` of the program that an object of class `c` runs, if it has one.
+    pub(super) fn hash_index(&self, c: usize) -> Option<usize> {
+        self.object_method("hashCode").and_then(|h| self.class.hierarchy.implementation(h, c))
     }
 
     /// The call that the dispatcher of the enum of `t` makes for an object of class `c` bound to
@@ -816,12 +1011,25 @@ impl<'a> Gen<'a> {
         self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
         self.indent += 1;
         self.match_arms(t, variants, &|g: &mut Self, c| {
+            match g.runtime_of(c) {
+                Some(Type::String) => return ("f.write_str(o)".to_string(), true),
+                Some(ty) => {
+                    let value = if g.faithful_box(ty) { "**o" } else { "*o" };
+                    let shown = g.shown(ty.unboxed(), value.to_string());
+                    return (format!("fmt::Display::fmt(&{shown}, f)"), true);
+                }
+                None => {}
+            }
             if g.holds_value(c) {
                 return ("fmt::Display::fmt(o, f)".to_string(), true);
             }
-            let i = hierarchy::to_string_impl(g.class, c)
-                .expect("lowering checks that printed classes have toString");
-            g.display_arm(t, c, i)
+            match hierarchy::to_string_impl(g.class, c) {
+                Some(i) => g.display_arm(t, c, i),
+                None => {
+                    let text = g.default_arm_text(t, c);
+                    (format!("f.write_str(&{text})"), true)
+                }
+            }
         });
         self.indent -= 1;
         self.line("}");
