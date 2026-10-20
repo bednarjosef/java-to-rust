@@ -8,6 +8,13 @@
 //! generated like the program's own, so a program's exception class extends them like any
 //! superclass. A standard class is abstract unless the program creates its objects, so that the
 //! enum of `Throwable` has a variant only for the classes whose objects exist.
+//!
+//! The runtime raises some of them itself (`RAISED`): a division by zero, an index out of
+//! bounds, a malformed number. Where a `catch` or a `finally` of the program might see such a
+//! failure (an operation that may fail and a `catch` of the class or one above it, or any
+//! `finally`, found in the syntax tree), the class is declared with its constructor from a
+//! message and counts as created; `Class::raised` holds the `new` expressions that build its
+//! objects, which the analysis decides are needed or not.
 
 use super::*;
 use std::collections::HashSet;
@@ -19,6 +26,26 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("ConcurrentModificationException", "java.util"),
     ("IOException", "java.io"),
     ("FileNotFoundException", "java.io"),
+];
+
+/// The standard classes that the runtime raises and a translation can catch, each with the
+/// kinds of javac's tree of the operations that may raise it (a method call by its owner and
+/// name: `owner#name`, or `owner#` for any method of the owner).
+const RAISED: &[(&str, &[&str])] = &[
+    ("java.lang.ArithmeticException", &["DIVIDE", "REMAINDER", "DIVIDE_ASSIGNMENT", "REMAINDER_ASSIGNMENT"]),
+    ("java.lang.ArrayIndexOutOfBoundsException", &["ARRAY_ACCESS"]),
+    ("java.lang.StringIndexOutOfBoundsException", &["java.lang.String#charAt", "java.lang.String#substring"]),
+    (
+        "java.lang.NumberFormatException",
+        &[
+            "java.lang.Integer#",
+            "java.lang.Long#",
+            "java.lang.Short#",
+            "java.lang.Byte#",
+            "java.lang.Double#",
+            "java.lang.Float#",
+        ],
+    ),
 ];
 
 /// The package of the standard class with this simple name.
@@ -113,6 +140,8 @@ pub(super) struct Standard {
     fields: HashSet<(String, String)>,
     /// The classes that the program creates objects of.
     pub instantiated: HashSet<String>,
+    /// The classes of `RAISED` that the runtime may raise where the program could catch them.
+    raised: HashSet<String>,
 }
 
 /// The uses of the standard classes found in a tree.
@@ -122,6 +151,11 @@ struct Uses {
     members: HashSet<(String, String, String)>,
     fields: HashSet<(String, String)>,
     instantiated: HashSet<String>,
+    /// The types of the `catch` clauses, and whether there is a `finally`.
+    catches: HashSet<String>,
+    finally: bool,
+    /// The operations that may fail, as `RAISED` names them.
+    operations: HashSet<String>,
 }
 
 impl Uses {
@@ -137,6 +171,25 @@ impl Uses {
                 }
                 let symbol = &v["symbol"];
                 let owner = text(symbol, "owner");
+                let kind = text(v, "kind");
+                match kind.as_str() {
+                    "TRY" => {
+                        self.finally |= !v["finallyBlock"].is_null();
+                        for catch in v["catches"].as_array().into_iter().flatten() {
+                            let ty = &catch["parameter"]["type"];
+                            for t in
+                                ty["typeAlternatives"].as_array().map_or(vec![ty], |a| a.iter().collect())
+                            {
+                                self.catches.insert(text(t, "javaType"));
+                            }
+                        }
+                    }
+                    "METHOD_INVOCATION" => {
+                        self.operations.insert(format!("{owner}#{}", text(symbol, "name")));
+                        self.operations.insert(format!("{owner}#"));
+                    }
+                    _ => _ = self.operations.insert(kind),
+                }
                 match symbol["kind"].as_str() {
                     Some("METHOD" | "CONSTRUCTOR") if is_standard(&owner) => {
                         self.members.insert((owner.clone(), text(symbol, "name"), text(symbol, "type")));
@@ -175,6 +228,18 @@ impl Standard {
         let mut uses = Uses::default();
         for tree in trees {
             uses.scan(tree);
+        }
+        // The classes the runtime raises where a `catch` or a `finally` might see them.
+        let mut raised = HashSet::new();
+        for (class, operations) in RAISED {
+            let caught =
+                uses.finally || uses.catches.iter().any(|c| is_standard(c) && standard_subclass(class, c));
+            if caught && operations.iter().any(|o| uses.operations.contains(*o)) {
+                uses.classes.insert(class.to_string());
+                uses.members.insert((class.to_string(), "<init>".into(), "(java.lang.String)void".into()));
+                uses.instantiated.insert(class.to_string());
+                raised.insert(class.to_string());
+            }
         }
         if uses.classes.is_empty() && uses.members.is_empty() {
             return Standard::default();
@@ -228,6 +293,7 @@ impl Standard {
             members: uses.members,
             fields: uses.fields,
             instantiated: uses.instantiated,
+            raised,
         }
     }
 
@@ -251,6 +317,32 @@ impl Standard {
 }
 
 impl<'t> Lowering<'t> {
+    /// `new C(message)` for each class `C` that the runtime may raise where the program could
+    /// catch it (see `Class::raised`).
+    pub(super) fn raised_objects(&self, types: &[TypeDecl], methods: &[Method]) -> Vec<Expr> {
+        let mut out = Vec::new();
+        for (t, decl) in types.iter().enumerate() {
+            if !self.standard.raised.contains(&decl.name) {
+                continue;
+            }
+            let ctor = methods.iter().position(|m| {
+                m.is_ctor && m.class == t && m.params.len() == 1 && m.params[0].ty == Type::String
+            });
+            let Some(ctor) = ctor else { continue };
+            let expr = |kind: ExprKind, ty: Type| {
+                let id = self.next_id.get();
+                self.next_id.set(id + 1);
+                Expr { kind, pos: Pos::default(), ty, id }
+            };
+            let message = expr(ExprKind::Var("raisedMessage".to_string()), Type::String);
+            out.push(expr(
+                ExprKind::New { class: t, args: vec![message], ctor: Some(ctor) },
+                Type::class(&decl.name),
+            ));
+        }
+        out
+    }
+
     /// Declares the standard classes that the program uses (see `Standard`).
     pub(super) fn declare_standard(&mut self) -> Result<(), Error> {
         // A standard class is an item of the crate's root named by its simple name, which a class

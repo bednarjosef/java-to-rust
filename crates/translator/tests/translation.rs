@@ -2976,16 +2976,60 @@ fn a_return_or_a_jump_through_a_finally_happens_after_it() {
 }
 
 #[test]
+fn a_runtime_failure_that_a_catch_sees_is_a_checked_call_that_throws() {
+    let rust = translate(
+        "class A {
+            static int ratio(int a, int b) { return a / b; }
+            public static void main(String[] args) {
+                int[] v = new int[2];
+                try {
+                    v[args.length + 2] = ratio(1, args.length);
+                } catch (ArithmeticException e) {
+                    System.out.println(\"zero: \" + e.getMessage());
+                } catch (ArrayIndexOutOfBoundsException e) {
+                    System.out.println(\"out\");
+                }
+                System.out.println(\"a b\".split(\" +\").length);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn ratio(a: i32, b: i32) -> Result<i32, Throwable> {",
+            "java::try_div(a, b)?",
+            "java::or_break!(java::try_put(&mut v, ",
+            "impl From<java::Exception> for Throwable {",
+            "\"java.lang.ArithmeticException\" => ",
+            "_ => java::uncaught(e),",
+        ],
+    );
+}
+
+#[test]
 fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
     let err = reject(
         "class A { public static void main(String[] a) {
-            int d = a.length;
-            try { System.out.println(10 / d); } catch (ArithmeticException e) { System.out.println(\"zero\"); }
+            try { int[] v = new int[a.length - 1]; System.out.println(v.length); }
+            catch (NegativeArraySizeException e) { System.out.println(\"negative\"); }
         } }",
     );
     assert!(
-        err.contains("catching the `ArithmeticException` that this division may throw not supported yet"),
+        err.contains(
+            "catching the `NegativeArraySizeException` that this array creation may throw not supported yet"
+        ),
+        "{err}"
+    );
+    let err = reject(
+        "class A { static String s(int n) { return n > 0 ? \"x\" : null; }
+            public static void main(String[] a) {
+                try { System.out.println(s(a.length).length()); }
+                catch (NullPointerException e) { System.out.println(\"null\"); }
+            } }",
+    );
+    assert!(
+        err.contains("catching the `NullPointerException` that this call may throw not supported yet"),
         "{err}"
     );
     let err = reject(

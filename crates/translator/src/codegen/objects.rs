@@ -99,6 +99,10 @@ pub(super) fn default_value(ty: Type) -> &'static str {
 /// functions.
 pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
     let mut live = instantiated(class);
+    // The runtime creates the exceptions it raises where the program sees them.
+    for &c in &facts.raised_classes {
+        live[c] = true;
+    }
     // A class that only ever types a null reference still needs its struct for the type.
     for t in mentioned(class) {
         live[t] |= class.hierarchy.is_concrete(t) && !class.hierarchy.has_subtypes(t);

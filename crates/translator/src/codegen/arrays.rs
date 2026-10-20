@@ -168,11 +168,12 @@ impl<'a> Gen<'a> {
                 return Code::atom(read_in_bounds(&a, &k, element(array.ty)));
             }
             let i = self.value(index, Type::Int).text;
-            return Code::atom(format!("{}({}, {i})", self.runtime("at"), self.slice_ref(&a)));
+            let slice = self.slice_ref(&a);
+            return self.may_fail(id, "at", "", &format!("{slice}, {i}"));
         }
         let handle = self.handle(array);
         let i = self.value(index, Type::Int).text;
-        Code::atom(format!("{}({handle}, {i})", self.runtime("get")))
+        self.may_fail(id, "get", "", &format!("{handle}, {i}"))
     }
 
     /// `a.length`.
@@ -232,7 +233,8 @@ impl<'a> Gen<'a> {
         let i = self.value(index, Type::Int).text;
         let v = self.element_value(rhs, ty);
         let helper = if used { "store" } else { "set" };
-        Self::bound_write(binding, format!("{}({handle}, {i}, {v})", self.runtime(helper)))
+        let call = self.may_fail(id, helper, "", &format!("{handle}, {i}, {v}")).text;
+        Self::bound_write(binding, call)
     }
 
     /// `a[i] = v` on a plain array: `put`, or a plain assignment where the index is in bounds.
@@ -254,14 +256,14 @@ impl<'a> Gen<'a> {
         }
         let i = self.value(index, Type::Int).text;
         let v = self.element_value(rhs, ty);
-        let put = self.runtime("put");
         let mr = self.mut_ref(a);
         if !mentions(index, name) && !mentions(rhs, name) {
-            return format!("{put}({mr}, {i}, {v})");
+            return self.may_fail(id, "put", "", &format!("{mr}, {i}, {v}")).text;
         }
         let slot = self.fresh_name(&["index", "slot", "at"]);
         let value = self.fresh_name(&["value", "item", "new"]);
-        format!("{{ let {slot} = {i}; let {value} = {v}; {put}({mr}, {slot}, {value}) }}")
+        let put = self.may_fail(id, "put", "", &format!("{mr}, {slot}, {value}")).text;
+        format!("{{ let {slot} = {i}; let {value} = {v}; {put} }}")
     }
 
     /// `a[i] op= v`, as a call of `update`, which reads the old element before it evaluates `v`.
@@ -296,7 +298,7 @@ impl<'a> Gen<'a> {
             }
             let old = self.fresh_name(&["old", "previous", "before"]);
             let new = self.element_update(op, ty, rhs, id, old);
-            return self.modify((name, &a), index, old, &new);
+            return self.modify(id, (name, &a), index, old, &new);
         }
         if let Some((_, a)) = self.plain_of(array) {
             let i = self.value(index, Type::Int).text;
@@ -304,17 +306,18 @@ impl<'a> Gen<'a> {
             let old = self.fresh_name(&["old", "previous", "before"]);
             let value = self.fresh_name(&["value", "item", "new"]);
             let new = self.element_update(op, ty, rhs, id, old);
-            let (at, put) = (self.runtime("at"), self.runtime("put"));
+            let at = self.may_fail(id, "at", "", &format!("&{a}, {slot}")).text;
             let mr = self.mut_ref(&a);
-            return format!(
-                "{{ let {slot} = {i}; let {old} = {at}(&{a}, {slot}); let {value} = {new}; {put}({mr}, {slot}, {value}) }}"
-            );
+            let put = self.may_fail(id, "put", "", &format!("{mr}, {slot}, {value}")).text;
+            return format!("{{ let {slot} = {i}; let {old} = {at}; let {value} = {new}; {put} }}");
         }
         let (binding, handle) = self.write_handle(array, has_effects(index) || has_effects(rhs));
         let i = self.value(index, Type::Int).text;
         let old = self.fresh_name(&["old", "previous", "before"]);
         let new = self.element_update(op, ty, rhs, id, old);
-        Self::bound_write(binding, format!("{}({handle}, {i}, |{old}| {new})", self.runtime("update")))
+        let new = self.closure_value(id, new);
+        let call = self.may_fail(id, "update", "", &format!("{handle}, {i}, |{old}| {new}")).text;
+        Self::bound_write(binding, call)
     }
 
     /// `a[i]++`, `--a[i]` and the like. As a statement (`used` false) on a plain array, it is
@@ -347,44 +350,57 @@ impl<'a> Gen<'a> {
             }
             let old = self.fresh_name(&["old", "previous", "before"]);
             let new = self.step_value(ty, increment, id, old);
-            return self.modify((name, &a), index, old, &new);
+            return self.modify(id, (name, &a), index, old, &new);
         }
         if let Some((_, a)) = self.plain_of(array) {
             let i = self.value(index, Type::Int).text;
             let slot = self.fresh_name(&["index", "slot", "at"]);
             let old = self.fresh_name(&["old", "previous", "before"]);
             let new = self.step_value(ty, increment, id, old);
-            let (at, put) = (self.runtime("at"), self.runtime("put"));
+            let at = self.may_fail(id, "at", "", &format!("&{a}, {slot}")).text;
             let mr = self.mut_ref(&a);
+            let put = self.may_fail(id, "put", "", &format!("{mr}, {slot}, {new}")).text;
             if prefix {
-                return format!(
-                    "{{ let {slot} = {i}; let {old} = {at}(&{a}, {slot}); {put}({mr}, {slot}, {new}) }}"
-                );
+                return format!("{{ let {slot} = {i}; let {old} = {at}; {put} }}");
             }
-            return format!(
-                "{{ let {slot} = {i}; let {old} = {at}(&{a}, {slot}); {put}({mr}, {slot}, {new}); {old} }}"
-            );
+            return format!("{{ let {slot} = {i}; let {old} = {at}; {put}; {old} }}");
         }
         let (binding, handle) = self.write_handle(array, has_effects(index));
         let i = self.value(index, Type::Int).text;
         let old = self.fresh_name(&["old", "previous", "before"]);
         let new = self.step_value(ty, increment, id, old);
+        let new = self.closure_value(id, new);
         let helper = if prefix { "update" } else { "post_update" };
-        Self::bound_write(binding, format!("{}({handle}, {i}, |{old}| {new})", self.runtime(helper)))
+        let call = self.may_fail(id, helper, "", &format!("{handle}, {i}, |{old}| {new}")).text;
+        Self::bound_write(binding, call)
     }
 
     /// `java::modify(&mut a, i, |old| new)` on the plain array `a`. The index is bound first when
     /// it mentions `a`, as in `a[Math.floorMod(k, a.length)] += 1`, since the call borrows `a`
     /// mutably before its arguments are evaluated.
-    fn modify(&mut self, (name, a): (&str, &str), index: &'a Expr, old: &str, new: &str) -> String {
+    fn modify(
+        &mut self,
+        id: ExprId,
+        (name, a): (&str, &str),
+        index: &'a Expr,
+        old: &str,
+        new: &str,
+    ) -> String {
         let i = self.value(index, Type::Int).text;
-        let modify = self.runtime("modify");
+        let new = self.closure_value(id, new.to_string());
         let mr = self.mut_ref(a);
         if !mentions(index, name) {
-            return format!("{modify}({mr}, {i}, |{old}| {new})");
+            return self.may_fail(id, "modify", "", &format!("{mr}, {i}, |{old}| {new}")).text;
         }
         let slot = self.fresh_name(&["index", "slot", "at"]);
-        format!("{{ let {slot} = {i}; {modify}({mr}, {slot}, |{old}| {new}) }}")
+        let modify = self.may_fail(id, "modify", "", &format!("{mr}, {slot}, |{old}| {new}")).text;
+        format!("{{ let {slot} = {i}; {modify} }}")
+    }
+
+    /// The new element `new` as the body of the closure of an element update: `Ok(new)` where
+    /// the update is the checked form (`may_fail`), whose closure returns a `Result`.
+    fn closure_value(&self, id: ExprId, new: String) -> String {
+        if self.facts.raising.contains(&id) { format!("Ok({new})") } else { new }
     }
 
     /// `slot op= rhs` where Rust's compound assignment does what Java's does.

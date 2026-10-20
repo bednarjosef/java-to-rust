@@ -128,10 +128,18 @@ pub fn variants(class: &Class, facts: &Facts, t: usize) -> Vec<usize> {
 /// struct, which borrows only the fields). A call of an inherited method, or `super.m()`, makes
 /// the receiver a value of the type that declares the method. An enum's constants are values of
 /// the enum.
-pub fn flows(class: &Class, field_level: &HashSet<usize>) -> Vec<HashSet<usize>> {
+/// The classes in `raised` are those whose objects the runtime creates when an operation fails.
+pub fn flows(
+    class: &Class,
+    field_level: &HashSet<usize>,
+    raised: &std::collections::BTreeSet<usize>,
+) -> Vec<HashSet<usize>> {
     let h = &class.hierarchy;
     let n = class.types.len();
     let mut flows: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    for &c in raised {
+        flows[c].insert(c);
+    }
     let mut edges: HashSet<(usize, usize)> = HashSet::new();
     for (t, decl) in class.types.iter().enumerate() {
         if decl.kind == TypeKind::Enum {

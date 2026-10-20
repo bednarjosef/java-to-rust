@@ -52,7 +52,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
     lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
     let hierarchy = Hierarchy::new(&types, &methods);
-    let class = Class { name: first.str("simpleName").to_string(), types, methods, hierarchy };
+    let raised = lowering.raised_objects(&types, &methods);
+    let class = Class { name: first.str("simpleName").to_string(), types, methods, hierarchy, raised };
     enums::check_nulls(&class)?;
     Ok(class)
 }

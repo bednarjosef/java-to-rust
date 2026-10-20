@@ -373,6 +373,57 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// A call of the runtime's function `name` (`generics` after its name, such as `::<i32>`)
+    /// with the arguments `args`, for the operation `id`, which may fail: where a `catch` or a
+    /// `finally` may see the failure, its checked form `try_name`, whose failure goes on from
+    /// here as a thrown exception does.
+    pub(super) fn may_fail(&mut self, id: ExprId, name: &str, generics: &str, args: &str) -> Code {
+        if self.facts.raising.contains(&id) {
+            let call = format!("{}{generics}({args})", self.runtime(&format!("try_{name}")));
+            return Code::atom(self.passed_on(Code::atom(call)));
+        }
+        Code::atom(format!("{}{generics}({args})", self.runtime(name)))
+    }
+
+    /// `impl From<java::Exception> for Throwable`, for the enum of `Throwable` (`t`) of a program
+    /// in which the runtime raises exceptions that the program may see: the failure becomes an
+    /// object of its standard class, built from its message. (`?` and `java::or_break!` convert
+    /// with it.)
+    pub(super) fn raised_impl(&mut self, t: usize) {
+        let Some(throwable) = self.class.type_index("java.lang.Throwable") else { return };
+        if t != throwable || self.facts.raised_classes.is_empty() {
+            return;
+        }
+        let name = self.throwable_type();
+        self.gap();
+        self.line(&format!("impl From<java::Exception> for {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn from(e: java::Exception) -> {name} {{"));
+        self.indent += 1;
+        self.line("let raised_message = e.message.clone().unwrap_or_default();");
+        self.line("match e.class {");
+        self.indent += 1;
+        let outer = self.method;
+        for new in &self.class.raised {
+            let ExprKind::New { class: c, args, ctor: Some(ctor) } = &new.kind else { continue };
+            if !self.facts.raised_classes.contains(c) {
+                continue;
+            }
+            self.method = *ctor;
+            let object = self.new_object_as(*ctor, args, Some(throwable)).text;
+            self.line(&format!("{} => {object},", rust_string(&self.class.types[*c].name)));
+        }
+        self.method = outer;
+        let uncaught = self.uncaught("uncaught");
+        self.line(&format!("_ => {uncaught}(e),"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     /// `throw value;`.
     pub(super) fn throw_stmt(&mut self, value: &'a Expr) {
         let text = self.expr(value).text;
@@ -642,8 +693,10 @@ impl<'a> Gen<'a> {
         let label = self.attempt_label("attempt");
         let result = self.result_name(&label);
         let never = "std::convert::Infallible";
-        // A program without exceptions has no `Throwable`, and nothing is thrown.
-        let exceptions = self.class.type_index("java.lang.Throwable").is_some();
+        // In a program without exceptions (no `Throwable`, or one without objects), nothing is
+        // thrown.
+        let exceptions =
+            self.class.type_index("java.lang.Throwable").is_some_and(|t| !self.enum_variants(t).is_empty());
         let throwable = if exceptions { self.throwable_type() } else { never.to_string() };
         let ty = if completion {
             let value = if has_return { self.completion_value() } else { never.to_string() };

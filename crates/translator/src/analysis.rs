@@ -126,6 +126,11 @@ pub struct Facts {
     /// The `try` statements, by address, whose body or `catch` clauses an exception of the
     /// program may leave or reach (which their `finally` must see).
     pub raising_tries: HashSet<usize>,
+    /// The operations whose failure a `catch` or a `finally` may see, which are written with the
+    /// runtime's checked form (see `analysis::exceptions`).
+    pub raising: HashSet<ExprId>,
+    /// The standard classes whose objects the runtime raises where the program may see them.
+    pub raised_classes: std::collections::BTreeSet<usize>,
 }
 
 impl Facts {
@@ -155,7 +160,7 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     facts.immutable = objects::immutable_classes(class);
     facts.field_level = hierarchy::field_level(class, &reach.reach, &facts.immutable, &facts.fields_structs);
     facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
-    facts.flows = hierarchy::flows(class, &facts.field_level);
+    facts.flows = hierarchy::flows(class, &facts.field_level, &Default::default());
     // An exception is converted to `Throwable` when it is thrown, so it is never a plain value.
     if let Some(throwable) = class.type_index("java.lang.Throwable") {
         facts.owned.retain(|c| class.type_index(c).is_none_or(|t| !class.hierarchy.is_subtype(t, throwable)));
@@ -180,6 +185,10 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     indexing::analyze(class, &mut facts);
     moves::analyze(class, &mut facts);
     exceptions::analyze(class, &mut facts)?;
+    // The exceptions that the runtime raises are values of `Throwable` too.
+    if !facts.raised_classes.is_empty() {
+        facts.flows = hierarchy::flows(class, &facts.field_level, &facts.raised_classes);
+    }
     Ok(facts)
 }
 

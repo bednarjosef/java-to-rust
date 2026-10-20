@@ -583,6 +583,7 @@ impl<'a> Gen<'a> {
         if self.wanted.contains(&Need::Display(t)) {
             self.display_impl(t, &variants);
         }
+        self.raised_impl(t);
     }
 
     /// The arms of a `match self` over the variants, each made by `arm` from the variant's class;

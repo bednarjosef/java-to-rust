@@ -453,8 +453,8 @@ impl<'a> Gen<'a> {
                 if constant || self.facts.safe_division.contains(&id) {
                     infix(if op == BinOp::Div { "/" } else { "%" }, MUL, &left, &right)
                 } else {
-                    let f = self.runtime(if op == BinOp::Div { "div" } else { "rem" });
-                    Code::atom(format!("{f}({}, {})", left.typed(), right.text))
+                    let f = if op == BinOp::Div { "div" } else { "rem" };
+                    self.may_fail(id, f, "", &format!("{}, {}", left.typed(), right.text))
                 }
             }
             BinOp::Shl | BinOp::Shr | BinOp::UShr => self.shift(op, left, right, result),
@@ -595,7 +595,7 @@ impl<'a> Gen<'a> {
             | Builtin::CharIsHighSurrogate
             | Builtin::CharIsLowSurrogate => self.char_builtin(builtin, args, id),
             Builtin::Native(native) => self.native(native, args, ty),
-            Builtin::String(op) => self.string_builtin(op, args),
+            Builtin::String(op) => self.string_builtin(op, args, id),
             // A chained call gives `&Self`; as a value, the builder is another handle to it.
             Builtin::Builder(op) if op.chains() => {
                 let code = self.builder_call(op, args);
@@ -603,7 +603,7 @@ impl<'a> Gen<'a> {
             }
             Builtin::Builder(op) => self.builder_call(op, args),
             Builtin::Format => self.format_builtin(args),
-            Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args),
+            Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args, id),
         }
     }
 }

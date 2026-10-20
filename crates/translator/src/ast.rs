@@ -211,6 +211,10 @@ pub struct Class {
     pub methods: Vec<Method>,
     /// Subtypes and overriders, computed from the types and methods (see `hierarchy`).
     pub hierarchy: Hierarchy,
+    /// `new C(message)` for each standard class `C` whose objects the runtime may raise where
+    /// the program could catch them, `message` a `String` variable: how a failure of the runtime
+    /// becomes the program's exception (see `lower/exceptions.rs`).
+    pub raised: Vec<Expr>,
 }
 
 /// What kind of type a declaration is.
