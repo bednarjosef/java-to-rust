@@ -139,15 +139,20 @@ impl<'a> Gen<'a> {
             return Code::atom(format!("{f}({s}, {}, {d}, {}, {})", ints[0], ints[1], ints[2]));
         }
         // A `&mut` borrow of a plain destination conflicts with a later argument that reads it,
-        // such as `a.length - 1`, so then the positions are computed first, in Java's order.
-        let names: Vec<&String> = src_plain.iter().chain(&dest_plain).collect();
+        // such as `a.length - 1`, so then the positions that are not constants are computed first,
+        // in Java's order, as statements before the call (which, being `void`, is a statement).
+        let names: Vec<&String> = dest_plain.iter().collect();
         let hoist = [src_pos, dest_pos, length].iter().any(|e| names.iter().any(|n| mentions(e, n)));
-        let mut ints: Vec<String> =
-            [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
-        let mut prefix = String::new();
-        if hoist {
-            prefix = format!("let (src_pos, dest_pos, length) = ({}); ", ints.join(", "));
-            ints = ["src_pos", "dest_pos", "length"].map(String::from).to_vec();
+        let mut ints = Vec::new();
+        for (e, base) in [(src_pos, "src_pos"), (dest_pos, "dest_pos"), (length, "length")] {
+            let code = self.value(e, Type::Int);
+            if hoist && code.literal.is_none() {
+                let temp = self.temp(base);
+                self.line(&format!("let {temp} = {};", code.text));
+                ints.push(temp);
+            } else {
+                ints.push(code.text);
+            }
         }
         let call = match (&src_plain, &dest_plain) {
             (Some(s), Some(d)) if s == d => {
@@ -163,7 +168,7 @@ impl<'a> Gen<'a> {
                 format!("{}({s}, {}, {d}, {}, {})", self.runtime("copy_slice"), ints[0], ints[1], ints[2])
             }
         };
-        if hoist { Code::atom(format!("{{ {prefix}{call} }}")) } else { Code::atom(call) }
+        Code::atom(call)
     }
 
     /// A shared array as the `&Array` the runtime takes.

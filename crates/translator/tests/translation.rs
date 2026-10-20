@@ -1123,8 +1123,7 @@ fn arraycopy_copies_plain_arrays_between_slices() {
         &[
             "let src: Vec<i32> = vec![1, 2, 3, 4];",
             "java::copy_slice(&src, 1, &mut dst, 0, 3);",
-            "let (src_pos, dest_pos, length) = (1, 0, dst.len() as i32 - 1); \
-             java::copy_within(&mut dst, src_pos, dest_pos, length)",
+            "let length = dst.len() as i32 - 1;\n    java::copy_within(&mut dst, 1, 0, length);",
             "java::copy_slice(&src, 0, &mut shared.borrow_mut(), 0, 2);",
         ],
     );
