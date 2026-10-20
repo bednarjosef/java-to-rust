@@ -409,6 +409,7 @@ impl<'a> Gen<'a> {
                 let code = self.value(&args[0], Type::Int);
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
+            Builtin::NullCheck => self.null_check(&args[0]),
             Builtin::MathAbs => {
                 let x = self.value(&args[0], ty);
                 // Math.abs(Integer.MIN_VALUE) is Integer.MIN_VALUE.

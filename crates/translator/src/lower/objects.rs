@@ -63,7 +63,7 @@ impl<'t> Lowering<'t> {
                     name: member.str("name"),
                     sig: member.symbol().map_or("", |s| s.ty),
                 }),
-                "VARIABLE" => {}
+                "VARIABLE" | "EMPTY_STATEMENT" => {}
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
                 "CLASS" => return unsupported(member, "inner classes"),
                 "BLOCK" => return unsupported(member, "initializer blocks"),
@@ -186,7 +186,8 @@ impl<'t> Lowering<'t> {
         let Some(class) = self.type_index(symbol.owner) else {
             return unsupported(node, &format!("`new {}`", symbol.owner));
         };
-        let args = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+        let args = self.packed_args(node, &symbol, args)?;
         Ok(ExprKind::New { class, args, ctor: self.method_index(&symbol) })
     }
 

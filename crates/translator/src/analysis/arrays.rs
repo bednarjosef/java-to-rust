@@ -59,10 +59,22 @@ struct Scan {
     calls: Vec<Call>,
 }
 
-/// A call and the variable each argument names (`None` for an argument that names no variable).
+/// A call and what each argument is.
 struct Call {
     callee: usize,
-    args: Vec<Option<String>>,
+    args: Vec<CallArg>,
+}
+
+/// What an argument of a call is, for the aliasing analysis.
+#[derive(PartialEq)]
+enum CallArg {
+    /// A variable, whose array the callee may share.
+    Name(String),
+    /// A new array literal, such as the packed trailing arguments of a varargs call: nobody else
+    /// holds it, so any parameter may borrow it.
+    Fresh,
+    /// Anything else.
+    Other,
 }
 
 fn scan(method: &Method) -> Scan {
@@ -151,9 +163,10 @@ impl Uses {
                     .map(|a| match &a.kind {
                         ExprKind::Var(name) => {
                             self.good.insert(a.id);
-                            Some(name.clone())
+                            CallArg::Name(name.clone())
                         }
-                        _ => None,
+                        ExprKind::ArrayLit(_) => CallArg::Fresh,
+                        _ => CallArg::Other,
                     })
                     .collect();
                 self.calls.push(Call { callee: *callee, args: names });
@@ -194,8 +207,13 @@ fn solve(scans: &[Scan]) -> (Vec<HashSet<String>>, HashSet<(usize, usize)>) {
         for (m, scan) in scans.iter().enumerate() {
             for call in &scan.calls {
                 for (i, arg) in call.args.iter().enumerate() {
-                    let distinct = call.args.iter().filter(|a| *a == arg).count() == 1;
-                    let plain_arg = matches!(arg, Some(name) if distinct && plain[m].contains(name));
+                    let plain_arg = match arg {
+                        CallArg::Name(name) => {
+                            call.args.iter().filter(|a| *a == arg).count() == 1 && plain[m].contains(name)
+                        }
+                        CallArg::Fresh => true,
+                        CallArg::Other => false,
+                    };
                     if !plain_arg && borrowed.remove(&(call.callee, i)) {
                         changed = true;
                     }
@@ -205,7 +223,7 @@ fn solve(scans: &[Scan]) -> (Vec<HashSet<String>>, HashSet<(usize, usize)>) {
         for (m, scan) in scans.iter().enumerate() {
             for call in &scan.calls {
                 for (i, arg) in call.args.iter().enumerate() {
-                    if let Some(name) = arg
+                    if let CallArg::Name(name) = arg
                         && !borrowed.contains(&(call.callee, i))
                         && plain[m].remove(name)
                     {
@@ -240,7 +258,7 @@ fn written_names(class: &Class, scans: &[Scan], borrowed: &HashSet<(usize, usize
         for (m, scan) in scans.iter().enumerate() {
             for call in &scan.calls {
                 for (i, arg) in call.args.iter().enumerate() {
-                    let Some(name) = arg else { continue };
+                    let CallArg::Name(name) = arg else { continue };
                     let param = &class.methods[call.callee].params[i].name;
                     let param_written = written[call.callee].contains(param);
                     if param_written && borrowed.contains(&(call.callee, i)) {

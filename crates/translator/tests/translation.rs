@@ -736,3 +736,85 @@ fn floats_are_f32_and_print_like_java() {
         ],
     );
 }
+
+#[test]
+fn varargs_that_are_only_read_are_borrowed_slices() {
+    let rust = translate(
+        "class A {
+            static int sum(int... xs) { int s = 0; for (int x : xs) s += x; return s; }
+            static void fill(int... xs) { xs[0] = 1; }
+            public static void main(String... args) {
+                int[] arr = {4, 5};
+                System.out.println(sum() + sum(1, 2, 3) + sum(arr));
+                fill(arr);
+                System.out.println(arr[0]);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn sum(xs: &[i32]) -> i32",
+            "sum(&[])",
+            "sum(&[1, 2, 3])",
+            "sum(&arr)",
+            "fn fill(xs: &mut [i32])",
+            "fill(&mut arr);",
+        ],
+    );
+    assert_lacks(&rust, &["java::Array"]);
+}
+
+#[test]
+fn varargs_that_escape_are_shared_arrays() {
+    let rust = translate(
+        "class A {
+            static int[] keep(int... xs) { return xs; }
+            public static void main(String[] args) {
+                int[] k = keep(7, 8);
+                System.out.println(k[0]);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn keep(xs: java::Array<i32>) -> java::Array<i32>",
+            "let k: java::Array<i32> = keep(java::from_vec(vec![7, 8]));",
+        ],
+    );
+}
+
+#[test]
+fn object_varargs_are_rejected() {
+    let err = java_to_rust::translate(
+        "class A { static void log(String f, Object... xs) {} public static void main(String[] a) {} }",
+    )
+    .expect_err("Object varargs must be rejected");
+    assert!(err.to_string().contains("Object not supported yet"), "{err}");
+}
+
+#[test]
+fn annotations_modifiers_and_assertions_leave_no_trace() {
+    let rust = translate(
+        "@interface Tag { String value() default \"\"; }
+        @Tag(\"a\") class A {
+            @Deprecated static volatile int n = 0;
+            @SuppressWarnings(\"x\") static synchronized void bump(final int by) { n += by; }
+            static strictfp double half(@Tag final double x) { return x / 2; }
+            public static void main(String[] args) {
+                assert n < 0 : \"off\";
+                synchronized (args) { bump(1); }
+                ;
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["fn bump(by: i32)", "fn half(x: f64) -> f64", "bump(1);", "let _ = args.clone();"],
+    );
+    assert_lacks(
+        &rust,
+        &["Tag", "Deprecated", "SuppressWarnings", "assert", "volatile", "synchronized", "strictfp"],
+    );
+}
