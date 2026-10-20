@@ -18,11 +18,11 @@ mod strings;
 mod switch;
 
 use code::*;
-use switch::{Frame, Kind};
 use expr::Operand;
 use names::*;
 use null::is_null_test;
 use primitives::*;
+use switch::{Frame, Kind};
 
 mod arrays;
 mod objects;

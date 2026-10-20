@@ -832,7 +832,10 @@ fn switch_expression_that_yields_from_inside_an_if_is_a_labeled_block() {
             }
         }",
     );
-    assert_contains(&rust, &["'sw1: {", "break 'sw1 String::from(\"big\");", "break 'sw1 String::from(\"negative\");"]);
+    assert_contains(
+        &rust,
+        &["'sw1: {", "break 'sw1 String::from(\"big\");", "break 'sw1 String::from(\"negative\");"],
+    );
     assert_lacks(&rust, &["loop {"]);
 }
 

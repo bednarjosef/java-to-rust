@@ -579,7 +579,11 @@ pub fn visit_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn
         }
         Stmt::Labeled { body, .. } => visit_stmt(body, on_expr, on_stmt),
         Stmt::Yield(e) => on_expr(e),
-        Stmt::Return(None, _) | Stmt::Break | Stmt::Continue | Stmt::BreakLabel(_) | Stmt::ContinueLabel(_) => {}
+        Stmt::Return(None, _)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::BreakLabel(_)
+        | Stmt::ContinueLabel(_) => {}
     }
 }
 

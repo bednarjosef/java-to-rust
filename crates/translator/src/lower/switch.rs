@@ -19,7 +19,12 @@ pub(super) fn jump(node: Node) -> Stmt {
 fn ends_by_leaving(stmt: &Stmt) -> bool {
     matches!(
         stmt,
-        Stmt::Break | Stmt::Continue | Stmt::Return(..) | Stmt::BreakLabel(_) | Stmt::ContinueLabel(_) | Stmt::Yield(_)
+        Stmt::Break
+            | Stmt::Continue
+            | Stmt::Return(..)
+            | Stmt::BreakLabel(_)
+            | Stmt::ContinueLabel(_)
+            | Stmt::Yield(_)
     )
 }
 
@@ -105,7 +110,9 @@ impl<'t> Lowering<'t> {
             "CONSTANT_CASE_LABEL" => {
                 let constant = node.child("constantExpression")?;
                 match constant.kind() {
-                    "INT_LITERAL" | "CHAR_LITERAL" | "STRING_LITERAL" => Ok(CaseLabel::Value(self.expr(constant)?)),
+                    "INT_LITERAL" | "CHAR_LITERAL" | "STRING_LITERAL" => {
+                        Ok(CaseLabel::Value(self.expr(constant)?))
+                    }
                     _ => unsupported(constant, "a case label that is not a literal"),
                 }
             }

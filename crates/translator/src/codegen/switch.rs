@@ -50,7 +50,14 @@ pub(super) struct Frame<'a> {
 fn leaves(body: &[Stmt]) -> bool {
     matches!(
         body.last(),
-        Some(Stmt::Break | Stmt::Continue | Stmt::Return(..) | Stmt::BreakLabel(_) | Stmt::ContinueLabel(_) | Stmt::Yield(_))
+        Some(
+            Stmt::Break
+                | Stmt::Continue
+                | Stmt::Return(..)
+                | Stmt::BreakLabel(_)
+                | Stmt::ContinueLabel(_)
+                | Stmt::Yield(_)
+        )
     )
 }
 
@@ -78,7 +85,11 @@ fn breaks_out(stmt: &Stmt) -> bool {
 fn is_breakable(stmt: &Stmt) -> bool {
     matches!(
         stmt,
-        Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::ForEach { .. } | Stmt::Switch { .. }
+        Stmt::While { .. }
+            | Stmt::DoWhile { .. }
+            | Stmt::For { .. }
+            | Stmt::ForEach { .. }
+            | Stmt::Switch { .. }
     )
 }
 
@@ -215,7 +226,9 @@ impl<'a> Gen<'a> {
         let target = self.frames.iter().rposition(|f| f.java.as_deref() == Some(label));
         match target {
             Some(index) => self.jump(index, cont, None),
-            None => self.line(&format!("{} '{};", if cont { "continue" } else { "break" }, snake_case(label))),
+            None => {
+                self.line(&format!("{} '{};", if cont { "continue" } else { "break" }, snake_case(label)))
+            }
         }
     }
 
@@ -232,7 +245,11 @@ impl<'a> Gen<'a> {
     /// becomes a labeled block, which only a `break` with its label leaves.
     pub(super) fn labeled(&mut self, label: &str, body: &'a Stmt) {
         match body {
-            Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::ForEach { .. } | Stmt::Switch { .. } => {
+            Stmt::While { .. }
+            | Stmt::DoWhile { .. }
+            | Stmt::For { .. }
+            | Stmt::ForEach { .. }
+            | Stmt::Switch { .. } => {
                 self.pending = Some(label.to_string());
                 self.stmt(body, &[]);
             }
