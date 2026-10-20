@@ -79,7 +79,9 @@ fn corpus_matches_java() {
             .iter()
             .map(|p| {
                 s.spawn(|| {
+                    // Without perf data, a JVM never warns on stdout about another JVM's lock file.
                     let output = Command::new("java")
+                        .args(["-XX:-UsePerfData"])
                         .arg(&p.java)
                         .output()
                         .expect("running `java` failed; the corpus test needs a JDK on PATH");

@@ -9,8 +9,16 @@ use std::process::{Command, Stdio};
 pub fn tree(source: &str) -> Result<Value, Error> {
     let fail = |message: String| Error { pos: Pos::default(), message };
     let mut child = Command::new("java")
-        // A short-lived JVM: skip the optimizing compiler and the parallel collector.
-        .args(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-cp", env!("OUT_DIR"), "JavaTree"])
+        // A short-lived JVM: skip the optimizing compiler, the parallel collector and perf data
+        // (whose lock-file warnings go to stdout when many JVMs run at once).
+        .args([
+            "-XX:TieredStopAtLevel=1",
+            "-XX:+UseSerialGC",
+            "-XX:-UsePerfData",
+            "-cp",
+            env!("OUT_DIR"),
+            "JavaTree",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
