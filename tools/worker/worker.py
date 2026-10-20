@@ -199,7 +199,7 @@ def cmd_start(args):
 def sessions():
     r = subprocess.run(["claude", "agents", "--json", "--all"], capture_output=True, text=True)
     try:
-        return {s["id"]: s for s in json.loads(r.stdout)}
+        return {s["id"]: s for s in json.loads(r.stdout) if s.get("id")}
     except (ValueError, KeyError):
         return {}
 
