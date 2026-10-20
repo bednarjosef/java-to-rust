@@ -66,6 +66,21 @@ pub fn is_lower_case(c: u16) -> bool {
     scalar(c).is_some_and(char::is_lowercase)
 }
 
+/// Java's `Character.isWhitespace(int)`: a space separator other than a no-break space, a line or
+/// paragraph separator, or one of the controls `\t`, `\n`, `\u000B`, `\f`, `\r` and
+/// `\u001C` to `\u001F`.
+pub fn is_java_whitespace(cp: u32) -> bool {
+    matches!(
+        cp,
+        0x09..=0x0D | 0x1C..=0x20 | 0x1680 | 0x2000..=0x2006 | 0x2008..=0x200A | 0x2028 | 0x2029 | 0x205F | 0x3000
+    )
+}
+
+/// Java's `Character.isWhitespace(char)`.
+pub fn is_whitespace(c: u16) -> bool {
+    is_java_whitespace(c as u32)
+}
+
 /// Java's `Character.toUpperCase(char)`: the simple case mapping, so a character whose upper
 /// case is several characters (`ß`) stays as it is.
 pub fn to_upper_case(c: u16) -> u16 {

@@ -11,20 +11,30 @@ pub use slice::*;
 use std::fmt;
 
 mod boxed;
+mod builder;
 mod character;
 pub mod fdlibm;
 mod float;
+pub mod format;
+mod integer;
 mod math;
 mod natives;
 mod null;
 mod out;
+pub mod regex;
+pub mod string;
 pub use boxed::*;
+pub use builder::{StringBuilder, same_builder};
 pub use character::*;
 pub use float::*;
+pub use format::{Arg, format};
+pub use integer::*;
 pub use math::*;
 pub use natives::*;
 pub use null::{OrNull, non_null, or_null, same};
 pub use out::{Out, flush, out, print_chars, println_chars, write_byte};
+pub use regex::{matches_all, replace_all, replace_first, split};
+pub use string::*;
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
 pub struct Double(pub f64);
@@ -73,7 +83,7 @@ fn layout(sign: &str, (digits, exp): (String, i32)) -> String {
 /// The decimal digits and exponent Java picks for a positive finite `d`: the shortest decimal
 /// that rounds to `d`, except that when one digit would do, Java takes the closest decimal of
 /// at most two digits (so `Double.MIN_VALUE` prints as `4.9E-324`, not `5.0E-324`).
-fn shortest_digits<T: fmt::LowerExp + std::str::FromStr + PartialEq>(d: T) -> (String, i32) {
+pub(crate) fn shortest_digits<T: fmt::LowerExp + std::str::FromStr + PartialEq>(d: T) -> (String, i32) {
     let split = |s: String| {
         let (mantissa, exp) = s.split_once('e').expect("{:e} output has an exponent");
         (mantissa.replace('.', ""), exp.parse::<i32>().expect("exponent is an integer"))
