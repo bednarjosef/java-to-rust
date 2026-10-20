@@ -836,6 +836,23 @@ fn char_cast_that_may_leave_ascii_keeps_utf16_units() {
 }
 
 #[test]
+fn primitive_statics_are_cells_and_other_statics_stay_ref_cells() {
+    let rust = translate(
+        "class A {
+            static int count;
+            static String name = \"x\";
+            static void bump() { count += 2; name += count; }
+            public static void main(String[] a) { bump(); System.out.println(count); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["static A_COUNT: Cell<i32> = const { Cell::new(0) };", "A_COUNT.get()", "A_COUNT.set(value);", "static A_NAME: RefCell<"],
+    );
+    assert_lacks(&rust, &["A_COUNT.with_borrow"]);
+}
+
+#[test]
 fn floats_are_f32_and_print_like_java() {
     let rust = translate(
         "class A {
@@ -1047,8 +1064,8 @@ fn classes_with_one_name_in_two_packages() {
             "crate::com::shop::model::Item::new_string_i32(\"apple\", 3)",
             "crate::com::shop::legacy::Item::new(7)",
             "crate::com::shop::model::RegistryEntry::new(4)",
-            "crate::com::shop::model::REGISTRY_CREATED.with_borrow(|v| *v)",
-            "pub(crate) static COUNTER_HITS: RefCell<i32>",
+            "crate::com::shop::model::REGISTRY_CREATED.get()",
+            "pub(crate) static COUNTER_HITS: Cell<i32>",
         ],
     );
 }

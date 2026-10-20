@@ -16,6 +16,16 @@ fn flag(class: &str) -> String {
     format!("{}__INITIALIZED", struct_name(class)).to_uppercase()
 }
 
+/// Whether a static field of this type is a `Cell`, read and written whole, rather than a
+/// `RefCell`: a primitive value, which is `Copy` and is never null. A `Cell` needs no borrow
+/// flag, so each access is one thread-local read or write.
+pub(super) fn is_cell(ty: Type) -> bool {
+    matches!(
+        ty,
+        Type::Int | Type::Long | Type::Double | Type::Byte | Type::Short | Type::Char | Type::Float | Type::Boolean
+    )
+}
+
 impl<'a> Gen<'a> {
     /// The constants as `const` items, then the thread-local cells of the other static fields. An
     /// eager class's cells start at Java's default and its `init` function sets them; any other
@@ -77,12 +87,13 @@ impl<'a> Gen<'a> {
                 || init.trim_start_matches('-').chars().next().is_some_and(|c| c.is_ascii_digit())
                     && init.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
                 || matches!(init.as_str(), "true" | "false");
+            let kind = if is_cell(f.ty) { "Cell" } else { "RefCell" };
             let init = if constant {
-                format!("const {{ RefCell::new({init}) }}")
+                format!("const {{ {kind}::new({init}) }}")
             } else {
-                format!("RefCell::new({init})")
+                format!("{kind}::new({init})")
             };
-            self.line(&format!("{}static {cell}: RefCell<{ty}> = {init};", self.vis()));
+            self.line(&format!("{}static {cell}: {kind}<{ty}> = {init};", self.vis()));
         }
         self.indent -= 1;
         self.line("}");

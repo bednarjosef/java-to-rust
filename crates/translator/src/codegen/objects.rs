@@ -4,6 +4,7 @@
 //! thread-local cells, which are initialized on first use.
 
 use super::*;
+use super::statics::is_cell;
 
 /// What an assignment, `++` or `--` does to a field or static field.
 pub(super) enum Update<'a> {
@@ -20,8 +21,10 @@ enum Slot {
         field: String,
         plain: bool,
     },
+    /// A static field: a `Cell` when `plain`, else a `RefCell`.
     Static {
         cell: String,
+        plain: bool,
     },
 }
 
@@ -35,7 +38,8 @@ impl Slot {
             Slot::Field { obj, field, plain: false } => {
                 format!("{obj}.borrow().{field}{}", if copy { "" } else { ".clone()" })
             }
-            Slot::Static { cell } => {
+            Slot::Static { cell, plain: true } => format!("{cell}.get()"),
+            Slot::Static { cell, plain: false } => {
                 format!("{cell}.with_borrow({})", if copy { "|v| *v" } else { "|v| v.clone()" })
             }
         }
@@ -45,7 +49,8 @@ impl Slot {
         match self {
             Slot::Field { obj, field, plain: true } => format!("{obj}.{field} = {value};"),
             Slot::Field { obj, field, plain: false } => format!("{obj}.borrow_mut().{field} = {value};"),
-            Slot::Static { cell } => format!("{cell}.with_borrow_mut(|v| *v = {value});"),
+            Slot::Static { cell, plain: true } => format!("{cell}.set({value});"),
+            Slot::Static { cell, plain: false } => format!("{cell}.with_borrow_mut(|v| *v = {value});"),
         }
     }
 }
@@ -572,7 +577,7 @@ impl<'a> Gen<'a> {
             return constant;
         }
         let cell = cell_name(&self.class.types[class].name, name);
-        let read = Slot::Static { cell }.read(self.clones(ty));
+        let read = Slot::Static { cell, plain: is_cell(ty) }.read(self.clones(ty));
         match self.init_call(class) {
             Some(init) => Code::atom(format!("{{ {init} {read} }}")),
             None => Code::atom(read),
@@ -816,7 +821,7 @@ impl<'a> Gen<'a> {
             // The old string and then the right operand are formatted, in Java's order.
             Update::Compound(_, value) if ty == Type::String => {
                 lines.extend(init);
-                let old = Slot::Static { cell: cell.clone() }.read(true);
+                let old = Slot::Static { cell: cell.clone(), plain: false }.read(true);
                 let mut parts = vec![Part::Arg(Code::atom(old))];
                 self.parts(value, &mut parts);
                 let text = self.format("format!", parts).text;
@@ -837,7 +842,15 @@ impl<'a> Gen<'a> {
                 let step = step
                     .replace(&format!("{marked}."), &format!("{v}."))
                     .replace(&marked, &format!("(*{v})"));
-                lines.push(format!("{cell}.with_borrow_mut(|{v}| {step});"));
+                if is_cell(ty) {
+                    // A `Cell` holds a copy: the step works on a local, which is then stored.
+                    let value = self.temp("value");
+                    lines.push(format!("let mut {value} = {cell}.get();"));
+                    lines.push(format!("{{ let {v} = &mut {value}; {step}; }}"));
+                    lines.push(format!("{cell}.set({value});"));
+                } else {
+                    lines.push(format!("{cell}.with_borrow_mut(|{v}| {step});"));
+                }
             }
         }
         Some(lines)
@@ -878,7 +891,7 @@ impl<'a> Gen<'a> {
                 Slot::Field { obj, field: snake_case(name), plain: false }
             }
             Place::Static { class, name } => {
-                Slot::Static { cell: cell_name(&self.class.types[*class].name, name) }
+                Slot::Static { cell: cell_name(&self.class.types[*class].name, name), plain: is_cell(ty) }
             }
             Place::Var(_) => unreachable!("variables are assigned by `assignment`"),
             Place::Index(..) => unreachable!("array elements are assigned by `index_set`"),
