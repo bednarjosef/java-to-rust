@@ -42,7 +42,7 @@ fn out_of_bounds(index: i32, length: i32) -> ! {
     throw("java.lang.StringIndexOutOfBoundsException", &message)
 }
 
-fn scalar(c: u16) -> Option<char> {
+pub(super) fn scalar(c: u16) -> Option<char> {
     char::from_u32(c as u32)
 }
 
@@ -74,11 +74,6 @@ pub fn is_java_whitespace(cp: u32) -> bool {
         cp,
         0x09..=0x0D | 0x1C..=0x20 | 0x1680 | 0x2000..=0x2006 | 0x2008..=0x200A | 0x2028 | 0x2029 | 0x205F | 0x3000
     )
-}
-
-/// Java's `Character.isWhitespace(char)`.
-pub fn is_whitespace(c: u16) -> bool {
-    is_java_whitespace(c as u32)
 }
 
 /// Java's `Character.toUpperCase(char)`: the simple case mapping, so a character whose upper

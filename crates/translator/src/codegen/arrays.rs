@@ -35,7 +35,7 @@ impl<'a> Gen<'a> {
     }
 
     /// `e` as an element of type `elem`: in `Some` where the elements may be null.
-    fn element_value(&mut self, e: &'a Expr, elem: Type) -> String {
+    pub(super) fn element_value(&mut self, e: &'a Expr, elem: Type) -> String {
         if self.nullable_element(elem) { self.optional_to(e, elem).text } else { self.value(e, elem).text }
     }
 
@@ -115,7 +115,7 @@ impl<'a> Gen<'a> {
     }
 
     /// `e` as a borrowed array handle, for the runtime helpers that take `&Array`.
-    fn handle(&mut self, e: &'a Expr) -> String {
+    pub(super) fn handle(&mut self, e: &'a Expr) -> String {
         if self.nullable(e) {
             // Using a null array throws `NullPointerException`.
             let place = self.object_place(e);
@@ -482,13 +482,7 @@ impl<'a> Gen<'a> {
         let handle = self.handle(&args[0]);
         match builtin {
             Builtin::ArraysToString => {
-                let show = match elem {
-                    Type::String if self.nullable_element(elem) => {
-                        "|v| v.unwrap_or_else(|| String::from(\"null\"))".to_string()
-                    }
-                    Type::String => "|v| v".to_string(),
-                    _ => format!("|v| {}.to_string()", self.shown(elem, "v".to_string())),
-                };
+                let show = self.show_closure(elem);
                 Code::atom(format!("{}({handle}, {show})", self.runtime("to_string")))
             }
             Builtin::ArraysFill => {
@@ -571,7 +565,7 @@ fn writes_elements(body: &Stmt, name: &str) -> bool {
 }
 
 /// The element type of an array type.
-fn element(ty: Type) -> Type {
+pub(super) fn element(ty: Type) -> Type {
     match ty {
         Type::Array(elem) => *elem,
         _ => unreachable!("lowering gives arrays array types"),
@@ -579,7 +573,7 @@ fn element(ty: Type) -> Type {
 }
 
 /// The default value of a primitive type, which is what a new array holds.
-fn zero_value(ty: Type) -> &'static str {
+pub(super) fn zero_value(ty: Type) -> &'static str {
     match ty {
         Type::Int => "0",
         Type::Long => "0i64",

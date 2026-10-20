@@ -7,7 +7,7 @@
 //! type keeps the same low bits, so that is `c.wrapping_add(1)`, and `c + 1` where the range
 //! analysis shows the result fits.
 
-use super::expr::Operand;
+use super::expr::{Operand, writes_inside};
 use super::*;
 use crate::types::{integral_bounds, narrow, promote};
 
@@ -176,6 +176,9 @@ impl<'a> Gen<'a> {
         id: ExprId,
     ) -> Option<String> {
         let compound = format!("{}=", op.java());
+        if writes_inside(value) {
+            return None;
+        }
         if ty == Type::Float {
             // `f += d` on a double rounds once, after the addition.
             if value.ty == Type::Double {
@@ -235,6 +238,13 @@ impl<'a> Gen<'a> {
             Builtin::CharIsUpperCase => "is_upper_case",
             Builtin::CharIsLowerCase => "is_lower_case",
             Builtin::CharToUpperCase => "to_upper_case",
+            Builtin::CharIsWhitespace => "is_whitespace",
+            Builtin::CharIsSpaceChar => "is_space_char",
+            Builtin::CharIsLetterOrDigit => "is_letter_or_digit",
+            Builtin::CharIsAlphabetic => "is_alphabetic",
+            Builtin::CharIsSurrogate => "is_surrogate",
+            Builtin::CharIsHighSurrogate => "is_high_surrogate",
+            Builtin::CharIsLowSurrogate => "is_low_surrogate",
             _ => "to_lower_case",
         };
         let c = self.value(&args[0], Type::Char);

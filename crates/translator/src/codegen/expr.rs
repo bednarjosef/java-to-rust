@@ -17,12 +17,24 @@ pub(super) fn in_shift_range(e: &Expr, ty: Type) -> bool {
     }
 }
 
+/// Whether `e` assigns or steps a variable, field or array element. Rust evaluates the right side
+/// of a primitive `x op= e` before reading `x`, where Java reads `x` first, so such an `e` cannot
+/// go in a Rust compound assignment.
+pub(super) fn writes_inside(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::Assign { .. } | ExprKind::IncDec { .. }));
+    found
+}
+
 impl<'a> Gen<'a> {
     /// `target = value` or `target op= value` as a Rust statement, without the semicolon.
     /// The Rust compound assignment operator (`+=`) that does what Java's `x op= value` does on a
     /// variable of type `ty`, if there is one: no promotion to a wider type, and no overflow,
     /// division by zero or shift out of range to handle.
     pub(super) fn in_place_op(&self, op: BinOp, ty: Type, value: &Expr, id: ExprId) -> Option<&'static str> {
+        if writes_inside(value) {
+            return None;
+        }
         let symbol = match op {
             BinOp::Add => "+=",
             BinOp::Sub => "-=",
@@ -276,6 +288,9 @@ impl<'a> Gen<'a> {
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if l.ty == Type::StringBuilder => {
                 self.builder_identity(*op, l, r)
             }
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Array(_)) => {
+                self.array_identity(*op, l, r)
+            }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
                 if self.faithful_box(l.ty) && r.ty == l.ty =>
             {
@@ -461,6 +476,7 @@ impl<'a> Gen<'a> {
             Builtin::ArraysToString | Builtin::ArraysFill | Builtin::ArraysSort | Builtin::ArraysCopyOf => {
                 self.arrays_builtin(builtin, args)
             }
+            Builtin::Arrays(op) => self.arrays_op(op, args),
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
                 let outer = std::mem::replace(&mut self.printing, true);
@@ -476,6 +492,7 @@ impl<'a> Gen<'a> {
             }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
             Builtin::CharNumericValue => self.char_numeric_value(args),
+            Builtin::CharDigit | Builtin::CharForDigit => self.character_radix(builtin, args),
             Builtin::Exit => {
                 let code = self.value(&args[0], Type::Int);
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
@@ -528,7 +545,14 @@ impl<'a> Gen<'a> {
             | Builtin::CharIsUpperCase
             | Builtin::CharIsLowerCase
             | Builtin::CharToUpperCase
-            | Builtin::CharToLowerCase => self.char_builtin(builtin, args, id),
+            | Builtin::CharToLowerCase
+            | Builtin::CharIsWhitespace
+            | Builtin::CharIsSpaceChar
+            | Builtin::CharIsLetterOrDigit
+            | Builtin::CharIsAlphabetic
+            | Builtin::CharIsSurrogate
+            | Builtin::CharIsHighSurrogate
+            | Builtin::CharIsLowSurrogate => self.char_builtin(builtin, args, id),
             Builtin::Native(native) => self.native(native, args, ty),
             Builtin::String(op) => self.string_builtin(op, args),
             // A chained call gives `&Self`; as a value, the builder is another handle to it.

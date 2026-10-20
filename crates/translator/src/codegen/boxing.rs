@@ -155,6 +155,10 @@ impl<'a> Gen<'a> {
                 };
                 Code::atom(format!("{}({})", self.runtime(function), code.text))
             }
+            BoxedOp::FloatTest(method) => {
+                let code = self.value(&args[0], kind);
+                Code::atom(format!("{}.{method}()", self.recv(&code, kind)))
+            }
             BoxedOp::Compare => {
                 let a = self.value(&args[0], kind);
                 let b = self.value(&args[1], kind);
@@ -202,6 +206,12 @@ impl<'a> Gen<'a> {
                 let b = self.value(&args[1], kind);
                 let (a, b) = (Operand { code: a, ty: kind }, Operand { code: b, ty: kind });
                 self.binary(BinOp::Add, a, b, kind, id)
+            }
+            BoxedOp::Logical(op) => {
+                let a = self.value(&args[0], kind);
+                let b = self.value(&args[1], kind);
+                let (a, b) = (Operand { code: a, ty: kind }, Operand { code: b, ty: kind });
+                self.binary(op, a, b, kind, id)
             }
         }
     }

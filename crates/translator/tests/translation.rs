@@ -1312,85 +1312,6 @@ fn an_enum_field_is_an_accessor_that_matches_on_self() {
 }
 
 #[test]
-fn an_enum_field_assigned_outside_its_constructor_is_rejected() {
-    let error = java_to_rust::translate(
-        "public class A {
-            enum Planet {
-                MERCURY(3.0);
-                private double mass;
-                Planet(double mass) { this.mass = mass; }
-                void grow() { mass += 1; }
-            }
-            public static void main(String[] args) { Planet.MERCURY.grow(); }
-        }",
-    )
-    .expect_err("an enum field that changes is rejected");
-    assert!(
-        error.to_string().contains("assigning an enum field outside its constructor not supported yet"),
-        "{error}"
-    );
-}
-
-#[test]
-fn enum_constant_bodies_become_arms_of_the_enum_method() {
-    let rust = translate(
-        "public class A {
-            enum Op {
-                PLUS { int apply(int x, int y) { return x + y; } },
-                NEG { int apply(int a, int b) { return -a; } };
-                abstract int apply(int a, int b);
-            }
-            public static void main(String[] args) { System.out.println(Op.PLUS.apply(1, 2) + Op.NEG.apply(3, 0)); }
-        }",
-    );
-    // The arms name the parameters as the override does.
-    assert_contains(
-        &rust,
-        &[
-            "fn apply(self, a: i32, b: i32) -> i32 {\n        match self {",
-            "AOp::Plus => {\n                let x = a;",
-        ],
-    );
-    let error = java_to_rust::translate(
-        "public class A {
-            enum Op { PLUS { public String toString() { return \"+\"; } } }
-            public static void main(String[] args) { System.out.println(Op.PLUS); }
-        }",
-    )
-    .expect_err("a body that overrides a method the enum does not declare is rejected");
-    assert!(
-        error.to_string().contains("a method of an enum constant's body that overrides none of the enum's"),
-        "{error}"
-    );
-}
-
-#[test]
-fn an_enum_field_with_a_method_of_its_name_gets_another_accessor() {
-    let rust = translate(
-        "public class A {
-            enum Planet {
-                MERCURY(3.0), VENUS(4.0);
-                private double mass;
-                private int rings = 0;
-                Planet(double mass) { this.mass = mass; }
-                double mass() { return mass; }
-                public String toString() { return \"planet \" + name(); }
-            }
-            public static void main(String[] args) { System.out.println(Planet.VENUS.mass() + \" \" + Planet.MERCURY); }
-        }",
-    );
-    assert_contains(
-        &rust,
-        &[
-            "fn mass_field(self) -> f64 {",
-            "fn mass(self) -> f64 {\n        self.mass_field()\n    }",
-            "fn rings(self) -> i32 {",
-            "f.write_str(&Self::to_string(*self))",
-        ],
-    );
-}
-
-#[test]
 fn an_enum_field_set_first_by_every_constructor_needs_no_initializer() {
     let rust = translate(
         "public class A {
@@ -1887,7 +1808,7 @@ fn the_survey_follows_calls_to_the_classes_whose_objects_are_created() {
         )],
     );
     let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
-    let report = java_to_rust::survey_program(&program).unwrap_or_else(|e| panic!("survey failed: {e}"));
+    let report = survey(&program).report;
     // `Circle.area` runs for `s.area()`; `Square` is named but never created, and the annotation
     // does nothing.
     assert_contains(
@@ -1900,6 +1821,246 @@ fn the_survey_follows_calls_to_the_classes_whose_objects_are_created() {
         ],
     );
     assert_lacks(&report, &["Square:", "Tag"]);
+}
+
+/// The survey of a program, which must not fail.
+fn survey(program: &java_to_rust::Program) -> java_to_rust::program::Survey {
+    java_to_rust::survey_program(program).unwrap_or_else(|e| panic!("survey failed: {e}"))
+}
+
+/// The feature table of one part's code in a survey report: its rows up to the blank line.
+fn feature_table<'a>(report: &'a str, title: &str) -> &'a str {
+    report
+        .split(title)
+        .nth(1)
+        .unwrap_or_else(|| panic!("no {title} in {report}"))
+        .split("\n\n")
+        .next()
+        .unwrap()
+}
+
+/// The row of a feature in a feature table.
+fn feature_row<'a>(table: &'a str, feature: &str) -> &'a str {
+    table.lines().find(|line| line.starts_with(feature)).unwrap_or_else(|| panic!("no {feature} in {table}"))
+}
+
+/// A program whose `Main.a`..`Main.d` each hold one lambda, in package `app`, under a source root.
+fn lambda_sources(dir: &str) -> std::path::PathBuf {
+    let java = [
+        "package app;",
+        "public class Main {",
+        "    static Runnable a() { return () -> {}; }",
+        "    static Runnable b() { return () -> {}; }",
+        "    static Runnable c() { return () -> {}; }",
+        "    static Runnable d() { return () -> {}; }",
+        "    public static void main(String[] args) {",
+        "        a().run(); b().run(); c().run(); d().run();",
+        "    }",
+        "}",
+    ]
+    .join("\n");
+    write_sources(dir, &[("app/Main.java", &java)])
+}
+
+#[test]
+fn local_and_anonymous_classes_are_declared_so_their_calls_are_not_outside() {
+    let dir = write_sources(
+        "survey_local",
+        &[(
+            "Main.java",
+            "public class Main {
+                public static void main(String[] args) {
+                    class Local { int n() { return 2; } }
+                    Object anon = new Object() { };
+                    System.out.println(new Local().n());
+                }
+            }",
+        )],
+    );
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let report = survey(&program).report;
+    // The local class is a feature of the method that declares it; its calls are not calls to
+    // classes outside the sources.
+    let table = feature_table(&report, "Program code: features");
+    assert!(feature_row(table, "local classes").contains("Main.java:"), "{table}");
+    assert!(feature_row(table, "anonymous classes").contains("Main.java:"), "{table}");
+    assert!(!table.contains("classes outside"), "{table}");
+    assert_lacks(&report, &["(outside)"]);
+}
+
+#[test]
+fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
+    let dir = write_sources(
+        "survey_split",
+        &[(
+            "Main.java",
+            "public class Main {
+                public static void main(String[] args) {
+                    class Local { int n() { return 1; } }
+                    System.out.println(Helper.run() + new Local().n());
+                }
+            }",
+        )],
+    );
+    let lib = write_sources(
+        "survey_split_lib",
+        &[(
+            "Helper.java",
+            "public class Helper { static int run() { Runnable r = () -> {}; r.run(); return 1; } }",
+        )],
+    );
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir],
+        libraries: vec![lib.clone()],
+        ..Default::default()
+    };
+    let report = survey(&program).report;
+    let program_table = feature_table(&report, "Program code: features");
+    let library_table = feature_table(&report, "Library code: features");
+    assert!(report.find("Program code:").unwrap() < report.find("Library code:").unwrap(), "{report}");
+    assert!(feature_row(program_table, "local classes").contains("Main.java:"), "{program_table}");
+    assert!(!program_table.contains("lambdas"), "{program_table}");
+    // The library's example is relative to its root, not the absolute path.
+    let row = feature_row(library_table, "lambdas");
+    assert!(row.contains("Helper.java:1"), "{row}");
+    assert!(!row.contains(lib.to_str().unwrap()), "{row}");
+    assert!(!library_table.contains("local classes"), "{library_table}");
+}
+
+#[test]
+fn the_survey_names_up_to_three_example_places_per_feature() {
+    let program = java_to_rust::Program {
+        main: "app.Main".into(),
+        sources: vec![lambda_sources("survey_examples")],
+        ..Default::default()
+    };
+    let report = survey(&program).report;
+    let table = feature_table(&report, "Program code: features");
+    // Four pieces use a lambda; the first three are named, relative to the source root.
+    assert!(
+        feature_row(table, "lambdas").ends_with("app/Main.java:3, app/Main.java:4, app/Main.java:5"),
+        "{table}"
+    );
+    assert_lacks(&report, &["app/Main.java:6"]);
+}
+
+#[test]
+fn the_survey_json_lists_the_pieces_with_their_example_places() {
+    let program = java_to_rust::Program {
+        main: "app.Main".into(),
+        sources: vec![lambda_sources("survey_json")],
+        ..Default::default()
+    };
+    let json = survey(&program).json;
+    assert_eq!(json["main"], "app.Main");
+    let pieces = json["pieces"].as_array().expect("pieces");
+    let a = pieces.iter().find(|p| p["name"] == "a").expect("a is a piece");
+    assert_eq!(a["source"], "program");
+    assert_eq!(a["kind"], "method");
+    assert_eq!(a["location"], "app/Main.java:3");
+    assert_eq!(a["features"]["lambdas"], "app/Main.java:3");
+    assert!(json["runtime_calls"].is_array(), "{json}");
+    assert!(json["natives"].is_array(), "{json}");
+}
+
+#[test]
+fn survey_json_writes_the_census_to_the_file_given() {
+    let dir = lambda_sources("survey_cli");
+    let json = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("survey_cli.json");
+    let _ = std::fs::remove_file(&json);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "app.Main", "--source"])
+        .arg(&dir)
+        .arg("--survey-json")
+        .arg(&json)
+        .output()
+        .expect("runs the translator");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Reachable from app.Main"), "{stdout}");
+    let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    assert_eq!(written["main"], "app.Main");
+    assert!(written["pieces"].as_array().is_some_and(|p| !p.is_empty()), "{written}");
+}
+
+#[test]
+fn an_enum_field_assigned_outside_its_constructor_is_rejected() {
+    let error = java_to_rust::translate(
+        "public class A {
+            enum Planet {
+                MERCURY(3.0);
+                private double mass;
+                Planet(double mass) { this.mass = mass; }
+                void grow() { mass += 1; }
+            }
+            public static void main(String[] args) { Planet.MERCURY.grow(); }
+        }",
+    )
+    .expect_err("an enum field that changes is rejected");
+    assert!(
+        error.to_string().contains("assigning an enum field outside its constructor not supported yet"),
+        "{error}"
+    );
+}
+
+#[test]
+fn enum_constant_bodies_become_arms_of_the_enum_method() {
+    let rust = translate(
+        "public class A {
+            enum Op {
+                PLUS { int apply(int x, int y) { return x + y; } },
+                NEG { int apply(int a, int b) { return -a; } };
+                abstract int apply(int a, int b);
+            }
+            public static void main(String[] args) { System.out.println(Op.PLUS.apply(1, 2) + Op.NEG.apply(3, 0)); }
+        }",
+    );
+    // The arms name the parameters as the override does.
+    assert_contains(
+        &rust,
+        &[
+            "fn apply(self, a: i32, b: i32) -> i32 {\n        match self {",
+            "AOp::Plus => {\n                let x = a;",
+        ],
+    );
+    let error = java_to_rust::translate(
+        "public class A {
+            enum Op { PLUS { public String toString() { return \"+\"; } } }
+            public static void main(String[] args) { System.out.println(Op.PLUS); }
+        }",
+    )
+    .expect_err("a body that overrides a method the enum does not declare is rejected");
+    assert!(
+        error.to_string().contains("a method of an enum constant's body that overrides none of the enum's"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_enum_field_with_a_method_of_its_name_gets_another_accessor() {
+    let rust = translate(
+        "public class A {
+            enum Planet {
+                MERCURY(3.0), VENUS(4.0);
+                private double mass;
+                private int rings = 0;
+                Planet(double mass) { this.mass = mass; }
+                double mass() { return mass; }
+                public String toString() { return \"planet \" + name(); }
+            }
+            public static void main(String[] args) { System.out.println(Planet.VENUS.mass() + \" \" + Planet.MERCURY); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn mass_field(self) -> f64 {",
+            "fn mass(self) -> f64 {\n        self.mass_field()\n    }",
+            "fn rings(self) -> i32 {",
+            "f.write_str(&Self::to_string(*self))",
+        ],
+    );
 }
 
 #[test]

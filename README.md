@@ -75,17 +75,25 @@ arithmetic, `if`, `while`, `do`, `for`, `break`, `continue`, the conditional ope
 statements and expressions on integers, chars, strings and enums (case labels may be constant
 expressions, which are folded as javac folds them), overloading, static and instance methods,
 fields with initializers, instance initializer blocks, static fields, constructors (including
-`this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math` methods,
-the `Character` tests and case conversions on a `char`, the `MIN_VALUE`/`MAX_VALUE`
-constants of the wrapper classes, `null` for `String`, and a user `toString` in `println` and
-string concatenation, object-typed fields and `null` objects. Strings have the common methods of
-`String` (searching, slicing, case, trimming, replacing, comparing, `split`/`replaceAll`/`matches`,
-`join`, `repeat`, `hashCode`, `toCharArray`, `valueOf`, `new String(char[])`), `StringBuilder`,
-`String.format`/`formatted`/`printf` and the bit and radix methods of `Integer` and `Long`
-(`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), all hand-written
-in the runtime with Java's exact results.
-Inheritance, interfaces and generics are rejected with an error that names the construct and its
-position.
+`this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math`
+methods (`floorDiv`, `floorMod`, the `*Exact` integer methods that throw on overflow, `round`,
+`rint`, `clamp`, `copySign`, `hypot`, `fma`, `ulp`, `nextUp`/`nextDown`, `max`/`min` on every
+type, and the rest of the common ones; `StrictMath` the same), `Double`/`Float` and `Boolean`
+methods (`isNaN`, `isInfinite`, `isFinite`, `compare`, `sum`, `max`/`min`, `parseDouble`,
+`parseBoolean`, `logicalAnd`/`logicalOr`/`logicalXor`), the
+`Character` tests (`isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`,
+`digit`, `forDigit`, `getNumericValue`), and case conversions on a `char`, the `MIN_VALUE`/`MAX_VALUE`
+and `MIN_NORMAL` constants of the wrapper classes, `null` for `String`, and a user `toString` in
+`println` and string concatenation, object-typed fields and `null` objects. Strings have the
+common methods of `String` (searching, slicing, case, trimming, replacing, comparing,
+`split`/`replaceAll`/`matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf`,
+`new String(char[])`), `StringBuilder`, `String.format`/`formatted`/`printf` and the bit and radix
+methods of `Integer` and `Long` (`toHexString`, `bitCount`, `numberOfLeadingZeros`,
+`toString(v, radix)`, ...), all hand-written in the runtime with Java's exact results. Inheritance,
+interfaces and generics are rejected with an error that names the construct and its position. So
+are `Float.parseFloat` and `Float.valueOf(String)` (Rust's `f32` parsing differs from Java's
+grammar), `Character.toChars` (it returns a `char[]`), and the `int` code-point overloads of the
+`Character` methods, except `isAlphabetic` on a `char`.
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
@@ -103,7 +111,11 @@ bits, as Rust's `as` does; floating values reach the small types through `int`
 keeps the same bits, so they become `b = b.wrapping_add(x as i8)` and `b = b.wrapping_add(1)`.
 Strings are Rust strings, so a lone surrogate `char` turns into `?` when it is printed or
 concatenated (as Java's UTF-8 output prints it), even where Java would later pair it up. The
-`Character` methods are exact on Latin-1 and use Rust's Unicode tables beyond it.
+`Character` methods are exact on Latin-1, ASCII and fullwidth letters and digits, and
+`isWhitespace` excludes no-break spaces as Java does. Beyond Latin-1, `isLetter`, `isAlphabetic`
+and `isDigit` use Rust's Unicode tables, which are not Java's general categories, so they can
+differ from Java there; `Character.digit` recognises only ASCII and fullwidth letters and digits,
+so it can differ from Java on other decimal digits.
 
 The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`, `charAt` agree on
 `"né😀e"`), and throw what Java throws (`StringIndexOutOfBoundsException` with Java's message).
@@ -169,6 +181,17 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   or given to `java.util.Arrays` stay shared for now. Arrays of strings, objects or arrays hold
   `Option`s when some array of that element type may hold null (`new String[n]`,
   `new int[n][]`, or a stored value that may be null), and plain values otherwise.
+- `java.util.Arrays` on arrays of primitives and strings (`lower/java_arrays.rs`,
+  `codegen/java_arrays.rs`, `runtime/src/java_arrays.rs`): `equals` and `hashCode` (Java's exact
+  formula, bit equality for floats, null arrays and null elements), `sort` for every primitive
+  type and `String` (Java's order: `-0.0` before `0.0`, NaN last, UTF-16 order for strings), whole
+  or by range with Java's range checks, `fill` by range, `copyOfRange` on primitives,
+  `binarySearch` in both forms (`-(insertion point) - 1` when absent), and `deepToString` on
+  arrays of primitive or `String` rows. `a.clone()` is a shallow copy; rows of a 2-D array are
+  shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`.
+  `==` on arrays is identity (`Rc::ptr_eq`, or `java::same` where either may be null). Not yet:
+  `copyOf` and `copyOfRange` on `String` arrays (the padding would need nulls that the
+  nullness analysis does not see), `equals(null, b)`, `asList` and `stream`.
 - Objects follow the same pattern (`analysis/objects.rs`, `analysis/owned.rs`, `analysis/borrowing.rs`). The faithful
   form of an object is `Rc<RefCell<C>>`, because Java references are shared and mutable. A class
   whose objects never change after construction is shared as `Rc<C>`. A class whose objects are
@@ -209,12 +232,15 @@ one entry into a `HashMap` reaches 3,268 classes of java.base; with it, 59. Anno
 nothing.
 
 `--survey` prints what the code reachable from `main` uses that is not supported yet instead of
-translating it: per feature (interfaces, inheritance, generic classes, exceptions, lambdas, ...)
-the classes and pieces of code (methods, field initializers, initializer blocks) that use it and
-those it alone blocks, the order of features that frees the most code at each step, the methods
-of the runtime's classes that are called, and the native methods reached
-(`program/survey.rs`). It is a syntactic census, so it misses the narrower rejections of the
-lowering.
+translating it: for the program's own code and for its library code, separately, per feature
+(interfaces, inheritance, generic classes, exceptions, lambdas, ...) the classes and pieces of code
+(methods, field initializers, initializer blocks) that use it, those it alone blocks, and up to
+three example places (`file:line`, relative to the source or library root). It also prints the
+order of features that frees the most code at each step, the methods of the runtime's classes
+that are called, and the native methods reached (`program/survey.rs`). `--survey-json <file>`
+writes the same census as JSON for scripts: the pieces with their class, kind, name, location and
+features, the runtime calls and the natives. It is a syntactic census, so it misses the narrower
+rejections of the lowering.
 
 The native layer, the JDK methods that bottom out in the JVM, is hand-written in the runtime
 (`natives.rs`, `math.rs`, `fdlibm/`, `out.rs`) and recognised by owner and name

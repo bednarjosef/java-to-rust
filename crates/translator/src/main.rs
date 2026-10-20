@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: java-to-rust <Input.java> [-o <output.rs> | --crate <directory>]
        java-to-rust --main <package.Class> [--source <root>]... [--library <root>]... [<File.java>]...
-                    [-o <output.rs> | --crate <directory> | --survey]";
+                    [-o <output.rs> | --crate <directory> | --survey [--survey-json <file>]]";
 
 /// The stack that translation runs on: the trees of real code, and the recursion over them, can
 /// be deeper than the main thread's stack allows.
@@ -28,7 +28,10 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Vec<String>) -> Result<(), String> {
-    if args.iter().any(|a| matches!(a.as_str(), "--main" | "--source" | "--library" | "--survey")) {
+    if args
+        .iter()
+        .any(|a| matches!(a.as_str(), "--main" | "--source" | "--library" | "--survey" | "--survey-json"))
+    {
         return run_program(&args);
     }
     let (input, output) = match &args[..] {
@@ -57,11 +60,13 @@ fn emit(output: Option<(&str, &str)>, input: &str, rust: &str) -> Result<(), Str
 /// Whole-program mode: `--main` names the class whose `main` starts the program, each
 /// `--source` is a source root laid out by package, each `--library` a root that classes are
 /// only read from when the program uses them, and other arguments are single source files.
-/// `--survey` prints what the reachable code uses that is not supported yet instead.
+/// `--survey` prints what the reachable code uses that is not supported yet instead, and
+/// `--survey-json` also writes that census as JSON to a file.
 fn run_program(args: &[String]) -> Result<(), String> {
     let mut program = java_to_rust::Program::default();
     let mut output = None;
     let mut survey = false;
+    let mut survey_json = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().ok_or_else(|| format!("{arg} needs a value\n{USAGE}"));
@@ -71,6 +76,10 @@ fn run_program(args: &[String]) -> Result<(), String> {
             "--library" => program.libraries.push(value()?.into()),
             "-o" | "--crate" => output = Some((arg.as_str(), value()?)),
             "--survey" => survey = true,
+            "--survey-json" => {
+                survey = true;
+                survey_json = Some(value()?);
+            }
             flag if flag.starts_with('-') => return Err(format!("unknown option {flag}\n{USAGE}")),
             file => program.files.push(file.into()),
         }
@@ -79,7 +88,12 @@ fn run_program(args: &[String]) -> Result<(), String> {
         return Err(format!("--main is required for a program\n{USAGE}"));
     }
     if survey {
-        print!("{}", java_to_rust::survey_program(&program).map_err(|e| e.to_string())?);
+        let census = java_to_rust::survey_program(&program).map_err(|e| e.to_string())?;
+        print!("{}", census.report);
+        if let Some(path) = survey_json {
+            let json = serde_json::to_string_pretty(&census.json).map_err(|e| e.to_string())?;
+            std::fs::write(&path, json + "\n").map_err(|e| format!("{path}: {e}"))?;
+        }
         return Ok(());
     }
     let rust = java_to_rust::translate_program(&program).map_err(|e| e.to_string())?;
