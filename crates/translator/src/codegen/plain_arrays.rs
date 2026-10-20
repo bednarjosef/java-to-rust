@@ -19,6 +19,8 @@ use arrays::element;
 pub(super) struct Path<'a> {
     /// The root's Java name.
     pub java: &'a str,
+    /// The slice the path starts at instead, in a sliced loop.
+    pub slice: Option<String>,
     /// The index of each row from the root outward, with the id of the row's indexing.
     pub rows: Vec<(&'a Expr, ExprId)>,
 }
@@ -38,20 +40,42 @@ impl<'a> Gen<'a> {
         self.facts.plain_arrays.get(&(self.method, name.to_string())).copied()
     }
 
-    /// The access path of `e`, if `e` is a plain array or a row of one.
+    /// The access path of `e`, if `e` is a plain array or a row of one. In a sliced loop, a path
+    /// through the sliced rows starts at the slice.
     pub(super) fn plain_path(&self, e: &'a Expr) -> Option<Path<'a>> {
+        let mut path = self.java_path(e)?;
+        if let Some((slice, depth)) = self.sliced.get(path.java)
+            && path.rows.len() >= *depth
+        {
+            path.rows.drain(..*depth);
+            path.slice = Some(slice.clone());
+        }
+        Some(path)
+    }
+
+    fn java_path(&self, e: &'a Expr) -> Option<Path<'a>> {
         match &e.kind {
             ExprKind::Var(name) => {
                 self.plain(name)?;
-                Some(Path { java: name, rows: Vec::new() })
+                Some(Path { java: name, slice: None, rows: Vec::new() })
             }
             ExprKind::Index(inner, index) => {
-                let mut path = self.plain_path(inner)?;
+                let mut path = self.java_path(inner)?;
                 path.rows.push((index, e.id));
                 Some(path)
             }
             _ => None,
         }
+    }
+
+    /// The Rust name of the array a path starts at.
+    fn path_root(&self, path: &Path<'a>) -> String {
+        path.slice.clone().unwrap_or_else(|| self.local(path.java))
+    }
+
+    /// Whether the access or row `id` is known to be in bounds.
+    fn in_bounds(&self, id: ExprId) -> bool {
+        self.facts.in_bounds.contains(&id) || self.sliced_accesses.contains(&id)
     }
 
     /// The Rust type of a plain array of type `ty`: `Vec<i32>`, `Vec<Vec<i32>>`.
@@ -104,12 +128,13 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether the Rust name `a` is a borrowed array parameter of the current method or the
-    /// variable of a for-each over the rows of a plain array: already a reference, so it is
-    /// passed on as it is.
+    /// variable of a for-each over the rows of a plain array or a slice of a sliced loop: already
+    /// a reference, so it is passed on as it is.
     pub(super) fn is_borrowed(&self, a: &str) -> bool {
         self.class.methods[self.method].params.iter().enumerate().any(|(j, p)| {
             self.facts.borrowed_arrays.contains_key(&(self.method, j)) && self.local(&p.name) == a
         }) || self.facts.row_loops.iter().any(|(m, name)| *m == self.method && self.local(name) == a)
+            || self.sliced.values().any(|(slice, _)| slice == a)
     }
 
     /// The `&` argument for the plain array `a`.
@@ -132,10 +157,10 @@ impl<'a> Gen<'a> {
 
     /// The array a path denotes, as code and what that code is.
     fn path_form(&mut self, path: &Path<'a>, mutable: bool) -> (String, Form) {
-        let mut text = self.local(path.java);
+        let mut text = self.path_root(path);
         let mut form = Form::Root;
         for &(index, id) in &path.rows {
-            if self.facts.in_bounds.contains(&id) {
+            if self.in_bounds(id) {
                 let k = self.position(index);
                 text = format!("{text}[{k}]");
                 form = Form::Place;
@@ -174,17 +199,17 @@ impl<'a> Gen<'a> {
 
     /// Whether every row of a path is known to be in bounds.
     fn rows_in_bounds(&self, path: &Path<'a>) -> bool {
-        path.rows.iter().all(|(_, id)| self.facts.in_bounds.contains(id))
+        path.rows.iter().all(|(_, id)| self.in_bounds(*id))
     }
 
     /// The positions of a path's rows computed into locals first, checked unless they are known
     /// to be in bounds: the bindings, and the place of the array the path denotes with them.
     fn bound_rows(&mut self, path: &Path<'a>) -> (Vec<String>, String) {
-        let mut place = self.local(path.java);
+        let mut place = self.path_root(path);
         let mut lets = Vec::new();
         for (level, &(index, id)) in path.rows.iter().enumerate() {
             let name = self.temp(["row", "column", "plane"].get(level).copied().unwrap_or("level"));
-            let position = if self.facts.in_bounds.contains(&id) {
+            let position = if self.in_bounds(id) {
                 self.position(index)
             } else {
                 let reference = if level == 0 { self.slice_ref(&place) } else { format!("&{place}") };
@@ -319,7 +344,7 @@ impl<'a> Gen<'a> {
                 self.runtime("at")
             ));
         }
-        if self.facts.in_bounds.contains(&id) {
+        if self.in_bounds(id) {
             let place = self.path_place(&path, false);
             let k = self.position(index);
             return Code::atom(read_in_bounds(&place, &k, elem));
@@ -353,7 +378,7 @@ impl<'a> Gen<'a> {
         let row = matches!(ty, Type::Array(_));
         let in_order = rust_order_is_same(index, Some(rhs))
             && path.rows.iter().all(|(i, _)| rust_order_is_same(i, Some(rhs)));
-        if !used && self.facts.in_bounds.contains(&id) && self.rows_in_bounds(&path) && in_order {
+        if !used && self.in_bounds(id) && self.rows_in_bounds(&path) && in_order {
             let place = self.path_place(&path, true);
             let k = self.position(index);
             let v = self.assigned_element(rhs, ty);
@@ -412,7 +437,7 @@ impl<'a> Gen<'a> {
             && path.rows.iter().all(|(i, _)| rust_order_is_same(i, Some(rhs)));
         if !used
             && !writes_root(rhs, root)
-            && self.facts.in_bounds.contains(&id)
+            && self.in_bounds(id)
             && self.rows_in_bounds(&path)
             && simple
             && in_order
@@ -468,7 +493,7 @@ impl<'a> Gen<'a> {
         let rows_mention = path.rows.iter().any(|(i, _)| mentions(i, root));
         if !used && !mentions(index, root) && !rows_mention {
             let simple = simple_index(index) && path.rows.iter().all(|(i, _)| simple_index(i));
-            if self.facts.in_bounds.contains(&id) && self.rows_in_bounds(&path) && simple {
+            if self.in_bounds(id) && self.rows_in_bounds(&path) && simple {
                 let place = self.path_place(&path, true);
                 let k = self.position(index);
                 let slot = format!("{place}[{k}]");

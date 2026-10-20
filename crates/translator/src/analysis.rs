@@ -29,6 +29,7 @@ mod statics;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
+pub use arrays::{RowIndex, Slice, SlicedLoop};
 pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
 
 #[derive(Default)]
@@ -84,6 +85,9 @@ pub struct Facts {
     /// The variables of for-each loops over plain arrays of arrays, as (method, name): each
     /// borrows the rows in turn (`for row in m.iter()`), as `&Vec<T>` or `&mut Vec<T>`.
     pub row_loops: HashSet<(usize, String)>,
+    /// Innermost counting loops over plain arrays whose accesses are all in bounds when a check
+    /// made before the loop passes: the loop then runs over slices, keyed by its condition.
+    pub sliced_loops: HashMap<ExprId, SlicedLoop>,
     /// Methods that return arrays nobody else holds: they return the plain `Vec`.
     pub owned_returns: HashSet<usize>,
     /// Counting loops over a plain array whose body only reads `a[i]`, keyed by the loop

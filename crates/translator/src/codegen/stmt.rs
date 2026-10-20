@@ -171,31 +171,12 @@ impl<'a> Gen<'a> {
             return;
         }
         if let Some(counted) = counting(init, cond, update, body) {
-            let ty = counted.ty;
-            let start = self.value(counted.from, ty);
-            let end = self.value(counted.to, ty);
-            let mut used = false;
-            visit_stmt(body, &mut |e| used |= mentions(e, counted.var), &mut |_| {});
-            let var = if used { self.local(counted.var) } else { "_".to_string() };
-            let start_text = if used && start.untyped && end.untyped {
-                let suffix = self.annotation(ty, rust_type(ty).to_string());
-                if suffix == rust_type(ty) { start.typed() } else { format!("{}{suffix}", start.text) }
-            } else {
-                start.at(ADD + 1)
-            };
-            let range =
-                format!("{start_text}{}{}", if counted.inclusive { "..=" } else { ".." }, end.at(ADD + 1));
-            let range = if counted.descending {
-                format!("({range}).rev()")
-            } else if counted.step > 1 {
-                format!("({range}).step_by({})", counted.step)
-            } else {
-                range
-            };
-            self.line(&format!("for {var} in {range} {{"));
-            self.loop_body(Loop::Plain, body, &[]);
-            self.line("}");
-            return;
+            if let Some(cond) = cond
+                && self.sliced_loop(cond, &counted, body)
+            {
+                return;
+            }
+            return self.range_loop(&counted, body);
         }
         // The loop variables stay in scope after the loop, which is harmless: Java forbids
         // using them there, and a later declaration of the same name shadows them.
@@ -221,6 +202,34 @@ impl<'a> Gen<'a> {
         }
         let kind = if has_continue(body) && !update.is_empty() { Loop::For(update) } else { Loop::Plain };
         self.loop_body(kind, body, update);
+        self.line("}");
+    }
+
+    /// A counting loop as `for i in a..b`, `(a..b).rev()` or `(a..b).step_by(k)`.
+    pub(super) fn range_loop(&mut self, counted: &Counting<'a>, body: &'a Stmt) {
+        let ty = counted.ty;
+        let start = self.value(counted.from, ty);
+        let end = self.value(counted.to, ty);
+        let mut used = false;
+        visit_stmt(body, &mut |e| used |= mentions(e, counted.var), &mut |_| {});
+        let var = if used { self.local(counted.var) } else { "_".to_string() };
+        let start_text = if used && start.untyped && end.untyped {
+            let suffix = self.annotation(ty, rust_type(ty).to_string());
+            if suffix == rust_type(ty) { start.typed() } else { format!("{}{suffix}", start.text) }
+        } else {
+            start.at(ADD + 1)
+        };
+        let range =
+            format!("{start_text}{}{}", if counted.inclusive { "..=" } else { ".." }, end.at(ADD + 1));
+        let range = if counted.descending {
+            format!("({range}).rev()")
+        } else if counted.step > 1 {
+            format!("({range}).step_by({})", counted.step)
+        } else {
+            range
+        };
+        self.line(&format!("for {var} in {range} {{"));
+        self.loop_body(Loop::Plain, body, &[]);
         self.line("}");
     }
 

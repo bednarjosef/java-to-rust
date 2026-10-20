@@ -23,13 +23,17 @@
 //!
 //! A method returns a `Vec` when every array it returns is one nobody else holds.
 //!
-//! The indexes that are always in bounds are found by `bounds`. A counting loop
+//! The indexes that are always in bounds are found by `bounds`, and the innermost counting loops
+//! whose accesses can be checked once before the loop by `slices`. A counting loop
 //! `for (int i = 0; i < a.length; i++)` over a plain array whose body reads `a[i]` and uses `i`
 //! and `a` nowhere else can be `for x in a.iter()`.
 
 mod bounds;
 mod liveness;
 mod scan;
+mod slices;
+
+pub use slices::{RowIndex, Slice, SlicedLoop};
 
 use super::Facts;
 use crate::ast::*;
@@ -77,6 +81,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
         }
         let proven = bounds::in_bounds(method, &solution.plain[m], &scans[m].reshaped, facts);
         facts.in_bounds.extend(proven);
+        facts.sliced_loops.extend(slices::sliced_loops(method, &solution.plain[m], facts));
         facts.moves.extend(scans[m].moves.iter().copied());
         for (name, written) in names {
             facts.plain_arrays.insert((m, name), written);
@@ -439,9 +444,9 @@ fn written_names(class: &Class, scans: &[Scan], borrowed: &HashSet<(usize, usize
     }
 }
 
-/// A counting loop `for (int i = 0; i < a.length; i++)` over a plain array `a`, which does not
-/// assign `i` or `a` in its body.
-struct Counting<'s> {
+/// A counting loop `for (int i = 0; i < a.length; i++)` over a plain array `a` (see
+/// `ast::counting`), which does not assign `a` in its body.
+struct OverArray<'s> {
     cond: &'s Expr,
     array: &'s str,
     index: &'s str,
@@ -449,27 +454,20 @@ struct Counting<'s> {
 }
 
 /// The counting loop `s`, if `s` is one over an array in `plain`.
-fn counting_over<'s>(s: &'s Stmt, plain: &HashMap<String, bool>) -> Option<Counting<'s>> {
+fn counting_over<'s>(s: &'s Stmt, plain: &HashMap<String, bool>) -> Option<OverArray<'s>> {
     let Stmt::For { init, cond: Some(cond), update, body } = s else { return None };
-    let [Stmt::Local { name: index, init: Some(start), .. }] = init.as_slice() else { return None };
-    let ExprKind::Binary(BinOp::Lt, var, end) = &cond.kind else { return None };
-    let ExprKind::Length(array) = &end.kind else { return None };
+    let (index, from, to) = counting_loop(init, Some(cond), update, body)?;
+    let ExprKind::Length(array) = &to.kind else { return None };
     let ExprKind::Var(array) = &array.kind else { return None };
-    let counts_up = matches!(update.as_slice(), [Expr { kind: ExprKind::IncDec { target: Place::Var(t), increment: true, .. }, .. }] if t == index);
-    let starts_at_zero = matches!(start.kind, ExprKind::Int(0));
-    let index_is_var = matches!(&var.kind, ExprKind::Var(v) if v == index);
-    if !(counts_up && starts_at_zero && index_is_var && plain.contains_key(array)) {
+    if !matches!(from.kind, ExprKind::Int(0)) || !plain.contains_key(array) || assigns_stmt(body, array) {
         return None;
     }
-    if assigns_stmt(body, index) || assigns_stmt(body, array) {
-        return None;
-    }
-    Some(Counting { cond, array, index, body })
+    Some(OverArray { cond, array, index, body })
 }
 
 /// The reads `a[i]` in the body of a counting loop, when the body uses `a` only to read its
 /// elements and `i` only as their index, so that `for x in a.iter()` gives the same values.
-fn element_reads(c: &Counting) -> Option<Vec<ExprId>> {
+fn element_reads(c: &OverArray) -> Option<Vec<ExprId>> {
     let is = |e: &Expr, name: &str| matches!(&e.kind, ExprKind::Var(v) if v == name);
     let (mut array_mentions, mut array_uses, mut index_mentions) = (0, 0, 0);
     let mut reads = Vec::new();

@@ -419,7 +419,7 @@ impl Walk<'_> {
                 update.iter().for_each(|u| self.expr(u));
                 let mut guards = self.guards_of(cond);
                 for g in &mut guards {
-                    g.counts_up = counts_up_from_zero(init, update, body, &g.var, cond);
+                    g.counts_up = counts_up_from_zero(init, cond, update, body, &g.var);
                 }
                 self.guarded(guards, body);
             }
@@ -530,18 +530,12 @@ impl Walk<'_> {
     }
 }
 
-/// Whether the `for` loop counts `var` up by one from a constant that is not negative, with a
-/// condition `var < bound`: then `var` is never negative in the body, since it stays below a
-/// bound that is at most `i32::MAX` and cannot wrap.
-fn counts_up_from_zero(init: &[Stmt], update: &[Expr], body: &Stmt, var: &str, cond: &Expr) -> bool {
-    let starts = init.iter().any(|s| {
-        matches!(s, Stmt::Local { name, init: Some(Expr { kind: ExprKind::Int(k), .. }), .. } if name == var && *k >= 0)
-    });
-    let steps = matches!(update, [Expr { kind: ExprKind::IncDec { target: Place::Var(t), increment: true, .. }, .. }] if t == var);
-    let strict = conjuncts(cond).iter().any(|c| {
-        matches!(&c.kind, ExprKind::Binary(BinOp::Lt, l, _) if matches!(&l.kind, ExprKind::Var(v) if v == var))
-    });
-    starts && steps && strict && !assigns_stmt(body, var)
+/// Whether the `for` loop is a counting loop (`ast::counting`) that counts `var` up from a
+/// constant that is not negative: then `var` is never negative in the body, as the loop never
+/// wraps around.
+fn counts_up_from_zero(init: &[Stmt], cond: &Expr, update: &[Expr], body: &Stmt, var: &str) -> bool {
+    counting(init, Some(cond), update, body)
+        .is_some_and(|c| c.var == var && !c.descending && matches!(c.from.kind, ExprKind::Int(k) if k >= 0))
 }
 
 /// The conjuncts of `a && b && ...`.
