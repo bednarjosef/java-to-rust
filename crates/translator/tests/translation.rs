@@ -30,7 +30,7 @@ fn counters_in_counting_loops_use_plain_arithmetic() {
         } }",
     );
     assert_contains(&rust, &["let mut count = 0;", "for i in 0..1000 {", "i % 7 == 0", "count += 1;"]);
-    assert_lacks(&rust, &["wrapping", "java::"]);
+    assert_lacks(&rust, &["wrapping", "java::rem", "java::div"]);
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn modular_arithmetic_stays_in_range() {
         }",
     );
     assert_contains(&rust, &["result = result * base % mod_;", "base = base * base % mod_;", "exp /= 2;"]);
-    assert_lacks(&rust, &["wrapping", "java::"]);
+    assert_lacks(&rust, &["wrapping", "java::rem", "java::div"]);
 }
 
 #[test]

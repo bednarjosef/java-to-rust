@@ -99,6 +99,12 @@ pub fn print_chars(chars: &[u16]) {
     let _ = out().write_all(text.as_bytes());
 }
 
+/// `System.out.println(char[])`.
+pub fn println_chars(chars: &[u16]) {
+    print_chars(chars);
+    let _ = out().write_all(b"\n");
+}
+
 /// `System.out.println(...)`, buffered; used as `java::println!` with `println!`'s arguments.
 #[macro_export]
 macro_rules! println {

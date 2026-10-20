@@ -23,6 +23,7 @@ use null::is_null_test;
 use primitives::*;
 
 mod arrays;
+mod natives;
 mod objects;
 mod owned;
 

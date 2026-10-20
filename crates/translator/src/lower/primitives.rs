@@ -42,6 +42,12 @@ impl<'t> Lowering<'t> {
             "java.lang.Short" => self.small_constant(Type::Short, integer(i16::MIN as i64, i16::MAX as i64)?),
             "java.lang.Float" => ExprKind::Float(floating(f32::MAX as f64, f32::from_bits(1) as f64)? as f32),
             "java.lang.Double" => ExprKind::Double(floating(f64::MAX, f64::from_bits(1))?),
+            "java.lang.Math" | "java.lang.StrictMath" => ExprKind::Double(match symbol.name {
+                "PI" => std::f64::consts::PI,
+                "E" => std::f64::consts::E,
+                "TAU" => std::f64::consts::TAU,
+                _ => return None,
+            }),
             _ => return None,
         })
     }
