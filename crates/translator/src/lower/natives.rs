@@ -33,6 +33,7 @@ impl<'t> Lowering<'t> {
                 };
                 Native::Math { name, strict: owner == "java.lang.StrictMath" }
             }
+            ("Array", "clone") => return self.array_clone(node, receiver, args),
             ("java.lang.System", "arraycopy") => {
                 let (src, dest) = (args[0].ty, args[2].ty);
                 if !matches!(src, Type::Array(_)) || src != dest {

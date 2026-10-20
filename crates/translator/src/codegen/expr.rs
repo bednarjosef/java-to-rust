@@ -283,6 +283,9 @@ impl<'a> Gen<'a> {
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(_)) => {
                 self.identity(*op, l, r)
             }
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Array(_)) => {
+                self.array_identity(*op, l, r)
+            }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
                 if self.faithful_box(l.ty) && r.ty == l.ty =>
             {
@@ -468,6 +471,7 @@ impl<'a> Gen<'a> {
             Builtin::ArraysToString | Builtin::ArraysFill | Builtin::ArraysSort | Builtin::ArraysCopyOf => {
                 self.arrays_builtin(builtin, args)
             }
+            Builtin::Arrays(op) => self.arrays_op(op, args),
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
                 let outer = std::mem::replace(&mut self.printing, true);

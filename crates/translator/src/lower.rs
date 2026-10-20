@@ -14,6 +14,7 @@ use std::cell::Cell;
 
 mod arrays;
 mod boxing;
+mod java_arrays;
 mod natives;
 mod primitives;
 mod program;
