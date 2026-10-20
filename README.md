@@ -345,5 +345,6 @@ translation and the Cargo build run in parallel, one thread per CPU. All the Rus
 one Cargo project under `target/tmp/corpus`, kept between runs, so a program is rebuilt only when
 its translation changes: a warm run takes about as long as translating the corpus. The report
 lists every failing program with the first differing lines of output. `CORPUS_FILTER=text cargo
-test --test corpus` runs only the programs whose name contains `text`.
+test --test corpus` runs only the programs whose name contains `text`, and `CORPUS_THREADS=n`
+limits it to n threads (one per CPU by default).
 `crates/translator/tests/translation.rs` pins down what the output looks like.
