@@ -36,7 +36,11 @@ for java in "$targets"/*.java; do
   mkdir -p "$dir"
 
   if [ -n "$library" ]; then
-    translated=$("$translator" --main "$name" --library "$library" "$java" --crate "$dir" 2>&1)
+    # A listed file next to a module's source root is rejected by javac ("file should be on
+    # source path"), so the program goes in as a source directory of its own.
+    mkdir -p "$dir/src-java"
+    cp "$java" "$dir/src-java/"
+    translated=$("$translator" --main "$name" --source "$dir/src-java" --library "$library" --crate "$dir" 2>&1)
   else
     translated=$("$translator" "$java" --crate "$dir" 2>&1)
   fi
