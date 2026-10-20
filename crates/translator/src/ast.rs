@@ -3,8 +3,8 @@
 
 use std::fmt;
 
-mod hierarchy;
 mod code_point;
+mod hierarchy;
 mod java_arrays;
 mod natives;
 pub use hierarchy::*;
