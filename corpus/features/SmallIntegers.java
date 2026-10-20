@@ -138,6 +138,15 @@ public class SmallIntegers {
             steps++;
         }
         System.out.println(steps);
+        short limit = 5;
+        int sum = 0;
+        for (short i = 0; i < limit; i++) {
+            sum += i;
+        }
+        boolean flag = sum > 3;
+        short mixed = flag ? b : s;
+        long widened = flag ? s : 7L;
+        System.out.println(sum + " " + mixed + " " + widened + " " + (flag ? b : 'c') + " " + (flag ? (byte) -1 : 200));
         System.out.println(Integer.MAX_VALUE + " " + Integer.MIN_VALUE + " " + Long.MAX_VALUE + " " + Long.MIN_VALUE);
     }
 }

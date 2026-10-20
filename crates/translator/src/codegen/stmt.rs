@@ -173,7 +173,8 @@ impl<'a> Gen<'a> {
         body: &'a Stmt,
     ) {
         if let Some((var, start, end)) = counting_loop(init, cond, update, body) {
-            let ty = start.ty.max_integral(end.ty);
+            // `counting_loop` checks that the bound has the loop variable's type.
+            let ty = end.ty;
             let start = self.value(start, ty);
             let end = self.value(end, ty);
             let mut used = false;
