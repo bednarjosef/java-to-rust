@@ -484,6 +484,9 @@ pub enum BoxedOp {
     /// `Integer.parseInt(s)` and the other `parseX`: the primitive of the result's kind, read from
     /// a string. `Integer.valueOf(s)` is the same, boxed.
     Parse,
+    /// `Integer.parseInt(s, radix)`, `Long.parseLong(s, radix)` and `Integer.valueOf(s, radix)`:
+    /// the same, read in the radix given as the second argument.
+    ParseRadix,
     /// `Integer.valueOf(i)`: the boxed kind of the result, from its primitive argument.
     Box,
     /// `x.intValue()` and the other `xValue()`: the result's primitive, from the receiver.

@@ -87,6 +87,7 @@ impl<'t> Lowering<'t> {
         let op = match (name, symbol.is_static) {
             ("max", true) => return Ok(Builtin::MathMax),
             ("min", true) => return Ok(Builtin::MathMin),
+            ("parseInt" | "parseLong" | "valueOf", true) if args.len() == 2 => BoxedOp::ParseRadix,
             ("parseInt" | "parseLong" | "parseDouble" | "parseFloat" | "parseBoolean", true) => {
                 BoxedOp::Parse
             }
@@ -133,7 +134,9 @@ impl<'t> Lowering<'t> {
             | BoxedOp::ToString
             | BoxedOp::HashCode
             | BoxedOp::FloatTest(_) => 1,
-            BoxedOp::Compare | BoxedOp::Equals | BoxedOp::Sum | BoxedOp::Logical(_) => 2,
+            BoxedOp::ParseRadix | BoxedOp::Compare | BoxedOp::Equals | BoxedOp::Sum | BoxedOp::Logical(_) => {
+                2
+            }
         };
         if args.len() != expected {
             return unsupported(node, &format!("the overload of `{name}` with {} arguments", args.len()));
