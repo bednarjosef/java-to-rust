@@ -31,48 +31,48 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
         let mut returns = Vec::new();
         let mut fields = Vec::new();
         let mut statics = Vec::new();
+        let mut on_expr = |m: usize, e: &Expr| {
+            visit_expr(e, &mut |x| match &x.kind {
+                ExprKind::Assign { op: None, target, value }
+                    if x.ty.is_reference() && maybe_null(facts, m, value) =>
+                {
+                    match target {
+                        Place::Var(name) => vars.push((m, name.clone())),
+                        Place::Field { object, name } => {
+                            if let Type::Class(owner) = object.ty {
+                                fields.push((owner.to_string(), name.clone()));
+                            }
+                        }
+                        Place::Static { class, name } => statics.push((*class, name.clone())),
+                        Place::Index(array, _) => elements.push(array.ty.element()),
+                    }
+                }
+                // `new T[n]` leaves its strings and objects null, and `new T[n][]` its
+                // arrays.
+                ExprKind::NewArray(sizes) => {
+                    let elem = x.ty.element_at(sizes.len());
+                    if elem.is_reference() {
+                        elements.push(elem);
+                    }
+                }
+                ExprKind::ArrayLit(items) if items.iter().any(|item| maybe_null(facts, m, item)) => {
+                    elements.push(x.ty.element());
+                }
+                ExprKind::Call { args, resolved: Some(callee), .. }
+                | ExprKind::MethodCall { args, resolved: Some(callee), .. }
+                | ExprKind::New { args, ctor: Some(callee), .. }
+                | ExprKind::ThisCall { args, resolved: Some(callee) } => {
+                    for (i, arg) in args.iter().enumerate() {
+                        if maybe_null(facts, m, arg) {
+                            params.push((*callee, i));
+                        }
+                    }
+                }
+                _ => {}
+            })
+        };
         for (m, method) in class.methods.iter().enumerate() {
             for stmt in &method.body {
-                let mut on_expr = |e: &Expr| {
-                    visit_expr(e, &mut |x| match &x.kind {
-                        ExprKind::Assign { op: None, target, value }
-                            if x.ty.is_reference() && maybe_null(facts, m, value) =>
-                        {
-                            match target {
-                                Place::Var(name) => vars.push((m, name.clone())),
-                                Place::Field { object, name } => {
-                                    if let Type::Class(owner) = object.ty {
-                                        fields.push((owner.to_string(), name.clone()));
-                                    }
-                                }
-                                Place::Static { class, name } => statics.push((*class, name.clone())),
-                                Place::Index(array, _) => elements.push(array.ty.element()),
-                            }
-                        }
-                        // `new T[n]` leaves its strings and objects null, and `new T[n][]` its
-                        // arrays.
-                        ExprKind::NewArray(sizes) => {
-                            let elem = x.ty.element_at(sizes.len());
-                            if elem.is_reference() {
-                                elements.push(elem);
-                            }
-                        }
-                        ExprKind::ArrayLit(items) if items.iter().any(|item| maybe_null(facts, m, item)) => {
-                            elements.push(x.ty.element());
-                        }
-                        ExprKind::Call { args, resolved: Some(callee), .. }
-                        | ExprKind::MethodCall { args, resolved: Some(callee), .. }
-                        | ExprKind::New { args, ctor: Some(callee), .. }
-                        | ExprKind::ThisCall { args, resolved: Some(callee) } => {
-                            for (i, arg) in args.iter().enumerate() {
-                                if maybe_null(facts, m, arg) {
-                                    params.push((*callee, i));
-                                }
-                            }
-                        }
-                        _ => {}
-                    })
-                };
                 let mut on_stmt = |s: &Stmt| match s {
                     Stmt::Local { ty, name, init: Some(init), .. }
                         if ty.is_reference() && maybe_null(facts, m, init) =>
@@ -87,7 +87,14 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                     }
                     _ => {}
                 };
-                visit_stmt(stmt, &mut on_expr, &mut on_stmt);
+                visit_stmt(stmt, &mut |e| on_expr(m, e), &mut on_stmt);
+            }
+        }
+        // Field initializers run in every object's constructor: a `new String[2]` there leaves
+        // its strings null too.
+        for f in class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics)) {
+            if let Some(init) = &f.init {
+                on_expr(usize::MAX, init);
             }
         }
         for (t, decl) in class.types.iter().enumerate() {

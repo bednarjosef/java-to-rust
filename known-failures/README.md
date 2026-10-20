@@ -43,10 +43,6 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
 - `NullOnlyClass.java`: a class that is only used as the type of a null local (`Named n = null;`,
   never constructed). Java prints `true`; rustc fails with E0425 "cannot find type
   `NullOnlyClassNamed` in this scope" because the class is not emitted.
-- `StringArrayFieldInitializer.java`: `String[] items = new String[2];` as a field initializer of
-  a class. Java prints `pen null 1`; rustc fails with E0308 "mismatched types" (the generated
-  `filled(2, None)` gives `Option`s where `String` is expected). The same array assigned in a
-  constructor translates.
 - `SwitchOnFieldThenMutate.java`: `switch (m.state)` on an `int` field of a mutable class, with an
   arm that calls a method changing `m.state`. Java prints `2 2`; the translated program panics
   with "RefCell already borrowed" and exits with 101. The `Ref` of the scrutinee lives for the
