@@ -8,7 +8,8 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
 - `AmbiguousLiteralMethod.java`: `aFloat[Math.floorMod(Math.abs((sBoolean ? 2 : -1)), ...)]++;`,
   a method call on a conditional of two `int` literals. Java prints nothing; rustc fails with
   E0689 "can't call method `abs` on ambiguous numeric type `{integer}`". The fuzzer's seed 2 hits
-  the same error with `wrapping_sub` on `(~(0)) - c`.
+  the same error with `wrapping_sub` on `(~(0)) - c`, and seed 55 with `Math.abs(-(0))` alone,
+  and seed 115 with `wrapping_add` on a sum of a `long` conditional and a `short`.
 - `ArrayStoreFromMethodCall.java`: `memory[slot] = pop();` in a method of a nested class, where
   `pop` changes a field of the same object. Java prints `1`; rustc fails with E0502 "cannot
   borrow `*self` as mutable because it is also borrowed as immutable" (the generated
@@ -21,8 +22,10 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
 - `BlockExpressionBeforeCast.java`: `return (sChar++);` in a `double` method, where `sChar` is a
   `char` static. Java prints `65.0`; the translated block is taken as a statement, so the `as f64`
   after it does not parse: rustc fails with "expected expression, found `as`". The fuzzer's
-  seeds hit the same parse error after a block with `>=`, `==`, `!=`, `/`, `%`, `^`, `>` and `+`
-  (not reduced separately).
+  seeds hit the same parse error after a block with `>=`, `==`, `!=`, `/`, `%`, `^`, `>`, `<` and
+  `+` (not reduced separately). Inside a `?:` branch, `(sDouble--) < 2` fails with "expected type,
+  found `2.0`" (or "found keyword `if`" when the right side is a conditional): the same block,
+  followed by `<`, is read as the start of generic arguments.
 - `CompoundThroughNullableField.java`: `h.box.v += 10` where `h.box` is a field that may be null,
   in a class whose fields are assigned after construction. Java prints `true`; rustc fails with
   E0716 "temporary value dropped while borrowed".
@@ -36,7 +39,8 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
   end of the statement).
 - `FloatIncrementValue.java`: `System.out.println(++sFloat);` on a `float` static. Java prints
   `2.5`; rustc fails with E0599 "no method named `wrapping_add` found for type `f32`" (the
-  increment is translated with integer wrapping arithmetic, which `f32` lacks).
+  increment is translated with integer wrapping arithmetic, which `f32` lacks). A decrement
+  (`--`) of a `float` fails the same way with `wrapping_sub`.
 - `IndexedIncrementReadsArray.java`: `a5[Math.floorMod((0), a5.length)]++;` on an `int[]` local,
   in a `switch` that is never taken. Java prints nothing; rustc fails with E0502 "cannot borrow
   `a5` as immutable because it is also borrowed as mutable": the index reads `a5.length` while the
