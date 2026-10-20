@@ -9,9 +9,11 @@ use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
 mod boxing;
+mod character;
 mod code;
 mod enums;
 mod expr;
+mod math;
 mod names;
 mod null;
 mod primitives;

@@ -74,11 +74,19 @@ type (`byte`, `short`, `char`, `int`, `long`, `float`, `double`, `boolean`) and 
 arithmetic, `if`, `while`, `do`, `for`, `break`, `continue`, the conditional operator,
 overloading, static and instance methods, fields with initializers, static fields, constructors
 (including `this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math`
-methods, `String.length`/`equals`/`charAt`, the `Character` tests and case conversions on a
-`char`, the `MIN_VALUE`/`MAX_VALUE` constants of the wrapper classes, `null` for `String`, and a
-user `toString` in `println` and string concatenation, object-typed fields and `null` objects.
-Inheritance, interfaces and generics are rejected with an error that names the construct and its
-position.
+methods (`floorDiv`, `floorMod`, the `*Exact` integer methods that throw on overflow, `round`,
+`rint`, `clamp`, `copySign`, `hypot`, `fma`, `ulp`, `nextUp`/`nextDown`, `max`/`min` on every
+type, and the rest of the common ones; `StrictMath` the same), `Double`/`Float` and `Boolean`
+methods (`isNaN`, `isInfinite`, `isFinite`, `compare`, `sum`, `max`/`min`, `parseDouble`,
+`parseBoolean`, `logicalAnd`/`logicalOr`/`logicalXor`), `String.length`/`equals`/`charAt`, the
+`Character` tests (`isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`,
+`digit`, `forDigit`, `getNumericValue`), and case conversions on a `char`, the `MIN_VALUE`/`MAX_VALUE`
+and `MIN_NORMAL` constants of the wrapper classes, `null` for `String`, and a user `toString` in
+`println` and string concatenation, object-typed fields and `null` objects. Inheritance, interfaces
+and generics are rejected with an error that names the construct and its position. So are
+`Float.parseFloat` and `Float.valueOf(String)` (Rust's `f32` parsing differs from Java's grammar),
+`Character.toChars` (it returns a `char[]`), and the `int` code-point overloads of the `Character`
+methods, except `isAlphabetic` on a `char`.
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
@@ -96,7 +104,11 @@ bits, as Rust's `as` does; floating values reach the small types through `int`
 keeps the same bits, so they become `b = b.wrapping_add(x as i8)` and `b = b.wrapping_add(1)`.
 Strings are Rust strings, so a lone surrogate `char` turns into `?` when it is printed or
 concatenated (as Java's UTF-8 output prints it), even where Java would later pair it up. The
-`Character` methods are exact on Latin-1 and use Rust's Unicode tables beyond it.
+`Character` methods are exact on Latin-1, ASCII and fullwidth letters and digits, and
+`isWhitespace` excludes no-break spaces as Java does. Beyond Latin-1, `isLetter`, `isAlphabetic`
+and `isDigit` use Rust's Unicode tables, which are not Java's general categories, so they can
+differ from Java there; `Character.digit` recognises only ASCII and fullwidth letters and digits,
+so it can differ from Java on other decimal digits.
 
 The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b` is
 `java::rem(a, b)`. The first analyses decide where plain Rust means the same:

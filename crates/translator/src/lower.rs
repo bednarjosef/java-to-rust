@@ -485,7 +485,10 @@ impl<'t> Lowering<'t> {
             (owner, name) if boxing::boxed_type(owner).is_some() && boxing::is_boxed_method(name) => {
                 self.boxed_call(node, &symbol, &mut args, receiver)?
             }
-            ("java.lang.Character", name) => self.character_method(node, name, symbol.ty)?,
+            ("java.lang.Character", name) => {
+                let char_arg = args.first().is_some_and(|a| a.ty == Type::Char);
+                self.character_method(node, name, symbol.ty, char_arg)?
+            }
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);

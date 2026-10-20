@@ -483,6 +483,7 @@ impl<'a> Gen<'a> {
             }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
             Builtin::CharNumericValue => self.char_numeric_value(args),
+            Builtin::CharDigit | Builtin::CharForDigit => self.character_radix(builtin, args),
             Builtin::Exit => {
                 let code = self.value(&args[0], Type::Int);
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
@@ -535,7 +536,14 @@ impl<'a> Gen<'a> {
             | Builtin::CharIsUpperCase
             | Builtin::CharIsLowerCase
             | Builtin::CharToUpperCase
-            | Builtin::CharToLowerCase => self.char_builtin(builtin, args, id),
+            | Builtin::CharToLowerCase
+            | Builtin::CharIsWhitespace
+            | Builtin::CharIsSpaceChar
+            | Builtin::CharIsLetterOrDigit
+            | Builtin::CharIsAlphabetic
+            | Builtin::CharIsSurrogate
+            | Builtin::CharIsHighSurrogate
+            | Builtin::CharIsLowSurrogate => self.char_builtin(builtin, args, id),
             Builtin::Native(native) => self.native(native, args, ty),
         }
     }
