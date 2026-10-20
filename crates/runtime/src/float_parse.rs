@@ -196,6 +196,41 @@ mod tests {
         assert_eq!(hex_float("1.fffffffffffff7p1023", 53, -1074), Some(f64::MAX));
     }
 
+    /// Java's results for generated inputs (`tests/parse_floats.txt`, made by a Java 26 program):
+    /// each line is the input, then the Double bits and the Float bits, or `NFE`.
+    #[test]
+    fn agrees_with_java_on_generated_inputs() {
+        let cases = include_str!("../tests/parse_floats.txt").lines().filter(|l| !l.starts_with('#'));
+        let mut count = 0;
+        for line in cases {
+            count += 1;
+            let (text, expected) = line.split_once('\t').expect("a tab");
+            let text = text.replace("\\t", "\t").replace("\\n", "\n");
+            let trimmed = text.trim_matches(|c: char| c <= ' ');
+            if expected == "NFE" {
+                assert_eq!(read::<f64>(trimmed), None, "{text:?}");
+                assert_eq!(read::<f32>(trimmed), None, "{text:?}");
+                continue;
+            }
+            let (double, float) = expected.split_once(' ').expect("two values");
+            let double = f64::from_bits(u64::from_str_radix(double, 16).expect("hex"));
+            let float = f32::from_bits(u32::from_str_radix(float, 16).expect("hex"));
+            let got = read::<f64>(trimmed).expect("a double");
+            if double.is_nan() {
+                assert!(got.is_nan(), "{text:?}");
+            } else {
+                assert_eq!(got.to_bits(), double.to_bits(), "{text:?}");
+            }
+            let got = read::<f32>(trimmed).expect("a float");
+            if float.is_nan() {
+                assert!(got.is_nan(), "{text:?}");
+            } else {
+                assert_eq!(got.to_bits(), float.to_bits(), "{text:?}");
+            }
+        }
+        assert!(count > 300, "{count} cases");
+    }
+
     #[test]
     fn rejects_what_java_rejects() {
         for bad in ["", "0x", "0x1", "0x1.8", "0x1p", "0x.p1", "0xgp0", "1e", "1e+", ".", "-", "1.5ff"] {
