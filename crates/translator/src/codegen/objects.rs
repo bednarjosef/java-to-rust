@@ -90,6 +90,10 @@ pub(super) fn default_value(ty: Type) -> &'static str {
 /// functions.
 pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
     let mut live = instantiated(class);
+    // A class that only ever types a null reference still needs its struct for the type.
+    for t in mentioned(class) {
+        live[t] |= class.hierarchy.is_concrete(t) && !class.hierarchy.has_subtypes(t);
+    }
     for t in 0..live.len() {
         if live[t] {
             for a in class.hierarchy.ancestors(t) {
@@ -117,6 +121,38 @@ pub(super) fn super_targets(class: &Class) -> HashSet<usize> {
                 &mut |_| {},
             );
         }
+    }
+    out
+}
+
+/// The classes that a field, parameter, result, local or expression has as its type.
+fn mentioned(class: &Class) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    let mut note = |mut ty: Type| {
+        while let Type::Array(element) = ty {
+            ty = *element;
+        }
+        if let Type::Class(name) = ty
+            && let Some(t) = class.type_index(name)
+        {
+            out.insert(t);
+        }
+    };
+    for f in class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics)) {
+        note(f.ty);
+    }
+    for m in &class.methods {
+        note(m.ret);
+        m.params.iter().for_each(|p| note(p.ty));
+        let (mut types, mut locals) = (Vec::new(), Vec::new());
+        for s in &m.body {
+            visit_stmt(s, &mut |e| visit_expr(e, &mut |x| types.push(x.ty)), &mut |s| {
+                if let Stmt::Local { ty, .. } = s {
+                    locals.push(*ty);
+                }
+            });
+        }
+        types.into_iter().chain(locals).for_each(&mut note);
     }
     out
 }
@@ -601,7 +637,29 @@ impl<'a> Gen<'a> {
     /// Whether a statement's own expressions may borrow an object mutably while another borrow made
     /// by the statement is still alive, so that every borrow must end where it is made.
     pub(super) fn stmt_conflicts(&self, stmt: &Stmt) -> bool {
-        self.conflicts(&own_exprs(stmt))
+        self.conflicts(&own_exprs(stmt)) || matches!(stmt, Stmt::Expr(e) if self.reassigns_through_borrow(e))
+    }
+
+    /// Whether evaluating `e` borrows a shared object through a `RefCell`.
+    pub(super) fn reads_through_borrow(&self, e: &Expr) -> bool {
+        let mut found = false;
+        visit_expr(e, &mut |x| found |= self.holds_borrow(x));
+        found
+    }
+
+    /// Whether an assignment to a local reads the local's old object through a `RefCell` borrow,
+    /// as `t = t.left` does: the borrow would outlive the assignment that drops the old object.
+    fn reassigns_through_borrow(&self, e: &Expr) -> bool {
+        let ExprKind::Assign { target: Place::Var(name), value, .. } = &e.kind else {
+            return false;
+        };
+        let mut found = false;
+        visit_expr(value, &mut |x| {
+            if self.holds_borrow(x) {
+                visit_expr(x, &mut |y| found |= matches!(&y.kind, ExprKind::Var(v) if v == name));
+            }
+        });
+        found
     }
 
     /// Whether the borrows that evaluating the expressions makes may conflict: a `RefCell` borrow
@@ -912,7 +970,16 @@ impl<'a> Gen<'a> {
                 // A method call dereferences by itself.
                 let step = step.replace(&format!("{marked}."), &format!("{local}."));
                 let step = step.replace(&marked, &format!("(*{local})"));
-                Some(format!("{{ let {local} = &mut {place}; {step}; }}"))
+                // An object computed by an expression is a temporary that a `let` would not keep
+                // alive while the field is borrowed: it gets a local of its own.
+                let (bind, place) = if stable {
+                    (String::new(), place)
+                } else {
+                    let handle = self.temp("object");
+                    let value = self.object_handle(object);
+                    (format!("let {handle} = {value}; "), format!("{handle}.borrow_mut().{field}"))
+                };
+                Some(format!("{{ {bind}let {local} = &mut {place}; {step}; }}"))
             }
         };
         self.guarded = outer;
