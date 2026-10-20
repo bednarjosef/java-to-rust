@@ -79,6 +79,7 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.Short",
     "java.lang.StrictMath",
     "java.lang.String",
+    "java.lang.StringBuffer",
     "java.lang.StringBuilder",
     "java.lang.System",
     "java.lang.Thread",

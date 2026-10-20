@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 mod boxing;
 mod character;
+mod charsets;
 mod code;
 mod code_point;
 mod enums;

@@ -244,12 +244,13 @@ impl<'t> Lowering<'t> {
     /// `new String(..)` and `new StringBuilder(..)`; `None` for any other class.
     pub(super) fn new_text(&self, node: Node<'t>) -> Result<Option<ExprKind>, Error> {
         let Some(symbol) = node.symbol() else { return Ok(None) };
-        if !matches!(symbol.owner, "java.lang.String" | "java.lang.StringBuilder") {
+        if !matches!(symbol.owner, "java.lang.String" | "java.lang.StringBuilder" | "java.lang.StringBuffer") {
             return Ok(None);
         }
-        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+        let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
         let tys: Vec<Type> = args.iter().map(|a| a.ty).collect();
         let chars = Type::array(Type::Char);
+        let bytes = Type::array(Type::Byte);
         Ok(Some(match (symbol.owner, tys.as_slice()) {
             ("java.lang.String", []) => ExprKind::Str(String::new()),
             ("java.lang.String", [Type::String]) => {
@@ -261,7 +262,12 @@ impl<'t> Lowering<'t> {
             ("java.lang.String", [a] | [a, Type::Int, Type::Int]) if *a == chars => {
                 ExprKind::Builtin(Builtin::String(StringOp::FromChars), args)
             }
-            ("java.lang.StringBuilder", [] | [Type::Int | Type::String | Type::StringBuilder]) => {
+            ("java.lang.String", [a] | [a, Type::Charset | Type::String] | [a, Type::Int, Type::Int, Type::Charset | Type::String])
+                if *a == bytes =>
+            {
+                ExprKind::Builtin(Builtin::String(StringOp::FromBytes), args)
+            }
+            ("java.lang.StringBuilder" | "java.lang.StringBuffer", [] | [Type::Int | Type::String | Type::StringBuilder]) => {
                 ExprKind::Builtin(Builtin::Builder(BuilderOp::New), args)
             }
             (owner, _) => return unsupported(node, &format!("this constructor of `{owner}`")),
