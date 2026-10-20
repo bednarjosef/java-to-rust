@@ -799,6 +799,43 @@ fn char_at_on_text_that_may_not_be_ascii_counts_utf16_units() {
 }
 
 #[test]
+fn string_built_from_ascii_char_casts_indexes_bytes() {
+    let rust = translate(
+        "class A {
+            static String letters(int n) {
+                String s = \"\";
+                for (int i = 0; i < n; i++) { s = s + (char) ('a' + (i * 7 + i / 3) % 26); }
+                return s;
+            }
+            static int count(String s, char target) {
+                int count = 0;
+                for (int i = 0; i < s.length(); i++) { if (s.charAt(i) == target) count++; }
+                return count;
+            }
+            public static void main(String[] a) { System.out.println(count(letters(4000), 'a')); }
+        }",
+    );
+    assert_contains(&rust, &["for i in 0..s.len() as i32 {", "s.as_bytes()[i as usize] as u16"]);
+    assert_lacks(&rust, &["java::char_at", "java::string_length"]);
+}
+
+#[test]
+fn char_cast_that_may_leave_ascii_keeps_utf16_units() {
+    let rust = translate(
+        "class A {
+            static String wide(int n) {
+                String s = \"\";
+                for (int i = 0; i < n; i++) { s = s + (char) (200 + i); }
+                return s;
+            }
+            public static void main(String[] a) { System.out.println(wide(4).charAt(1)); }
+        }",
+    );
+    assert_contains(&rust, &["java::char_at(&wide(4), 1)"]);
+    assert_lacks(&rust, &["as_bytes"]);
+}
+
+#[test]
 fn floats_are_f32_and_print_like_java() {
     let rust = translate(
         "class A {
