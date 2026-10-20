@@ -221,6 +221,20 @@ platform libm), which agree with it on all but about 0.1 percent of arguments, a
 `Math.log10` is computed correctly rounded, as HotSpot's is. `System.out` is buffered
 (`java::println!`), several times faster than `println!` for programs that print a lot.
 
+`System.getProperty` is answered at run time for the keys whose values do not depend on the JVM:
+`line.separator`, `file.separator`, `path.separator`, `user.dir`, `user.home`, `user.name`,
+`java.io.tmpdir`, `os.name` and `os.arch`. Any other key gives null, or the default given; a key
+the JVM sets itself (`java.version`, `java.vendor`, ...) is rejected at translation. The memory
+figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
+JVM's, and `gc()` does nothing. `Runtime.halt` flushes the output and exits without shutdown
+hooks. `Thread.sleep` (both forms), `onSpinWait` and `yield` are the platform's. The runtime's
+descriptor table (`fd.rs`) backs the `FileInputStream`, `FileOutputStream` and `FileDescriptor`
+natives: stdin has its own buffered reader, stdout writes through the buffered `System.out` so
+its order is kept with `println`, stderr is written as it is (unbuffered, like Java's), and files
+are opened by path. Translated
+programs cannot reach these natives yet: the JDK classes that call them need the object model to
+give each stream its descriptor.
+
 Translation never runs the program; it only compiles it. Starting javac costs about half a
 second per run; building the translator needs `javac` (JDK 21 or newer) on PATH.
 
