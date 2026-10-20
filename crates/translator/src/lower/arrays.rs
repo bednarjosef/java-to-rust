@@ -7,6 +7,10 @@ impl<'t> Lowering<'t> {
     /// `new T[n][m]`, or an initializer such as `{1, 2}` and `new int[] {1, 2}`.
     pub(super) fn new_array(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let ty = self.ty(node, node.java_type())?;
+        // A boxed element is `null` until it is set, which a plain `Vec` cannot hold yet.
+        if matches!(leaf(ty), Type::Boxed(_)) {
+            return unsupported(node, "an array of boxed values");
+        }
         if node.get("initializers").is_some() {
             let items = node.list("initializers").map(|item| self.expr(item)).collect::<Result<_, _>>()?;
             return Ok(ExprKind::ArrayLit(items));

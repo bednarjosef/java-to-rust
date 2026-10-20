@@ -17,6 +17,7 @@
 
 mod arrays;
 mod borrowing;
+mod boxing;
 mod indexing;
 mod moves;
 mod nullness;
@@ -82,12 +83,16 @@ pub struct Facts {
     /// The classes, by index in `Class::types`, whose static initialization runs eagerly through
     /// an `init` function; the other classes initialize each static lazily on first access.
     pub eager_init: HashSet<usize>,
+    /// The boxed kinds (`Type::Boxed` of the primitive) whose identity `==` observes: their boxes
+    /// are shared objects. Every other boxed kind is its primitive value.
+    pub faithful_boxes: HashSet<Type>,
 }
 
 pub fn analyze(class: &Class) -> Facts {
     let mut facts = Facts::default();
     ranges::analyze(class, &mut facts);
     nullness::analyze(class, &mut facts);
+    boxing::analyze(class, &mut facts);
     borrowed_params(class, &mut facts);
     ascii_strings(class, &mut facts);
     facts.immutable = objects::immutable_classes(class);

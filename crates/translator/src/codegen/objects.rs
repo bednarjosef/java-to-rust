@@ -27,8 +27,8 @@ enum Slot {
 }
 
 impl Slot {
-    fn read(&self, ty: Type) -> String {
-        let copy = !needs_clone(ty);
+    fn read(&self, clone: bool) -> String {
+        let copy = !clone;
         match self {
             Slot::Field { obj, field, plain: true } => {
                 format!("{obj}.{field}{}", if copy { "" } else { ".clone()" })
@@ -91,6 +91,7 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Double | Type::Float => "0.0",
         Type::Boolean => "false",
         Type::String => "String::new()",
+        Type::Boxed(_) => "None",
         _ => unreachable!("lowering rejects fields of type {ty}"),
     }
 }
@@ -298,7 +299,7 @@ impl<'a> Gen<'a> {
                 } else if self.facts.borrowed_optional_params.contains(&(index, i)) {
                     self.option_arg(a)
                 } else if self.optional_var(index, p.ty, &p.name) {
-                    self.optional(a).text
+                    self.optional_to(a, p.ty).text
                 } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {
                     self.borrowed_arg(a, written)
                 } else if self.guarded && self.holds_borrow(a) {
@@ -408,7 +409,7 @@ impl<'a> Gen<'a> {
             return self.enum_field(object, name);
         }
         let obj = self.object(object);
-        let clone = if needs_clone(ty) { ".clone()" } else { "" };
+        let clone = if self.clones(ty) { ".clone()" } else { "" };
         if self.is_plain(object) {
             return Code::atom(format!("{obj}.{}{clone}", snake_case(name)));
         }
@@ -424,7 +425,7 @@ impl<'a> Gen<'a> {
             return constant;
         }
         let cell = cell_name(&self.class.types[class].name, name);
-        let read = Slot::Static { cell }.read(ty);
+        let read = Slot::Static { cell }.read(self.clones(ty));
         match self.init_call(class) {
             Some(init) => Code::atom(format!("{{ {init} {read} }}")),
             None => Code::atom(read),
@@ -561,6 +562,10 @@ impl<'a> Gen<'a> {
             return None;
         }
         let ty = e.ty;
+        // A boxed field is updated through its value, in the general form.
+        if matches!(ty, Type::Boxed(_)) && !matches!(how, Update::Assign(_)) {
+            return None;
+        }
         if let Update::Compound(_, value) = how
             && (ty == Type::String || has_effects(value))
         {
@@ -571,7 +576,7 @@ impl<'a> Gen<'a> {
         if self.is_plain(object) {
             let place = format!("{obj}.{field}");
             return Some(match how {
-                Update::Assign(value) => format!("{place} = {}", self.value(value, ty).text),
+                Update::Assign(value) => format!("{place} = {}", self.field_value(value, ty)),
                 Update::Compound(op, value) => self.compound(op, &place, ty, value, e.id),
                 Update::Step(increment) => self.step_place(place, ty, increment, e.id),
             });
@@ -581,7 +586,7 @@ impl<'a> Gen<'a> {
         let place = format!("{obj}.borrow_mut().{field}");
         let outer = std::mem::replace(&mut self.guarded, true);
         let text = match how {
-            Update::Assign(value) => Some(format!("{place} = {}", self.value(value, ty).text)),
+            Update::Assign(value) => Some(format!("{place} = {}", self.field_value(value, ty))),
             Update::Compound(op, value) => self.in_place_op(op, ty, value, e.id).map(|symbol| {
                 let v = self.value(value, if op.is_shift() { value.ty } else { ty });
                 format!("{place} {symbol} {}", v.text)
@@ -651,26 +656,42 @@ impl<'a> Gen<'a> {
         let outer = std::mem::replace(&mut self.guarded, rhs);
         let result = match how {
             Update::Assign(value) => {
-                let v = self.value(value, ty).text;
+                let v = self.field_value(value, ty);
                 lines.push(format!("let {new} = {v};"));
                 new.clone()
             }
+            Update::Compound(op, value) if matches!(ty, Type::Boxed(_)) => {
+                lines.push(format!("let {old} = {};", slot.read(self.clones(ty))));
+                let right = self.operand(value);
+                let stored = self.boxed_result(op, ty, Code::atom(old.clone()), true, right, id);
+                lines.push(format!("let {new} = {};", stored.text));
+                format!("{}({new})", self.runtime("non_null"))
+            }
+            Update::Step(increment) if matches!(ty, Type::Boxed(_)) => {
+                lines.push(format!("let {old} = {};", slot.read(self.clones(ty))));
+                let op = if increment { BinOp::Add } else { BinOp::Sub };
+                let one = Operand { code: Code::literal(Literal::Int(1)), ty: Type::Int };
+                let stored = self.boxed_result(op, ty, Code::atom(old.clone()), true, one, id);
+                lines.push(format!("let {new} = {};", stored.text));
+                let value = if prefix { new.clone() } else { old.clone() };
+                format!("{}({value})", self.runtime("non_null"))
+            }
             Update::Compound(_, value) if ty == Type::String => {
-                let mut parts = vec![Part::Arg(Code::atom(slot.read(ty)))];
+                let mut parts = vec![Part::Arg(Code::atom(slot.read(self.clones(ty))))];
                 self.parts(value, &mut parts);
                 lines.push(format!("let {new} = {};", self.format("format!", parts).text));
                 new.clone()
             }
             Update::Compound(op, value) => {
-                lines.push(format!("let {old} = {};", slot.read(ty)));
-                let rty = crate::types::binary_type(op, ty, value.ty).expect("checked");
+                lines.push(format!("let {old} = {};", slot.read(self.clones(ty))));
+                let rty = crate::types::binary_type(op, ty, value.ty.unboxed()).expect("checked");
                 let right = self.operand(value);
                 let code = self.binary(op, Operand { code: Code::atom(old.clone()), ty }, right, rty, id);
                 lines.push(format!("let {new} = {};", self.convert(code, rty, ty).text));
                 new.clone()
             }
             Update::Step(increment) => {
-                lines.push(format!("let {old} = {};", slot.read(ty)));
+                lines.push(format!("let {old} = {};", slot.read(self.clones(ty))));
                 let sign = if increment { "+" } else { "-" };
                 let text = if ty == Type::Double {
                     format!("{old} {sign} 1.0")
@@ -684,7 +705,7 @@ impl<'a> Gen<'a> {
             }
         };
         self.guarded = outer;
-        let stored = if needs_clone(ty) { format!("{new}.clone()") } else { new.clone() };
+        let stored = if self.clones(ty) { format!("{new}.clone()") } else { new.clone() };
         if assigns {
             lines.extend(init);
         }
@@ -701,7 +722,7 @@ impl<'a> Gen<'a> {
         self.line(&format!("{}struct {name} {{", self.vis()));
         self.indent += 1;
         for f in &decl.fields {
-            let ty = self.ty_name(f.ty);
+            let ty = self.field_ty_name(f.ty);
             self.line(&format!("{}{}: {ty},", self.vis(), snake_case(&f.name)));
         }
         self.indent -= 1;
@@ -814,7 +835,7 @@ impl<'a> Gen<'a> {
         for f in inits {
             // The line writes a field, so a read in the value must end its `Ref` first.
             let outer = std::mem::replace(&mut self.guarded, true);
-            let value = self.value(f.init.as_ref().expect("filtered"), f.ty).text;
+            let value = self.field_value(f.init.as_ref().expect("filtered"), f.ty);
             self.guarded = outer;
             let field = snake_case(&f.name);
             if by_value {

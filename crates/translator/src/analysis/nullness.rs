@@ -82,6 +82,12 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
                 || (!narrowed(b, false) && maybe_null(facts, m, b))
         }
         ExprKind::Cast(_, value) => maybe_null(facts, m, value),
+        // A boxed field is always an `Option`: its default is `null`, and so is an assignment of
+        // `null` to it.
+        ExprKind::Field { .. } | ExprKind::Static { .. } => matches!(e.ty, Type::Boxed(_)),
+        ExprKind::Assign { op: None, target: Place::Field { .. } | Place::Static { .. }, .. } => {
+            matches!(e.ty, Type::Boxed(_))
+        }
         _ => false,
     }
 }

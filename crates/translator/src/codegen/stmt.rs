@@ -146,7 +146,7 @@ impl<'a> Gen<'a> {
             return Code::atom(text.replacen("write!(", "write!(f, ", 1));
         }
         if self.optional_return() {
-            return self.optional(value);
+            return self.optional_to(value, self.ret);
         }
         if let ExprKind::Var(name) = &value.kind
             && value.ty == Type::String
@@ -239,7 +239,7 @@ impl<'a> Gen<'a> {
 
     pub(super) fn local_decl(&mut self, ty: Type, name: &str, init: Option<&'a Expr>, mutable: bool) {
         if self.optional_var(self.method, ty, name) {
-            return self.optional_local(name, init, mutable);
+            return self.optional_local(name, ty, init, mutable);
         }
         if let Some(written) = self.plain(name) {
             self.plain_local(ty, name, init, written);

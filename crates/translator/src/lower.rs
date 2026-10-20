@@ -13,6 +13,7 @@ use serde_json::Value;
 use std::cell::Cell;
 
 mod arrays;
+mod boxing;
 mod natives;
 mod primitives;
 mod program;
@@ -199,6 +200,9 @@ impl<'t> Lowering<'t> {
 
     /// The supported type named by javac's `name` for it.
     fn ty(&self, node: Node, name: &str) -> Result<Type, Error> {
+        if let Some(boxed) = boxing::boxed_type(name) {
+            return Ok(boxed);
+        }
         match name {
             "int" => Ok(Type::Int),
             "long" => Ok(Type::Long),
@@ -376,7 +380,7 @@ impl<'t> Lowering<'t> {
             "MEMBER_SELECT" if is_array_length(node) => {
                 ExprKind::Length(Box::new(self.expr(node.child("expression")?)?))
             }
-            "MEMBER_SELECT" => match self.constant_field(node) {
+            "MEMBER_SELECT" => match self.constant_field(node).or_else(|| self.boolean_constant(node)) {
                 Some(constant) => constant,
                 None => self.select(node)?,
             },
@@ -475,6 +479,9 @@ impl<'t> Lowering<'t> {
                 let receiver = receiver.expect("an instance method has a receiver");
                 args.insert(0, self.expr(receiver)?);
                 Builtin::StringCharAt
+            }
+            (owner, name) if boxing::boxed_type(owner).is_some() && boxing::is_boxed_method(name) => {
+                self.boxed_call(node, &symbol, &mut args, receiver)?
             }
             ("java.lang.Character", name) => self.character_method(node, name, symbol.ty)?,
             _ if self.type_index(symbol.owner).is_some() => {

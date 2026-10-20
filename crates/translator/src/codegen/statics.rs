@@ -63,11 +63,11 @@ impl<'a> Gen<'a> {
         }
         for (t, f) in cells {
             let init = match &f.init {
-                Some(e) if !self.facts.eager_init.contains(&t) => self.value(e, f.ty).text,
+                Some(e) if !self.facts.eager_init.contains(&t) => self.field_value(e, f.ty),
                 _ => self.placeholder(f.ty),
             };
             let cell = cell_name(&class.types[t].name, &f.name);
-            let ty = self.ty_name(f.ty);
+            let ty = self.field_ty_name(f.ty);
             self.line(&format!("{}static {cell}: RefCell<{ty}> = RefCell::new({init});", self.vis()));
         }
         self.indent -= 1;

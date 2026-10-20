@@ -69,6 +69,7 @@ impl<'t> Lowering<'t> {
             "isLowerCase" => Builtin::CharIsLowerCase,
             "toUpperCase" => Builtin::CharToUpperCase,
             "toLowerCase" => Builtin::CharToLowerCase,
+            "getNumericValue" => Builtin::CharNumericValue,
             _ => return unsupported(node, &format!("method `Character.{name}`")),
         };
         if !signature.starts_with("(char)") {

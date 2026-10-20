@@ -16,6 +16,7 @@ impl<'a> Gen<'a> {
             }
             Type::Class(name) => self.object_type(name),
             Type::Enum(name) => struct_name(name),
+            Type::Boxed(_) => self.boxed_name(ty),
             _ => rust_type(ty).to_string(),
         }
     }

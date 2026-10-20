@@ -37,6 +37,12 @@ impl<'a> Gen<'a> {
 
     /// `e` as an `Option<String>`: a possibly-null value as it is, any other string in `Some`.
     pub(super) fn optional(&mut self, e: &'a Expr) -> Code {
+        self.optional_to(e, e.ty)
+    }
+
+    /// `e` as an `Option` of the type `ty`: a possibly-null value as it is, any other value in
+    /// `Some`, converted to `ty` (boxing it when `ty` is boxed).
+    pub(super) fn optional_to(&mut self, e: &'a Expr, ty: Type) -> Code {
         if let ExprKind::Var(name) = &e.kind
             && self.borrowed_optional.contains(name)
             && self.nullable(e)
@@ -46,19 +52,20 @@ impl<'a> Gen<'a> {
         if self.nullable(e) {
             return self.expr(e);
         }
-        let value = self.value(e, e.ty);
+        let value = self.value(e, ty);
         Code::atom(format!("Some({})", value.text))
     }
 
-    /// `let name: Option<String> = init;`
-    pub(super) fn optional_local(&mut self, name: &str, init: Option<&'a Expr>, mutable: bool) {
+    /// `let name: Option<T> = init;`, where `T` is the Rust type of `ty`.
+    pub(super) fn optional_local(&mut self, name: &str, ty: Type, init: Option<&'a Expr>, mutable: bool) {
         let mutable = if mutable { "mut " } else { "" };
         let rust = self.local(name);
+        let rust_ty = self.ty_name(ty);
         match init {
-            None => self.line(&format!("let {mutable}{rust}: Option<String>;")),
+            None => self.line(&format!("let {mutable}{rust}: Option<{rust_ty}>;")),
             Some(init) => {
-                let code = self.optional(init);
-                self.line(&format!("let {mutable}{rust}: Option<String> = {};", code.text));
+                let code = self.optional_to(init, ty);
+                self.line(&format!("let {mutable}{rust}: Option<{rust_ty}> = {};", code.text));
             }
         }
     }
@@ -75,12 +82,15 @@ impl<'a> Gen<'a> {
     /// The possibly-null string variable `name` as an `Option<&str>`.
     fn option_source(&self, name: &str) -> String {
         let rust = self.local(name);
-        if self.borrowed_optional.contains(name) { rust } else { format!("{rust}.as_deref()") }
+        // An `Option<i32>` is `Copy` and matches as it is; a faithful box is `as_deref`'d.
+        let plain_box = self.boxed.get(name).is_some_and(|&ty| !self.faithful_box(ty));
+        if self.borrowed_optional.contains(name) || plain_box { rust } else { format!("{rust}.as_deref()") }
     }
 
     /// A possibly-null string as an `Option<&str>`.
     pub(super) fn option_ref(&mut self, e: &'a Expr) -> String {
         match &e.kind {
+            _ if matches!(e.ty, Type::Boxed(_)) => self.expr(e).text,
             ExprKind::Null => "None::<&str>".to_string(),
             ExprKind::Var(name) => self.option_source(name),
             ExprKind::Cast(_, inner) => self.option_ref(inner),
@@ -154,6 +164,9 @@ impl<'a> Gen<'a> {
         }
         if !e.ty.is_reference() || !self.nullable(e) {
             return None;
+        }
+        if matches!(e.ty, Type::Boxed(_)) {
+            return Some(Part::Arg(Code::atom(self.boxed_text(e, e.ty.unboxed()))));
         }
         let text = match &e.kind {
             // An operand that assigns the variable is read before the assignment, as a copy.

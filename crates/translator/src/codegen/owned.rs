@@ -89,7 +89,7 @@ impl<'a> Gen<'a> {
             .map(|(f, v)| {
                 let field = snake_case(&f.name);
                 let value = match v {
-                    Some(e) => self.value(e, f.ty).text,
+                    Some(e) => self.field_value(e, f.ty),
                     None => self.placeholder(f.ty),
                 };
                 if value == field { field } else { format!("{field}: {value}") }

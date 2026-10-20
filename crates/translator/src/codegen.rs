@@ -8,6 +8,7 @@ use crate::analysis::Facts;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
+mod boxing;
 mod code;
 mod enums;
 mod expr;
@@ -34,6 +35,7 @@ mod owned;
 mod sync;
 
 use arrays::name_part;
+use boxing::boxed_locals;
 use objects::*;
 
 pub fn generate(class: &Class, facts: &Facts) -> String {
@@ -55,6 +57,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         annotations: Vec::new(),
         fn_names: method_names(class),
         locals: HashMap::new(),
+        boxed: HashMap::new(),
         elements: HashMap::new(),
         out: String::new(),
         indent: 0,
@@ -151,6 +154,8 @@ struct Gen<'a> {
     fn_names: Vec<String>,
     /// Java local variable names to Rust names, for the current method.
     locals: HashMap<String, String>,
+    /// The boxed types of the current method's parameters and locals, by Java name.
+    boxed: HashMap<String, Type>,
     /// Reads of elements that a for-each-style loop has bound to a variable, by expression.
     elements: HashMap<ExprId, String>,
     out: String,
@@ -264,7 +269,7 @@ impl<'a> Gen<'a> {
                 let ty = if self.borrowed_optional.contains(&p.name) {
                     "Option<&str>".to_string()
                 } else if self.optional_var(index, p.ty, &p.name) {
-                    "Option<String>".to_string()
+                    format!("Option<{}>", self.ty_name(p.ty))
                 } else if self.borrowed.contains(&p.name) {
                     "&str".to_string()
                 } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {
@@ -283,7 +288,7 @@ impl<'a> Gen<'a> {
         } else if m.ret == Type::Void {
             String::new()
         } else if self.optional_return() {
-            " -> Option<String>".to_string()
+            format!(" -> Option<{}>", self.ty_name(m.ret))
         } else {
             format!(" -> {}", self.ty_name(m.ret))
         };
@@ -334,6 +339,7 @@ impl<'a> Gen<'a> {
                 entry.insert(rust);
             }
         }
+        self.boxed = boxed_locals(m);
     }
 }
 

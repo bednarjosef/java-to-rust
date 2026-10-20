@@ -1577,3 +1577,68 @@ fn break_in_a_switch_inside_a_loop_leaves_the_switch_only() {
     assert_contains(&rust, &["'sw1: {", "break 'sw1;"]);
     assert_lacks(&rust, &["break;"]);
 }
+
+#[test]
+fn boxed_values_without_identity_checks_are_plain_ints() {
+    let rust = translate(
+        "class A {
+            static Integer maybe(int n) { return n > 2 ? n : null; }
+            static Integer twice(Integer x) { return x * 2; }
+            public static void main(String[] a) {
+                Integer plain = 5;
+                int sum = plain + twice(3);
+                Integer nul = maybe(sum);
+                System.out.println(sum + \" \" + nul);
+                if (nul != null) {
+                    System.out.println(nul.intValue() + 1);
+                }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn maybe(n: i32) -> Option<i32>",
+            "fn twice(x: i32) -> i32",
+            "let plain: i32 = 5;",
+            "let nul: Option<i32> = maybe(sum);",
+            "if let Some(nul) = nul {",
+        ],
+    );
+    assert_lacks(&rust, &["Boxed", "box_int", "as_deref"]);
+}
+
+#[test]
+fn boxed_values_compared_by_identity_are_shared_boxes() {
+    let rust = translate(
+        "class A {
+            static Integer twice(Integer x) { return x * 2; }
+            public static void main(String[] a) {
+                Integer p = 100, q = 100;
+                System.out.println((p == q) + \" \" + twice(p).equals(q));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["fn twice(x: java::Boxed<i32>) -> java::Boxed<i32>", "java::box_int(100)", "java::same_optional("],
+    );
+}
+
+#[test]
+fn a_nullable_boxed_identity_is_an_option_of_the_shared_box() {
+    let rust = translate(
+        "class A {
+            static Integer maybe(int n) { return n > 2 ? n : null; }
+            public static void main(String[] a) {
+                Integer nul = maybe(3);
+                Integer other = maybe(4);
+                System.out.println((nul == other) + \" \" + nul);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["fn maybe(n: i32) -> Option<java::Boxed<i32>>", "let nul: Option<java::Boxed<i32>> = maybe(3);"],
+    );
+}

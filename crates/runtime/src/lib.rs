@@ -10,6 +10,7 @@ pub use slice::*;
 
 use std::fmt;
 
+mod boxed;
 mod character;
 pub mod fdlibm;
 mod float;
@@ -17,6 +18,7 @@ mod math;
 mod natives;
 mod null;
 mod out;
+pub use boxed::*;
 pub use character::*;
 pub use float::*;
 pub use math::*;

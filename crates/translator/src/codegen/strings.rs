@@ -58,6 +58,11 @@ impl<'a> Gen<'a> {
             }
             // An enum prints through its `Display`, which is its name.
             _ if matches!(e.ty, Type::Enum(_)) => out.push(Part::Arg(self.expr(e))),
+            _ if matches!(e.ty, Type::Boxed(_)) => {
+                let kind = e.ty.unboxed();
+                let value = self.value(e, kind);
+                out.push(Part::Arg(Code::atom(self.shown(kind, value.text))));
+            }
             ExprKind::Binary(BinOp::Add, l, r) if e.ty == Type::String => {
                 self.concat_parts(l, assigned, out);
                 self.concat_parts(r, assigned, out);
