@@ -5,7 +5,8 @@
 //!   which divisions can neither divide by zero nor overflow; those use Rust's plain operators
 //!   instead of `wrapping_add` and `java::div` (see `ranges`).
 //! - Strings that are always ASCII have a `len()` equal to Java's UTF-16 `length()`.
-//! - String parameters that a method never assigns and that are never null are borrowed as `&str`.
+//! - String parameters that a method never assigns are borrowed: `&str`, or `Option<&str>` when
+//!   they can be null.
 //! - Array locals that no other name can see are plain `Vec`s (see `arrays`).
 //!
 //! The facts form a table keyed by expression id. An expression without a fact gets the faithful
@@ -18,7 +19,7 @@ mod ranges;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
-pub use nullness::{maybe_null, nullable_var};
+pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_var};
 
 #[derive(Default)]
 pub struct Facts {
@@ -32,6 +33,8 @@ pub struct Facts {
     pub ascii_length: HashSet<ExprId>,
     /// String parameters, as (method, parameter) indexes, that are never assigned.
     pub borrowed_params: HashSet<(usize, usize)>,
+    /// String parameters that are never assigned but can be null: `Option<&str>`.
+    pub borrowed_optional_params: HashSet<(usize, usize)>,
     /// String variables and parameters, as (method, name), that can hold null.
     pub nullable_vars: HashSet<(usize, String)>,
     /// Methods whose string return value can be null.
@@ -62,8 +65,12 @@ pub fn analyze(class: &Class) -> Facts {
 fn borrowed_params(class: &Class, facts: &mut Facts) {
     for (m, method) in class.methods.iter().enumerate() {
         for (i, p) in method.params.iter().enumerate() {
-            if p.ty == Type::String && !assigns_any(&method.body, &p.name) && !nullable_var(facts, m, &p.name)
-            {
+            if p.ty != Type::String || assigns_any(&method.body, &p.name) {
+                continue;
+            }
+            if nullable_var(facts, m, &p.name) {
+                facts.borrowed_optional_params.insert((m, i));
+            } else {
                 facts.borrowed_params.insert((m, i));
             }
         }

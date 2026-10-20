@@ -30,6 +30,7 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
         facts,
         method: 0,
         borrowed: HashSet::new(),
+        borrowed_optional: HashSet::new(),
         int_receiver: false,
         double_receiver: false,
         annotations: Vec::new(),
@@ -76,8 +77,11 @@ struct Gen<'a> {
     facts: &'a Facts,
     /// The index of the current method.
     method: usize,
-    /// The current method's string parameters that are borrowed as `&str`.
+    /// The current method's string variables that are `&str`: borrowed parameters, and
+    /// possibly-null strings inside a null check that narrowed them.
     borrowed: HashSet<String>,
+    /// The current method's possibly-null string parameters that are borrowed as `Option<&str>`.
+    borrowed_optional: HashSet<String>,
     /// Whether the current method calls a method on an `i32` or `f64` value that is not a
     /// literal. Rust needs the type of such a value to be known, so variables initialized with a
     /// bare literal then get their type written (see `annotation`).
@@ -166,13 +170,19 @@ impl<'a> Gen<'a> {
             .filter(|&i| self.facts.borrowed_params.contains(&(index, i)))
             .map(|i| m.params[i].name.clone())
             .collect();
+        self.borrowed_optional = (0..m.params.len())
+            .filter(|&i| self.facts.borrowed_optional_params.contains(&(index, i)))
+            .map(|i| m.params[i].name.clone())
+            .collect();
         let params: Vec<String> = m
             .params
             .iter()
             .enumerate()
             .map(|(i, p)| {
                 let mutable = if assigns_any(&m.body, &p.name) { "mut " } else { "" };
-                let ty = if self.optional_var(index, p.ty, &p.name) {
+                let ty = if self.borrowed_optional.contains(&p.name) {
+                    "Option<&str>".to_string()
+                } else if self.optional_var(index, p.ty, &p.name) {
                     "Option<String>".to_string()
                 } else if self.borrowed.contains(&p.name) {
                     "&str".to_string()

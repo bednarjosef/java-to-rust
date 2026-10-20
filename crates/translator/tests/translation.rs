@@ -203,10 +203,7 @@ fn dereferencing_a_maybe_null_parameter_throws() {
             }
         }",
     );
-    assert_contains(
-        &rust,
-        &["fn size(s: Option<String>) -> i32", "java::non_null(s.as_deref()).len() as i32"],
-    );
+    assert_contains(&rust, &["fn size(s: Option<&str>) -> i32", "java::non_null(s).len() as i32"]);
     assert_lacks(&rust, &["unwrap()"]);
 }
 
@@ -218,7 +215,7 @@ fn a_null_check_binds_the_string_in_its_branch() {
             public static void main(String[] a) { System.out.println(size(null)); }
         }",
     );
-    assert_contains(&rust, &["if let Some(s) = s.as_deref() {", "s.len() as i32"]);
+    assert_contains(&rust, &["if let Some(s) = s {", "s.len() as i32"]);
     assert_lacks(&rust, &["non_null"]);
 }
 
@@ -230,7 +227,7 @@ fn an_early_return_on_null_binds_the_rest_of_the_block() {
             public static void main(String[] a) { System.out.println(size(null)); }
         }",
     );
-    assert_contains(&rust, &["let Some(s) = s.as_deref() else {", "return -1;", "s.len() as i32"]);
+    assert_contains(&rust, &["let Some(s) = s else {", "return -1;", "s.len() as i32"]);
     assert_lacks(&rust, &["non_null"]);
 }
 
@@ -242,7 +239,7 @@ fn a_null_check_whose_branch_does_not_read_the_string_does_not_bind_it() {
             public static void main(String[] a) { System.out.println(count(null)); }
         }",
     );
-    assert_contains(&rust, &["if !s.as_deref().is_none() {"]);
+    assert_contains(&rust, &["if s.is_some() {"]);
     assert_lacks(&rust, &["if let Some(s)"]);
 }
 
@@ -369,4 +366,83 @@ fn element_loops_that_write_or_use_the_index_stay_indexed() {
     );
     assert_contains(&rust, &["while i < a.len() as i32 {"]);
     assert_lacks(&rust, &["a.iter().cloned()"]);
+}
+
+#[test]
+fn nullable_parameters_that_are_only_read_are_borrowed() {
+    let rust = translate(
+        "class A {
+            static String describe(String s) {
+                if (s == null) { return \"nothing\"; }
+                return \"text \" + s;
+            }
+            public static void main(String[] a) {
+                System.out.println(describe(null));
+                System.out.println(describe(\"x\"));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["fn describe(s: Option<&str>) -> String {", "let Some(s) = s else {", "describe(Some(\"x\"))"],
+    );
+}
+
+#[test]
+fn null_checks_in_and_chains_and_while_conditions_narrow() {
+    let rust = translate(
+        "class A {
+            static String find(int i) { return i % 3 == 0 ? null : \"item\" + i; }
+            static int len(String s) { return s != null && s.length() > 3 ? s.length() : -1; }
+            public static void main(String[] a) {
+                String t = find(1);
+                int i = 0;
+                while (t != null && i < 3) { System.out.println(t); i++; }
+                System.out.println(len(find(2)));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "if let Some(s) = s && s.len() as i32 > 3 { s.len() as i32 } else { -1 }",
+            "while let Some(t) = t.as_deref() && i < 3 {",
+            "println!(\"{t}\");",
+        ],
+    );
+    assert_lacks(&rust, &["is_none()", "non_null"]);
+}
+
+#[test]
+fn a_default_for_null_is_unwrap_or() {
+    let rust = translate(
+        "class A {
+            static String orDefault(String m) { return m == null ? \"missing\" : m; }
+            public static void main(String[] a) {
+                System.out.println(orDefault(null) + orDefault(\"here\"));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["fn or_default(m: Option<&str>) -> String {", "m.unwrap_or(\"missing\").to_string()"],
+    );
+}
+
+#[test]
+fn equals_on_null_evaluates_its_argument_first() {
+    let rust = translate(
+        "class A {
+            static String find(int i) { return i > 0 ? \"x\" : null; }
+            static String noisy(String s) { System.out.println(s); return s; }
+            public static void main(String[] a) {
+                String n = find(0);
+                System.out.println(n.equals(noisy(\"y\")));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["let receiver_ = n.as_deref(); let other_ = noisy(\"y\"); java::non_null(receiver_) == other_"],
+    );
 }

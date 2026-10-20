@@ -84,6 +84,12 @@ impl<'a> Gen<'a> {
             Stmt::While { cond, body } => {
                 if matches!(cond.kind, ExprKind::Bool(true)) {
                     self.line("loop {");
+                } else if let Some((cond_text, narrowed)) = self.let_chain(cond, &[body], &[]) {
+                    self.line(&format!("while {cond_text} {{"));
+                    self.loop_body(Loop::Plain, body, &[]);
+                    self.line("}");
+                    self.unnarrow(narrowed);
+                    return;
                 } else {
                     let cond_text = self.condition(cond);
                     self.line(&format!("while {cond_text} {{"));

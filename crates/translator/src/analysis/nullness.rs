@@ -75,8 +75,60 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
         ExprKind::Var(name) => nullable_var(facts, m, name),
         ExprKind::Assign { op: None, target: Place::Var(_), value } => maybe_null(facts, m, value),
         ExprKind::Call { resolved: Some(callee), .. } => facts.nullable_returns.contains(callee),
-        ExprKind::Conditional(_, a, b) => maybe_null(facts, m, a) || maybe_null(facts, m, b),
+        // In `s != null ? s : t` the arm that is just `s` is not null.
+        ExprKind::Conditional(cond, a, b) => {
+            let narrowed = |arm: &Expr, when: bool| matches!(&arm.kind, ExprKind::Var(v) if non_null_names(cond, when).contains(&v.as_str()));
+            (!narrowed(a, true) && maybe_null(facts, m, a))
+                || (!narrowed(b, false) && maybe_null(facts, m, b))
+        }
         ExprKind::Cast(_, value) => maybe_null(facts, m, value),
         _ => false,
     }
+}
+
+/// The variables that `cond` proves not null when it evaluates to `when`: those tested with
+/// `s != null` in its top-level `&&` chain (and not assigned later in the chain) when true, the
+/// one tested by a whole `s == null` when false.
+pub fn non_null_names(cond: &Expr, when: bool) -> Vec<&str> {
+    let mut parts = Vec::new();
+    conjuncts(cond, &mut parts);
+    if !when {
+        return match &parts[..] {
+            [test] => {
+                null_test(test).filter(|&(_, non_null)| !non_null).map(|(v, _)| v).into_iter().collect()
+            }
+            _ => Vec::new(),
+        };
+    }
+    let mut out = Vec::new();
+    for (k, part) in parts.iter().enumerate() {
+        if let Some((v, true)) = null_test(part)
+            && !parts[k + 1..].iter().any(|later| assigns(later, v))
+        {
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// The operands of a chain of `&&`, left to right.
+pub fn conjuncts<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match &e.kind {
+        ExprKind::Binary(BinOp::And, l, r) => {
+            conjuncts(l, out);
+            conjuncts(r, out);
+        }
+        _ => out.push(e),
+    }
+}
+
+/// `v == null` or `v != null` (either way round) on a variable: the variable and whether the test
+/// is true when it is not null.
+pub fn null_test(e: &Expr) -> Option<(&str, bool)> {
+    let ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) = &e.kind else { return None };
+    let name = match (&l.kind, &r.kind) {
+        (ExprKind::Var(v), ExprKind::Null) | (ExprKind::Null, ExprKind::Var(v)) => v,
+        _ => return None,
+    };
+    Some((name.as_str(), *op == BinOp::Ne))
 }

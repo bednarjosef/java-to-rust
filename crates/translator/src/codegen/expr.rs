@@ -231,6 +231,9 @@ impl<'a> Gen<'a> {
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
+                if let Some(code) = self.narrowed_conditional(e, cond, a, b) {
+                    return code;
+                }
                 let cond = self.condition(cond);
                 let (a, b) = if self.nullable(e) {
                     (self.optional(a), self.optional(b))
@@ -251,6 +254,8 @@ impl<'a> Gen<'a> {
                     .map(|(i, (a, p))| {
                         if self.facts.borrowed_params.contains(&(index, i)) {
                             self.str_ref(a)
+                        } else if self.facts.borrowed_optional_params.contains(&(index, i)) {
+                            self.option_arg(a)
                         } else if self.optional_var(index, p.ty, &p.name) {
                             self.optional(a).text
                         } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {

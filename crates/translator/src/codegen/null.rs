@@ -2,7 +2,7 @@
 //! from `analysis::maybe_null` and `analysis::nullable_var`; here is how each use is written.
 
 use super::*;
-use crate::analysis::{maybe_null, nullable_var};
+use crate::analysis::{conjuncts, maybe_null, nullable_var};
 
 /// Whether `l == r` or `l != r` compares a string with the `null` literal.
 pub(super) fn is_null_test(op: BinOp, l: &Expr, r: &Expr) -> bool {
@@ -37,6 +37,12 @@ impl<'a> Gen<'a> {
 
     /// `e` as an `Option<String>`: a possibly-null value as it is, any other string in `Some`.
     pub(super) fn optional(&mut self, e: &'a Expr) -> Code {
+        if let ExprKind::Var(name) = &e.kind
+            && self.borrowed_optional.contains(name)
+            && self.nullable(e)
+        {
+            return Code::atom(format!("{}.map(String::from)", self.local(name)));
+        }
         if self.nullable(e) {
             return self.expr(e);
         }
@@ -57,11 +63,26 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// `e` as an argument for an `Option<&str>` parameter.
+    pub(super) fn option_arg(&mut self, e: &'a Expr) -> String {
+        match &e.kind {
+            ExprKind::Null => "None".to_string(),
+            _ if self.nullable(e) => self.option_ref(e),
+            _ => format!("Some({})", self.str_ref(e)),
+        }
+    }
+
+    /// The possibly-null string variable `name` as an `Option<&str>`.
+    fn option_source(&self, name: &str) -> String {
+        let rust = self.local(name);
+        if self.borrowed_optional.contains(name) { rust } else { format!("{rust}.as_deref()") }
+    }
+
     /// A possibly-null string as an `Option<&str>`.
     pub(super) fn option_ref(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             ExprKind::Null => "None::<&str>".to_string(),
-            ExprKind::Var(name) => format!("{}.as_deref()", self.local(name)),
+            ExprKind::Var(name) => self.option_source(name),
             ExprKind::Cast(_, inner) => self.option_ref(inner),
             _ => format!("{}.as_deref()", self.expr(e).at(ATOM)),
         }
@@ -81,7 +102,8 @@ impl<'a> Gen<'a> {
             Code::atom("true")
         } else if self.nullable(other) {
             let option = self.option_ref(other);
-            Code::atom(format!("{option}.is_none()"))
+            let test = if matches!(op, BinOp::Ne) { "is_some" } else { "is_none" };
+            return Code::atom(format!("{option}.{test}()"));
         } else if matches!(other.kind, ExprKind::Var(_) | ExprKind::Str(_)) {
             Code::atom("false")
         } else {
@@ -94,6 +116,17 @@ impl<'a> Gen<'a> {
     /// `a.equals(b)` where one of the strings may be null: a null receiver throws, and a null
     /// argument is simply not equal.
     pub(super) fn equals_optional(&mut self, args: &'a [Expr]) -> Code {
+        // Java evaluates the argument before the call throws on a null receiver.
+        if self.nullable(&args[0]) && has_effects(&args[1]) {
+            let receiver = self.option_ref(&args[0]);
+            let non_null = self.runtime("non_null");
+            let (other, test) = if self.nullable(&args[1]) {
+                (self.option_ref(&args[1]), format!("other_ == Some({non_null}(receiver_))"))
+            } else {
+                (self.value(&args[1], Type::String).text, format!("{non_null}(receiver_) == other_"))
+            };
+            return Code::atom(format!("{{ let receiver_ = {receiver}; let other_ = {other}; {test} }}"));
+        }
         let receiver = if self.nullable(&args[0]) { self.deref(&args[0]) } else { self.str_value(&args[0]) };
         if self.nullable(&args[1]) {
             let option = self.option_ref(&args[1]);
@@ -169,30 +202,141 @@ impl<'a> Gen<'a> {
         Some((name.as_str(), matches!(op, BinOp::Ne)))
     }
 
-    /// `if (s != null) { .. }` or `if (s == null) .. else { .. }`: the branch where `s` is not
-    /// null binds it as `if let Some(s) = s.as_deref()`, so `s` is a `&str` there. Returns
-    /// false, emitting nothing, when the `if` is not of that form, or the branch does not use `s`
-    /// (a binding that is never read would only warn), or the branch assigns `s`.
+    /// `if (s != null && ..) { .. }`: see `let_chain`. And `if (s == null) .. else { .. }`: the
+    /// else branch binds `s` as `if let Some(s) = s.as_deref()`, so `s` is a `&str` there. Returns
+    /// false, emitting nothing, when the `if` is of neither form, or the branch where `s` is not
+    /// null does not use it (a binding that is never read would only warn), or assigns it.
     pub(super) fn narrow_if(&mut self, cond: &'a Expr, then: &'a Stmt, otherwise: Option<&'a Stmt>) -> bool {
-        let Some((name, then_non_null)) = self.null_test_var(cond) else { return false };
-        let (non_null, null) = if then_non_null { (Some(then), otherwise) } else { (otherwise, Some(then)) };
-        let Some(non_null) = non_null else { return false };
-        if assigns_stmt(non_null, name) || !mentions_stmt(non_null, name) {
-            return false;
-        }
-        let rust = self.local(name);
-        self.line(&format!("if let Some({rust}) = {rust}.as_deref() {{"));
-        let added = self.borrowed.insert(name.to_string());
-        self.nested(non_null);
-        if added {
-            self.borrowed.remove(name);
-        }
-        if let Some(null) = null {
+        if let Some((name, false)) = self.null_test_var(cond)
+            && let Some(non_null) = otherwise
+        {
+            if assigns_stmt(non_null, name) || !mentions_stmt(non_null, name) {
+                return false;
+            }
+            self.line(&format!("if let Some({}) = {} {{", self.local(name), self.option_source(name)));
+            let narrowed = self.narrow(name);
+            self.nested(non_null);
+            self.unnarrow(narrowed);
             self.line("} else {");
-            self.nested(null);
+            self.nested(then);
+            self.line("}");
+            return true;
+        }
+        let Some((cond_text, narrowed)) = self.let_chain(cond, &[then], &[]) else { return false };
+        self.line(&format!("if {cond_text} {{"));
+        self.nested(then);
+        self.unnarrow(narrowed);
+        if let Some(otherwise) = otherwise {
+            self.line("} else {");
+            self.nested(otherwise);
         }
         self.line("}");
         true
+    }
+
+    /// `cond` as a let chain that binds, as a `&str`, each possibly-null string tested with
+    /// `s != null` in its top-level `&&` chain that is read later in the chain or in the guarded
+    /// code (`stmts`, `exprs`) and assigned in neither:
+    /// `n > 0 && let Some(s) = s.as_deref() && s.len() > 3`. The bound names stay narrowed for
+    /// the guarded code; the caller ends that with `unnarrow`. `None`, emitting nothing, when no
+    /// test binds.
+    pub(super) fn let_chain(
+        &mut self,
+        cond: &'a Expr,
+        stmts: &[&'a Stmt],
+        exprs: &[&'a Expr],
+    ) -> Option<(String, Vec<String>)> {
+        let mut parts = Vec::new();
+        conjuncts(cond, &mut parts);
+        let binds: Vec<Option<&str>> = parts
+            .iter()
+            .enumerate()
+            .map(|(k, part)| {
+                let (name, true) = self.null_test_var(part)? else { return None };
+                let later = parts[k + 1..].iter().chain(exprs);
+                let assigned =
+                    later.clone().any(|e| assigns(e, name)) || stmts.iter().any(|s| assigns_stmt(s, name));
+                let used =
+                    later.clone().any(|e| mentions(e, name)) || stmts.iter().any(|s| mentions_stmt(s, name));
+                (used && !assigned).then_some(name)
+            })
+            .collect();
+        if binds.iter().all(Option::is_none) {
+            return None;
+        }
+        let mut texts = Vec::new();
+        let mut narrowed = Vec::new();
+        for (part, bind) in parts.iter().zip(binds) {
+            match bind {
+                Some(name) => {
+                    texts.push(format!("let Some({}) = {}", self.local(name), self.option_source(name)));
+                    narrowed.extend(self.narrow(name));
+                }
+                None => {
+                    let text = self.expr(part).at(AND + 1);
+                    texts.push(if text.starts_with('{') { format!("({text})") } else { text });
+                }
+            }
+        }
+        Some((texts.join(" && "), narrowed))
+    }
+
+    /// Treats the possibly-null `name` as a non-null `&str` from here on; returns it if it was not
+    /// already, for `unnarrow`.
+    fn narrow(&mut self, name: &str) -> Option<String> {
+        self.borrowed.insert(name.to_string()).then(|| name.to_string())
+    }
+
+    pub(super) fn unnarrow(&mut self, names: impl IntoIterator<Item = String>) {
+        for name in names {
+            self.borrowed.remove(&name);
+        }
+    }
+
+    /// `s != null && .. ? a : b` with a let chain, and `s == null ? a : b` as
+    /// `if let Some(s) = s.as_deref() { b } else { a }`; `s == null ? "text" : s` as
+    /// `s.as_deref().unwrap_or("text")`. `None` when `cond` narrows nothing.
+    pub(super) fn narrowed_conditional(
+        &mut self,
+        e: &'a Expr,
+        cond: &'a Expr,
+        a: &'a Expr,
+        b: &'a Expr,
+    ) -> Option<Code> {
+        let arm =
+            |g: &mut Self, arm: &'a Expr| if g.nullable(e) { g.optional(arm) } else { g.value(arm, e.ty) };
+        let (head, non_null, other, narrowed) = match self.null_test_var(cond) {
+            Some((name, then_non_null)) => {
+                let (non_null, other) = if then_non_null { (a, b) } else { (b, a) };
+                if assigns(non_null, name) || !mentions(non_null, name) {
+                    return None;
+                }
+                // `s == null ? "text" : s`
+                if matches!(&non_null.kind, ExprKind::Var(v) if v == name)
+                    && let ExprKind::Str(text) = &other.kind
+                    && !self.nullable(e)
+                {
+                    let source = self.option_source(name);
+                    return Some(Code::atom(format!(
+                        "{source}.unwrap_or({}).to_string()",
+                        rust_string(text)
+                    )));
+                }
+                let head = format!("let Some({}) = {}", self.local(name), self.option_source(name));
+                (head, non_null, other, self.narrow(name).into_iter().collect())
+            }
+            None => {
+                let (head, narrowed) = self.let_chain(cond, &[], &[a])?;
+                (head, a, b, narrowed)
+            }
+        };
+        let non_null = arm(self, non_null);
+        self.unnarrow(narrowed);
+        let other = arm(self, other);
+        let text = format!("if {head} {{ {} }} else {{ {} }}", non_null.text, other.text);
+        let mut code = Code::new(text, LOWEST);
+        code.untyped = non_null.untyped && other.untyped;
+        Some(code)
     }
 
     /// `if (s == null) return ..;` (or `break`, `continue`): the rest of the block sees `s` as
@@ -208,10 +352,19 @@ impl<'a> Gen<'a> {
         {
             return None;
         }
-        let rust = self.local(name);
-        self.line(&format!("let Some({rust}) = {rust}.as_deref() else {{"));
+        self.line(&format!("let Some({}) = {} else {{", self.local(name), self.option_source(name)));
         self.nested(then);
         self.line("};");
         Some(name)
     }
+}
+
+/// Whether evaluating `e` can do something observable: a call, an assignment, `++` or `--`.
+fn has_effects(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| {
+        found |= matches!(x.kind, ExprKind::Call { .. } | ExprKind::Assign { .. } | ExprKind::IncDec { .. })
+            || matches!(x.kind, ExprKind::Builtin(Builtin::Print | Builtin::Println | Builtin::Exit, _))
+    });
+    found
 }
