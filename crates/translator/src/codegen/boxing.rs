@@ -313,6 +313,14 @@ impl<'a> Gen<'a> {
         let option = self.expr(e).at(ATOM);
         let value = self.unbox_code(Code::atom("v_"), kind, false);
         let shown = self.shown(kind, value.at(ATOM));
-        format!("{option}.map_or(String::from(\"null\"), |v_| {shown}.to_string())")
+        let or_null = self.runtime("or_null");
+        match shown.strip_suffix("(v_)") {
+            _ if shown == "v_" => format!("{or_null}({option})"),
+            _ if shown == "(*v_)" => format!("{or_null}({option}.map(|v_| *v_))"),
+            Some(function) if !function.contains(['.', '(']) => {
+                format!("{or_null}({option}.map({function}))")
+            }
+            _ => format!("{or_null}({option}.map(|v_| {shown}))"),
+        }
     }
 }
