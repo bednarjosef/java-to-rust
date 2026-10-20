@@ -16,5 +16,13 @@ public class Arrays {
         int[] same = squares;
         same[0] = 9;
         System.out.println(squares[0]);
+        squares[1] += 10;
+        squares[3]++;
+        --squares[4];
+        int total = 0;
+        for (int x : squares) {
+            total += x;
+        }
+        System.out.println("total = " + total + ", second = " + squares[1] + ", fourth = " + squares[3]);
     }
 }
