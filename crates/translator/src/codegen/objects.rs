@@ -146,7 +146,14 @@ pub(super) fn stmt_borrows_mut(stmt: &Stmt) -> bool {
         Stmt::If { cond, .. } | Stmt::While { cond, .. } | Stmt::DoWhile { cond, .. } => vec![cond],
         Stmt::ForEach { array, .. } => vec![array],
         Stmt::For { cond, update, .. } => cond.iter().chain(update.iter()).collect(),
-        Stmt::Return(None, _) | Stmt::Break | Stmt::Continue | Stmt::Block(_) => Vec::new(),
+        Stmt::Switch { selector: e, .. } | Stmt::Yield(e) => vec![e],
+        Stmt::Return(None, _)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Block(_)
+        | Stmt::Labeled { .. }
+        | Stmt::BreakLabel(_)
+        | Stmt::ContinueLabel(_) => Vec::new(),
     };
     exprs.into_iter().any(borrows_mut)
 }

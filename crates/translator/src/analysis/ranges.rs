@@ -163,11 +163,30 @@ fn widen(head: &Env, next: &Env, thresholds: &[i128]) -> Env {
         .collect()
 }
 
-/// Where `break` and `continue` leave a loop body.
-#[derive(Default)]
+/// What a frame of `Analysis::loops` is: a loop, a switch statement, a switch expression, or a
+/// labeled statement that is not a loop.
+#[derive(Clone, Copy, PartialEq)]
+enum Frame {
+    Loop,
+    Switch,
+    Expr,
+    Labeled,
+}
+
+/// Where `break`, `continue` and `yield` leave a frame.
 struct Flow {
+    kind: Frame,
+    label: Option<String>,
     breaks: Option<Env>,
     continues: Option<Env>,
+    /// The values that `yield` gives (for a switch expression).
+    value: Interval,
+}
+
+impl Flow {
+    fn new(kind: Frame, label: Option<String>) -> Flow {
+        Flow { kind, label, breaks: None, continues: None, value: EMPTY }
+    }
 }
 
 struct Analysis<'a> {
@@ -420,14 +439,44 @@ impl<'a> Analysis<'a> {
                 None
             }
             Stmt::Break => {
-                let flow = self.loops.last_mut().expect("break inside a loop");
+                let flow = self.target(|f| matches!(f, Frame::Loop | Frame::Switch));
                 flow.breaks = join(flow.breaks.take(), Some(env));
                 None
             }
             Stmt::Continue => {
-                let flow = self.loops.last_mut().expect("continue inside a loop");
+                let flow = self.target(|f| f == Frame::Loop);
                 flow.continues = join(flow.continues.take(), Some(env));
                 None
+            }
+            Stmt::BreakLabel(label) => {
+                let flow = self.labeled(label);
+                flow.breaks = join(flow.breaks.take(), Some(env));
+                None
+            }
+            Stmt::ContinueLabel(label) => {
+                // The loop that a labeled `continue` names is the frame inside its label.
+                let i = self.labeled_index(label) + 1;
+                let flow = &mut self.loops[i];
+                flow.continues = join(flow.continues.take(), Some(env));
+                None
+            }
+            Stmt::Yield(e) => {
+                let v = self.expr(e, &mut env);
+                let flow = self.target(|f| f == Frame::Expr);
+                flow.value = flow.value.join(v);
+                flow.breaks = join(flow.breaks.take(), Some(env));
+                None
+            }
+            Stmt::Labeled { label, body } => {
+                self.loops.push(Flow::new(Frame::Labeled, Some(label.clone())));
+                let out = self.stmt(body, Some(env));
+                let flow = self.loops.pop().expect("pushed above");
+                join(out, flow.breaks)
+            }
+            Stmt::Switch { selector, cases } => {
+                self.expr(selector, &mut env);
+                let (out, _) = self.switch(cases, env, Frame::Switch);
+                out
             }
             Stmt::Block(stmts) => self.stmts(stmts, Some(env)),
             Stmt::ForEach { ty, name, array, body } => {
@@ -444,6 +493,41 @@ impl<'a> Analysis<'a> {
                 })
             }
         }
+    }
+
+    /// Runs the cases of a switch. A case starts from the state after the selector, joined with
+    /// the state that falls through from the case before. Returns the state after the switch and
+    /// the values of its `yield`s.
+    fn switch(&mut self, cases: &[Case], env: Env, kind: Frame) -> (Option<Env>, Interval) {
+        self.loops.push(Flow::new(kind, None));
+        let mut fall = None;
+        for case in cases {
+            let entry = join(Some(env.clone()), fall.take());
+            fall = match entry {
+                Some(entry) => self.stmts(&case.body, Some(entry)),
+                None => None,
+            };
+        }
+        let flow = self.loops.pop().expect("pushed above");
+        // No case may match, so the state after the selector also leaves the switch.
+        (join(join(fall, flow.breaks), Some(env)), flow.value)
+    }
+
+    /// The innermost frame that a `break` or `yield` of the given kind leaves.
+    fn target(&mut self, want: impl Fn(Frame) -> bool) -> &mut Flow {
+        self.loops.iter_mut().rev().find(|f| want(f.kind)).expect("jump inside its target")
+    }
+
+    fn labeled_index(&self, label: &str) -> usize {
+        self.loops
+            .iter()
+            .rposition(|f| f.label.as_deref() == Some(label))
+            .expect("labeled jump inside its label")
+    }
+
+    fn labeled(&mut self, label: &str) -> &mut Flow {
+        let i = self.labeled_index(label);
+        &mut self.loops[i]
     }
 
     /// Finds the loop invariant at the head of a loop, then runs the body once more on it (the
@@ -498,7 +582,7 @@ impl<'a> Analysis<'a> {
         update: &[Expr],
         do_while: bool,
     ) -> (Option<Env>, Option<Env>) {
-        self.loops.push(Flow::default());
+        self.loops.push(Flow::new(Frame::Loop, None));
         if do_while {
             let out = self.stmt(body, Some(head.clone()));
             let flow = self.loops.pop().expect("pushed above");
@@ -794,6 +878,15 @@ impl<'a> Analysis<'a> {
                     self.narrowed(v, *to, e.id);
                 }
                 convert(v, x.ty, *to)
+            }
+            ExprKind::Switch { selector, cases } => {
+                // Each `yield` gives a value of the switch's type, so the values join as they are.
+                self.expr(selector, env);
+                let (out, value) = self.switch(cases, env.clone(), Frame::Expr);
+                if let Some(out) = out {
+                    *env = out;
+                }
+                if ty.is_integral() { value } else { other }
             }
             ExprKind::Conditional(c, a, b) => {
                 let (t, f) = self.cond(c, env.clone());

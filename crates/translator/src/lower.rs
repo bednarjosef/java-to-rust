@@ -12,6 +12,7 @@ use std::cell::Cell;
 
 mod arrays;
 mod primitives;
+mod switch;
 use arrays::{is_array_length, reads_name};
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
@@ -252,16 +253,12 @@ impl<'t> Lowering<'t> {
                 Some(value) => Stmt::Return(Some(self.expr(value)?), node.pos()),
                 None => Stmt::Return(None, node.pos()),
             },
-            "BREAK" | "CONTINUE" => {
-                if node.get("label").is_some() {
-                    return unsupported(node, "labeled break and continue");
-                }
-                if node.kind() == "BREAK" { Stmt::Break } else { Stmt::Continue }
-            }
+            "BREAK" | "CONTINUE" => switch::jump(node),
+            "YIELD" => Stmt::Yield(self.expr(node.child("value")?)?),
             "ENHANCED_FOR_LOOP" => self.for_each(node)?,
-            "SWITCH" => return unsupported(node, "switch"),
+            "SWITCH" => self.switch_stmt(node)?,
             "TRY" | "THROW" => return unsupported(node, "exceptions"),
-            "LABELED_STATEMENT" => return unsupported(node, "labeled statements"),
+            "LABELED_STATEMENT" => self.labeled(node)?,
             "CLASS" | "INTERFACE" | "ENUM" | "RECORD" => return unsupported(node, "local classes"),
             kind => return unsupported(node, &kind_words(kind)),
         };
@@ -346,7 +343,7 @@ impl<'t> Lowering<'t> {
             },
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => return unsupported(node, "lambdas"),
             "INSTANCE_OF" => return unsupported(node, "instanceof"),
-            "SWITCH_EXPRESSION" => return unsupported(node, "switch"),
+            "SWITCH_EXPRESSION" => self.switch_expr(node)?,
             kind => {
                 let left = node.child("leftOperand");
                 let op = binary_op(node, kind);
