@@ -101,9 +101,16 @@ and `MIN_NORMAL` constants of the wrapper classes, `null` for `String`, and a us
 `println` and string concatenation, object-typed fields and `null` objects. Strings have the
 common methods of `String` (searching, slicing, case, trimming, replacing, comparing,
 `split`/`replaceAll`/`matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf`,
-`new String(char[])`), `StringBuilder`, `String.format`/`formatted`/`printf` and the bit and radix
-methods of `Integer` and `Long` (`toHexString`, `bitCount`, `numberOfLeadingZeros`,
-`toString(v, radix)`, ...), all hand-written in the runtime with Java's exact results. Inheritance,
+`new String(char[])`), `StringBuilder` and `StringBuffer` (the same type in the runtime, as
+`java::StringBuilder`), `String.format`/`formatted`/`printf` and the bit and radix methods of
+`Integer` and `Long` (`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...),
+all hand-written in the runtime with Java's exact results. Strings and bytes meet through
+`getBytes()`, `getBytes(charset)` and `getBytes("name")`, and `new String(bytes)`,
+`new String(bytes, charset)`, `new String(bytes, offset, length, charset)` and the name forms, for
+UTF-8, US-ASCII, ISO-8859-1, UTF-16 (with its byte order mark), UTF-16BE and UTF-16LE. The
+`StandardCharsets` constants and `Charset.forName` are charsets only in those arguments: a `Charset`
+kept in a variable or passed elsewhere is rejected. Encoding replaces unmappable characters as Java
+does, and decoding replaces malformed input as Java's `String` does (`crates/runtime/src/charset.rs`). Inheritance,
 interfaces and generics are rejected with an error that names the construct and its position. So
 are the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and the like),
 `Character.toChars(int, char[], int)`, and the unsigned and parse methods with other argument counts.
