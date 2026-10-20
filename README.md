@@ -305,5 +305,10 @@ cargo test                                                # needs a JDK: runs co
 The corpus test runs every program in `corpus/` with `java`, translates and builds it with
 overflow checks on (so a wrong "cannot overflow" fact panics), and compares standard output and
 exit code. A multi-file program is a directory of `corpus/projects/` with a source root `src/`
-and a file `main` that names the main class; it runs on Java after `javac`.
+and a file `main` that names the main class; it runs on Java after `javac`. Java's runs,
+translation and the Cargo build run in parallel, one thread per CPU. All the Rust programs are
+one Cargo project under `target/tmp/corpus`, kept between runs, so a program is rebuilt only when
+its translation changes: a warm run takes about as long as translating the corpus. The report
+lists every failing program with the first differing lines of output. `CORPUS_FILTER=text cargo
+test --test corpus` runs only the programs whose name contains `text`.
 `crates/translator/tests/translation.rs` pins down what the output looks like.
