@@ -20,6 +20,7 @@ mod nullness;
 mod objects;
 mod owned;
 mod ranges;
+mod statics;
 
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
@@ -63,6 +64,9 @@ pub struct Facts {
     pub owned: HashSet<String>,
     /// The instance methods (indexes into `Class::methods`) that change their owned object.
     pub mutating: HashSet<usize>,
+    /// The classes, by index in `Class::types`, whose static initialization runs eagerly through
+    /// an `init` function; the other classes initialize each static lazily on first access.
+    pub eager_init: HashSet<usize>,
 }
 
 pub fn analyze(class: &Class) -> Facts {
@@ -75,6 +79,7 @@ pub fn analyze(class: &Class) -> Facts {
     let owned = owned::owned_classes(class, &facts.immutable);
     facts.owned = owned.classes;
     facts.mutating = owned.mutating;
+    facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
     arrays::analyze(class, &mut facts);
     indexing::analyze(class, &mut facts);
     facts

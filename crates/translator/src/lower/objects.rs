@@ -66,6 +66,7 @@ impl<'t> Lowering<'t> {
                 "VARIABLE" => {}
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
                 "CLASS" => return unsupported(member, "inner classes"),
+                "BLOCK" if Self::is_static_block(member) => {}
                 "BLOCK" => return unsupported(member, "initializer blocks"),
                 "INTERFACE" => return unsupported(member, "interfaces"),
                 kind => return unsupported(member, &kind_words(kind)),
@@ -127,8 +128,15 @@ impl<'t> Lowering<'t> {
         if init.is_none() && ty == Type::String {
             return unsupported(node, "null");
         }
-        let init = init.map(|i| self.expr(i)).transpose()?;
-        Ok(Field { name: node.str("name").to_string(), ty, init, pos: node.pos() })
+        let constant = Self::is_constant(node);
+        let init = if constant {
+            let text = node.symbol().and_then(|s| s.constant).unwrap_or_default();
+            let kind = self.constant_literal(node, ty, text)?;
+            Some(self.synth(kind, node.pos(), ty))
+        } else {
+            init.map(|i| self.expr(i)).transpose()?
+        };
+        Ok(Field { name: node.str("name").to_string(), ty, init, constant, pos: node.pos() })
     }
 
     /// The place that `node` names when it is a field: `name`, `this.name`, `object.name` or

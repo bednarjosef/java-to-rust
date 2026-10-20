@@ -188,6 +188,12 @@ public class JavaTree {
         out.append(",\"static\":").append(e.getModifiers().contains(Modifier.STATIC));
         out.append(",\"type\":");
         string(e.asType().toString(), out);
+        // The value of a constant variable, as text: javac's compile-time constant.
+        if (e instanceof VariableElement v && v.getConstantValue() != null) {
+            Object c = v.getConstantValue();
+            out.append(",\"constant\":");
+            string(c instanceof Character ch ? Integer.toString(ch) : c.toString(), out);
+        }
         out.append('}');
     }
 

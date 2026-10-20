@@ -264,8 +264,15 @@ impl<'a> Gen<'a> {
 
     /// A value read from a static field.
     pub(super) fn static_read(&self, class: usize, name: &str, ty: Type) -> Code {
+        if let Some(constant) = self.constant_read(class, name, ty) {
+            return constant;
+        }
         let cell = cell_name(&self.class.types[class].name, name);
-        Code::atom(Slot::Static { cell }.read(ty))
+        let read = Slot::Static { cell }.read(ty);
+        match self.init_call(class) {
+            Some(init) => Code::atom(format!("{{ {init} {read} }}")),
+            None => Code::atom(read),
+        }
     }
 
     /// `new C(args)`, which calls the constructor that the checker chose.
@@ -327,6 +334,16 @@ impl<'a> Gen<'a> {
         prefix: bool,
     ) -> Code {
         let mut lines = Vec::new();
+        // Java initializes the class of a static before it reads the static, but after the value
+        // of an assignment is computed, when it writes.
+        let init = match place {
+            Place::Static { class, .. } => self.init_call(*class),
+            _ => None,
+        };
+        let assigns = matches!(how, Update::Assign(_));
+        if !assigns {
+            lines.extend(init.clone());
+        }
         let slot = match place {
             Place::Field { object, name } if self.is_plain(object) => {
                 // Only a constructor writes a field of an immutable class, through its own `this`;
@@ -394,6 +411,9 @@ impl<'a> Gen<'a> {
         };
         self.guarded = outer;
         let stored = if needs_clone(ty) { format!("{new}.clone()") } else { new.clone() };
+        if assigns {
+            lines.extend(init);
+        }
         lines.push(slot.write(&stored));
         Code::atom(format!("{{ {} {result} }}", lines.join(" ")))
     }
@@ -455,30 +475,6 @@ impl<'a> Gen<'a> {
                 self.line(&format!("this.{field} = {value};"));
             } else {
                 self.line(&format!("this.borrow_mut().{field} = {value};"));
-            }
-        }
-        self.indent -= 1;
-        self.line("}");
-    }
-
-    /// The thread-local cells of all static fields, initialized lazily on first use.
-    pub(super) fn statics(&mut self) {
-        let class = self.class;
-        if class.types.iter().all(|t| t.statics.is_empty()) {
-            return;
-        }
-        self.gap();
-        self.line("thread_local! {");
-        self.indent += 1;
-        for decl in &class.types {
-            for f in &decl.statics {
-                let init = match &f.init {
-                    Some(e) => self.value(e, f.ty).text,
-                    None => default_value(f.ty).to_string(),
-                };
-                let cell = cell_name(&decl.name, &f.name);
-                let ty = self.ty_name(f.ty);
-                self.line(&format!("static {cell}: RefCell<{ty}> = RefCell::new({init});"));
             }
         }
         self.indent -= 1;

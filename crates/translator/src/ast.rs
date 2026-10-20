@@ -141,6 +141,8 @@ pub struct Field {
     pub name: String,
     pub ty: Type,
     pub init: Option<Expr>,
+    /// A `static final` compile-time constant: a Rust `const`, with no cell.
+    pub constant: bool,
     pub pos: Pos,
 }
 

@@ -4,6 +4,7 @@
 //! outside it is reported as an error naming the construct.
 
 mod objects;
+mod statics;
 
 use crate::ast::*;
 use objects::{MethodInfo, TypeInfo};
@@ -19,8 +20,13 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
     let decls: Vec<Node> = unit.list("typeDecls").filter(|n| n.kind() != "EMPTY_STATEMENT").collect();
     let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
     let lowering = Lowering::declare(&decls)?;
-    let types = (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
-    let methods = (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
+    let types: Vec<TypeDecl> =
+        (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
+    let mut methods: Vec<Method> =
+        (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
+    for index in (0..types.len()).filter(|&t| lowering.has_static_init(t)) {
+        methods.push(lowering.clinit(index)?);
+    }
     Ok(Class { name: first.str("simpleName").to_string(), types, methods })
 }
 
@@ -36,6 +42,8 @@ struct Symbol<'t> {
     is_static: bool,
     /// The declared type, such as `int` or, for a method, `(int,long)double`.
     ty: &'t str,
+    /// The value of a compile-time constant variable, as text (`Character`s as their code unit).
+    constant: Option<&'t str>,
 }
 
 impl<'t> Node<'t> {
@@ -80,6 +88,7 @@ impl<'t> Node<'t> {
             owner: s.str("owner"),
             is_static: s.0["static"].as_bool().unwrap_or(false),
             ty: s.str("type"),
+            constant: s.0.get("constant").map(|_| s.str("constant")),
         })
     }
 

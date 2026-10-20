@@ -13,6 +13,7 @@ mod expr;
 mod names;
 mod null;
 mod primitives;
+mod statics;
 mod stmt;
 mod strings;
 
@@ -56,7 +57,9 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
     }
     g.statics();
     for i in 0..class.methods.len() {
-        if class.methods[i].is_static {
+        let m = &class.methods[i];
+        let emit = if m.name == "<clinit>" { facts.eager_init.contains(&m.class) } else { m.is_static };
+        if emit {
             g.gap();
             g.method(i);
         }
@@ -65,9 +68,13 @@ pub fn generate(class: &Class, facts: &Facts) -> String {
     // Owned objects are plain values and immutable ones are shared as `Rc` alone; statics and
     // mutable objects also need `RefCell`.
     let refcell = class.types.iter().zip(&live).any(|(t, &l)| {
-        (l && !facts.immutable.contains(&t.name) && !facts.owned.contains(&t.name)) || !t.statics.is_empty()
+        (l && !facts.immutable.contains(&t.name) && !facts.owned.contains(&t.name))
+            || t.statics.iter().any(|f| !f.constant)
     });
     let shared = class.types.iter().zip(&live).any(|(t, &l)| l && !facts.owned.contains(&t.name));
+    if !facts.eager_init.is_empty() {
+        uses.push("use std::cell::Cell;\n");
+    }
     match (shared, refcell) {
         (true, true) => uses.push("use std::cell::RefCell;\nuse std::rc::Rc;\n"),
         (true, false) => uses.push("use std::rc::Rc;\n"),
@@ -244,8 +251,15 @@ impl<'a> Gen<'a> {
         } else {
             format!(" -> {}", self.ty_name(m.ret))
         };
-        self.line(&format!("fn {}({}){ret} {{", self.fn_names[index], params.join(", ")));
+        let fn_name =
+            if m.name == "<clinit>" { statics::init_name(name) } else { self.fn_names[index].clone() };
+        self.line(&format!("fn {fn_name}({}){ret} {{", params.join(", ")));
         self.indent += 1;
+        if m.name == "<clinit>" {
+            self.init_guard(name);
+        } else if self.facts.eager_init.contains(&m.class) && (m.is_static || m.is_ctor) {
+            self.line(&format!("{}();", statics::init_name(name)));
+        }
         if m.is_ctor {
             self.constructor(m);
         } else {
