@@ -123,6 +123,12 @@ impl<'a> Gen<'a> {
         format!("{}::{name}", struct_name(&self.class.types[t].name))
     }
 
+    /// `variant`, when the enum of `t` has a variant for class `c`: it has none when no object of
+    /// `c` is ever created, where code that has one never runs.
+    fn variant_of(&self, t: usize, c: usize) -> Option<String> {
+        self.enum_variants(t).contains(&c).then(|| self.variant(t, c))
+    }
+
     /// The name of the conversion to the enum of `t`: `to_shape`.
     fn to_name(&self, t: usize) -> String {
         let simple = self.class.types[t].name.rsplit(['.', '$']).next().unwrap_or_default();
@@ -395,7 +401,13 @@ impl<'a> Gen<'a> {
             }
             None => {
                 let (c, handle) = self.variant_value(e);
-                format!("{}({handle})", self.variant(t, c))
+                match self.variant_of(t, c) {
+                    Some(variant) => format!("{variant}({handle})"),
+                    None => {
+                        let ty = struct_name(&self.class.types[t].name);
+                        format!("{{ let value: {ty} = {}; value }}", absent(self, c))
+                    }
+                }
             }
         }
     }
@@ -433,7 +445,12 @@ impl<'a> Gen<'a> {
                 }
                 None => {
                     let c = self.value_class(value);
-                    format!("{option}.map({})", self.variant(t, c))
+                    match self.variant_of(t, c) {
+                        Some(variant) => format!("{option}.map({variant})"),
+                        None => {
+                            format!("{option}.map(|_| -> {} {{ {} }})", self.ty_name(to), absent(self, c))
+                        }
+                    }
                 }
             });
         }
@@ -445,11 +462,15 @@ impl<'a> Gen<'a> {
             None => {
                 let c = self.value_class(value);
                 // An object's last use moves its handle in.
+                let Some(variant) = self.variant_of(t, c) else {
+                    let ty = self.ty_name(to);
+                    return Code::atom(format!("{{ let value: {ty} = {}; value }}", absent(self, c)));
+                };
                 let v = match self.runtime_of(c) {
                     Some(_) => self.variant_value(value).1,
                     None => self.expr(value).text,
                 };
-                Code::atom(format!("{}({v})", self.variant(t, c)))
+                Code::atom(format!("{variant}({v})"))
             }
         }
     }
@@ -745,6 +766,14 @@ impl<'a> Gen<'a> {
         };
         self.enter_method(r);
         let m = &self.class.methods[r];
+        // The arms bind the object to `o`, which must not hide a parameter of that name.
+        let names: Vec<String> = m.params.iter().map(|p| self.local(&p.name)).collect();
+        for p in &m.params {
+            if self.local(&p.name) == "o" {
+                let fresh = (1..).map(|n| format!("o{n}")).find(|f| !names.contains(f)).expect("a free name");
+                self.locals.insert(p.name.clone(), fresh);
+            }
+        }
         let params = self.typed_params(r, false);
         let ret = self.ret_text(r);
         let args: Vec<String> = m.params.iter().map(|p| self.local(&p.name)).collect();
@@ -900,6 +929,7 @@ impl<'a> Gen<'a> {
 
     /// The address of the object of class `c` that `receiver` is (see `address`).
     pub(super) fn receiver_address(&mut self, receiver: &'a Expr, c: usize) -> String {
+        let id = receiver.id;
         let receiver = self.peel(receiver);
         match receiver.kind {
             ExprKind::This if self.this_form == ThisForm::Local => "std::ptr::from_ref(&this)".to_string(),
@@ -907,8 +937,8 @@ impl<'a> Gen<'a> {
                 format!("std::ptr::from_ref({})", self.this_name())
             }
             _ if self.nullable(receiver) => {
-                let handle =
-                    format!("{}({}.as_ref())", self.runtime("non_null"), self.object_place(receiver));
+                let option = format!("{}.as_ref()", self.object_place(receiver));
+                let handle = self.dereference(&[id, receiver.id], &option);
                 self.address(c, &handle)
             }
             _ => {
@@ -934,6 +964,12 @@ impl<'a> Gen<'a> {
         let temp = self.temp("address");
         let same = format!("std::ptr::addr_eq({temp}, {})", self.address(c, "b"));
         let test = self.equals_test(c, &place, optional, &same);
+        // An argument that cannot be the object is still evaluated.
+        let test = if test == "false" && has_effects(&args[0]) {
+            format!("{{ let _ = {place}; false }}")
+        } else {
+            test
+        };
         Code::atom(format!("{{ let {temp} = {address}; {test} }}"))
     }
 
@@ -946,7 +982,7 @@ impl<'a> Gen<'a> {
 
     /// The hash code of a value of class `c`, reached through `handle`, a reference to what the
     /// variant holds, whose class does not override `hashCode`.
-    fn value_hash(&mut self, c: usize, handle: &str) -> String {
+    pub(super) fn value_hash(&mut self, c: usize, handle: &str) -> String {
         let Some(ty) = self.runtime_of(c) else {
             if self.holds_value(c) {
                 // An enum's constant hashes by its identity in Java, which nothing can depend on.
@@ -1118,3 +1154,8 @@ impl<'a> Gen<'a> {
 
 /// The enum items that a pass of the generator asked for, which the next pass writes.
 pub(super) type Needs = BTreeSet<Need>;
+
+/// The value of an object of class `c` where the program creates none, so the code never runs.
+fn absent(g: &Gen, c: usize) -> String {
+    format!("unreachable!(\"no object of {} is created\")", g.class.types[c].name)
+}

@@ -1,3 +1,5 @@
+// `+=` on a static `String` that may be null (it is assigned an element of a `String[]`):
+// with itself and with a literal, appending to `null`.
 public class NullableStaticStringAppend {
     static String s = "a";
 

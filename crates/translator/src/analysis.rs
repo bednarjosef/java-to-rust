@@ -142,6 +142,10 @@ pub struct Facts {
     /// The operations whose failure a `catch` or a `finally` may see, which are written with the
     /// runtime's checked form (see `analysis::exceptions`).
     pub raising: HashSet<ExprId>,
+    /// The objects, by expression, whose dereference by a call or a field access may throw a
+    /// `NullPointerException` that a `catch` or a `finally` may see: they are written with the
+    /// runtime's checked `non_null`. With the position of the call or the field access.
+    pub null_checked: HashMap<ExprId, Pos>,
     /// The standard classes whose objects the runtime raises where the program may see them.
     pub raised_classes: std::collections::BTreeSet<usize>,
 }

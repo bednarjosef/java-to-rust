@@ -55,6 +55,10 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                         elements.push(elem);
                     }
                 }
+                // `Arrays.copyOf` pads a longer copy with null.
+                ExprKind::Builtin(Builtin::ArraysCopyOf, _) if x.ty.element().is_reference() => {
+                    elements.push(x.ty.element());
+                }
                 ExprKind::ArrayLit(items) if items.iter().any(|item| maybe_null(facts, m, item)) => {
                     elements.push(x.ty.element());
                 }

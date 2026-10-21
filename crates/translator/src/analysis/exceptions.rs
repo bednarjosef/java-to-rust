@@ -158,6 +158,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     let mut live_tries = HashSet::new();
     let mut raising_tries = HashSet::new();
     let mut raising = HashSet::new();
+    let mut null_checked = std::collections::HashMap::new();
     let mut raised_classes = BTreeSet::new();
     for (m, method) in class.methods.iter().enumerate() {
         for p in &points[m] {
@@ -182,7 +183,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
                     && checked
                     && let Some(c) = raised_class
                 {
-                    raising.insert(id);
+                    if name == "java.lang.NullPointerException" {
+                        null_checked.insert(id, p.pos);
+                    } else {
+                        raising.insert(id);
+                    }
                     raised_classes.insert(c);
                 } else if seen_here {
                     let simple = name.rsplit('.').next().unwrap_or_default();
@@ -278,6 +283,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     facts.live_tries = live_tries;
     facts.raising_tries = raising_tries;
     facts.raising = raising;
+    facts.null_checked = null_checked;
     facts.raised_classes = raised_classes;
     Ok(())
 }
@@ -575,8 +581,8 @@ fn expr_points(
             push(Raise::Call(shown), object.pos, "this toString");
         }
     }
-    for (name, what, checked) in runtime_failures(class, facts, m, x, safe) {
-        push(Raise::Runtime { class: name, checked, id: x.id }, x.pos, what);
+    for (name, what, checked, id) in runtime_failures(class, facts, m, x, safe) {
+        push(Raise::Runtime { class: name, checked, id }, x.pos, what);
     }
     if let ExprKind::Switch { selector, cases } = &x.kind {
         // The statements of a switch expression's cases may `throw` and hold `try`s.
@@ -649,7 +655,7 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
 fn text_objects(x: &Expr) -> Vec<&Expr> {
     let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..));
     match &x.kind {
-        ExprKind::Builtin(Builtin::ClassName { .. }, _) => Vec::new(),
+        ExprKind::Builtin(Builtin::ClassName { .. } | Builtin::ClassLiteralName { .. }, _) => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
             [&**l, &**r].into_iter().filter(is_object).collect()
@@ -673,6 +679,12 @@ fn to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
         }
     }
     out
+}
+
+/// Whether the generator has the checked form of dereferencing `object`: the object of a call or
+/// a field access is written by `Gen::object` and its relatives, which check it with `non_null`.
+fn object_checked(object: &Expr) -> bool {
+    matches!(object.ty, Type::Class(..))
 }
 
 /// What a method of the library that the runtime implements may throw besides a
@@ -755,14 +767,16 @@ fn library_failure(builtin: &Builtin) -> Option<&'static str> {
 }
 
 /// The failures of the runtime that evaluating `x` itself (not its operands) may raise, by
-/// standard class name, with what raises them in words.
+/// standard class name, with what raises them in words, whether the generator has their checked
+/// form, and the expression that the checked form is written for: `x`, or for a
+/// `NullPointerException` of a call or a field access, the object that is dereferenced.
 fn runtime_failures(
     class: &Class,
     facts: &Facts,
     m: usize,
     x: &Expr,
     safe: &[String],
-) -> Vec<(&'static str, &'static str, bool)> {
+) -> Vec<(&'static str, &'static str, bool, ExprId)> {
     const NPE: &str = "java.lang.NullPointerException";
     const INDEX: &str = "java.lang.ArrayIndexOutOfBoundsException";
     let tested = |e: &Expr| is_tested(e, safe);
@@ -777,7 +791,7 @@ fn runtime_failures(
             let constant =
                 matches!(r.kind, ExprKind::Int(v) if v != 0) || matches!(r.kind, ExprKind::Long(v) if v != 0);
             if !constant && !facts.safe_division.contains(&x.id) {
-                out.push(("java.lang.ArithmeticException", "this division", true));
+                out.push(("java.lang.ArithmeticException", "this division", true, x.id));
             }
         }
         ExprKind::Assign { op: Some(BinOp::Div | BinOp::Rem), value, .. }
@@ -786,33 +800,35 @@ fn runtime_failures(
             let constant = matches!(value.kind, ExprKind::Int(v) if v != 0)
                 || matches!(value.kind, ExprKind::Long(v) if v != 0);
             if !constant && !facts.safe_division.contains(&x.id) {
-                out.push(("java.lang.ArithmeticException", "this division", true));
+                out.push(("java.lang.ArithmeticException", "this division", true, x.id));
             }
         }
         ExprKind::Index(array, _) => {
             if null(array) {
-                out.push((NPE, "this array access", false));
+                out.push((NPE, "this array access", false, x.id));
             }
             if !facts.in_bounds.contains(&x.id) {
-                out.push((INDEX, "this array access", true));
+                out.push((INDEX, "this array access", true, x.id));
             }
         }
-        ExprKind::Length(array) if null(array) => out.push((NPE, "this length", false)),
-        ExprKind::Field { object, .. } if null(object) => out.push((NPE, "this field access", false)),
+        ExprKind::Length(array) if null(array) => out.push((NPE, "this length", false, x.id)),
+        ExprKind::Field { object, .. } if null(object) => {
+            out.push((NPE, "this field access", object_checked(object), object.id))
+        }
         ExprKind::MethodCall { receiver, resolved: Some(r), is_super: false, .. }
             if !class.methods[*r].is_static && null(receiver) =>
         {
-            out.push((NPE, "this call", false))
+            out.push((NPE, "this call", object_checked(receiver), receiver.id))
         }
         ExprKind::NewArray(sizes) => {
             if sizes.iter().any(|s| !matches!(s.kind, ExprKind::Int(v) if v >= 0)) {
-                out.push(("java.lang.NegativeArraySizeException", "this array creation", false));
+                out.push(("java.lang.NegativeArraySizeException", "this array creation", false, x.id));
             }
         }
         ExprKind::Cast(to, value)
             if !to.is_reference() && matches!(value.ty, Type::Boxed(_)) && null(value) =>
         {
-            out.push((NPE, "this unboxing", false))
+            out.push((NPE, "this unboxing", false, x.id))
         }
         ExprKind::Builtin(builtin, args) => match builtin {
             Builtin::Println
@@ -843,24 +859,26 @@ fn runtime_failures(
             | Builtin::EnumCompareTo
             | Builtin::Exit
             | Builtin::ClassName { .. }
+            | Builtin::ClassLiteralName { .. }
+            | Builtin::SameClass { .. }
             // A null is a value to them, and an object's own method is a call of its own.
             | Builtin::ObjectsEquals
             | Builtin::ObjectsHashCode => {}
             Builtin::StringLength | Builtin::StringEquals => {
                 if args.first().is_some_and(null) {
-                    out.push((NPE, "this call", false));
+                    out.push((NPE, "this call", false, x.id));
                 }
             }
             Builtin::StringCharAt => {
                 if args.first().is_some_and(null) {
-                    out.push((NPE, "this call", false));
+                    out.push((NPE, "this call", false, x.id));
                 }
                 if !facts.index_in_bounds.contains(&x.id) {
-                    out.push(("java.lang.StringIndexOutOfBoundsException", "this charAt", true));
+                    out.push(("java.lang.StringIndexOutOfBoundsException", "this charAt", true, x.id));
                 }
             }
             Builtin::Boxed(BoxedOp::Parse | BoxedOp::ParseRadix, _) => {
-                out.push(("java.lang.NumberFormatException", "this parse", true));
+                out.push(("java.lang.NumberFormatException", "this parse", true, x.id));
             }
             Builtin::Boxed(
                 BoxedOp::Box
@@ -872,10 +890,10 @@ fn runtime_failures(
                 | BoxedOp::Logical(_),
                 _,
             ) => {}
-            Builtin::NullCheck => out.push((NPE, "this synchronized", false)),
+            Builtin::NullCheck => out.push((NPE, "this synchronized", false, x.id)),
             Builtin::NullChecked | Builtin::Unmatched => {
                 if null(&args[0]) {
-                    out.push((NPE, "this null check", false));
+                    out.push((NPE, "this null check", false, x.id));
                 }
             }
             // A zero divisor throws, as in a division.
@@ -883,7 +901,7 @@ fn runtime_failures(
                 let constant = matches!(args[1].kind, ExprKind::Int(v) if v != 0)
                     || matches!(args[1].kind, ExprKind::Long(v) if v != 0);
                 if !constant {
-                    out.push(("java.lang.ArithmeticException", "this division", true));
+                    out.push(("java.lang.ArithmeticException", "this division", true, x.id));
                 }
             }
             _ => {
@@ -902,7 +920,7 @@ fn runtime_failures(
                     &args[..]
                 };
                 if !takes_null && checked.iter().any(null) {
-                    out.push((NPE, "this call", false));
+                    out.push((NPE, "this call", false, x.id));
                 }
                 if let Some(failure) = library_failure(builtin)
                     && !constant_pattern(builtin, args)
@@ -913,7 +931,7 @@ fn runtime_failures(
                             | Builtin::Bits(BitsOp::ParseRadix, _)
                             | Builtin::EnumValueOf
                     );
-                    out.push((failure, "this call of the library", checked));
+                    out.push((failure, "this call of the library", checked, x.id));
                 }
             }
         },
@@ -923,17 +941,17 @@ fn runtime_failures(
     | ExprKind::IncDec { target: Place::Index(array, _), .. } = &x.kind
     {
         if null(array) {
-            out.push((NPE, "this array access", false));
+            out.push((NPE, "this array access", false, x.id));
         }
         if !facts.in_bounds.contains(&x.id) {
-            out.push((INDEX, "this array access", true));
+            out.push((INDEX, "this array access", true, x.id));
         }
     }
     if let ExprKind::Assign { target: Place::Field { object, .. }, .. }
     | ExprKind::IncDec { target: Place::Field { object, .. }, .. } = &x.kind
         && null(object)
     {
-        out.push((NPE, "this field access", false));
+        out.push((NPE, "this field access", false, x.id));
     }
     // A cast to a class that the value's type is not under may fail, unless an `instanceof`
     // tested the variable.
@@ -946,13 +964,13 @@ fn runtime_failures(
         && !class.hierarchy.is_subtype(s, t)
         && !instance(to, value)
     {
-        out.push(("java.lang.ClassCastException", "this cast", false));
+        out.push(("java.lang.ClassCastException", "this cast", false, x.id));
     }
     // A box that may be null is unboxed by arithmetic and comparisons.
     if let ExprKind::Binary(_, l, r) = &x.kind {
         for operand in [l, r] {
             if matches!(operand.ty, Type::Boxed(_)) && null(operand) && !matches!(x.ty, Type::String) {
-                out.push((NPE, "this unboxing", false));
+                out.push((NPE, "this unboxing", false, x.id));
             }
         }
     }

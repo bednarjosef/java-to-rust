@@ -253,9 +253,6 @@ impl Census {
                 refs: BTreeSet::new(),
                 sequential: reach.sequential,
             };
-            if kind == "METHOD" && intersects(member) {
-                scan.feature("intersection types", member);
-            }
             if kind == "BLOCK" && member["static"].as_bool() != Some(true) {
                 scan.feature("initializer blocks", member);
             }
@@ -325,15 +322,21 @@ impl Census {
                     {
                         scan.feature("reference casts", node)
                     }
-                    "ENHANCED_FOR_LOOP" if !text(&node["expression"], "javaType").ends_with(']') => {
-                        scan.feature("for-each over collections", node)
+                    // A for-each over one of the program's `Iterable`s calls its iterator.
+                    "ENHANCED_FOR_LOOP"
+                        if !text(&node["expression"], "javaType").ends_with(']')
+                            && !self.declared.contains(&raw(text(&node["expression"], "javaType"))) =>
+                    {
+                        scan.feature("for-each over types outside the sources", node)
                     }
                     "BINDING_PATTERN" | "RECORD_PATTERN" => scan.feature("patterns", node),
                     _ => {}
                 }
                 // The program's generic types are erased; one from elsewhere is not translated.
-                // javac names an anonymous class `<anonymous Sink>`: that is not a generic type.
-                if ty.contains('<') && !ty.starts_with('<') && !self.erases(ty) {
+                // javac names an anonymous class `<anonymous Sink>`: that is not a generic type,
+                // and nor is the method type of a method's name (`(java.lang.Class<?>)int`, or
+                // `<T>(T)T` for a generic method), whose call has a type of its own.
+                if ty.contains('<') && !ty.starts_with(['<', '(']) && !self.erases(ty) {
                     scan.feature("generic types", node);
                 }
                 refer(&node["symbol"], scan);
@@ -389,12 +392,13 @@ impl Census {
             || value == "java.lang.Object" && held
     }
 
-    /// Whether a parameterized type translates: one of the program's generic types, erased, or
-    /// `Comparable`.
+    /// Whether a parameterized type translates as far as its type arguments go: one of the
+    /// program's generic types, erased, `Comparable`, or a class of the runtime, whose type
+    /// arguments are erased too (`Class<?>` translates as far as `Class` does).
     fn erases(&self, ty: &str) -> bool {
         let raw = raw(ty);
         let raw = raw.trim_end_matches("[]");
-        self.declared.contains(raw) || raw == "java.lang.Comparable"
+        self.declared.contains(raw) || raw == "java.lang.Comparable" || provided(raw)
     }
 
     /// The node of the call graph that a reachable member's code belongs to, with the edges that
@@ -759,9 +763,6 @@ fn class_features(decl: &Value, declared: &HashSet<String>) -> BTreeSet<&'static
             features.insert("extending classes outside the sources");
         }
     }
-    if intersects(decl) {
-        features.insert("intersection types");
-    }
     if kind == "ENUM" && members(decl).any(|m| !m["initializer"]["classBody"].is_null()) {
         features.insert("enum constants with bodies");
     }
@@ -773,15 +774,6 @@ fn class_features(decl: &Value, declared: &HashSet<String>) -> BTreeSet<&'static
 fn is_anonymous(name: &str) -> bool {
     name.starts_with('<')
         || name.rsplit_once('$').is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// Whether a declaration has a type variable with more than one bound (`T extends A & B`).
-fn intersects(decl: &Value) -> bool {
-    decl["typeParameters"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|p| p["bounds"].as_array().is_some_and(|b| b.len() > 1))
 }
 
 /// A type without its type arguments: `Box<java.lang.Integer>[]` is `Box[]`.

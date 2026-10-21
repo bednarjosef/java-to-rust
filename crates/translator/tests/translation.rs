@@ -2362,6 +2362,58 @@ fn local_and_anonymous_classes_are_declared_so_their_calls_are_not_outside() {
 }
 
 #[test]
+fn the_survey_counts_only_a_for_each_over_a_type_outside_the_sources() {
+    let dir = write_sources(
+        "survey_for_each",
+        &[(
+            "Main.java",
+            "import java.util.Iterator;
+            public class Main implements Iterable<String> {
+                public Iterator<String> iterator() { return null; }
+                static void own(Main m) { for (String s : m) System.out.println(s); }
+                static void jdk(java.util.List<String> l) { for (String s : l) System.out.println(s); }
+                public static void main(String[] args) { own(new Main()); jdk(null); }
+            }",
+        )],
+    );
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let report = survey(&program).report;
+    let table = feature_table(&report, "Program code: features");
+    let row = feature_row(table, "for-each over types outside the sources");
+    assert!(row.contains("Main.java:5") && !row.contains("Main.java:4"), "{table}");
+}
+
+#[test]
+fn the_survey_counts_only_values_of_generic_types_outside_the_sources() {
+    let dir = write_sources(
+        "survey_generic_types",
+        &[(
+            "Main.java",
+            "public class Main {
+                static <T> Box<T> box(T t) { return new Box<>(t); }
+                static int size(Box<?> b) { return 1; }
+                static Class<?> kind() { return null; }
+                static int a() { return size(box(\"a\")); }
+                static Object b() { return kind(); }
+                static void c(java.util.List<String> l) { System.out.println(l); }
+                public static void main(String[] args) { a(); b(); c(null); }
+            }
+            class Box<T> { T v; Box(T v) { this.v = v; } }",
+        )],
+    );
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let report = survey(&program).report;
+    let table = feature_table(&report, "Program code: features");
+    // The names of `size` and `box` have method types (`(Box<?>)int`, `<T>(T)Box<T>`), which are
+    // not values; a `Class<?>` is the runtime's class; only the `List<String>` is outside.
+    let row = feature_row(table, "generic types");
+    assert!(
+        row.contains("Main.java:7") && !row.contains("Main.java:5") && !row.contains("Main.java:6"),
+        "{table}"
+    );
+}
+
+#[test]
 fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
     let dir = write_sources(
         "survey_split",
@@ -3236,6 +3288,38 @@ fn a_runtime_failure_that_a_catch_sees_is_a_checked_call_that_throws() {
 }
 
 #[test]
+fn a_null_dereference_that_a_catch_sees_is_a_checked_non_null() {
+    let rust = translate(
+        "class A {
+            int v;
+            A next;
+            int get() { return v; }
+            static int second(A a) {
+                try {
+                    return a.next.get() + a.next.v;
+                } catch (NullPointerException e) {
+                    return -1;
+                }
+            }
+            public static void main(String[] args) {
+                A a = new A();
+                System.out.println(second(a));
+                System.out.println(a.get());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::or_break!(java::try_non_null(a.next.as_ref()), 'attempt).get()",
+            "\"java.lang.NullPointerException\" => ",
+        ],
+    );
+    // A dereference that no handler sees keeps the plain check.
+    assert_lacks(&rust, &["try_non_null(a.as_ref())"]);
+}
+
+#[test]
 fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
     let err = reject(
@@ -3636,6 +3720,36 @@ fn bounded_type_variables_erase_to_the_bound() {
             "enum Comparable {\n    Point(Rc<Point>),\n    String(String),\n}",
             "Comparable::Point(o) => o.compare_to(other),",
             "Comparable::String(o) => match &other { Comparable::String(b) => java::compare_to(o, b), _ => java::cast_failed(\"java.lang.String\") },",
+        ],
+    );
+}
+
+#[test]
+fn a_type_variable_with_several_bounds_is_cast_to_the_later_bound_it_calls() {
+    let rust = translate(
+        "interface Named { String name(); }
+        interface Sized { int size(); }
+        class Parcel implements Named, Sized {
+            public String name() { return \"box\"; }
+            public int size() { return 2; }
+        }
+        public class Main {
+            static <T extends Object & Comparable<? super T>> T max(T a, T b) { return a.compareTo(b) >= 0 ? a : b; }
+            static <T extends Named & Sized> String show(T t) { return t.name() + t.size(); }
+            public static void main(String[] args) {
+                System.out.println(max(\"a\", \"b\"));
+                System.out.println(show(new Parcel()));
+            }
+        }",
+    );
+    // `T` erases to its first bound; a call of a later bound's method casts to it first, as
+    // javac's erased code does.
+    assert_contains(
+        &rust,
+        &[
+            "fn max(a: Object, b: Object) -> Object {",
+            "java::cast(a.as_comparable(), \"Comparable\").compare_to(",
+            "t.name()",
         ],
     );
 }

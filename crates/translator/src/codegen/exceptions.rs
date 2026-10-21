@@ -812,23 +812,10 @@ impl<'a> Gen<'a> {
     /// `o.getClass().getName()`: the binary name of the object's class; with `simple`,
     /// `o.getClass().getSimpleName()`, the name of the class in its source.
     pub(super) fn class_name(&mut self, object: &'a Expr, simple: bool) -> Code {
-        let binary = |decl: &TypeDecl| {
-            if let Some((binary, simple_name)) = decl.origin.java_names() {
-                (if simple { simple_name } else { binary }).to_string()
-            } else if simple {
-                decl.name.rsplit('.').next().unwrap_or_default().to_string()
-            } else if crate::lower::is_standard(&decl.name) {
-                decl.name.clone()
-            } else if decl.package.is_empty() {
-                decl.name.replace('.', "$")
-            } else {
-                format!("{}.{}", decl.package, decl.name[decl.package.len() + 1..].replace('.', "$"))
-            }
-        };
         match self.enum_of(object) {
             None => {
                 let c = self.struct_class(object).expect("an object has a class");
-                let name = rust_string(&binary(&self.class.types[c]));
+                let name = rust_string(&self.java_class_name(c, simple));
                 if has_effects(object) {
                     let text = self.expr(object).text;
                     return Code::atom(format!("{{ {text}; String::from({name}) }}"));
@@ -841,11 +828,32 @@ impl<'a> Gen<'a> {
                     .enum_variants(t)
                     .into_iter()
                     .map(|c| {
-                        format!("{}(_) => {}", self.variant(t, c), rust_string(&binary(&self.class.types[c])))
+                        format!(
+                            "{}(_) => {}",
+                            self.variant(t, c),
+                            rust_string(&self.java_class_name(c, simple))
+                        )
                     })
                     .collect();
                 Code::atom(format!("String::from(match {obj} {{ {} }})", arms.join(", ")))
             }
+        }
+    }
+
+    /// The name that `Class.getName` gives class `c`, its binary name; with `simple`, the
+    /// name that `getSimpleName` gives it, its name in its source.
+    pub(super) fn java_class_name(&self, c: usize, simple: bool) -> String {
+        let decl = &self.class.types[c];
+        if let Some((binary, simple_name)) = decl.origin.java_names() {
+            (if simple { simple_name } else { binary }).to_string()
+        } else if simple {
+            decl.name.rsplit('.').next().unwrap_or_default().to_string()
+        } else if crate::lower::is_standard(&decl.name) {
+            decl.name.clone()
+        } else if decl.package.is_empty() {
+            decl.name.replace('.', "$")
+        } else {
+            format!("{}.{}", decl.package, decl.name[decl.package.len() + 1..].replace('.', "$"))
         }
     }
 }
