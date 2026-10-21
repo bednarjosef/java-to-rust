@@ -93,6 +93,8 @@ pub(super) const OBJECT_METHODS: &[(&str, &str)] =
 /// reaches deep into the JVM.
 pub const RUNTIME_CLASSES: &[&str] = &[
     "java.io.PrintStream",
+    // The builders' base class, whose methods are the builders' (see `lower::strings`).
+    "java.lang.AbstractStringBuilder",
     "java.lang.Boolean",
     "java.lang.Byte",
     "java.lang.Character",
@@ -408,6 +410,10 @@ pub const ITERATION: &[(&str, &str, &str)] = &[
     ("java.util.Iterator", "hasNext", "()boolean"),
     ("java.util.Iterator", "next", "()E"),
 ];
+
+/// The method that a try-with-resources calls on each resource, which javac's tree does not show:
+/// reaching it reaches the `close()` of every live class of a resource.
+pub const CLOSE: (&str, &str, &str) = ("java.lang.AutoCloseable", "close", "()void");
 
 /// The node kinds of class declarations, and the symbol kinds of classes.
 pub const CLASS_KINDS: &[&str] = &["CLASS", "INTERFACE", "ENUM", "RECORD", "ANNOTATION_TYPE"];
@@ -780,6 +786,16 @@ impl<'t> Walk<'t> {
                             signature.to_string(),
                         )));
                     }
+                }
+                if text(value, "kind") == "TRY"
+                    && value["resources"].as_array().is_some_and(|r| !r.is_empty())
+                {
+                    let (class, name, signature) = CLOSE;
+                    self.work.push(Item::Method((
+                        class.to_string(),
+                        name.to_string(),
+                        signature.to_string(),
+                    )));
                 }
                 if text(value, "kind") == "VARIABLE" {
                     self.stub_type(text(&value["symbol"], "type"));
