@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// The objects named by `this` and by locals (keyed `this` and by the local's name) that a
+/// statement changes as a whole or passes on, and the fields of them it assigns. A string field
+/// of a plain object that the statement neither assigns nor passes on can be borrowed where it
+/// is: no other reference to a plain object exists, so nothing else changes it while the borrow
+/// lasts.
+#[derive(Clone, Default)]
+pub(super) struct Steady {
+    disturbed: HashSet<String>,
+    written: HashSet<(String, String)>,
+}
+
+impl Steady {
+    fn keeps(&self, object: &str, field: &str) -> bool {
+        !self.disturbed.contains(object) && !self.written.contains(&(object.to_string(), field.to_string()))
+    }
+}
+
 impl<'a> Gen<'a> {
     /// A string expression as a `&str`.
     pub(super) fn str_ref(&mut self, e: &'a Expr) -> String {
@@ -9,23 +26,89 @@ impl<'a> Gen<'a> {
             ExprKind::Str(s) => rust_string(s),
             ExprKind::Var(name) if self.borrowed.contains(name) => self.local(name),
             ExprKind::Var(name) => format!("&{}", self.local(name)),
-            ExprKind::Field { object, .. } if self.field_in_place(object) => {
+            ExprKind::Field { object, name } if self.field_in_place(object, name) => {
                 format!("&{}", self.object_place(e))
             }
             _ => format!("&{}", self.expr(e).at(UNARY)),
         }
     }
 
-    /// Whether a string field of `object` can be borrowed where it is for as long as the statement
-    /// runs: an immutable object never changes, and a shared object's borrow is scoped where the
-    /// statement may change it (see `conflicts`). An owned object, or `this` borrowed by a method,
-    /// may be changed by a call in the same statement, which the borrow would forbid.
-    pub(super) fn field_in_place(&self, object: &Expr) -> bool {
+    /// Whether the string field `field` of `object` can be borrowed where it is for as long as
+    /// the statement runs: an immutable object never changes, and a shared object's borrow is
+    /// scoped where the statement may change it (see `conflicts`). An owned object, or `this`
+    /// borrowed by a method, may be changed by a call in the same statement, which the borrow
+    /// would forbid: it is borrowed in place only where the statement being written leaves the
+    /// object and the field alone (`Steady`).
+    pub(super) fn field_in_place(&self, object: &Expr, field: &str) -> bool {
         match object.ty {
             Type::Class(name, _) if self.facts.immutable.contains(name) => true,
-            Type::Class(..) => !self.is_plain(object),
+            Type::Class(..) if self.is_plain(object) => {
+                let key = match &object.kind {
+                    ExprKind::This => "this",
+                    ExprKind::Var(name) => name.as_str(),
+                    _ => return false,
+                };
+                self.steady.as_ref().is_some_and(|s| s.keeps(key, field))
+            }
+            Type::Class(..) => true,
             _ => false,
         }
+    }
+
+    /// What the statements and expressions do to the objects that `this` and the locals name
+    /// (see `Steady`).
+    pub(super) fn steady(&self, stmts: &[&Stmt], exprs: &[&Expr]) -> Steady {
+        // Per object: its uses, and those that only read a field or call a `&self` method.
+        let mut uses: HashMap<String, (usize, usize)> = HashMap::new();
+        let mut steady = Steady::default();
+        let key = |e: &Expr| match &e.kind {
+            ExprKind::This => Some("this".to_string()),
+            ExprKind::Var(name) => Some(name.clone()),
+            _ => None,
+        };
+        let mut on_expr = |x: &Expr| {
+            let mut harmless = |e: &Expr| {
+                if let Some(k) = key(e) {
+                    uses.entry(k).or_default().1 += 1;
+                }
+            };
+            match &x.kind {
+                ExprKind::This | ExprKind::Var(_) => {
+                    uses.entry(key(x).expect("a name")).or_default().0 += 1;
+                }
+                ExprKind::Field { object, .. } => harmless(object),
+                // Writing a field changes that field only: Rust borrows the others apart.
+                ExprKind::Assign { target: Place::Field { object, name }, .. }
+                | ExprKind::IncDec { target: Place::Field { object, name }, .. } => {
+                    harmless(object);
+                    if let Some(k) = key(object) {
+                        steady.written.insert((k, name.clone()));
+                    }
+                }
+                ExprKind::Assign { target: Place::Var(name), .. }
+                | ExprKind::IncDec { target: Place::Var(name), .. } => {
+                    steady.disturbed.insert(name.clone());
+                }
+                ExprKind::MethodCall { receiver, .. }
+                    if self.target(x).is_some_and(|m| !self.facts.mutating.contains(&m)) =>
+                {
+                    harmless(receiver)
+                }
+                _ => {}
+            }
+        };
+        for stmt in stmts {
+            visit_stmt(stmt, &mut |e| visit_expr(e, &mut on_expr), &mut |_| {});
+        }
+        for e in exprs {
+            visit_expr(e, &mut on_expr);
+        }
+        // Any other use (an argument, a returned or stored value, a call of a `&mut self` method)
+        // may move the object or borrow it mutably.
+        steady
+            .disturbed
+            .extend(uses.into_iter().filter(|(_, (all, harmless))| all > harmless).map(|(k, _)| k));
+        steady
     }
 
     /// A string expression for comparing, without copying variables.
@@ -33,7 +116,7 @@ impl<'a> Gen<'a> {
         match &e.kind {
             ExprKind::Str(s) => rust_string(s),
             ExprKind::Var(name) => self.local(name),
-            ExprKind::Field { object, .. } if self.field_in_place(object) => self.object_place(e),
+            ExprKind::Field { object, name } if self.field_in_place(object, name) => self.object_place(e),
             _ => self.expr(e).at(CMP + 1),
         }
     }

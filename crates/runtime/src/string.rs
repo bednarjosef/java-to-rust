@@ -74,6 +74,28 @@ pub fn substring(s: &str, begin: i32, end: i32) -> String {
     try_substring(s, begin, end).unwrap_or_else(crate::uncaught)
 }
 
+/// `s.substring(begin, end)` of a string that the translation proved ASCII, whose code units are
+/// its bytes: no scan of the string.
+pub fn ascii_substring(s: &str, begin: i32, end: i32) -> String {
+    try_ascii_substring(s, begin, end).unwrap_or_else(crate::uncaught)
+}
+
+/// `s.substring(begin)` of an ASCII string.
+pub fn ascii_substring_from(s: &str, begin: i32) -> String {
+    try_ascii_substring_from(s, begin).unwrap_or_else(crate::uncaught)
+}
+
+/// `ascii_substring` where the program observes the `StringIndexOutOfBoundsException`.
+pub fn try_ascii_substring(s: &str, begin: i32, end: i32) -> Result<String, crate::Exception> {
+    check_begin_end(begin, end, s.len())?;
+    Ok(s[begin as usize..end as usize].to_string())
+}
+
+/// `ascii_substring_from` where the program observes the `StringIndexOutOfBoundsException`.
+pub fn try_ascii_substring_from(s: &str, begin: i32) -> Result<String, crate::Exception> {
+    try_ascii_substring(s, begin, s.len() as i32)
+}
+
 /// `substring_from` where the program observes the `StringIndexOutOfBoundsException`.
 pub fn try_substring_from(s: &str, begin: i32) -> Result<String, crate::Exception> {
     let len = length(s);

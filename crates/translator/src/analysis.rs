@@ -76,7 +76,8 @@ pub struct Facts {
     /// Integer `/`, `%` and their compound assignments whose divisor is never zero and that never
     /// compute `MIN / -1`.
     pub safe_division: HashSet<ExprId>,
-    /// `String.length()` and `String.charAt` calls on strings that are always ASCII.
+    /// `String.length()`, `String.charAt` and `String.substring` calls on strings that are always
+    /// ASCII.
     pub ascii_length: HashSet<ExprId>,
     /// `(char)` casts whose integer value the range analysis keeps within ASCII.
     pub ascii_chars: HashSet<ExprId>,
@@ -598,15 +599,39 @@ fn used_as_value(e: &Expr, name: &str, borrowed: &HashSet<(usize, usize)>) -> bo
 struct NonAscii {
     vars: HashSet<(usize, String)>,
     params: HashSet<(usize, usize)>,
+    /// Override groups (`Hierarchy::group_id`) of which a method may return non-ASCII text, and
+    /// those with a method that does not return a `String` (a type variable), not followed.
     returns: HashSet<usize>,
+    untyped: HashSet<usize>,
+    /// Instance and static fields, by name in any class: a name is followed only when every
+    /// field of that name is a `String` (`string_fields`), and then it is non-ASCII when any of
+    /// them may be.
+    fields: HashSet<String>,
+    string_fields: HashSet<String>,
     /// The `(char)` casts that the range analysis proves ASCII.
     chars: HashSet<ExprId>,
 }
 
+/// The method index that `NonAscii::ascii` takes for an expression outside any method (a field
+/// initializer), where every variable may be non-ASCII.
+const NO_METHOD: usize = usize::MAX;
+
 impl NonAscii {
     fn var(&self, class: &Class, m: usize, name: &str) -> bool {
-        let param = class.methods[m].params.iter().position(|p| p.name == name);
+        let Some(method) = class.methods.get(m) else { return true };
+        let param = method.params.iter().position(|p| p.name == name);
         self.vars.contains(&(m, name.to_string())) || param.is_some_and(|i| self.params.contains(&(m, i)))
+    }
+
+    fn field(&self, name: &str) -> bool {
+        !self.string_fields.contains(name) || self.fields.contains(name)
+    }
+
+    /// Whether the method `callee` (or an override of it that a call may run) may return a
+    /// non-ASCII string. A method that returns a type variable is not followed.
+    fn returns(&self, class: &Class, callee: usize) -> bool {
+        let group = class.hierarchy.group_id(callee);
+        self.returns.contains(&group) || self.untyped.contains(&group)
     }
 
     /// Whether `e`, evaluated in method `m`, is ASCII text (or not a string at all).
@@ -630,7 +655,17 @@ impl NonAscii {
             ExprKind::Assign { target: Place::Var(target), value, .. } => {
                 !self.var(class, m, target) && self.ascii(class, m, value)
             }
-            ExprKind::Call { resolved: Some(callee), .. } => !self.returns.contains(callee),
+            ExprKind::Assign { target: Place::Field { name, .. }, value, .. } => {
+                !self.field(name) && self.ascii(class, m, value)
+            }
+            ExprKind::Assign { target: Place::Static { name, .. }, value, .. } => {
+                !self.field(name) && self.ascii(class, m, value)
+            }
+            ExprKind::Field { name, .. } | ExprKind::Static { name, .. } => !self.field(name),
+            ExprKind::Call { resolved: Some(callee), .. }
+            | ExprKind::MethodCall { resolved: Some(callee), is_super: false, .. } => {
+                !self.returns(class, *callee)
+            }
             ExprKind::Conditional(_, a, b) => self.ascii(class, m, a) && self.ascii(class, m, b),
             // Slicing, trimming, case mapping, repeating and replacing ASCII text gives ASCII.
             ExprKind::Builtin(
@@ -656,10 +691,31 @@ impl NonAscii {
 
 fn ascii_strings(class: &Class, facts: &mut Facts) {
     let mut non_ascii = NonAscii { chars: facts.ascii_chars.clone(), ..NonAscii::default() };
+    let all_fields = || class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics));
+    let other_fields: HashSet<&str> =
+        all_fields().filter(|f| f.ty != Type::String).map(|f| f.name.as_str()).collect();
+    non_ascii.string_fields = all_fields()
+        .filter(|f| f.ty == Type::String && !other_fields.contains(f.name.as_str()))
+        .map(|f| f.name.clone())
+        .collect();
+    // An enum's fields hold the values of its constants' arguments, which no assignment shows.
+    for t in &class.types {
+        let Some(constants) = &t.enum_constants else { continue };
+        let literal = |v: &Expr| v.ty != Type::String || matches!(&v.kind, ExprKind::Str(s) if s.is_ascii());
+        if !constants.iter().all(|c| c.values.iter().all(literal)) {
+            non_ascii.fields.extend(t.fields.iter().filter(|f| f.ty == Type::String).map(|f| f.name.clone()));
+        }
+    }
+    for (m, method) in class.methods.iter().enumerate() {
+        if method.ret != Type::String {
+            non_ascii.untyped.insert(class.hierarchy.group_id(m));
+        }
+    }
     // Field initializers are not walked below and have no method's variables to look up, so
-    // every parameter that a call in one reaches may be non-ASCII.
-    let initializers = class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics));
-    for init in initializers.filter_map(|f| f.init.as_ref()) {
+    // every parameter that a call in one reaches may be non-ASCII; so are the parameters of the
+    // constructors that build the exceptions the runtime raises, from the runtime's message.
+    let initializers = all_fields().filter_map(|f| f.init.as_ref()).chain(&class.raised);
+    for init in initializers {
         visit_expr(init, &mut |x| match &x.kind {
             ExprKind::Call { args, resolved: Some(callee), .. }
             | ExprKind::MethodCall { args, resolved: Some(callee), .. }
@@ -678,6 +734,10 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
         let mut declared = Vec::new();
         let mut params = Vec::new();
         let mut returns = Vec::new();
+        let mut fields: Vec<String> = all_fields()
+            .filter(|f| f.init.as_ref().is_some_and(|init| !non_ascii.ascii(class, NO_METHOD, init)))
+            .map(|f| f.name.clone())
+            .collect();
         for (m, method) in class.methods.iter().enumerate() {
             for stmt in &method.body {
                 let mut on_expr = |e: &Expr| {
@@ -685,6 +745,14 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
                         ExprKind::Assign { target: Place::Var(target), .. } if x.ty == Type::String => {
                             if !non_ascii.ascii(class, m, x) {
                                 vars.push((m, target.clone()));
+                            }
+                        }
+                        ExprKind::Assign {
+                            target: Place::Field { name, .. } | Place::Static { name, .. },
+                            ..
+                        } if x.ty == Type::String => {
+                            if !non_ascii.ascii(class, m, x) {
+                                fields.push(name.clone());
                             }
                         }
                         // A string that a pattern binds is any string an `Object` holds.
@@ -713,18 +781,22 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
                     }
                     // The elements of a string array are not followed: each may be non-ASCII.
                     Stmt::ForEach { ty: Type::String, name, .. } => declared.push((m, name.clone())),
-                    Stmt::Return(Some(value), _) if !non_ascii.ascii(class, m, value) => returns.push(m),
+                    Stmt::Return(Some(value), _) if !non_ascii.ascii(class, m, value) => {
+                        returns.push(class.hierarchy.group_id(m))
+                    }
                     _ => {}
                 };
                 visit_stmt(stmt, &mut on_expr, &mut on_stmt);
             }
         }
-        let before = (non_ascii.vars.len(), non_ascii.params.len(), non_ascii.returns.len());
+        let sizes = |n: &NonAscii| (n.vars.len(), n.params.len(), n.returns.len(), n.fields.len());
+        let before = sizes(&non_ascii);
         non_ascii.vars.extend(vars);
         non_ascii.vars.extend(declared);
         non_ascii.params.extend(params);
         non_ascii.returns.extend(returns);
-        if before == (non_ascii.vars.len(), non_ascii.params.len(), non_ascii.returns.len()) {
+        non_ascii.fields.extend(fields);
+        if before == sizes(&non_ascii) {
             break;
         }
     }
@@ -734,8 +806,14 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
                 stmt,
                 &mut |e| {
                     visit_expr(e, &mut |x| {
-                        if let ExprKind::Builtin(Builtin::StringLength | Builtin::StringCharAt, args) =
-                            &x.kind
+                        if let ExprKind::Builtin(
+                            Builtin::StringLength
+                            | Builtin::StringCharAt
+                            | Builtin::String(StringOp::Substring),
+                            args,
+                        ) = &x.kind
+                            && (args[0].ty == Type::String
+                                || !matches!(x.kind, ExprKind::Builtin(Builtin::String(_), _)))
                             && non_ascii.ascii(class, m, &args[0])
                         {
                             facts.ascii_length.insert(x.id);

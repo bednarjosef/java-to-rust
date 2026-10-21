@@ -48,6 +48,7 @@ struct Saved {
     out: String,
     indent: usize,
     guarded: bool,
+    steady: Option<strings::Steady>,
     chain: bool,
     formatting: bool,
     printing: bool,
@@ -472,6 +473,7 @@ impl<'a> Gen<'a> {
             out: std::mem::take(&mut self.out),
             indent: self.indent,
             guarded: std::mem::replace(&mut self.guarded, false),
+            steady: self.steady.take(),
             chain: std::mem::replace(&mut self.chain, false),
             formatting: std::mem::replace(&mut self.formatting, false),
             printing: std::mem::replace(&mut self.printing, false),
@@ -508,6 +510,7 @@ impl<'a> Gen<'a> {
         self.out = s.out;
         self.indent = s.indent;
         self.guarded = s.guarded;
+        self.steady = s.steady;
         self.chain = s.chain;
         self.formatting = s.formatting;
         self.printing = s.printing;

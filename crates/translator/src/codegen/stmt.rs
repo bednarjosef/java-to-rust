@@ -18,16 +18,20 @@ impl<'a> Gen<'a> {
         let end = if folded { stmts.len() - 2 } else { stmts.len() };
         let mut narrowed = Vec::new();
         let mut synchronized = false;
+        let outer_steady = self.steady.take();
         for (i, stmt) in stmts[..end].iter().enumerate() {
             let rest = &stmts[i + 1..];
             // The block of a `synchronized` that `synchronized_block` wrote with its lock.
             if std::mem::take(&mut synchronized) {
                 continue;
             }
+            let pair: Vec<&Stmt> = std::iter::once(stmt).chain(rest.first()).collect();
+            self.steady = Some(self.steady(&pair, &[]));
             if self.synchronized_block(stmt, rest.first(), tail && rest.len() == 1) {
                 synchronized = true;
                 continue;
             }
+            self.steady = Some(self.steady(&[stmt], &[]));
             if let Some(name) = self.early_null_exit(stmt, rest) {
                 if self.borrowed.insert(name.to_string()) {
                     narrowed.push(name);
@@ -48,8 +52,10 @@ impl<'a> Gen<'a> {
             }
         }
         if folded {
+            self.steady = Some(self.steady(&[&stmts[end], &stmts[end + 1]], &[]));
             self.tail_local(&stmts[end]);
         }
+        self.steady = outer_steady;
         for name in narrowed {
             self.borrowed.remove(name);
         }
@@ -65,12 +71,18 @@ impl<'a> Gen<'a> {
     pub(super) fn stmt(&mut self, stmt: &'a Stmt, rest: &'a [Stmt]) {
         let conflicts = self.stmt_conflicts(stmt);
         let outer = std::mem::replace(&mut self.guarded, conflicts);
+        let steady = self.steady(&[stmt], &[]);
+        let outer_steady = self.steady.replace(steady);
         self.statement(stmt, rest);
+        self.steady = outer_steady;
         self.guarded = outer;
     }
 
     pub(super) fn statement(&mut self, stmt: &'a Stmt, rest: &'a [Stmt]) {
         match stmt {
+            Stmt::Local { ty, name, init: None, .. } => {
+                self.local_decl(*ty, name, None, self.declared_local_is_mut(*ty, name, rest));
+            }
             Stmt::Local { ty, name, init, .. } => {
                 self.local_decl(*ty, name, init.as_ref(), self.local_is_mut(*ty, name, rest));
             }
