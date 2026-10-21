@@ -653,6 +653,7 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
             Builtin::MainArgs => self.main_args(ty),
+            Builtin::StringArrayOf | Builtin::ObjectArrayOf => self.array_conversion(builtin, &args[0], ty),
             Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
             Builtin::InitializeClass { class } => match self.init_call(class) {
                 Some(init) => Code::atom(format!("{{ {init} }}")),

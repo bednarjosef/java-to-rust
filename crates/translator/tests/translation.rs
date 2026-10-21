@@ -4055,6 +4055,66 @@ fn a_type_variables_array_passed_for_an_erased_array_erases_only_its_generic() {
 }
 
 #[test]
+fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at_builtins() {
+    let rust = translate(
+        "public class Main {
+            static <T> T first(T[] a) { return a[0]; }
+            public static void main(String[] args) {
+                String[] words = \"b a\".split(\" \");
+                Integer[] numbers = {1, 2};
+                System.out.println(first(words) + first(numbers) + String.join(\",\", words));
+            }
+        }",
+    );
+    // `String[]` meets `Integer[]` at `T[]`, so it is an `Object[]` of strings; the runtime's
+    // string builtins take and give copies as `String[]`.
+    assert_contains(
+        &rust,
+        &[
+            "String(String),",
+            "fn first(a: &[Object]) -> Object {",
+            "let words: java::Array<Object> = java::from_vec((&java::from_vec(java::split(\"b a\", \" \", 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>());",
+            "java::join(\",\", &java::from_vec((&words.borrow()).iter().map(|s| java::cast(s.as_string(), \"java.lang.String\")).collect::<Vec<_>>()).borrow())",
+        ],
+    );
+}
+
+#[test]
+fn main_arguments_that_are_an_object_array_are_strings_as_objects() {
+    let rust = translate(
+        "public class Main {
+            static <T> int count(T[] a) { return a.length; }
+            public static void main(String[] args) {
+                System.out.println(count(args) + count(new Integer[] {1}));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["String(String),", "main_args().into_iter().map(|s| Object::String(s)).collect::<Vec<_>>()"],
+    );
+}
+
+#[test]
+fn sorting_a_string_array_that_is_an_object_array_in_place_is_rejected() {
+    let err = java_to_rust::translate(
+        "public class Main {
+            static <T> T first(T[] a) { return a[0]; }
+            public static void main(String[] args) {
+                String[] words = {\"b\", \"a\"};
+                java.util.Arrays.sort(words);
+                System.out.println(first(words) + first(new Integer[] {1}));
+            }
+        }",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("a change in place of a `String[]` that is also an `Object[]`"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_string_builder_as_an_object_is_a_shared_variant_compared_by_identity() {
     let rust = translate(
         "public class Main {

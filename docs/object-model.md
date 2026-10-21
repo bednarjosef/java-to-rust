@@ -1749,10 +1749,18 @@ Generics are erased in lowering, and nothing after it knows they existed:
   in a tag beside the elements would need an array type of its own through all of the array code,
   so it is not done, with two deviations: storing an object of another class in such an array
   does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s
-  (`[Ljava.lang.Object;`). Arrays of strings are left out: the runtime's string methods make and
-  take `java::Array<String>` (`split`, `String.join`, `main`'s arguments), so a `String[]` passed
-  for an array of a type variable is still rejected ("an array passed as an array of a type
-  variable").
+  (`[Ljava.lang.Object;`). A `String[]` is covariant the same way, but the runtime's string
+  methods make and take `java::Array<String>` (`split`, `String.join`, `Arrays.toString` of
+  strings, `main`'s arguments), so where one meets a `String[]` that is an `Object[]`, lowering
+  wraps it in a copy (`Builtin::StringArrayOf` casting each element back to `String`,
+  `Builtin::ObjectArrayOf` putting each in `Object::String`), and `main`'s arguments are made as
+  `Object`s. A copy keeps the elements but not the array's identity, which only matters where the
+  builtin keeps or changes the array: those that read it (`join`, `toString`, `equals`,
+  `hashCode`, `copyOf`) and those that make a new one (`split`) are copied, and those that change
+  it in place (`Arrays.sort`, `Arrays.fill`) are rejected ("a change in place of a `String[]`
+  that is also an `Object[]`"). The strings in such an array are values of `Object`'s `String`
+  class (`analysis::hierarchy::flows`). A program whose `String[]`s never meet another array type
+  translates as before.
 - An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the
   plan's `Variant::Array`, done as a runtime class beside the strings and the boxes rather than a
   variant kind of its own: each array type that is converted to `Object` or cast back from it gets
