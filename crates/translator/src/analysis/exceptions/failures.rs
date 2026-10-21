@@ -116,10 +116,11 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         Builtin::Native(Native::Math { name: "clamp", .. }) => Some("java.lang.IllegalArgumentException"),
         // The others are functions on numbers, which never throw.
         Builtin::Native(Native::Math { .. }) => None,
-        // A negative time. Nothing interrupts a thread of a translated program, so `sleep` never
-        // throws `InterruptedException`.
+        // A negative time (and an interrupt, which `runtime_failures` adds in a program that
+        // interrupts).
         Builtin::Native(Native::Sleep { .. }) => Some("java.lang.IllegalArgumentException"),
-        // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail.
+        // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail, but for
+        // the interrupt of `join0`, which `runtime_failures` adds.
         Builtin::Native(
             Native::OnSpinWait
             | Native::ThreadYield
@@ -132,11 +133,13 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::ThreadStart
             | Native::ThreadAlive
             | Native::ThreadJoin
-            | Native::ThreadRename,
+            | Native::ThreadRename
+            | Native::ThreadInterrupt
+            | Native::ThreadIsInterrupted
+            | Native::ThreadClearInterrupt,
         ) => None,
-        // A monitor that the thread does not hold (and for `wait` a negative timeout, which
-        // `runtime_failures` adds). Nothing interrupts a thread, so `wait` never throws
-        // `InterruptedException`.
+        // A monitor that the thread does not hold (and for `wait` a negative timeout, and an
+        // interrupt, which `runtime_failures` adds).
         Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. }) => {
             Some("java.lang.IllegalMonitorStateException")
         }
@@ -425,13 +428,19 @@ pub(super) fn runtime_failures(
                             | Builtin::CodePoint(CodePointOp::ToCharsInto)
                             | Builtin::EnumValueOf
                             | Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. })
-                    );
+                    ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })));
                     out.push((failure, "this call of the library", checked, x.id));
                 }
                 if let Builtin::Native(Native::MonitorWait) = builtin
                     && !matches!(args[1].kind, ExprKind::Long(n) if n >= 0)
                 {
                     out.push(("java.lang.IllegalArgumentException", "this call of the library", true, x.id));
+                }
+                // In a program that interrupts a thread, what waits ends with an interrupt.
+                if facts.interrupts
+                    && matches!(builtin, Builtin::Native(Native::Sleep { .. } | Native::ThreadJoin | Native::MonitorWait))
+                {
+                    out.push(("java.lang.InterruptedException", "this call of the library", true, x.id));
                 }
             }
         },
