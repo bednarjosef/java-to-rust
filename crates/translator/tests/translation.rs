@@ -1649,6 +1649,36 @@ fn library_roots_are_read_only_where_used() {
 }
 
 #[test]
+fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
+    let library = (
+        "lib/lib/Tags.java",
+        "package lib;\npublic class Tags {\n    public static boolean none(String tag) { return tag == \"\"; }\n    public static boolean differ(String a, String b) { return a != b; }\n}\n",
+    );
+    let main = "package main;\nimport lib.Tags;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Tags.none(\"\") + \" \" + Tags.differ(\"x\", a.length > 0 ? a[0] : \"y\"));\n    }\n}\n";
+    let dir = write_sources("library-string-equality", &[("app/main/Main.java", main), library]);
+    let program = java_to_rust::Program {
+        main: "main.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    // Value equality, `Objects.equals`, of the two strings.
+    assert_contains(&rust, &["tag == \"\"", "!(a == b)"]);
+    // The same comparison in the program's own code compares references, which it cannot.
+    let own = "package main;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(a.length > 0 && a[0] == \"x\");\n    }\n}\n";
+    let dir = write_sources("program-string-equality", &[("app/main/Main.java", own)]);
+    let program = java_to_rust::Program {
+        main: "main.Main".into(),
+        sources: vec![dir.join("app")],
+        ..Default::default()
+    };
+    let err = java_to_rust::translate_program(&program).expect_err("== on the program's strings");
+    assert!(err.to_string().contains("== on strings compares references; not supported yet"), "{err}");
+}
+
+#[test]
 fn program_errors_name_their_file() {
     let dir = write_sources(
         "program-errors",

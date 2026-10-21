@@ -187,6 +187,32 @@ impl<'t> Node<'t> {
     }
 }
 
+impl<'t> Lowering<'t> {
+    /// `a == b` or `a != b` of two strings, which compares references. A translated string is a
+    /// value without an identity, so the program's own code is rejected. The JDK compares by
+    /// reference only strings it interned (the parts of a `Locale`, `Charset`'s canonical names)
+    /// or as a shortcut before comparing the characters (`LocaleUtils.caseIgnoreMatch`), and no
+    /// code of it that the targets reach makes a string with an identity of its own to tell it
+    /// apart (a `new String` kept as a marker): there, the reference comparison gives what value
+    /// equality does, which is how the library's code is lowered (`Objects.equals`).
+    fn library_string_comparison(
+        &self,
+        node: Node<'t>,
+        op: BinOp,
+        left: Expr,
+        right: Expr,
+    ) -> Result<ExprKind, Error> {
+        if !self.library.get(self.current.get()).copied().unwrap_or(false) {
+            return error(node.pos(), "== on strings compares references; not supported yet");
+        }
+        let equal = ExprKind::Builtin(Builtin::ObjectsEquals, vec![left, right]);
+        Ok(match op {
+            BinOp::Eq => equal,
+            _ => ExprKind::Unary(UnOp::Not, Box::new(self.synth(equal, node.pos(), Type::Boolean))),
+        })
+    }
+}
+
 fn unsupported<T>(node: Node, what: &str) -> Result<T, Error> {
     error(node.pos(), format!("{what} not supported yet"))
 }
@@ -247,6 +273,9 @@ struct Lowering<'t> {
     /// The member classes of local and anonymous classes, each with its outer class, by index:
     /// they are named after that class (see `inner::name_nested`).
     member_outers: Vec<(usize, usize)>,
+    /// In a whole program, whether each class, by index, is the library's (the JDK's) rather than
+    /// the program's own; a class without an entry is the program's.
+    library: Vec<bool>,
 }
 
 impl<'t> Lowering<'t> {
@@ -690,21 +719,22 @@ impl<'t> Lowering<'t> {
                 let (left, right) = (self.expr(left)?, self.expr(node.child("rightOperand")?)?);
                 if left.ty == Type::String && right.ty == Type::String && matches!(op, BinOp::Eq | BinOp::Ne)
                 {
-                    return error(node.pos(), "== on strings compares references; not supported yet");
-                }
-                // An array's text is its type and identity hash, such as `[I@1b6d3586`.
-                if op == BinOp::Add
-                    && (left.ty == Type::String || right.ty == Type::String)
-                    && (matches!(left.ty, Type::Array(_)) || matches!(right.ty, Type::Array(_)))
-                {
-                    return unsupported(node, "the text of an array");
-                }
-                let (left, right) = if matches!(op, BinOp::Eq | BinOp::Ne) {
-                    self.convert_operands(left, right)
+                    self.library_string_comparison(node, op, left, right)?
                 } else {
-                    (left, right)
-                };
-                ExprKind::Binary(op, Box::new(left), Box::new(right))
+                    // An array's text is its type and identity hash, such as `[I@1b6d3586`.
+                    if op == BinOp::Add
+                        && (left.ty == Type::String || right.ty == Type::String)
+                        && (matches!(left.ty, Type::Array(_)) || matches!(right.ty, Type::Array(_)))
+                    {
+                        return unsupported(node, "the text of an array");
+                    }
+                    let (left, right) = if matches!(op, BinOp::Eq | BinOp::Ne) {
+                        self.convert_operands(left, right)
+                    } else {
+                        (left, right)
+                    };
+                    ExprKind::Binary(op, Box::new(left), Box::new(right))
+                }
             }
         };
         // `printf` returns its stream, which the translation has no type for; it is a statement.
