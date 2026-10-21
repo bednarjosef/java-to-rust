@@ -289,17 +289,27 @@ A small subset, end to end:
   Reflection (`getDeclaredFields`, `newInstance`, ...) is rejected, as are a record with an array component (its text would be the array's identity) and
   a generic record in a record pattern. An accessor written in the record runs at each use of a
   pattern variable that names a component, not once.
+- **The class of a method's caller**: a static method that asks for the class that called it
+  (`StackWalker.getInstance(RETAIN_CLASS_REFERENCE).getCallerClass()`, as logging libraries name a
+  logger after it, or `Reflection.getCallerClass()` in the JDK's `@CallerSensitive` methods such as
+  `ResourceBundle.getBundle`) gets that class from each call as a parameter more, since the
+  translator knows which class every call is in (`lower/callers.rs`). Asking anywhere else, and
+  walking the stack's frames (`StackWalker.walk`), is rejected.
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
   and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
   `super(message)`, `super(message, cause)`, fields, and overrides of `getMessage` and `toString`)
   and the standard ones (`Exception`, `RuntimeException`, `IllegalArgumentException`,
   `IllegalStateException`, `UnsupportedOperationException` and the rest of
   `crates/translator/java/Standard.java`, written in Java and given to the program by the
-  translator), with `getMessage`, `getCause`, `toString`, `printStackTrace` (without stack frames)
-  and `getClass().getName()` and `getSimpleName()`. A method returns `Result<T, Throwable>` only
+  translator), with `getMessage`, `getCause`, `toString`, `printStackTrace` (to standard error, a
+  `PrintStream` or a `PrintWriter`) and `getClass().getName()` and `getSimpleName()`. Stack traces
+  are empty, as the specification of `getStackTrace` allows: `printStackTrace` prints what Java
+  prints without the `at` lines (the exception, its suppressed exceptions and its causes), and
+  `setStackTrace` gives an exception the frames that it then has (docs/exceptions.md, "Stack
+  traces"). A method returns `Result<T, Throwable>` only
   when some caller catches what it may throw, `?` passes it on, and every other method keeps its
   plain signature: an exception that nothing catches ends the program where it is thrown, with
-  `Exception in thread "main" ...` on standard error and exit code 1. A `try` is a labeled block
+  `Exception in thread "main" ` and its stack trace on standard error and exit code 1. A `try` is a labeled block
   that evaluates to a `Result`, and its catch clauses are a `match`. `finally` runs however its
   `try` ends: after an exception (which then goes on), a `return` (whose value is taken first) and a
   `break` or `continue` out of the `try`, through nested `try`s; a `return` or an exception in the

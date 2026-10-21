@@ -98,6 +98,11 @@ pub enum Native {
     InstallUncaught,
     UncaughtException,
     PrintUncaught,
+    /// Gives the runtime the text of the stack trace of an uncaught exception: the argument, a call
+    /// of `Throwable.uncaughtTrace()` that lowering puts at the start of `main` (see
+    /// `lower/natives.rs`), which is not evaluated where the native is, and which reads the
+    /// exception with `Throwable.uncaught0()` (`UncaughtException`).
+    InstallTrace,
     /// `Unsafe.park(absolute, time)` of `LockSupport`: waits for the calling thread's permit, until
     /// the deadline `time` (milliseconds since the epoch) when `absolute`, else for `time`
     /// nanoseconds, or without a limit for 0.
@@ -230,6 +235,7 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.lang.Thread", "printUncaught0", "(java.lang.String,java.lang.Throwable)void") => {
             Native::PrintUncaught
         }
+        ("java.lang.Throwable", "uncaught0", "()java.lang.Throwable") => Native::UncaughtException,
         _ => return None,
     })
 }

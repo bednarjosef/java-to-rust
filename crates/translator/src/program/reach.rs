@@ -199,6 +199,35 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Blocker", "end", "(boolean)void"),
 ];
 
+/// A method, by class, name and javac's signature.
+type Member = (&'static str, &'static str, &'static str);
+
+/// The methods of the JDK that the translator's standard classes (`lower::exceptions`) call, by
+/// the standard method that calls them: reachability does not read the standard classes' code.
+const STANDARD_CALLS: &[(Member, Member)] = &[
+    (
+        ("java.lang.Throwable", "printStackTrace", "(java.io.PrintStream)void"),
+        ("java.io.PrintStream", "println", "(java.lang.String)void"),
+    ),
+    (
+        ("java.lang.Throwable", "printStackTrace", "(java.io.PrintWriter)void"),
+        ("java.io.PrintWriter", "println", "(java.lang.String)void"),
+    ),
+];
+
+/// The methods that answer which class called the method that calls them: the lowering makes the
+/// answer the class of each call of that method (`lower/callers.rs`), so reachability does not
+/// enter them, nor counts the one of `jdk.internal.reflect` as reflection.
+pub const CALLER_QUERIES: &[(&str, &str, &str)] = &[
+    ("jdk.internal.reflect.Reflection", "getCallerClass", "()java.lang.Class<?>"),
+    ("java.lang.StackWalker", "getCallerClass", "()java.lang.Class<?>"),
+];
+
+/// The class of the method among `CALLER_QUERIES` with this class, name and signature, if it is one.
+pub fn caller_query(class: &str, name: &str, signature: &str) -> Option<&'static str> {
+    CALLER_QUERIES.iter().find(|q| **q == (class, name, signature)).map(|q| q.0)
+}
+
 /// The class and the field that `node` is the offset of, when it is a call of `Unsafe`'s
 /// `objectFieldOffset` of a class literal and the field's name, or of the field that
 /// `getDeclaredField` of a class literal finds by its name: the field is reached, though no code
@@ -325,6 +354,7 @@ pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
         || signature.ends_with(")java.lang.invoke.VarHandle")
         || class == "java.lang.invoke.VarHandle"
         || REPLACED_BY_NAME.contains(&(class, name))
+        || caller_query(class, name, signature).is_some()
         || (class == "java.lang.Character" && crate::lower::runtime_character_method(name, signature))
         || unsafe_field_access(class, name, signature).is_some()
         || unsafe_field_update(class, name, signature).is_some()
@@ -1465,6 +1495,10 @@ impl<'t> Walk<'t> {
 
     fn symbol(&mut self, symbol: &Value) {
         let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
+        let member = (owner.as_str(), name.as_str(), text(symbol, "type"));
+        for (_, (class, method, signature)) in STANDARD_CALLS.iter().filter(|(m, _)| *m == member) {
+            self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
+        }
         match text(symbol, "kind") {
             "METHOD"
                 if owner == "java.lang.String"

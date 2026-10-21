@@ -382,9 +382,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // form only.
     let npe = Kind::Runtime("java.lang.NullPointerException");
     let mut reading_tries = HashSet::new();
-    // A suppressed exception is read only through `getSuppressed` (the runtime's stack traces do
-    // not show it), so adding one to the exception that is thrown on (a try-with-resources'
-    // `closing` catch) reads neither, unless the program gets them back.
+    // A suppressed exception is read only through `getSuppressed`, and printed by a
+    // `printStackTrace` to a stream or a writer, which may be standard output (standard error, where
+    // `printStackTrace()` and uncaught exceptions print, is not compared). So adding one to the
+    // exception that is thrown on (a try-with-resources' `closing` catch) reads neither, unless
+    // the program gets them back or prints them so.
     let mut suppressed_read = false;
     for method in &class.methods {
         for s in &method.body {
@@ -392,8 +394,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 s,
                 &mut |e| {
                     visit_expr(e, &mut |x| {
-                        suppressed_read |=
-                            matches!(&x.kind, ExprKind::MethodCall { name, .. } if name == "getSuppressed")
+                        suppressed_read |= matches!(
+                            &x.kind,
+                            ExprKind::MethodCall { name, args, .. }
+                                if name == "getSuppressed" || name == "printStackTrace" && args.len() == 1
+                        )
                     })
                 },
                 &mut |_| {},
@@ -986,8 +991,9 @@ fn expr_points(
         // What a started thread runs raises nothing where the thread is started: an exception
         // that escapes it ends that thread (the runtime prints it), whatever catches the start.
         ExprKind::Builtin(Builtin::Native(Native::ThreadStart), args) => children.extend(&args[..4]),
-        // The runtime runs the dispatch of an uncaught exception later, on the thread it ends.
-        ExprKind::Builtin(Builtin::Native(Native::InstallUncaught), _) => {}
+        // The runtime runs the dispatch of an uncaught exception later, on the thread it ends, and
+        // makes the text of its stack trace there.
+        ExprKind::Builtin(Builtin::Native(Native::InstallUncaught | Native::InstallTrace), _) => {}
         // The store of an atomic update of an element through `Unsafe` checks neither the array
         // nor the index, as the JVM's does not (see `failures::library_failure`): its operands
         // are evaluated, and the store raises nothing.

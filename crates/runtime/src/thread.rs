@@ -271,9 +271,30 @@ pub fn pending_uncaught<T: Clone + 'static>() -> T {
 }
 
 /// `printUncaught0(name, e)`: what the thread group prints for an exception without a handler.
-pub fn print_uncaught(name: &str, e: &impl std::fmt::Display) {
+pub fn print_uncaught<E: std::fmt::Display + 'static>(name: &str, e: &E) {
     crate::flush();
-    eprintln!("Exception in thread \"{name}\" {e}");
+    eprintln!("Exception in thread \"{name}\" {}", crate::uncaught_text(e));
+}
+
+/// The text of an uncaught exception's stack trace, made by the program (see `set_trace_hook`).
+type Trace = fn(&dyn Any) -> Option<String>;
+
+static TRACE_HOOK: Mutex<Option<Trace>> = Mutex::new(None);
+
+/// `Throwable`'s `installTrace0()`: from now on, an uncaught exception that is a value of the
+/// program's `Throwable` is printed with the text that `trace` makes of it, Java's
+/// `printStackTrace` without frames (its causes and suppressed exceptions), rather than its
+/// `toString()`.
+pub fn set_trace_hook(trace: Trace) {
+    *lock(&TRACE_HOOK) = Some(trace);
+}
+
+/// What Java prints for an uncaught exception after `Exception in thread "name" `, or after
+/// `Caused by: `: its stack trace, which the program makes once it has given the hook, else its
+/// `toString()` (a failure of the runtime has neither a cause nor suppressed exceptions).
+pub fn uncaught_text<E: std::fmt::Display + 'static>(e: &E) -> String {
+    let hook = *lock(&TRACE_HOOK);
+    hook.and_then(|trace| trace(e as &dyn Any)).unwrap_or_else(|| e.to_string())
 }
 
 /// Hands an exception that nothing caught to the program's handlers, once it has set one; `true`
@@ -311,9 +332,9 @@ pub(crate) fn end_dispatched() -> ! {
 
 /// Ends the calling thread, started by the program, because of an exception that nothing caught:
 /// the message is printed, and the other threads go on.
-pub(crate) fn end_worker(e: impl std::fmt::Display) -> ! {
+pub(crate) fn end_worker(e: impl std::fmt::Display + 'static) -> ! {
     let name = current_record().name();
-    crate::out::eprint_text(&format!("Exception in thread \"{name}\" {e}\n"));
+    crate::out::eprint_text(&format!("Exception in thread \"{name}\" {}\n", uncaught_text(&e)));
     std::panic::resume_unwind(Box::new(Uncaught))
 }
 
