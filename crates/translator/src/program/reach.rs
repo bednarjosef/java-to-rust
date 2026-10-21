@@ -54,7 +54,7 @@ impl Reach {
 
 /// The methods of `Object` that a class may override, which code outside the program (printing,
 /// string concatenation, collections) calls on its objects.
-const OBJECT_METHODS: &[(&str, &str)] =
+pub(super) const OBJECT_METHODS: &[(&str, &str)] =
     &[("toString", "()java.lang.String"), ("equals", "(java.lang.Object)boolean"), ("hashCode", "()int")];
 
 /// The classes that the runtime provides and the translator maps to it, such as `String` and
@@ -106,6 +106,33 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("jdk.internal.reflect.", "reflection"),
     ("sun.security.", "security"),
 ];
+
+/// Static fields that only Java Flight Recorder sets, through reflection when it starts
+/// (`jdk.internal.event.JFRTracing`): no code sets them otherwise, so in a translated program they
+/// stay `false` and the code they guard, which records events through `jdk.internal.event`, never
+/// runs.
+pub const FALSE_FLAGS: &[(&str, &str)] = &[
+    ("java.io.FileInputStream", "jfrTracing"),
+    ("java.io.FileOutputStream", "jfrTracing"),
+    ("java.io.RandomAccessFile", "jfrTracing"),
+    ("java.lang.Throwable", "jfrTracing"),
+    ("sun.nio.ch.FileChannelImpl", "jfrTracing"),
+];
+
+/// Whether an `if` statement's condition is never true, so that only its `else` branch can run:
+/// it reads one of the `FALSE_FLAGS`, alone or as an operand of `&&`.
+pub fn never_true(condition: &Value) -> bool {
+    match text(condition, "kind") {
+        "PARENTHESIZED" => never_true(&condition["expression"]),
+        "CONDITIONAL_AND" => never_true(&condition["leftOperand"]) || never_true(&condition["rightOperand"]),
+        "IDENTIFIER" | "MEMBER_SELECT" => {
+            let symbol = &condition["symbol"];
+            text(symbol, "kind") == "FIELD"
+                && FALSE_FLAGS.contains(&(text(symbol, "owner"), text(symbol, "name")))
+        }
+        _ => false,
+    }
+}
 
 /// The feature that the class with qualified name `class` belongs to, if it is not translated.
 pub fn untranslated(class: &str) -> Option<&'static str> {
@@ -358,10 +385,16 @@ impl<'t> Walk<'t> {
 
     /// Makes every declaration that a node of this subtree refers to reachable. Local and
     /// anonymous classes inside are scanned whole, which over-approximates. Annotations are
-    /// skipped: without reflection they do nothing at run time.
+    /// skipped: without reflection they do nothing at run time. So is the branch of an `if` whose
+    /// condition is never true (`never_true`).
     fn scan(&mut self, value: &'t Value) {
         match value {
             Value::Object(_) if matches!(text(value, "kind"), "ANNOTATION" | "TYPE_ANNOTATION") => {}
+            // The branch that a condition that is never true guards is not reached.
+            Value::Object(_) if text(value, "kind") == "IF" && never_true(&value["condition"]) => {
+                self.scan(&value["condition"]);
+                self.scan(&value["elseStatement"]);
+            }
             Value::Object(fields) => {
                 for (field, child) in fields {
                     if field == "symbol" {
@@ -459,5 +492,54 @@ fn has_effects(value: &Value) -> bool {
         }
         Value::Array(items) => items.iter().any(has_effects),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A static call of `class.name()`, as a statement of javac's tree.
+    fn call(class: &str, name: &str) -> Value {
+        json!({"kind": "EXPRESSION_STATEMENT", "expression": {
+            "kind": "METHOD_INVOCATION",
+            "symbol": {"kind": "METHOD", "owner": class, "name": name, "type": "()void", "static": true},
+        }})
+    }
+
+    /// A class with static methods of no arguments (`main` takes its `String[]`), each with the
+    /// statements given.
+    fn class(name: &str, methods: &[(&str, Vec<Value>)]) -> Value {
+        let members: Vec<Value> = methods
+            .iter()
+            .map(|(method, statements)| {
+                let ty = if *method == "main" { "(java.lang.String[])void" } else { "()void" };
+                json!({"kind": "METHOD", "name": method, "symbol": {"type": ty, "static": true},
+                       "body": {"kind": "BLOCK", "statements": statements}})
+            })
+            .collect();
+        json!({"kind": "CLASS", "symbol": {"type": name}, "members": members})
+    }
+
+    #[test]
+    fn a_branch_guarded_by_a_flag_only_flight_recorder_sets_is_not_reached() {
+        let flag = json!({"kind": "MEMBER_SELECT",
+            "symbol": {"kind": "FIELD", "owner": "java.lang.Throwable", "name": "jfrTracing", "static": true}});
+        let guarded = json!({"kind": "IF",
+            "condition": {"kind": "PARENTHESIZED", "expression": {"kind": "CONDITIONAL_AND",
+                "leftOperand": flag, "rightOperand": {"kind": "LITERAL"}}},
+            "thenStatement": call("Tracer", "trace"),
+            "elseStatement": call("Other", "run")});
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![guarded])]),
+            class("Tracer", &[("trace", vec![])]),
+            class("Other", &[("run", vec![])]),
+        ]});
+        let reach = reach(&[&unit], "Main").unwrap();
+        let method = |class: &str, name: &str| (class.to_string(), name.to_string(), "()void".to_string());
+        assert!(reach.methods.contains(&method("Other", "run")), "{reach:?}");
+        assert!(!reach.methods.contains(&method("Tracer", "trace")), "{reach:?}");
+        assert!(!reach.classes.contains("Tracer"), "{reach:?}");
     }
 }

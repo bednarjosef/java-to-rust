@@ -287,6 +287,11 @@ impl<'t> Lowering<'t> {
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
             }
             "EXPRESSION_STATEMENT" => Stmt::Expr(self.expr(node.child("expression")?)?),
+            // Reachability skipped the branch that the condition guards (`program::never_true`).
+            "IF" if crate::program::never_true(&node.0["condition"]) => match node.get("elseStatement") {
+                Some(n) => self.single_stmt(n)?,
+                None => Stmt::Block(Vec::new()),
+            },
             "IF" => Stmt::If {
                 cond: self.expr(node.child("condition")?)?,
                 then: Box::new(self.single_stmt(node.child("thenStatement")?)?),

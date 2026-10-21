@@ -9,14 +9,21 @@
 //! own (its files and source roots) or library code (the files of its library roots), and each
 //! table is printed for both. Each feature names up to `EXAMPLES` places where reachable code uses
 //! it.
+//!
+//! The scan also builds a call graph of the reachable code (methods, and each class's static and
+//! instance initialization), so that each native method, and each method outside the sources that
+//! is called, comes with the shortest chain of calls from `main` that reaches it: one example of
+//! why it is reached. Local and anonymous classes belong to the code that declares them, as in
+//! reachability.
 
 use super::Program;
 use super::reach::{
-    CLASS_KINDS, RUNTIME_CLASSES, Reach, class_name, has_flag, members, symbol_type, text, untranslated,
+    CLASS_KINDS, MethodKey, OBJECT_METHODS, RUNTIME_CLASSES, Reach, class_name, has_flag, members,
+    never_true, outside, symbol_type, text, untranslated,
 };
 use serde_json::{Value, json};
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -112,6 +119,7 @@ pub fn survey(units: &[&Value], reach: &Reach, program: &Program, files: &[PathB
             census.class(decl, None, origin, reach);
         }
     }
+    census.chains(&program.main);
     Survey { report: census.report(reach, &program.main), json: census.json(reach, &program.main) }
 }
 
@@ -130,11 +138,12 @@ struct Piece {
 }
 
 /// What the scan of a piece of code finds: its unsupported features, each with its first place,
-/// and the methods of the runtime it calls.
+/// the methods of the runtime it calls, and the nodes of the call graph it refers to.
 struct Scan<'a> {
     file: &'a str,
     features: BTreeMap<&'static str, String>,
     calls: BTreeSet<String>,
+    refs: BTreeSet<String>,
 }
 
 impl Scan<'_> {
@@ -158,8 +167,15 @@ struct Census {
     /// Methods of the runtime's classes that reachable code calls, by part, with the number of
     /// pieces of code that call each.
     runtime: BTreeMap<(Part, String), usize>,
-    /// Reachable methods that have no body in Java: the JVM implements them.
-    natives: Vec<(Part, String)>,
+    /// Reachable methods that have no body in Java: the JVM implements them. With each, its
+    /// node in the call graph.
+    natives: Vec<(Part, String, String)>,
+    /// The call graph of the reachable code: from each node (a method, or a class's static or
+    /// instance initialization, see `method_node`) to the nodes its code may run.
+    edges: HashMap<String, BTreeSet<String>>,
+    /// For each node that `main` reaches through the graph, the node it is first reached from,
+    /// by breadth: the shortest chains of calls.
+    parent: HashMap<String, String>,
 }
 
 impl Census {
@@ -202,7 +218,11 @@ impl Census {
                         (class.clone(), text(member, "name").to_string(), symbol_type(member).to_string());
                     if member["body"].is_null() && has_flag(member, "NATIVE") && reach.methods.contains(&key)
                     {
-                        self.natives.push((origin.part, format!("{class}.{}{}", key.1, key.2)));
+                        self.natives.push((
+                            origin.part,
+                            format!("{class}.{}{}", key.1, key.2),
+                            method_node(&key),
+                        ));
                     }
                     reach.methods.contains(&key)
                 }
@@ -220,7 +240,12 @@ impl Census {
             if !reached {
                 continue;
             }
-            let mut scan = Scan { file: &origin.file, features: header.clone(), calls: BTreeSet::new() };
+            let mut scan = Scan {
+                file: &origin.file,
+                features: header.clone(),
+                calls: BTreeSet::new(),
+                refs: BTreeSet::new(),
+            };
             if kind == "METHOD" && !member["typeParameters"].as_array().is_none_or(Vec::is_empty) {
                 scan.feature("generic methods", member);
             }
@@ -231,6 +256,8 @@ impl Census {
             for call in scan.calls {
                 *self.runtime.entry((origin.part, call)).or_default() += 1;
             }
+            let node = self.graph_node(&class, member);
+            self.edges.entry(node).or_default().extend(scan.refs);
             self.pieces.push(Piece {
                 part: origin.part,
                 class: class.clone(),
@@ -245,6 +272,11 @@ impl Census {
     /// The unsupported features that a piece of code uses, and the methods of the runtime it calls.
     fn body(&self, node: &Value, scan: &mut Scan<'_>) {
         match node {
+            // Reachability skips the branch, and so does the translation.
+            Value::Object(_) if text(node, "kind") == "IF" && never_true(&node["condition"]) => {
+                self.body(&node["condition"], scan);
+                self.body(&node["elseStatement"], scan);
+            }
             Value::Object(fields) => {
                 let kind = text(node, "kind");
                 let ty = text(node, "javaType");
@@ -278,6 +310,7 @@ impl Census {
                 if ty == "java.lang.Object" {
                     scan.feature("Object values", node);
                 }
+                refer(&node["symbol"], scan);
                 if matches!(kind, "METHOD_INVOCATION" | "NEW_CLASS") {
                     let symbol = &node["symbol"];
                     let owner = text(symbol, "owner");
@@ -288,6 +321,7 @@ impl Census {
                         // Nothing to report.
                     } else if let Some(feature) = untranslated(owner) {
                         scan.feature(feature, node);
+                        scan.calls.insert(format!("({feature}) {owner}.{name}"));
                     } else if RUNTIME_CLASSES.contains(&owner) {
                         let simple = owner.rsplit('.').next().unwrap_or(owner);
                         scan.calls.insert(format!("{simple}.{name}"));
@@ -305,6 +339,77 @@ impl Census {
             Value::Array(items) => items.iter().for_each(|item| self.body(item, scan)),
             _ => {}
         }
+    }
+
+    /// The node of the call graph that a reachable member's code belongs to, with the edges that
+    /// its declaration adds: a call of the method it overrides may run it, and a constructor runs
+    /// its class's initializers and makes the methods of `Object` it overrides callable.
+    fn graph_node(&mut self, class: &str, member: &Value) -> String {
+        let is_static = member["static"].as_bool() == Some(true) || has_flag(member, "STATIC");
+        if text(member, "kind") != "METHOD" {
+            return if is_static { static_node(class) } else { instance_node(class) };
+        }
+        let key: MethodKey = (class.into(), text(member, "name").into(), symbol_type(member).into());
+        let node = method_node(&key);
+        for overridden in member["symbol"]["overrides"].as_array().into_iter().flatten() {
+            let overridden =
+                (text(overridden, "owner").to_string(), key.1.clone(), text(overridden, "type").to_string());
+            self.edges.entry(method_node(&overridden)).or_default().insert(node.clone());
+        }
+        if key.1 == "<init>" {
+            let runs = self.edges.entry(node.clone()).or_default();
+            runs.insert(instance_node(class));
+            runs.insert(static_node(class));
+            for (name, signature) in OBJECT_METHODS {
+                runs.insert(method_node(&(class.into(), name.to_string(), signature.to_string())));
+            }
+        }
+        node
+    }
+
+    /// The shortest chain of calls from `main` to every node of the call graph it reaches.
+    fn chains(&mut self, main: &str) {
+        let entry = (main.to_string(), "main".to_string(), "(java.lang.String[])void".to_string());
+        let mut work = VecDeque::new();
+        for root in [static_node(main), method_node(&entry)] {
+            self.parent.insert(root.clone(), String::new());
+            work.push_back(root);
+        }
+        while let Some(node) = work.pop_front() {
+            for next in self.edges.get(&node).into_iter().flatten() {
+                if !self.parent.contains_key(next) {
+                    self.parent.insert(next.clone(), node.clone());
+                    work.push_back(next.clone());
+                }
+            }
+        }
+    }
+
+    /// The chain of calls from `main` to a node, as the names of the methods and initializers on
+    /// it; empty when the graph does not reach it.
+    fn chain(&self, node: &str) -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut at = node;
+        while let Some(parent) = self.parent.get(at) {
+            chain.push(label(at).to_string());
+            at = parent;
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// The classes whose objects are created, each with the shortest chain of calls to one of its
+    /// constructors: why its instance methods can run.
+    fn instantiated(&self, reach: &Reach) -> Vec<Value> {
+        let mut chains: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for key in reach.methods.iter().filter(|key| key.1 == "<init>") {
+            let chain = self.chain(&method_node(key));
+            let best = chains.entry(&key.0).or_default();
+            if best.is_empty() || (!chain.is_empty() && chain.len() < best.len()) {
+                *best = chain;
+            }
+        }
+        chains.into_iter().map(|(class, chain)| json!({"class": class, "chain": chain})).collect()
     }
 
     /// The pieces of one part of the code.
@@ -344,7 +449,7 @@ impl Census {
         self.greedy_order(&mut out, free);
         _ = writeln!(
             out,
-            "\nMethods of the runtime's classes, and of classes outside the sources, by pieces of code that call them:"
+            "\nMethods of the runtime's classes, of classes not translated and of classes outside the sources, by pieces of code that call them:"
         );
         for part in Part::ALL {
             _ = writeln!(out, "{}:", part.title());
@@ -378,11 +483,19 @@ impl Census {
         _ = writeln!(out, "\nNative methods reached:");
         for part in Part::ALL {
             _ = writeln!(out, "{}:", part.title());
-            let mut natives: Vec<&str> =
-                self.natives.iter().filter(|(p, _)| *p == part).map(|(_, n)| n.as_str()).collect();
+            let mut natives: Vec<(&str, &str)> = self
+                .natives
+                .iter()
+                .filter(|(p, _, _)| *p == part)
+                .map(|(_, name, node)| (name.as_str(), node.as_str()))
+                .collect();
             natives.sort();
-            for native in natives {
+            for (native, node) in natives {
                 _ = writeln!(out, "  {native}");
+                let chain = self.chain(node);
+                if !chain.is_empty() {
+                    _ = writeln!(out, "      via {}", chain.join(" -> "));
+                }
             }
         }
         out
@@ -465,6 +578,9 @@ impl Census {
     }
 
     fn json(&self, reach: &Reach, main: &str) -> Value {
+        // The methods of `Object` that a translated class does not override are `Object`'s.
+        let external: BTreeSet<&MethodKey> =
+            reach.external.iter().filter(|key| outside(&key.0) || !self.declared.contains(&key.0)).collect();
         json!({
             "main": main,
             "reachable": {
@@ -486,10 +602,16 @@ impl Census {
                 "method": method,
                 "pieces": n,
             })).collect::<Vec<_>>(),
-            "natives": self.natives.iter().map(|(part, method)| json!({
+            "natives": self.natives.iter().map(|(part, method, node)| json!({
                 "source": part.name(),
                 "method": method,
+                "chain": self.chain(node),
             })).collect::<Vec<_>>(),
+            "external": external.iter().map(|key| json!({
+                "method": format!("{}.{}{}", key.0, key.1, key.2),
+                "chain": self.chain(&method_node(key)),
+            })).collect::<Vec<_>>(),
+            "instantiated": self.instantiated(reach),
         })
     }
 }
@@ -501,6 +623,47 @@ struct Row<'a> {
     code: usize,
     only: usize,
     examples: Vec<&'a str>,
+}
+
+/// The node of the call graph for a method or constructor: its class and name, then its signature
+/// after a tab, which no name holds.
+fn method_node(key: &MethodKey) -> String {
+    format!("{}.{}\t{}", key.0, key.1, key.2)
+}
+
+/// The node of a class's static initialization: its static initializer blocks and the initializers
+/// of its static fields.
+fn static_node(class: &str) -> String {
+    format!("{class}.<clinit>\t")
+}
+
+/// The node of the initializers that every constructor of a class runs.
+fn instance_node(class: &str) -> String {
+    format!("{class}.<instance initializers>\t")
+}
+
+/// The name of a node of the call graph without the signature.
+fn label(node: &str) -> &str {
+    node.split('\t').next().unwrap_or(node)
+}
+
+/// Adds to the scan the nodes of the call graph that a symbol refers to: a method or constructor,
+/// and the static initialization of its class when it is static or creates an object (or is a
+/// static field).
+fn refer(symbol: &Value, scan: &mut Scan<'_>) {
+    let owner = text(symbol, "owner");
+    let is_static = symbol["static"].as_bool() == Some(true);
+    match text(symbol, "kind") {
+        kind @ ("METHOD" | "CONSTRUCTOR") => {
+            let key = (owner.to_string(), text(symbol, "name").to_string(), text(symbol, "type").to_string());
+            scan.refs.insert(method_node(&key));
+            if is_static || kind == "CONSTRUCTOR" {
+                scan.refs.insert(static_node(owner));
+            }
+        }
+        "FIELD" | "ENUM_CONSTANT" if is_static => _ = scan.refs.insert(static_node(owner)),
+        _ => {}
+    }
 }
 
 /// The kind of a piece of code, from the member that holds it.
