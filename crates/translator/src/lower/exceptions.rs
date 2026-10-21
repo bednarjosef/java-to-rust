@@ -291,6 +291,11 @@ fn suppress_member() -> (String, String, String) {
     ("java.lang.Throwable".into(), "addSuppressed".into(), "(java.lang.Throwable)void".into())
 }
 
+/// `Throwable.initCause`.
+fn init_cause_member() -> (String, String, String) {
+    ("java.lang.Throwable".into(), "initCause".into(), "(java.lang.Throwable)java.lang.Throwable".into())
+}
+
 /// The classes that a static initializer's failure is seen as (see `lower/clinit_errors.rs`): a
 /// program that catches one of these, or a supertype of them, declares them, with the constructors
 /// that the rewritten `<clinit>` calls.
@@ -463,12 +468,18 @@ impl Standard {
             // The operations of the standard members scanned so far may raise (`addSuppressed`
             // indexes an array), so the classes they raise are decided again on every round.
             raise_classes(&mut uses, &mut raised);
-            // The checks of `addSuppressed` throw these (see `lower/suppress.rs`).
-            if uses.members.contains(&suppress_member()) {
-                for class in super::suppress::CLASSES {
-                    uses.classes.insert(class.into());
-                    uses.members.insert((class.into(), "<init>".into(), "(java.lang.String)void".into()));
-                    uses.instantiated.insert(class.into());
+            // The checks of `addSuppressed` and `initCause` throw these (see `lower/suppress.rs`).
+            let checked = [
+                (suppress_member(), super::suppress::CLASSES),
+                (init_cause_member(), super::suppress::CAUSE_CLASSES),
+            ];
+            for (member, classes) in checked {
+                if uses.members.contains(&member) {
+                    for class in classes {
+                        uses.classes.insert(class.into());
+                        uses.members.insert((class.into(), "<init>".into(), "(java.lang.String)void".into()));
+                        uses.instantiated.insert(class.into());
+                    }
                 }
             }
             let before = (uses.classes.len(), uses.members.len(), uses.fields.len(), uses.operations.len());
