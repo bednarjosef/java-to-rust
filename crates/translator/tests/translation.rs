@@ -3788,3 +3788,20 @@ fn a_field_assigned_from_a_borrow_of_itself_ends_the_borrow_first() {
     // The `Ref` of the old head must end before the field is written.
     assert_contains(&rust, &["self.head = { java::non_null(self.head.as_ref()).borrow().next.clone() };"]);
 }
+
+#[test]
+fn new_object_creates_a_plain_object_with_its_identity() {
+    let rust = translate(
+        "class A {
+            static final Object LOCK = new Object();
+            public static void main(String[] args) {
+                Object o = new Object();
+                System.out.println(o.equals(LOCK) + \" \" + o.toString().startsWith(\"java.lang.Object@\"));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["struct PlainObject {", "let o = Rc::new(PlainObject::new());", "java.lang.Object"],
+    );
+}

@@ -16,7 +16,7 @@ impl<'t> Lowering<'t> {
         if self.standard.has(class) {
             return self.standard.keeps(member, class);
         }
-        if self.functional.has(class) {
+        if self.functional.has(class) || self.plain_object.is_some_and(|t| self.types[t].javac == class) {
             return true;
         }
         self.reach.is_none_or(|reach| reach.member(class, member.0))
@@ -74,8 +74,9 @@ fn lower_with<'t>(
     lowering.standard = super::exceptions::Standard::select(reachable.iter().copied());
     lowering.declare_standard().map_err(|e| (None, e))?;
     let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
-    lowering.functional = super::functional::Functional::select(reachable, &declared);
+    lowering.functional = super::functional::Functional::select(reachable.iter().copied(), &declared);
     lowering.declare_functional().map_err(|e| (None, e))?;
+    lowering.declare_plain_object(reachable.iter().copied()).map_err(|e| (None, e))?;
     unit_of.resize(lowering.types.len(), usize::MAX);
     lowering.name_nested();
     lowering.plan_captures().map_err(|(t, e)| ((unit_of[t] != usize::MAX).then_some(unit_of[t]), e))?;

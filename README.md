@@ -150,7 +150,9 @@ A small subset, end to end:
   to the program's types, `String` and the boxes. The program's `equals(Object)` and `hashCode()`
   override `Object`'s; a class without them compares and hashes its identity, and a string or a box
   its value. A class without `toString` prints as Java's `Object.toString` does, its binary name and
-  its hash code in hexadecimal (`Point@1b6d3586`). `getClass()` (reflection), an array as an
+  its hash code in hexadecimal (`Point@1b6d3586`). `new Object()` makes an object of a class
+  without fields, `PlainObject`, equal only to itself and printed as `java.lang.Object@..`, as the
+  JDK's lock objects and placeholder values (`HashSet`'s `PRESENT`) need. `getClass()` (reflection), an array as an
   `Object`, and `==` between two `Object`s that may both be strings or boxes (whose identity the
   translation does not keep, except in the shortcut `a == b || a.equals(b)`) are rejected. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
