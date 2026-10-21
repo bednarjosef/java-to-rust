@@ -1547,3 +1547,63 @@ Decisions that changed during the implementation, milestone by milestone.
   `toString`), `corpus/features/NullObjectConcat.java` (moved from the known failures),
   `corpus/programs/PropertyBag.java` (a settings store of `Object` values with typed getters),
   and `equals`, `hashCode`, `contains(Object)` and an `Object` label in `corpus/projects/zoo`.
+
+### Milestone 5
+
+Generics are erased in lowering, and nothing after it knows they existed:
+
+- There is no `Type::Param` or `Type::Generic`. `lower/generics.rs` reads javac's type strings: a
+  type variable is the erasure of its first bound (`Object` without one, `Comparable` for
+  `T extends Comparable<T>`, a class for `S extends Shape`), looked up in the method being lowered
+  and then its class and the classes it is nested in; a parameterized type (`Box<Integer>`,
+  `Entry<K, V>[]`) is its class; `? extends X` and `capture#1 of ? extends X` are `X`, and `?` and
+  `? super X` are `Object`. A type variable hides a class of the same name (a class `T` beside
+  `Box<T>`). Members are declared with the erased types; a use whose type javac substituted (a
+  call's result, a field, an element) gets `Cast(substituted, use)` from the declared type, which
+  is javac's checkcast and the generator's `java::cast(x.as_integer(), ..)`. Arguments convert to
+  the erased parameter types through the conversions every call already makes. Milestone 6 has to
+  add the types it needs to keep a type variable instead.
+- `Comparable` is not the runtime-interface table of 1.9 but a second synthetic interface,
+  `COMPARABLE`, beside `Object`, planned only when the program uses `java.lang.Comparable` as a type
+  outside an `implements` clause. Strings, the boxes and the program's enums implement it, and so
+  does a class that says `implements Comparable<..>`. Its abstract `compareTo(Comparable)` has an
+  arm per runtime type and enum in `codegen::dispatch::compare_arm` (`java::compare_to`, `cmp`,
+  `java::double_compare`, `java::bool_compare`, a difference of `char`s or ordinals), which throws
+  `ClassCastException` when the argument is of another class. A program that only calls a class's
+  `compareTo` directly translates as before.
+- Bridges are methods, not conversions in dispatcher arms: when a method overrides one whose erased
+  parameter or return types differ (`Integer next()` implementing `T next()` of `Source<Integer>`,
+  `compareTo(Point)` implementing `Comparable`'s), lowering adds a method to its class with the
+  overridden signature that converts the arguments, calls it and converts the result, and that
+  method takes its place in the override group (`object::bridges`). A subclass whose superclass
+  already has the bridge gets none. The method keeps its own types and a name told apart by its
+  parameter or return type (`next_integer`, `compare_to_point`); the group names are now unique in
+  every class tree the group reaches (`codegen::names`). This also lifts "covariant return types"
+  for these overrides.
+- Arrays do not convert: `String[]` is `java::Array<String>` and `Object[]` is
+  `java::Array<Option<Object>>`, so an array passed as an array of a type variable
+  (`<T> T first(T[] xs)` called with a `String[]`) is rejected ("an array passed as an array of a
+  type variable"), and so is an array of a type variable read as an array of its argument. An
+  array as an `Object` value stays rejected; the plan's `Variant::Array` is not done. A generic
+  array built as `(T[]) new Object[n]` is an `Object[]` and translates.
+- A value read back out of a generic container is a cast from `Object` that may be null (the
+  container's array has null elements), so reading an enum back (`Suit s = list.get(0)`) is
+  rejected by the existing "casting a value that may be null to an enum"; strings, boxes and
+  classes read back fine. The enum-field check was too strict for the classes that hold enums: an
+  enum field without an initializer may now be set by any of the leading field assignments of
+  every constructor, not only the first statement (`lower::enums::set_before_use`).
+- Intersection bounds (`T extends A & B`) are rejected ("intersection types"). Generic
+  constructors, explicit type arguments (`G.<Long>boxed(5L)`), raw types and diamonds need nothing
+  of their own.
+- Survey: "generic classes" and "generic methods" are no longer features, "generic types" counts
+  only parameterized types from outside the sources (`java.lang.Comparable` is inside), and a cast
+  to a type variable, to a generic array or between the program's generic types is not a
+  "reference cast". The free share goes from 22.5% to 62.2% (library 420 to 1184 pieces, program
+  16 to 20).
+- Corpus: `corpus/features/GenericsErased.java` (bounded type variables, wildcards, a subclass of
+  a parameterized class, `(T[]) new Object[n]`, a generic method of a generic class, nested
+  `Box<Box<String>>`, explicit type arguments), `corpus/features/GenericBridges.java` (generic
+  interfaces implemented with type arguments, `Comparable` bounds over boxes, strings, an enum and
+  a class), `corpus/programs/ArrayListLike.java`, `corpus/programs/HashMapLike.java`, and
+  `corpus/projects/collections` (a generic interface with a default method, two implementations,
+  a `Pair<A, B>` with `equals` and `hashCode`, and algorithms bounded by `Comparable`).

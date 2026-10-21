@@ -244,19 +244,34 @@ fn set_before_use(class: &Class, index: usize, name: &str) -> bool {
         return false;
     }
     let ctors: Vec<&Method> = class.methods.iter().filter(|m| m.class == index && m.is_ctor).collect();
+    // The constructor's first statements set fields of `this` to values that call nothing (and
+    // so cannot read the field either), and one of them sets this field.
+    let calls = |e: &Expr| {
+        let mut call = false;
+        visit_expr(e, &mut |x| {
+            call |=
+                matches!(x.kind, ExprKind::MethodCall { .. } | ExprKind::Call { .. } | ExprKind::New { .. });
+        });
+        call
+    };
     !ctors.is_empty()
         && ctors.iter().all(|m| {
-            matches!(
-                m.body.first(),
-                Some(Stmt::Expr(Expr {
-                    kind: ExprKind::Assign {
-                        op: None,
-                        target: Place::Field { object, name: n },
-                        value,
-                    },
+            for stmt in &m.body {
+                let Stmt::Expr(Expr {
+                    kind: ExprKind::Assign { op: None, target: Place::Field { object, name: n }, value },
                     ..
-                })) if matches!(object.kind, ExprKind::This) && n == name && !reads(value)
-            )
+                }) = stmt
+                else {
+                    return false;
+                };
+                if !matches!(object.kind, ExprKind::This) || reads(value) || calls(value) {
+                    return false;
+                }
+                if n == name {
+                    return true;
+                }
+            }
+            false
         })
 }
 

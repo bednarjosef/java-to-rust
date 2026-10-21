@@ -3342,3 +3342,128 @@ fn an_array_as_an_object_is_rejected() {
     .unwrap_err();
     assert!(err.to_string().contains("an array as an `Object` value not supported yet"), "{err}");
 }
+
+const GENERICS: &str = "
+    class Box<T> {
+        T value;
+        Box(T value) { this.value = value; }
+        T get() { return value; }
+        void set(T v) { value = v; }
+    }
+    interface Source<T> { T next(); }
+    class Counter implements Source<Integer> {
+        int n;
+        public Integer next() { return n++; }
+    }
+    abstract class Shape { abstract int sides(); }
+    class Tri extends Shape { int sides() { return 3; } }
+    class Point implements Comparable<Point> {
+        final int x;
+        Point(int x) { this.x = x; }
+        public int compareTo(Point o) { return x - o.x; }
+    }
+    class M {
+        static <C extends Comparable<C>> C max(C a, C b) { return a.compareTo(b) >= 0 ? a : b; }
+        static int sides(Box<? extends Shape> b) { return b.get().sides(); }
+        public static void main(String[] args) {
+            Box<Integer> b = new Box<>(3);
+            int x = b.get() + 1;
+            b.set(x);
+            Source<Integer> source = new Counter();
+            int y = source.next();
+            Box raw = b;
+            System.out.println(x + y + \" \" + raw.get());
+            System.out.println(max(new Point(1), new Point(2)).x + max(\"a\", \"b\"));
+            System.out.println(sides(new Box<>(new Tri())));
+        }
+    }
+";
+
+#[test]
+fn type_variables_erase_to_object() {
+    let rust = translate(GENERICS);
+    // A type variable without a bound is `Object`, and the class is a plain struct.
+    assert_contains(
+        &rust,
+        &[
+            "struct Box {\n    value: Object,\n}",
+            "fn get(&self) -> Object {",
+            "fn set(&mut self, v: Object) {",
+            "Box::new(Object::Integer(3))",
+            "b.borrow_mut().set(Object::Integer(x));",
+        ],
+    );
+}
+
+#[test]
+fn use_sites_check_cast() {
+    let rust = translate(GENERICS);
+    // Where javac substituted a type argument, the erased value is cast back, as javac's checked
+    // cast does.
+    assert_contains(
+        &rust,
+        &["let x = java::cast(b.borrow().get().as_integer(), \"java.lang.Integer\").wrapping_add(1);"],
+    );
+}
+
+#[test]
+fn bounded_type_variables_erase_to_the_bound() {
+    let rust = translate(GENERICS);
+    // `Comparable` is an enum like `Object`: a string compares by its text, a class by its own
+    // `compareTo`.
+    assert_contains(
+        &rust,
+        &[
+            "fn max(a: Comparable, b: Comparable) -> Comparable {",
+            "enum Comparable {\n    Point(Rc<Point>),\n    String(String),\n}",
+            "Comparable::Point(o) => o.compare_to(other),",
+            "Comparable::String(o) => match &other { Comparable::String(b) => java::compare_to(o, b), _ => java::cast_failed(\"java.lang.String\") },",
+        ],
+    );
+}
+
+#[test]
+fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
+    let rust = translate(GENERICS);
+    // The method with the substituted types keeps its own signature; a bridge with the erased
+    // one converts, as the bridge javac writes does.
+    assert_contains(
+        &rust,
+        &[
+            "fn next_integer(&mut self) -> i32 {",
+            "fn next(&mut self) -> Object {\n        Object::Integer(self.next_integer())\n    }",
+            "fn compare_to_point(&self, o: &Rc<Point>) -> i32 {",
+            "fn compare_to(&self, other: Comparable) -> i32 {\n        self.compare_to_point(&java::cast(other.as_point(), \"Point\"))\n    }",
+        ],
+    );
+}
+
+#[test]
+fn wildcards_and_raw_types_erase() {
+    let rust = translate(GENERICS);
+    // `? extends Shape` is `Shape`, and a raw `Box` is the class itself.
+    assert_contains(&rust, &["java::cast(b.borrow().get().as_shape(), \"Shape\").sides()", "let raw = b;"]);
+}
+
+#[test]
+fn an_array_passed_as_an_array_of_a_type_variable_is_rejected() {
+    let err = java_to_rust::translate(
+        "class M { static <T> T first(T[] xs) { return xs[0]; }
+            public static void main(String[] x) { String[] s = {\"a\"}; System.out.println(first(s)); } }",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("an array passed as an array of a type variable not supported yet"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_type_variable_hides_a_class_of_its_name() {
+    let rust = translate(
+        "class M { public static void main(String[] x) { System.out.println(new Holder<>(new T()).get().n + new Holder<>(\"s\").get()); } }
+        class T { int n = 1; }
+        class Holder<T> { T held; Holder(T held) { this.held = held; } T get() { return held; } }",
+    );
+    assert_contains(&rust, &["struct Holder {\n    held: Object,\n}"]);
+}

@@ -767,6 +767,9 @@ impl<'a> Gen<'a> {
         if self.is_object_method(r) {
             return self.object_arm(r, c);
         }
+        if self.is_comparable_method(r) {
+            return self.compare_arm(r, c);
+        }
         match self.class.methods[r].name.as_str() {
             "ordinal" => "*o as i32".to_string(),
             "name" => "o.enum_name()".to_string(),
@@ -788,6 +791,50 @@ impl<'a> Gen<'a> {
     /// Whether method `r` is `Object`'s own abstract `equals` or `hashCode`.
     pub(super) fn is_object_method(&self, r: usize) -> bool {
         self.object_index() == Some(self.class.methods[r].class)
+    }
+
+    /// Whether method `r` is `Comparable`'s own abstract `compareTo`.
+    fn is_comparable_method(&self, r: usize) -> bool {
+        let t = &self.class.types[self.class.methods[r].class];
+        t.kind == TypeKind::Interface && t.name == COMPARABLE
+    }
+
+    /// `Comparable`'s `compareTo` (method `r`) for a value of class `c` bound to `o`, a string,
+    /// a box or an enum's constant, compared with the argument, which must be one of the same
+    /// class.
+    fn compare_arm(&mut self, r: usize, c: usize) -> String {
+        let p = &self.class.methods[r].params[0];
+        let other = self.local(&p.name);
+        let optional = self.optional_var(r, p.ty, &p.name);
+        let place = if self.facts.borrowed_objects.contains(&(r, 0)) { other } else { format!("&{other}") };
+        let comparable = self.class.methods[r].class;
+        let compare = match self.runtime_of(c) {
+            Some(ty) => {
+                let star = if self.faithful_box(ty) { "**" } else { "*" };
+                let (a, b) = (format!("{star}o"), format!("{star}b"));
+                match ty.unboxed() {
+                    Type::String => format!("{}(o, b)", self.runtime("compare_to")),
+                    Type::Int | Type::Long => format!("({a}).cmp(&{b}) as i32"),
+                    Type::Boolean => format!("{}({a}, {b})", self.runtime("bool_compare")),
+                    Type::Double => format!("{}({a}, {b})", self.runtime("double_compare")),
+                    Type::Float => {
+                        format!("{}(f64::from({a}), f64::from({b}))", self.runtime("double_compare"))
+                    }
+                    _ => format!("i32::from({a}) - i32::from({b})"),
+                }
+            }
+            // An enum's constants compare by their ordinals.
+            None => "*o as i32 - *b as i32".to_string(),
+        };
+        let name = self.binary_name(c);
+        let failed = format!("{}({})", self.runtime("cast_failed"), rust_string(&name));
+        let Some(e) = self.enum_for(comparable) else { return failed };
+        let variant = self.variant(e, c);
+        let pattern = if optional { format!("Some({variant}(b))") } else { format!("{variant}(b)") };
+        if !optional && self.enum_variants(e).len() == 1 {
+            return format!("{{ let {pattern} = {place}; {compare} }}");
+        }
+        format!("match {place} {{ {pattern} => {compare}, _ => {failed} }}")
     }
 
     /// `Object`'s `equals` or `hashCode` (method `r`) for a value of class `c` bound to `o`

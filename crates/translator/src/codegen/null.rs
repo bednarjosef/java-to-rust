@@ -108,7 +108,7 @@ impl<'a> Gen<'a> {
             _ if e.ty == Type::StringBuilder => self.builder_option(e),
             ExprKind::Null => "None::<&str>".to_string(),
             ExprKind::Var(name) => self.option_source(name, e.ty),
-            ExprKind::Cast(_, inner) => self.option_ref(inner),
+            ExprKind::Cast(_, inner) if !matches!(inner.ty, Type::Class(_)) => self.option_ref(inner),
             // In a format, a field is borrowed until the text is formatted, after every operand,
             // so it is borrowed only when no operand has effects.
             ExprKind::Field { .. } | ExprKind::Index(..) if !self.formatting || self.lazy_text => {

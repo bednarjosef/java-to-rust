@@ -224,6 +224,7 @@ fn collect_switches<'e>(e: &'e Expr, out: &mut Vec<&'e [Case]>) {
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }
         | ExprKind::ThisCall { args, .. }
+        | ExprKind::SuperInit { args, .. }
         | ExprKind::NewArray(args)
         | ExprKind::ArrayLit(args) => args.iter().for_each(|a| collect_switches(a, out)),
         _ => {}

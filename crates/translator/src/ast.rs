@@ -236,6 +236,10 @@ pub enum TypeKind {
 /// `hashCode` that the program's own override, and the `Runtime` types beside it.
 pub const OBJECT: &str = "Object";
 
+/// The name of the type of `java.lang.Comparable`'s values, which lowering adds to a program that
+/// uses it as a type, beside `OBJECT`.
+pub const COMPARABLE: &str = "Comparable";
+
 /// The runtime classes whose values an `Object` can hold, with the Java type of those values.
 pub fn runtime_values() -> [(&'static str, Type); 9] {
     [

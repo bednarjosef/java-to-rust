@@ -528,7 +528,8 @@ impl<'m> Walk<'m> {
             | ExprKind::NewArray(args)
             | ExprKind::ArrayLit(args) => args.iter().for_each(|a| self.expr(a)),
             ExprKind::Unary(_, x) | ExprKind::Cast(_, x) => self.expr(x),
-            ExprKind::Field { object, .. } | ExprKind::InstanceOf { value: object, .. } => self.expr(object),
+            ExprKind::Field { object, .. } => self.expr(object),
+            ExprKind::InstanceOf { value, .. } => self.expr(value),
             ExprKind::Binary(_, l, r) => {
                 self.expr(l);
                 self.expr(r);

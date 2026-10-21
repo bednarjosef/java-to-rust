@@ -152,9 +152,17 @@ compares and hashes its identity, and a string or a box its value. A class witho
 prints as Java's `Object.toString` does, its binary name and its hash code in hexadecimal
 (`Point@1b6d3586`). `getClass()` (reflection), an array as an `Object`, and `==` between two
 `Object`s that may both be strings or boxes (whose identity the translation does not keep, except
-in the shortcut `a == b || a.equals(b)`) are rejected. Other interfaces of the JDK (`Runnable`,
-`Comparable` as a type), lambdas and generics are rejected with an error that names the construct
-and its position. So
+in the shortcut `a == b || a.equals(b)`) are rejected. The program's generic classes, interfaces
+and methods translate erased, as javac compiles them: a type variable is its bound (`Object`
+without one), `Box<Integer>` is `Box`, a wildcard is its bound, and a use where javac substituted a
+type argument gets the checked cast back (`java::cast(b.get().as_integer(), ..)`). `Comparable` as
+a type (a bound, mostly) is an enum like `Object`, over strings, boxes, the program's enums and its
+classes that implement it. A method implementing one whose erased signature differs (`Integer
+next()` for `T next()`, `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a
+method with the erased signature that converts and calls it. An array passed as an array of a type
+variable (`first(String[])` for `<T> T first(T[])`) and intersection bounds (`T extends A & B`) are
+rejected. Other interfaces of the JDK (`Runnable`, `Iterable`) and lambdas are rejected with an
+error that names the construct and its position. So
 are the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and the like),
 `Character.toChars(int, char[], int)`, and the unsigned and parse methods with other argument counts.
 The design of the object model, and what is still to come, is in
