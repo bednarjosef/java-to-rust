@@ -583,6 +583,35 @@ impl<'a> Gen<'a> {
                 let root = self.fields_root(t).expect("a fields struct is at or above its subclasses");
                 let path = hierarchy::base_path(self.facts, self.class, root, d);
                 let borrow = self.enum_borrow(t, self.facts.mutating.contains(&index));
+                let name = self.fn_names[index].clone();
+                // The object is borrowed before the arguments run, so arguments that may reach an
+                // object of the class run first, as `bound_call` runs them.
+                let Type::Class(class, _) = receiver.ty else { unreachable!("a receiver has a class type") };
+                if args.iter().any(|a| has_effects(a) || reads_class(self.class, a, class)) {
+                    let outer = std::mem::replace(&mut self.guarded, false);
+                    let mut lines = Vec::new();
+                    let obj = match &receiver.kind {
+                        ExprKind::This | ExprKind::Var(_) => self.object(receiver),
+                        _ => {
+                            let temp = self.temp("object");
+                            lines.push(format!("let {temp} = {};", self.object(receiver)));
+                            temp
+                        }
+                    };
+                    let texts = self.call_args(index, args);
+                    let mut bound = Vec::new();
+                    for (text, p) in texts.into_iter().zip(&self.class.methods[index].params) {
+                        let mut temp = self.temp(&snake_case(&p.name));
+                        while bound.contains(&temp) || temp == obj {
+                            temp.push('_');
+                        }
+                        lines.push(format!("let {temp} = {text};"));
+                        bound.push(temp);
+                    }
+                    self.guarded = outer;
+                    lines.push(format!("{obj}{borrow}.{path}{name}({})", bound.join(", ")));
+                    return Some(Code::atom(format!("{{ {} }}", lines.join(" "))));
+                }
                 let obj = self.object(receiver);
                 let args = self.call_args(index, args).join(", ");
                 Some(Code::atom(format!("{obj}{borrow}.{path}{}({args})", self.fn_names[index])))

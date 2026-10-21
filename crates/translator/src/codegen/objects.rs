@@ -312,7 +312,7 @@ fn reads_static(e: &Expr) -> bool {
 
 /// Whether an expression reads a field of an object of class `name`, or of a class of its class
 /// tree, or turns one into text.
-fn reads_class(class: &Class, e: &Expr, name: &str) -> bool {
+pub(super) fn reads_class(class: &Class, e: &Expr, name: &str) -> bool {
     let root = class.type_index(name).map(|t| class.hierarchy.root(t));
     let of_class = |x: &Expr| matches!(x.ty, Type::Class(c, _) if c == name || class.type_index(c).map(|t| class.hierarchy.root(t)) == root);
     let mut found = false;
