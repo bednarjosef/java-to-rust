@@ -170,8 +170,9 @@ def natives(censuses, names):
 def report(censuses, jdk):
     targets = [n for n, _ in programs() if n != DRIVER and n in censuses]
     commit = git("rev-parse", "--short", "HEAD")
-    main_commit = git("merge-base", "HEAD", "main")[:7]
-    on_main = f"on main at `{main_commit}`" if main_commit else "on main"
+    # The last commit of main that the measured one has: itself once main has it.
+    base = git("merge-base", "HEAD", "main")
+    on_main = "on main" if base == git("rev-parse", "HEAD") else f"on main at `{base[:7]}`"
     date = datetime.date.today().isoformat()
     incomplete = [n for n in censuses if not censuses[n]["complete"]]
     lib_targets = union(censuses, targets, "library")
@@ -184,6 +185,9 @@ def report(censuses, jdk):
       f"Measured on {date} at commit `{commit}` ({on_main}) by `scripts/jdk-coverage.py`, which regenerates this "
       f"file, over the {len(targets)} programs of `targets/` and the driver "
       f"`targets/driver/{DRIVER}.java`, each translated whole with the sources of `java.base`.\n")
+    missing = [n for n, _ in programs() if n not in censuses]
+    if missing:
+        w(f"No census of {', '.join(missing)}: it did not finish (see Limits).\n")
     w("## Method\n")
     w("`java-to-rust --census-json` (`program/census.rs`) runs the translator's real pipeline (lowering, "
       "the analyses and the generator) over everything reachable from `main`, without stopping at the "
@@ -210,6 +214,9 @@ def report(censuses, jdk):
       "translator outside the generator; the numbers then count only what was checked before the "
       "stop. A rejection of a class's declaration, or in code that lowering provides, belongs to no "
       "piece; it is listed in the census as rejected elsewhere.")
+    w("- The analyses run again after each round of stubs. Most programs take seconds, but those that "
+      "reach `Scanner` (regular expressions, `java.time`; about 9000 pieces, where one run of the "
+      "analyses takes minutes) take most of an hour or more.")
     w("- " + (f"Incomplete censuses: {', '.join(sorted(incomplete))} (see the per-program table)."
               if incomplete else "Every census here is complete."))
     w("")
@@ -237,8 +244,23 @@ def report(censuses, jdk):
         distinct = len(blockers(censuses, [name]))
         w(f"| {name} | {t['program']['translate']} / {t['program']['pieces']} | "
           f"{t['library']['translate']} / {t['library']['pieces']} ({percent(t['library']['translate'], t['library']['pieces'])}) | "
-          f"{distinct} | {'yes' if c['complete'] else 'no'} |")
+          f"{distinct} | {'yes' if c['complete'] else 'no: ' + escape(c['fatal']['message']) + ' (' + c['fatal']['place'] + ')'} |")
     w("")
+    w("## Rejections per program\n")
+    w(f"Each program's rejections, grouped by message, with the pieces each blocks (up to {TOP}; "
+      f"the programs with none are left out).\n")
+    for name in targets + ([DRIVER] if DRIVER in censuses else []):
+        rows = blockers(censuses, [name])
+        if not rows:
+            continue
+        w(f"### {name}\n")
+        w("| Pieces | Rejection |")
+        w("|---:|---|")
+        for message, row in sorted(rows.items(), key=lambda r: (-len(r[1]["pieces"]), r[0]))[:TOP]:
+            w(f"| {len(row['pieces'])} | {escape(message)} |")
+        if len(rows) > TOP:
+            w(f"| | and {len(rows) - TOP} more |")
+        w("")
     rows = blockers(censuses, targets)
     w(f"## Top {TOP} rejections over the targets, by pieces they block\n")
     w("Pieces are counted once however many programs reach them; program and library code together.\n")
