@@ -842,6 +842,7 @@ impl<'a> Gen<'a> {
             self.line("}");
         }
         self.identity_impl(t, &variants);
+        self.monitor_impl(t, &variants);
         if self.wanted.contains(&Need::Display(t)) {
             self.display_impl(t, &variants);
         }
@@ -1069,17 +1070,42 @@ impl<'a> Gen<'a> {
         t.kind == TypeKind::Interface && t.name == CHAR_SEQUENCE
     }
 
-    /// `CharSequence`'s `length()` or `charAt(index)` (method `r`) for a string or a builder of
-    /// class `c` bound to `o`.
+    /// `CharSequence`'s `length()`, `charAt(index)` or `subSequence(start, end)` (method `r`) for
+    /// a string or a builder of class `c` bound to `o`.
     fn char_sequence_arm(&mut self, r: usize, c: usize) -> String {
         let method = &self.class.methods[r];
         let builder = self.runtime_of(c) == Some(Type::StringBuilder);
+        if method.name == "subSequence" {
+            return self.sub_sequence_arm(r, builder);
+        }
         match (method.name.as_str(), builder) {
             ("length", true) => "o.length()".to_string(),
             ("length", false) => format!("{}(o)", self.runtime("string_length")),
             (_, true) => format!("o.char_at({})", self.local(&method.params[0].name)),
             (_, false) => format!("{}(o, {})", self.runtime("char_at"), self.local(&method.params[0].name)),
         }
+    }
+
+    /// `subSequence(start, end)` (method `r`) of a string or a builder bound to `o`: its
+    /// `substring`, as the string variant of `CharSequence`'s enum.
+    fn sub_sequence_arm(&mut self, r: usize, builder: bool) -> String {
+        let method = &self.class.methods[r];
+        let (start, end) = (self.local(&method.params[0].name), self.local(&method.params[1].name));
+        let text = if builder {
+            format!("o.substring({start}, {end})")
+        } else {
+            format!("{}(o, {start}, {end})", self.runtime("substring"))
+        };
+        let char_sequence = method.class;
+        let string =
+            self.class.type_of(Type::String).filter(|&s| self.enum_variants(char_sequence).contains(&s));
+        let Some(string) = string else {
+            let message = "`subSequence` of a builder held as a `CharSequence` where no string is one not supported yet";
+            self.rejected.push(Error { pos: method.pos, message: message.to_string() });
+            return "unreachable!()".to_string();
+        };
+        let value = format!("{}({text})", self.variant(char_sequence, string));
+        if self.facts.nullable_returns.contains(&r) { format!("Some({value})") } else { value }
     }
 
     /// Whether method `r` is one of `Number`'s own abstract `byteValue()` to `doubleValue()`.
@@ -1397,6 +1423,41 @@ impl<'a> Gen<'a> {
             self.indent -= 1;
             self.line("}");
         }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// The monitor of an object of the type, where the program keeps the monitors of its objects
+    /// (`synchronized (node)` on a `ConcurrentHashMap` bin): the monitor of the variant's handle.
+    /// A type with a variant that is not such a handle (a value, or an immutable object shared as
+    /// it is) has none.
+    fn monitor_impl(&mut self, t: usize, variants: &[usize]) {
+        if variants.is_empty() || !self.facts.kept_monitor_of(t) {
+            return;
+        }
+        for &c in variants {
+            let payload = self.payload(c);
+            if !(payload.starts_with("Rc<") || payload.starts_with("Arc<java::Locked<")) {
+                return;
+            }
+        }
+        let name = struct_name(&self.class.types[t].name);
+        let (has, of) = (self.runtime("HasMonitor"), self.runtime("MonitorOf"));
+        self.gap();
+        self.line(&format!("impl {has} for {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn monitor(&self) -> {of}<'_> {{"));
+        self.indent += 1;
+        self.line("match self {");
+        self.indent += 1;
+        for &c in variants {
+            let v = self.variant(t, c);
+            self.line(&format!("{v}(o) => {has}::monitor(o),"));
+        }
+        self.indent -= 1;
+        self.line("}");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;

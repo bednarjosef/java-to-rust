@@ -248,7 +248,9 @@ impl<'t> Lowering<'t> {
             "compareTo" => Builtin::EnumCompareTo,
             // The class of an enum's constant is its enum's, a constant body's too.
             "getDeclaringClass" => return Ok(Some(ExprKind::Builtin(Builtin::GetClass, vec![receiver]))),
-            "equals" | "hashCode" if erased => {
+            // `Enum`'s `equals` and `hashCode` are `Object`'s identity ones (and final), so a
+            // constant of a known enum is compared and hashed as an `Object` too.
+            "equals" | "hashCode" if erased || self.object.is_some() => {
                 let at = self.object.expect("an `Object` has its methods");
                 let (resolved, args) = match symbol.name {
                     "equals" => {

@@ -4,6 +4,7 @@
 
 pub mod analysis;
 pub mod ast;
+pub mod check_cache;
 pub mod codegen;
 pub mod javac;
 pub mod lower;

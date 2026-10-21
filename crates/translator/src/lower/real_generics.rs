@@ -275,6 +275,13 @@ impl<'t> Lowering<'t> {
     pub(super) fn verify(&self, types: &[TypeDecl], methods: &[Method]) -> Real {
         let check = Check { lowering: self, methods };
         for decl in types {
+            // A Rust struct must use each type parameter in a field other than one of its own
+            // type (`next: TableStack<K, V>`): a field whose class was erased uses none.
+            for &p in &decl.type_params {
+                if !decl.fields.iter().any(|f| mentions_outside(f.ty, p, &decl.name)) {
+                    self.fail_all_of(p);
+                }
+            }
             for f in decl.fields.iter().chain(&decl.statics) {
                 check.ty(f.ty);
                 if let Some(init) = &f.init {
@@ -306,6 +313,17 @@ fn mentions(ty: Type, p: Type) -> bool {
         || match ty {
             Type::Array(element) => mentions(*element, p),
             Type::Class(_, args) => args.iter().any(|&a| mentions(a, p)),
+            _ => false,
+        }
+}
+
+/// Whether type `ty` mentions type `p` other than as an argument of the class `own`.
+fn mentions_outside(ty: Type, p: Type, own: &str) -> bool {
+    ty == p
+        || match ty {
+            Type::Array(element) => mentions_outside(*element, p, own),
+            Type::Class(name, _) if name == own => false,
+            Type::Class(_, args) => args.iter().any(|&a| mentions_outside(a, p, own)),
             _ => false,
         }
 }

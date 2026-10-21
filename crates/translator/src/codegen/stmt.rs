@@ -412,8 +412,11 @@ impl<'a> Gen<'a> {
             {
                 self.effect(value)
             }
-            // A chained builder call is made for its effect on the builder.
-            ExprKind::Builtin(Builtin::Builder(op), args) if op.chains() => {
+            // A chained builder call is made for its effect on the builder (one whose failure a
+            // `catch` sees runs in `java::catching`, as an expression).
+            ExprKind::Builtin(Builtin::Builder(op), args)
+                if op.chains() && !self.facts.catching.contains_key(&e.id) =>
+            {
                 let code = self.builder_call(*op, args);
                 self.line(&format!("{};", code.text));
             }

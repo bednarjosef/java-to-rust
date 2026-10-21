@@ -23,6 +23,7 @@ mod constants;
 mod exceptions;
 pub mod hierarchy;
 mod indexing;
+pub mod live_methods;
 mod monitors;
 mod moves;
 mod npe_messages;

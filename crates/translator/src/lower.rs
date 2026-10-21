@@ -66,7 +66,7 @@ pub use exceptions::{is_standard, standard_local_name, standard_names, standard_
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
-pub use program::{Lowered, census_lower_program, lower_program};
+pub use program::{Lowered, Rejected, census_lower_program, lower_program, tolerant_lower_program};
 
 /// Checks that no enum of the program can be null: the translation has no null enums.
 pub fn check_enum_nulls(class: &Class) -> Result<(), Error> {
@@ -307,6 +307,10 @@ struct Lowering<'t> {
     /// the type whose code it is in and the position of the method being lowered, and lowering
     /// goes on past it; `None` otherwise, when the first error ends lowering.
     census: Option<RefCell<Vec<CensusError>>>,
+    /// Whether a census takes a panic while lowering a method for a rejection of the method. A
+    /// whole program's lowering, which goes on past rejections too (`tolerant_lower_program`),
+    /// lets it end the translation, as it would without them.
+    catch_panics: bool,
     /// Whether the method being lowered is a census's stub of one that lowering rejected.
     stubbing: Cell<bool>,
     /// In a census, the classes whose declaration lowering rejected (one that extends or
@@ -321,8 +325,9 @@ struct Lowering<'t> {
 }
 
 /// An error that lowering for a census records: the index of the type whose code it is in, the
-/// position of the method being lowered, and the error.
-type CensusError = (usize, Option<Pos>, Error);
+/// position of the method being lowered, the index of that method when the code rejected is part
+/// of its body alone, and the error.
+type CensusError = (usize, Option<Pos>, Option<usize>, Error);
 
 impl<'t> Lowering<'t> {
     /// What lowering adds once every declared method is lowered, for a file and a whole program
@@ -545,9 +550,17 @@ impl<'t> Lowering<'t> {
 
     fn block(&self, node: Node<'t>) -> Result<Vec<Stmt>, Error> {
         let mut out = Vec::new();
+        // The `if`s that test a property that is never set run only their `else` branch.
+        let unset = crate::program::unset_property_ifs(node.0);
         for stmt in node.list("statements") {
             if is_super_call(stmt) {
                 out.extend(self.super_init(stmt)?);
+                continue;
+            }
+            if unset.iter().any(|s| std::ptr::eq(*s, stmt.0)) {
+                if let Some(otherwise) = stmt.get("elseStatement") {
+                    self.stmt_into(otherwise, &mut out)?;
+                }
                 continue;
             }
             self.stmt_into(stmt, &mut out)?;
@@ -578,6 +591,8 @@ impl<'t> Lowering<'t> {
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
             }
             "EXPRESSION_STATEMENT" if let Some(set_all) = self.set_all(node)? => set_all,
+            // The value of a field handle is no field's (see `handles`).
+            "EXPRESSION_STATEMENT" if self.handle_definition(node) => return Ok(()),
             "EXPRESSION_STATEMENT" => match self.expr(node.child("expression")?)? {
                 // A native that does nothing here, such as `registerNatives()`, leaves no trace.
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
@@ -1014,6 +1029,16 @@ impl<'t> Lowering<'t> {
             ("jdk.internal.access.JavaLangAccess", "join") if args.len() == 5 => {
                 Builtin::String(StringOp::JoinRange)
             }
+            // There are no virtual threads: a thread's carrier is the thread itself
+            // (`ThreadLocalRandom` keeps its seeds in the carrier).
+            ("jdk.internal.access.JavaLangAccess", "currentCarrierThread") => {
+                let resolved = self.methods.iter().position(|m| {
+                    self.types[m.owner].javac == "java.lang.Thread"
+                        && m.name == "currentThread"
+                        && m.sig == "()java.lang.Thread"
+                });
+                return Ok(ExprKind::Call { name: "currentThread".to_string(), args, resolved });
+            }
             (
                 "java.lang.StringBuilder"
                 | "java.lang.StringBuffer"
@@ -1069,7 +1094,7 @@ impl<'t> Lowering<'t> {
                     r.kind() == "IDENTIFIER" && r.str("name") == "super"
                         || r.kind() == "MEMBER_SELECT"
                             && r.str("identifier") == "super"
-                            && self.types[self.current.get()].node.kind() != "INTERFACE"
+                            && self.types[self.lambda_holder(self.current.get())].node.kind() != "INTERFACE"
                 });
                 let receiver = match receiver {
                     Some(r) if is_super => self.super_receiver(r)?,

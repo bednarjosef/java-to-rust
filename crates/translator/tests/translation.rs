@@ -1007,7 +1007,7 @@ fn methods_that_reach_their_object_another_way_take_the_shared_handle() {
         &[
             "fn register(this: &Rc<RefCell<P>>) {\n        share(this);",
             // `o` may be `this`, which the method then must not hold borrowed.
-            "fn copy(this: &Rc<RefCell<P>>, o: &Rc<RefCell<P>>) {\n        this.borrow_mut().x = { o.borrow().x };",
+            "fn copy(this: &Rc<RefCell<P>>, o: &Rc<RefCell<P>>) {\n        this.borrow_mut().x = { let value = o.borrow().x; value };",
             "P::register(&p);",
             "P::copy(&q, &p);",
         ],
@@ -3367,6 +3367,25 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             public final void putReferenceRelease(Object o, long offset, Object x) { putReferenceVolatile(o, offset, x); }
             public native int getInt(Object o, long offset);
             public native void putIntVolatile(Object o, long offset, int x);
+            public final native boolean compareAndSetReference(Object o, long offset, Object expected, Object x);
+        }",
+    ),
+    (
+        "lib/jdk/internal/misc/Slots.java",
+        "package jdk.internal.misc;
+        public final class Slots {
+            private static final Unsafe U = Unsafe.getUnsafe();
+            public static final class Cell { final String name; public Cell(String n) { name = n; } public String toString() { return name; } }
+            private static final long BASE = U.arrayBaseOffset(Cell[].class);
+            private static final int SHIFT = 31 - Integer.numberOfLeadingZeros(U.arrayIndexScale(Cell[].class));
+            private static final int SCALE = U.arrayIndexScale(Cell[].class);
+            private final Cell[] slots = new Cell[4];
+            public boolean claim(int i, Cell o) {
+                return U.compareAndSetReference(slots, ((long) i << SHIFT) + BASE, null, o);
+            }
+            public Cell at(int i) { return (Cell) U.getReferenceAcquire(slots, BASE + (long) i * SCALE); }
+            public void set(int i, Cell o) { U.putReferenceRelease(slots, ((long) i << SHIFT) + BASE, o); }
+            public Cell stray(int i) { return (Cell) U.getReferenceAcquire(slots, BASE + i); }
         }",
     ),
     (
@@ -3492,6 +3511,40 @@ fn an_access_through_a_field_offset_is_the_field() {
         &["LAZY_VALUE", "LAZY_COUNT", "field_offset", "fn get_reference_acquire", "fn get_int"],
     );
     assert_contains(&rust, &["self.value", "self.count"]);
+}
+
+#[test]
+fn an_access_at_an_element_offset_is_the_element() {
+    let rust = translate_with_natives(
+        "jdk-element-handles",
+        "Slots s = new Slots(); s.set(1, new Slots.Cell(\"b\"));
+        System.out.println(s.claim(0, new Slots.Cell(\"a\")) + \" \" + s.claim(0, new Slots.Cell(\"c\")) + \" \" + s.at(0) + s.at(1));",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    // The update reads, compares and writes the element in one runtime call, which holds the
+    // array for all of it; reads and writes are of the element.
+    assert_contains(
+        &rust,
+        &[
+            "java::compare_and_set_element(&self.slots, i, None, Some(o), ",
+            "java::set(&self.slots, i, Some(o));",
+            "java::get(&self.slots, i)",
+        ],
+    );
+    assert_lacks(&rust, &["fn compare_and_set_reference", "fn get_reference_acquire"]);
+}
+
+#[test]
+fn offset_arithmetic_that_is_no_element_offset_is_rejected() {
+    let error = translate_with_natives("jdk-element-stray", "System.out.println(new Slots().stray(1));")
+        .expect_err("must be rejected");
+    assert!(
+        error.ends_with(
+            "`Unsafe.getReferenceAcquire` with an offset that is neither a field's nor an array element's \
+             not supported yet"
+        ),
+        "{error}"
+    );
 }
 
 #[test]
@@ -4792,7 +4845,10 @@ fn a_field_assigned_from_a_borrow_of_itself_ends_the_borrow_first() {
             System.out.println(c.pop() + c.pop()); } }",
     );
     // The `Ref` of the old head must end before the field is written.
-    assert_contains(&rust, &["self.head = { java::non_null(self.head.as_ref()).borrow().next.clone() };"]);
+    assert_contains(
+        &rust,
+        &["self.head = { let value = java::non_null(self.head.as_ref()).borrow().next.clone(); value };"],
+    );
 }
 
 #[test]

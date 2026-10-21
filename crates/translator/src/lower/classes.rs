@@ -5,7 +5,9 @@
 //! classes of a program have the same one, and the names of such a literal are constants. Any
 //! other class is a value, a `java::Class` (`Type::JavaClass`): `x.getClass()`
 //! (`Builtin::GetClass`), a class literal (`Builtin::ClassLiteral`), and the methods of `Class`
-//! that need no reflection (`Builtin::ClassMethod`).
+//! that need no reflection (`Builtin::ClassMethod`). `isInstance` and `cast` of any class value
+//! test the binary names of the classes and interfaces of the object's class, which the generator
+//! writes out per class (`Builtin::ClassIsInstance`, `Builtin::ClassCheck`).
 
 use super::*;
 
@@ -43,7 +45,11 @@ impl<'t> Lowering<'t> {
         ) {
             return Ok(Some(self.enum_universe(node)?));
         }
-        if (symbol.owner, symbol.name) == ("java.util.HashMap", "comparableClassFor") {
+        // `ConcurrentHashMap` has a copy of `HashMap`'s.
+        if matches!(
+            (symbol.owner, symbol.name),
+            ("java.util.HashMap" | "java.util.concurrent.ConcurrentHashMap", "comparableClassFor")
+        ) {
             let x = self.expr(node.list("arguments").next().expect("comparableClassFor has an argument"))?;
             return Ok(Some(ExprKind::Builtin(Builtin::ComparableClassFor, vec![x])));
         }
@@ -101,6 +107,11 @@ impl<'t> Lowering<'t> {
                 let class = self.expr(receiver)?;
                 return Ok(Some(self.new_instance(node, class, receiver.java_type())?));
             }
+            ("isInstance", [x]) => {
+                let (class, x) = (self.expr(receiver)?, self.expr(*x)?);
+                return Ok(Some(ExprKind::Builtin(Builtin::ClassIsInstance, vec![class, x])));
+            }
+            ("cast", [x]) => return Ok(Some(self.class_cast(node, receiver, *x)?)),
             ("getResourceAsStream", [name]) => {
                 let class = receiver.java_type();
                 let class =
@@ -134,6 +145,47 @@ impl<'t> Lowering<'t> {
             values.push(value);
         }
         Ok(Some(ExprKind::Builtin(Builtin::ClassMethod(op), values)))
+    }
+
+    /// `class.cast(x)`: `x`, checked against the class (`Builtin::ClassCheck`), then converted
+    /// to the call's type as javac's cast of the result does, in a block when `x` needs a local.
+    ///
+    /// ```text
+    /// switch (0) { default -> { T cast = x; check(class, cast); yield (T) cast; } }
+    /// ```
+    fn class_cast(&self, node: Node<'t>, receiver: Node<'t>, x: Node<'t>) -> Result<ExprKind, Error> {
+        let class = self.expr(receiver)?;
+        let value = self.expr(x)?;
+        let to = self.ty(node, node.java_type())?;
+        let pos = node.pos();
+        // A class literal casts `null` to `null`.
+        if is_literal(receiver) && matches!(value.kind, ExprKind::Null) {
+            return Ok(ExprKind::Cast(to, Box::new(value)));
+        }
+        let (ty, mut block, name) = match &value.kind {
+            ExprKind::Var(name) => (value.ty, Vec::new(), Some(name.clone())),
+            ExprKind::Null => (value.ty, Vec::new(), None),
+            _ => {
+                let (ty, name) = (value.ty, self.fresh_name("cast"));
+                (ty, vec![Stmt::Local { ty, name: name.clone(), init: Some(value), pos }], Some(name))
+            }
+        };
+        let read = || match &name {
+            Some(name) => self.synth(ExprKind::Var(name.clone()), pos, ty),
+            None => self.synth(ExprKind::Null, pos, Type::Null),
+        };
+        let check = ExprKind::Builtin(Builtin::ClassCheck, vec![class, read()]);
+        block.push(Stmt::Expr(self.synth(check, pos, Type::Void)));
+        // `cast(null)` is a null of the call's type.
+        let result = match name {
+            Some(_) => self.convert(read(), to),
+            None => self.synth(ExprKind::Null, pos, to),
+        };
+        block.push(Stmt::Yield(result));
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        })
     }
 
     /// A call of a `Constructor` without parameters, which is its class (`lower::by_name`):

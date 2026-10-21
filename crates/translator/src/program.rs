@@ -10,10 +10,11 @@ mod survey;
 
 pub use census::{Census, census_program};
 pub use reach::{
-    CLASS_KINDS, FieldUpdate, LOCALE_LANGUAGE, PRINT_FORMATTED, Reach, STRING_STREAMS, class_bound,
-    class_for_name, class_name, component_array, computed_for_name, created_by_name, direct_stream_call,
-    is_ensure_initialized, literal_class, live_branch, module_for_name, standard_stream_field,
-    stream_of_call, unsafe_field_access, unsafe_field_update, untranslated, writes_string_array,
+    CLASS_KINDS, FieldUpdate, LOCALE_LANGUAGE, PRINT_FORMATTED, Reach, STRING_STREAMS, UNSET_PROPERTIES,
+    class_bound, class_for_name, class_name, component_array, computed_for_name, created_by_name,
+    direct_stream_call, field_offset_named, is_ensure_initialized, literal_class, live_branch,
+    module_for_name, standard_stream_field, stream_of_call, unsafe_field_access, unsafe_field_update,
+    unset_property_ifs, untranslated, writes_string_array,
 };
 pub use survey::Survey;
 
@@ -80,11 +81,15 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Str
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     // The program's files are the first units (`load`).
     let program_units = source_files(program)?.len();
-    let mut class = phase("lower", || lower::lower_program(&trees, program_units, &reach, &program.main))
-        .map_err(|(unit, error)| ProgramError {
-            file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string),
-            error,
-        })?;
+    let file = |unit: Option<usize>| unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string);
+    let lowered =
+        phase("lower", || lower::tolerant_lower_program(&trees, program_units, &reach, &program.main));
+    let mut class = lowered.class.map_err(|(unit, error)| ProgramError { file: file(unit), error })?;
+    if let Err(rejected) = phase("live methods", || keep_live(&mut class, lowered.rejected)) {
+        let file = file(rejected.unit).or_else(|| locate(&units, &class, rejected.error.pos));
+        return Err(ProgramError { file, error: rejected.error });
+    }
+    lower::check_enum_nulls(&class).map_err(|error| ProgramError { file: None, error })?;
     phase("whole objects", || analysis::whole_objects(&mut class))
         .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
     let located = |error: Error| ProgramError { file: locate(&units, &class, error.pos), error };
@@ -97,6 +102,48 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Str
         phase("messages", || analysis::npe_messages(&class, &mut facts, &names)).map_err(located)?;
     }
     phase("codegen", || codegen::generate(&class, &facts)).map_err(located)
+}
+
+/// Keeps the methods of `class` that can run (`analysis::live_methods`) and gives the others a
+/// body that never runs; the first piece of code that lowering rejected and that can run, if
+/// there is one. When the methods that can run are not known, every rejection can run.
+fn keep_live(class: &mut crate::ast::Class, rejected: Vec<lower::Rejected>) -> Result<(), lower::Rejected> {
+    let live = match analysis::live_methods::live_methods(class) {
+        Ok(live) => live,
+        Err(unknown) => {
+            if crate::timings::enabled() {
+                eprintln!("timing: live methods: not known for {unknown}, {} rejections", rejected.len());
+            }
+            return rejected.into_iter().next().map_or(Ok(()), Err);
+        }
+    };
+    let distinct = |rejected: &[lower::Rejected]| {
+        rejected.iter().map(|r| r.error.message.as_str()).collect::<std::collections::HashSet<_>>().len()
+    };
+    let (total, distinct_total) = (rejected.len(), distinct(&rejected));
+    let mut running: Vec<lower::Rejected> =
+        rejected.into_iter().filter(|r| live.runs(r.ty, r.method)).collect();
+    // A call that lowering left unresolved is rejected where it can run.
+    running.extend(live.unresolved.iter().map(|error| lower::Rejected {
+        unit: None,
+        anchor: None,
+        error: Error { pos: error.pos, message: error.message.clone() },
+        ty: 0,
+        method: None,
+    }));
+    if crate::timings::enabled() {
+        let (live, methods) = (live.methods.len(), class.methods.len());
+        let (count, kinds) = (running.len(), distinct(&running));
+        eprintln!(
+            "timing: live methods: {live} of {methods}; {total} rejections ({distinct_total} distinct), \
+             {count} of them can run ({kinds} distinct)"
+        );
+    }
+    if let Some(first) = running.into_iter().next() {
+        return Err(first);
+    }
+    analysis::live_methods::prune(class, &live);
+    Ok(())
 }
 
 /// The units of the program and of the library classes that its reachable code uses, with what

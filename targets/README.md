@@ -20,10 +20,12 @@ targets/run.sh JDK_ROOT        # translate whole programs, reading JDK classes f
 ```
 
 `JDK_ROOT` is a source tree laid out by package (the `java.base` sources of a JDK). It is only
-read, never copied. `run.sh` builds `java-to-rust`, translates each program into
-`target/targets/<Name>/` as a Cargo crate, builds all crates into `target/targets/cargo`, runs
-each binary with `Name.input` on stdin (or nothing), and compares stdout and the exit code. Each
-program is reported as one of:
+read, never copied. `run.sh` builds `java-to-rust`, translates each program into `targets/<Name>/`
+of the cargo target directory (`CARGO_TARGET_DIR`, or `target/`) as a Cargo crate, builds all
+crates into `targets/cargo` there, runs each binary with `Name.input` on stdin (or nothing), and
+compares stdout and the exit code. A program whose crate is the same as in an earlier run that
+passed is not built and run again: its stored output is compared instead (see "Testing" in the
+top README; `CHECK_FRESH=1` builds and runs everything). Each program is reported as one of:
 
 - `REJECTED`: the translator stopped with the message shown.
 - `DOES NOT COMPILE`: the first rustc error of the generated crate.

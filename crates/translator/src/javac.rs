@@ -4,6 +4,7 @@
 
 mod bytecode_names;
 mod records;
+mod run_cache;
 
 pub use bytecode_names::{BytecodeNames, CHECKED_JAVA, NameKind, program_names, source_names};
 
@@ -41,18 +42,9 @@ const JAVAC_PACKAGES: [&str; 5] = ["api", "code", "tree", "util", "jvm"];
 
 pub fn tree(source: &str) -> Result<Value, Error> {
     let fail = |message: String| Error { pos: Pos::default(), message };
-    let mut child = java_tree()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let output = run_cache::run(java_tree(), source)
         .map_err(|e| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")))?;
-    let mut stdin = child.stdin.take().expect("stdin is piped");
-    let source = source.to_string();
-    let writer = std::thread::spawn(move || stdin.write_all(source.as_bytes()));
-    let output = child.wait_with_output().map_err(|e| fail(format!("running javac failed: {e}")))?;
-    let _ = writer.join();
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // The first compile error, printed as `LINE:COLUMN: message`.
         let first = stderr.lines().next().unwrap_or("javac failed");

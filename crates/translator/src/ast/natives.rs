@@ -96,6 +96,12 @@ pub enum Native {
     InstallUncaught,
     UncaughtException,
     PrintUncaught,
+    /// `Unsafe.park(absolute, time)` of `LockSupport`: waits for the calling thread's permit, until
+    /// the deadline `time` (milliseconds since the epoch) when `absolute`, else for `time`
+    /// nanoseconds, or without a limit for 0.
+    Park,
+    /// `Unsafe.unpark(thread)`: gives the thread its permit. Lowering passes the thread's id.
+    Unpark,
     /// `o.wait()` and `o.wait(millis)`: the object, and the timeout in milliseconds (0 for none).
     MonitorWait,
     /// `o.notify()`, or with `all` `o.notifyAll()`: the object.
@@ -228,6 +234,8 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
                 // Lowered as code on the referent (`lower::references`).
                 | ("java.lang.ref.Reference", "get0" | "refersTo0" | "clear0")
                 | ("java.lang.ref.PhantomReference", "refersTo0" | "clear0")
+                // `LockSupport`'s, with the thread's id for `unpark` (`lower/natives.rs`).
+                | ("jdk.internal.misc.Unsafe", "park" | "unpark")
         )
 }
 

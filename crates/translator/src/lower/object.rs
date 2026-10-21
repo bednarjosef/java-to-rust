@@ -64,10 +64,13 @@ pub(super) const NUMBER_METHODS: [(&str, Type); 6] = [
     ("doubleValue", Type::Double),
 ];
 
-/// The abstract methods of `CharSequence`, in order, with the name of their `int` parameter, if
-/// they have one, and their result types.
-pub(super) const CHAR_SEQUENCE_METHODS: [(&str, Option<&str>, Type); 2] =
-    [("length", None, Type::Int), ("charAt", Some("index"), Type::Char)];
+/// The abstract methods of `CharSequence`, in order, with the names of their `int` parameters and
+/// their result types (`None` for `CharSequence` itself).
+pub(super) const CHAR_SEQUENCE_METHODS: [(&str, &[&str], Option<Type>); 3] = [
+    ("length", &[], Some(Type::Int)),
+    ("charAt", &["index"], Some(Type::Char)),
+    ("subSequence", &["start", "end"], None),
+];
 
 /// Whether the declarations use `java.lang.CharSequence` as the type of a value, as `uses_number`
 /// tells for `Number`.
@@ -192,6 +195,9 @@ fn mentions_object(v: &Value, real: &HashSet<*const Value>) -> bool {
             names.iter().any(|n| {
                 fields.get(*n).and_then(Value::as_str).is_some_and(|t| t.contains("java.lang.Object"))
             }) || fields.get("javaType").and_then(Value::as_str).is_some_and(is_enum)
+                // `Enum.hashCode()` is `Object`'s (see `enums`).
+                || fields.get("owner").and_then(Value::as_str) == Some("java.lang.Enum")
+                    && fields.get("name").and_then(Value::as_str) == Some("hashCode")
                 || fields.values().any(mentions_object)
         }
         Value::Array(items) => items.iter().any(mentions_object),
@@ -355,12 +361,14 @@ impl<'t> Lowering<'t> {
                 _ => {}
             }
         }
-        // The `length()` and `charAt(int)` that a class implementing `CharSequence` declares or
-        // inherits implement the interface's.
+        // The `length()`, `charAt(int)` and `subSequence(int, int)` that a class implementing
+        // `CharSequence` declares or inherits implement the interface's. A `subSequence` may
+        // return a subclass of `CharSequence` (`CharBuffer`'s returns a `CharBuffer`), which the
+        // dispatcher converts; one that returns a string is rejected.
         if let Some(s) = at.char_sequence {
             for t in (0..self.types.len()).filter(|&t| self.implements_directly(t, "java.lang.CharSequence"))
             {
-                for (i, (name, param, ret)) in CHAR_SEQUENCE_METHODS.into_iter().enumerate() {
+                for (i, (name, params, ret)) in CHAR_SEQUENCE_METHODS.into_iter().enumerate() {
                     let mut class = Some(t);
                     while let Some(c) = class {
                         let found = methods.iter().take(at.equals).position(|m| {
@@ -368,11 +376,27 @@ impl<'t> Lowering<'t> {
                                 && m.name == name
                                 && !m.is_static
                                 && !m.is_ctor
-                                && m.ret == ret
-                                && m.params.len() == usize::from(param.is_some())
+                                && m.params.len() == params.len()
                                 && m.params.iter().all(|p| p.ty == Type::Int)
                         });
                         if let Some(m) = found {
+                            let returned = methods[m].ret;
+                            let fits = match ret {
+                                Some(ret) => returned == ret,
+                                None => matches!(returned, Type::Class(..)),
+                            };
+                            if !fits && ret.is_none() {
+                                return Err(Error {
+                                    pos: methods[m].pos,
+                                    message: format!(
+                                        "a `CharSequence.{name}` that returns a `{returned}` not supported yet"
+                                    ),
+                                });
+                            }
+                            if !fits {
+                                class = self.superclass(c)?;
+                                continue;
+                            }
                             if !methods[m].overrides.contains(&(s.methods + i)) {
                                 methods[m].overrides.push(s.methods + i);
                             }
@@ -425,9 +449,10 @@ impl<'t> Lowering<'t> {
         }
         if let Some(s) = at.char_sequence {
             debug_assert_eq!(methods.len(), s.methods);
-            for (name, param, ret) in CHAR_SEQUENCE_METHODS {
+            for (name, params, ret) in CHAR_SEQUENCE_METHODS {
                 let params =
-                    param.map(|name| Param { name: name.to_string(), ty: Type::Int }).into_iter().collect();
+                    params.iter().map(|name| Param { name: name.to_string(), ty: Type::Int }).collect();
+                let ret = ret.unwrap_or(Type::class(CHAR_SEQUENCE));
                 methods.push(Method { class: s.decl, ..method(name, params, ret) });
             }
         }
@@ -795,22 +820,26 @@ impl<'t> Lowering<'t> {
     /// Integer.toHexString(hashCode())`.
     fn object_super_call(&self, node: Node<'t>, symbol: &Symbol, args: Vec<Expr>) -> Result<ExprKind, Error> {
         let at = self.object.expect("`object_call` checked `Object`");
-        let this = self.this(node);
+        // In a lambda, `super` is the object of the class whose code holds it.
+        let this = || match self.lambda_this(node) {
+            Some(holder) => holder,
+            None => Ok(self.this(node)),
+        };
         let pos = node.pos();
         match symbol.name {
-            "hashCode" => Ok(ExprKind::Builtin(Builtin::Native(Native::IdentityHash), vec![this])),
+            "hashCode" => Ok(ExprKind::Builtin(Builtin::Native(Native::IdentityHash), vec![this()?])),
             "equals" => {
-                let this = self.convert(this, Type::class(OBJECT));
+                let this = self.convert(this()?, Type::class(OBJECT));
                 let other = args.into_iter().next().expect("`equals` has an argument");
                 let other = self.convert(other, Type::class(OBJECT));
                 Ok(ExprKind::Binary(BinOp::Eq, Box::new(this), Box::new(other)))
             }
             "toString" => {
-                let name = ExprKind::Builtin(Builtin::ClassName { simple: false }, vec![self.this(node)]);
+                let name = ExprKind::Builtin(Builtin::ClassName { simple: false }, vec![this()?]);
                 let name = self.synth(name, pos, Type::String);
                 let at_sign = self.synth(ExprKind::Str("@".to_string()), pos, Type::String);
                 let hash = ExprKind::MethodCall {
-                    receiver: Box::new(this),
+                    receiver: Box::new(this()?),
                     name: "hashCode".to_string(),
                     args: Vec::new(),
                     resolved: Some(at.hash_code),
@@ -899,6 +928,10 @@ impl<'t> Lowering<'t> {
             "charAt" => {
                 let index = self.expr(node.list("arguments").next().expect("`charAt` has an index"))?;
                 Ok(call(receiver, "charAt", vec![index]))
+            }
+            "subSequence" => {
+                let range = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+                Ok(call(receiver, "subSequence", range))
             }
             "toString" => Ok(self.as_text(receiver).kind),
             "isEmpty" => {

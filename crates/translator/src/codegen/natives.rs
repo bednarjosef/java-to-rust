@@ -150,6 +150,15 @@ impl<'a> Gen<'a> {
                 call(self, "is_interrupted", vec![tid])
             }
             Native::ThreadClearInterrupt => call(self, "thread_interrupted", vec![]),
+            Native::Park => {
+                let (absolute, time) =
+                    (self.value(&args[0], Type::Boolean).text, self.value(&args[1], Type::Long).text);
+                call(self, "unsafe_park", vec![absolute, time])
+            }
+            Native::Unpark => {
+                let tid = self.value(&args[0], Type::Long).text;
+                call(self, "unpark", vec![tid])
+            }
             Native::InstallUncaught => self.install_uncaught(args),
             Native::UncaughtException => {
                 let ty = self.ty_name(ty);

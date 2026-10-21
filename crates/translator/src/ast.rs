@@ -826,9 +826,22 @@ pub enum Builtin {
     ClassLiteral(Type),
     /// `[class, args...]`: a method of `java.lang.Class`.
     ClassMethod(ClassOp),
+    /// `[class, x]`: `class.isInstance(x)`, whether `x` is not null and of `class` or a subclass,
+    /// told by the binary names of the classes and interfaces of `x`'s class.
+    ClassIsInstance,
+    /// `[class, x]`, a statement: the check of `class.cast(x)`, a `ClassCastException` (`Cannot
+    /// cast A to B`) unless `x` is null or `class.isInstance(x)`. `lower::classes` writes the cast
+    /// that gives the value after it.
+    ClassCheck,
     /// `[x]`: `HashMap.comparableClassFor(x)`, the class of `x` if it says `implements
     /// Comparable` itself, else `null`; the JDK's reads the type argument through reflection.
     ComparableClassFor,
+    /// `[expected, a[i] = x]` (the compare forms) or `[a[i] = x]` (`a[i] += delta` for
+    /// get-and-add): an atomic update of an array element through `Unsafe` at an element offset
+    /// (`lower::handles`), made under one borrow of the array. The operands are the store it
+    /// makes, as an assignment, for the analyses to see; its value is the old element, or for
+    /// compare-and-set whether it was `expected`.
+    ElementUpdate(crate::program::FieldUpdate),
 }
 
 /// The methods of `java.lang.Class` that a program can use without reflection.

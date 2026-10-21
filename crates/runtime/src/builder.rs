@@ -17,6 +17,26 @@ use std::rc::Rc;
 #[derive(Clone, Default)]
 pub struct StringBuilder(Rc<RefCell<Vec<u16>>>);
 
+/// The UTF-16 units of a code point, which must be valid, as `Character.toChars` makes them.
+fn code_point_units(cp: i32) -> Vec<u16> {
+    if !(0..=0x10FFFF).contains(&cp) {
+        throw("java.lang.IllegalArgumentException", &format!("Not a valid Unicode code point: 0x{cp:X}"));
+    }
+    if cp < 0x10000 {
+        return vec![cp as u16];
+    }
+    let v = cp - 0x10000;
+    vec![0xD800 + (v >> 10) as u16, 0xDC00 + (v & 0x3FF) as u16]
+}
+
+/// Whether `repeat` adds anything: a negative count throws, and zero adds nothing.
+fn check_count(count: i32) -> bool {
+    if count < 0 {
+        throw("java.lang.IllegalArgumentException", &format!("count is negative: {count}"));
+    }
+    count > 0
+}
+
 /// Writes formatted text into a builder's code units.
 struct Units<'a>(&'a mut Vec<u16>);
 
@@ -287,6 +307,81 @@ impl StringBuilder {
     pub fn substring_from(&self, start: i32) -> String {
         let len = self.length();
         self.substring(start, len)
+    }
+
+    /// `sb.appendCodePoint(cp)`: one unit, or a surrogate pair for a supplementary code point.
+    pub fn append_code_point(&self, cp: i32) -> &Self {
+        let units = code_point_units(cp);
+        self.append_chars(&units)
+    }
+
+    /// `sb.repeat(cp, count)`: `count` copies of a code point.
+    pub fn repeat_code_point(&self, cp: i32, count: i32) -> &Self {
+        if check_count(count) {
+            let units = code_point_units(cp);
+            self.0.borrow_mut().extend(units.iter().cycle().take(units.len() * count as usize));
+        }
+        self
+    }
+
+    /// `sb.repeat(s, count)`: `count` copies of a string.
+    pub fn repeat_str(&self, s: &str, count: i32) -> &Self {
+        if check_count(count) {
+            let units: Vec<u16> = s.encode_utf16().collect();
+            self.0.borrow_mut().extend(units.iter().cycle().take(units.len() * count as usize));
+        }
+        self
+    }
+
+    /// `sb.repeat(other, count)` of a builder, which may be this one.
+    pub fn repeat_builder(&self, other: &StringBuilder, count: i32) -> &Self {
+        if check_count(count) {
+            let copy = other.0.borrow().clone();
+            self.0.borrow_mut().extend(copy.iter().cycle().take(copy.len() * count as usize));
+        }
+        self
+    }
+
+    /// `sb.codePointAt(index)`.
+    pub fn code_point_at(&self, index: i32) -> i32 {
+        crate::string::code_point_at_units(&self.0.borrow(), index)
+    }
+
+    /// `sb.codePointBefore(index)`.
+    pub fn code_point_before(&self, index: i32) -> i32 {
+        crate::string::code_point_before_units(&self.0.borrow(), index)
+    }
+
+    /// `sb.codePointCount(begin, end)`.
+    pub fn code_point_count(&self, begin: i32, end: i32) -> i32 {
+        crate::string::code_point_count_units(&self.0.borrow(), begin, end)
+    }
+
+    /// `sb.offsetByCodePoints(index, offset)`.
+    pub fn offset_by_code_points(&self, index: i32, offset: i32) -> i32 {
+        crate::string::offset_by_code_points_units(&self.0.borrow(), index, offset)
+    }
+
+    /// `sb.getChars(begin, end, dst, dst_begin)`: the units `begin..end` into `dst` from
+    /// `dst_begin`.
+    pub fn get_chars(&self, begin: i32, end: i32, dst: &mut [u16], dst_begin: i32) {
+        let value = self.0.borrow();
+        if begin < 0 || begin > end || end as usize > value.len() {
+            out_of_bounds(format!("Range [{begin}, {end}) out of bounds for length {}", value.len()));
+        }
+        let count = (end - begin) as usize;
+        if dst_begin < 0 || dst_begin as i64 + count as i64 > dst.len() as i64 {
+            throw(
+                "java.lang.IndexOutOfBoundsException",
+                &format!(
+                    "Range [{dst_begin}, {}) out of bounds for length {}",
+                    dst_begin as i64 + count as i64,
+                    dst.len()
+                ),
+            );
+        }
+        let at = dst_begin as usize;
+        dst[at..at + count].copy_from_slice(&value[begin as usize..end as usize]);
     }
 
     /// `a.compareTo(b)`: the difference of the first code units that differ, or of the lengths.

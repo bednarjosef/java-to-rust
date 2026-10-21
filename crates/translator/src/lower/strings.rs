@@ -179,6 +179,26 @@ impl<'t> Lowering<'t> {
             "concat" => StringOp::Concat,
             "toCharArray" => StringOp::ToCharArray,
             "getChars" if symbol.ty == "(int,int,char[],int)void" => StringOp::GetChars,
+            "getBytes" if symbol.ty == "(int,int,byte[],int)void" => StringOp::GetLowBytes,
+            "codePointAt" => StringOp::CodePointAt,
+            "codePointBefore" => StringOp::CodePointBefore,
+            "codePointCount" => StringOp::CodePointCount,
+            "offsetByCodePoints" => StringOp::OffsetByCodePoints,
+            "regionMatches" => StringOp::RegionMatches,
+            "stripIndent" => StringOp::StripIndent,
+            // A `CharSequence` is compared by its text, which its `toString()` gives.
+            "contentEquals" if matches!(args[0].ty, Type::Class(..)) => {
+                let x = args.pop().expect("one argument");
+                let pos = x.pos;
+                args.push(self.synth(ExprKind::Builtin(Builtin::ObjectText, vec![x]), pos, Type::String));
+                StringOp::ContentEquals
+            }
+            "contentEquals" => StringOp::ContentEquals,
+            "subSequence" => {
+                let receiver = receiver.expect("an instance method has a receiver");
+                args.insert(0, self.expr(receiver)?);
+                return self.as_char_sequence(node, Builtin::String(StringOp::Substring), args);
+            }
             "chars" | "lines" if args.is_empty() => return self.string_stream(node, name, receiver),
             "hashCode" => StringOp::HashCode,
             "toString" | "intern" => StringOp::Identity,
@@ -203,6 +223,9 @@ impl<'t> Lowering<'t> {
             _ => return unsupported(node, &format!("method `String.{name}`")),
         };
         match op {
+            StringOp::ContentEquals if args[0].ty == Type::Null => {
+                return unsupported(node, "`String.contentEquals(null)`");
+            }
             StringOp::Contains | StringOp::Replace
                 if args.iter().any(|a| !char_sequence(a.ty) && a.ty != Type::Char) =>
             {
@@ -243,6 +266,14 @@ impl<'t> Lowering<'t> {
             args.insert(0, self.expr(receiver)?);
         }
         Ok(ExprKind::Builtin(Builtin::String(op), args))
+    }
+
+    /// `subSequence` of a string or a builder, `builtin` with `args`: its `substring`, as the
+    /// `CharSequence` that the call's type is.
+    fn as_char_sequence(&self, node: Node<'t>, builtin: Builtin, args: Vec<Expr>) -> Result<ExprKind, Error> {
+        let text = self.synth(ExprKind::Builtin(builtin, args), node.pos(), Type::String);
+        let ty = self.ty(node, node.java_type())?;
+        Ok(self.convert(text, ty).kind)
     }
 
     /// `String.format(format, args...)`, or `format.formatted(args...)` when `formatted` holds the
@@ -350,12 +381,31 @@ impl<'t> Lowering<'t> {
             "substring" => BuilderOp::Substring,
             "isEmpty" => BuilderOp::IsEmpty,
             "compareTo" => BuilderOp::CompareTo,
+            "appendCodePoint" => BuilderOp::AppendCodePoint,
+            "repeat" => BuilderOp::Repeat,
+            "codePointAt" => BuilderOp::CodePointAt,
+            "codePointBefore" => BuilderOp::CodePointBefore,
+            "codePointCount" => BuilderOp::CodePointCount,
+            "offsetByCodePoints" => BuilderOp::OffsetByCodePoints,
+            "getChars" => BuilderOp::GetChars,
+            "subSequence" => BuilderOp::Substring,
             _ => return unsupported(node, &format!("method `StringBuilder.{name}`")),
         };
         let receiver = receiver.expect("an instance method has a receiver");
         let receiver = self.expr(receiver)?;
         if receiver.ty != Type::StringBuilder {
             return unsupported(node, &format!("method `{}.{name}`", symbol.owner));
+        }
+        // `repeat(text, count)` of a string or a builder; `repeat(codePoint, count)` takes an `int`.
+        if op == BuilderOp::Repeat
+            && symbol.ty.starts_with("(java.lang.CharSequence")
+            && !char_sequence(args[0].ty)
+        {
+            return unsupported(node, "`StringBuilder.repeat` of this kind of text");
+        }
+        if name == "subSequence" {
+            args.insert(0, receiver);
+            return self.as_char_sequence(node, Builtin::Builder(op), args);
         }
         let shown = match op {
             BuilderOp::Append if args.len() == 1 => Some(0),

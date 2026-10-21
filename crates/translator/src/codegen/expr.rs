@@ -641,6 +641,7 @@ impl<'a> Gen<'a> {
                 self.arrays_builtin(builtin, args, id)
             }
             Builtin::Arrays(op) => self.arrays_op(op, args),
+            Builtin::ElementUpdate(update) => self.element_update_call(update, args),
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
                 let outer = std::mem::replace(&mut self.printing, true);
@@ -691,6 +692,9 @@ impl<'a> Gen<'a> {
             Builtin::GetClass => self.get_class(&args[0]),
             Builtin::ClassLiteral(ty) => Code::atom(self.type_class(ty)),
             Builtin::ClassMethod(op) => self.class_method(op, args),
+            Builtin::ClassIsInstance | Builtin::ClassCheck => {
+                self.class_instance(builtin == Builtin::ClassCheck, args)
+            }
             Builtin::ComparableClassFor => self.comparable_class_for(&args[0]),
             Builtin::ClassLiteralName { class, simple } => {
                 Code::atom(format!("String::from({})", rust_string(&self.java_class_name(class, simple))))
