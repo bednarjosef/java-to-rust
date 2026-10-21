@@ -133,6 +133,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         attempt_count: 0,
         try_assigned: HashSet::new(),
         dereferenced: HashSet::new(),
+        written: HashSet::new(),
         rejected: None,
     };
     if modules.is_some() {
@@ -298,6 +299,9 @@ struct Gen<'a> {
     try_assigned: HashSet<String>,
     /// The objects of `Facts::null_checked` whose checked dereference has been written.
     dereferenced: HashSet<ExprId>,
+    /// The methods whose bodies have been written. A body that is not, as no call needs it or
+    /// it never runs, dereferences nothing.
+    written: HashSet<usize>,
     /// The first construct found that cannot be translated, which `generate` reports.
     rejected: Option<Error>,
 }
@@ -526,6 +530,9 @@ impl<'a> Gen<'a> {
             && let Some(t) = self.facts.init_class(self.class, m.class)
         {
             self.line(&format!("{}();", statics::init_name(&self.class.types[t].name)));
+        }
+        if !never_runs {
+            self.written.insert(index);
         }
         if never_runs {
             self.line(&no_object(&self.class.types[m.class].name));
