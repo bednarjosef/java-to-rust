@@ -31,6 +31,12 @@ pub struct Reach {
     /// whose instance methods can run.
     pub live: HashSet<String>,
     pub methods: HashSet<MethodKey>,
+    /// Instance methods of classes that are not live, among `methods`: reachable code calls them,
+    /// but no object of their class exists, so the receiver of every call is null and their
+    /// bodies never run. They are declared with a body that says so (`Builtin::NoObject`), and
+    /// what their bodies use is not reached. Interfaces are left out, as the runtime's strings
+    /// and boxes are objects of `CharSequence` and `Comparable` that no constructor shows.
+    pub dormant: HashSet<MethodKey>,
     pub fields: HashSet<FieldKey>,
     /// Methods that reachable code calls but that are not among the sources: those of the
     /// classes the runtime provides (see `RUNTIME_CLASSES`), and any that are missing; and the
@@ -55,6 +61,13 @@ impl Reach {
             kind if CLASS_KINDS.contains(&kind) => self.classes.contains(&class_name(member)),
             _ => true,
         }
+    }
+
+    /// Whether a method of the class with qualified name `class` (a node of its `members`) is
+    /// one of the `dormant` ones, whose body never runs.
+    pub fn dormant(&self, class: &str, member: &Value) -> bool {
+        let key = (class.to_string(), text(member, "name").to_string(), symbol_type(member).to_string());
+        self.dormant.contains(&key)
     }
 }
 
@@ -373,7 +386,8 @@ impl<'t> Walk<'t> {
     }
 
     /// The initializers that run for the class's static initialization (`statics`) or for every
-    /// object it creates.
+    /// object it creates. A class's `serialPersistentFields` is kept only if code reads it
+    /// (`for_serialization`).
     fn initializers(&mut self, decl: &'t Value, class: &str, statics: bool) {
         for member in members(decl) {
             let is_static = match text(member, "kind") {
@@ -386,7 +400,7 @@ impl<'t> Walk<'t> {
             }
             if text(member, "kind") == "BLOCK" {
                 self.scan(member);
-            } else if has_effects(&member["initializer"]) {
+            } else if has_effects(&member["initializer"]) && !for_serialization(member) {
                 self.work.push(Item::Field((class.to_string(), text(member, "name").to_string())));
             }
         }
@@ -403,24 +417,30 @@ impl<'t> Walk<'t> {
             }
             return;
         };
-        if !self.reach.methods.insert(key.clone()) {
-            return;
-        }
         let class = key.0.clone();
         let is_ctor = key.1 == "<init>";
         let is_static = node["symbol"]["static"].as_bool() == Some(true);
+        if !self.reach.methods.insert(key.clone()) {
+            // A dormant method runs once its class is live.
+            if !self.reach.live.contains(&class) || !self.reach.dormant.remove(&key) {
+                return;
+            }
+        } else if !is_static && !is_ctor && !self.reach.live.contains(&class) && self.has_objects(&class) {
+            // Until an object of its class is created, only its signature is used.
+            self.reach.dormant.insert(key.clone());
+            self.waiting.entry(class.clone()).or_default().push(key);
+            self.work.push(Item::Class(class));
+            for part in ["typeParameters", "returnType", "parameters", "thrown"] {
+                self.scan(&node[part]);
+            }
+            return;
+        }
         self.work.push(Item::Class(class.clone()));
         if is_static || is_ctor {
             self.work.push(Item::Init(class.clone()));
         }
-        if is_ctor && self.reach.instantiated.insert(class.clone()) {
-            self.live(class.clone());
-            let decl = self.classes[&class].0;
-            self.initializers(decl, &class, false);
-            // Library code calls these on any object, as string conversion calls `toString`.
-            for (name, signature) in OBJECT_METHODS {
-                self.work.push(Item::Method((class.clone(), name.to_string(), signature.to_string())));
-            }
+        if is_ctor {
+            self.instantiate(class);
         }
         if !is_static && !is_ctor {
             for overrider in self.overriders(&key) {
@@ -428,6 +448,28 @@ impl<'t> Walk<'t> {
             }
         }
         self.scan(node);
+    }
+
+    /// Whether `class` is a class whose objects come from its constructors, which reachability
+    /// sees: not an interface, which the runtime's classes and lambdas implement too.
+    fn has_objects(&self, class: &str) -> bool {
+        self.classes
+            .get(class)
+            .is_some_and(|(decl, _)| matches!(text(decl, "kind"), "CLASS" | "ENUM" | "RECORD"))
+    }
+
+    /// A class whose objects are created: it is live, and its instance initializers run.
+    fn instantiate(&mut self, class: String) {
+        if !self.reach.instantiated.insert(class.clone()) {
+            return;
+        }
+        self.live(class.clone());
+        let decl = self.classes[&class].0;
+        self.initializers(decl, &class, false);
+        // Library code calls these on any object, as string conversion calls `toString`.
+        for (name, signature) in OBJECT_METHODS {
+            self.work.push(Item::Method((class.clone(), name.to_string(), signature.to_string())));
+        }
     }
 
     /// The methods that a call of the instance method `method` may run instead of it: those that
@@ -626,6 +668,24 @@ pub(super) fn has_flag(node: &Value, flag: &str) -> bool {
     node["modifiers"]["flags"].as_array().is_some_and(|f| f.iter().any(|x| x == flag))
 }
 
+/// Whether a field is the `serialPersistentFields` of a serializable class: serialization reads it
+/// by reflection, which a translation has not, and its initializer only creates the
+/// `ObjectStreamField`s that describe the fields, from arguments without effects. Some thirty
+/// classes of java.base have one (`String`, `Random`, `ConcurrentHashMap`, ...), whose
+/// `Long.TYPE` and `String.class` arguments are `Class` values.
+fn for_serialization(field: &Value) -> bool {
+    let describes = |element: &Value| {
+        text(element, "kind") == "NEW_CLASS"
+            && text(&element["symbol"], "owner") == "java.io.ObjectStreamField"
+            && !has_effects(&element["arguments"])
+    };
+    let init = &field["initializer"];
+    text(field, "name") == "serialPersistentFields"
+        && has_flag(field, "STATIC")
+        && text(init, "kind") == "NEW_ARRAY"
+        && init["initializers"].as_array().is_some_and(|elements| elements.iter().all(describes))
+}
+
 /// Whether evaluating an initializer may do more than compute a value: call a method, create an
 /// object, assign, or throw on a division.
 fn has_effects(value: &Value) -> bool {
@@ -697,6 +757,38 @@ mod tests {
         assert!(reach.methods.contains(&method("Other", "run")), "{reach:?}");
         assert!(!reach.methods.contains(&method("Tracer", "trace")), "{reach:?}");
         assert!(!reach.classes.contains("Tracer"), "{reach:?}");
+    }
+
+    #[test]
+    fn serial_persistent_fields_are_not_initialized_unless_read() {
+        let describe = json!({"kind": "NEW_CLASS",
+            "symbol": {"kind": "CONSTRUCTOR", "owner": "java.io.ObjectStreamField", "name": "<init>",
+                       "type": "(java.lang.String,java.lang.Class)void"},
+            "arguments": [{"kind": "STRING_LITERAL", "value": "seed"}]});
+        let field = |name: &str, init: Value| {
+            json!({"kind": "VARIABLE", "name": name, "symbol": {"type": "java.io.ObjectStreamField[]", "static": true},
+                   "initializer": {"kind": "NEW_ARRAY", "initializers": [init]}})
+        };
+        let holder = |fields: Value| {
+            let mut holder = class("Holder", &[("run", vec![])]);
+            holder["members"].as_array_mut().unwrap().push(fields);
+            let unit = json!({"typeDecls": [
+                class("Main", &[("main", vec![call("Holder", "run")])]),
+                holder,
+                class("java.io.ObjectStreamField", &[]),
+                class("Describe", &[("run", vec![])]),
+            ]});
+            reach(&[&unit], "Main").unwrap()
+        };
+        let key = ("Holder".to_string(), "serialPersistentFields".to_string());
+        let reach = holder(field("serialPersistentFields", describe.clone()));
+        assert!(!reach.fields.contains(&key), "{reach:?}");
+        // Another name, or an element that does something, is initialized with its class.
+        let reach = holder(field("persistent", describe));
+        assert!(reach.fields.contains(&("Holder".to_string(), "persistent".to_string())), "{reach:?}");
+        let reach = holder(field("serialPersistentFields", call("Describe", "run")["expression"].clone()));
+        assert!(reach.fields.contains(&key), "{reach:?}");
+        assert!(reach.methods.contains(&("Describe".into(), "run".into(), "()void".into())), "{reach:?}");
     }
 
     #[test]
