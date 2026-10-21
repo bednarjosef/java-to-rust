@@ -587,12 +587,18 @@ fn static_inits(class: &Class, facts: &Facts, m: usize, x: &Expr) -> Vec<usize> 
         }
     }
     let current = class.methods.get(m).map(|c| c.class);
+    // `main` starts by initializing its class (`statics::entry_inits`), so no later code runs
+    // that class's `<clinit>` but the code it runs itself, where the call returns at once.
+    let main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
+        [main] => Some(main.class),
+        _ => None,
+    };
     classes
         .into_iter()
         .filter_map(|t| {
             let init = facts.init_class(class, t)?;
-            let initialized =
-                current.is_some_and(|c| c == init || class.hierarchy.ancestors(c).contains(&init));
+            let initialized = Some(init) == main_class
+                || current.is_some_and(|c| c == init || class.hierarchy.ancestors(c).contains(&init));
             if initialized {
                 return None;
             }
