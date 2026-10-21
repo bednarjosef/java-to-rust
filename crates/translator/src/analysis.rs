@@ -46,6 +46,9 @@ pub use whole_objects::whole_objects;
 pub struct Facts {
     /// Whether the program starts a thread (see `threads`).
     pub threaded: bool,
+    /// Whether the program interrupts a thread, so that `sleep`, `join` and `wait` may throw
+    /// `InterruptedException` (see `threads`).
+    pub interrupts: bool,
     /// The classes, by type index, whose objects two threads may reach: `Arc`s, with a
     /// `java::Locked` unless immutable.
     pub thread_shared: HashSet<usize>,
@@ -241,6 +244,7 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
 /// `immutable` to `writers`, given `fields_structs`.
 fn representation(class: &Class, facts: &mut Facts) {
     facts.threaded = threads::threaded(class);
+    facts.interrupts = threads::interrupts(class);
     if facts.threaded {
         facts.thread_shared = threads::thread_shared(class);
         facts.long_methods = threads::long_methods(class, &facts.thread_shared);

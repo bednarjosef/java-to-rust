@@ -4,8 +4,7 @@
 //! JVM does not set itself (the translation rejects the rest). The memory figures are plausible
 //! constants, not the JVM's, which depend on the machine and its flags.
 
-use crate::{exit, throw};
-use std::time::Duration;
+use crate::exit;
 
 /// The value of a system property this runtime answers, or `None` for any other key (which
 /// `System.getProperty` gives as null).
@@ -56,23 +55,19 @@ pub fn halt(status: i32) -> ! {
     exit(status)
 }
 
-/// `Thread.sleep(millis)`.
+/// `Thread.sleep(millis)`. An interrupt ends it with an `InterruptedException` (see
+/// `thread::try_sleep`).
 pub fn sleep(millis: i64) {
-    if millis < 0 {
-        throw("java.lang.IllegalArgumentException", "timeout value is negative");
+    if let Err(e) = crate::thread::try_sleep(millis) {
+        crate::uncaught::<()>(e);
     }
-    std::thread::sleep(Duration::from_millis(millis as u64));
 }
 
 /// `Thread.sleep(millis, nanos)`.
 pub fn sleep_nanos(millis: i64, nanos: i32) {
-    if millis < 0 {
-        throw("java.lang.IllegalArgumentException", "timeout value is negative");
+    if let Err(e) = crate::thread::try_sleep_nanos(millis, nanos) {
+        crate::uncaught::<()>(e);
     }
-    if !(0..=999_999).contains(&nanos) {
-        throw("java.lang.IllegalArgumentException", "nanosecond timeout value out of range");
-    }
-    std::thread::sleep(Duration::new(millis as u64, nanos as u32));
 }
 
 /// `Thread.onSpinWait()`.

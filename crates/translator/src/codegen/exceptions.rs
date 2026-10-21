@@ -528,7 +528,9 @@ impl<'a> Gen<'a> {
             }
             self.method = *ctor;
             let object = self.new_object_as(*ctor, args, Some(throwable)).text;
-            self.line(&format!("{} => {object},", rust_string(&self.class.types[*c].name)));
+            // The form without a message comes first (`Lowering::raised_objects`).
+            let bare = if args.is_empty() { " if e.message.is_none()" } else { "" };
+            self.line(&format!("{}{bare} => {object},", rust_string(&self.class.types[*c].name)));
         }
         self.method = outer;
         let uncaught = self.uncaught("uncaught");

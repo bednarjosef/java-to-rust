@@ -93,12 +93,12 @@ impl<'a> Gen<'a> {
             }
             Native::Sleep { nanos: false } => {
                 let millis = self.value(&args[0], Type::Long).text;
-                call(self, "sleep", vec![millis])
+                self.may_fail(id, "sleep", "", &millis)
             }
             Native::Sleep { nanos: true } => {
                 let millis = self.value(&args[0], Type::Long).text;
                 let nanos = self.value(&args[1], Type::Int).text;
-                call(self, "sleep_nanos", vec![millis, nanos])
+                self.may_fail(id, "sleep_nanos", "", &format!("{millis}, {nanos}"))
             }
             Native::OnSpinWait => call(self, "on_spin_wait", vec![]),
             Native::ThreadYield => call(self, "thread_yield", vec![]),
@@ -125,8 +125,17 @@ impl<'a> Gen<'a> {
             Native::ThreadJoin => {
                 let (tid, millis) =
                     (self.value(&args[0], Type::Long).text, self.value(&args[1], Type::Long).text);
-                call(self, "join_thread", vec![tid, millis])
+                self.may_fail(id, "join_thread", "", &format!("{tid}, {millis}"))
             }
+            Native::ThreadInterrupt => {
+                let tid = self.value(&args[0], Type::Long).text;
+                call(self, "interrupt_thread", vec![tid])
+            }
+            Native::ThreadIsInterrupted => {
+                let tid = self.value(&args[0], Type::Long).text;
+                call(self, "is_interrupted", vec![tid])
+            }
+            Native::ThreadClearInterrupt => call(self, "thread_interrupted", vec![]),
             Native::ThreadRename => {
                 let tid = self.value(&args[0], Type::Long).text;
                 let name = format!("&{}", self.thread_name(&args[1]));

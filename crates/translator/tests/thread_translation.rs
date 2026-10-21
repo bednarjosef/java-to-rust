@@ -322,3 +322,42 @@ fn a_string_that_threads_lock_is_rejected() {
     .to_string();
     assert!(error.ends_with("`synchronized` on a string not supported yet"), "{error}");
 }
+
+/// A worker that sleeps, which main interrupts when `interrupt` is set.
+fn sleeper(interrupt: bool) -> String {
+    let stop = if interrupt { "w.interrupt();" } else { "" };
+    format!(
+        "class A {{
+    static class Worker extends Thread {{
+        String end = \"slept\";
+        public void run() {{
+            try {{ Thread.sleep(1000); }} catch (InterruptedException e) {{ end = e.getMessage(); }}
+        }}
+    }}
+    public static void main(String[] args) throws InterruptedException {{
+        Worker w = new Worker();
+        w.start();
+        {stop}
+        try {{ w.join(); }} catch (InterruptedException e) {{ System.out.println(e); }}
+        System.out.println(w.end);
+    }}
+}}"
+    )
+}
+
+#[test]
+fn sleep_and_join_throw_only_in_a_program_that_interrupts() {
+    let quiet = translate(&sleeper(false));
+    assert_contains(&quiet, &["java::sleep(1000);", "java::join_thread("]);
+    assert_lacks(&quiet, &["try_sleep", "try_join_thread"]);
+    let interrupted = translate(&sleeper(true));
+    assert_contains(
+        &interrupted,
+        &[
+            "java::try_sleep(1000)",
+            "java::try_join_thread(",
+            "java::interrupt_thread(",
+            "if e.message.is_none() =>",
+        ],
+    );
+}
