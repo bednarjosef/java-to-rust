@@ -32,6 +32,13 @@ class Thread {
     int threadLocalRandomProbe;
     int threadLocalRandomSecondarySeed;
     Object parkBlocker;
+    // The values of the thread's `ThreadLocal`s, which the JDK's `ThreadLocal` keeps in the thread
+    // (and those of its `TerminatingThreadLocal`s). The inheritable ones are only a field, which
+    // `ForkJoinWorkerThread` clears: without the accessors of the JDK's `Thread`, and without a new
+    // thread's copy of its parent's, `InheritableThreadLocal` is rejected rather than wrong.
+    ThreadLocal.ThreadLocalMap threadLocals;
+    ThreadLocal.ThreadLocalMap inheritableThreadLocals;
+    ThreadLocal.ThreadLocalMap terminatingThreadLocals;
 
     public Thread() {
         this((Runnable) null, genName());
@@ -71,6 +78,12 @@ class Thread {
     }
 
     public Thread(ThreadGroup group, Runnable task, String name, long stackSize) {
+        this(group, task, name);
+    }
+
+    // `ForkJoinWorkerThread`'s. A new thread copies none of its parent's inheritable thread
+    // locals (see the fields above), so `inheritInheritableThreadLocals` changes nothing.
+    Thread(ThreadGroup group, Runnable task, String name, long stackSize, boolean inheritInheritableThreadLocals) {
         this(group, task, name);
     }
 
@@ -156,6 +169,22 @@ class Thread {
         }
         this.name = name;
         rename0(tid, name);
+    }
+
+    ThreadLocal.ThreadLocalMap threadLocals() {
+        return threadLocals;
+    }
+
+    void setThreadLocals(ThreadLocal.ThreadLocalMap map) {
+        threadLocals = map;
+    }
+
+    ThreadLocal.ThreadLocalMap terminatingThreadLocals() {
+        return terminatingThreadLocals;
+    }
+
+    void setTerminatingThreadLocals(ThreadLocal.ThreadLocalMap map) {
+        terminatingThreadLocals = map;
     }
 
     public final boolean isDaemon() {

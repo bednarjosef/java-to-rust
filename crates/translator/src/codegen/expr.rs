@@ -642,6 +642,7 @@ impl<'a> Gen<'a> {
             }
             Builtin::Arrays(op) => self.arrays_op(op, args),
             Builtin::ElementUpdate(update) => self.element_update_call(update, args),
+            Builtin::ByteView { ty, big_endian } => self.byte_view_call(ty, big_endian, args),
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
                 let outer = std::mem::replace(&mut self.printing, true);

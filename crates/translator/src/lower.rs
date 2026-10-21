@@ -62,7 +62,9 @@ use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
 pub use census::panic_message;
 pub(crate) use clinit_errors::rewritten_clinit;
-pub use exceptions::{is_standard, standard_local_name, standard_names, standard_subclass};
+pub use exceptions::{
+    is_standard, standard_field_type, standard_local_name, standard_names, standard_subclass,
+};
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
@@ -551,6 +553,10 @@ impl<'t> Lowering<'t> {
                 }
                 continue;
             }
+            // A field found by reflection only to make a handle of it, which is no value.
+            if self.handle_field_local(node, stmt) {
+                continue;
+            }
             self.stmt_into(stmt, &mut out)?;
         }
         Ok(out)
@@ -881,6 +887,9 @@ impl<'t> Lowering<'t> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
         if let Some(kind) = self.handle_access(node, &symbol)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.var_handle_access(node, &symbol)? {
             return Ok(kind);
         }
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {

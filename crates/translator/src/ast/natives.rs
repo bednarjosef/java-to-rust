@@ -174,6 +174,9 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
     Some(match (class, name, signature) {
         // Registering a class's natives with the JVM, and looking up the fields they use.
         (_, "registerNatives" | "initIDs", "()void") => Native::Nothing,
+        // A fence orders nothing more: every access that threads share is under a lock or
+        // sequentially consistent already (docs/multi-threading.md, 1.1).
+        ("jdk.internal.misc.Unsafe", "fullFence", "()void") => Native::Nothing,
         // Registers `getNanoTimeAdjustment`, and nothing else.
         ("jdk.internal.misc.VM", "initialize", "()void") => Native::Nothing,
         ("jdk.internal.misc.VM", "getNanoTimeAdjustment", "(long)long") => Native::NanoTimeAdjustment,

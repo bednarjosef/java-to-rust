@@ -225,14 +225,27 @@ impl<'t> Lowering<'t> {
         Ok(Some(ExprKind::Builtin(Builtin::Native(Native::ErrPrint { newline: true }), vec![text])))
     }
 
-    /// The id of the thread that `Unsafe.unpark(thread)` (`node`) passes, a variable of the
-    /// translator's `Thread`: its field `tid`.
+    /// The id of the thread that `Unsafe.unpark(thread)` (`node`) passes, of the translator's
+    /// `Thread`: its field `tid`. A variable is one that `LockSupport.unpark` has tested; a field
+    /// read (`v.owner`) may be null, which `unpark` ignores, as it does an id of no thread: there
+    /// the id is `t != null ? t.tid : -1`, the read made twice, which has no effects.
     fn thread_id(&self, node: Node<'t>) -> Result<Expr, Error> {
-        let arg = node.list("arguments").next().filter(|a| a.kind() == "IDENTIFIER");
-        let thread = match arg {
-            Some(arg) => self.expr(arg)?,
-            None => return unsupported(node, "`Unsafe.unpark` of anything but a variable"),
+        let arg = node.list("arguments").next();
+        let path = |mut n: Node<'t>| loop {
+            match n.kind() {
+                "IDENTIFIER" => return true,
+                "MEMBER_SELECT" if n.symbol().is_some_and(|s| s.kind == "FIELD") => match n.get("expression")
+                {
+                    Some(e) => n = e,
+                    None => return false,
+                },
+                _ => return false,
+            }
         };
+        let Some(arg) = arg.filter(|a| path(*a)) else {
+            return unsupported(node, "`Unsafe.unpark` of anything but a variable or a field");
+        };
+        let thread = self.expr(arg)?;
         let class = self.type_index("java.lang.Thread");
         let of_thread = match thread.ty {
             Type::Class(name, _) => self
@@ -245,7 +258,16 @@ impl<'t> Lowering<'t> {
         }
         let pos = node.pos();
         let tid = super::objects::read(Place::Field { object: Box::new(thread), name: "tid".to_string() });
-        Ok(self.synth(tid, pos, Type::Long))
+        let tid = self.synth(tid, pos, Type::Long);
+        if arg.kind() == "IDENTIFIER" {
+            return Ok(tid);
+        }
+        let again = self.expr(arg)?;
+        let null = self.synth(ExprKind::Null, pos, Type::Null);
+        let test =
+            self.synth(ExprKind::Binary(BinOp::Ne, Box::new(again), Box::new(null)), pos, Type::Boolean);
+        let none = self.synth(ExprKind::Long(-1), pos, Type::Long);
+        Ok(self.synth(ExprKind::Conditional(Box::new(test), Box::new(tid), Box::new(none)), pos, Type::Long))
     }
 
     /// A call whose argument is a class literal, which the translation has no value for, of a
@@ -269,11 +291,16 @@ impl<'t> Lowering<'t> {
             }
             _ => return Ok(None),
         };
-        let literal = node
-            .list("arguments")
-            .next()
-            .filter(|a| a.kind() == "MEMBER_SELECT" && a.str("identifier") == "class");
-        let Some(literal) = literal else {
+        // A class literal, or a variable of an array class's type, which can hold nothing else
+        // (`ForkJoinPool` keeps `ForkJoinTask[].class` in a local).
+        let class = node.list("arguments").next().and_then(|a| {
+            if a.kind() == "MEMBER_SELECT" && a.str("identifier") == "class" {
+                return Some(a.get("expression")?.java_type());
+            }
+            let ty = a.java_type().strip_prefix("java.lang.Class<")?.strip_suffix('>')?;
+            (a.kind() == "IDENTIFIER" && ty.ends_with("[]")).then_some(ty)
+        });
+        let Some(class) = class else {
             return unsupported(node, &format!("`{method}` of anything but a class literal"));
         };
         if symbol.name == "initializeFromArchive" {
@@ -288,7 +315,7 @@ impl<'t> Lowering<'t> {
         if !stateless {
             return unsupported(node, &format!("`{method}` on this receiver"));
         }
-        let Some(element) = literal.child("expression")?.java_type().strip_suffix("[]") else {
+        let Some(element) = class.strip_suffix("[]") else {
             return unsupported(node, &format!("`{method}` of a class that is not an array"));
         };
         let native = if symbol.name == "arrayBaseOffset" {
