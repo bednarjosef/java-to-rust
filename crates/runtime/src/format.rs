@@ -397,6 +397,24 @@ pub fn never_fails(format: &str, args: &[Arg]) -> bool {
     !numeric_char && try_format(format, args).is_ok()
 }
 
+/// `String.format(format, args)` with the arguments in an `Object[]`, each by the text of its
+/// `toString` (`None` for null). The text does not tell a number from a string, so a conversion
+/// other than `%s` and `%S` (and `%n` and `%%`, which take none) is not supported, and fails
+/// loudly when it runs.
+pub fn format_objects(format: &str, texts: &[Option<String>]) -> String {
+    if let Ok(items) = parse(format)
+        && let Some(spec) = items.iter().find_map(|item| match item {
+            Item::Spec(spec) if !matches!(spec.conversion, 's' | 'S' | 'n' | '%') => Some(spec),
+            _ => None,
+        })
+    {
+        let message = format!("%{} of an element of an Object[] in a format not supported", spec.conversion);
+        throw(UNSUPPORTED, &message);
+    }
+    let args: Vec<Arg> = texts.iter().map(|t| t.as_deref().map_or(Arg::Null, Arg::Text)).collect();
+    self::format(format, &args)
+}
+
 /// `String.format(format, args)`.
 pub fn format(format: &str, args: &[Arg]) -> String {
     try_format(format, args).unwrap_or_else(|e| {

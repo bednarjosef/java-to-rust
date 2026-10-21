@@ -184,6 +184,66 @@ impl<'t> Lowering<'t> {
         Ok(Some(Builtin::Native(native)))
     }
 
+    /// `System.getLogger(name).log(System.Logger.Level.L, message)`, as `LocaleServiceProviderPool`
+    /// reports a provider that returned null. The JDK's default logger, without `java.logging`,
+    /// prints the messages of level `INFO` and above to `System.err`, after a line with the time
+    /// and the caller; the translation prints `L: message`, without that line, which a translated
+    /// program has no stack to find the caller in. `None` for any other call; it runs before the
+    /// arguments are lowered, as the level is a constant of `System`'s nested enum, which is the
+    /// runtime's.
+    pub(super) fn system_log(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        select: Node<'t>,
+    ) -> Result<Option<ExprKind>, Error> {
+        if (symbol.owner, symbol.name, symbol.ty)
+            != ("java.lang.System.Logger", "log", "(java.lang.System.Logger.Level,java.lang.String)void")
+        {
+            return Ok(None);
+        }
+        let logger = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        let get_logger = logger.filter(|l| {
+            l.kind() == "METHOD_INVOCATION"
+                && l.symbol().is_some_and(|s| (s.owner, s.name) == ("java.lang.System", "getLogger"))
+        });
+        let Some(get_logger) = get_logger else {
+            return unsupported(node, "a `System.Logger` other than `System.getLogger(name)`");
+        };
+        let mut arguments = node.list("arguments");
+        let (Some(level), Some(message)) = (arguments.next(), arguments.next()) else {
+            return unsupported(node, "this `System.Logger.log`");
+        };
+        let level = (level.kind() == "MEMBER_SELECT").then(|| level.str("identifier"));
+        let shown = match level {
+            Some("INFO" | "WARNING" | "ERROR") => true,
+            Some("ALL" | "TRACE" | "DEBUG" | "OFF") => false,
+            _ => return unsupported(node, "`System.Logger.log` of a level that is not a constant"),
+        };
+        let pos = node.pos();
+        // The logger's name is evaluated for nothing but its effects, which the name of a class
+        // literal has none of.
+        let name = get_logger.list("arguments").next().expect("getLogger has a name");
+        let of_literal = name.kind() == "METHOD_INVOCATION"
+            && name
+                .child("methodSelect")
+                .ok()
+                .and_then(|s| s.get("expression"))
+                .is_some_and(super::classes::is_literal);
+        if !of_literal && has_effects(&self.expr(name)?) {
+            return unsupported(node, "a `System.getLogger` name that does more than name the logger");
+        }
+        let message = self.expr(message)?;
+        let level = level.expect("a constant level");
+        if !shown {
+            return Ok(Some(message.kind));
+        }
+        let prefix = self.synth(ExprKind::Str(format!("{level}: ")), pos, Type::String);
+        let text = ExprKind::Binary(BinOp::Add, Box::new(prefix), Box::new(self.as_text(message)));
+        let text = self.synth(text, pos, Type::String);
+        Ok(Some(ExprKind::Builtin(Builtin::Native(Native::ErrPrint { newline: true }), vec![text])))
+    }
+
     /// A call whose argument is a class literal, which the translation has no value for, of a
     /// method that needs only the class it names: `Unsafe.arrayBaseOffset(int[].class)` and
     /// `arrayIndexScale`, whose null check cannot fail for a literal and which reachability

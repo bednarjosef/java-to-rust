@@ -53,12 +53,21 @@ impl<'t> Lowering<'t> {
         if (symbol.owner, symbol.name) == ("java.lang.Class", "getPrimitiveClass") {
             return Ok(Some(self.primitive_class(node)?));
         }
+        if let Some(name) = crate::program::module_for_name(node.0) {
+            return Ok(Some(self.module_for_name(node, name)?));
+        }
         if (symbol.owner, symbol.name) == ("java.lang.Class", "forName")
             && let Some(kind) = self.class_for_name(node)?
         {
             return Ok(Some(kind));
         }
+        if crate::program::computed_for_name(node.0) {
+            return Ok(Some(self.computed_for_name(node)?));
+        }
         let Some(receiver) = receiver else { return Ok(None) };
+        if symbol.owner == "java.lang.reflect.Constructor" {
+            return Ok(Some(self.constructor_call(node, symbol, receiver)?));
+        }
         // `equals`, `hashCode` and `toString` of a class are `Object`'s.
         let of_class = |ty: &str| ty == "java.lang.Class" || ty.starts_with("java.lang.Class<");
         let owner = symbol.owner == "java.lang.Class"
@@ -83,6 +92,15 @@ impl<'t> Lowering<'t> {
             // `CharacterName`'s `uniName.dat` or `Currency`'s `currency.data`, which are generated
             // when the JDK is built and are not in its source: the program ends when it reads one
             // (`Builtin::MissingResource`).
+            ("isAssignableFrom", [class]) if is_literal(receiver) => {
+                return Ok(Some(self.is_assignable_from(node, receiver, *class)?));
+            }
+            // A constructor without parameters is its class (`lower::by_name`).
+            ("getConstructor" | "getDeclaredConstructor", []) => return Ok(Some(self.expr(receiver)?.kind)),
+            ("newInstance", []) => {
+                let class = self.expr(receiver)?;
+                return Ok(Some(self.new_instance(node, class, receiver.java_type())?));
+            }
             ("getResourceAsStream", [name]) => {
                 let class = receiver.java_type();
                 let class =
@@ -116,6 +134,38 @@ impl<'t> Lowering<'t> {
             values.push(value);
         }
         Ok(Some(ExprKind::Builtin(Builtin::ClassMethod(op), values)))
+    }
+
+    /// A call of a `Constructor` without parameters, which is its class (`lower::by_name`):
+    /// `getModifiers()`, `setAccessible(flag)`, which does nothing but evaluate the flag, and
+    /// `newInstance()` with no arguments or a `null` array of them.
+    fn constructor_call(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol,
+        receiver: Node<'t>,
+    ) -> Result<ExprKind, Error> {
+        let args: Vec<Node<'t>> = node.list("arguments").collect();
+        let null_array = |arg: &Node<'t>| {
+            let arg = if arg.kind() == "TYPE_CAST" { arg.get("expression") } else { Some(*arg) };
+            arg.is_some_and(|arg| arg.kind() == "NULL_LITERAL")
+        };
+        match (symbol.name, args.as_slice()) {
+            ("getModifiers", []) => {
+                let class = self.expr(receiver)?;
+                self.constructor_modifiers(node, class, receiver.java_type())
+            }
+            ("setAccessible", [flag]) => Ok(self.expr(*flag)?.kind),
+            ("newInstance", []) => {
+                let class = self.expr(receiver)?;
+                self.new_instance(node, class, receiver.java_type())
+            }
+            ("newInstance", [arg]) if null_array(arg) => {
+                let class = self.expr(receiver)?;
+                self.new_instance(node, class, receiver.java_type())
+            }
+            _ => unsupported(node, &format!("`Constructor.{}` (reflection)", symbol.name)),
+        }
     }
 
     /// The constants of the enum class `cls`, which `EnumMap.getKeyUniverse(cls)` and

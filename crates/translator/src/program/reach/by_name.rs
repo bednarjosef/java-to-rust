@@ -13,6 +13,20 @@
 //! javac gives a library's units only for the classes that reachability names, the literals that
 //! could name a class no unit declares are noted as missing (`Walk::note_named`), so that the
 //! next round has their units.
+//!
+//! An object is also created from a `Class` value: `c.getConstructor().newInstance()`, with
+//! `getDeclaredConstructor` or the older `c.newInstance()`, as `ResourceBundle` creates the
+//! locale data that `Bundles` finds. The candidates are the same, with `T` the bound of `c`'s
+//! type (`Class<? extends T>`, `Object` for `Class<?>`). A class name that code computes finds
+//! the locale data of the libraries: `Class.forName(module, name)`, which `Bundles` calls with
+//! the names that `ResourceBundle.Control.toBundleName` makes of a base name such as
+//! `sun.text.resources.cldr.FormatData` and a locale, finds one of the classes of the
+//! `LOCALE_DATA_PACKAGES` for the root locale, `en` and `en_US`, the locales of the translation
+//! (`locale_data_classes`), which are then candidates as if a literal named them. A name that
+//! `Class.forName(name)` computes is one of the classes named so far, or of those named later,
+//! and each of them is initialized, as the call would.
+
+use std::path::PathBuf;
 
 use super::{Item, Walk, class_name, has_flag, text};
 use serde_json::Value;
@@ -93,11 +107,150 @@ fn unparenthesized(node: &Value) -> &Value {
     }
 }
 
+/// The packages of the locale data that a computed `Class.forName(module, name)` finds: the
+/// resource bundles of the JDK's two locale providers, the CLDR's and the JRE's.
+pub const LOCALE_DATA_PACKAGES: &[&str] =
+    &["sun.text.resources", "sun.text.resources.cldr", "sun.util.resources", "sun.util.resources.cldr"];
+
+/// The suffixes of the names of the locale data for the locales of the translation: the root
+/// locale, `en` and `en_US`.
+pub const LOCALE_DATA_SUFFIXES: &[&str] = &["", "_en", "_en_US"];
+
+/// The classes of the `LOCALE_DATA_PACKAGES` in these source roots whose names have one of the
+/// `LOCALE_DATA_SUFFIXES`: `FormatData`, `FormatData_en`, but not `FormatData_en_US_POSIX`.
+pub fn locale_data_classes(roots: &[PathBuf]) -> Vec<String> {
+    let mut out = Vec::new();
+    for root in roots {
+        for package in LOCALE_DATA_PACKAGES {
+            let dir = package.split('.').fold(root.clone(), |dir, part| dir.join(part));
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let file = entry.file_name().to_string_lossy().to_string();
+                let Some(simple) = file.strip_suffix(".java") else { continue };
+                let base = simple.find('_').map_or(simple, |i| &simple[..i]);
+                if LOCALE_DATA_SUFFIXES.iter().any(|suffix| format!("{base}{suffix}") == simple) {
+                    out.push(format!("{package}.{simple}"));
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The call `node` is `Class.forName(module, name)`: `Some` of the name when the code spells it
+/// out, `Some(None)` when it computes it, `None` for any other node.
+pub fn module_for_name(node: &Value) -> Option<Option<String>> {
+    let symbol = &node["symbol"];
+    let is_for_name = text(node, "kind") == "METHOD_INVOCATION"
+        && text(symbol, "owner") == "java.lang.Class"
+        && text(symbol, "name") == "forName"
+        && text(symbol, "type").starts_with("(java.lang.Module,java.lang.String)");
+    if !is_for_name {
+        return None;
+    }
+    let name = unparenthesized(node["arguments"].as_array()?.get(1)?);
+    Some(
+        (text(name, "kind") == "STRING_LITERAL")
+            .then(|| name["value"].as_str().map(str::to_string))
+            .flatten(),
+    )
+}
+
+/// Whether the call `node` is `Class.forName(name)` or `Class.forName(name, initialize, loader)`
+/// with a name that the code computes.
+pub fn computed_for_name(node: &Value) -> bool {
+    let symbol = &node["symbol"];
+    let is_for_name = text(node, "kind") == "METHOD_INVOCATION"
+        && text(symbol, "owner") == "java.lang.Class"
+        && text(symbol, "name") == "forName"
+        && text(symbol, "type").starts_with("(java.lang.String");
+    let name = node["arguments"].as_array().and_then(|a| a.first()).map(unparenthesized);
+    is_for_name && name.is_some_and(|name| text(name, "kind") != "STRING_LITERAL")
+}
+
+/// The call `node` creates an object from a `Class` value without naming its class:
+/// `c.getConstructor()`, `c.getDeclaredConstructor()` or `c.newInstance()`, with no arguments.
+/// The class that the object is of extends or implements the bound of `c`'s type, which this
+/// gives (`java.lang.Object` for `Class<?>` or a type variable). `None` for any other node.
+pub fn created_from_class(node: &Value) -> Option<String> {
+    let symbol = &node["symbol"];
+    let creates = text(node, "kind") == "METHOD_INVOCATION"
+        && text(symbol, "owner") == "java.lang.Class"
+        && matches!(text(symbol, "name"), "getConstructor" | "getDeclaredConstructor" | "newInstance")
+        && node["arguments"].as_array().is_some_and(Vec::is_empty);
+    if !creates {
+        return None;
+    }
+    let select = &node["methodSelect"];
+    let receiver =
+        if text(select, "kind") == "MEMBER_SELECT" { text(&select["expression"], "javaType") } else { "" };
+    Some(class_bound(receiver))
+}
+
+/// The type that a type `Class<? extends T>`, `Class<T>` or `Constructor<? extends T>` bounds
+/// its values' classes with: `T`, which may be a type variable, or `java.lang.Object` for
+/// `Class<?>`, a raw `Class` or a generic `T`.
+pub fn class_bound(ty: &str) -> String {
+    let inner = ty.split_once('<').and_then(|(_, rest)| rest.strip_suffix('>')).unwrap_or("");
+    let inner = inner.strip_prefix("? extends ").unwrap_or(inner);
+    let inner = inner.rsplit(" of ? extends ").next().unwrap_or(inner);
+    if !inner.is_empty() && !inner.contains(['<', '?', ' ']) {
+        inner.to_string()
+    } else {
+        "java.lang.Object".to_string()
+    }
+}
+
 impl Walk<'_> {
+    /// The reflection that reachable code finds classes and creates objects with
+    /// (`module_for_name`, `created_from_class`), as the module's comment says.
+    pub(super) fn reflective(&mut self, node: &Value) {
+        match module_for_name(node) {
+            Some(Some(name)) => self.work.push(Item::Class(name)),
+            Some(None) if !self.finds_locale_data => {
+                self.finds_locale_data = true;
+                for class in self.locale_data.clone() {
+                    self.found(class);
+                }
+            }
+            _ => {}
+        }
+        if computed_for_name(node) && !self.finds_named {
+            self.finds_named = true;
+            for class in self.named.clone() {
+                self.work.push(Item::Init(class));
+            }
+        }
+        if let Some(target) = created_from_class(node) {
+            // A bound that is no class, a type variable `T`, is `Object`'s.
+            let class = target.contains('.') || self.classes.contains_key(&target);
+            self.created_by_target(if class { target } else { "java.lang.Object".to_string() });
+        }
+    }
+
+    /// A class that a computed name finds: it is reached, and named as a literal would name it.
+    /// One that no unit declares yet is asked for, and found when a unit does (`add_named`).
+    fn found(&mut self, class: String) {
+        self.reach.found_by_name.insert(class.clone());
+        if self.classes.contains_key(&class) {
+            self.work.push(Item::Class(class.clone()));
+        } else {
+            self.missing(&class);
+        }
+        self.named(&class);
+    }
+
     /// The cast `node` creates an object of a class named by a string: the candidates named so
     /// far become reachable, and those named later will.
     pub(super) fn created_by_name(&mut self, node: &Value) {
-        let target = super::strip_arguments(text(node, "javaType"));
+        self.created_by_target(super::strip_arguments(text(node, "javaType")));
+    }
+
+    /// Code creates an object of a `target` from a class name or a `Class` value: the
+    /// candidates named so far become reachable, and those named later will.
+    fn created_by_target(&mut self, target: String) {
         if !self.by_name.insert(target.clone()) {
             return;
         }
@@ -118,6 +271,10 @@ impl Walk<'_> {
         }
         if !self.named.insert(literal.to_string()) {
             return;
+        }
+        self.reach.named.insert(literal.to_string());
+        if self.finds_named {
+            self.work.push(Item::Init(literal.to_string()));
         }
         let targets: Vec<String> = self.by_name.iter().cloned().collect();
         for target in targets {
@@ -161,6 +318,9 @@ impl Walk<'_> {
             self.literals.iter().filter(|literal| self.classes.contains_key(*literal)).cloned().collect();
         for literal in declared {
             self.literals.remove(&literal);
+            if self.reach.found_by_name.contains(&literal) {
+                self.work.push(Item::Class(literal.clone()));
+            }
             self.named(&literal);
         }
         let named: Vec<String> = self.named.iter().cloned().collect();
@@ -173,6 +333,9 @@ impl Walk<'_> {
 
     /// Whether the class `class` is `target` or extends or implements it, directly or not.
     fn is_subtype(&self, class: &str, target: &str) -> bool {
+        if target == "java.lang.Object" {
+            return true;
+        }
         let mut work = vec![class.to_string()];
         let mut seen = std::collections::HashSet::new();
         while let Some(class) = work.pop() {
@@ -197,4 +360,39 @@ fn could_name_class(text: &str) -> bool {
 fn is_identifier(part: &str) -> bool {
     part.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
         && part.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bound_of_a_class_value_is_its_type_argument() {
+        assert_eq!(
+            class_bound("java.lang.Class<? extends java.util.ResourceBundle>"),
+            "java.util.ResourceBundle"
+        );
+        assert_eq!(
+            class_bound("java.lang.reflect.Constructor<capture#1 of ? extends java.util.ResourceBundle>"),
+            "java.util.ResourceBundle"
+        );
+        assert_eq!(class_bound("java.lang.Class<Shape>"), "Shape");
+        assert_eq!(class_bound("java.lang.Class<capture#1 of ?>"), "java.lang.Object");
+        assert_eq!(class_bound("java.lang.Class"), "java.lang.Object");
+    }
+
+    #[test]
+    fn locale_data_is_that_of_the_root_locale_and_english() {
+        let root = std::env::temp_dir().join(format!("locale-data-{}", std::process::id()));
+        let dir = root.join("sun/text/resources/cldr");
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in
+            ["FormatData.java", "FormatData_en.java", "FormatData_en_US_POSIX.java", "FormatData_fr.java"]
+        {
+            std::fs::write(dir.join(file), "").unwrap();
+        }
+        let classes = locale_data_classes(std::slice::from_ref(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(classes, ["sun.text.resources.cldr.FormatData", "sun.text.resources.cldr.FormatData_en"]);
+    }
 }
