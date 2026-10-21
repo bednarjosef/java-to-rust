@@ -236,9 +236,52 @@ translator's peak for those three. With the debug translator, which `run.sh` use
 three of the table took 36, 41 and 40 s before and 4.8, 4.2 and 5.3 s after. Most of what
 remains for a small program is the JVM and javac starting and attributing the program's own
 file (2.4 s and 0.9 GB for `CheckedExceptions`, which uses no library unit); for the large ones,
-javac's attribution and the reachability rounds, each of which walks every unit again.
+javac's attribution and the reachability rounds.
 `-Xmx512m` halves the java process's peak (to about 0.5 GB) at no visible cost for the small
 programs, and 256 MB makes it three times slower; it is not set, as the large ones need more.
+
+**Reachability rounds that walk only what is new.** Each round used to walk every unit again
+from `main`: declare them all, survey them all for the records' members, walk, and index the
+reached code for the check that streams stay sequential. A round now does that for its new units
+only (`reach::Rounds`): an item that needed a class no unit declared waits for that class, and
+a new unit's overriders of a method whose overriders may run are reached as they would have
+been. Two cases are not incremental. When the members written into a record walked before
+differ with the new units, `load` walks every unit again; it did not happen in
+`ScannerGrades`, whose rounds were timed one by one. When a method was taken for an external one, because its class was missing, and made
+its overriders reachable, and then turns out to be dormant (`Walk::stale`), that walk starts
+again from `main` over the units it has declared. `ScannerGrades` and `TextAdventure` do that
+two or three times in their 11 rounds (`AbstractCollection.isEmpty`, `CalendarNameProvider`,
+`CalendarSystem`), `StreamPipeline`, `PriorityScheduler` and `ListOperations` once; the
+number varies between runs with the order of the work, but the result does not. Every round
+of every target and corpus program was checked equal, `Reach` and classes asked for, to a walk
+from scratch over the same units, and the translations are byte for byte those before.
+
+Release translator on a loaded machine (load 16 to 23), the before and after runs alternated,
+twice each:
+
+| program | reachability before | after | translation before | after |
+|---|---|---|---|---|
+| ScannerGrades | 5.7, 6.4 s | 3.1, 2.2 s | 18.0, 20.9 s | 22.3, 15.4 s |
+| TextAdventure | 6.1, 7.5 s | 2.2, 1.9 s | 18.0, 23.3 s | 14.9, 14.3 s |
+
+For the small programs reachability was 0.1 to 0.3 s and is about two thirds of that; the
+translation's time is javac's. Peak memory is unchanged (1.1 GB + 2.3 GB for these two).
+
+Further speed-ups, not done:
+
+- The restarts of a stale walk are now about half of what is left of reachability on the large
+  programs (a round without one takes 0.06 to 0.35 s, one with one 0.5 to 0.6 s). Holding a
+  method of a missing class back until its class comes, instead of taking it for external
+  meanwhile, would avoid them, but it changes what the rounds in between ask for, and so the
+  units' order and the output.
+- javac is now most of a large program's translation (9 to 15 s of `ScannerGrades`), and at
+  least 2.4 s and 0.9 GB of any. A cache of javac's trees per JDK unit would have to be keyed
+  by the whole JDK tree (a unit's attributed tree depends on the declarations of others), and
+  saves 0.5 to 1.3 s on a small program; a JVM kept running between translations (a server
+  for the corpus and target runs) would save the start-up instead.
+- Lowering of `ScannerGrades` and `TextAdventure` now takes 1 to 2.5 s, twice (two attempts
+  of the Rust generics, `lower::real_generics`); keeping what the first attempt learned
+  instead of lowering everything again would halve it.
 
 ## NodeList: stack overflow when the list is freed (fixed)
 
