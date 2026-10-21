@@ -207,12 +207,18 @@ impl<'a> Gen<'a> {
         let name = struct_name(&self.class.types[t].name);
         let link = self.runtime("Link");
         let paths: Vec<String> = linked.iter().map(|&c| self.variant(t, c)).collect();
+        // An object that threads share is an `Arc`, which the chain keeps apart.
+        let pushes: Vec<&str> = linked
+            .iter()
+            .map(|&c| if self.pointer(c) == "Arc" { "chain.push_shared(o)" } else { "chain.push(o)" })
+            .collect();
         self.gap();
         self.line(&format!("impl<'a> {link}<'a> for {name} {{"));
         self.indent += 1;
-        for (signature, call) in [
-            ("unlink_in(&mut self, chain: &mut java::Chain<'a>)", format!("{link}::unlink_in(o, chain)")),
-            ("into_chain(self, chain: &mut java::Chain<'a>)", "chain.push(o)".to_string()),
+        let unlink_in = format!("{link}::unlink_in(o, chain)");
+        for (signature, calls) in [
+            ("unlink_in(&mut self, chain: &mut java::Chain<'a>)", vec![unlink_in.as_str(); paths.len()]),
+            ("into_chain(self, chain: &mut java::Chain<'a>)", pushes.clone()),
         ] {
             self.line(&format!("fn {signature} {{"));
             self.indent += 1;
@@ -221,7 +227,7 @@ impl<'a> Gen<'a> {
             {
                 self.line(&format!("if let {path}(o) = self {{"));
                 self.indent += 1;
-                self.line(&format!("{call};"));
+                self.line(&format!("{};", calls[0]));
                 self.indent -= 1;
                 self.line("}");
                 self.indent -= 1;
@@ -230,7 +236,7 @@ impl<'a> Gen<'a> {
             }
             self.line("match self {");
             self.indent += 1;
-            for path in &paths {
+            for (path, call) in paths.iter().zip(&calls) {
                 self.line(&format!("{path}(o) => {call},"));
             }
             if rest {

@@ -563,9 +563,15 @@ fn stmt_points(
     match s {
         Stmt::If { cond, then, otherwise } => {
             expr_points(class, facts, m, cond, frames, safe, out);
+            // A branch that a known condition never takes raises nothing (see `guards`).
+            let known = guards::known_condition(class, cond);
             let then_safe = narrowed(safe, cond, true, |v| assigns_stmt(then, v));
-            stmt_points(class, facts, m, then, frames, &then_safe, out);
-            if let Some(o) = otherwise {
+            if known != Some(false) {
+                stmt_points(class, facts, m, then, frames, &then_safe, out);
+            }
+            if let Some(o) = otherwise
+                && known != Some(true)
+            {
                 let else_safe = narrowed(safe, cond, false, |v| assigns_stmt(o, v));
                 stmt_points(class, facts, m, o, frames, &else_safe, out);
             }
@@ -886,12 +892,13 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
     }
 }
 
-/// The `toString` methods that showing a value of type `ty` may run.
+/// The `toString` methods that showing a value of type `ty` may run, and the `hashCode`s that
+/// `Object`'s `toString` shows.
 fn to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
     let Some(t) = class.class_index(ty) else { return Vec::new() };
     let mut out = Vec::new();
     for c in class.hierarchy.concretes(t) {
-        if let Some(i) = hierarchy::to_string_impl(class, c)
+        if let Some(i) = hierarchy::text_impl(class, c)
             && !out.contains(&i)
         {
             out.push(i);

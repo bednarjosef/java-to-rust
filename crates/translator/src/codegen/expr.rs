@@ -249,9 +249,10 @@ impl<'a> Gen<'a> {
 
     pub(super) fn expr(&mut self, e: &'a Expr) -> Code {
         if self.facts.catching.contains_key(&e.id) && self.catching_now.insert(e.id) {
+            let mark = self.out.len();
             let code = self.expr(e);
             self.catching_now.remove(&e.id);
-            return self.caught(e.id, code);
+            return self.caught(e.id, code, mark);
         }
         if let Some(code) = self.shared_array(e) {
             return code;
