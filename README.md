@@ -416,13 +416,17 @@ call of an instance method also reaches its overriders in every class that an in
 is, extends or implements. It stops at the classes that the runtime provides (`String`,
 `StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`, the `java.lang.ref`
 references; `RUNTIME_CLASSES`), whose sources reach deep into the JVM, and at what is not
-translated: reflection, method handles, serialization and security (`UNTRANSLATED`). Library code
+translated: reflection (but not `java.lang.reflect.Array`, which is array code), method handles,
+serialization, security and class loading (`Module`, `ResourceBundle`, `ServiceLoader`,
+`jdk.internal.loader`; `UNTRANSLATED`). Library code
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
 `comparableClassFor` and parallel streams reach threads, so the boundary is needed. A program that
 puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints the count).
 Annotations reach nothing, and neither does the code that Java Flight Recorder's flags guard
 (`jfrTracing` in `Throwable` and the file streams, which only JFR sets, by reflection): it is not
-translated.
+translated. Nor is what `AbstractPipeline.isParallel()` guards, when a check over the code reached
+shows that no stream can become parallel (`program/reach/sequential.rs`); otherwise reachability
+runs again without that assumption.
 
 `--survey` prints what the code reachable from `main` uses that is not supported yet instead of
 translating it: for the program's own code and for its library code, separately, per feature
@@ -431,7 +435,8 @@ translating it: for the program's own code and for its library code, separately,
 three example places (`file:line`, relative to the source or library root). It also prints the
 order of features that frees the most code at each step, the methods of the runtime's classes
 and of the untranslated ones that are called, and the native methods reached, each with the
-shortest chain of calls from `main` that reaches it (`program/survey.rs`). `--survey-json <file>`
+shortest chain of calls from `main` that reaches it and whether the runtime implements it
+(`program/survey.rs`). `--survey-json <file>`
 writes the same census as JSON for scripts: the pieces with their class, kind, name, location and
 features, the runtime calls, the natives, the methods outside the sources that are called and the
 classes whose objects are created, with their chains. It is a syntactic census, so it misses the narrower rejections of the lowering.
@@ -465,6 +470,19 @@ natives: stdin has its own buffered reader, stdout writes through the buffered `
 its order is kept with `println`, stderr is written as it is (unbuffered, like Java's), and files
 are opened by path. Translated programs cannot reach these natives yet: the JDK classes that call
 them need the object model to give each stream its descriptor.
+
+A native method of a translated JDK class is never lowered itself (javac marks it `native`); a
+call of one becomes the runtime function that `ast/natives.rs` names for its class, name and
+signature, and any other is rejected with its name and signature. The runtime has (`vm.rs`,
+`fd.rs`): every `registerNatives()` and `initIDs()`, `VM.initialize` and
+`CDS.initializeFromArchive` of a class literal (nothing); `CDS.getCDSConfigStatus` and
+`getRandomSeedForDumping` (0: no class data sharing); `ContinuationSupport.isSupported0` (false,
+as with `-XX:-VMContinuations`); `VM.getNanoTimeAdjustment` (HotSpot's, from the system clock);
+`FileDescriptor.getHandle` (-1) and `getAppend` (the descriptor's `O_APPEND`); and
+`CRC32.update` and `updateBytes0` (zlib's CRC-32). `Unsafe.arrayBaseOffset` and
+`arrayIndexScale` of an array class literal are HotSpot's layout (16, and 1 to 8 by element, 4
+for references) and are answered at the call, so their `Class`-taking natives are not reached.
+`String.intern()` is the string itself; `==` on two strings stays rejected.
 
 ### Not yet
 

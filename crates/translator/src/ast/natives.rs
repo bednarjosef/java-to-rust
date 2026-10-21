@@ -1,5 +1,5 @@
 //! The JDK methods that bottom out in the JVM, which the runtime implements by hand
-//! (`java_runtime::natives`, `math`, `fdlibm`, `out`).
+//! (`java_runtime::natives`, `math`, `fdlibm`, `out`, `fd`, `vm`).
 
 /// A call into the native layer; its arguments are those of the `Builtin` that holds it, with
 /// the receiver first for instance methods.
@@ -78,6 +78,69 @@ pub enum Native {
     FileWrite,
     /// `writeBytes(b, off, len, append)`.
     FileWriteBytes,
+    /// A native that does nothing in a translated program, such as `registerNatives()`: its
+    /// statement is dropped.
+    Nothing,
+    /// `CDS.getCDSConfigStatus()`.
+    CdsConfigStatus,
+    /// `CDS.getRandomSeedForDumping()`.
+    CdsRandomSeed,
+    /// `ContinuationSupport.isSupported0()`.
+    ContinuationsSupported,
+    /// `VM.getNanoTimeAdjustment(offsetInSeconds)`.
+    NanoTimeAdjustment,
+    /// `Unsafe.arrayBaseOffset(c)` of a class literal `c` of an array class.
+    ArrayBaseOffset,
+    /// `Unsafe.arrayIndexScale(c)` of a class literal of an array class, by the element type: a
+    /// primitive type, or `java.lang.Object` for every reference type.
+    ArrayIndexScale(&'static str),
+    /// `FileDescriptor.getHandle(fd)`.
+    DescriptorHandle,
+    /// `FileDescriptor.getAppend(fd)`.
+    DescriptorAppend,
+    /// `CRC32.update(crc, b)`.
+    Crc32Update,
+    /// `CRC32.updateBytes0(crc, b, off, len)`.
+    Crc32UpdateBytes,
+}
+
+/// The native methods of translated JDK classes that the runtime implements and whose calls
+/// become a `Native` of their arguments as they are, by class, name and javac's signature. (The
+/// stream natives of `java.io`, which take their object's descriptor, are lowered on their own.)
+pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Native> {
+    Some(match (class, name, signature) {
+        // Registering a class's natives with the JVM, and looking up the fields they use.
+        (_, "registerNatives" | "initIDs", "()void") => Native::Nothing,
+        // Registers `getNanoTimeAdjustment`, and nothing else.
+        ("jdk.internal.misc.VM", "initialize", "()void") => Native::Nothing,
+        ("jdk.internal.misc.VM", "getNanoTimeAdjustment", "(long)long") => Native::NanoTimeAdjustment,
+        ("jdk.internal.misc.CDS", "getCDSConfigStatus", "()int") => Native::CdsConfigStatus,
+        ("jdk.internal.misc.CDS", "getRandomSeedForDumping", "()long") => Native::CdsRandomSeed,
+        // Without an archive there is nothing to restore. Its argument is a class literal, which
+        // the lowering drops with the call (`class_literal_call`).
+        ("jdk.internal.misc.CDS", "initializeFromArchive", "(java.lang.Class<?>)void") => Native::Nothing,
+        ("jdk.internal.vm.ContinuationSupport", "isSupported0", "()boolean") => {
+            Native::ContinuationsSupported
+        }
+        ("java.io.FileDescriptor", "getHandle", "(int)long") => Native::DescriptorHandle,
+        ("java.io.FileDescriptor", "getAppend", "(int)boolean") => Native::DescriptorAppend,
+        ("java.util.zip.CRC32", "update", "(int,int)int") => Native::Crc32Update,
+        ("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int") => Native::Crc32UpdateBytes,
+        _ => return None,
+    })
+}
+
+/// Whether the runtime implements a native method of a translated JDK class: one of
+/// `declared_native`, or a stream native of `java.io`, which `lower/natives.rs` lowers with the
+/// descriptor of the stream's object.
+pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
+    declared_native(class, name, signature).is_some()
+        || matches!(
+            (class, name),
+            ("java.io.FileInputStream", "open0" | "read0" | "readBytes" | "available0" | "skip0" | "close0")
+                | ("java.io.FileOutputStream", "open0" | "write" | "writeBytes" | "close0")
+                | ("java.io.FileDescriptor", "close0")
+        )
 }
 
 /// The `Math` and `StrictMath` functions the native layer covers (beyond `abs`, `max`, `min`).
@@ -126,3 +189,32 @@ pub const MATH_FUNCTIONS: &[&str] = &[
     "toRadians",
     "toDegrees",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn natives_of_jdk_classes_are_found_by_class_name_and_signature() {
+        // The classes of `java.io` and `java.util.zip` cannot be stood in for in a test (java.base
+        // exports them, so javac reads the JDK's), so their mapping is checked here.
+        let found = |class, name, signature| declared_native(class, name, signature);
+        assert_eq!(
+            found("java.io.FileDescriptor", "getAppend", "(int)boolean"),
+            Some(Native::DescriptorAppend)
+        );
+        assert_eq!(found("java.io.FileDescriptor", "getHandle", "(int)long"), Some(Native::DescriptorHandle));
+        assert_eq!(found("java.io.FileInputStream", "initIDs", "()void"), Some(Native::Nothing));
+        assert_eq!(found("java.nio.MappedMemoryUtils", "registerNatives", "()void"), Some(Native::Nothing));
+        assert_eq!(found("java.util.zip.CRC32", "update", "(int,int)int"), Some(Native::Crc32Update));
+        assert_eq!(
+            found("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int"),
+            Some(Native::Crc32UpdateBytes)
+        );
+        // Another overload, or another class's method of the same name, is not the native.
+        assert_eq!(found("java.util.zip.CRC32", "update", "(byte[],int,int)void"), None);
+        assert_eq!(found("jdk.internal.misc.Unsafe", "initialize", "()void"), None);
+        assert!(runtime_native("java.io.FileInputStream", "readBytes", "(byte[],int,int)int"));
+        assert!(!runtime_native("java.lang.Throwable", "fillInStackTrace", "(int)java.lang.Throwable"));
+    }
+}

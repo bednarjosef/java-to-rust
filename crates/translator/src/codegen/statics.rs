@@ -6,9 +6,11 @@
 
 use super::*;
 
-/// The `init` function of a class, which runs the class's static initialization once.
+/// The `init` function of a class, which runs the class's static initialization once; from
+/// another package, with that package's path (`crate::a::b::init_point`).
 pub(super) fn init_name(class: &str) -> String {
-    format!("init_{}", snake_case(&struct_name(class)))
+    let (path, local) = modules::split(class);
+    path + &format!("init_{}", snake_case(&local.replace('.', "")))
 }
 
 /// The thread-local flag that records that a class's static initialization has started.
