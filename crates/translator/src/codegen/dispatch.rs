@@ -423,7 +423,23 @@ impl<'a> Gen<'a> {
             Narrowing::Known(false) => return self.failing_cast(to, value),
             Narrowing::Up | Narrowing::Known(true) => {}
         }
-        let Some(t) = self.enum_type(to) else { return self.expr(value) };
+        let Some(t) = self.enum_type(to) else {
+            // The values of `to` are the objects of one class: a value of another class is one
+            // whose objects never reach `to`, so it is null.
+            let target = self.class.class_index(to).map(|t| self.rep_class(t));
+            if let (Some(target), Some(c)) = (target, self.struct_class(value))
+                && target != c
+            {
+                let ty = self.ty_name(to);
+                let text = self.expr(value).text;
+                return Code::atom(if self.nullable(value) {
+                    format!("{{ let _ = {text}; None::<{ty}> }}")
+                } else {
+                    format!("{{ let _ = {text}; let value: {ty} = {}; value }}", absent(self, c))
+                });
+            }
+            return self.expr(value);
+        };
         // A new object becomes a value of the target's enum directly.
         if let ExprKind::New { ctor: Some(ctor), args, .. } = &value.kind {
             return self.new_object_as(*ctor, args, Some(t));
