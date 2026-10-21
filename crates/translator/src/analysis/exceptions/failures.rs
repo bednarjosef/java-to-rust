@@ -80,6 +80,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | BuilderOp::IsEmpty
             | BuilderOp::CompareTo,
         ) => None,
+        // Inserting at the start is always in bounds.
+        Builtin::Builder(BuilderOp::Insert) if matches!(args[1].kind, ExprKind::Int(0)) => None,
         // An index out of the builder's bounds.
         Builtin::Builder(_) => Some("?"),
         Builtin::ArraysSort | Builtin::ArraysToString => None,
@@ -389,7 +391,20 @@ pub(super) fn runtime_failures(
                         | Builtin::Bits(BitsOp::ParseRadix, _)
                         | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
                 );
-                let checked = if takes_null || matches!(builtin, Builtin::String(StringOp::Join) | Builtin::Format) {
+                // Appending or inserting a null string, builder or boxed value writes "null" (the
+                // generator's `appended`); a null `char[]` throws.
+                let text = |e: &Expr| {
+                    matches!(e.ty, Type::Null | Type::String | Type::StringBuilder | Type::Boxed(_))
+                };
+                let writes_null = match builtin {
+                    Builtin::Builder(BuilderOp::Append) => args.len() == 2 && text(&args[1]),
+                    Builtin::Builder(BuilderOp::Insert) => args.len() == 3 && text(&args[2]),
+                    _ => false,
+                };
+                let checked = if takes_null
+                    || writes_null
+                    || matches!(builtin, Builtin::String(StringOp::Join) | Builtin::Format)
+                {
                     &args[..args.len().min(1)]
                 } else {
                     &args[..]
