@@ -3,6 +3,12 @@
 //! initialization must run eagerly (see `analysis::statics`) has an `init` function that runs its
 //! `<clinit>` once, and every static method, constructor and access from another class calls it
 //! first, as Java initializes a class on first use.
+//!
+//! A program that starts threads has one copy of each static for the process, read and written
+//! with the same text: a primitive is a `java::Atomic` (`X.get()`, `X.set(v)`, which acquire and
+//! release), anything else a `java::Locked` (`X.with_borrow(..)`, `X.with_borrow_mut(..)`), inside
+//! a `LazyLock` when its initializer is not a constant; an eager class's flag is a
+//! `java::ClassInit`, which makes another thread wait while one runs the initialization.
 
 use super::*;
 
@@ -13,7 +19,7 @@ pub(super) fn init_name(class: &str) -> String {
     path + &format!("init_{}", snake_case(&local.replace('.', "")))
 }
 
-/// The thread-local flag that records that a class's static initialization has started.
+/// The flag that records that a class's static initialization has started.
 fn flag(class: &str) -> String {
     format!("{}__INITIALIZED", struct_name(class)).to_uppercase()
 }
@@ -71,6 +77,9 @@ impl<'a> Gen<'a> {
             return;
         }
         self.gap();
+        if self.facts.threaded {
+            return self.process_statics(&eager, cells);
+        }
         self.line("thread_local! {");
         self.indent += 1;
         for &t in &eager {
@@ -81,21 +90,7 @@ impl<'a> Gen<'a> {
             ));
         }
         for (t, f) in cells {
-            let init = match &f.init {
-                Some(e) if !self.facts.eager_init.contains(&t) => {
-                    self.field_value(e, f.ty, self.facts.nullable_statics.contains(&(t, f.name.clone())))
-                }
-                _ => self.placeholder(f.ty, self.facts.nullable_statics.contains(&(t, f.name.clone()))),
-            };
-            let cell = cell_name(&class.types[t].name, &f.name);
-            let ty = self.field_ty_name(f.ty, self.facts.nullable_statics.contains(&(t, f.name.clone())));
-            // A literal initializer is evaluated at compile time.
-            let constant = init == "None"
-                || init == "String::new()"
-                || init.parse::<f64>().is_ok()
-                || init.trim_start_matches('-').chars().next().is_some_and(|c| c.is_ascii_digit())
-                    && init.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-                || matches!(init.as_str(), "true" | "false");
+            let (cell, ty, init, constant) = self.static_cell(t, f);
             let kind = if is_cell(f.ty) { "Cell" } else { "RefCell" };
             let init = if constant {
                 format!("const {{ {kind}::new({init}) }}")
@@ -108,14 +103,69 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
+    /// The cell of static field `f` of class `t`: its name, its Rust type, its initial value,
+    /// and whether that value is a constant, which Rust evaluates at compile time. An eager
+    /// class's cells start at Java's default.
+    fn static_cell(&mut self, t: usize, f: &'a Field) -> (String, String, String, bool) {
+        let nullable = self.facts.nullable_statics.contains(&(t, f.name.clone()));
+        let init = match &f.init {
+            Some(e) if !self.facts.eager_init.contains(&t) => self.field_value(e, f.ty, nullable),
+            _ => self.placeholder(f.ty, nullable),
+        };
+        let cell = cell_name(&self.class.types[t].name, &f.name);
+        let ty = self.field_ty_name(f.ty, nullable);
+        let constant = init == "None"
+            || init == "String::new()"
+            || init.parse::<f64>().is_ok()
+            || init.trim_start_matches('-').chars().next().is_some_and(|c| c.is_ascii_digit())
+                && init.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            || matches!(init.as_str(), "true" | "false");
+        (cell, ty, init, constant)
+    }
+
+    /// The statics of a program with threads, one for the process (see the module's
+    /// documentation).
+    fn process_statics(&mut self, eager: &[usize], cells: Vec<(usize, &'a Field)>) {
+        for &t in eager {
+            let init = self.runtime("ClassInit");
+            let flag = flag(&self.class.types[t].name);
+            self.line(&format!("{}static {flag}: {init} = {init}::new();", self.vis()));
+        }
+        for (t, f) in cells {
+            let (cell, ty, init, constant) = self.static_cell(t, f);
+            let kind = if is_cell(f.ty) { self.runtime("Atomic") } else { self.runtime("Locked") };
+            let vis = self.vis();
+            if constant {
+                self.line(&format!("{vis}static {cell}: {kind}<{ty}> = {kind}::new({init});"));
+            } else {
+                self.line(&format!(
+                    "{vis}static {cell}: LazyLock<{kind}<{ty}>> = LazyLock::new(|| {kind}::new({init}));"
+                ));
+            }
+        }
+    }
+
     /// At the start of an `init` function: returns if initialization has started, else records
     /// that it has, so that a use during initialization, from the same thread, sees the class as
-    /// initialized, as Java does.
+    /// initialized, as Java does. With threads, another thread's initialization is waited for,
+    /// and `init_done` ends the function.
     pub(super) fn init_guard(&mut self, class: &str) {
+        if self.facts.threaded {
+            self.line(&format!("if !{}.start() {{", flag(class)));
+            self.line("    return;");
+            self.line("}");
+            return;
+        }
         self.line(&format!("if {}.get() {{", flag(class)));
         self.line("    return;");
         self.line("}");
         self.line(&format!("{}.set(true);", flag(class)));
+    }
+
+    /// At the end of an `init` function in a program with threads: the initialization is done,
+    /// for the threads that wait for it.
+    pub(super) fn init_done(&mut self, class: &str) {
+        self.line(&format!("{}.finish();", flag(class)));
     }
 
     /// The call that initializes the class of a static field or method before it is used, or

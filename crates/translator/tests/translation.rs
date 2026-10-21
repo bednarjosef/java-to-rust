@@ -1565,13 +1565,14 @@ fn program_errors_name_their_file() {
             ),
             (
                 "p/Other.java",
-                "package p;\nclass Other {\n    static void run() {\n        Thread t = null;\n    }\n}\n",
+                "package p;\nclass Other {\n    static void run() {\n        ProcessBuilder t = null;\n    }\n}\n",
             ),
         ],
     );
     let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
-    let error = java_to_rust::translate_program(&program).expect_err("Thread is not supported").to_string();
-    assert!(error.ends_with("Other.java:4:9: type `java.lang.Thread` not supported yet"), "{error}");
+    let error =
+        java_to_rust::translate_program(&program).expect_err("ProcessBuilder is not supported").to_string();
+    assert!(error.ends_with("Other.java:4:9: type `java.lang.ProcessBuilder` not supported yet"), "{error}");
 }
 
 #[test]
@@ -3826,4 +3827,21 @@ fn new_object_creates_a_plain_object_with_its_identity() {
         &rust,
         &["struct PlainObject {", "let o = Rc::new(PlainObject::new());", "java.lang.Object"],
     );
+}
+
+#[test]
+fn an_element_that_may_be_null_is_passed_as_the_receiver_that_it_is() {
+    // `start` uses `this` as a value, so it takes the element's `&Rc<..>`, which the null check
+    // already gives.
+    let rust = translate(
+        "class P {
+            static class Box { int v; static void register(Box b) { b.v++; } void start() { register(this); } }
+            public static void main(String[] args) {
+                Box[] boxes = new Box[2];
+                for (int i = 0; i < 2; i++) { boxes[i] = new Box(); boxes[i].start(); }
+                System.out.println(boxes[0].v + boxes[1].v);
+            }
+        }",
+    );
+    assert_contains(&rust, &["PBox::start(java::non_null(boxes[i as usize].as_ref()));"]);
 }

@@ -29,6 +29,7 @@ mod owned;
 mod patterns;
 mod ranges;
 mod statics;
+mod threads;
 
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
@@ -38,6 +39,13 @@ pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_ty
 
 #[derive(Default)]
 pub struct Facts {
+    /// Whether the program starts a thread (see `threads`).
+    pub threaded: bool,
+    /// The classes, by type index, whose objects two threads may reach: `Arc`s, with a
+    /// `java::Locked` unless immutable.
+    pub thread_shared: HashSet<usize>,
+    /// The methods of those classes that must not borrow their object for the whole call.
+    pub long_methods: HashSet<usize>,
     /// Integer `+`, `-`, `*`, negation, `++`, `--`, compound assignments and `Math.abs` that
     /// never overflow.
     pub no_overflow: HashSet<ExprId>,
@@ -168,10 +176,21 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
         field_owners: hierarchy::field_owners(class),
         ..Facts::default()
     };
+    facts.threaded = threads::threaded(class);
+    if facts.threaded {
+        facts.thread_shared = threads::thread_shared(class);
+        facts.long_methods = threads::long_methods(class, &facts.thread_shared);
+    }
     ranges::analyze(class, &mut facts);
     let reach = borrowing::reach(class);
     facts.immutable = objects::immutable_classes(class);
-    facts.field_level = hierarchy::field_level(class, &reach.reach, &facts.immutable, &facts.fields_structs);
+    facts.field_level = hierarchy::field_level(
+        class,
+        &reach.reach,
+        &facts.immutable,
+        &facts.fields_structs,
+        &facts.long_methods,
+    );
     facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
     facts.flows = hierarchy::flows(class, &facts.field_level, &Default::default());
     // An exception is converted to `Throwable` when it is thrown, so it is never a plain value.
@@ -192,6 +211,9 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     patterns::check_enum_casts(class, &facts)?;
     patterns::check_object_values(class, &facts)?;
     boxing::analyze(class, &mut facts);
+    if facts.threaded {
+        threads::check(class, &facts)?;
+    }
     borrowed_params(class, &mut facts);
     facts.borrowed_objects = borrowed_objects(class, &facts);
     ascii_strings(class, &mut facts);

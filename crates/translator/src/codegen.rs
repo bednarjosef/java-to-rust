@@ -500,10 +500,19 @@ impl<'a> Gen<'a> {
         {
             self.line(&format!("{}();", statics::init_name(&self.class.types[t].name)));
         }
+        // The program ends when its last thread does, not when `main` returns.
+        if m.is_main && self.facts.threaded {
+            let guard = self.runtime("main_thread");
+            self.line(&format!("let _main = {guard}();"));
+        }
+        let initializes = m.name == "<clinit>" && self.facts.threaded;
         if m.is_ctor {
             self.constructor(m);
         } else {
-            self.stmts(&m.body, true);
+            self.stmts(&m.body, !initializes);
+            if initializes {
+                self.init_done(name);
+            }
             if self.throwing && m.ret == Type::Void && exceptions::completes_all(&m.body) {
                 self.line("Ok(())");
             }

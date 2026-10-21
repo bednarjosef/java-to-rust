@@ -392,6 +392,13 @@ impl<'t> Walk<'t> {
                 for overrider in self.overriders(&key) {
                     self.work.push(Item::Method(overrider));
                 }
+                // The thread that `start()` starts runs the thread's `run()`, which runs its
+                // `Runnable` (see `java/Threads.java` in the translator).
+                if key.0 == "java.lang.Thread" && key.1 == "start" {
+                    for class in ["java.lang.Thread", "java.lang.Runnable"] {
+                        self.work.push(Item::Method((class.into(), "run".into(), "()void".into())));
+                    }
+                }
             }
             return;
         };

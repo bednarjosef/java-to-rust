@@ -61,7 +61,9 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
         lowering.declare_standard()?;
         let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
-        lowering.functional = functional::Functional::select(decls.iter().map(|d| d.0), &declared);
+        // The standard classes may name interfaces too (`Thread` holds a `Runnable`).
+        let trees = decls.iter().map(|d| d.0).chain(lowering.standard.classes.iter().map(|(_, d)| *d));
+        lowering.functional = functional::Functional::select(trees, &declared);
         lowering.declare_functional()?;
         lowering.declare_plain_object(decls.iter().map(|d| d.0))?;
         lowering.name_nested();

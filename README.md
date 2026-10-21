@@ -28,8 +28,8 @@ shared and mutable, and a reference that may be null is an `Option` of it. An ar
 counting, not by a garbage collector, so a cycle of objects is never freed. The runtime crate
 (`crates/runtime`) supplies what Rust lacks: Java's exact number semantics (wrapping integer
 overflow, Java's float rules and printing), strings, `StringBuilder`, `String.format`, regular
-expressions and charsets with Java's results. Collections and threads are not translated yet (see
-"Not yet" below).
+expressions and charsets with Java's results. Threads are real threads, and the objects they share
+are `Arc`s with a lock; collections are not translated yet (see "Not yet" below).
 
 ### Level 2: analysis-driven Rust
 
@@ -132,8 +132,7 @@ A small subset, end to end:
 - **Classes**: static and instance methods, overloading, varargs, fields with initializers,
   instance initializer blocks, static fields, constructors (including `this(...)`), `new`,
   object-typed fields and `null` objects, and a user `toString` in `println` and concatenation.
-  `synchronized (x)` checks `x` for null and runs the block: a program has one thread, so the lock
-  does nothing.
+  `synchronized (x)` checks `x` for null and runs the block; it does not lock yet (see "Threads").
 - **Class trees, interfaces and generics**: class trees of the program's own classes translate,
   abstract or not and of any depth: `extends`, abstract methods, overriding and virtual calls,
   `super(...)` and `super.m(...)`, upcasts, `==` on objects of a class tree, and printing through
@@ -199,6 +198,23 @@ A small subset, end to end:
   catches, throwing a value that may be null, and a `yield` or a constructor's `return` through a
   `finally`. A constructor that throws returns a `Result`, as a method does. The design is in
   [docs/exceptions.md](docs/exceptions.md).
+- **Threads** are the platform's: a class that extends `Thread` and overrides `run`, or a
+  `Thread` given a `Runnable` (a class or a lambda), with `start`, `join` (with and without a
+  timeout), `isAlive`, `currentThread`, `getName`/`setName`, `setDaemon`/`isDaemon`, `getId`,
+  `threadId`, `getPriority`/`setPriority`, `toString` and `sleep`, as Java names and numbers them
+  (`Thread-0`, `Thread[#3,main,5,main]`). `java.lang.Thread` is `crates/translator/java/Threads.java`,
+  written in Java over the runtime's natives (`thread.rs`) and given to the program as
+  `Standard.java` is. The program ends when its last thread that is not a daemon ends; an exception
+  that ends a thread prints `Exception in thread "<name>" ...` and the other threads go on. In a
+  program that starts a thread, the classes that threads may share (`Thread` and its subclasses,
+  the classes of statics, and what their fields reach) are `Arc<java::Locked<C>>`, or `Arc<C>` when
+  immutable, and every other class keeps `Rc<RefCell<C>>`; arrays are `java::SharedArray<T>`; and
+  statics are process-wide (`java::Atomic<T>` for primitives, `java::Locked<T>` otherwise, and a
+  `java::ClassInit` that runs a class's initializer once). A program without threads translates
+  exactly as before. `synchronized` does not lock yet, and a `volatile` static is read with
+  acquire and written with release, as every static is. Monitors, interrupts, sequentially
+  consistent `volatile`, the atomics and `java.util.concurrent` are next; the design is in
+  [docs/multi-threading.md](docs/multi-threading.md).
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`).
 - **Library**: a set of `Math`, `StrictMath`, `Double`, `Float`, `Boolean`, `Integer`, `Long`,
   `Byte`, `Short` and `Character` methods, `String`, `StringBuilder` and `StringBuffer`, and
@@ -531,8 +547,9 @@ Each construct below is rejected at translation with an error that names it:
   lambda, the default and static methods of the JDK's functional interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
-- threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls
-  above.
+- of threads: `wait`/`notify`, `interrupt`, thread groups, uncaught exception handlers,
+  `ThreadLocal` and the `java.util.concurrent` classes; a `StringBuilder`, or a box compared by
+  identity, that threads may share.
 
 Also rejected: the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and
 the like), `Character.toChars(int, char[], int)`, `Charset` values kept in variables, and the

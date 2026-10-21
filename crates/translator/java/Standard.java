@@ -175,6 +175,15 @@ class IllegalArgumentException extends RuntimeException {
     }
 }
 
+class IllegalThreadStateException extends IllegalArgumentException {
+    public IllegalThreadStateException() {
+    }
+
+    public IllegalThreadStateException(String s) {
+        super(s);
+    }
+}
+
 class NumberFormatException extends IllegalArgumentException {
     public NumberFormatException() {
     }

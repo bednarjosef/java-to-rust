@@ -7,7 +7,9 @@
 //! (with what they use in turn), as classes of the program: they are lowered, analysed and
 //! generated like the program's own, so a program's exception class extends them like any
 //! superclass. A standard class is abstract unless the program creates its objects, so that the
-//! enum of `Throwable` has a variant only for the classes whose objects exist.
+//! enum of `Throwable` has a variant only for the classes whose objects exist. `java.lang.Thread`
+//! comes the same way from `java/Threads.java` (see docs/multi-threading.md): it is a standard
+//! class too, though not an exception.
 //!
 //! The runtime raises some of them itself (`RAISED`): a division by zero, an index out of
 //! bounds, a malformed number. Where a `catch` or a `finally` of the program might see such a
@@ -67,43 +69,52 @@ fn package_of(simple: &str) -> &'static str {
     OTHER_PACKAGES.iter().find(|(s, _)| *s == simple).map_or("java.lang", |(_, p)| p)
 }
 
-/// The class declarations of `java/Standard.java`, renamed from the package `standard` to their
-/// real packages, as javac names the real classes in a program's tree.
+/// The class declarations of `java/Standard.java` and `java/Threads.java`, renamed from the
+/// packages `standard` and `threads` to their real packages, as javac names the real classes in a
+/// program's tree.
 fn template() -> &'static [Value] {
     static DECLS: OnceLock<Vec<Value>> = OnceLock::new();
     DECLS.get_or_init(|| {
-        let text = include_str!(concat!(env!("OUT_DIR"), "/standard.json"));
-        let mut tree: Value = serde_json::from_str(text).expect("build.rs writes the tree of Standard.java");
-        rename(&mut tree);
-        match tree["units"][0]["tree"]["typeDecls"].take() {
-            Value::Array(decls) => decls,
-            _ => panic!("the tree of Standard.java has its classes"),
+        let files = [
+            ("standard", include_str!(concat!(env!("OUT_DIR"), "/standard.json"))),
+            ("threads", include_str!(concat!(env!("OUT_DIR"), "/threads.json"))),
+        ];
+        let mut decls = Vec::new();
+        for (package, text) in files {
+            let mut tree: Value = serde_json::from_str(text).expect("build.rs writes the templates' trees");
+            rename(&mut tree, package);
+            match tree["units"][0]["tree"]["typeDecls"].take() {
+                Value::Array(found) => decls.extend(found),
+                _ => panic!("the tree of the template `{package}` has its classes"),
+            }
         }
+        decls
     })
 }
 
-/// Gives the classes of the package `standard` their real packages, in every name and type.
-fn rename(v: &mut Value) {
+/// Gives the classes of the template's package `from` their real packages, in every name and type.
+fn rename(v: &mut Value, from: &str) {
+    let prefix = format!("{from}.");
     match v {
         Value::String(s) => {
-            while let Some(at) = s.find("standard.") {
-                let rest = &s[at + "standard.".len()..];
+            while let Some(at) = s.find(&prefix) {
+                let rest = &s[at + prefix.len()..];
                 let end = rest.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(rest.len());
                 let simple = rest[..end].to_string();
-                s.replace_range(at..at + "standard".len(), package_of(&simple));
+                s.replace_range(at..at + from.len(), package_of(&simple));
             }
         }
-        Value::Array(items) => items.iter_mut().for_each(rename),
+        Value::Array(items) => items.iter_mut().for_each(|i| rename(i, from)),
         Value::Object(map) => {
             // A class's symbol names its package as its owner.
             if map.get("kind").and_then(Value::as_str) == Some("CLASS")
-                && map.get("owner").and_then(Value::as_str) == Some("standard")
+                && map.get("owner").and_then(Value::as_str) == Some(from)
             {
                 let simple = map.get("name").and_then(Value::as_str).unwrap_or_default();
                 let package = package_of(simple);
                 map.insert("owner".into(), Value::String(package.into()));
             }
-            map.values_mut().for_each(rename);
+            map.values_mut().for_each(|v| rename(v, from));
         }
         _ => {}
     }
@@ -266,7 +277,14 @@ impl Standard {
             return Standard::default();
         }
         // `toString` is how an uncaught exception is printed.
-        uses.members.insert(("java.lang.Throwable".into(), "toString".into(), "()java.lang.String".into()));
+        let throwable = |c: &String| standard_subclass(c, "java.lang.Throwable");
+        if uses.classes.iter().any(throwable) || uses.members.iter().any(|m| throwable(&m.0)) {
+            uses.members.insert((
+                "java.lang.Throwable".into(),
+                "toString".into(),
+                "()java.lang.String".into(),
+            ));
+        }
         let decls: Vec<(String, &'static Value)> = template().iter().map(|d| (qualified(d), d)).collect();
         let decl = |name: &str| decls.iter().find(|(n, _)| n == name).map(|(_, d)| *d);
         let mut scanned: HashSet<(String, String, String)> = HashSet::new();
@@ -284,6 +302,15 @@ impl Standard {
                 if let Some(s) = d["extendsClause"]["javaType"].as_str() {
                     uses.classes.insert(s.to_string());
                 }
+            }
+            // The thread that `start0` starts runs the thread's `run()`.
+            if uses.members.iter().any(|m| m.0 == "java.lang.Thread" && m.1 == "start0") {
+                uses.members.insert(("java.lang.Thread".into(), "run".into(), "()void".into()));
+            }
+            // A thread prints as its `toString`, which string conversion calls unseen.
+            if uses.classes.contains("java.lang.Thread") {
+                let to_string = ("java.lang.Thread".into(), "toString".into(), "()java.lang.String".into());
+                uses.members.insert(to_string);
             }
             for member in uses.members.clone() {
                 if !scanned.insert(member.clone()) {

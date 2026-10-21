@@ -330,7 +330,8 @@ impl<'a> Gen<'a> {
             return None;
         }
         let value = self.owned(e);
-        Some(Code::atom(format!("{}({value})", self.runtime("share"))))
+        let share = self.runtime(if self.facts.threaded { "share_across" } else { "share" });
+        Some(Code::atom(format!("{share}({value})")))
     }
 
     /// `a[i]` of a plain array or row, as a value.

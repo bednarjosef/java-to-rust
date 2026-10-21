@@ -59,6 +59,24 @@ pub enum Native {
     OnSpinWait,
     /// `Thread.yield()`.
     ThreadYield,
+    /// The natives of the translator's `Thread` (`java/Threads.java`): the number of the next
+    /// thread created without a name, and the id of the next thread.
+    ThreadNumber,
+    ThreadId,
+    /// The id of the main thread.
+    MainThreadId,
+    /// Whether the calling thread has its `Thread` object, `setCurrent0(t)` that gives it one,
+    /// and `current0()` that returns it.
+    HasCurrentThread,
+    SetCurrentThread,
+    CurrentThread,
+    /// `start0(t, tid, name, daemon)`, to which lowering adds the call `t.run()` that the new
+    /// thread makes, as a fifth argument that is not evaluated where the native is.
+    ThreadStart,
+    /// `alive0(tid)`, `join0(tid, millis)` and `rename0(tid, name)`.
+    ThreadAlive,
+    ThreadJoin,
+    ThreadRename,
     /// `FileInputStream.open0(name)`: opens the file and returns its descriptor.
     FileOpenRead,
     /// `FileOutputStream.open0(name, append)`: creates or opens the file and returns its descriptor.
@@ -126,6 +144,18 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.io.FileDescriptor", "getAppend", "(int)boolean") => Native::DescriptorAppend,
         ("java.util.zip.CRC32", "update", "(int,int)int") => Native::Crc32Update,
         ("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int") => Native::Crc32UpdateBytes,
+        ("java.lang.Thread", "nextThreadNum", "()int") => Native::ThreadNumber,
+        ("java.lang.Thread", "nextThreadId", "()long") => Native::ThreadId,
+        ("java.lang.Thread", "mainId0", "()long") => Native::MainThreadId,
+        ("java.lang.Thread", "hasCurrent0", "()boolean") => Native::HasCurrentThread,
+        ("java.lang.Thread", "setCurrent0", "(java.lang.Thread)void") => Native::SetCurrentThread,
+        ("java.lang.Thread", "current0", "()java.lang.Thread") => Native::CurrentThread,
+        ("java.lang.Thread", "start0", "(java.lang.Thread,long,java.lang.String,boolean)void") => {
+            Native::ThreadStart
+        }
+        ("java.lang.Thread", "alive0", "(long)boolean") => Native::ThreadAlive,
+        ("java.lang.Thread", "join0", "(long,long)void") => Native::ThreadJoin,
+        ("java.lang.Thread", "rename0", "(long,java.lang.String)void") => Native::ThreadRename,
         _ => return None,
     })
 }

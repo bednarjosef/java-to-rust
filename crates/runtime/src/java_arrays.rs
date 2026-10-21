@@ -2,7 +2,7 @@
 //! type says how Java compares, hashes and tests it equal, so one function serves every type.
 
 use crate::{
-    Array, bool_hash, double_compare, double_hash, float_hash, from_vec, len, long_hash, string_hash, throw,
+    Elements, bool_hash, double_compare, double_hash, float_hash, len, long_hash, string_hash, throw,
 };
 use std::cmp::Ordering;
 
@@ -127,10 +127,10 @@ fn range(len: usize, from: i32, to: i32) -> std::ops::Range<usize> {
 
 /// `Arrays.equals(a, b)`: the same length, and equal elements in order. A null array equals only
 /// another null array.
-pub fn equals<T: JavaElement>(a: Option<&Array<T>>, b: Option<&Array<T>>) -> bool {
+pub fn equals<T: JavaElement>(a: Option<&impl Elements<T>>, b: Option<&impl Elements<T>>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => {
-            let (a, b) = (a.borrow(), b.borrow());
+            let (a, b) = (a.items(), b.items());
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.java_eq(y))
         }
         (None, None) => true,
@@ -139,51 +139,51 @@ pub fn equals<T: JavaElement>(a: Option<&Array<T>>, b: Option<&Array<T>>) -> boo
 }
 
 /// `Arrays.hashCode(a)`: `31 * h + hash(e)` over the elements, from 1; 0 for a null array.
-pub fn hash_code<T: JavaElement>(a: Option<&Array<T>>) -> i32 {
-    a.map_or(0, |a| a.borrow().iter().fold(1i32, |h, e| h.wrapping_mul(31).wrapping_add(e.java_hash())))
+pub fn hash_code<T: JavaElement>(a: Option<&impl Elements<T>>) -> i32 {
+    a.map_or(0, |a| a.items().iter().fold(1i32, |h, e| h.wrapping_mul(31).wrapping_add(e.java_hash())))
 }
 
 /// `Arrays.sort(a)` for elements that are not doubles or floats, in Java's order.
-pub fn sort_all<T: JavaElement>(a: &Array<T>) {
-    a.borrow_mut().sort_by(JavaElement::java_cmp);
+pub fn sort_all<T: JavaElement>(a: &impl Elements<T>) {
+    a.items_mut().sort_by(JavaElement::java_cmp);
 }
 
 /// `Arrays.sort(a, from, to)`.
-pub fn sort_range<T: JavaElement>(a: &Array<T>, from: i32, to: i32) {
-    let r = range(a.borrow().len(), from, to);
-    a.borrow_mut()[r].sort_by(JavaElement::java_cmp);
+pub fn sort_range<T: JavaElement>(a: &impl Elements<T>, from: i32, to: i32) {
+    let r = range(a.items().len(), from, to);
+    a.items_mut()[r].sort_by(JavaElement::java_cmp);
 }
 
 /// `Arrays.fill(a, from, to, v)`.
-pub fn fill_range<T: Clone>(a: &Array<T>, from: i32, to: i32, v: T) {
-    let r = range(a.borrow().len(), from, to);
-    a.borrow_mut()[r].fill(v);
+pub fn fill_range<T: Clone>(a: &impl Elements<T>, from: i32, to: i32, v: T) {
+    let r = range(a.items().len(), from, to);
+    a.items_mut()[r].fill(v);
 }
 
 /// `Arrays.copyOfRange(a, from, to)`: the elements from `from` up to `to`, padded with `zero` past
 /// the end of `a`.
-pub fn copy_of_range<T: Clone>(a: &Array<T>, from: i32, to: i32, zero: T) -> Array<T> {
+pub fn copy_of_range<T: Clone, A: Elements<T>>(a: &A, from: i32, to: i32, zero: T) -> A {
     if from > to {
         throw("java.lang.IllegalArgumentException", &format!("{from} > {to}"));
     }
-    let items = a.borrow();
+    let items = a.items();
     if from < 0 || from as usize > items.len() {
         throw("java.lang.ArrayIndexOutOfBoundsException", &format!("Array index out of range: {from}"));
     }
     let mut copy: Vec<T> = items[from as usize..].to_vec();
     copy.resize(to as usize - from as usize, zero);
-    from_vec(copy)
+    A::made(copy)
 }
 
 /// `Arrays.binarySearch(a, key)`: the index of `key`, or `-(insertion point) - 1`.
-pub fn binary_search_all<T: JavaElement>(a: &Array<T>, key: T) -> i32 {
+pub fn binary_search_all<T: JavaElement>(a: &impl Elements<T>, key: T) -> i32 {
     binary_search_range(a, 0, len(a), key)
 }
 
 /// `Arrays.binarySearch(a, from, to, key)`, with Java's algorithm, so that the same index is found
 /// among equal elements.
-pub fn binary_search_range<T: JavaElement>(a: &Array<T>, from: i32, to: i32, key: T) -> i32 {
-    let items = a.borrow();
+pub fn binary_search_range<T: JavaElement>(a: &impl Elements<T>, from: i32, to: i32, key: T) -> i32 {
+    let items = a.items();
     let r = range(items.len(), from, to);
     let (mut low, mut high) = (r.start as i64, r.end as i64 - 1);
     while low <= high {
@@ -199,10 +199,11 @@ pub fn binary_search_range<T: JavaElement>(a: &Array<T>, from: i32, to: i32, key
 
 /// `Arrays.deepToString(a)`: `show` formats each element, a row being formatted the same way; a
 /// null array is `null`.
-pub fn deep_to_string<T: Clone>(a: Option<&Array<T>>, show: impl Fn(T) -> String) -> String {
+pub fn deep_to_string<T: Clone>(a: Option<&impl Elements<T>>, show: impl Fn(T) -> String) -> String {
     match a {
         Some(a) => {
-            let items: Vec<String> = a.borrow().iter().cloned().map(show).collect();
+            let items: Vec<T> = a.items().clone();
+            let items: Vec<String> = items.into_iter().map(show).collect();
             format!("[{}]", items.join(", "))
         }
         None => String::from("null"),
@@ -211,6 +212,6 @@ pub fn deep_to_string<T: Clone>(a: Option<&Array<T>>, show: impl Fn(T) -> String
 
 /// `a.clone()`: a new array of the same elements. The elements are handles, so rows of an array
 /// of arrays are shared with the copy, as in Java.
-pub fn clone_array<T: Clone>(a: &Array<T>) -> Array<T> {
-    from_vec(a.borrow().clone())
+pub fn clone_array<T: Clone, A: Elements<T>>(a: &A) -> A {
+    A::made(a.items().clone())
 }
