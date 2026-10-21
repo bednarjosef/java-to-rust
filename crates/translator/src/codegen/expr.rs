@@ -394,6 +394,12 @@ impl<'a> Gen<'a> {
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
             // An upcast or a downcast between the program's types, or a string, a box or a
             // primitive becoming an `Object`.
+            ExprKind::Cast(to @ Type::Class(..), value)
+                if let Some(t) = self.closure_type(*to)
+                    && let ExprKind::New { args, ctor: Some(ctor), .. } = &value.kind =>
+            {
+                self.closure(t, *ctor, args)
+            }
             ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
             // A cast to an enum of a value that may be null, which an enum value is not.
             ExprKind::Cast(to @ Type::Enum(_), value) if matches!(value.ty, Type::Class(..)) && self.nullable(value) => {
@@ -446,7 +452,11 @@ impl<'a> Gen<'a> {
             }
             ExprKind::MethodCall { receiver, args, resolved, is_super, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
-                let code = if self.class.methods[index].is_static {
+                let code = if self.closure_type(receiver.ty).is_some() {
+                    self.closure_call(receiver, index, args)
+                } else if self.inlined(receiver, index) {
+                    self.inline_call(index, args)
+                } else if self.class.methods[index].is_static {
                     let args = self.call_args(index, args).join(", ");
                     Code::atom(format!("{}({args})", self.static_fn(index)))
                 } else if !*is_super && let Some(t) = self.enum_of(receiver) {

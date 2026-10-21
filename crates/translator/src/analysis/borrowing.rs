@@ -94,7 +94,12 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
     let mut methods: HashSet<usize> = (0..scans.len())
         .filter(|&m| match homes[m] {
             _ if class.methods[m].is_ctor => false,
-            Home::Class(c) => always(c) || (!scans[m].this_as_value && !reach[m].contains(name(c))),
+            Home::Class(c) => {
+                always(c)
+                    || (!scans[m].this_as_value
+                        && !reach[m].contains(name(c))
+                        && !facts.long_methods.contains(&m))
+            }
             Home::Fields(_) => true,
             _ => false,
         })

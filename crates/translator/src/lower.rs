@@ -12,6 +12,7 @@ mod foreach;
 mod functional;
 mod generic_args;
 mod generics;
+mod handles;
 mod hierarchy;
 mod lambdas;
 mod object;
@@ -55,6 +56,7 @@ pub use program::lower_program;
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
+    charsets::check(unit)?;
     // A `;` at top level and an annotation type (`@interface`) do nothing when the program runs.
     let decls: Vec<Node> = unit
         .list("typeDecls")
@@ -66,7 +68,9 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
         lowering.declare_standard()?;
         let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
-        lowering.functional = functional::Functional::select(decls.iter().map(|d| d.0), &declared);
+        // The standard classes may name interfaces too (`Thread` holds a `Runnable`).
+        let trees = decls.iter().map(|d| d.0).chain(lowering.standard.classes.iter().map(|(_, d)| *d));
+        lowering.functional = functional::Functional::select(trees, &declared);
         lowering.declare_functional()?;
         lowering.declare_plain_object(decls.iter().map(|d| d.0))?;
         lowering.name_nested();
@@ -374,9 +378,7 @@ impl<'t> Lowering<'t> {
             {
                 Ok(Type::class(ENUM))
             }
-            "java.nio.charset.Charset" => {
-                error(node.pos(), "a `Charset` outside `getBytes` or `new String` not supported yet")
-            }
+            "java.nio.charset.Charset" => Ok(Type::Charset),
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
@@ -511,6 +513,7 @@ impl<'t> Lowering<'t> {
 
     fn expr(&self, node: Node<'t>) -> Result<Expr, Error> {
         let kind = match node.kind() {
+            _ if charsets::is_charset_op(node) => self.charset_op(node)?,
             "PARENTHESIZED" => return self.expr(node.child("expression")?),
             "INT_LITERAL" => ExprKind::Int(self.number(node)?),
             "LONG_LITERAL" => ExprKind::Long(self.number(node)?),
@@ -635,6 +638,9 @@ impl<'t> Lowering<'t> {
             "INSTANCE_OF" => self.instance_of(node)?,
             "SWITCH_EXPRESSION" => self.switch_expr(node)?,
             "EQUAL_TO" | "NOT_EQUAL_TO" if self.compares_classes(node) => self.class_comparison(node)?,
+            "EQUAL_TO" | "NOT_EQUAL_TO" if charsets::compares_charsets(node) => {
+                self.charset_comparison(node)?
+            }
             kind => {
                 let left = node.child("leftOperand");
                 let op = binary_op(node, kind);
@@ -720,6 +726,9 @@ impl<'t> Lowering<'t> {
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
+        if let Some(kind) = self.handle_access(node, &symbol)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);
         }
@@ -729,7 +738,7 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.copy_of_with_class(node, &symbol)? {
             return Ok(kind);
         }
-        let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
+        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
             let resolved = self.method_index(&symbol);
