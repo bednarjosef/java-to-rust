@@ -114,7 +114,9 @@ included). A program that warms up also reports the time of its timed kernel. Me
 measured.
 
 `docs/performance.md` has the table from one run on the `array-ownership` branch, and the causes
-of the slow cases. `NodeList` does not compile yet.
+of the slow cases. Freeing a long chain of objects, such as `NodeList`'s list, does not
+overflow the stack: classes on a cycle of field types get an iterative `Drop`
+(docs/object-model.md, "1.13 Dropping long chains").
 
 ## First milestone
 
@@ -164,14 +166,17 @@ A small subset, end to end:
   its value. A class without `toString` prints as Java's `Object.toString` does, its binary name and
   its hash code in hexadecimal (`Point@1b6d3586`). `new Object()` makes an object of a class
   without fields, `PlainObject`, equal only to itself and printed as `java.lang.Object@..`, as the
-  JDK's lock objects and placeholder values (`HashSet`'s `PRESENT`) need. An array as an
-  `Object`, and `==` between two `Object`s that may both be strings or boxes (whose identity the
-  translation does not keep, except in the shortcut `a == b || a.equals(b)`) are rejected. The
+  JDK's lock objects and placeholder values (`HashSet`'s `PRESENT`) need. An array becomes an
+  `Object` too (`Object::IntArray(..)`), shared and compared by identity, so a `Deque<int[]>` holds
+  its arrays. `==` between two `Object`s that may both be strings or boxes (whose identity the
+  translation does not keep, except in the shortcut `a == b || a.equals(b)`) is rejected. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
   and a use where javac substituted a type argument gets the checked cast back
   (`java::cast(b.get().as_integer(), ..)`). `Comparable` as a type (a bound, mostly) is an enum like
-  `Object`, over strings, boxes, the program's enums and its classes that implement it. A method
+  `Object`, over strings, boxes, the program's enums and its classes that implement it, and so is
+  `Number` (`T extends Number`, `List<? extends Number>`), over the numeric boxes, whose
+  `intValue()` and the others convert as Java does. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &
@@ -247,15 +252,19 @@ A small subset, end to end:
     `max`/`min`, `parseDouble`, `parseFloat`, `parseBoolean`, `logicalAnd`/`logicalOr`/
     `logicalXor`, and the `valueOf` of both with Java's grammar and rounding (whitespace,
     suffixes, hexadecimal floats).
-  - `Integer` and `Long`: parsing with a radix, the bit and radix methods (`toHexString`,
-    `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), and the unsigned methods
-    (`divideUnsigned`, `remainderUnsigned`, `compareUnsigned`, `toUnsignedString`,
-    `parseUnsignedInt`, `toUnsignedLong`, `toUnsignedInt`), which `Byte` and `Short` share.
-  - `Character`: the code point methods (`toChars`, `toString(int)`, `charCount`,
-    `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint`, ...), the tests
+  - `Integer` and `Long`: parsing with a radix and over a `begin`/`end` range of a `String`
+    (`parseInt(s, begin, end, radix)`, `valueOf(s, radix)`), the bit and radix methods
+    (`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), and the unsigned
+    methods (`divideUnsigned`, `remainderUnsigned`, `compareUnsigned`, `toUnsignedString`,
+    `parseUnsignedInt` with a radix or a range, `toUnsignedLong`, `toUnsignedInt`), which `Byte` and
+    `Short` share. Their `NumberFormatException` and `IndexOutOfBoundsException` messages are Java's.
+  - `Short` and `Byte`: `parseShort`/`parseByte` and `valueOf`, with or without a radix.
+  - `Character`: the code point methods (`toChars`, `toChars(int, char[], int)`, `toString(int)`,
+    `charCount`, `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint`, ...), the tests
     `isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`, `digit`,
-    `forDigit` and `getNumericValue`, case conversion, and the `MIN_VALUE`, `MAX_VALUE` and
-    `MIN_NORMAL` constants of the wrapper classes.
+    `forDigit` and `getNumericValue`, with their `int` code point overloads (`isLetter(int)`,
+    `toUpperCase(int)`, `digit(int, int)`, ...), case conversion, and the `MIN_VALUE`, `MAX_VALUE`
+    and `MIN_NORMAL` constants of the wrapper classes.
   - `String`: searching, slicing, case, trimming, replacing, comparing, `split`, `replaceAll`,
     `matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf` and `new String(char[])`,
     and `String.valueOf(char[])` and `valueOf(char[], offset, count)` (which throw as Java does
@@ -281,10 +290,11 @@ keeps the same bits, so they become `b = b.wrapping_add(x as i8)` and `b = b.wra
 Strings are Rust strings, so a lone surrogate `char` turns into `?` when it is printed or
 concatenated (as Java's UTF-8 output prints it), even where Java would later pair it up. The
 `Character` methods are exact on Latin-1, ASCII and fullwidth letters and digits, and
-`isWhitespace` excludes no-break spaces as Java does. Beyond Latin-1, `isLetter`, `isAlphabetic`
-and `isDigit` use Rust's Unicode tables, which are not Java's general categories, so they can
-differ from Java there; `Character.digit` recognises only ASCII and fullwidth letters and digits,
-so it can differ from Java on other decimal digits.
+`isWhitespace` excludes no-break spaces as Java does. The letter, digit, numeric value and case
+tables are generated from the JDK's own data, so the `Character` tests and conversions, including
+the `int` overloads for supplementary code points, follow Java's. Case conversion uses Rust's
+Unicode tables with Java's exceptions added, and `isAlphabetic` uses Rust's `is_alphabetic`; both
+can differ from Java on code points the corpus does not test.
 
 The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`, `charAt` agree on
 `"né😀e"`), and throw what Java throws (`StringIndexOutOfBoundsException` with Java's message).
@@ -385,9 +395,12 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   or by range with Java's range checks, `fill` by range, `copyOfRange` on primitives,
   `binarySearch` in both forms (`-(insertion point) - 1` when absent), and `deepToString` on
   arrays of primitive or `String` rows. `a.clone()` is a shallow copy; rows of a 2-D array are
-  shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`. Not
-  yet: `copyOf` and `copyOfRange` on `String` arrays (the padding would need nulls that the
-  nullness analysis does not see), `equals(null, b)`, `asList` and `stream`.
+  shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`.
+  `copyOf` works on any array, and `copyOf(a, n, type)` is the same copy (its class is dropped).
+  Translated with the JDK's sources, every other call of `Arrays` (a sort with a `Comparator`, a
+  sort of objects, `asList`) is a call of the translated `java/util/Arrays.java`, and
+  reachability follows only those (`lower::runtime_arrays_call`). Not yet without the JDK:
+  `copyOfRange` on `String` arrays, `equals(null, b)`, `asList` and `stream`.
 - Objects (`analysis/objects.rs`, `analysis/owned.rs`, `analysis/borrowing.rs`). The faithful form
   of an object is `Rc<RefCell<C>>`, because Java references are shared and mutable. A class whose
   objects never change after construction is shared as `Rc<C>`: its fields are written only by its
@@ -408,7 +421,11 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
 - Class hierarchies (`ast/hierarchy.rs`, `analysis/hierarchy.rs`). A class with subclasses keeps
   its fields in a struct of its own, `ShapeFields`, which the struct of each subclass embeds as
   `base` (`Circle { base: ShapeFields::new("circle"), radius }`), and its constructors build that
-  struct. Its methods that use the object only for its fields and for calls of such methods that
+  struct. When a constructor of such a class uses `this` as a value or calls a method that a
+  subclass overrides, its class tree builds objects as Java does instead (`analysis/whole_objects.rs`):
+  the object is allocated with every field zero, null or false, then each class's constructor body
+  runs on it, the superclass's first, as a method (`construct_stage(&self, ..)`), so an override
+  that the superclass's constructor calls sees the subclass's fields unset. Its methods that use the object only for its fields and for calls of such methods that
   nothing overrides live on that struct (`c.borrow_mut().base.move_()`); the others are emitted for
   the concrete class, where `this` is the whole object, a superclass's method that the subclass
   overrides under a name of its own for `super` calls (`withdraw_in_account`). Where every value of
@@ -583,9 +600,7 @@ Each construct below is rejected at translation with an error that names it:
 - threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls
   above.
 
-Also rejected: the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and
-the like), `Character.toChars(int, char[], int)`, `Charset` values kept in variables, and the
-unsigned and parse methods with other argument counts.
+Also rejected: `Charset` values kept in variables.
 
 Checked by `--survey` on the JDK's sources: the library code that `HashMap` reaches uses
 interfaces, generic classes, inheritance, exceptions, inner classes and reflection, so none of it

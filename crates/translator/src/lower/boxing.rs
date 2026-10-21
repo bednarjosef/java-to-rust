@@ -27,6 +27,8 @@ pub(super) fn is_boxed_method(name: &str) -> bool {
         name,
         "parseInt"
             | "parseLong"
+            | "parseShort"
+            | "parseByte"
             | "parseDouble"
             | "parseFloat"
             | "parseBoolean"
@@ -87,10 +89,14 @@ impl<'t> Lowering<'t> {
         let op = match (name, symbol.is_static) {
             ("max", true) => return Ok(Builtin::MathMax),
             ("min", true) => return Ok(Builtin::MathMin),
-            ("parseInt" | "parseLong" | "valueOf", true) if args.len() == 2 => BoxedOp::ParseRadix,
-            ("parseInt" | "parseLong" | "parseDouble" | "parseFloat" | "parseBoolean", true) => {
-                BoxedOp::Parse
+            ("parseInt" | "parseLong" | "parseShort" | "parseByte" | "valueOf", true) if args.len() == 2 => {
+                BoxedOp::ParseRadix
             }
+            (
+                "parseInt" | "parseLong" | "parseShort" | "parseByte" | "parseDouble" | "parseFloat"
+                | "parseBoolean",
+                true,
+            ) => BoxedOp::Parse,
             ("valueOf", true) if args.first().is_some_and(|a| a.ty == Type::String) => BoxedOp::Parse,
             ("valueOf", true) => BoxedOp::Box,
             ("toString" | "hashCode", true) => {

@@ -13,6 +13,9 @@ pub enum UnsignedOp {
     ToString,
     /// `Integer.parseUnsignedInt(s)` and the radix form, `Long.parseUnsignedLong` too.
     Parse,
+    /// `Integer.parseUnsignedInt(s, begin, end, radix)` and `Long.parseUnsignedLong`, read from a
+    /// `CharSequence`.
+    ParseRange,
     /// `Integer.toUnsignedLong(i)`, `Byte.toUnsignedInt(b)` and the other unsigned views: the
     /// operand's bits read as unsigned, widened to the result type.
     Widen,

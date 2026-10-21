@@ -10,6 +10,7 @@ use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
 mod boxing;
+mod chains;
 mod character;
 mod charsets;
 mod classes;
@@ -26,6 +27,7 @@ mod math;
 mod names;
 mod null;
 mod object_clone;
+mod parse_range;
 mod primitives;
 mod statics;
 mod stmt;
@@ -135,7 +137,9 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         dereferenced: HashSet::new(),
         written: HashSet::new(),
         rejected: None,
+        chains: chains::Chains::default(),
     };
+    g.chains = g.find_chains();
     if modules.is_some() {
         let text = g.program(&live);
         g.check_dereferences();
@@ -200,6 +204,8 @@ enum Part {
 
 struct Gen<'a> {
     class: &'a Class,
+    /// The structs and enums that take part in long chains of objects (see `chains`).
+    chains: chains::Chains,
     facts: &'a Facts,
     /// Where each method is emitted (see `analysis::hierarchy`).
     homes: Vec<Home>,

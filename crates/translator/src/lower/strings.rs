@@ -301,6 +301,7 @@ impl<'t> Lowering<'t> {
             ("signum", 1) => BitsOp::Signum,
             ("toString", 2) => BitsOp::ToStringRadix,
             ("parseInt" | "parseLong", 2) if args[0].ty == Type::String => BitsOp::ParseRadix,
+            ("parseInt" | "parseLong", 4) if args[0].ty == Type::String => BitsOp::ParseRange,
             _ => return None,
         };
         symbol.is_static.then_some(Builtin::Bits(op, kind))

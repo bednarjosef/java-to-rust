@@ -391,8 +391,8 @@ impl<'a> Gen<'a> {
             // primitive becoming an `Object`.
             ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
             // A downcast from an interface to an enum that implements it, or from `Object` to a
-            // string or a box.
-            ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_)), value)
+            // string, a box or an array.
+            ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_) | Type::Array(_)), value)
                 if matches!(value.ty, Type::Class(..)) =>
             {
                 self.class_cast(*to, value)
@@ -596,8 +596,8 @@ impl<'a> Gen<'a> {
                 self.enum_builtin(builtin, args, ty, id)
             }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
-            Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty),
-            Builtin::CodePoint(op) => self.code_point_builtin(op, args),
+            Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty, id),
+            Builtin::CodePoint(op) => self.code_point_builtin(op, args, id),
             Builtin::Charset(op) => self.charset_builtin(op, args),
             Builtin::CharNumericValue => self.char_numeric_value(args),
             Builtin::CharDigit | Builtin::CharForDigit => self.character_radix(builtin, args),

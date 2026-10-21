@@ -46,10 +46,19 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StrictMath#floorMod",
         ],
     ),
-    ("java.lang.ArrayIndexOutOfBoundsException", &["ARRAY_ACCESS"]),
+    ("java.lang.ArrayIndexOutOfBoundsException", &["ARRAY_ACCESS", "java.lang.Character#toChars"]),
+    (
+        "java.lang.IndexOutOfBoundsException",
+        &[
+            "java.lang.Integer#parseInt",
+            "java.lang.Long#parseLong",
+            "java.lang.Integer#parseUnsignedInt",
+            "java.lang.Long#parseUnsignedLong",
+        ],
+    ),
     // A call or a field access on an object that may be null.
     ("java.lang.NullPointerException", &["METHOD_INVOCATION", "MEMBER_SELECT"]),
-    ("java.lang.IllegalArgumentException", &["enum#valueOf"]),
+    ("java.lang.IllegalArgumentException", &["enum#valueOf", "java.lang.Character#toChars"]),
     (
         "java.lang.StringIndexOutOfBoundsException",
         &[

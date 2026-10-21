@@ -495,7 +495,16 @@ are instance methods of exceptions, trivial once `Throwable` objects exist. In o
    - Behaviour: with an archive, sets the class's archived static fields (such as
      `ImmutableCollections.archivedObjects`); without one, does nothing, and the caller builds the
      values itself (`if (archivedObjects == null) { ... }`).
-   - Rust: nothing. The argument is a class literal, so the call can be dropped.
+   - Rust: nothing. The argument is a class literal, so the call can be dropped. Since nothing
+     sets the archived fields, a null test of one right after the call is always true: the fields
+     whose class tests them directly (`ImmutableCollections.archivedObjects`,
+     `Attributes.Name.KNOWN_NAMES`, `Configuration.EMPTY_CONFIGURATION`) are listed in
+     `program::reach::ARCHIVED_FIELDS`, and reachability, the survey and the lowering keep only
+     the branch that builds the values (`live_branch`). Without it, `ImmutableCollections`'s
+     sentinel `EMPTY` also took `archivedObjects[0]`, which could be any `Object`, so
+     `e1 != EMPTY` in `List12` compared two values that might be strings and was rejected. The
+     classes that copy the field into a local first (`FDBigInteger`, `BaseLocale`) are not
+     covered; the runtime's boxes have no source to translate.
    - **Done** for 4 to 6: `java::cds_config_status()` and `java::cds_random_seed_for_dumping()`
      (both 0), and `initializeFromArchive(C.class)` is dropped before its argument is lowered;
      another argument than a class literal is rejected.

@@ -110,7 +110,6 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.ref.ReferenceQueue",
     "java.lang.ref.SoftReference",
     "java.lang.ref.WeakReference",
-    "java.util.Arrays",
     "sun.util.logging.PlatformLogger",
 ];
 
@@ -171,6 +170,47 @@ pub const FALSE_FLAGS: &[(&str, &str)] = &[
     ("sun.nio.ch.FileChannelImpl", "jfrTracing"),
 ];
 
+/// Static fields that only the class data sharing archive sets, through the native
+/// `CDS.initializeFromArchive` at the start of their class's static initializer, which then tests
+/// each against null once to build the value itself when the archive had none. The runtime's
+/// `initializeFromArchive` sets nothing, so that test always finds null, and the branch that
+/// would use the archived value never runs.
+pub const ARCHIVED_FIELDS: &[(&str, &str)] = &[
+    ("java.lang.module.Configuration", "EMPTY_CONFIGURATION"),
+    ("java.util.ImmutableCollections", "archivedObjects"),
+    ("java.util.jar.Attributes.Name", "KNOWN_NAMES"),
+];
+
+/// Whether `condition` tests one of the `ARCHIVED_FIELDS` against null with `==` (`equal`) or
+/// `!=`.
+fn archived_null_test(condition: &Value, equal: bool) -> bool {
+    let kind = if equal { "EQUAL_TO" } else { "NOT_EQUAL_TO" };
+    let archived = |v: &Value| {
+        let symbol = &v["symbol"];
+        text(symbol, "kind") == "FIELD"
+            && ARCHIVED_FIELDS.contains(&(text(symbol, "owner"), text(symbol, "name")))
+    };
+    let null = |v: &Value| text(v, "kind") == "NULL_LITERAL";
+    let (left, right) = (&condition["leftOperand"], &condition["rightOperand"]);
+    text(condition, "kind") == kind && (archived(left) && null(right) || null(left) && archived(right))
+}
+
+/// The only branch of an `if` statement or a `?:` that can run, when its condition is never true
+/// (`never_true`: the `else` branch, `Null` for an `if` without one) or always true (a test that
+/// one of the `ARCHIVED_FIELDS` is null: the `then` branch).
+pub fn live_branch(node: &Value, sequential: bool) -> Option<&Value> {
+    if !matches!(text(node, "kind"), "IF" | "CONDITIONAL_EXPRESSION") {
+        return None;
+    }
+    let condition = &node["condition"];
+    let condition =
+        if text(condition, "kind") == "PARENTHESIZED" { &condition["expression"] } else { condition };
+    if never_true(condition, sequential) {
+        return Some(else_branch(node));
+    }
+    archived_null_test(condition, true).then(|| then_branch(node))
+}
+
 /// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
 /// branch can run: it reads one of the `FALSE_FLAGS`, or, when the program's streams are all
 /// `sequential` (see `sequential.rs`), it is a pipeline's `isParallel()` or a test whether one
@@ -190,14 +230,20 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
                 && FALSE_FLAGS.contains(&(text(symbol, "owner"), text(symbol, "name")))
         }
         "METHOD_INVOCATION" => sequential && sequential::is_parallel_test(condition),
+        "NOT_EQUAL_TO" => archived_null_test(condition, false),
         "GREATER_THAN" => sequential && sequential::has_children_test(condition),
         _ => false,
     }
 }
 
 /// The branch of an `if` statement or a `?:` that can run when its condition is never true.
-pub fn else_branch(node: &Value) -> &Value {
+fn else_branch(node: &Value) -> &Value {
     &node[if text(node, "kind") == "IF" { "elseStatement" } else { "falseExpression" }]
+}
+
+/// The branch of an `if` statement or a `?:` that runs when its condition is true.
+fn then_branch(node: &Value) -> &Value {
+    &node[if text(node, "kind") == "IF" { "thenStatement" } else { "trueExpression" }]
 }
 
 /// The feature that the class with qualified name `class` belongs to, if it is not translated.
@@ -218,6 +264,17 @@ pub fn outside(class: &str) -> bool {
 /// classes, or a standard exception class (see `lower::exceptions`).
 pub fn provided(class: &str) -> bool {
     RUNTIME_CLASSES.contains(&class) || crate::lower::is_standard(class)
+}
+
+/// Whether the node is a call of `java.util.Arrays` that the runtime does rather than the JDK's
+/// source, such as `Arrays.sort` of an `int[]`.
+pub fn runtime_arrays_call(node: &Value) -> bool {
+    let symbol = &node["symbol"];
+    text(node, "kind") == "METHOD_INVOCATION" && text(symbol, "owner") == "java.util.Arrays" && {
+        let args: Vec<&str> =
+            node["arguments"].as_array().into_iter().flatten().map(|a| text(a, "javaType")).collect();
+        crate::lower::runtime_arrays_call(text(symbol, "name"), &args)
+    }
 }
 
 /// The methods that a for-each over an `Iterable` calls.
@@ -519,21 +576,21 @@ impl<'t> Walk<'t> {
     /// by dispatch once the class is instantiated. (The body of an enum constant is not such a
     /// class, see `local_classes`, and is scanned with its constant.) Annotations are skipped:
     /// without reflection they do nothing at run time. So is the branch of an `if` or a `?:`
-    /// whose condition is never true (`never_true`).
+    /// that never runs (`live_branch`).
     fn scan(&mut self, value: &'t Value) {
         match value {
             Value::Object(_) if matches!(text(value, "kind"), "ANNOTATION" | "TYPE_ANNOTATION") => {}
             Value::Object(_)
                 if CLASS_KINDS.contains(&text(value, "kind"))
                     && self.classes.contains_key(&class_name(value)) => {}
-            // The branch that a condition that is never true guards is not reached, and neither
-            // is the condition, which the lowering drops: a flag's class need not exist.
-            Value::Object(_)
-                if matches!(text(value, "kind"), "IF" | "CONDITIONAL_EXPRESSION")
-                    && never_true(&value["condition"], self.sequential) =>
-            {
-                self.scan(else_branch(value));
+            // The branch that never runs is not reached, and neither is the condition, which the
+            // lowering drops: a flag's class need not exist.
+            Value::Object(_) if let Some(branch) = live_branch(value, self.sequential) => {
+                self.scan(branch);
             }
+            // A call of `java.util.Arrays` that the runtime does (`lower::runtime_arrays_call`)
+            // reaches only what its arguments do.
+            Value::Object(_) if runtime_arrays_call(value) => self.scan(&value["arguments"]),
             Value::Object(fields) => {
                 // A for-each over an `Iterable` calls its iterator's methods, which javac's tree
                 // does not show.
@@ -757,6 +814,53 @@ mod tests {
         assert!(reach.methods.contains(&method("Other", "run")), "{reach:?}");
         assert!(!reach.methods.contains(&method("Tracer", "trace")), "{reach:?}");
         assert!(!reach.classes.contains("Tracer"), "{reach:?}");
+    }
+
+    #[test]
+    fn only_the_branch_that_finds_no_archived_value_is_reached() {
+        let archived = json!({"kind": "IDENTIFIER",
+            "symbol": {"kind": "FIELD", "owner": "java.util.ImmutableCollections", "name": "archivedObjects", "static": true}});
+        let test = |kind: &str| {
+            json!({"kind": "PARENTHESIZED", "expression": {"kind": kind,
+                "leftOperand": archived, "rightOperand": {"kind": "NULL_LITERAL"}}})
+        };
+        let is_null = json!({"kind": "IF", "condition": test("EQUAL_TO"),
+            "thenStatement": call("Build", "run"), "elseStatement": call("Restore", "run")});
+        let not_null = json!({"kind": "IF", "condition": test("NOT_EQUAL_TO"),
+            "thenStatement": call("Restore", "again"), "elseStatement": call("Build", "again")});
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![is_null, not_null])]),
+            class("Build", &[("run", vec![]), ("again", vec![])]),
+            class("Restore", &[("run", vec![]), ("again", vec![])]),
+        ]});
+        let reach = reach(&[&unit], "Main").unwrap();
+        let method = |class: &str, name: &str| (class.to_string(), name.to_string(), "()void".to_string());
+        assert!(reach.methods.contains(&method("Build", "run")), "{reach:?}");
+        assert!(reach.methods.contains(&method("Build", "again")), "{reach:?}");
+        assert!(!reach.classes.contains("Restore"), "{reach:?}");
+    }
+
+    #[test]
+    fn a_call_of_arrays_that_the_runtime_does_is_not_followed_into_the_jdk() {
+        let sort = |arg: &str| {
+            json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "METHOD_INVOCATION",
+                "symbol": {"kind": "METHOD", "owner": "java.util.Arrays", "name": "sort", "type": "()void", "static": true},
+                "arguments": [{"kind": "IDENTIFIER", "javaType": arg}]}})
+        };
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![sort("int[]")])]),
+            class("java.util.Arrays", &[("sort", vec![call("DualPivot", "run")])]),
+            class("DualPivot", &[("run", vec![])]),
+        ]});
+        let runtime = reach(&[&unit], "Main").unwrap();
+        assert!(!runtime.classes.contains("DualPivot"), "{runtime:?}");
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![sort("Shape[]")])]),
+            class("java.util.Arrays", &[("sort", vec![call("DualPivot", "run")])]),
+            class("DualPivot", &[("run", vec![])]),
+        ]});
+        let translated = reach(&[&unit], "Main").unwrap();
+        assert!(translated.classes.contains("DualPivot"), "{translated:?}");
     }
 
     #[test]

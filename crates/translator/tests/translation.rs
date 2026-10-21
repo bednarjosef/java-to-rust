@@ -741,14 +741,23 @@ fn super_calls_are_non_virtual() {
 }
 
 #[test]
-fn a_superclass_constructor_that_leaks_this_is_rejected() {
-    let err = java_to_rust::translate(
+fn a_superclass_constructor_that_calls_an_override_runs_on_the_whole_object() {
+    let rust = translate(
         "abstract class Base { int x; Base() { x = size(); } abstract int size(); }
         class Impl extends Base { @Override int size() { return 3; } }
         class A { public static void main(String[] a) { System.out.println(new Impl().x); } }",
-    )
-    .expect_err("a superclass constructor that calls an overridable method must be rejected");
-    assert!(err.to_string().contains("call overridable methods not supported yet"), "{err}");
+    );
+    // The object is built with every field zero, then the superclass's constructor body runs on
+    // it as a method, where `size()` is the subclass's.
+    assert_contains(
+        &rust,
+        &[
+            "let mut this = Impl { base: BaseFields::new() };",
+            "this.construct_base();",
+            "fn construct_base(&mut self) {",
+            "self.base.x = self.size();",
+        ],
+    );
 }
 
 #[test]
@@ -3683,12 +3692,14 @@ fn identity_of_object_values_that_may_be_strings_is_rejected() {
 }
 
 #[test]
-fn an_array_as_an_object_is_rejected() {
-    let err = java_to_rust::translate(
+fn an_array_as_an_object_prints_as_its_jvm_name_and_hash() {
+    let rust = translate(
         "class M { public static void main(String[] x) { Object a = new int[2]; System.out.println(a); } }",
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("an array as an `Object` value not supported yet"), "{err}");
+    );
+    assert_contains(
+        &rust,
+        &["Object::IntArray(o) => f.write_str(&java::default_text(\"[I\", java::identity_hash(o))),"],
+    );
 }
 
 const GENERICS: &str = "
@@ -3796,6 +3807,33 @@ fn a_type_variable_with_several_bounds_is_cast_to_the_later_bound_it_calls() {
             "fn max(a: Object, b: Object) -> Object {",
             "java::cast(a.as_comparable(), \"Comparable\").compare_to(",
             "t.name()",
+        ],
+    );
+}
+
+#[test]
+fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
+    let rust = translate(
+        "public class Main {
+            public static void main(String[] args) {
+                int[] cell = {1, 2};
+                Object held = cell;
+                int[] back = (int[]) held;
+                back[0] = 5;
+                System.out.println(cell[0] + \" \" + (held == cell) + \" \" + (held instanceof String[]));
+                System.out.println(held.hashCode() == cell.hashCode());
+            }
+        }",
+    );
+    // The variant holds the array's handle, so the array keeps its identity in the `Object`.
+    assert_contains(
+        &rust,
+        &[
+            "IntArray(java::Array<i32>),",
+            "let held = Object::IntArray(cell.clone());",
+            "java::cast(held.as_int_array(), \"[I\")",
+            "(Object::IntArray(a), Object::IntArray(b)) => Rc::ptr_eq(a, b),",
+            "Object::IntArray(o) => java::identity_hash(o),",
         ],
     );
 }

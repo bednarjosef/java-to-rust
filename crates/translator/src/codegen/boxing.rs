@@ -228,6 +228,9 @@ impl<'a> Gen<'a> {
     /// `Integer.parseInt(s)` and the like. A null string is `null` to `parseBoolean`, which is
     /// false, and a `NullPointerException` to the others.
     fn parse(&mut self, kind: Type, arg: &'a Expr, id: ExprId) -> Code {
+        if matches!(kind, Type::Short | Type::Byte) {
+            return self.parse_small(kind, arg, "10", id);
+        }
         let text = if kind == Type::Boolean && self.nullable(arg) {
             format!("{}.unwrap_or(\"\")", self.option_ref(arg))
         } else if self.nullable(arg) {
@@ -249,12 +252,8 @@ impl<'a> Gen<'a> {
         let text =
             if self.nullable(text) { self.option_ref(text) } else { format!("Some({})", self.str_ref(text)) };
         let radix = self.value(radix, Type::Int);
-        self.may_fail(
-            id,
-            "parse_radix",
-            &format!("::<{}>", rust_type(kind)),
-            &format!("{text}, {}", radix.text),
-        )
+        let name = if matches!(kind, Type::Short | Type::Byte) { "parse_small_radix" } else { "parse_radix" };
+        self.may_fail(id, name, &format!("::<{}>", rust_type(kind)), &format!("{text}, {}", radix.text))
     }
 
     /// `a == b` for two primitives of `kind`, for `equals`: `Double.equals` compares bits.
