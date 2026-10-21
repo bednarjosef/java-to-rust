@@ -3,14 +3,16 @@
 // supports. `build.rs` prints their syntax tree with `JavaTree`, and lowering gives each class
 // its real package (`java.lang`, `java.util` or `java.io`) and adds the classes a program uses to it (see
 // `lower/exceptions.rs`). Stack traces and serialization are left out; `cause` is null where
-// Java's field holds the object itself to mean "not set yet", which only `initCause` tells apart.
-// `addSuppressed` does not reject itself or null here: this file cannot `throw`, since javac sees
-// its `Throwable` as unrelated to `java.lang.Throwable`, so `lower/suppress.rs` adds the checks.
+// Java's field holds the object itself to mean "not set yet", and `causeSet` tells the two apart
+// for `initCause`. `addSuppressed` does not reject itself or null here, and `initCause` neither a
+// second cause nor itself: this file cannot `throw`, since javac sees its `Throwable` as
+// unrelated to `java.lang.Throwable`, so `lower/suppress.rs` adds the checks.
 package standard;
 
 class Throwable {
     private String message;
     private Throwable cause;
+    private boolean causeSet;
     private Throwable[] suppressed = new Throwable[0];
 
     public Throwable() {
@@ -23,11 +25,13 @@ class Throwable {
     public Throwable(String message, Throwable cause) {
         this.message = message;
         this.cause = cause;
+        this.causeSet = true;
     }
 
     public Throwable(Throwable cause) {
         this.message = cause == null ? null : cause.toString();
         this.cause = cause;
+        this.causeSet = true;
     }
 
     public String getMessage() {
@@ -40,6 +44,15 @@ class Throwable {
 
     public Throwable getCause() {
         return cause;
+    }
+
+    // The message of the `IllegalStateException` for a cause set before, which
+    // `lower/suppress.rs` throws when it is not null.
+    public Throwable initCause(Throwable cause) {
+        String overwrite = causeSet ? "Can't overwrite cause with " + (cause == null ? "a null" : cause.toString()) : null;
+        this.cause = cause;
+        this.causeSet = true;
+        return this;
     }
 
     public void addSuppressed(Throwable exception) {

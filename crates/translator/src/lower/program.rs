@@ -121,6 +121,7 @@ fn lower_with<'t>(
         .map(|m| lowering.method(m).map_err(|e| (unit(lowering.methods[m].owner), e)))
         .collect::<Result<_, _>>()?;
     lowering.suppress_checks(&mut methods);
+    lowering.init_cause_checks(&mut methods);
     lowering.object_methods(&mut methods).map_err(|e| (None, e))?;
     lowering.finish_types(&mut types, &mut methods).map_err(|(t, e)| (unit(t), e))?;
     lowering.object_types(&mut types);
