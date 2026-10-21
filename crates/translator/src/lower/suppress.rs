@@ -16,11 +16,14 @@ impl<'t> Lowering<'t> {
     /// `addSuppressed`, with Java's messages, when the program's classes include it.
     pub(super) fn suppress_checks(&self, methods: &mut [Method]) {
         let Some(throwable) = self.type_index("java.lang.Throwable") else { return };
-        let Some(at) = methods.iter().position(|m| m.class == throwable && m.name == "addSuppressed" && !m.is_static)
+        let Some(at) =
+            methods.iter().position(|m| m.class == throwable && m.name == "addSuppressed" && !m.is_static)
         else {
             return;
         };
-        let Some((name, ty)) = methods[at].params.first().map(|p| (p.name.clone(), p.ty.clone())) else { return };
+        let Some((name, ty)) = methods[at].params.first().map(|p| (p.name.clone(), p.ty)) else {
+            return;
+        };
         let ctor = |class: &str| {
             let class = self.type_index(class)?;
             let ctor = methods.iter().position(|m| {
@@ -31,8 +34,8 @@ impl<'t> Lowering<'t> {
         let (Some(self_ctor), Some(null_ctor)) = (ctor(SELF), ctor(NULL)) else { return };
         let pos = methods[at].pos;
         let throwable_ty = Type::class(&self.types[throwable].name);
-        let var = || self.synth(ExprKind::Var(name.clone()), pos, ty.clone());
-        let this = self.synth(ExprKind::This, pos, throwable_ty.clone());
+        let var = || self.synth(ExprKind::Var(name.clone()), pos, ty);
+        let this = self.synth(ExprKind::This, pos, throwable_ty);
         let null = self.synth(ExprKind::Null, pos, Type::Null);
         let same = |right: Expr| ExprKind::Binary(BinOp::Eq, Box::new(var()), Box::new(right));
         let self_cond = self.synth(same(this), pos, Type::Boolean);
