@@ -19,7 +19,10 @@ pub fn try_secure_seed(num_bytes: i32) -> Result<Array<i8>, Failure> {
     if !bytes.is_empty() {
         let read = File::open("/dev/urandom").and_then(|mut source| source.read_exact(&mut bytes));
         if let Err(e) = read {
-            return Err(Failure { class: "java.security.ProviderException", message: format!("seed generator: {e}") });
+            return Err(Failure {
+                class: "java.security.ProviderException",
+                message: format!("seed generator: {e}"),
+            });
         }
     }
     Ok(from_vec(bytes.into_iter().map(|b| b as i8).collect()))

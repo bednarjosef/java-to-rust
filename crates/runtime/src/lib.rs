@@ -44,8 +44,8 @@ mod natives;
 mod null;
 mod out;
 mod parse_range;
-pub mod regex;
 mod random;
+pub mod regex;
 mod scalb;
 mod statics;
 pub mod string;
@@ -89,8 +89,8 @@ pub use out::{
     standard_close, standard_flush, standard_write, standard_write_bytes, write_byte,
 };
 pub use parse_range::{parse_range, parse_unsigned_range, try_parse_range, try_parse_unsigned_range};
-pub use regex::{matches_all, replace_all, replace_first, split};
 pub use random::*;
+pub use regex::{matches_all, replace_all, replace_first, split};
 pub use scalb::*;
 pub use statics::*;
 pub use string::*;
