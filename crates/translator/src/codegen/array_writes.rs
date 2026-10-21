@@ -3,6 +3,9 @@
 //! (`set(&self.memory, slot, self.pop())`) would borrow `self` twice. Java evaluates the array
 //! first, then the index and the value; the array's handle is copied into a local at that point,
 //! so the write holds no borrow of the object while that code runs.
+//! An index or value that lends an array to a call (`a[last(&a.borrow())] = v`) is computed into
+//! a local after it too: the borrow lives to the end of its statement, and the write would
+//! panic with the cell already borrowed.
 
 use super::*;
 
@@ -25,6 +28,22 @@ impl<'a> Gen<'a> {
         (Some(binding), handle)
     }
 
+    /// `text`, an index or value of a bound write, computed into a fresh local after the binding
+    /// of the array. A call in it that is lent a shared array (`f(&a.borrow())`) keeps that
+    /// borrow to the end of its statement, so it must not be in the statement of the write.
+    pub(super) fn bind_first(
+        &mut self,
+        binding: &mut Option<String>,
+        text: String,
+        names: &[&'static str],
+    ) -> String {
+        let name = self.fresh_name(names);
+        let mut lines = binding.take().unwrap_or_default();
+        lines.push_str(&format!(" let {name} = {text};"));
+        *binding = Some(lines);
+        name.to_string()
+    }
+
     /// The write `call`, after the binding of its array, if there is one, in a block.
     pub(super) fn bound_write(binding: Option<String>, call: String) -> String {
         match binding {
@@ -32,4 +51,16 @@ impl<'a> Gen<'a> {
             None => call,
         }
     }
+}
+
+/// Whether `e` passes an array to a method or a library call, which may borrow it.
+pub(super) fn lends_array(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| match &x.kind {
+        ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } | ExprKind::Builtin(_, args) => {
+            found |= args.iter().any(|a| matches!(a.ty, Type::Array(_)))
+        }
+        _ => {}
+    });
+    found
 }
