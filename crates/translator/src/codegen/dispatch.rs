@@ -228,8 +228,10 @@ impl<'a> Gen<'a> {
             let ty = self.ty_name(to);
             return Code::atom(format!("{option}.as_ref().map(|_| -> {ty} {{ {failed} }})"));
         }
+        // The value is typed, as `cast_failed` returns `!` and a local it initializes may be used.
         let v = self.expr(value).text;
-        Code::new(format!("{{ let _ = {v}; {failed} }}"), LOWEST)
+        let ty = self.ty_name(to);
+        Code::atom(format!("{{ let _ = {v}; None::<{ty}>.unwrap_or_else(|| {failed}) }}"))
     }
 
     /// `value instanceof T`.
@@ -405,7 +407,7 @@ impl<'a> Gen<'a> {
                     Some(variant) => format!("{variant}({handle})"),
                     None => {
                         let ty = struct_name(&self.class.types[t].name);
-                        format!("{{ let value: {ty} = {}; value }}", absent(self, c))
+                        format!("None::<{ty}>.unwrap_or_else(|| {})", absent(self, c))
                     }
                 }
             }
@@ -435,7 +437,7 @@ impl<'a> Gen<'a> {
                 return Code::atom(if self.nullable(value) {
                     format!("{{ let _ = {text}; None::<{ty}> }}")
                 } else {
-                    format!("{{ let _ = {text}; let value: {ty} = {}; value }}", absent(self, c))
+                    format!("{{ let _ = {text}; None::<{ty}>.unwrap_or_else(|| {}) }}", absent(self, c))
                 });
             }
             return self.expr(value);
@@ -480,7 +482,7 @@ impl<'a> Gen<'a> {
                 // An object's last use moves its handle in.
                 let Some(variant) = self.variant_of(t, c) else {
                     let ty = self.ty_name(to);
-                    return Code::atom(format!("{{ let value: {ty} = {}; value }}", absent(self, c)));
+                    return Code::atom(format!("None::<{ty}>.unwrap_or_else(|| {})", absent(self, c)));
                 };
                 let v = match self.runtime_of(c) {
                     Some(_) => self.variant_value(value).1,
