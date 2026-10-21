@@ -777,7 +777,10 @@ impl<'a> Gen<'a> {
         let Some(index) = self.to_string_index(e) else {
             let c = self.struct_class(e).expect("an object has a class type");
             let hash = match self.hash_index(c) {
-                Some(i) => self.handle_call(handle, e, i),
+                Some(i) => {
+                    let call = self.handle_call(handle, e, i);
+                    self.text_hash(i, call)
+                }
                 None => format!("{}({})", self.runtime("address_hash"), self.address(c, handle)),
             };
             return self.default_text(c, hash);
@@ -1245,7 +1248,10 @@ impl<'a> Gen<'a> {
         let Some(index) = self.to_string_index(e) else {
             let c = self.struct_class(e).expect("an object has a class type");
             let hash = match self.hash_index(c) {
-                Some(i) => self.method_call(e, i, &[]).text,
+                Some(i) => {
+                    let call = self.method_call(e, i, &[]).text;
+                    self.text_hash(i, call)
+                }
                 None => {
                     let address = self.receiver_address(e, c);
                     format!("{}({address})", self.runtime("address_hash"))
