@@ -896,7 +896,7 @@ impl<'a> Gen<'a> {
     /// method `r`: `Object`'s `equals` or `hashCode`, or for an enum's constant a method that
     /// every enum has, which `lower` checks: `name()`, `toString()` or `ordinal()`.
     fn builtin_arm(&mut self, r: usize, c: usize) -> String {
-        if self.is_object_method(r) {
+        if self.is_object_method(r) || self.redeclares_object_method(r) {
             return self.object_arm(r, c);
         }
         if self.is_comparable_method(r) {
@@ -926,6 +926,20 @@ impl<'a> Gen<'a> {
     /// Whether method `r` is `Object`'s own abstract `equals` or `hashCode`.
     pub(super) fn is_object_method(&self, r: usize) -> bool {
         self.object_index() == Some(self.class.methods[r].class)
+    }
+
+    /// Whether method `r` is an interface's abstract `equals(Object)` or `hashCode()`, which
+    /// restates `Object`'s (`Comparator.equals`): a class that does not override it runs
+    /// `Object`'s.
+    fn redeclares_object_method(&self, r: usize) -> bool {
+        let m = &self.class.methods[r];
+        let t = &self.class.types[m.class];
+        t.kind == TypeKind::Interface
+            && match (m.name.as_str(), &m.params[..]) {
+                ("equals", [p]) => matches!(p.ty, Type::Class(name, _) if name == OBJECT),
+                ("hashCode", []) => true,
+                _ => false,
+            }
     }
 
     /// Whether method `r` is `Comparable`'s own abstract `compareTo`.

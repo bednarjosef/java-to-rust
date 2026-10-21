@@ -88,7 +88,10 @@ impl<'a> Gen<'a> {
         // `super(...)` runs first: before any value that is computed into a local first.
         let base_part = base.map(|b| {
             let values = inits.iter().flatten().copied().chain(leading.iter().map(|&(_, v)| v));
-            if sequential || values.into_iter().any(has_effects) {
+            // A borrow in `super(...)` (the enclosing instance's enclosing instance, read through
+            // the `outer` parameter) lasts to the end of the literal, which may move what it borrows.
+            let borrows = b.contains(".borrow()") && !leading.is_empty();
+            if sequential || borrows || values.into_iter().any(has_effects) {
                 let temp = self.temp("base");
                 self.line(&format!("let {temp} = {b};"));
                 if temp == "base" { temp } else { format!("base: {temp}") }

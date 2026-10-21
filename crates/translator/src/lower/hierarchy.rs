@@ -11,7 +11,8 @@ impl<'t> Lowering<'t> {
         let node = self.types[t].node;
         let Some(clause) = node.get("extendsClause") else { return Ok(None) };
         // A generic superclass is its erasure.
-        let name = clause.java_type().split('<').next().unwrap_or_default();
+        let name = super::captures::raw(clause.java_type());
+        let name = name.as_str();
         match self.type_index(name) {
             Some(s) if self.types[s].node.kind() == "CLASS" => Ok(Some(s)),
             Some(_) => unsupported(clause, &format!("extending `{name}`")),
@@ -103,14 +104,22 @@ impl<'t> Lowering<'t> {
         // found from the current class.
         let outer = match call.child("methodSelect")?.get("expression") {
             Some(qualifier) => {
-                let Some(nested) = self.nesting(superclass).filter(|n| n.outer) else {
+                let Some(nested) = self.nesting(superclass) else {
                     return unsupported(
                         qualifier,
                         "a qualified `super(..)` of a class without an enclosing instance",
                     );
                 };
                 let value = self.expr(qualifier)?;
-                Some(self.convert(value, self.self_type(nested.enclosing)))
+                // A superclass whose code does not use its enclosing instance does not hold it.
+                if !nested.outer {
+                    if has_effects(&value) {
+                        return unsupported(qualifier, "an enclosing instance with effects that is not used");
+                    }
+                    None
+                } else {
+                    Some(self.convert(value, self.self_type(nested.enclosing)))
+                }
             }
             None => None,
         };
@@ -131,7 +140,7 @@ impl<'t> Lowering<'t> {
             return None;
         }
         let class =
-            node.get("expression")?.symbol().and_then(|s| self.type_index(super::captures::raw(s.ty)))?;
+            node.get("expression")?.symbol().and_then(|s| self.type_index(&super::captures::raw(s.ty)))?;
         (class != self.current.get() && self.types[class].node.kind() != "INTERFACE").then_some(class)
     }
 

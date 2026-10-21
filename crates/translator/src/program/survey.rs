@@ -758,8 +758,8 @@ fn class_features(decl: &Value, declared: &HashSet<String>) -> BTreeSet<&'static
     // Class trees of the program's own classes translate; a superclass from elsewhere does not.
     if kind == "CLASS" && !decl["extendsClause"].is_null() {
         let superclass = text(&decl["extendsClause"], "javaType");
-        let superclass = superclass.split('<').next().unwrap_or(superclass);
-        if !declared.contains(superclass) && !crate::lower::is_standard(superclass) {
+        let superclass = raw(superclass);
+        if !declared.contains(&superclass) && !crate::lower::is_standard(&superclass) {
             features.insert("extending classes outside the sources");
         }
     }
