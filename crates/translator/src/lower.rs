@@ -21,6 +21,7 @@ mod object;
 mod object_clone;
 mod objects;
 mod real_generics;
+mod references;
 mod statics;
 mod strings;
 mod stubs;
@@ -530,6 +531,9 @@ impl<'t> Lowering<'t> {
     }
 
     fn expr(&self, node: Node<'t>) -> Result<Expr, Error> {
+        if let Some(code) = self.reference_native(node)? {
+            return Ok(code);
+        }
         let kind = match node.kind() {
             _ if charsets::is_charset_op(node) => self.charset_op(node)?,
             "PARENTHESIZED" => return self.expr(node.child("expression")?),
