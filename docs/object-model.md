@@ -1740,6 +1740,13 @@ Generics are erased in lowering, and nothing after it knows they existed:
   with `Rc::ptr_eq`, `hashCode` is `java::identity_hash`, and it prints as Java's default
   `toString`, its JVM name and hash (`[I@1b6d3586`). Arrays of a Rust generic's instantiation
   (`Box<String>[]` under real generics) have no runtime class and are rejected.
+  A `StringBuilder` as an `Object` (a `Supplier<StringBuilder>`'s value, the elements of a
+  `List<StringBuilder>`) is done the same way: the runtime class `java.lang.StringBuilder` is added
+  when a builder is converted to `Object` or cast back, its variant holds the shared
+  `java::StringBuilder`, `==`, `equals` and `hashCode` are the builder's identity (`same`,
+  `identity_hash`), and it prints as its text (`ast::hierarchy::shared_of` gives the type of
+  either kind of runtime class). In a program with threads it is rejected, since the builder is
+  an `Rc` that an `Object` crossing threads cannot hold.
   `System.arraycopy` where the source or the destination is such an `Object` (the JDK's code
   generic over the kind of array, `SpinedBuffer.OfPrimitive`'s `T_ARR`) converts both to `Object`
   and matches their variants: two arrays of one type are copied as any two arrays are, anything

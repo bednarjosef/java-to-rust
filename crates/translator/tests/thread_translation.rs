@@ -166,3 +166,26 @@ fn a_string_builder_that_threads_share_is_rejected() {
     .to_string();
     assert!(error.ends_with("a `StringBuilder` that threads may share not supported yet"), "{error}");
 }
+
+#[test]
+fn a_string_builder_as_an_object_in_a_program_with_threads_is_rejected() {
+    // `Object`'s variant would hold the builder's `Rc`, and an `Object` may cross threads.
+    let error = java_to_rust::translate(
+        "class A {
+            static Object held;
+            public static void main(String[] args) throws InterruptedException {
+                held = new StringBuilder(\"a\");
+                Thread t = new Thread(() -> System.out.println(\"x\"));
+                t.start();
+                t.join();
+                System.out.println(held);
+            }
+        }",
+    )
+    .expect_err("a StringBuilder as an Object with threads is not supported")
+    .to_string();
+    assert!(
+        error.ends_with("a `StringBuilder` as an `Object` in a program with threads not supported yet"),
+        "{error}"
+    );
+}

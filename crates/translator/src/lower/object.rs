@@ -403,16 +403,19 @@ impl<'t> Lowering<'t> {
             let implements = std::iter::once(at.decl).chain(at.comparable.map(|c| c.decl)).collect();
             types.push(decl(ENUM, "", TypeKind::Interface, implements));
         }
-        // The arrays that become `Object`s, each named after its type (`int[]`).
-        for ty in self.object_arrays.borrow().iter() {
-            types.push(decl(&ty.to_string(), "", TypeKind::Runtime, vec![at.decl]));
+        // The arrays that become `Object`s, each named after its type (`int[]`), and the
+        // `StringBuilder`s.
+        for &ty in self.object_arrays.borrow().iter() {
+            let name = if ty == Type::StringBuilder { STRING_BUILDER.to_string() } else { ty.to_string() };
+            types.push(decl(&name, "", TypeKind::Runtime, vec![at.decl]));
         }
     }
 
-    /// Notes that arrays of type `ty`, if it is an array type, become `Object`s.
+    /// Notes that arrays of type `ty`, if it is an array type, or `StringBuilder`s become
+    /// `Object`s.
     pub(super) fn note_object_array(&self, ty: Type) {
         let mut arrays = self.object_arrays.borrow_mut();
-        if matches!(ty, Type::Array(_)) && !arrays.contains(&ty) {
+        if matches!(ty, Type::Array(_) | Type::StringBuilder) && !arrays.contains(&ty) {
             arrays.push(ty);
         }
     }
@@ -686,8 +689,9 @@ impl<'t> Lowering<'t> {
             Some(r) => self.expr(r)?,
             None => self.this(node),
         };
-        // An array's methods are `Object`'s: the array becomes an `Object` to call them.
-        let receiver = if matches!(receiver.ty, Type::Array(_)) {
+        // An array's methods are `Object`'s, and so are a builder's `equals` and `hashCode`: it
+        // becomes an `Object` to call them.
+        let receiver = if matches!(receiver.ty, Type::Array(_) | Type::StringBuilder) {
             self.object_array(node, receiver.ty)?;
             self.convert(receiver, Type::class(OBJECT))
         } else {

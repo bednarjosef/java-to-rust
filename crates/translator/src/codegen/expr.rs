@@ -416,11 +416,10 @@ impl<'a> Gen<'a> {
             }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
             // string, a box or an array.
-            ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_) | Type::Array(_)), value)
-                if matches!(value.ty, Type::Class(..)) =>
-            {
-                self.class_cast(*to, value)
-            }
+            ExprKind::Cast(
+                to @ (Type::Enum(_) | Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_)),
+                value,
+            ) if matches!(value.ty, Type::Class(..)) => self.class_cast(*to, value),
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {

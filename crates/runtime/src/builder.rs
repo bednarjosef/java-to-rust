@@ -308,6 +308,13 @@ pub fn same_builder(a: Option<&StringBuilder>, b: Option<&StringBuilder>) -> boo
 }
 
 /// `sb.toString()`, and how a builder prints.
+/// A builder's identity is its cell's address, which `identity_hash` hashes.
+impl crate::Handle for StringBuilder {
+    fn address(&self) -> *const u8 {
+        Rc::as_ptr(&self.0) as *const u8
+    }
+}
+
 impl fmt::Display for StringBuilder {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for c in char::decode_utf16(self.0.borrow().iter().copied()) {
