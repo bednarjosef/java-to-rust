@@ -207,9 +207,21 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
 fn representation(class: &Class, facts: &mut Facts) {
     let reach = borrowing::reach(class);
     facts.immutable = objects::immutable_classes(class);
-    facts.field_level = hierarchy::field_level(class, &reach.reach, &facts.immutable, &facts.fields_structs);
-    facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
-    facts.flows = hierarchy::flows(class, &facts.field_level, &Default::default());
+    loop {
+        facts.field_level =
+            hierarchy::field_level(class, &reach.reach, &facts.immutable, &facts.fields_structs);
+        facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
+        facts.flows = hierarchy::flows(class, &facts.field_level, &Default::default());
+        let handled = objects::calls_needing_handles(class, facts);
+        if handled.is_empty() {
+            break;
+        }
+        for c in handled {
+            for f in class.hierarchy.family(c) {
+                facts.immutable.remove(&class.types[f].name);
+            }
+        }
+    }
     // An exception is converted to `Throwable` when it is thrown, so it is never a plain value.
     if let Some(throwable) = class.type_index("java.lang.Throwable") {
         facts.owned.retain(|c| class.type_index(c).is_none_or(|t| !class.hierarchy.is_subtype(t, throwable)));

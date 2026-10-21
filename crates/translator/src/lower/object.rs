@@ -443,6 +443,8 @@ impl<'t> Lowering<'t> {
                 }
             }
         }
+        // The bridges written, by the method they call and the signature they have.
+        let mut written: Vec<(usize, usize)> = Vec::new();
         for &(i, o) in &wanted {
             methods[i].overrides.retain(|&x| x != o);
             // A method that this one overrides with the same signature has the bridge already.
@@ -451,7 +453,16 @@ impl<'t> Lowering<'t> {
             }) {
                 continue;
             }
+            // So has a method that overrides two methods with the same erased signature (an
+            // abstract class's `R evaluate(..)` and its interface's): one bridge overrides both.
+            if let Some(&(_, b)) =
+                written.iter().find(|&&(j, b)| j == i && Self::same_signature(&methods[b], &methods[o]))
+            {
+                methods[b].overrides.push(o);
+                continue;
+            }
             let bridge = self.bridge(&methods[i], i, &methods[o], o);
+            written.push((i, methods.len()));
             methods.push(bridge);
         }
         Ok(())
