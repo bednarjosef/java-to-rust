@@ -1143,6 +1143,20 @@ Decisions that change during the implementation are recorded here, milestone by 
   collector would; a `HashMap` that caches its `keySet()` leaks with its view. Programs print
   the same; memory is the cost, as with any other cycle of objects in the translation.
 
+### Anonymous classes
+
+- **Anonymous classes come with the captures commit too**; this milestone adds their corpus,
+  shape tests and survey row, and fixes found on the way: a static field of an interface type
+  had its initializer unconverted (no variant), a method of an immutable class took `&mut self`
+  when another method of its override group changes its object, and an anonymous subclass of a
+  local class was named after the local class's binary name (`1CounterInChained`).
+- **The name of an anonymous class has no enclosing class**: `<package><Supertype>In<Place>`
+  (`OrderInMain`, `TaskInInit`) as 2.5 says, numbered from 2 on a clash.
+- **An anonymous class extending a class or implementing an interface of the JDK** (`new
+  Runnable() { .. }`, `new Comparator<..>() { .. }`) needs those types as program types: the
+  lambdas work's runtime interfaces in single-file mode, the JDK's sources in whole-program
+  mode. Without them it is rejected as "implementing `java.lang.Runnable`".
+
 ### Lambdas and method references
 
 - **Captures came before the closure forms.** The captures landed while the object form of
@@ -1197,10 +1211,8 @@ Decisions that change during the implementation are recorded here, milestone by 
   `hierarchy::interfaces`.
 - Fixed on the way, in shared files: a string method taking an `Integer` (`"ab".repeat(n)`)
   passed a reference; a `StringBuilder` converted to `Object` panicked in the generator instead
-  of being rejected; a call of an interface method returning an array, on an interface with one
-  implementor, called the interface's `make`; and a method of a class whose objects never
-  change took `&mut self` when another method of its override group changes its own object
-  (`analysis/borrowing.rs`), which did not compile on the `Rc` without a `RefCell`.
+  of being rejected; and a call of an interface method returning an array, on an interface with
+  one implementor, called the interface's `make`.
 - **Still rejected:** the receivers and `super` above; a functional interface whose descriptor
   has an array of a type variable (`IntFunction<int[]>`, as any generic method, 4.4); a
   `StringBuilder` or array as the value of a generic functional interface

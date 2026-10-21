@@ -296,8 +296,7 @@ impl Census {
                     "MEMBER_REFERENCE" if crate::lower::computed_receiver(node, &|_, _| true).is_some() => {
                         scan.feature("computed method receivers", node)
                     }
-                    "NEW_CLASS" if !node["classBody"].is_null() => scan.feature("anonymous classes", node),
-                    // An anonymous class body is a class node too: it is counted above.
+                    // An anonymous class body is a class node too, but no local declaration.
                     "INTERFACE" | "ENUM" | "RECORD" if !is_anonymous(symbol_type(node)) => {
                         scan.feature("local interfaces, enums and records", node)
                     }

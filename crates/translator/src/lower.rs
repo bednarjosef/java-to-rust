@@ -8,6 +8,7 @@ mod enum_nulls;
 mod enums;
 mod exceptions;
 mod functional;
+mod generic_args;
 mod generics;
 mod hierarchy;
 mod lambdas;
@@ -756,7 +757,7 @@ impl<'t> Lowering<'t> {
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);
-                let args = self.convert_args(resolved, args)?;
+                let args = self.convert_generic_args(node, resolved, args)?;
                 if symbol.is_static {
                     return Ok(ExprKind::Call { name, args, resolved });
                 }
