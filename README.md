@@ -412,7 +412,8 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   Names::iterator(&names); while it.borrow().has_next() { let s = it.borrow_mut().next(); .. }`,
   with the program's or the JDK's `iterator`, `hasNext` and `next`, so a translated iterator
   throws `ConcurrentModificationException` and ends early where Java's does. The element is cast
-  from the erased type of `next` to the loop variable's.
+  from the erased type of `next` to the loop variable's. In a file, `Iterable` and `Iterator`
+  are the interfaces lowering provides (`java/Functional.java`), without the default `remove`.
 - Lambdas and method references (`lower/lambdas.rs`), lowered as javac desugars them: each is a
   class that implements its functional interface (`IntOpLambdaInMain`), a variant of the
   interface's enum like any other implementor, whose one method is the lambda's body with

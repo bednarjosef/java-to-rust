@@ -758,6 +758,11 @@ impl<'t> Lowering<'t> {
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);
+                // A default method of a JDK interface that lowering provides is not declared.
+                if resolved.is_none() && self.functional.has(symbol.owner) {
+                    let what = format!("the default method {}.{}", symbol.owner, symbol.name);
+                    return unsupported(node, &what);
+                }
                 let args = self.convert_generic_args(node, resolved, args)?;
                 if symbol.is_static {
                     return Ok(ExprKind::Call { name, args, resolved });

@@ -1176,9 +1176,18 @@ Decisions that change during the implementation are recorded here, milestone by 
 - **The JDK's packages as modules:** a whole program with JDK classes wrote `mod java`, which
   clashed with the runtime's alias `java`; package segments `java`, `std`, `core`, `alloc` and
   the path keywords now take a `_` (`crate::java_::util::Iterator`).
-- **Single-file mode needs `Iterable` and `Iterator` declared**: they come from the lambdas
-  work's `java/Functional.java`. Until it is merged, a for-each over a user `Iterable` translates
-  in whole-program mode only, and the corpus programs for it wait for that merge.
+- **Single-file mode takes `Iterable` and `Iterator` from the lambdas work's
+  `java/Functional.java`**, which declares their abstract methods only. So a call of
+  `Iterator.remove` (a default method of the JDK's) on an `Iterator` is rejected in a file as
+  "the default method java.util.Iterator.remove", where before the merge it reached the
+  analyses unresolved; `corpus/features/IteratorRemove.java` declares its own
+  `RemovingIterator` for it. With the JDK's sources the JDK's `Iterator` is translated, default
+  methods included.
+- **No corpus project over the JDK's collections**: the corpus test runs without the JDK's
+  sources, so the two for-each programs were also checked by hand in whole-program mode with
+  `--library` and the JDK's `Iterator` (same output as Java). A for-each over the JDK's own
+  collections still stops before it, at what those classes use (`ArraysSupport`'s fields,
+  `new Object()` in `TreeMap`).
 ### Lambdas and method references
 
 - **Captures came before the closure forms.** The captures landed while the object form of
