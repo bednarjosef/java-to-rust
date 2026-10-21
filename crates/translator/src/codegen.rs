@@ -16,6 +16,7 @@ mod classes;
 mod closures;
 mod code;
 mod code_point;
+mod covariant;
 mod dispatch;
 mod enums;
 mod exceptions;
@@ -25,6 +26,7 @@ mod idiomatic;
 mod math;
 mod names;
 mod null;
+mod object_clone;
 mod primitives;
 mod statics;
 mod stmt;
@@ -90,6 +92,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         fn_names,
         group_names,
         live: live.clone(),
+        runs: running_types(class, facts),
         wanted: wanted.clone(),
         needs: std::cell::RefCell::new(Needs::new()),
         homes,
@@ -203,6 +206,8 @@ struct Gen<'a> {
     group_names: HashMap<usize, String>,
     /// Which classes have a struct (see `live_types`).
     live: Vec<bool>,
+    /// Which classes' instance methods can run (see `running_types`).
+    runs: Vec<bool>,
     /// The enum items to write, which an earlier pass found used (see `generate`).
     wanted: Needs,
     /// The enum items that the code written so far uses.
@@ -486,6 +491,12 @@ impl<'a> Gen<'a> {
         }
         params.extend(self.typed_params(index, true));
         let ret = self.ret_text(index);
+        // The body of a method that never runs may call what was never emitted, such as the
+        // default methods of an interface on a class that implements it without objects.
+        let never_runs = !m.is_static && !m.is_ctor && !self.runs[m.class];
+        if never_runs {
+            self.line("#[allow(unused_variables)]");
+        }
         if self.display {
             self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
         } else {
@@ -507,7 +518,10 @@ impl<'a> Gen<'a> {
         {
             self.line(&format!("{}();", statics::init_name(&self.class.types[t].name)));
         }
-        if m.is_ctor {
+        if never_runs {
+            let name = &self.class.types[m.class].name;
+            self.line(&format!("unreachable!(\"no object of {name} is created\")"));
+        } else if m.is_ctor {
             self.constructor(m);
         } else {
             self.stmts(&m.body, true);

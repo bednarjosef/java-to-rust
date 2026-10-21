@@ -118,6 +118,11 @@ impl<'t> Lowering<'t> {
                 args.truncate(3);
                 self.stream_native(node, receiver, args, Native::FileWriteBytes)?
             }
+            ("java.io.PrintStream", name @ ("print" | "println"))
+                if stream == Some("err") && symbol.ty == "(char[])void" =>
+            {
+                Native::ErrPrintChars { newline: name == "println" }
+            }
             ("java.io.PrintStream", name @ ("print" | "println")) if stream == Some("err") => {
                 if let Some(arg) = args.first()
                     && matches!(arg.ty, Type::Array(_))

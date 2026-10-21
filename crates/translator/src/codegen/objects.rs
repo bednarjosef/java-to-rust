@@ -127,6 +127,32 @@ pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
     live
 }
 
+/// Which classes' instance methods can run: those of a class that the program creates objects of,
+/// or that the runtime raises, and of its superclasses. A class of the program that is neither
+/// still has its methods emitted, as its type may be named, but nothing calls them.
+pub(super) fn running_types(class: &Class, facts: &Facts) -> Vec<bool> {
+    let mut created = instantiated(class);
+    for &c in &facts.raised_classes {
+        created[c] = true;
+    }
+    let mut runs: Vec<bool> = class
+        .types
+        .iter()
+        .map(|t| {
+            t.kind != TypeKind::Class
+                || t.enum_constants.is_some()
+                || !matches!(t.origin, Origin::Member | Origin::Local { .. })
+        })
+        .collect();
+    for t in (0..created.len()).filter(|&t| created[t]) {
+        runs[t] = true;
+        for a in class.hierarchy.ancestors(t) {
+            runs[a] = true;
+        }
+    }
+    runs
+}
+
 /// The methods that a `super.m(...)` call names.
 pub(super) fn super_targets(class: &Class) -> HashSet<usize> {
     let mut out = HashSet::new();
@@ -292,7 +318,7 @@ fn reads_static(e: &Expr) -> bool {
 
 /// Whether an expression reads a field of an object of class `name`, or of a class of its class
 /// tree, or turns one into text.
-fn reads_class(class: &Class, e: &Expr, name: &str) -> bool {
+pub(super) fn reads_class(class: &Class, e: &Expr, name: &str) -> bool {
     let root = class.type_index(name).map(|t| class.hierarchy.root(t));
     let of_class = |x: &Expr| matches!(x.ty, Type::Class(c, _) if c == name || class.type_index(c).map(|t| class.hierarchy.root(t)) == root);
     let mut found = false;
@@ -1045,8 +1071,9 @@ impl<'a> Gen<'a> {
         let mutating = self.facts.mutating.contains(&index);
         if self.is_plain(receiver) {
             // The call borrows a plain object itself, and two-phase borrows accept `p.set(p.x + 1)`;
-            // an argument that changes the object must run before the call borrows it.
-            if mutating && args.iter().any(|a| changes_object(a, receiver, &self.facts.mutating)) {
+            // an argument that changes the object must run before the call borrows it, whether the
+            // call borrows it mutably or not.
+            if args.iter().any(|a| changes_object(a, receiver, &self.facts.mutating)) {
                 return self.bound_call(receiver, index, args, "");
             }
             let args = self.call_args(index, args).join(", ");
