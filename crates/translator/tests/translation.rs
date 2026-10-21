@@ -1751,7 +1751,7 @@ fn an_enum_is_a_copy_rust_enum_with_its_name_and_value_of() {
             "fn enum_name(self) -> String {",
             "AColor::VeryBig => \"VERY_BIG\",",
             "fn enum_value_of(name: &str) -> AColor {",
-            "_ => java::throw(\"IllegalArgumentException\", &format!(\"No enum constant A.Color.{name}\")),",
+            "_ => java::throw(\"java.lang.IllegalArgumentException\", &format!(\"No enum constant A.Color.{name}\")),",
             "impl fmt::Display for AColor {",
             "write!(f, \"{}\", self.enum_name())",
         ],

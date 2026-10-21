@@ -550,7 +550,7 @@ impl<'a> Gen<'a> {
             }
             Builtin::ObjectText => self.object_to_string(&args[0]),
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
-                self.enum_builtin(builtin, args, ty)
+                self.enum_builtin(builtin, args, ty, id)
             }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
             Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty),

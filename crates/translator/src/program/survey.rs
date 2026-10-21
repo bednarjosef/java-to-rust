@@ -730,9 +730,8 @@ fn piece_kind(member: &Value) -> &'static str {
 fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String>) -> BTreeSet<&'static str> {
     let mut features = BTreeSet::new();
     let kind = text(decl, "kind");
-    match kind {
-        "ANNOTATION_TYPE" => _ = features.insert("annotation types"),
-        _ => {}
+    if kind == "ANNOTATION_TYPE" {
+        features.insert("annotation types");
     }
     // The program's own interfaces translate, generic ones erased, and so does `Comparable`; one
     // from elsewhere is not translated.
