@@ -614,6 +614,13 @@ impl<'t> Walk<'t> {
         let node = self.methods.get(&key).filter(|_| !replaced(&key.0, &key.1, &key.2));
         let Some(&node) = node else {
             self.missing(&key.0);
+            // An enum's `values()` and `valueOf()`, which javac declares without code, initialize
+            // the enum: its constants are built with what their arguments call.
+            if matches!(key.1.as_str(), "values" | "valueOf")
+                && self.classes.get(&key.0).is_some_and(|(decl, _)| text(decl, "kind") == "ENUM")
+            {
+                self.work.push(Item::Init(key.0.clone()));
+            }
             // What overrides a method of the runtime, such as `Object.toString`, can still run.
             if self.reach.external.insert(key.clone()) {
                 for overrider in self.overriders(&key) {
