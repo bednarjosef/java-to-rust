@@ -74,7 +74,7 @@ impl<'t> Lowering<'t> {
                     let Some(init) = member.get("initializer") else { continue };
                     let ty = self.ty(member, member.symbol().map_or("", |s| s.ty))?;
                     let target = Place::Static { class: index, name: member.str("name").to_string() };
-                    let value = Box::new(self.expr(init)?);
+                    let value = Box::new(self.convert(self.expr(init)?, ty));
                     let kind = ExprKind::Assign { op: None, target, value };
                     let stmt = self.synth(kind, member.pos(), ty);
                     body.push(Stmt::Expr(stmt));
