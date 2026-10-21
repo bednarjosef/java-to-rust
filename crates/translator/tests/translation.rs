@@ -1501,6 +1501,36 @@ fn classes_with_one_name_in_two_packages() {
     );
 }
 
+#[test]
+fn objects_created_from_a_class_name_are_of_the_classes_that_code_names() {
+    let java = "package app;\n\
+        abstract class Shape { abstract String name(); }\n\
+        class Circle extends Shape { String name() { return \"circle\"; } }\n\
+        class Square extends Shape { String name() { return \"square\"; } }\n\
+        public class Main {\n\
+            static Shape make(String n) throws Exception {\n\
+                return (Shape) Class.forName(n).getDeclaredConstructor().newInstance();\n\
+            }\n\
+            public static void main(String[] a) throws Exception {\n\
+                System.out.println(make(a.length > 0 ? a[0] : \"app.Circle\").name());\n\
+            }\n\
+        }\n";
+    let dir = write_sources("by-name", &[("app/Main.java", java)]);
+    let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &[
+            "\"app.Circle\" => {",
+            "Rc::new(Circle::new());",
+            "java::throw_uncaught(format!(\"java.lang.ClassNotFoundException: {} is not a class of the translated program\"",
+        ],
+    );
+    // No code names `Square`, so no name can create one.
+    assert_lacks(&rust, &["Square", "square"]);
+}
+
 /// Writes Java files into a fresh directory under the test's temporary directory.
 fn write_sources(dir: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(dir);
@@ -3462,16 +3492,17 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
         ),
         "{err}"
     );
-    let err = reject(
+    // A string that may be null is dereferenced with the checked form where a catch sees it.
+    let rust = translate(
         "class A { static String s(int n) { return n > 0 ? \"x\" : null; }
             public static void main(String[] a) {
                 try { System.out.println(s(a.length).length()); }
                 catch (NullPointerException e) { System.out.println(\"null\"); }
             } }",
     );
-    assert!(
-        err.contains("catching the `NullPointerException` that this call may throw not supported yet"),
-        "{err}"
+    assert_contains(
+        &rust,
+        &["java::or_break!(java::try_non_null(s(a.len() as i32).as_deref()), 'attempt).len()"],
     );
     let err = reject(
         "class Bad extends RuntimeException {
@@ -3515,17 +3546,26 @@ fn a_try_with_resources_closes_each_resource_in_a_finally() {
         }",
     );
     assert_contains(&rust, &["r_failed", "add_suppressed"]);
-    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
-    let err = reject(
+    let rust = translate(
         "class A {
-            static class R implements AutoCloseable { public void close() {} }
+            static class R implements AutoCloseable { public void close() { System.out.println(2); } }
             public static void main(String[] args) {
                 R r = new R();
                 try (r) { System.out.println(1); }
             }
         }",
     );
-    assert!(err.contains("try-with-resources over an existing variable not supported yet"), "{err}");
+    assert_contains(&rust, &["r_resource", "r_resource_failed", "close()"]);
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
+    let err = reject(
+        "class A {
+            public static void main(String[] args) throws Exception {
+                AutoCloseable tick = new java.io.StringWriter();
+                try (tick) { System.out.println(2); }
+            }
+        }",
+    );
+    assert!(err.contains("not supported yet"), "{err}");
 }
 
 #[test]
@@ -4091,4 +4131,11 @@ fn an_element_that_may_be_null_is_passed_as_the_receiver_that_it_is() {
         }",
     );
     assert_contains(&rust, &["PBox::start(java::non_null(boxes[i as usize].as_ref()));"]);
+}
+
+#[test]
+fn string_chars_needs_the_jdk_sources() {
+    let err = java_to_rust::translate("class A { public static void main(String[] a) { \"abc\".chars(); } }")
+        .expect_err("`String.chars` streams with the JDK's code");
+    assert!(err.to_string().contains("translate the program with the JDK's sources"), "{err}");
 }

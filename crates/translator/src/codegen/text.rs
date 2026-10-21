@@ -180,6 +180,14 @@ impl<'a> Gen<'a> {
                 let units = call(self, "units", vec![s]).text;
                 Code::atom(format!("{}({units})", self.array_maker("from_vec")))
             }
+            StringOp::CharCodes => {
+                let s = self.text_ref(&args[0]);
+                let units = call(self, "units", vec![s]).text;
+                Code::atom(format!(
+                    "{}({units}.into_iter().map(i32::from).collect())",
+                    self.runtime("from_vec")
+                ))
+            }
             StringOp::FromChars => {
                 let chars = self.slice_of(&args[0]);
                 match args.get(1..) {
@@ -239,7 +247,8 @@ impl<'a> Gen<'a> {
                     _ => {}
                 }
                 if receiver_null {
-                    steps.push(format!("{}(receiver_);", self.runtime("non_null")));
+                    let checked = self.dereference(&[receiver.id], "receiver_");
+                    steps.push(format!("{checked};"));
                 }
                 if steps.is_empty() {
                     Code::atom("false")
@@ -293,7 +302,7 @@ impl<'a> Gen<'a> {
             ExprKind::Builtin(Builtin::Builder(op), args) if op.chains() => self.builder_call(*op, args).text,
             _ if self.nullable(e) => {
                 let option = self.builder_option(e);
-                format!("{}({option})", self.runtime("non_null"))
+                self.dereference(&[e.id], &option)
             }
             ExprKind::Var(name) => self.local(name),
             ExprKind::Field { .. } | ExprKind::Index(..) => {

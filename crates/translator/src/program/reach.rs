@@ -7,9 +7,13 @@
 //! declaration reachable in turn: a worklist that runs until nothing new is found.
 
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+mod by_name;
 mod sequential;
+mod stubs;
+
+pub use by_name::created_by_name;
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
 /// constructor) and javac's signature, such as `(int)void`.
@@ -49,6 +53,10 @@ pub struct Reach {
     /// where reachability stops (`outside`): those that the sources do not have, and those whose
     /// units javac has not given yet when it gives them as they are asked for (`javac::Session`).
     pub missing: BTreeSet<String>,
+    /// Classes that are not translated but that reachable code uses as the types of variables,
+    /// which are only ever null, with the instance methods that it calls on them, by name and
+    /// signature (`stubs.rs`).
+    pub stubs: BTreeMap<String, BTreeSet<(String, String)>>,
 }
 
 impl Reach {
@@ -329,6 +337,11 @@ pub fn runtime_arrays_call(node: &Value) -> bool {
     }
 }
 
+/// The JDK method that `String.chars()` runs (see `lower::strings`): it streams the string's
+/// UTF-16 code units, as an `int[]`.
+pub const STRING_CHARS: (&str, &str, &str) =
+    ("java.util.Arrays", "stream", "(int[])java.util.stream.IntStream");
+
 /// The methods that a for-each over an `Iterable` calls.
 pub const ITERATION: &[(&str, &str, &str)] = &[
     ("java.lang.Iterable", "iterator", "()java.util.Iterator<T>"),
@@ -360,6 +373,7 @@ pub fn reach(units: &[&Value], main: &str) -> Result<Reach, String> {
         walk.work.push(Item::Init(main.to_string()));
         walk.work.push(Item::Method(entry));
         walk.run();
+        walk.note_named();
         walk.reach.sequential = sequential;
         Ok(walk)
     };
@@ -398,6 +412,13 @@ struct Walk<'t> {
     reach: Reach,
     /// Whether streams are assumed to stay sequential (`Reach::sequential`).
     sequential: bool,
+    /// The classes that reachable code creates objects of by class name (`by_name`).
+    by_name: HashSet<String>,
+    /// The string literals of reachable code that are names of classes.
+    named: HashSet<String>,
+    /// The string literals of reachable code that could be names of classes that no unit
+    /// declares (`by_name`).
+    literals: HashSet<String>,
 }
 
 impl<'t> Walk<'t> {
@@ -435,6 +456,18 @@ impl<'t> Walk<'t> {
                     self.fields.insert((class.clone(), name), member);
                 }
                 _ => self.declare(member, Some(&class)),
+            }
+        }
+        // A method inherited from a superclass that implements a method of this class's interfaces.
+        for inherited in decl["symbol"]["inherits"].as_array().into_iter().flatten() {
+            let name = text(inherited, "name").to_string();
+            let implemented = &inherited["implements"];
+            let overridden =
+                (text(implemented, "owner").to_string(), name.clone(), text(implemented, "type").to_string());
+            let key = (text(inherited, "owner").to_string(), name, text(inherited, "type").to_string());
+            let overriders = self.overriders.entry(overridden).or_default();
+            if !overriders.contains(&key) {
+                overriders.push(key);
             }
         }
         let mut supertypes: Vec<String> = ["extendsClause", "implementsClause"]
@@ -663,6 +696,13 @@ impl<'t> Walk<'t> {
             // A call of `java.util.Arrays` that the runtime does (`lower::runtime_arrays_call`)
             // reaches only what its arguments do.
             Value::Object(_) if runtime_arrays_call(value) => self.scan(&value["arguments"]),
+            // An object created from a class name (`by_name`) reaches the constructors of the
+            // classes that the name can be, not reflection.
+            Value::Object(_) if let Some(name) = created_by_name(value) => {
+                self.created_by_name(value);
+                self.scan(&value["type"]);
+                self.scan(name);
+            }
             Value::Object(fields) => {
                 // A for-each over an `Iterable` calls its iterator's methods, which javac's tree
                 // does not show.
@@ -676,6 +716,14 @@ impl<'t> Walk<'t> {
                             signature.to_string(),
                         )));
                     }
+                }
+                if text(value, "kind") == "VARIABLE" {
+                    self.stub_type(text(&value["symbol"], "type"));
+                }
+                if text(value, "kind") == "STRING_LITERAL"
+                    && let Some(literal) = value["value"].as_str()
+                {
+                    self.named(literal);
                 }
                 // A lambda creates an object of a class that implements its interface with the
                 // interface's abstract method.
@@ -709,7 +757,12 @@ impl<'t> Walk<'t> {
     fn symbol(&mut self, symbol: &Value) {
         let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
         match text(symbol, "kind") {
+            "METHOD" if owner == "java.lang.String" && name == "chars" => {
+                let (class, method, signature) = STRING_CHARS;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
             "METHOD" | "CONSTRUCTOR" => {
+                self.stub_method(symbol);
                 self.work.push(Item::Method((owner, name, text(symbol, "type").to_string())));
             }
             "FIELD" | "ENUM_CONSTANT" => self.work.push(Item::Field((owner, name))),

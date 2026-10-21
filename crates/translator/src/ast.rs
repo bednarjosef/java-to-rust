@@ -679,6 +679,10 @@ pub enum Builtin {
     NoObject {
         class: usize,
     },
+    /// The default of a creation from a class name (`lower::by_name`): the name, its argument,
+    /// is of no class of the translated program, and the program ends with a
+    /// `ClassNotFoundException` that nothing catches.
+    UnknownClass,
     /// The lock of a `synchronized` block, the statement before the block: evaluated, and a
     /// `NullPointerException` when it is null. Where the program can tell (`codegen::sync`), the
     /// block holds the lock's monitor.
@@ -1001,6 +1005,7 @@ pub fn has_effects(e: &Expr) -> bool {
                         | Builtin::Println
                         | Builtin::Exit
                         | Builtin::NoObject { .. }
+                        | Builtin::UnknownClass
                         | Builtin::Native(_),
                     _
                 )

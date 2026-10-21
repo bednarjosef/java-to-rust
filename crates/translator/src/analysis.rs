@@ -241,16 +241,27 @@ fn representation(class: &Class, facts: &mut Facts) {
     facts.immutable = objects::immutable_classes(class);
     // An object whose monitor is kept has a lock, or an address that stays.
     facts.immutable.retain(|c| !monitor_classes.contains(c));
-    facts.field_level = hierarchy::field_level(
-        class,
-        &reach.reach,
-        &facts.immutable,
-        &facts.fields_structs,
-        &facts.long_methods,
-    );
-    facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
-    facts.owned.retain(|c| !monitor_classes.contains(c));
-    facts.flows = hierarchy::flows(class, &facts.field_level, &Default::default());
+    loop {
+        facts.field_level = hierarchy::field_level(
+            class,
+            &reach.reach,
+            &facts.immutable,
+            &facts.fields_structs,
+            &facts.long_methods,
+        );
+        facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
+        facts.owned.retain(|c| !monitor_classes.contains(c));
+        facts.flows = hierarchy::flows(class, &facts.field_level, &Default::default());
+        let handled = objects::calls_needing_handles(class, facts);
+        if handled.is_empty() {
+            break;
+        }
+        for c in handled {
+            for f in class.hierarchy.family(c) {
+                facts.immutable.remove(&class.types[f].name);
+            }
+        }
+    }
     // An exception is converted to `Throwable` when it is thrown, so it is never a plain value.
     if let Some(throwable) = class.type_index("java.lang.Throwable") {
         facts.owned.retain(|c| class.type_index(c).is_none_or(|t| !class.hierarchy.is_subtype(t, throwable)));
@@ -355,10 +366,12 @@ pub fn reads_earlier_fields(decl: &TypeDecl, i: usize, e: &Expr) -> bool {
     selves.iter().all(|id| allowed.contains(id))
 }
 
-/// The leading statements of a constructor that assign a field of `this` a value that does not
-/// read `this`, each field once: the constructor's struct literal takes them in, as (field index,
-/// value). Empty when the class's initializers are not inlined, or the constructor starts with
-/// `this(...)`. A field whose initializer has effects is never taken, as the initializer must run.
+/// The leading statements of a constructor that assign a field of `this` a value that uses `this`
+/// only to read fields that earlier ones assigned, each field once: the constructor's struct
+/// literal takes them in, as (field index, value), computing those earlier ones into locals first
+/// (see `reads_leading_fields`). Empty when the class's initializers are not inlined, or the
+/// constructor starts with `this(...)`. A field whose initializer has effects is never taken, as
+/// the initializer must run.
 pub fn leading_assignments<'c>(class: &Class, ctor: &'c Method, facts: &Facts) -> Vec<(usize, &'c Expr)> {
     let decl = &class.types[ctor.class];
     let delegates =
@@ -380,7 +393,7 @@ pub fn leading_assignments<'c>(class: &Class, ctor: &'c Method, facts: &Facts) -
         else {
             break;
         };
-        if !matches!(object.kind, ExprKind::This) || mentions_this(value) {
+        if !matches!(object.kind, ExprKind::This) || !reads_only(value, decl, &out) {
             break;
         }
         // A field of a superclass is in `base`, built by `super(...)`: it is assigned after it.
@@ -391,6 +404,37 @@ pub fn leading_assignments<'c>(class: &Class, ctor: &'c Method, facts: &Facts) -
         out.push((i, value));
     }
     out
+}
+
+/// Whether `value` uses `this` only to read fields of `decl` that the assignments `earlier` set.
+fn reads_only(value: &Expr, decl: &TypeDecl, earlier: &[(usize, &Expr)]) -> bool {
+    let mut allowed = HashSet::new();
+    let mut selves = Vec::new();
+    visit_expr(value, &mut |x| match &x.kind {
+        ExprKind::This => selves.push(x.id),
+        ExprKind::Field { object, name }
+            if matches!(object.kind, ExprKind::This)
+                && earlier.iter().any(|&(j, _)| decl.fields[j].name == *name) =>
+        {
+            allowed.insert(object.id);
+        }
+        _ => {}
+    });
+    selves.iter().all(|id| allowed.contains(id))
+}
+
+/// Whether a leading assignment of `leading` reads a field that an earlier one set: the struct
+/// literal then computes them into locals, in order, first.
+pub fn reads_leading_fields(decl: &TypeDecl, leading: &[(usize, &Expr)]) -> bool {
+    leading.iter().any(|&(_, value)| {
+        let mut found = false;
+        visit_expr(value, &mut |x| {
+            found |= matches!(&x.kind, ExprKind::Field { object, name }
+                if matches!(object.kind, ExprKind::This)
+                    && leading.iter().any(|&(j, _)| decl.fields[j].name == *name))
+        });
+        found
+    })
 }
 
 fn borrowed_params(class: &Class, facts: &mut Facts) {

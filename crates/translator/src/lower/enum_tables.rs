@@ -332,7 +332,7 @@ fn rewrite_cases(cases: &mut [Case], f: &mut dyn FnMut(&mut Expr)) {
 }
 
 /// Calls `f` on every expression inside `e`, then on `e`.
-fn rewrite(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
+pub(super) fn rewrite(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
     match &mut e.kind {
         ExprKind::Unary(_, x)
         | ExprKind::Cast(_, x)

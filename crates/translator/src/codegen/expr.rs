@@ -400,12 +400,18 @@ impl<'a> Gen<'a> {
             {
                 self.closure(t, *ctor, args)
             }
-            ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
+            // A closure is one of the closure type its interface extends too.
+            ExprKind::Cast(to @ Type::Class(..), value)
+                if self.closure_type(*to).is_some() && self.closure_type(value.ty).is_some() =>
+            {
+                self.expr(value)
+            }
+            ExprKind::Cast(to @ Type::Class(..), value) => self.checked_class_cast(e.id, *to, value),
             // A cast to an enum of a value that may be null, which an enum value is not.
             ExprKind::Cast(to @ Type::Enum(_), value)
                 if matches!(value.ty, Type::Class(..)) && self.nullable(value) =>
             {
-                let option = self.class_cast(*to, value).text;
+                let option = self.checked_class_cast(e.id, *to, value).text;
                 Code::atom(format!("{}({option})", self.runtime("null_enum")))
             }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
@@ -413,7 +419,7 @@ impl<'a> Gen<'a> {
             ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_) | Type::Array(_)), value)
                 if matches!(value.ty, Type::Class(..)) =>
             {
-                self.class_cast(*to, value)
+                self.checked_class_cast(e.id, *to, value)
             }
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
@@ -630,6 +636,11 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
             Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
+            Builtin::UnknownClass => {
+                let name = self.value(&args[0], Type::String);
+                let message = "java.lang.ClassNotFoundException: {} is not a class of the translated program";
+                Code::atom(format!("{}(format!({message:?}, {}))", self.runtime("throw_uncaught"), name.text))
+            }
             Builtin::MonitorEnter => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),

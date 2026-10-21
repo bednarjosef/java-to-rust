@@ -18,8 +18,8 @@
 
 use super::Program;
 use super::reach::{
-    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, has_flag, live_branch, members, outside,
-    provided, replaced, runtime_arrays_call, symbol_type, text, untranslated,
+    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, created_by_name, has_flag, live_branch,
+    members, outside, provided, replaced, runtime_arrays_call, symbol_type, text, untranslated,
 };
 use crate::ast::runtime_native;
 use serde_json::{Value, json};
@@ -281,6 +281,9 @@ impl Census {
                 self.body(&node["condition"], scan);
                 self.body(branch, scan);
             }
+            // An object created from a class name translates (`reach::by_name`): only the name is
+            // code.
+            Value::Object(_) if let Some(name) = created_by_name(node) => self.body(name, scan),
             Value::Object(fields) => {
                 let kind = text(node, "kind");
                 let ty = text(node, "javaType");
@@ -758,8 +761,8 @@ fn class_features(decl: &Value, declared: &HashSet<String>) -> BTreeSet<&'static
     // Class trees of the program's own classes translate; a superclass from elsewhere does not.
     if kind == "CLASS" && !decl["extendsClause"].is_null() {
         let superclass = text(&decl["extendsClause"], "javaType");
-        let superclass = superclass.split('<').next().unwrap_or(superclass);
-        if !declared.contains(superclass) && !crate::lower::is_standard(superclass) {
+        let superclass = raw(superclass);
+        if !declared.contains(&superclass) && !crate::lower::is_standard(&superclass) {
             features.insert("extending classes outside the sources");
         }
     }

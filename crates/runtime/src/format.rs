@@ -387,6 +387,16 @@ pub fn check_supported(format: &str) -> Result<(), String> {
     }
 }
 
+/// Whether a constant format never throws with arguments of the kinds of `args`, whatever their
+/// values: its conversions fit them, and no `%c` takes a number, whose value may not be a code
+/// point. The translator asks it of each `String.format` with a literal format.
+pub fn never_fails(format: &str, args: &[Arg]) -> bool {
+    let Ok(items) = parse(format) else { return false };
+    let numeric_char = items.iter().any(|item| matches!(item, Item::Spec(spec) if spec.conversion == 'c'))
+        && args.iter().any(|a| matches!(a, Arg::Byte(_) | Arg::Short(_) | Arg::Int(_)));
+    !numeric_char && try_format(format, args).is_ok()
+}
+
 /// `String.format(format, args)`.
 pub fn format(format: &str, args: &[Arg]) -> String {
     try_format(format, args).unwrap_or_else(|e| {
