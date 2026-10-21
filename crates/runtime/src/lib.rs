@@ -267,6 +267,14 @@ pub fn cast<T>(value: Option<T>, to: &str) -> T {
     }
 }
 
+/// `cast`, where a `catch` or a `finally` sees its `ClassCastException`: the failure is
+/// returned, to go on as a thrown exception does.
+pub fn try_cast<T>(value: Option<T>, to: &str) -> Result<T, Exception> {
+    value.ok_or_else(|| {
+        Exception::new("java.lang.ClassCastException", format!("cannot be cast to class {to}"))
+    })
+}
+
 /// The `ClassCastException` of a cast to class `to` (by binary name) that fails.
 pub fn cast_failed(to: &str) -> ! {
     throw("java.lang.ClassCastException", &format!("cannot be cast to class {to}"))

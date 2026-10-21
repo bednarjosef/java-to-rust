@@ -400,12 +400,12 @@ impl<'a> Gen<'a> {
             {
                 self.closure(t, *ctor, args)
             }
-            ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
+            ExprKind::Cast(to @ Type::Class(..), value) => self.checked_class_cast(e.id, *to, value),
             // A cast to an enum of a value that may be null, which an enum value is not.
             ExprKind::Cast(to @ Type::Enum(_), value)
                 if matches!(value.ty, Type::Class(..)) && self.nullable(value) =>
             {
-                let option = self.class_cast(*to, value).text;
+                let option = self.checked_class_cast(e.id, *to, value).text;
                 Code::atom(format!("{}({option})", self.runtime("null_enum")))
             }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
@@ -413,7 +413,7 @@ impl<'a> Gen<'a> {
             ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_) | Type::Array(_)), value)
                 if matches!(value.ty, Type::Class(..)) =>
             {
-                self.class_cast(*to, value)
+                self.checked_class_cast(e.id, *to, value)
             }
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
             ExprKind::Cast(ty, value) => self.value(value, *ty),

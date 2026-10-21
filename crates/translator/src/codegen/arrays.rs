@@ -88,7 +88,7 @@ impl<'a> Gen<'a> {
         if self.nullable(e) {
             // Using a null array throws `NullPointerException`.
             let place = self.object_place(e);
-            return format!("{}({place}.as_ref())", self.runtime("non_null"));
+            return self.dereference(&[e.id], &format!("{place}.as_ref()"));
         }
         match &e.kind {
             ExprKind::Var(name) => format!("&{}", self.local(name)),

@@ -3462,16 +3462,17 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
         ),
         "{err}"
     );
-    let err = reject(
+    // A string that may be null is dereferenced with the checked form where a catch sees it.
+    let rust = translate(
         "class A { static String s(int n) { return n > 0 ? \"x\" : null; }
             public static void main(String[] a) {
                 try { System.out.println(s(a.length).length()); }
                 catch (NullPointerException e) { System.out.println(\"null\"); }
             } }",
     );
-    assert!(
-        err.contains("catching the `NullPointerException` that this call may throw not supported yet"),
-        "{err}"
+    assert_contains(
+        &rust,
+        &["java::or_break!(java::try_non_null(s(a.len() as i32).as_deref()), 'attempt).len()"],
     );
     let err = reject(
         "class Bad extends RuntimeException {
