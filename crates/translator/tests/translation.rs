@@ -3328,6 +3328,36 @@ fn a_null_dereference_that_a_catch_sees_is_a_checked_non_null() {
 }
 
 #[test]
+fn the_message_of_a_null_dereference_is_rejected_and_a_created_ones_is_not() {
+    let program = |message: &str| {
+        format!(
+            "class A {{
+                A next;
+                int v;
+                static int second(A a) {{
+                    try {{
+                        if (a.v > 0) {{ throw new NullPointerException(\"given\"); }}
+                        return a.next.v;
+                    }} catch (NullPointerException e) {{
+                        System.out.println({message});
+                        return -1;
+                    }}
+                }}
+                public static void main(String[] args) {{
+                    System.out.println(second(new A()));
+                }}
+            }}"
+        )
+    };
+    let err = java_to_rust::translate(&program("e.getMessage()")).unwrap_err().to_string();
+    assert!(
+        err.contains("the message of a `NullPointerException` that the runtime raises not supported yet"),
+        "{err}"
+    );
+    java_to_rust::translate(&program("\"caught\"")).expect("a catch that does not read the message");
+}
+
+#[test]
 fn an_eager_static_object_starts_empty_and_is_not_null_once_initialized() {
     let rust = translate(
         "class A {

@@ -692,6 +692,9 @@ pub enum Builtin {
     /// `x.toString()` of `Object` on an object (the receiver is the argument): the text that
     /// printing it shows, its class's `toString` or `Object`'s `Name@hash`.
     ObjectText,
+    /// `super.clone()` of `Object` in a `Cloneable` class (the receiver is the argument): a new
+    /// object of the same class with a copy of each of its fields.
+    ObjectClone,
     /// `e.ordinal()`; the receiver is the first argument.
     EnumOrdinal,
     /// `e.name()` and `e.toString()`, which the enum's default `toString` returns as `name()`.
