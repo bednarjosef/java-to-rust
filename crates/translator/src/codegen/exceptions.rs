@@ -438,7 +438,7 @@ impl<'a> Gen<'a> {
         if code.text.contains('?') || code.text.contains("or_break!") {
             let pos = self.facts.catching[&id];
             let message = "catching the exception of an operation that holds another one that is caught not supported yet";
-            self.rejected.get_or_insert(Error { pos, message: message.to_string() });
+            self.rejected.push(Error { pos, message: message.to_string() });
             return code;
         }
         self.dereferenced.insert(id);
@@ -469,7 +469,7 @@ impl<'a> Gen<'a> {
         }
         if let Some(pos) = missed.into_iter().min_by_key(|p| (p.line, p.column)) {
             let message = "catching the exception of this operation not supported yet";
-            self.rejected.get_or_insert(Error { pos, message: message.to_string() });
+            self.rejected.push(Error { pos, message: message.to_string() });
         }
     }
 
@@ -498,7 +498,7 @@ impl<'a> Gen<'a> {
         }
         if let Some(pos) = missed.into_iter().min_by_key(|p| (p.line, p.column)) {
             let message = "catching the `ClassCastException` of this cast not supported yet";
-            self.rejected.get_or_insert(Error { pos, message: message.to_string() });
+            self.rejected.push(Error { pos, message: message.to_string() });
         }
     }
 

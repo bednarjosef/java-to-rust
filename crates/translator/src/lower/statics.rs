@@ -71,7 +71,11 @@ impl<'t> Lowering<'t> {
                 continue;
             }
             match member.kind() {
-                "BLOCK" => body.push(Stmt::Block(self.block(member)?)),
+                // In a census, a rejected block or initializer is left out.
+                "BLOCK" => match self.block(member) {
+                    Ok(block) => body.push(Stmt::Block(block)),
+                    Err(e) => self.reject(index, e)?,
+                },
                 // A field that nothing reads, whose initializer does nothing else, is not kept.
                 "VARIABLE"
                     if !Self::is_constant(member)
@@ -79,9 +83,21 @@ impl<'t> Lowering<'t> {
                         && self.handle_declaration(member).is_none() =>
                 {
                     let Some(init) = member.get("initializer") else { continue };
-                    let ty = self.ty(member, member.symbol().map_or("", |s| s.ty))?;
+                    let ty = match self.ty(member, member.symbol().map_or("", |s| s.ty)) {
+                        Ok(ty) => ty,
+                        Err(e) => {
+                            self.reject(index, e)?;
+                            continue;
+                        }
+                    };
                     let target = Place::Static { class: index, name: member.str("name").to_string() };
-                    let value = Box::new(self.convert(self.expr(init)?, ty));
+                    let value = match self.expr(init) {
+                        Ok(value) => Box::new(self.convert(value, ty)),
+                        Err(e) => {
+                            self.reject(index, e)?;
+                            continue;
+                        }
+                    };
                     let kind = ExprKind::Assign { op: None, target, value };
                     let stmt = self.synth(kind, member.pos(), ty);
                     body.push(Stmt::Expr(stmt));

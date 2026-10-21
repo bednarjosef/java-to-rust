@@ -641,7 +641,7 @@ impl<'a> Gen<'a> {
             .filter(|(id, _)| !self.dereferenced.contains(id) && !unwritten.contains(id));
         if let Some(pos) = missed.map(|(_, &pos)| pos).min_by_key(|p| (p.line, p.column)) {
             let message = "catching the `NullPointerException` of this dereference not supported yet";
-            self.rejected.get_or_insert(Error { pos, message: message.to_string() });
+            self.rejected.push(Error { pos, message: message.to_string() });
         }
     }
 

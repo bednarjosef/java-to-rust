@@ -65,6 +65,9 @@ impl<'t> Lowering<'t> {
             capture_refs: Default::default(),
             capture_sites: Default::default(),
             member_outers: Vec::new(),
+            census: None,
+            stubbing: Cell::new(false),
+            stubbed: Default::default(),
         }
     }
 
@@ -206,7 +209,7 @@ impl<'t> Lowering<'t> {
 
     /// A field, with its initializer when `with_init`.
     fn field(&self, node: Node<'t>, with_init: bool) -> Result<Field, Error> {
-        let ty = self.ty(node, node.symbol().map_or("", |s| s.ty))?;
+        let ty = self.signature_type(node, node.symbol().map_or("", |s| s.ty))?;
         let init = node.get("initializer").filter(|_| with_init);
         let constant = Self::is_constant(node);
         let init = if constant {
@@ -214,7 +217,14 @@ impl<'t> Lowering<'t> {
             let kind = self.constant_literal(node, ty, text)?;
             Some(self.synth(kind, node.pos(), ty))
         } else {
-            init.map(|i| Ok::<_, Error>(self.convert(self.expr(i)?, ty))).transpose()?
+            match init.map(|i| self.expr(i)).transpose() {
+                Ok(init) => init.map(|i| self.convert(i, ty)),
+                // In a census, a rejected initializer leaves the field at its default value.
+                Err(e) => {
+                    self.reject(self.current.get(), e)?;
+                    None
+                }
+            }
         };
         Ok(Field { name: node.str("name").to_string(), ty, init, constant, pos: node.pos() })
     }

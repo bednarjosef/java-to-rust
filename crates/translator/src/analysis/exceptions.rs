@@ -171,6 +171,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     let mut throwing: HashSet<usize> = (0..class.methods.len())
         .filter(|&m| guarded[m] || (!initializer[m] && escapes[m].iter().any(|k| observed(k, &seen[m]))))
         .collect();
+    // The methods that throw themselves, not only through an override.
+    let own = throwing.clone();
     let groups: Vec<usize> = throwing.iter().flat_map(|&m| h.group(m)).collect();
     throwing.extend(groups);
 
@@ -253,7 +255,10 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             return error(method.pos, "a constructor of an enum that throws not supported yet");
         }
         if method.name == "toString" && method.params.is_empty() {
-            return error(method.pos, "a toString that throws an exception that is caught not supported yet");
+            // At the override that throws, which may not be the first of its group.
+            let thrower = h.group(m).into_iter().find(|g| own.contains(g)).unwrap_or(m);
+            let pos = class.methods[thrower].pos;
+            return error(pos, "a toString that throws an exception that is caught not supported yet");
         }
     }
 

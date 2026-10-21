@@ -270,7 +270,7 @@ impl<'t> Lowering<'t> {
 
     /// The type of a captured local, from an identifier that reads it.
     pub(super) fn capture_type(&self, c: &Captured<'t>) -> Result<Type, Error> {
-        self.ty(c.node, c.node.symbol().map_or("", |s| s.ty))
+        self.signature_type(c.node, c.node.symbol().map_or("", |s| s.ty))
     }
 
     /// Whether the instance field initializers of class `t` run as statements of its

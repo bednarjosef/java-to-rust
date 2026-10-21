@@ -3,9 +3,11 @@
 //! mod util { .. } } }`). javac compiles all of it in one run, so that names across files resolve,
 //! and only what is reachable from `main` is lowered and translated.
 
+mod census;
 mod reach;
 mod survey;
 
+pub use census::{Census, census_program};
 pub use reach::{
     CLASS_KINDS, Reach, STRING_STREAMS, class_name, component_array, created_by_name, live_branch,
     unsafe_field_access, untranslated,

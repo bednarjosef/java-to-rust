@@ -155,6 +155,13 @@ impl<'t> Lowering<'t> {
 
     /// Checks an enum's members and constructors against what the translation supports.
     pub(super) fn check_enum(&self, index: usize, methods: &[Method]) -> Result<(), Error> {
+        // A census's stub of a constructor sets no field: the enum keeps its fields in tables.
+        let stubs = self.stubbed.borrow();
+        if let Some(&stub) =
+            stubs.iter().find(|&&m| m < methods.len() && methods[m].is_ctor && methods[m].class == index)
+        {
+            return error(methods[stub].pos, "a stub of an enum's constructor");
+        }
         let ty = Type::enum_type(&self.types[index].name);
         // A field that is not final is still one value per constant if only the constructor sets it.
         for m in methods.iter().filter(|m| !(m.is_ctor && m.class == index)) {
