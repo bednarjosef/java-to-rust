@@ -168,7 +168,7 @@ impl<'a> Gen<'a> {
                 let reference = self.reference(text, form, mutable);
                 let i = self.value(index, Type::Int).text;
                 let helper = if mutable { "row_mut" } else { "row" };
-                text = format!("{}({reference}, {i})", self.runtime(helper));
+                text = self.may_fail(id, helper, "", &format!("{reference}, {i}")).text;
                 form = Form::Ref;
             }
         }
@@ -214,7 +214,7 @@ impl<'a> Gen<'a> {
             } else {
                 let reference = if level == 0 { self.slice_ref(&place) } else { format!("&{place}") };
                 let i = self.value(index, Type::Int).text;
-                format!("{}({reference}, {i})", self.runtime("position_of"))
+                self.may_fail(id, "position_of", "", &format!("{reference}, {i}")).text
             };
             lets.push(format!("let {name} = {position};"));
             place = format!("{place}[{name}]");
@@ -338,11 +338,8 @@ impl<'a> Gen<'a> {
             let i = self.value(index, Type::Int).text;
             lets.push(format!("let {slot} = {i};"));
             let reference = self.bound_ref(&path, &place, false);
-            return Code::atom(format!(
-                "{{ {} {}({reference}, {slot}) }}",
-                lets.join(" "),
-                self.runtime("at")
-            ));
+            let at = self.may_fail(id, "at", "", &format!("{reference}, {slot}")).text;
+            return Code::atom(format!("{{ {} {at} }}", lets.join(" ")));
         }
         if self.in_bounds(id) {
             let place = self.path_place(&path, false);
@@ -351,7 +348,7 @@ impl<'a> Gen<'a> {
         }
         let reference = self.path_ref(&path, false);
         let i = self.value(index, Type::Int).text;
-        Code::atom(format!("{}({reference}, {i})", self.runtime("at")))
+        self.may_fail(id, "at", "", &format!("{reference}, {i}"))
     }
 
     /// `a.length` of a plain array or row.
@@ -391,7 +388,7 @@ impl<'a> Gen<'a> {
             let i = self.value(index, Type::Int).text;
             let v = self.assigned_element(rhs, ty);
             let helper = if row && !used { "assign" } else { "put" };
-            return format!("{}({reference}, {i}, {v})", self.runtime(helper));
+            return self.may_fail(id, helper, "", &format!("{reference}, {i}, {v}")).text;
         }
         let (mut lets, place) = self.bound_rows(&path);
         let i = self.value(index, Type::Int).text;
@@ -407,7 +404,8 @@ impl<'a> Gen<'a> {
         let v = self.assigned_element(rhs, ty);
         lets.push(format!("let {value} = {v};"));
         let reference = self.bound_ref(&path, &place, true);
-        format!("{{ {} {}({reference}, {slot}, {value}) }}", lets.join(" "), self.runtime("put"))
+        let put = self.may_fail(id, "put", "", &format!("{reference}, {slot}, {value}")).text;
+        format!("{{ {} {put} }}", lets.join(" "))
     }
 
     /// The value stored by `a[i] = rhs` into a plain array: an element, or a row moved in.
@@ -454,12 +452,14 @@ impl<'a> Gen<'a> {
             let new = self.element_update(op, ty, rhs, id, &slot);
             return format!("{slot} = {new}");
         }
-        if !used && !mentions(rhs, root) && !mentions(index, root) && !rows_mention {
+        // A value that may fail is computed outside a closure, where its failure can go on.
+        if !used && !mentions(rhs, root) && !mentions(index, root) && !rows_mention && !self.raises_in(rhs) {
             let reference = self.path_ref(&path, true);
             let i = self.value(index, Type::Int).text;
             let old = self.fresh_name(&["old", "previous", "before"]);
             let new = self.element_update(op, ty, rhs, id, old);
-            return format!("{}({reference}, {i}, |{old}| {new})", self.runtime("modify"));
+            let new = self.closure_value(id, new);
+            return self.may_fail(id, "modify", "", &format!("{reference}, {i}, |{old}| {new}")).text;
         }
         let (mut lets, place) = self.bound_rows(&path);
         let slot = self.fresh_name(&["index", "slot", "at"]);
@@ -468,11 +468,13 @@ impl<'a> Gen<'a> {
         let i = self.value(index, Type::Int).text;
         lets.push(format!("let {slot} = {i};"));
         let read = self.bound_ref(&path, &place, false);
-        lets.push(format!("let {old} = {}({read}, {slot});", self.runtime("at")));
+        let at = self.may_fail(id, "at", "", &format!("{read}, {slot}")).text;
+        lets.push(format!("let {old} = {at};"));
         let new = self.element_update(op, ty, rhs, id, old);
         lets.push(format!("let {value} = {new};"));
         let write = self.bound_ref(&path, &place, true);
-        format!("{{ {} {}({write}, {slot}, {value}) }}", lets.join(" "), self.runtime("put"))
+        let put = self.may_fail(id, "put", "", &format!("{write}, {slot}, {value}")).text;
+        format!("{{ {} {put} }}", lets.join(" "))
     }
 
     /// `a[i]++`, `--a[i]` and the like on a plain array or row. As a statement (`used` false),
@@ -510,7 +512,8 @@ impl<'a> Gen<'a> {
             let i = self.value(index, Type::Int).text;
             let old = self.fresh_name(&["old", "previous", "before"]);
             let new = self.step_value(ty, increment, id, old);
-            return format!("{}({reference}, {i}, |{old}| {new})", self.runtime("modify"));
+            let new = self.closure_value(id, new);
+            return self.may_fail(id, "modify", "", &format!("{reference}, {i}, |{old}| {new}")).text;
         }
         let (mut lets, place) = self.bound_rows(&path);
         let slot = self.fresh_name(&["index", "slot", "at"]);
@@ -518,10 +521,11 @@ impl<'a> Gen<'a> {
         let i = self.value(index, Type::Int).text;
         lets.push(format!("let {slot} = {i};"));
         let read = self.bound_ref(&path, &place, false);
-        lets.push(format!("let {old} = {}({read}, {slot});", self.runtime("at")));
+        let at = self.may_fail(id, "at", "", &format!("{read}, {slot}")).text;
+        lets.push(format!("let {old} = {at};"));
         let new = self.step_value(ty, increment, id, old);
         let write = self.bound_ref(&path, &place, true);
-        let put = format!("{}({write}, {slot}, {new})", self.runtime("put"));
+        let put = self.may_fail(id, "put", "", &format!("{write}, {slot}, {new}")).text;
         if prefix {
             format!("{{ {} {put} }}", lets.join(" "))
         } else {

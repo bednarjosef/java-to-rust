@@ -4,7 +4,6 @@
 //! type (a `Float` is parsed straight to `f32`, not through `f64`). Rust does not read hexadecimal
 //! floats, so those are rounded here, half to even, with the subnormal and overflow cases.
 
-use crate::throw;
 use std::ops::Neg;
 use std::str::FromStr;
 
@@ -44,14 +43,27 @@ pub fn parse_float(s: &str) -> f32 {
     parse(s)
 }
 
+/// `parse_double` where the program observes the `NumberFormatException`.
+pub fn try_parse_double(s: &str) -> Result<f64, crate::Exception> {
+    try_parse(s)
+}
+
+/// `parse_float` where the program observes the `NumberFormatException`.
+pub fn try_parse_float(s: &str) -> Result<f32, crate::Exception> {
+    try_parse(s)
+}
+
 fn parse<T: Float>(s: &str) -> T {
+    try_parse(s).unwrap_or_else(crate::uncaught)
+}
+
+fn try_parse<T: Float>(s: &str) -> Result<T, crate::Exception> {
+    let fail = |message: String| crate::Exception::new("java.lang.NumberFormatException", message);
     let trimmed = s.trim_matches(|c: char| c <= ' ');
     if trimmed.is_empty() {
-        throw("java.lang.NumberFormatException", "empty String");
+        return Err(fail("empty String".to_string()));
     }
-    read::<T>(trimmed).unwrap_or_else(|| {
-        throw("java.lang.NumberFormatException", &format!("For input string: \"{trimmed}\""))
-    })
+    read::<T>(trimmed).ok_or_else(|| fail(format!("For input string: \"{trimmed}\"")))
 }
 
 /// A trimmed, non-empty string in Java's floating-point grammar, or `None`.

@@ -436,6 +436,18 @@ impl Walk<'_> {
             }
             Stmt::Labeled { body, .. } => self.stmt(body),
             Stmt::Block(stmts) => self.block(stmts),
+            Stmt::Throw(e) => self.expr(e),
+            // A `catch` or the `finally` may start after any part of the body; the guards from
+            // outside were checked against the whole statement.
+            Stmt::Try { body, catches, finally } => {
+                self.block(body);
+                for catch in catches {
+                    self.block(&catch.body);
+                }
+                if let Some(f) = finally {
+                    self.block(f);
+                }
+            }
             Stmt::Return(None, _)
             | Stmt::Break
             | Stmt::Continue

@@ -28,8 +28,8 @@ shared and mutable, and a reference that may be null is an `Option` of it. An ar
 counting, not by a garbage collector, so a cycle of objects is never freed. The runtime crate
 (`crates/runtime`) supplies what Rust lacks: Java's exact number semantics (wrapping integer
 overflow, Java's float rules and printing), strings, `StringBuilder`, `String.format`, regular
-expressions and charsets with Java's results. Interfaces, exceptions and generics are not
-translated yet (see "Not yet" below).
+expressions and charsets with Java's results. Collections, lambdas and threads are not translated
+yet (see "Not yet" below).
 
 ### Level 2: analysis-driven Rust
 
@@ -112,85 +112,12 @@ of the slow cases. `NodeList` does not compile yet.
 
 Level 1 end to end for a subset of Java: classes, interfaces, inheritance, generics, the common
 collections, strings and exceptions; no reflection and no threads. Done when the feature corpus
-translates, compiles and matches Java's output. The corpus meets the string, array and expression
-parts of this; the object parts, interfaces, generics, collections and exceptions are not reached
-yet (see "Not yet").
+translates, compiles and matches Java's output. The corpus meets the string, array, expression,
+object, interface, generics and exception parts of this; the collections are not reached yet (see
+"Not yet").
 
 ## Current state
 
-<<<<<<< HEAD
-A first end-to-end pipeline for a small subset: several classes with locals of every primitive
-type (`byte`, `short`, `char`, `int`, `long`, `float`, `double`, `boolean`) and `String`,
-arithmetic, `if`, `while`, `do`, `for`, `break`, `continue`, the conditional operator, `switch`
-statements and expressions on integers, chars, strings and enums (case labels may be constant
-expressions, which are folded as javac folds them), overloading, static and instance methods,
-fields with initializers, instance initializer blocks, static fields, constructors (including
-`this(...)`), `new`, arrays, `System.out.print`/`println`, `System.exit`, a few `Math`
-methods (`floorDiv`, `floorMod`, the `*Exact` integer methods that throw on overflow, `round`,
-`rint`, `clamp`, `copySign`, `hypot`, `fma`, `ulp`, `nextUp`/`nextDown`, `max`/`min` on every
-type, and the rest of the common ones; `StrictMath` the same), `Double`/`Float` and `Boolean`
-methods (`isNaN`, `isInfinite`, `isFinite`, `compare`, `sum`, `max`/`min`, `parseDouble`,
-`parseBoolean`, `logicalAnd`/`logicalOr`/`logicalXor`), `Double.parseDouble`, `Float.parseFloat` and the `valueOf`
-of both with Java's grammar and rounding (whitespace, suffixes, hexadecimal floats), `Integer` and
-`Long` parsing with a radix, the unsigned methods of `Integer`, `Long`, `Byte` and `Short`
-(`divideUnsigned`, `remainderUnsigned`, `compareUnsigned`, `toUnsignedString`, `parseUnsignedInt`,
-`toUnsignedLong`, `toUnsignedInt`), the code point methods of `Character` (`toChars`, `toString(int)`,
-`charCount`, `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint` and the rest), the
-`Character` tests (`isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`,
-`digit`, `forDigit`, `getNumericValue`), and case conversions on a `char`, the `MIN_VALUE`/`MAX_VALUE`
-and `MIN_NORMAL` constants of the wrapper classes, `null` for `String`, and a user `toString` in
-`println` and string concatenation, object-typed fields and `null` objects. Strings have the
-common methods of `String` (searching, slicing, case, trimming, replacing, comparing,
-`split`/`replaceAll`/`matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf`,
-`new String(char[])`), `StringBuilder` and `StringBuffer` (the same type in the runtime, as
-`java::StringBuilder`), `String.format`/`formatted`/`printf` and the bit and radix methods of
-`Integer` and `Long` (`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...),
-all hand-written in the runtime with Java's exact results. Strings and bytes meet through
-`getBytes()`, `getBytes(charset)` and `getBytes("name")`, and `new String(bytes)`,
-`new String(bytes, charset)`, `new String(bytes, offset, length, charset)` and the name forms, for
-UTF-8, US-ASCII, ISO-8859-1, UTF-16 (with its byte order mark), UTF-16BE and UTF-16LE. The
-`StandardCharsets` constants and `Charset.forName` are charsets only in those arguments: a `Charset`
-kept in a variable or passed elsewhere is rejected. Encoding replaces unmappable characters as Java
-does, and decoding replaces malformed input as Java's `String` does (`crates/runtime/src/charset.rs`). Class
-trees of the program's own classes translate, abstract or not and of any depth: `extends`,
-abstract methods, overriding and virtual calls, `super(...)` and `super.m(...)`, upcasts, `==` on
-objects of a class tree, and printing through the class's `toString`. So do the program's
-interfaces: abstract, default, private and static methods, constants, interfaces extending
-interfaces, `Iface.super.m()`, classes and enums implementing them, and `Comparable` implemented by
-a class that calls `compareTo` directly. Between the program's own types, `instanceof` is a
-`matches!` on the type's enum, a pattern `x instanceof Circle c` binds `c` with `if let`, a let
-chain, `let .. else` (for `if (!(x instanceof Circle c)) return ..;`) or `is_some_and`, and a
-downcast or a cast across interfaces is checked, throwing `ClassCastException` when it fails. A
-pattern variable read anywhere else is rejected. `Object` is an enum too, with a variant for each
-of the program's classes and enums whose values become `Object`s and one for each string or box
-(`Object::String(..)`, `Object::Integer(5)`), so `Object` variables, fields, parameters, arrays
-and varargs translate, with `instanceof` and casts to the program's types, `String` and the boxes.
-The program's `equals(Object)` and `hashCode()` override `Object`'s; a class without them
-compares and hashes its identity, and a string or a box its value. A class without `toString`
-prints as Java's `Object.toString` does, its binary name and its hash code in hexadecimal
-(`Point@1b6d3586`). `getClass()` (reflection), an array as an `Object`, and `==` between two
-`Object`s that may both be strings or boxes (whose identity the translation does not keep, except
-in the shortcut `a == b || a.equals(b)`) are rejected. The program's generic classes, interfaces
-and methods translate erased, as javac compiles them: a type variable is its bound (`Object`
-without one), `Box<Integer>` is `Box`, a wildcard is its bound, and a use where javac substituted a
-type argument gets the checked cast back (`java::cast(b.get().as_integer(), ..)`). `Comparable` as
-a type (a bound, mostly) is an enum like `Object`, over strings, boxes, the program's enums and its
-classes that implement it. A method implementing one whose erased signature differs (`Integer
-next()` for `T next()`, `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a
-method with the erased signature that converts and calls it. An array passed as an array of a type
-variable (`first(String[])` for `<T> T first(T[])`) and intersection bounds (`T extends A & B`) are
-rejected. A generic class or method that only stores, returns and passes on the values of its
-type variables (a stack, a pair, a node, `<T> T choose(boolean, T, T)`) is a Rust generic instead
-(`struct Stack<T>`, `impl<T: Clone> Stack<T>`, `fn choose<T: Clone>(..)`), and its uses keep the
-substituted types with no casts. One that needs more of them (their text, `equals`, a bound, a
-cast, an array of them), a class with a supertype or a subclass, a raw use, and a method whose type
-parameters its parameters do not all mention stay erased. Other interfaces of the JDK (`Runnable`, `Iterable`) and lambdas are rejected with an
-error that names the construct and its position. So
-are the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and the like),
-`Character.toChars(int, char[], int)`, and the unsigned and parse methods with other argument counts.
-The design of the object model, and what is still to come, is in
-[docs/object-model.md](docs/object-model.md).
-=======
 ### What translates
 
 A small subset, end to end:
@@ -205,6 +132,68 @@ A small subset, end to end:
   object-typed fields and `null` objects, and a user `toString` in `println` and concatenation.
   `synchronized (x)` checks `x` for null and runs the block: a program has one thread, so the lock
   does nothing.
+- **Class trees, interfaces and generics**: class trees of the program's own classes translate,
+  abstract or not and of any depth: `extends`, abstract methods, overriding and virtual calls,
+  `super(...)` and `super.m(...)`, upcasts, `==` on objects of a class tree, and printing through
+  the class's `toString`. So do the program's interfaces: abstract, default, private and static
+  methods, constants, interfaces extending interfaces, `Iface.super.m()`, classes and enums
+  implementing them, and `Comparable` implemented by a class that calls `compareTo` directly.
+  Between the program's own types, `instanceof` is a `matches!` on the type's enum, a pattern `x
+  instanceof Circle c` binds `c` with `if let`, a let chain, `let .. else` (for `if (!(x instanceof
+  Circle c)) return ..;`) or `is_some_and`, and a downcast or a cast across interfaces is checked,
+  throwing `ClassCastException` when it fails. A pattern variable read anywhere else is rejected.
+  `Object` is an enum too, with a variant for each of the program's classes and enums whose values
+  become `Object`s and one for each string or box (`Object::String(..)`, `Object::Integer(5)`), so
+  `Object` variables, fields, parameters, arrays and varargs translate, with `instanceof` and casts
+  to the program's types, `String` and the boxes. The program's `equals(Object)` and `hashCode()`
+  override `Object`'s; a class without them compares and hashes its identity, and a string or a box
+  its value. A class without `toString` prints as Java's `Object.toString` does, its binary name and
+  its hash code in hexadecimal (`Point@1b6d3586`). `getClass()` (reflection), an array as an
+  `Object`, and `==` between two `Object`s that may both be strings or boxes (whose identity the
+  translation does not keep, except in the shortcut `a == b || a.equals(b)`) are rejected. The
+  program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
+  variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
+  and a use where javac substituted a type argument gets the checked cast back
+  (`java::cast(b.get().as_integer(), ..)`). `Comparable` as a type (a bound, mostly) is an enum like
+  `Object`, over strings, boxes, the program's enums and its classes that implement it. A method
+  implementing one whose erased signature differs (`Integer next()` for `T next()`,
+  `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
+  signature that converts and calls it. An array passed as an array of a type variable
+  (`first(String[])` for `<T> T first(T[])`) and intersection bounds (`T extends A & B`) are
+  rejected. A generic class or method that only stores, returns and passes on the values of its type
+  variables (a stack, a pair, a node, `<T> T choose(boolean, T, T)`) is a Rust generic instead
+  (`struct Stack<T>`, `impl<T: Clone> Stack<T>`, `fn choose<T: Clone>(..)`), and its uses keep the
+  substituted types with no casts. One that needs more of them (their text, `equals`, a bound, a
+  cast, an array of them), a class with a supertype or a subclass, a raw use, and a method whose
+  type parameters its parameters do not all mention stay erased. Other interfaces of the JDK
+  (`Runnable`, `Iterable`) and lambdas are rejected with an error that names the construct and its
+  position. The design of the object model, and what is still to come, is in
+  [docs/object-model.md](docs/object-model.md).
+- **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
+  and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
+  `super(message)`, `super(message, cause)`, fields, and overrides of `getMessage` and `toString`)
+  and the standard ones (`Exception`, `RuntimeException`, `IllegalArgumentException`,
+  `IllegalStateException`, `UnsupportedOperationException` and the rest of
+  `crates/translator/java/Standard.java`, written in Java and given to the program by the
+  translator), with `getMessage`, `getCause`, `toString`, `printStackTrace` (without stack frames)
+  and `getClass().getName()` and `getSimpleName()`. A method returns `Result<T, Throwable>` only
+  when some caller catches what it may throw, `?` passes it on, and every other method keeps its
+  plain signature: an exception that nothing catches ends the program where it is thrown, with
+  `Exception in thread "main" ...` on standard error and exit code 1. A `try` is a labeled block
+  that evaluates to a `Result`, and its catch clauses are a `match`. `finally` runs however its
+  `try` ends: after an exception (which then goes on), a `return` (whose value is taken first) and a
+  `break` or `continue` out of the `try`, through nested `try`s; a `return` or an exception in the
+  `finally` replaces how the `try` ended. A failure of the runtime that a `catch` or a `finally`
+  sees (a division by zero, an array index out of bounds, `charAt` or `substring` out of range, a
+  malformed number) is the standard exception Java throws, with Java's message; elsewhere it ends
+  the program as before. try-with-resources closes the program's own resources (a new object whose
+  `close` cannot fail) in the reverse order, before its `catch` clauses and `finally`. Rejected for
+  now, by name: other try-with-resources, catching or letting a `finally` see a null dereference, a
+  negative array size, a failed cast or a failure of the library other than these, a `toString`, a
+  field initializer or a constructor of an exception or an enum that throws something a caller
+  catches, throwing a value that may be null, and a `yield` or a constructor's `return` through a
+  `finally`. A constructor that throws returns a `Result`, as a method does. The design is in
+  [docs/exceptions.md](docs/exceptions.md).
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`).
 - **Library**: a set of `Math`, `StrictMath`, `Double`, `Float`, `Boolean`, `Integer`, `Long`,
   `Byte`, `Short` and `Character` methods, `String`, `StringBuilder` and `StringBuffer`, and
@@ -227,7 +216,6 @@ A small subset, end to end:
     `MIN_NORMAL` constants of the wrapper classes.
   - `String`: searching, slicing, case, trimming, replacing, comparing, `split`, `replaceAll`,
     `matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf` and `new String(char[])`.
->>>>>>> main
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
@@ -472,12 +460,12 @@ them need the object model to give each stream its descriptor.
 
 Each construct below is rejected at translation with an error that names it:
 
-- exceptions (`try`, `catch`, `finally`, `throw`, `throws`);
-- inheritance (`extends`), interfaces, generic classes and generic methods;
-- records, inner, local and anonymous classes, and `instanceof` with patterns;
+- the exceptions and try-with-resources listed under "Exceptions" above, and intersection bounds
+  (`T extends A & B`);
+- records, inner, local and anonymous classes, and record patterns;
 - lambdas and method references, and for-each over an `Iterable`;
-- `Object` as a type, and the `java.util` collections and interfaces (`Map`, `List`, `HashMap`,
-  `ArrayList`), `asList` and streams;
+- the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
+  and streams;
 - threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls
   above.
 

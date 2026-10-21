@@ -198,8 +198,8 @@ struct Walk<'m> {
     bad: HashSet<String>,
     /// The expression of the simple statement being walked, where a variable may be moved.
     top: Option<&'m Expr>,
-    /// How many switches enclose the code being walked; the liveness analysis does not look
-    /// into them, so nothing is moved there.
+    /// How many switches and `try` statements enclose the code being walked; the liveness
+    /// analysis does not look into them, so nothing is moved there.
     switches: usize,
     scan: Scan,
 }
@@ -341,7 +341,18 @@ impl<'m> Walk<'m> {
             }
             Stmt::Labeled { body, .. } => self.stmt(body, ret),
             Stmt::Block(stmts) => self.block(stmts, ret),
-            Stmt::Yield(e) => self.expr(e),
+            Stmt::Yield(e) | Stmt::Throw(e) => self.expr(e),
+            Stmt::Try { body, catches, finally } => {
+                self.switches += 1;
+                self.block(body, ret);
+                for catch in catches {
+                    self.block(&catch.body, ret);
+                }
+                if let Some(f) = finally {
+                    self.block(f, ret);
+                }
+                self.switches -= 1;
+            }
             Stmt::Return(None, _)
             | Stmt::Break
             | Stmt::Continue

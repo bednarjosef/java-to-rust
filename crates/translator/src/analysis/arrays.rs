@@ -163,6 +163,15 @@ pub(super) fn declarations(method: &Method) -> Vec<Declaration<'_>> {
             }
             Stmt::Labeled { body, .. } => stmt(body, out),
             Stmt::Block(stmts) => stmts.iter().for_each(|s| stmt(s, out)),
+            Stmt::Throw(e) => expr(e, out),
+            Stmt::Try { body, catches, finally } => {
+                body.iter().for_each(|s| stmt(s, out));
+                for catch in catches {
+                    out.push(Declaration { name: &catch.name, ty: catch.ty, init: None, loop_var: false });
+                    catch.body.iter().for_each(|s| stmt(s, out));
+                }
+                finally.iter().flatten().for_each(|s| stmt(s, out));
+            }
             Stmt::Return(None, _)
             | Stmt::Break
             | Stmt::Continue
@@ -267,8 +276,10 @@ fn solve(class: &Class, scans: &[Scan], lend_shared: bool, facts: &Facts) -> Sol
             ExprKind::Call { args, resolved: Some(callee), .. }
             | ExprKind::MethodCall { args, resolved: Some(callee), .. }
             | ExprKind::New { args, ctor: Some(callee), .. } => {
-                for i in 0..args.len() {
-                    borrowed.remove(&(*callee, i));
+                for g in class.hierarchy.group(*callee) {
+                    for i in 0..args.len() {
+                        borrowed.remove(&(g, i));
+                    }
                 }
             }
             _ => {}
@@ -316,7 +327,8 @@ fn solve(class: &Class, scans: &[Scan], lend_shared: bool, facts: &Facts) -> Sol
                 }
             }
         }
-        // The methods of an override group borrow a parameter together or not at all.
+        // The methods of an override group borrow a parameter together or not at all, and
+        // return a `Vec` together or not at all.
         let unaligned: Vec<(usize, usize)> = borrowed
             .iter()
             .copied()
@@ -324,6 +336,14 @@ fn solve(class: &Class, scans: &[Scan], lend_shared: bool, facts: &Facts) -> Sol
             .collect();
         for key in unaligned {
             changed |= borrowed.remove(&key);
+        }
+        let unowned: Vec<usize> = owned_returns
+            .iter()
+            .copied()
+            .filter(|&m| class.hierarchy.group(m).iter().any(|g| !owned_returns.contains(g)))
+            .collect();
+        for m in unowned {
+            changed |= owned_returns.remove(&m);
         }
         for (m, scan) in scans.iter().enumerate() {
             for (i, name) in &scan.params {

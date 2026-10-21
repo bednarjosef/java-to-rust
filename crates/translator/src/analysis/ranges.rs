@@ -132,6 +132,16 @@ fn join(a: Option<Env>, b: Option<Env>) -> Option<Env> {
     }
 }
 
+/// `env` with every variable that the statements assign at the full range of its type.
+fn widened<'s>(env: &Env, stmts: impl Iterator<Item = &'s Stmt> + Clone) -> Env {
+    env.iter()
+        .map(|(k, v)| {
+            let assigned = stmts.clone().any(|s| assigns_stmt(s, k));
+            (k.clone(), if assigned { Var { ty: v.ty, range: Interval::full(v.ty) } } else { *v })
+        })
+        .collect()
+}
+
 fn within(a: &Env, b: &Env) -> bool {
     a.iter().all(|(k, v)| b.get(k).is_some_and(|w| v.range.within(w.range)))
 }
@@ -511,6 +521,30 @@ impl<'a> Analysis<'a> {
                 out
             }
             Stmt::Block(stmts) => self.stmts(stmts, Some(env)),
+            Stmt::Throw(e) => {
+                self.expr(e, &mut env);
+                None
+            }
+            Stmt::Try { body, catches, finally } => {
+                // An exception can leave the body at any point, so a handler starts from the
+                // state before the `try` with what the body assigns at any value.
+                let raised = widened(&env, body.iter());
+                let mut out = self.stmts(body, Some(env));
+                for catch in catches {
+                    let handled = self.stmts(&catch.body, Some(raised.clone()));
+                    out = join(out, handled);
+                }
+                let Some(finally) = finally else { return out };
+                // The `finally` also runs on the way out of an exception, a `return`, a `break` or
+                // a `continue`, from any point of the body and the handlers.
+                let escaping = widened(&raised, catches.iter().flat_map(|c| &c.body));
+                let after = self.stmts(finally, join(out.clone(), Some(escaping)));
+                for flow in &mut self.loops {
+                    flow.breaks = flow.breaks.take().map(|e| widened(&e, finally.iter()));
+                    flow.continues = flow.continues.take().map(|e| widened(&e, finally.iter()));
+                }
+                out.and(after)
+            }
             Stmt::ForEach { ty, name, array, body } => {
                 self.expr(array, &mut env);
                 if ty.is_integral() {

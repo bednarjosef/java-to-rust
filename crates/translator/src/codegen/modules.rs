@@ -58,6 +58,14 @@ fn set_current(package: &str) {
 /// The path prefix that names a class from the module being written (empty inside its own
 /// module), and its name inside its package (`Outer.Inner` for a nested class).
 pub(super) fn split(name: &str) -> (String, &str) {
+    // The standard exception classes are items of the crate's root, named by their simple names.
+    if crate::lower::is_standard(name) {
+        let simple = name.rsplit('.').next().unwrap_or(name);
+        let root = CONTEXT.with_borrow(|c| {
+            c.as_ref().and_then(|c| c.current.as_deref()).is_some_and(|current| !current.is_empty())
+        });
+        return (if root { "crate::".to_string() } else { String::new() }, simple);
+    }
     CONTEXT.with_borrow(|c| {
         let Some((c, package)) = c.as_ref().and_then(|c| Some((c, c.packages.get(name)?))) else {
             return (String::new(), name);

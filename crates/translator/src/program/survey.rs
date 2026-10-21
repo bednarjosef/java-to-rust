@@ -18,8 +18,8 @@
 
 use super::Program;
 use super::reach::{
-    CLASS_KINDS, MethodKey, OBJECT_METHODS, RUNTIME_CLASSES, Reach, class_name, has_flag, members,
-    never_true, outside, symbol_type, text, untranslated,
+    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, has_flag, members, never_true, outside,
+    provided, symbol_type, text, untranslated,
 };
 use serde_json::{Value, json};
 use std::cmp::Reverse;
@@ -293,7 +293,9 @@ impl Census {
                     "CLASS" | "INTERFACE" | "ENUM" | "RECORD" if !symbol_type(node).starts_with('<') => {
                         scan.feature("local classes", node)
                     }
-                    "TRY" | "THROW" => scan.feature("exceptions", node),
+                    "TRY" if node["resources"].as_array().is_some_and(|r| !r.is_empty()) => {
+                        scan.feature("try-with-resources", node)
+                    }
                     // Tests and casts between the program's own classes translate, and from
                     // `Object` to them, to strings and to boxes; a pattern binding its variable is
                     // part of the test.
@@ -347,7 +349,7 @@ impl Census {
                     } else if let Some(feature) = untranslated(owner) {
                         scan.feature(feature, node);
                         scan.calls.insert(format!("({feature}) {owner}.{name}"));
-                    } else if RUNTIME_CLASSES.contains(&owner) {
+                    } else if provided(owner) {
                         let simple = owner.rsplit('.').next().unwrap_or(owner);
                         scan.calls.insert(format!("{simple}.{name}"));
                     } else if !owner.is_empty() && !self.declared.contains(owner) {
@@ -744,7 +746,8 @@ fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String
     // Class trees of the program's own classes translate; a superclass from elsewhere does not.
     if kind == "CLASS" && !decl["extendsClause"].is_null() {
         let superclass = text(&decl["extendsClause"], "javaType");
-        if !declared.contains(superclass.split('<').next().unwrap_or(superclass)) {
+        let superclass = superclass.split('<').next().unwrap_or(superclass);
+        if !declared.contains(superclass) && !crate::lower::is_standard(superclass) {
             features.insert("extending classes outside the sources");
         }
     }

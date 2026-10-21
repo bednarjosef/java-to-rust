@@ -161,7 +161,19 @@ impl Walk {
                 self.loops -= 1;
             }
             Stmt::Labeled { body, .. } => self.scoped(body),
-            Stmt::Yield(e) => self.top(e),
+            Stmt::Yield(e) | Stmt::Throw(e) => self.top(e),
+            Stmt::Try { body, catches, finally } => {
+                self.block(body);
+                for catch in catches {
+                    let mark = self.scope.len();
+                    self.declare(&catch.name);
+                    self.block(&catch.body);
+                    self.scope.truncate(mark);
+                }
+                if let Some(finally) = finally {
+                    self.block(finally);
+                }
+            }
             Stmt::Return(None, _)
             | Stmt::Break
             | Stmt::Continue

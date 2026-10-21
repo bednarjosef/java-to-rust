@@ -18,6 +18,7 @@ mod character_tables;
 mod charset;
 mod code_point;
 mod exact;
+mod exception;
 mod fd;
 pub mod fdlibm;
 mod float;
@@ -44,16 +45,17 @@ pub use code_point::{
     is_valid_code_point, low_surrogate, to_chars, to_code_point,
 };
 pub use exact::*;
+pub use exception::*;
 pub use fd::*;
 pub use float::*;
-pub use float_parse::{parse_double, parse_float};
+pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
 pub use format::{Arg, format};
 pub use integer::*;
-pub use integer_parse::parse_radix;
+pub use integer_parse::{parse_radix, try_parse_radix};
 pub use java_arrays::*;
 pub use math::*;
 pub use natives::*;
-pub use null::{OrNull, non_null, or_null, same};
+pub use null::{OrNull, non_null, or_null, same, try_non_null};
 pub use out::{Out, flush, out, print_chars, println_chars, write_byte};
 pub use regex::{matches_all, replace_all, replace_first, split};
 pub use string::*;
@@ -132,6 +134,8 @@ pub(crate) fn shortest_digits<T: fmt::LowerExp + std::str::FromStr + PartialEq>(
 pub trait Integer: Copy {
     fn java_div(self, rhs: Self) -> Self;
     fn java_rem(self, rhs: Self) -> Self;
+    fn try_div(self, rhs: Self) -> Result<Self, Exception>;
+    fn try_rem(self, rhs: Self) -> Result<Self, Exception>;
 }
 
 macro_rules! integer {
@@ -150,6 +154,20 @@ macro_rules! integer {
                 }
                 self.wrapping_rem(rhs)
             }
+
+            fn try_div(self, rhs: Self) -> Result<Self, Exception> {
+                if rhs == 0 {
+                    return Err(Exception::new("java.lang.ArithmeticException", "/ by zero"));
+                }
+                Ok(self.wrapping_div(rhs))
+            }
+
+            fn try_rem(self, rhs: Self) -> Result<Self, Exception> {
+                if rhs == 0 {
+                    return Err(Exception::new("java.lang.ArithmeticException", "/ by zero"));
+                }
+                Ok(self.wrapping_rem(rhs))
+            }
         }
     )*};
 }
@@ -164,6 +182,16 @@ pub fn div<T: Integer>(a: T, b: T) -> T {
 /// Java's `%` on `int` and `long`.
 pub fn rem<T: Integer>(a: T, b: T) -> T {
     a.java_rem(b)
+}
+
+/// `/` where the program observes the `ArithmeticException` of a division by zero.
+pub fn try_div<T: Integer>(a: T, b: T) -> Result<T, Exception> {
+    a.try_div(b)
+}
+
+/// `%` where the program observes the `ArithmeticException` of a division by zero.
+pub fn try_rem<T: Integer>(a: T, b: T) -> Result<T, Exception> {
+    a.try_rem(b)
 }
 
 /// Java's `Math.max(double, double)`: NaN wins, and `0.0` is larger than `-0.0`.
@@ -203,11 +231,9 @@ pub fn exit(code: i32) -> ! {
     std::process::exit(code)
 }
 
-/// Ends the program the way an uncaught Java exception does.
+/// Ends the program the way an uncaught Java exception of the standard class `class` does.
 pub fn throw(class: &str, message: &str) -> ! {
-    flush();
-    eprintln!("Exception in thread \"main\" {class}: {message}");
-    std::process::exit(1)
+    exception::die(format_args!("{class}: {message}"))
 }
 
 /// Java's checked cast `(T) x` on a non-null object: the object as a `T` if it is one, which

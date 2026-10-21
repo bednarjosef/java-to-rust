@@ -29,6 +29,11 @@ impl<'a> Gen<'a> {
                 continue;
             }
             match stmt {
+                // A `throw` that ends a method that throws is its `Err` result.
+                Stmt::Throw(value) if tail && rest.is_empty() && self.throwing => {
+                    let text = self.expr(value).text;
+                    self.line(&format!("Err({text})"));
+                }
                 _ if tail && rest.is_empty() && self.tail_value(stmt) => self.tail_stmt(stmt),
                 _ => self.stmt(stmt, rest),
             }
@@ -89,14 +94,13 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
             Stmt::For { init, cond, update, body } => self.for_loop(init, cond.as_ref(), update, body),
-            Stmt::Return(None, _) => match self.ctor_result {
-                Some(result) => self.line(&format!("return {result};")),
-                None => self.line("return;"),
-            },
-            Stmt::Return(Some(value), _) => {
+            Stmt::Return(None, pos) => self.return_stmt(None, *pos),
+            Stmt::Return(Some(value), pos) => {
                 let code = self.returned(value);
-                self.line(&format!("return {};", code.text));
+                self.return_stmt(Some(code.text), *pos);
             }
+            Stmt::Throw(value) => self.throw_stmt(value),
+            Stmt::Try { body, catches, finally } => self.try_stmt(stmt, body, catches, finally.as_deref()),
             Stmt::Break => self.plain_jump(false),
             Stmt::Continue => self.plain_jump(true),
             Stmt::Switch { selector, cases } => self.switch_form(selector, cases, None, false),
@@ -130,9 +134,11 @@ impl<'a> Gen<'a> {
         if self.facts.owned_returns.contains(&self.method) {
             return Code::atom(self.owned(value));
         }
+        // (A `finally` that the `return` runs may still read the variable.)
         if let ExprKind::Var(name) = &value.kind
             && value.ty == Type::String
             && !self.borrowed.contains(name)
+            && self.finallies.is_empty()
         {
             return Code::atom(self.local(name));
         }
@@ -255,6 +261,14 @@ impl<'a> Gen<'a> {
         let mutable = if mutable { "mut " } else { "" };
         let rust = self.local(name);
         match init {
+            None if self.try_assigned.contains(name) => {
+                // Rust cannot tell that a `try` block or its `catch` clauses assign it before it is
+                // read, as Java can: it starts as the value Java would give a field.
+                let ty_text = self.ty_name(ty);
+                let value = exceptions::default_value(ty).unwrap_or("todo!()");
+                self.line("#[allow(unused_assignments)]");
+                self.line(&format!("let {mutable}{rust}: {ty_text} = {value};"));
+            }
             None => {
                 let ty_text = self.ty_name(ty);
                 self.line(&format!("let {mutable}{rust}: {ty_text};"));

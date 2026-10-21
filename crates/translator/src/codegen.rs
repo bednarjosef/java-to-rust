@@ -16,6 +16,7 @@ mod code;
 mod code_point;
 mod dispatch;
 mod enums;
+mod exceptions;
 mod expr;
 mod files;
 mod idiomatic;
@@ -55,21 +56,26 @@ use arrays::name_part;
 use boxing::boxed_locals;
 use objects::*;
 
-pub fn generate(class: &Class, facts: &Facts) -> String {
+pub fn generate(class: &Class, facts: &Facts) -> Result<String, Error> {
     // The enums of class types get the items that the code uses, which writing the code finds:
     // the program is written again until it asks for no item that was not written.
     let mut wanted = Needs::new();
     loop {
-        let (text, needs) = generate_with(class, facts, &wanted);
+        let (text, needs, rejected) = generate_with(class, facts, &wanted);
+        if let Some(e) = rejected {
+            return Err(e);
+        }
         if needs.is_subset(&wanted) {
-            return text;
+            exceptions::check_closures(&text)?;
+            return Ok(text);
         }
         wanted.extend(needs);
     }
 }
 
-/// The program, with the enum items `wanted`, and the enum items that it uses.
-fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs) {
+/// The program, with the enum items `wanted`, and the enum items that it uses; and what in it
+/// cannot be translated, if anything.
+fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs, Option<Error>) {
     let live = live_types(class, facts);
     let modules = modules::enter(class);
     let homes: Vec<Home> = (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect();
@@ -113,10 +119,16 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         labels: 0,
         ret: Type::Void,
         uses_runtime: false,
+        throwing: false,
+        attempts: Vec::new(),
+        finallies: Vec::new(),
+        attempt_count: 0,
+        try_assigned: HashSet::new(),
+        rejected: None,
     };
     if modules.is_some() {
         let text = g.program(&live);
-        return (text, g.needs.take());
+        return (text, g.needs.take(), g.rejected);
     }
     for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
         g.type_items(index);
@@ -142,7 +154,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
     if !uses.is_empty() {
         header.push_str(&(uses.join("\n") + "\n"));
     }
-    (header + &g.out, g.needs.take())
+    (header + &g.out, g.needs.take(), g.rejected)
 }
 
 /// How `this` is written in the code being generated.
@@ -253,6 +265,20 @@ struct Gen<'a> {
     /// The return type of the current method.
     ret: Type,
     uses_runtime: bool,
+    /// Whether the current method returns `Result<_, Throwable>` (see `exceptions`).
+    throwing: bool,
+    /// The `try` blocks around the code being written, innermost last.
+    attempts: Vec<exceptions::Attempt>,
+    /// The `try` statements with a `finally` whose body or `catch` clauses are being written,
+    /// innermost last.
+    finallies: Vec<exceptions::Finally>,
+    /// How many `try` blocks of the current method have a label.
+    attempt_count: usize,
+    /// The current method's locals declared without a value that a `try` block assigns (see
+    /// `exceptions::try_assigned`).
+    try_assigned: HashSet<String>,
+    /// The first construct found that cannot be translated, which `generate` reports.
+    rejected: Option<Error>,
 }
 
 impl<'a> Gen<'a> {
@@ -319,6 +345,14 @@ impl<'a> Gen<'a> {
         let m = &self.class.methods[index];
         self.ret = m.ret;
         self.method = index;
+        self.throwing = self.facts.throwing.contains(&index);
+        self.attempts.clear();
+        self.finallies.clear();
+        self.attempt_count = 0;
+        self.try_assigned = exceptions::try_assigned(self.facts, &m.body);
+        if let Some(e) = exceptions::check_try_assigned(&m.body, &self.try_assigned) {
+            self.rejected.get_or_insert(e);
+        }
         self.name_locals(m);
         self.int_receiver = false;
         self.double_receiver = false;
@@ -372,6 +406,16 @@ impl<'a> Gen<'a> {
     /// The return type of method `index` as it is written after its parameters: ` -> T`, or
     /// nothing.
     fn ret_text(&mut self, index: usize) -> String {
+        let plain = self.plain_ret_text(index);
+        if !self.facts.throwing.contains(&index) {
+            return plain;
+        }
+        let ok = plain.strip_prefix(" -> ").unwrap_or("()").to_string();
+        format!(" -> Result<{ok}, {}>", self.throwable_type())
+    }
+
+    /// `ret_text` of a method that does not throw.
+    fn plain_ret_text(&mut self, index: usize) -> String {
         let m = &self.class.methods[index];
         let name = &self.class.types[m.class].name;
         if m.is_ctor && self.builds_plain(name) {
@@ -454,6 +498,9 @@ impl<'a> Gen<'a> {
             self.constructor(m);
         } else {
             self.stmts(&m.body, true);
+            if self.throwing && m.ret == Type::Void && exceptions::completes_all(&m.body) {
+                self.line("Ok(())");
+            }
         }
         self.indent -= 1;
         self.line("}");
@@ -542,6 +589,9 @@ fn collect_locals(stmts: &[Stmt], out: &mut Vec<String>) {
         visit_stmt(stmt, &mut |_| {}, &mut |s| {
             if let Stmt::Local { name, .. } | Stmt::ForEach { name, .. } = s {
                 out.push(name.clone());
+            }
+            if let Stmt::Try { catches, .. } = s {
+                out.extend(catches.iter().map(|c| c.name.clone()));
             }
         });
     }
