@@ -87,7 +87,7 @@ impl<'a> Gen<'a> {
 
     /// The value of a new array's elements: zero, `false`, or `None` for references.
     pub(super) fn element_zero(&self, elem: Type) -> &'static str {
-        if elem.is_reference() { "None" } else { zero_value(elem) }
+        if elem.is_reference() || self.nullable_element(elem) { "None" } else { zero_value(elem) }
     }
 
     /// `e` as a borrowed array handle, for the runtime helpers that take `&Array`.

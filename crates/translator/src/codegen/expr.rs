@@ -346,6 +346,16 @@ impl<'a> Gen<'a> {
             {
                 self.boxed_identity(*op, l, r)
             }
+            // Enums of which one may be null (see `lower::enum_nulls`): `Option`s, equal when both
+            // are null or both are the same constant.
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
+                if matches!((l.ty, r.ty), (Type::Enum(_), Type::Enum(_)))
+                    && (self.nullable(l) || self.nullable(r)) =>
+            {
+                let (a, b) = (self.optional_to(l, l.ty), self.optional_to(r, r.ty));
+                let symbol = if *op == BinOp::Eq { "==" } else { "!=" };
+                Code::new(format!("{} {symbol} {}", a.at(CMP + 1), b.at(CMP + 1)), CMP)
+            }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if bool_test(l, r).is_some() => {
                 self.bool_comparison(*op, l, r)
             }
