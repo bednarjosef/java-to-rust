@@ -1554,6 +1554,30 @@ fn objects_created_from_a_class_name_are_of_the_classes_that_code_names() {
     assert_lacks(&rust, &["Square", "square"]);
 }
 
+#[test]
+fn class_for_name_of_a_spelled_out_name_initializes_that_class() {
+    let registry = "package app;\n\
+        class Registry {\n\
+            static { Main.value = \"registered\"; System.out.println(\"registry\"); }\n\
+        }\n";
+    let java = "package app;\n\
+        public class Main {\n\
+            static String value;\n\
+            public static void main(String[] a) {\n\
+                try {\n\
+                    Class.forName(\"app.Registry\", true, null);\n\
+                } catch (ClassNotFoundException e) {}\n\
+                System.out.println(value);\n\
+            }\n\
+        }\n";
+    let dir = write_sources("for-name", &[("app/Main.java", java), ("app/Registry.java", registry)]);
+    let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    // Only the string names `Registry`, and the call runs its static initializer.
+    assert_contains(&rust, &["init_registry();", "\"registry\""]);
+}
+
 /// Writes Java files into a fresh directory under the test's temporary directory.
 fn write_sources(dir: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(dir);

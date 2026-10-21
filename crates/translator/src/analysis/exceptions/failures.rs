@@ -270,6 +270,7 @@ pub(super) fn runtime_failures(
             | Builtin::MainArgs
             | Builtin::NoObject { .. }
             | Builtin::UnknownClass
+            | Builtin::InitializeClass { .. }
             | Builtin::ClassName { .. }
             | Builtin::ClassLiteralName { .. }
             | Builtin::SameClass { .. }
