@@ -245,6 +245,11 @@ impl<'a> Gen<'a> {
     /// An array that nobody else holds, as a plain `Vec`: a new array, a literal, the result of a
     /// method that returns its own arrays, or a plain local moved out of its variable.
     pub(super) fn owned(&mut self, e: &'a Expr) -> String {
+        if self.facts.catching.contains_key(&e.id) && self.catching_now.insert(e.id) {
+            let text = self.owned(e);
+            self.catching_now.remove(&e.id);
+            return self.caught(e.id, Code::atom(text)).text;
+        }
         match &e.kind {
             ExprKind::NewArray(sizes) => self.owned_new(e.ty, sizes),
             ExprKind::ArrayLit(items) => {
