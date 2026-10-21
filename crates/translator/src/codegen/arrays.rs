@@ -129,6 +129,28 @@ impl<'a> Gen<'a> {
     /// `new T[n]`, or `new T[n][m]` and so on. Every size is evaluated, and checked, before any
     /// array is allocated, as Java does.
     pub(super) fn new_array(&mut self, ty: Type, sizes: &'a [Expr]) -> Code {
+        self.new_rows(ty, sizes, None)
+    }
+
+    /// `new T[n][m]..` of an array type that is translated as an `Object[]` (`to`, see
+    /// `lower::covariant`), whose Java type is `exact`: the rows are made as `new_array` makes
+    /// them, and each becomes an `Object`. Nothing else holds the new rows yet, so no identity is
+    /// lost.
+    pub(super) fn new_object_rows(&mut self, to: Type, exact: Type, sizes: &'a [Expr]) -> Code {
+        let object = self.enum_type(to.element()).expect("`Object` is an enum");
+        let row = self.class.type_of(exact.element()).expect("rows that are `Object`s (see `lower::arrays`)");
+        let variant = self.variant_of(object, row).expect("a variant of `Object` for the rows");
+        let wrapped = if self.nullable_element(to.element()) {
+            format!("Some({variant}(#))")
+        } else {
+            format!("{variant}(#)")
+        };
+        self.new_rows(exact, sizes, Some(wrapped))
+    }
+
+    /// `new_array`, with each row of the outermost level put in place of the `#` of `wrap` when
+    /// given.
+    fn new_rows(&mut self, ty: Type, sizes: &'a [Expr], wrap: Option<String>) -> Code {
         let zero = self.element_zero(ty.element_at(sizes.len()));
         if let [size] = sizes {
             let n = self.value(size, Type::Int).text;
@@ -140,8 +162,11 @@ impl<'a> Gen<'a> {
         for level in (0..last).rev() {
             // The rows built here are elements of level `level`; they are `Some` where that
             // element type is nullable, as the array they fill is.
-            let row =
-                if self.nullable_element(ty.element_at(level + 1)) { format!("Some({text})") } else { text };
+            let row = match &wrap {
+                Some(wrap) if level == 0 => wrap.replacen('#', &text, 1),
+                _ if self.nullable_element(ty.element_at(level + 1)) => format!("Some({text})"),
+                _ => text,
+            };
             text = format!("{}(dims[{level}], |_| {row})", self.array_maker("tabulate"));
         }
         let check = self.runtime("check_sizes");

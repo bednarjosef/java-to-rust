@@ -124,7 +124,7 @@ impl<'a> Gen<'a> {
 
     /// `variant`, when the enum of `t` has a variant for class `c`: it has none when no object of
     /// `c` is ever created, where code that has one never runs.
-    fn variant_of(&self, t: usize, c: usize) -> Option<String> {
+    pub(super) fn variant_of(&self, t: usize, c: usize) -> Option<String> {
         self.enum_variants(t).contains(&c).then(|| self.variant(t, c))
     }
 
@@ -1097,6 +1097,8 @@ impl<'a> Gen<'a> {
             Some(Type::Double | Type::Float) => "o.to_bits() == b.to_bits()",
             Some(Type::Array(_)) => "Rc::ptr_eq(o, b)",
             Some(Type::StringBuilder) => "o.same(b)",
+            // A box whose identity is kept (`java::Boxed`) compares the values it holds.
+            _ if self.runtime_of(c).is_some_and(|ty| self.faithful_box(ty)) => "**o == **b",
             _ if self.holds_value(c) => "o == b",
             _ if self.facts.thread_shared.contains(&c) => "Arc::ptr_eq(o, b)",
             _ => "Rc::ptr_eq(o, b)",
@@ -1299,8 +1301,12 @@ impl<'a> Gen<'a> {
                 // An array is a shared handle, the same array only when it is the same handle; in a
                 // program with threads, an `Arc`, as a shared object is.
                 let array = self.class.array_of(c).is_some();
+                // A box whose identity is kept is the same box only when it is the same object.
+                let faithful = self.runtime_of(c).is_some_and(|ty| self.faithful_box(ty));
+                let same_box = format!("{}(Some(a), Some(b))", self.runtime("same_optional"));
                 let same = match () {
                     _ if self.runtime_of(c) == Some(Type::StringBuilder) => "a.same(b)",
+                    _ if faithful => &same_box,
                     _ if self.holds_value(c) && !array => "a == b",
                     _ if self.facts.thread_shared.contains(&c) || array && self.facts.threaded => {
                         "Arc::ptr_eq(a, b)"

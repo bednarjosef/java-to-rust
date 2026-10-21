@@ -403,6 +403,13 @@ impl<'a> Gen<'a> {
             ExprKind::Index(array, index) => self.index(e.id, array, index),
             ExprKind::Length(array) => self.length(array),
             ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
+            // `new int[n][m]` where `int[][]` is an `Object[]` (see `lower::arrays::new_array`).
+            ExprKind::Cast(to @ Type::Array(_), value)
+                if let ExprKind::NewArray(sizes) = &value.kind
+                    && value.ty != *to =>
+            {
+                self.new_object_rows(*to, value.ty, sizes)
+            }
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
             // An upcast or a downcast between the program's types, or a string, a box or a
             // primitive becoming an `Object`.
