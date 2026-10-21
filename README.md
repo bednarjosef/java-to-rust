@@ -188,7 +188,10 @@ A small subset, end to end:
   (`java::cast(b.get().as_integer(), ..)`). `Comparable` as a type (a bound, mostly) is an enum like
   `Object`, over strings, boxes, the program's enums and its classes that implement it, and so is
   `Number` (`T extends Number`, `List<? extends Number>`), over the numeric boxes, whose
-  `intValue()` and the others convert as Java does. A method
+  `intValue()` and the others convert as Java does, and over the program's classes that extend
+  `Number` (the JDK's `AtomicInteger` and `BigInteger`), whose own `intValue()` to
+  `doubleValue()` run; `Number`'s `byteValue()` and `shortValue()` narrow `intValue()`, and a
+  class that overrides them is rejected. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &
