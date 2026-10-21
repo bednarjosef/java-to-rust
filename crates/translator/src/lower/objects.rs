@@ -49,6 +49,8 @@ impl<'t> Lowering<'t> {
             object: None,
             real: Default::default(),
             failed: Default::default(),
+            functional: Default::default(),
+            lambdas: Vec::new(),
         }
     }
 
@@ -67,18 +69,25 @@ impl<'t> Lowering<'t> {
         let members: Vec<Node<'t>> = node.list("members").filter(|m| self.keeps(*m, &name)).collect();
         for member in members {
             match member.kind() {
-                "METHOD" => self.methods.push(MethodInfo {
-                    owner: index,
-                    node: member,
-                    name: member.str("name"),
-                    sig: member.symbol().map_or("", |s| s.ty),
-                }),
-                "VARIABLE" | "EMPTY_STATEMENT" => {}
+                "METHOD" => {
+                    self.methods.push(MethodInfo {
+                        owner: index,
+                        node: member,
+                        name: member.str("name"),
+                        sig: member.symbol().map_or("", |s| s.ty),
+                    });
+                    self.declare_lambdas(member, index, Some(self.methods.len() - 1));
+                }
+                "VARIABLE" => self.declare_lambdas(member, index, None),
+                "EMPTY_STATEMENT" => {}
                 "ENUM" | "INTERFACE" => self.declare_type(member, Some(&name))?,
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
                 "CLASS" => return unsupported(member, "inner classes"),
-                "BLOCK" if Self::is_static_block(member) => {}
-                "BLOCK" => self.check_initializer_block(node, member)?,
+                "BLOCK" if Self::is_static_block(member) => self.declare_lambdas(member, index, None),
+                "BLOCK" => {
+                    self.check_initializer_block(node, member)?;
+                    self.declare_lambdas(member, index, None);
+                }
                 kind => return unsupported(member, &kind_words(kind)),
             }
         }
@@ -99,6 +108,9 @@ impl<'t> Lowering<'t> {
 
     /// The declaration of a class: its instance fields and static fields, in source order.
     pub(super) fn type_decl(&self, index: usize) -> Result<TypeDecl, Error> {
+        if let Some(decl) = self.lambda_decl(index) {
+            return decl;
+        }
         self.current.set(index);
         let node = self.types[index].node;
         let (mut fields, mut statics) = (Vec::new(), Vec::new());

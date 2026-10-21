@@ -33,6 +33,8 @@ impl<'t> Lowering<'t> {
     /// one `scope` names), then its class's and those of the classes it is nested in.
     fn type_var(&self, name: &str) -> Option<(Node<'t>, Owner)> {
         let (class, method) = self.scope.get().unwrap_or((self.current.get(), self.method_ctx.get()));
+        // A lambda sees the type variables of the code that holds it.
+        let (class, method) = self.lambda_scope(class, method);
         let declares = |node: Node<'t>| node.list("typeParameters").find(|p| p.str("name") == name);
         if let Some(m) = method
             && let Some(found) = declares(self.methods[m].node)

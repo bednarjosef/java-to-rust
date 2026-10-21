@@ -32,6 +32,9 @@ impl<'t> Lowering<'t> {
         for clause in node.list("implementsClause") {
             let name = clause.java_type();
             let raw = name.split('<').next().unwrap_or(name);
+            if functional::is_marker(raw) {
+                continue;
+            }
             match self.type_index(raw) {
                 Some(i) if self.types[i].node.kind() == "INTERFACE" => out.push(i),
                 None if matches!(

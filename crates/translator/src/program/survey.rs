@@ -283,8 +283,13 @@ impl Census {
                 let kind = text(node, "kind");
                 let ty = text(node, "javaType");
                 match kind {
-                    "LAMBDA_EXPRESSION" => scan.feature("lambdas", node),
-                    "MEMBER_REFERENCE" => scan.feature("method references", node),
+                    // A lambda or method reference translates unless it captures something (a
+                    // `static final` receiver is taken for a capture here).
+                    "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE"
+                        if crate::lower::captured(node, &|_, _| false).is_some() =>
+                    {
+                        scan.feature("lambda captures", node)
+                    }
                     "NEW_CLASS" if !node["classBody"].is_null() => scan.feature("anonymous classes", node),
                     "NEW_CLASS" if !node["enclosingExpression"].is_null() => {
                         scan.feature("inner classes", node)
