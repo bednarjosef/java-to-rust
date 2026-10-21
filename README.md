@@ -798,8 +798,24 @@ natives (`open0`, `read0`, `readBytes`, `available0`, `skip0`, `length0`, `posit
 `isRegularFile0`, `writeBytes`, `close0`): stdin is the process's descriptor 0, read after
 standard output is written out so that a prompt shows, stdout writes through the buffered
 `System.out` so its order is kept with `println`, stderr is written as it is, and files are opened
-by path. Their failures are the JDK's `IOException` and `FileNotFoundException`, which a `catch`
-sees.
+by path. `RandomAccessFile`'s natives are the same table's (`open0` with `"r"` or `"rw"`, which
+creates the file, `read0`, `readBytes0`, `write0`, `writeBytes0`, `seek0`, `getFilePointer`,
+`length0`, `setLength0`). Their failures are the JDK's `IOException` and `FileNotFoundException`,
+with its messages, which a `catch` sees. `java.io.File` asks `UnixFileSystem`, whose natives
+(`fs.rs`) are `std::fs` on the `File`'s path: `getBooleanAttributes0` (exists, regular file,
+directory), `checkAccess0`, `getLength0`, `getLastModifiedTime0`, `setLastModifiedTime0`,
+`setPermission0`, `setReadOnly0`, `createFileExclusively0`, `createDirectory0`, `delete0`,
+`rename0`, `list0` (the system's order), `canonicalize0` and `getNameMax0`; `getSpace0` is
+rejected. A file stream's `FileCleanable.register` does nothing, since nothing is garbage
+collected: a stream the program never closes stays open until it ends. `Blocker.begin` is `false`
+and `end` does nothing, as without virtual threads. `jdk.internal.util.ByteArray`, which
+`RandomAccessFile` and the data streams use to pack numbers, is the translator's own
+(`java/overlay/jdk/internal/util/ByteArray.java`), which shifts bytes where the JDK's uses
+`VarHandle` views, and the `JavaLangAccess` methods that the data streams call on
+`SharedSecrets` (`countPositives`, `countNonZeroAscii`, `uncheckedNewStringWithLatin1Bytes`,
+`inflateBytesToChars`) are its static methods of the same name
+(`java/overlay/jdk/internal/access/TranslatedLangAccess.java`). `java.nio.file` is not translated
+yet.
 
 A native method of a translated JDK class is never lowered itself (javac marks it `native`); a
 call of one becomes the runtime function that `ast/natives.rs` names for its class, name and
@@ -809,7 +825,8 @@ signature, and any other is rejected with its name and signature. The runtime ha
 `getRandomSeedForDumping` (0: no class data sharing); `ContinuationSupport.isSupported0` (false,
 as with `-XX:-VMContinuations`); `VM.getNanoTimeAdjustment` (HotSpot's, from the system clock);
 `FileDescriptor.getHandle` (-1) and `getAppend` (the descriptor's `O_APPEND`); and
-`CRC32.update` and `updateBytes0` (zlib's CRC-32). `Unsafe.arrayBaseOffset` and
+`CRC32.update` and `updateBytes0` (zlib's CRC-32); `Unsafe.fullFence` (a sequentially consistent
+fence), and so `loadFence` and `storeFence`. `Unsafe.arrayBaseOffset` and
 `arrayIndexScale` of an array class literal are HotSpot's layout (16, and 1 to 8 by element, 4
 for references) and are answered at the call, so their `Class`-taking natives are not reached.
 `Unsafe.park` and `unpark` park the current thread and unpark a thread by its id, as

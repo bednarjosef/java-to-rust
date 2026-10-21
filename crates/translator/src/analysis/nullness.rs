@@ -259,6 +259,8 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
         ExprKind::Builtin(Builtin::ElementUpdate(_), _) => {
             facts.nullable_elements.contains(&updated_element(e))
         }
+        // `File.list()` of what is not a readable directory.
+        ExprKind::Builtin(Builtin::Native(Native::FileSystem("list0")), _) => true,
         // A boxed field is always an `Option`: its default is `null`, and so is an assignment of
         // `null` to it.
         _ if matches!(e.ty, Type::Boxed(_))

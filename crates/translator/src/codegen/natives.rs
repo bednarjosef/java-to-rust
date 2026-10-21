@@ -102,6 +102,9 @@ impl<'a> Gen<'a> {
                 call(self, "java_home", vec![fallback])
             }
             Native::SystemProperty(key) => call(self, "system_property", vec![rust_string(key)]),
+            Native::FullFence => {
+                Code::atom("std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst)".to_string())
+            }
             Native::TotalMemory => call(self, "total_memory", vec![]),
             Native::FreeMemory => call(self, "free_memory", vec![]),
             Native::MaxMemory => call(self, "max_memory", vec![]),
@@ -192,7 +195,11 @@ impl<'a> Gen<'a> {
             | Native::FileWriteBytes
             | Native::FileIsRegular
             | Native::FileLength
-            | Native::FilePosition => self.file_native(native, args, id),
+            | Native::FilePosition
+            | Native::FileOpenRandom
+            | Native::FileSeek
+            | Native::FileSetLength => self.file_native(native, args, id),
+            Native::FileSystem(name) => self.file_system_native(name, args, ty, id),
             // The lowering drops its statement; anywhere else it is the unit it returns.
             Native::Nothing => Code::atom("()"),
             Native::CdsConfigStatus => call(self, "cds_config_status", vec![]),

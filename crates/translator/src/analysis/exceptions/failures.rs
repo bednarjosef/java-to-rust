@@ -88,6 +88,10 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             {
                 None
             }
+            // A range outside the array, decoded with a `Charset` or the default one.
+            StringOp::FromBytes if args.len() == 3 || args.len() == 4 && args[3].ty == Type::Charset => {
+                Some("java.lang.StringIndexOutOfBoundsException")
+            }
             // A range outside the array, an invalid code point.
             StringOp::FromCodePoints | StringOp::FromHighByte => Some("?"),
             // A malformed pattern, a bad group in a replacement, an unknown charset.
@@ -205,12 +209,18 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::ArrayIndexScale(_)
             | Native::DescriptorHandle
             | Native::DescriptorAppend
+            | Native::FullFence
             | Native::Crc32Update,
         ) => None,
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
         // of a closed descriptor does nothing.
-        Builtin::Native(Native::FileOpenRead | Native::FileOpenWrite) => {
+        Builtin::Native(Native::FileOpenRead | Native::FileOpenWrite | Native::FileOpenRandom) => {
             Some("java.io.FileNotFoundException")
+        }
+        Builtin::Native(Native::FileSeek | Native::FileSetLength) => Some("java.io.IOException"),
+        // `java.io.File`'s questions answer `false` or 0 where they fail.
+        Builtin::Native(Native::FileSystem(name)) => {
+            matches!(*name, "createFileExclusively0" | "canonicalize0").then_some("java.io.IOException")
         }
         Builtin::Native(
             Native::FileRead
@@ -260,6 +270,9 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         Builtin::Charset(_) => None,
         // What an object's `toString` throws is a point of its own (`text_objects`).
         Builtin::ObjectText => None,
+        // `Unsafe` checks no index: the JDK's code passes one inside the array, and an index
+        // outside it, which the JVM does not see, ends the translated program.
+        Builtin::ElementUpdate(_) => None,
         Builtin::ArraysCopyOf => Some("java.lang.NegativeArraySizeException"),
         Builtin::Native(Native::ArrayCopy) => Some("java.lang.ArrayIndexOutOfBoundsException"),
         // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
@@ -485,6 +498,8 @@ pub(super) fn runtime_failures(
                         | Builtin::Bits(BitsOp::ParseRadix, _)
                         | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
                         | Builtin::Native(Native::SystemIdentityHash)
+                        // The expected and the new element of an atomic update may be null.
+                        | Builtin::ElementUpdate(_)
                 );
                 // Appending or inserting a null string, builder or boxed value writes "null" (the
                 // generator's `appended`); a null `char[]` throws.
@@ -506,7 +521,13 @@ pub(super) fn runtime_failures(
                 };
                 // Only the first may be the receiver, which is dereferenced with the checked
                 // form; the code generator rejects a call that does not (`check_dereferences`).
-                if !takes_null && checked.iter().any(null) {
+                // The buffer of a descriptor native, after its descriptor, is dereferenced with the
+                // checked form (`Gen::handle`).
+                if let Builtin::Native(Native::FileReadBytes | Native::FileWriteBytes) = builtin {
+                    if null(&args[1]) {
+                        out.push((NPE, "this call", true, args[1].id));
+                    }
+                } else if !takes_null && checked.iter().any(null) {
                     let receiver = !checked[1..].iter().any(null);
                     out.push((NPE, "this call", receiver, if receiver { args[0].id } else { x.id }));
                 }
@@ -515,7 +536,9 @@ pub(super) fn runtime_failures(
                 {
                     let checked = matches!(
                         builtin,
-                        Builtin::String(StringOp::Substring | StringOp::FromChars | StringOp::GetChars)
+                        Builtin::String(
+                            StringOp::Substring | StringOp::FromChars | StringOp::GetChars | StringOp::FromBytes
+                        )
                             | Builtin::ArraysCopyOf
                             | Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _)
                             | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
@@ -534,6 +557,10 @@ pub(super) fn runtime_failures(
                                     | Native::FileWriteBytes
                                     | Native::FileLength
                                     | Native::FilePosition
+                                    | Native::FileOpenRandom
+                                    | Native::FileSeek
+                                    | Native::FileSetLength
+                                    | Native::FileSystem(_)
                             )
                     ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })));
                     out.push((failure, "this call of the library", checked, x.id));

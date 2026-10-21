@@ -1,6 +1,8 @@
 //! The file natives (`ast::Native::File*`), which call the runtime's descriptor table
-//! (`java_runtime::fd`). A call that can fail is wrapped in `or_throw`, which raises the Java
-//! exception, or where the program may catch it, passed on as a thrown exception. Every native but `open0` takes the stream's descriptor (`fd`) as its first argument.
+//! (`java_runtime::fd`), and those of `java.io.UnixFileSystem` (`Native::FileSystem`, on
+//! `java_runtime::fs`). A call that can fail is wrapped in `or_throw`, which raises the Java
+//! exception, or where the program may catch it, passed on as a thrown exception. Every
+//! descriptor native but `open0` takes the stream's descriptor (`fd`) as its first argument.
 
 use super::*;
 
@@ -8,13 +10,24 @@ impl<'a> Gen<'a> {
     pub(super) fn file_native(&mut self, native: Native, args: &'a [Expr], id: ExprId) -> Code {
         match native {
             Native::FileOpenRead => {
-                let name = self.str_value(&args[0]);
-                self.fallible(id, "fd_open_read", vec![format!("&{name}")])
+                let name = self.text_ref(&args[0]);
+                self.fallible(id, "fd_open_read", vec![name])
             }
             Native::FileOpenWrite => {
-                let name = self.str_value(&args[0]);
+                let name = self.text_ref(&args[0]);
                 let append = self.value(&args[1], Type::Boolean).text;
-                self.fallible(id, "fd_open_write", vec![format!("&{name}"), append])
+                self.fallible(id, "fd_open_write", vec![name, append])
+            }
+            Native::FileOpenRandom => {
+                let name = self.text_ref(&args[0]);
+                let mode = self.value(&args[1], Type::Int).text;
+                self.fallible(id, "fd_open_random", vec![name, mode])
+            }
+            Native::FileSeek | Native::FileSetLength => {
+                let fd = self.value(&args[0], Type::Int).text;
+                let n = self.value(&args[1], Type::Long).text;
+                let f = if native == Native::FileSeek { "fd_seek" } else { "fd_set_length" };
+                self.fallible(id, f, vec![fd, n])
             }
             Native::FileRead => {
                 let fd = self.value(&args[0], Type::Int).text;
@@ -62,6 +75,44 @@ impl<'a> Gen<'a> {
             }
             _ => unreachable!("not a file native: {native:?}"),
         }
+    }
+
+    /// A native of `java.io.UnixFileSystem` (`java_runtime::fs`), whose `File` arguments the
+    /// lowering made their paths. `list0` gives `null` (an `Option`) for a directory it cannot
+    /// read; `createFileExclusively0` and `canonicalize0` may throw.
+    pub(super) fn file_system_native(&mut self, name: &str, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
+        let mut values = Vec::new();
+        for arg in args {
+            values.push(match arg.ty {
+                Type::String => self.text_ref(arg),
+                Type::Boolean => self.value(arg, Type::Boolean).text,
+                Type::Long => self.value(arg, Type::Long).text,
+                _ => self.value(arg, Type::Int).text,
+            });
+        }
+        let f = match name {
+            "getBooleanAttributes0" => "fs_attributes",
+            "checkAccess0" => "fs_access",
+            "getLastModifiedTime0" => "fs_modified",
+            "getLength0" => "fs_length",
+            "setPermission0" => "fs_set_permission",
+            "createFileExclusively0" => return self.fallible(id, "fs_create_file", values),
+            "canonicalize0" => return self.fallible(id, "fs_canonicalize", values),
+            "delete0" => "fs_delete",
+            "list0" => {
+                let names = format!("{}({})", self.runtime("fs_list"), values.join(", "));
+                let each = self.string_vec_as(ty, "names".to_string());
+                let array = format!("{}({each})", self.array_maker("from_vec"));
+                return Code::atom(format!("{names}.map(|names| {array})"));
+            }
+            "createDirectory0" => "fs_create_directory",
+            "rename0" => "fs_rename",
+            "setLastModifiedTime0" => "fs_set_modified",
+            "setReadOnly0" => "fs_set_read_only",
+            "getNameMax0" => "fs_name_max",
+            _ => unreachable!("not a native of `UnixFileSystem` the runtime implements: {name}"),
+        };
+        Code::atom(format!("{}({})", self.runtime(f), values.join(", ")))
     }
 
     /// The natives of the stream under `System.out` and `System.err` (`Native::StandardWrite`

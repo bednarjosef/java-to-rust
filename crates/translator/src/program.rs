@@ -9,8 +9,8 @@ mod survey;
 
 pub use census::{Census, census_program};
 pub use reach::{
-    CLASS_KINDS, FieldUpdate, LOCALE_LANGUAGE, PRINT_FORMATTED, Reach, STRING_STREAMS, TRANSLATED_PROPERTIES,
-    UNSET_PROPERTIES,
+    CLASS_KINDS, FieldUpdate, LOCALE_LANGUAGE, PRINT_FORMATTED, Reach, STRING_STREAMS,
+    TRANSLATED_LANG_ACCESS, TRANSLATED_LANG_ACCESS_CLASS, TRANSLATED_PROPERTIES, UNSET_PROPERTIES,
     class_bound, class_for_name, class_name, component_array, computed_for_name, created_by_name,
     direct_stream_call, field_offset_named, is_ensure_initialized, literal_class, live_branch,
     module_for_name, standard_stream_field, stream_of_call, unsafe_field_access, unsafe_field_update,
