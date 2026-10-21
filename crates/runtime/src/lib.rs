@@ -34,6 +34,7 @@ pub mod regex;
 pub mod string;
 mod system;
 mod unsigned;
+mod vm;
 pub use boxed::*;
 pub use builder::{StringBuilder, same_builder};
 pub use character::*;
@@ -61,6 +62,7 @@ pub use system::*;
 pub use unsigned::{
     compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,
 };
+pub use vm::*;
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
 pub struct Double(pub f64);
