@@ -365,7 +365,7 @@ impl<'a> Gen<'a> {
 
     /// A `Result` whose error is a `Throwable` (`code`), whose `Ok` value is used and whose error
     /// goes on from here: it leaves the enclosing `try` block or the method, or ends the program.
-    fn passed_on(&mut self, code: Code) -> String {
+    pub(super) fn passed_on(&mut self, code: Code) -> String {
         match self.innermost_attempt() {
             Some((label, _)) => format!("{}({}, '{label})", self.runtime("or_break!"), code.text),
             None if self.throwing => format!("{}?", code.at(ATOM)),

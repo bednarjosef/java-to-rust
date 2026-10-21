@@ -291,8 +291,11 @@ impl Census {
                 let kind = text(node, "kind");
                 let ty = text(node, "javaType");
                 match kind {
-                    "LAMBDA_EXPRESSION" => scan.feature("lambdas", node),
-                    "MEMBER_REFERENCE" => scan.feature("method references", node),
+                    // A method reference translates unless its receiver is computed (any field is
+                    // taken for a final one here).
+                    "MEMBER_REFERENCE" if crate::lower::computed_receiver(node, &|_, _| true).is_some() => {
+                        scan.feature("computed method receivers", node)
+                    }
                     // An anonymous class body is a class node too, but no local declaration.
                     "INTERFACE" | "ENUM" | "RECORD" if !is_anonymous(symbol_type(node)) => {
                         scan.feature("local interfaces, enums and records", node)
@@ -737,10 +740,8 @@ fn piece_kind(member: &Value) -> &'static str {
 fn class_features(decl: &Value, declared: &HashSet<String>) -> BTreeSet<&'static str> {
     let mut features = BTreeSet::new();
     let kind = text(decl, "kind");
-    match kind {
-        "ANNOTATION_TYPE" => _ = features.insert("annotation types"),
-        "RECORD" => _ = features.insert("records"),
-        _ => {}
+    if kind == "ANNOTATION_TYPE" {
+        features.insert("annotation types");
     }
     // The program's own interfaces translate, generic ones erased, and so does `Comparable`; one
     // from elsewhere is not translated.

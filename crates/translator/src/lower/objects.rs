@@ -57,6 +57,9 @@ impl<'t> Lowering<'t> {
             object: None,
             real: Default::default(),
             failed: Default::default(),
+            aliases: Default::default(),
+            functional: Default::default(),
+            lambdas: Vec::new(),
             capture_refs: Default::default(),
             capture_sites: Default::default(),
         }
@@ -64,7 +67,7 @@ impl<'t> Lowering<'t> {
 
     /// Declares a class, named `outer.Name` inside `outer` (a class or a package).
     pub(super) fn declare_type(&mut self, node: Node<'t>, outer: Option<&str>) -> Result<(), Error> {
-        if !matches!(node.kind(), "CLASS" | "ENUM" | "INTERFACE") {
+        if !matches!(node.kind(), "CLASS" | "ENUM" | "INTERFACE" | "RECORD") {
             return unsupported(node, &kind_words(node.kind()));
         }
         let simple = node.str("simpleName");
@@ -72,8 +75,12 @@ impl<'t> Lowering<'t> {
             Some(outer) => format!("{outer}.{simple}"),
             None => simple.to_string(),
         };
+        // A local record, enum or interface moved to the top level (see `javac::records`) keeps
+        // the binary name that javac's symbols give it.
+        let binary = crate::program::class_name(node.0);
+        let javac = if binary.contains('$') { binary } else { name.clone() };
         let index = self.types.len();
-        self.types.push(TypeInfo { name: name.clone(), javac: name, node, nested: None });
+        self.types.push(TypeInfo { name, javac, node, nested: None });
         self.declare_members(index)
     }
 
@@ -94,14 +101,18 @@ impl<'t> Lowering<'t> {
                     });
                     let method = self.methods.len() - 1;
                     self.declare_local_classes(index, member, Some(method))?;
+                    self.declare_lambdas(member, index, Some(method))?;
                 }
-                "VARIABLE" if enums::is_enum_constant(member) => {}
-                "VARIABLE" => self.declare_local_classes(index, member, None)?,
+                "VARIABLE" if enums::is_enum_constant(member) => self.declare_lambdas(member, index, None)?,
+                "VARIABLE" => {
+                    self.declare_local_classes(index, member, None)?;
+                    self.declare_lambdas(member, index, None)?;
+                }
                 "EMPTY_STATEMENT" => {}
                 "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
                     return unsupported(member, "member classes of local and anonymous classes");
                 }
-                "ENUM" | "INTERFACE" => self.declare_type(member, Some(&name))?,
+                "ENUM" | "INTERFACE" | "RECORD" => self.declare_type(member, Some(&name))?,
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
                 "CLASS" => self.declare_inner(index, member)?,
                 "BLOCK" => {
@@ -109,6 +120,7 @@ impl<'t> Lowering<'t> {
                         self.check_initializer_block(node, member)?;
                     }
                     self.declare_local_classes(index, member, None)?;
+                    self.declare_lambdas(member, index, None)?;
                 }
                 kind => return unsupported(member, &kind_words(kind)),
             }
@@ -131,6 +143,9 @@ impl<'t> Lowering<'t> {
 
     /// The declaration of a class: its instance fields and static fields, in source order.
     pub(super) fn type_decl(&self, index: usize) -> Result<TypeDecl, Error> {
+        if let Some(decl) = self.lambda_decl(index) {
+            return decl;
+        }
         self.current.set(index);
         let node = self.types[index].node;
         // The enclosing instance and the captured locals come first, set before anything runs.
@@ -208,7 +223,7 @@ impl<'t> Lowering<'t> {
             // Java evaluates an object in front of a static field and ignores it, even null;
             // one without effects is simply dropped.
             if let Some(r) = receiver
-                && r.symbol().is_none_or(|s| !matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM"))
+                && r.symbol().is_none_or(|s| !matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD"))
                 && has_effects(&self.expr(r)?)
             {
                 return unsupported(node, "static fields through an expression with effects");
@@ -225,6 +240,10 @@ impl<'t> Lowering<'t> {
     /// An identifier: a field, `this`, or a local variable or parameter.
     pub(super) fn name(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         if node.str("name") == "this" {
+            // In a lambda, the object of the code that holds it.
+            if let Some(holder) = self.lambda_this(node) {
+                return Ok(holder?.kind);
+            }
             return Ok(ExprKind::This);
         }
         if let Some(constant) = node.symbol().and_then(|s| self.enum_constant(&s)) {

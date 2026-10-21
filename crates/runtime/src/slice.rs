@@ -45,6 +45,14 @@ pub fn put<T: Clone>(a: &mut [T], i: i32, v: T) -> T {
     v
 }
 
+/// `a[i] = v` as an expression, where the elements may be null and `v` is not: yields `v`.
+#[inline]
+pub fn put_some<T: Clone>(a: &mut [Option<T>], i: i32, v: T) -> T {
+    let k = position(a.len(), i);
+    a[k] = Some(v.clone());
+    v
+}
+
 /// `a[i] = v` as a statement, which moves `v` into the array: a row of an array of arrays.
 #[inline]
 pub fn assign<T>(a: &mut [T], i: i32, v: T) {
@@ -74,6 +82,13 @@ pub fn try_at<T: Clone>(a: &[T], i: i32) -> Result<T, Exception> {
 pub fn try_put<T: Clone>(a: &mut [T], i: i32, v: T) -> Result<T, Exception> {
     let k = try_position(a.len(), i)?;
     a[k] = v.clone();
+    Ok(v)
+}
+
+/// `put_some` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_put_some<T: Clone>(a: &mut [Option<T>], i: i32, v: T) -> Result<T, Exception> {
+    let k = try_position(a.len(), i)?;
+    a[k] = Some(v.clone());
     Ok(v)
 }
 

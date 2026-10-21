@@ -63,6 +63,9 @@ fn mentions_object(v: &Value, real: &HashSet<*const Value>) -> bool {
     match v {
         // A type variable erases to `Object`.
         Value::Object(fields) if fields.get("kind").and_then(Value::as_str) == Some("TYPE_PARAMETER") => true,
+        // A call that the members written for records make (see `javac::records`) on a value that
+        // is not an `Object`.
+        Value::Object(fields) if fields.get("implicit") == Some(&Value::Bool(true)) => false,
         Value::Object(fields) => {
             if fields.get("kind").and_then(Value::as_str) == Some("CONSTRUCTOR")
                 && fields.get("owner").and_then(Value::as_str) == Some("java.lang.Object")

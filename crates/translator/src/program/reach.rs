@@ -80,6 +80,7 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.Long",
     "java.lang.Math",
     "java.lang.Number",
+    "java.lang.Record",
     "java.lang.Object",
     "java.lang.Runtime",
     "java.lang.Short",
@@ -471,6 +472,22 @@ impl<'t> Walk<'t> {
                 self.scan(else_branch(value));
             }
             Value::Object(fields) => {
+                // A lambda creates an object of a class that implements its interface with the
+                // interface's abstract method.
+                let descriptor = &value["descriptor"];
+                if matches!(text(value, "kind"), "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE")
+                    && descriptor.is_object()
+                {
+                    let target = text(descriptor, "target").to_string();
+                    self.work.push(Item::Class(target.clone()));
+                    self.live(target);
+                    let (owner, name) = (text(descriptor, "owner"), text(descriptor, "name"));
+                    self.work.push(Item::Method((
+                        owner.into(),
+                        name.into(),
+                        text(descriptor, "type").into(),
+                    )));
+                }
                 for (field, child) in fields {
                     if field == "symbol" {
                         self.symbol(child);

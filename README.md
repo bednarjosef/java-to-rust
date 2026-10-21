@@ -28,8 +28,8 @@ shared and mutable, and a reference that may be null is an `Option` of it. An ar
 counting, not by a garbage collector, so a cycle of objects is never freed. The runtime crate
 (`crates/runtime`) supplies what Rust lacks: Java's exact number semantics (wrapping integer
 overflow, Java's float rules and printing), strings, `StringBuilder`, `String.format`, regular
-expressions and charsets with Java's results. Collections, lambdas and threads are not translated
-yet (see "Not yet" below).
+expressions and charsets with Java's results. Collections and threads are not translated yet (see
+"Not yet" below).
 
 ### Level 2: analysis-driven Rust
 
@@ -77,15 +77,17 @@ exactly. The Java run is the expected result, so no expectations are written by 
 
 The test programs come from:
 
-- `corpus/features`: 161 small programs, one or more per language feature;
+- `corpus/features`: 231 small programs, one or more per language feature;
 - `corpus/programs`: 32 larger realistic programs (algorithms, data structures, parsers,
   interpreters, simulations);
 - `corpus/projects`: 3 multi-file programs (`imports`, `pruning`, `statics`), each with a source
   root `src/` and a file `main` that names the main class. The corpus has no open-source projects
   yet;
 - `tools/fuzz`: random programs generated from a seed (`fuzz.py`, with `fuzz_strings.py` for
-  strings and builders under `--strings`), run and compared by `run.py`, and shrunk to a minimal
-  case by `reduce.py`. A minimal case that still fails is kept in `known-failures/` (10 programs)
+  strings and builders under `--strings`, `fuzz_arrays.py` for arrays of up to three dimensions,
+  their aliases, rows, loops and helper methods under `--arrays`, and `fuzz_objects.py` for
+  classes, interfaces and generics under `--objects`), run and compared by `run.py`, and shrunk
+  to a minimal case by `reduce.py`. A minimal case that still fails is kept in `known-failures/` (3 programs)
   and stays out of the corpus until it is fixed.
 
 `targets/` holds 28 typical Java programs that the translator does not translate yet, run one by
@@ -165,9 +167,10 @@ A small subset, end to end:
   (`struct Stack<T>`, `impl<T: Clone> Stack<T>`, `fn choose<T: Clone>(..)`), and its uses keep the
   substituted types with no casts. One that needs more of them (their text, `equals`, a bound, a
   cast, an array of them), a class with a supertype or a subclass, a raw use, and a method whose
-  type parameters its parameters do not all mention stay erased. Other interfaces of the JDK
-  (`Runnable`, `Iterable`) and lambdas are rejected with an error that names the construct and its
-  position. The design of the object model, and what is still to come, is in
+  type parameters its parameters do not all mention stay erased. The JDK's functional interfaces
+  (`Runnable`, `Comparator`, `java.util.function`) translate with their abstract methods (see
+  lambdas below); its other interfaces are rejected with an error that names the construct and
+  its position. The design of the object model, and what is still to come, is in
   [docs/object-model.md](docs/object-model.md).
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
   and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
@@ -407,6 +410,21 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   `getName` is javac's (`Main$1`) and its `getSimpleName` empty. Not yet: local interfaces, enums and records, member classes of local
   classes, `Outer.super.m()`, `outer.super()`, and an inner class extending one nested in
   another class.
+- Lambdas and method references (`lower/lambdas.rs`), lowered as javac desugars them: each is a
+  class that implements its functional interface (`IntOpLambdaInMain`), a variant of the
+  interface's enum like any other implementor, whose one method is the lambda's body with
+  javac's substituted descriptor (`apply_integer(&self, x: i32) -> i32` for a
+  `Function<Integer, Integer>`, with the bridge `apply(Object)`). A method reference's body is
+  the call it makes (`a.len() as i32` for `String::length`, `Point::new`, `int[]::new`,
+  `System.out::println`), lowered as a written call. A lambda's class is nested like a local
+  class: the locals it captures are fields set from its constructor
+  (`OpLambdaInMain::new(k, &name)`), and `this` and the enclosing class's members are read
+  through `outer` (`self.outer.borrow().base`), also from a lambda in a lambda or in a local or
+  anonymous class. A bound method reference takes a local, `this` or a final field as its
+  receiver. In single-file mode the JDK's functional interfaces come from
+  `crates/translator/java/Functional.java` (abstract methods only). Not yet: other receivers,
+  `super` in a lambda, the closure forms (`impl FnMut`, `Rc<dyn Fn>`) and the JDK interfaces'
+  default and static methods.
 
 ### Whole programs
 
@@ -501,7 +519,9 @@ Each construct below is rejected at translation with an error that names it:
 - the exceptions and try-with-resources listed under "Exceptions" above, and intersection bounds
   (`T extends A & B`);
 - records, local interfaces, enums and records, and record patterns;
-- lambdas and method references, and for-each over an `Iterable`;
+- method references on a receiver other than a local, `this` or a final field, `super` in a
+  lambda, the default and static methods of the JDK's functional interfaces, and for-each over
+  an `Iterable`;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
 - threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls

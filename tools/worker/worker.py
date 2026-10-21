@@ -33,7 +33,8 @@ MODEL = "claude-haiku-5-5"
 COMPACT_WINDOW = "122000"
 TOOLS = ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "SendMessage"]
 COMMANDS = [
-    "cargo *", "scripts/check.sh", "./scripts/check.sh", "java *", "javac *", "timeout * java *",
+    "cargo *", "scripts/check.sh", "./scripts/check.sh", "python3 scripts/benchmark.py*",
+    "java *", "javac *", "timeout * java *",
     "timeout * cargo *", "timeout * target/*", "./target/*", "target/*",
     "git status*", "git diff*", "git log*", "git show*", "git add *", "git commit *",
     "git restore *", "git rm *", "git mv *", "git grep *", "git stash*", "git blame *",

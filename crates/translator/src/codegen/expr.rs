@@ -80,11 +80,16 @@ impl<'a> Gen<'a> {
             if let Some(text) = self.self_update(&name, target, ty, value) {
                 return text;
             }
+            let lends = self.lends_itself(target, ty, value);
             let value = if self.optional_var(self.method, ty, target) {
                 self.optional(value)
             } else {
                 self.value(value, ty)
             };
+            if lends {
+                let bound = self.fresh_name(&["value", "item", "new"]);
+                return format!("{{ let {bound} = {}; {name} = {bound} }}", value.text);
+            }
             return format!("{name} = {}", value.text);
         };
         if ty == Type::String {
@@ -259,8 +264,10 @@ impl<'a> Gen<'a> {
                 let rust = self.local(name);
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
-                    // An object narrowed by a null check is a reference to the `Rc`.
-                    Type::Class(..) | Type::StringBuilder if self.borrowed.contains(name) => {
+                    // An object or array narrowed by a null check is a reference to the `Rc`.
+                    Type::Class(..) | Type::StringBuilder | Type::Array(_)
+                        if self.borrowed.contains(name) =>
+                    {
                         Code::atom(format!("{rust}.clone()"))
                     }
                     ty if self.clones(ty) && !self.facts.moves.contains(&e.id) => {
@@ -329,6 +336,16 @@ impl<'a> Gen<'a> {
                 let (l, r) = (self.operand(l), self.operand(r));
                 self.binary(*op, l, r, e.ty, e.id)
             }
+            // A variable that may be null takes a value that is not: the assignment's value is
+            // that value, not the variable's `Option`.
+            ExprKind::Assign { op: None, target: Place::Var(target), value }
+                if self.optional_var(self.method, e.ty, target) && !self.nullable(value) =>
+            {
+                let bound = self.fresh_name(&["value", "item", "new"]);
+                let v = self.value(value, e.ty).text;
+                let name = self.local(target);
+                Code::new(format!("{{ let {bound} = {v}; {name} = Some({bound}.clone()); {bound} }}"), LOWEST)
+            }
             ExprKind::Assign { op, target: Place::Var(target), value } => {
                 let text = self.assignment(*op, target, e.ty, value, e.id);
                 Code::new(format!("{{ {text}; {} }}", self.read(target, e.ty)), LOWEST)
@@ -390,12 +407,13 @@ impl<'a> Gen<'a> {
                 let outer = std::mem::replace(&mut self.guarded, false);
                 let cond = self.condition(cond);
                 self.guarded = outer;
-                let (a, b) = if self.nullable(e) {
-                    (self.optional(a), self.optional(b))
-                } else {
-                    (self.value(a, e.ty), self.value(b, e.ty))
-                };
-                let text = |a: String, b: String| format!("if {cond} {{ {a} }} else {{ {b} }}");
+                let chain = std::mem::replace(&mut self.chain, false);
+                let a = if self.nullable(e) { self.optional(a) } else { self.value(a, e.ty) };
+                self.chain = matches!(b.kind, ExprKind::Conditional(..));
+                let lines = chain || self.chain;
+                let b = if self.nullable(e) { self.optional(b) } else { self.value(b, e.ty) };
+                self.chain = chain;
+                let text = |a: String, b: String| self.if_else(&cond, &a, &b, lines);
                 if a.untyped && b.untyped {
                     // As for literals, inference gives the branches `i32` or `f64` unless the
                     // type is written.
@@ -442,7 +460,8 @@ impl<'a> Gen<'a> {
     /// Reads a variable after assigning it, for an assignment used as a value.
     pub(super) fn read(&self, target: &str, ty: Type) -> String {
         let name = self.local(target);
-        if ty == Type::String { format!("{name}.clone()") } else { name }
+        // An array assigned inside an expression is shared, and its handle is cloned.
+        if ty == Type::String || matches!(ty, Type::Array(_)) { format!("{name}.clone()") } else { name }
     }
 
     pub(super) fn binary(&mut self, op: BinOp, l: Operand, r: Operand, result: Type, id: ExprId) -> Code {
@@ -532,6 +551,29 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// `if head { a } else { b }`; with `lines`, a link of a chain `if .. else if .. else ..`, on
+    /// lines of their own.
+    pub(super) fn if_else(&self, head: &str, a: &str, b: &str, lines: bool) -> String {
+        if !lines {
+            return format!("if {head} {{ {a} }} else {{ {b} }}");
+        }
+        let pad = "    ".repeat(self.indent);
+        let otherwise = if b.starts_with("if ") {
+            format!("else {b}")
+        } else {
+            format!(
+                "else {{
+{pad}    {b}
+{pad}}}"
+            )
+        };
+        format!(
+            "if {head} {{
+{pad}    {a}
+{pad}}} {otherwise}"
+        )
+    }
+
     pub(super) fn builtin(&mut self, builtin: Builtin, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
         match builtin {
             Builtin::ArraysToString | Builtin::ArraysFill | Builtin::ArraysSort | Builtin::ArraysCopyOf => {
@@ -550,7 +592,7 @@ impl<'a> Gen<'a> {
             }
             Builtin::ObjectText => self.object_to_string(&args[0]),
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
-                self.enum_builtin(builtin, args, ty)
+                self.enum_builtin(builtin, args, ty, id)
             }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
             Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty),
@@ -628,6 +670,10 @@ impl<'a> Gen<'a> {
             }
             Builtin::Builder(op) => self.builder_call(op, args),
             Builtin::Format => self.format_builtin(args),
+            Builtin::ObjectsEquals => self.objects_equals(args),
+            Builtin::NullChecked => self.null_checked(args),
+            Builtin::Unmatched => self.unmatched(args),
+            Builtin::ObjectsHashCode => self.objects_hash_code(args),
             Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args, id),
         }
     }

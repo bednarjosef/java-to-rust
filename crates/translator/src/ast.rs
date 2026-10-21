@@ -356,11 +356,15 @@ pub enum Origin {
     /// An anonymous class, `new T(..) { .. }`, in `method` (`None`: in an initializer), which
     /// implements or extends `T`; `binary` is javac's binary name, such as `Main$1`.
     Anonymous { method: Option<usize>, binary: String },
+    /// The class of a lambda or method reference in `method` (`None`: in an initializer);
+    /// `binary` is the name the JVM gives such a class, up to the part that varies between runs
+    /// (`Main$$Lambda`).
+    Lambda { method: Option<usize>, binary: String },
 }
 
 impl Origin {
-    /// The names that `Class.getName` and `Class.getSimpleName` give a local or anonymous class:
-    /// its binary name, and its simple name (empty for an anonymous class).
+    /// The names that `Class.getName` and `Class.getSimpleName` give a local or anonymous class
+    /// or a lambda's: its binary name, and its simple name (empty for an anonymous class).
     pub fn java_names(&self) -> Option<(&str, &str)> {
         match self {
             Origin::Member => None,
@@ -369,6 +373,7 @@ impl Origin {
                 Some((binary, last.trim_start_matches(|c: char| c.is_ascii_digit())))
             }
             Origin::Anonymous { binary, .. } => Some((binary, "")),
+            Origin::Lambda { binary, .. } => Some((binary, binary.rsplit('.').next().unwrap_or_default())),
         }
     }
 }
@@ -713,6 +718,18 @@ pub enum Builtin {
     Unsigned(UnsignedOp, Type),
     /// A code point method of `Character` (`toChars`, `charCount` and the like), see `CodePointOp`.
     CodePoint(CodePointOp),
+    /// `Objects.equals(a, b)` on two strings, boxes of one kind, or objects; for objects a third
+    /// argument is the call `a.equals(b)` that runs when `a` is not null.
+    ObjectsEquals,
+    /// `Objects.hashCode(o)` on a string, a box, an enum or an object; for an object a second
+    /// argument is the call `o.hashCode()` that runs when `o` is not null.
+    ObjectsHashCode,
+    /// `[selector, value]`: `value`, once a pattern switch has checked its selector (a variable)
+    /// for null (see `lower::patterns`); `[selector]`: the check alone.
+    NullChecked,
+    /// `[selector]`: the end of an exhaustive pattern switch that no case matched, which only a
+    /// null selector reaches: it throws `NullPointerException`.
+    Unmatched,
     /// `o.getClass().getName()`: Java's binary name of the class of the object `o`, such as
     /// `java.lang.IllegalStateException` or `Bank$Overdrawn`; with `simple`,
     /// `o.getClass().getSimpleName()`, its name in its source: `IllegalStateException`, `Overdrawn`.
