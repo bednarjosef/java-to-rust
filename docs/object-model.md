@@ -1732,8 +1732,20 @@ Generics are erased in lowering, and nothing after it knows they existed:
   elements of a `List<? extends Number>`). The six numeric boxes implement it, and its abstract
   `byteValue()` to `doubleValue()` have an arm per box in `codegen::dispatch::number_arm`: the
   value converted with `as`, which converts as Java's primitive conversions do (a floating-point
-  value becomes a `byte` or a `short` through an `int`). A program class that extends `Number` is
-  still rejected, as is any extension of a runtime class.
+  value becomes a `byte` or a `short` through an `int`). Any other extension of a runtime class
+  is rejected.
+- Later, a class of the program that extends `Number` implements `NUMBER` too, for the JDK's
+  `AtomicInteger`, `AtomicLong`, `Striped64`, `BigInteger` and `BigDecimal`, which
+  `ThreadLocalRandom`, `Locale`'s statics (through `ConcurrentHashMap`), `pidigits` and
+  `DecimalFormat` reach. Its superclass is `Object` to the translation (`super()` does
+  nothing), and the `intValue()` to `doubleValue()` that it or a subclass declares implement
+  the interface's, so they dispatch like any interface method; an abstract class between
+  (`Striped64`) need not declare them. `Number`'s own `byteValue()` and `shortValue()` are
+  concrete, `(byte) intValue()` and `(short) intValue()`, and the boxes' give the same (Java
+  narrows a `long`, `float` or `double` to a `byte` through an `int`), so a call of either
+  through `Number`, or on such a class, lowers to that narrowing of `intValue()`, and the
+  interface's own two methods are never called. A class that overrides them would need its own
+  arm, and is rejected. A comparison of such an object with a `Number` converts it to `Number`.
 - `java.lang.CharSequence` is a fourth, `CHAR_SEQUENCE`, planned when the program uses it as the
   type of a value (the JDK's `StringJoiner` and `Collectors.joining` take `CharSequence`s). The
   JDK's interface is not translated (it is among `RUNTIME_CLASSES`). Strings implement it, and so
@@ -1781,9 +1793,13 @@ Generics are erased in lowering, and nothing after it knows they existed:
   `Builtin::ObjectArrayOf` putting each in `Object::String`), and `main`'s arguments are made as
   `Object`s. A copy keeps the elements but not the array's identity, which only matters where the
   builtin keeps or changes the array: those that read it (`join`, `toString`, `equals`,
-  `hashCode`, `copyOf`) and those that make a new one (`split`) are copied, and those that change
-  it in place (`Arrays.sort`, `Arrays.fill`) are rejected ("a change in place of a `String[]`
-  that is also an `Object[]`"). The strings in such an array are values of `Object`'s `String`
+  `hashCode`, `copyOf`) and those that make a new one (`split`) are copied. Those that change it
+  in place (`Arrays.sort`, `Arrays.fill`) run the JDK's methods for an `Object[]` instead
+  (`ComparableTimSort`, the fill loop) where the JDK's sources are translated: reachability
+  leaves those calls to the runtime, so when the lowering finds one, `translate_program`
+  reaches and lowers the program again with them kept (`Reach::string_array_writes`), and only
+  such a program pulls in the JDK's sorting code. Without the JDK's sources they are rejected
+  ("a change in place of a `String[]` that is also an `Object[]`"). The strings in such an array are values of `Object`'s `String`
   class (`analysis::hierarchy::flows`). A program whose `String[]`s never meet another array type
   translates as before.
 - An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the

@@ -10,10 +10,12 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod by_name;
+mod initialize;
 mod sequential;
 mod stubs;
 
 pub use by_name::{class_for_name, created_by_name};
+pub use initialize::{is_ensure_initialized, literal_class};
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
 /// constructor) and javac's signature, such as `(int)void`.
@@ -49,6 +51,11 @@ pub struct Reach {
     /// Whether no stream of the program can be parallel, so that what a pipeline's
     /// `isParallel()` guards is not reached (`sequential.rs`).
     pub sequential: bool,
+    /// Whether `Arrays.sort` and `Arrays.fill` of a `String[]` reach the JDK's methods for an
+    /// `Object[]` rather than being done by the runtime (`writes_string_array`): where a
+    /// `String[]` is an `Object[]` (`lower::covariant`), the runtime's in-place methods would
+    /// change only a copy. `translate_program` sets it when the lowering without it finds one.
+    pub string_array_writes: bool,
     /// Classes that reachable code names, or makes live, that no unit declares, other than those
     /// where reachability stops (`outside`): those that the sources do not have, and those whose
     /// units javac has not given yet when it gives them as they are asked for (`javac::Session`).
@@ -57,6 +64,9 @@ pub struct Reach {
     /// which are only ever null, with the instance methods that it calls on them, by name and
     /// signature (`stubs.rs`).
     pub stubs: BTreeMap<String, BTreeSet<(String, String)>>,
+    /// Classes that reachable code initializes through a `Class` value, which it gives
+    /// `MethodHandles.Lookup.ensureInitialized` (`initialize.rs`).
+    pub ensured: BTreeSet<String>,
 }
 
 impl Reach {
@@ -372,6 +382,19 @@ pub fn runtime_arrays_call(node: &Value) -> bool {
     }
 }
 
+/// Whether the node is an `Arrays.sort` or `Arrays.fill` of a `String[]`, which changes the array
+/// in place (see `Reach::string_array_writes`).
+pub fn writes_string_array(node: &Value) -> bool {
+    let symbol = &node["symbol"];
+    text(node, "kind") == "METHOD_INVOCATION"
+        && text(symbol, "owner") == "java.util.Arrays"
+        && matches!(text(symbol, "name"), "sort" | "fill")
+        && node["arguments"]
+            .as_array()
+            .and_then(|a| a.first())
+            .is_some_and(|a| text(a, "javaType") == "java.lang.String[]")
+}
+
 /// A method of the JDK, by class, name and javac's type of it.
 pub type JdkMethod = (&'static str, &'static str, &'static str);
 
@@ -452,6 +475,8 @@ pub struct Rounds<'t> {
     parallel: Option<Walk<'t>>,
     /// How many times a walk started again (`Walk::stale`).
     restarts: usize,
+    /// `Reach::string_array_writes`.
+    string_array_writes: bool,
 }
 
 impl<'t> Rounds<'t> {
@@ -464,7 +489,15 @@ impl<'t> Rounds<'t> {
             stays_sequential: true,
             parallel: None,
             restarts: 0,
+            string_array_writes: false,
         }
+    }
+
+    /// Reachability in which `Arrays.sort` and `Arrays.fill` of a `String[]` reach the JDK's
+    /// methods (`Reach::string_array_writes`).
+    pub fn with_string_array_writes(mut self) -> Rounds<'t> {
+        self.string_array_writes = true;
+        self
     }
 
     /// How many times a walk started again from `main` over all the units so far, because
@@ -487,7 +520,9 @@ impl<'t> Rounds<'t> {
                 }
                 walk
             }
-            None => self.sequential.insert(Walk::start(&self.units, &self.main, true)?),
+            None => {
+                self.sequential.insert(Walk::start(&self.units, &self.main, true, self.string_array_writes)?)
+            }
         };
         self.stays_sequential = self.check.streams_stay_sequential(sequential);
         match &mut self.parallel {
@@ -499,7 +534,7 @@ impl<'t> Rounds<'t> {
                 }
             }
             None if !self.stays_sequential => {
-                self.parallel = Some(Walk::start(&self.units, &self.main, false)?);
+                self.parallel = Some(Walk::start(&self.units, &self.main, false, self.string_array_writes)?);
             }
             None => {}
         }
@@ -582,13 +617,26 @@ struct Walk<'t> {
     /// The string literals of reachable code that could be names of classes that no unit
     /// declares (`by_name`).
     literals: HashSet<String>,
+    /// The method whose code is being scanned.
+    scanning: Option<MethodKey>,
+    /// The parameters, by method and position, that a method gives `ensureInitialized`, and the
+    /// class literals that reachable code passes to each parameter (`initialize.rs`).
+    initializing: HashSet<(MethodKey, usize)>,
+    class_arguments: HashMap<(MethodKey, usize), BTreeSet<String>>,
 }
 
 impl<'t> Walk<'t> {
-    /// Walks from `main` over these units, with streams assumed to stay sequential or not.
-    fn start(units: &[&'t Value], main: &str, sequential: bool) -> Result<Walk<'t>, String> {
+    /// Walks from `main` over these units, with streams assumed to stay sequential or not, and
+    /// with `Reach::string_array_writes`.
+    fn start(
+        units: &[&'t Value],
+        main: &str,
+        sequential: bool,
+        string_array_writes: bool,
+    ) -> Result<Walk<'t>, String> {
         let mut walk = Walk { sequential, ..Walk::default() };
         walk.reach.sequential = sequential;
+        walk.reach.string_array_writes = string_array_writes;
         walk.declare_units(units);
         walk.declared.clear();
         walk.found_overriders.clear();
@@ -614,7 +662,7 @@ impl<'t> Walk<'t> {
 
     /// Walks again from `main`, as `start` would over the units declared, which it keeps.
     fn restart(&mut self, main: &str) {
-        let sequential = self.sequential;
+        let (sequential, string_array_writes) = (self.sequential, self.reach.string_array_writes);
         *self = Walk {
             classes: std::mem::take(&mut self.classes),
             methods: std::mem::take(&mut self.methods),
@@ -625,6 +673,7 @@ impl<'t> Walk<'t> {
             ..Walk::default()
         };
         self.reach.sequential = sequential;
+        self.reach.string_array_writes = string_array_writes;
         self.enter(main);
     }
 
@@ -871,7 +920,9 @@ impl<'t> Walk<'t> {
                 self.work.push(Item::Method(overrider));
             }
         }
+        let outer = self.scanning.replace(key);
         self.scan(node);
+        self.scanning = outer;
     }
 
     /// Whether `class` is a class whose objects come from its constructors, which reachability
@@ -985,7 +1036,14 @@ impl<'t> Walk<'t> {
             }
             // A call of `java.util.Arrays` that the runtime does (`lower::runtime_arrays_call`)
             // reaches only what its arguments do.
-            Value::Object(_) if runtime_arrays_call(value) => self.scan(&value["arguments"]),
+            // So does an in-place one of a `String[]`, unless it reaches the JDK's
+            // (`Reach::string_array_writes`).
+            Value::Object(_)
+                if runtime_arrays_call(value)
+                    && !(self.reach.string_array_writes && writes_string_array(value)) =>
+            {
+                self.scan(&value["arguments"])
+            }
             // An object created from a class name (`by_name`) reaches the constructors of the
             // classes that the name can be, not reflection.
             Value::Object(_) if let Some(name) = created_by_name(value) => {
@@ -1020,6 +1078,7 @@ impl<'t> Walk<'t> {
                 if text(value, "kind") == "VARIABLE" {
                     self.stub_type(text(&value["symbol"], "type"));
                 }
+                self.initialization(value);
                 // A class that `Class.forName` names exists, and is initialized if the call says
                 // so (`lower::by_name`).
                 if let Some((class, initialize)) = class_for_name(value) {

@@ -8,7 +8,8 @@ mod survey;
 
 pub use reach::{
     CLASS_KINDS, LOCALE_LANGUAGE, Reach, STRING_STREAMS, class_for_name, class_name, component_array,
-    created_by_name, live_branch, unsafe_field_access, untranslated,
+    created_by_name, is_ensure_initialized, literal_class, live_branch, unsafe_field_access, untranslated,
+    writes_string_array,
 };
 pub use survey::Survey;
 
@@ -59,8 +60,18 @@ fn fail(message: String) -> ProgramError {
 /// Translates a whole program into the source of one Rust program that uses the `java-runtime`
 /// crate.
 pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
+    // An `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]` calls the JDK's
+    // method for an `Object[]`, which only that program reaches (`Reach::string_array_writes`).
+    match translate_reached(program, false) {
+        Err(e) if e.error.message.starts_with(lower::STRING_ARRAY_WRITE) => translate_reached(program, true),
+        result => result,
+    }
+}
+
+/// `translate_program`, with `Reach::string_array_writes` or without.
+fn translate_reached(program: &Program, string_array_writes: bool) -> Result<String, ProgramError> {
     use crate::timings::phase;
-    let (units, reach) = load(program)?;
+    let (units, reach) = load(program, string_array_writes)?;
     let units: Vec<&Value> = units.iter().collect();
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     // The program's files are the first units (`load`).
@@ -90,7 +101,7 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
 /// Each round walks only what its units add (`reach::Rounds`), over the units with their records
 /// complete (`javac::Records`). Which members a record gets depends on every unit, so when a new
 /// unit changes those of a unit walked before, the round walks all of them again.
-fn load(program: &Program) -> Result<(Vec<Value>, Reach), ProgramError> {
+fn load(program: &Program, string_array_writes: bool) -> Result<(Vec<Value>, Reach), ProgramError> {
     let files = source_files(program)?;
     let javac_error = |(file, error)| ProgramError { file, error };
     let (mut javac, mut reaching) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
@@ -104,7 +115,11 @@ fn load(program: &Program) -> Result<(Vec<Value>, Reach), ProgramError> {
     // changes, by index, with their records as completed.
     let mut trees: Vec<&Value> = Vec::new();
     let mut changing: Vec<(usize, &Value, Vec<Value>)> = Vec::new();
-    let mut rounds = reach::Rounds::new(&program.main);
+    let new_rounds = || {
+        let rounds = reach::Rounds::new(&program.main);
+        if string_array_writes { rounds.with_string_array_writes() } else { rounds }
+    };
+    let mut rounds = new_rounds();
     let (mut round, mut walks) = (0, 0);
     loop {
         round += 1;
@@ -139,7 +154,7 @@ fn load(program: &Program) -> Result<(Vec<Value>, Reach), ProgramError> {
         }
         if restart {
             walks += 1 + rounds.restarts();
-            rounds = reach::Rounds::new(&program.main);
+            rounds = new_rounds();
             rounds.add(&trees).map_err(fail)?;
         } else {
             rounds.add(&trees[old..]).map_err(fail)?;

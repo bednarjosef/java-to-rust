@@ -859,8 +859,10 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   nothing when the class has nothing to run) if the call initializes. Reachability reaches the
   class as initialized, and the next round loads its unit if no unit declares it yet. The loader
   is evaluated for its effects only: a JVM's bootstrap loader (`null`) finds only the JDK's
-  classes, where the translation finds the program's too. A name of no class of the program is
-  rejected, and so are a computed name and a computed `initialize`. The `ClassNotFoundException`
+  classes, where the translation finds the program's too. A name of no class of the program, such as
+  `java.lang.invoke.MethodHandleImpl` in `SharedSecrets.getJavaLangInvokeAccess`, ends the
+  program when the call runs (`Builtin::UnknownClass`), as an unknown name does for a creation; a
+  computed name and a computed `initialize` are rejected. The `ClassNotFoundException`
   that the caller catches is then never thrown; for a single file, `Standard.java` has it and
   `ReflectiveOperationException`. Test: `corpus/features/ClassForName.java` and
   `class_for_name_of_a_spelled_out_name_initializes_that_class`.
@@ -893,6 +895,18 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   are text read or built (`Reader.lines`, `DataInputStream.readUTF`, `Pattern`'s group names,
   `ZoneInfoFile`'s ids, `LocaleResources`' patterns), none kept to be compared by reference. Test:
   `library_code_compares_strings_by_value_and_the_programs_own_code_cannot`.
+- **`MethodHandles.lookup().ensureInitialized(c)`** (`program/reach/initialize.rs`,
+  `lower/by_name.rs`): `SharedSecrets.ensureClassInitialized` has `Buffer`, `FileDescriptor` and
+  `ResourceBundle` (among others) register their access objects by running their static
+  initializers through it, so every program that reads a file or a buffer reached a
+  `java.lang.invoke` call. It initializes the class of the `Class` value and gives the value back.
+  The JDK passes the class literal to a helper that passes its parameter on, so reachability
+  takes as initialized the classes whose literals reachable code gives `ensureInitialized`
+  directly or through the parameter of a method that gives it that parameter, one call deep
+  (`Reach::ensured`). The lowering initializes a literal's class directly, and any other value's
+  by comparing it with each of those classes (`c.equals(X.class)`), as the class's first use
+  would (`Builtin::InitializeClass`); the receiver must be `MethodHandles.lookup()`, which has
+  access to every class of the closed program. Test: `corpus/whole-program/EnsureInitialized.java`.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 
