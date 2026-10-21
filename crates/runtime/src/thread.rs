@@ -217,7 +217,8 @@ pub fn set_pending_uncaught<T: 'static>(e: T) {
 
 /// `uncaught0()`: the exception that ends the calling thread, which its handler is given.
 pub fn pending_uncaught<T: Clone + 'static>() -> T {
-    PENDING.with_borrow(|p| p.as_ref().and_then(|e| e.downcast_ref::<T>()).cloned())
+    PENDING
+        .with_borrow(|p| p.as_ref().and_then(|e| e.downcast_ref::<T>()).cloned())
         .expect("the runtime sets the exception before it runs the handler")
 }
 

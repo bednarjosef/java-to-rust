@@ -153,7 +153,8 @@ impl<'a> Gen<'a> {
             Native::PrintUncaught => {
                 let name = self.thread_name(&args[0]);
                 let e = self.value(&args[1], args[1].ty).text;
-                let e = if self.nullable(&args[1]) { format!("{}({e})", self.runtime("non_null")) } else { e };
+                let e =
+                    if self.nullable(&args[1]) { format!("{}({e})", self.runtime("non_null")) } else { e };
                 call(self, "print_uncaught", vec![format!("&{name}"), format!("&{e}")])
             }
             Native::ThreadRename => {

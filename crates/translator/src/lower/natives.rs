@@ -263,9 +263,12 @@ impl<'t> Lowering<'t> {
     /// native (`InstallUncaught`) so that every analysis sees the call and what it reaches.
     fn uncaught_dispatch(&self, node: Node<'t>, args: &mut Vec<Expr>) {
         let dispatch = self.methods.iter().position(|m| {
-            self.types[m.owner].javac == "java.lang.Thread" && m.name == "dispatchUncaught" && m.sig == "()void"
+            self.types[m.owner].javac == "java.lang.Thread"
+                && m.name == "dispatchUncaught"
+                && m.sig == "()void"
         });
-        let call = ExprKind::Call { name: "dispatchUncaught".to_string(), args: Vec::new(), resolved: dispatch };
+        let call =
+            ExprKind::Call { name: "dispatchUncaught".to_string(), args: Vec::new(), resolved: dispatch };
         args.push(self.synth(call, node.pos(), Type::Void));
     }
 
