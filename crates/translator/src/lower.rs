@@ -189,6 +189,10 @@ impl<'t> Node<'t> {
     }
 }
 
+/// What the rejection of an `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]`
+/// says, where the runtime would do it (see `Reach::string_array_writes`).
+pub const STRING_ARRAY_WRITE: &str = "a change in place of a `String[]` that is also an `Object[]`";
+
 impl<'t> Lowering<'t> {
     /// `a == b` or `a != b` of two strings, which compares references. A translated string is a
     /// value without an identity, so the program's own code is rejected. The JDK compares by
@@ -256,6 +260,9 @@ struct Lowering<'t> {
     /// The array types whose arrays become `Object`s or are cast back from them: each is a
     /// runtime class beside `Object` (see `object::object_types`).
     object_arrays: std::cell::RefCell<Vec<Type>>,
+    /// The atomic updates of fields through `Unsafe` that the code makes, each a method that
+    /// lowering adds to the field's class (see `handles`).
+    field_updates: RefCell<Vec<handles::FieldUpdateMethod>>,
     /// The arrays of references that are `Object[]`s (see `covariant`).
     covariant: covariant::Covariant,
     /// Where `Object` goes, in a program that uses it (see `object`).
@@ -319,6 +326,7 @@ impl<'t> Lowering<'t> {
             };
             types[index].enum_constants = Some(constants);
         }
+        self.field_update_methods(methods);
         Ok(())
     }
 
@@ -897,11 +905,12 @@ impl<'t> Lowering<'t> {
             ("java.lang.Math", "sqrt") => Builtin::MathSqrt,
             ("java.lang.Math", "pow") => Builtin::MathPow,
             // Where the JDK's `Arrays` is translated, a call that the runtime does not do is one of
-            // it, such as a sort with a `Comparator`.
+            // it, such as a sort with a `Comparator`, and so is a sort or a fill of a `String[]`
+            // that is an `Object[]` where reachability kept the JDK's for it.
             ("java.util.Arrays", name)
                 if self.type_index(symbol.owner).is_none() || {
                     let types: Vec<&str> = node.list("arguments").map(|a| a.java_type()).collect();
-                    arrays::runtime_arrays_call(name, &types)
+                    arrays::runtime_arrays_call(name, &types) && !self.jdk_string_array_write(node)
                 } =>
             {
                 let (writes, copies) =

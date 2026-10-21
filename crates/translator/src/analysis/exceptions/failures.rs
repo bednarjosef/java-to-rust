@@ -129,8 +129,33 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             Some("java.lang.IllegalMonitorStateException")
         }
         Builtin::Native(Native::HoldsLock) => None,
-        // An object's identity hash (a null one is the receiver's `NullPointerException`).
-        Builtin::Native(Native::IdentityHash) => None,
+        // What the JVM answers about itself, the clock and the bits of numbers (`vm.rs`, `natives`).
+        Builtin::Native(
+            Native::DoubleToLongBits
+            | Native::DoubleToRawLongBits
+            | Native::LongBitsToDouble
+            | Native::FloatToIntBits
+            | Native::FloatToRawIntBits
+            | Native::IntBitsToFloat
+            | Native::IdentityHash
+            | Native::CurrentTimeMillis
+            | Native::NanoTime
+            | Native::AvailableProcessors
+            | Native::LineSeparator
+            | Native::SystemProperty(_)
+            | Native::TotalMemory
+            | Native::FreeMemory
+            | Native::MaxMemory
+            | Native::Gc
+            | Native::Nothing
+            | Native::CdsConfigStatus
+            | Native::CdsRandomSeed
+            | Native::ContinuationsSupported
+            | Native::NanoTimeAdjustment
+            | Native::ArrayBaseOffset
+            | Native::ArrayIndexScale(_)
+            | Native::Crc32Update,
+        ) => None,
         Builtin::CodePoint(CodePointOp::ToCharsInto) => Some("java.lang.IllegalArgumentException"),
         Builtin::CodePoint(
             CodePointOp::CharCount

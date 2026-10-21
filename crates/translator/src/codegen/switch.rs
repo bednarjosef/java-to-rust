@@ -309,7 +309,7 @@ impl<'a> Gen<'a> {
         let target = self.frames.iter().rposition(|f| matches!(f.kind, Kind::Value { .. }));
         let Some(index) = target else { return self.line("break;") };
         let Kind::Value { ty, .. } = self.frames[index].kind else { unreachable!() };
-        let code = self.value(value, ty);
+        let code = if self.optional_yield { self.optional(value) } else { self.value(value, ty) };
         if self.leaves_finally(index) {
             // The `finally` runs before the switch expression ends, so the value waits in a local
             // that `switch_expr` declares; the `try` passes it on when it reaches the switch.
@@ -429,8 +429,21 @@ impl<'a> Gen<'a> {
         self.close();
     }
 
-    /// A switch expression, as a block that ends with its value.
-    pub(super) fn switch_expr(&mut self, ty: Type, selector: &'a Expr, cases: &'a [Case]) -> Code {
+    /// A switch expression, as a block that ends with its value: an `Option` when `optional`.
+    pub(super) fn switch_expr(
+        &mut self,
+        ty: Type,
+        optional: bool,
+        selector: &'a Expr,
+        cases: &'a [Case],
+    ) -> Code {
+        let outer = std::mem::replace(&mut self.optional_yield, optional);
+        let code = self.switch_value(ty, selector, cases);
+        self.optional_yield = outer;
+        code
+    }
+
+    fn switch_value(&mut self, ty: Type, selector: &'a Expr, cases: &'a [Case]) -> Code {
         let mark = self.out.len();
         let indent = self.indent;
         let pending = self.pending.take();

@@ -310,7 +310,17 @@ impl<'a> Gen<'a> {
     /// computed inside a closure.
     pub(super) fn raises_in(&self, e: &Expr) -> bool {
         let mut found = false;
-        visit_expr(e, &mut |x| found |= self.facts.raising.contains(&x.id));
+        visit_expr(e, &mut |x| {
+            found |= self.facts.raising.contains(&x.id)
+                || self.facts.null_checked.contains_key(&x.id)
+                || match &x.kind {
+                    // A call of a method that throws, whose exception goes on with `?`.
+                    ExprKind::Call { resolved: Some(m), .. }
+                    | ExprKind::MethodCall { resolved: Some(m), .. }
+                    | ExprKind::New { ctor: Some(m), .. } => self.facts.throwing.contains(m),
+                    _ => false,
+                }
+        });
         found
     }
 

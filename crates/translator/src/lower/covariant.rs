@@ -69,8 +69,17 @@ impl<'t> Lowering<'t> {
         true
     }
 
+    /// Whether `node`, an `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]`,
+    /// calls the JDK's method for an `Object[]`, which reachability then kept
+    /// (`Reach::string_array_writes`).
+    pub(super) fn jdk_string_array_write(&self, node: Node<'t>) -> bool {
+        self.strings_covariant()
+            && self.reach.is_some_and(|r| r.string_array_writes)
+            && crate::program::writes_string_array(node.0)
+    }
+
     /// Whether `String[]` is an `Object[]` in this lowering.
-    fn strings_covariant(&self) -> bool {
+    pub(super) fn strings_covariant(&self) -> bool {
         self.covariant.known.contains(&Type::array(Type::String))
     }
 
@@ -94,7 +103,7 @@ impl<'t> Lowering<'t> {
             if n.java_type() != "java.lang.String[]" || !Self::is_object_array(a.ty) {
                 out.push(a);
             } else if writes {
-                return unsupported(node, "a change in place of a `String[]` that is also an `Object[]`");
+                return unsupported(node, STRING_ARRAY_WRITE);
             } else {
                 let pos = a.pos;
                 out.push(self.synth(
