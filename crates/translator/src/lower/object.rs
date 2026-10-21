@@ -386,8 +386,7 @@ impl<'t> Lowering<'t> {
         // The `intValue()` to `doubleValue()` of a class that extends `Number`, or of a subclass,
         // implement the interface's.
         if let Some(n) = at.number {
-            for m in 0..at.equals {
-                let method = &methods[m];
+            for method in methods.iter_mut().take(at.equals) {
                 if method.is_static
                     || method.is_ctor
                     || !method.params.is_empty()
@@ -407,8 +406,8 @@ impl<'t> Lowering<'t> {
                         message: format!("overriding `Number.{}` not supported yet", method.name),
                     });
                 }
-                if !methods[m].overrides.contains(&(n.methods + i)) {
-                    methods[m].overrides.push(n.methods + i);
+                if !method.overrides.contains(&(n.methods + i)) {
+                    method.overrides.push(n.methods + i);
                 }
             }
         }
