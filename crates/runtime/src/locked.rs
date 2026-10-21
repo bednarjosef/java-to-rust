@@ -202,6 +202,11 @@ impl<T: ?Sized> Locked<T> {
         f(&mut self.borrow_mut())
     }
 
+    /// The data of an object that nothing else holds, as `RefCell::get_mut`: no lock is needed.
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+
     /// The address of the data, which is the object's identity (as `RefCell::as_ptr`).
     pub fn as_ptr(&self) -> *mut T {
         self.value.as_ptr()
