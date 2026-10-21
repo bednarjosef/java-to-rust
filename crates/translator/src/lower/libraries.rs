@@ -17,7 +17,7 @@ impl<'t> Lowering<'t> {
         if (symbol.owner, symbol.name) != ("jdk.internal.loader.BootLoader", "loadLibrary") {
             return Ok(None);
         }
-        if !matches!(&args[..], [arg] if matches!(arg.kind, ExprKind::Str(_) | ExprKind::Var(_))) {
+        if !matches!(args, [arg] if matches!(arg.kind, ExprKind::Str(_) | ExprKind::Var(_))) {
             return unsupported(node, "`BootLoader.loadLibrary` of anything but a literal or a variable");
         }
         Ok(Some(ExprKind::Builtin(Builtin::Native(Native::Nothing), Vec::new())))
