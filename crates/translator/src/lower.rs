@@ -65,7 +65,7 @@ pub use exceptions::{is_standard, standard_local_name, standard_names, standard_
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
-pub use program::{Lowered, census_lower_program, lower_program};
+pub use program::{Lowered, Rejected, census_lower_program, lower_program, tolerant_lower_program};
 
 /// Checks that no enum of the program can be null: the translation has no null enums.
 pub fn check_enum_nulls(class: &Class) -> Result<(), Error> {
@@ -304,6 +304,10 @@ struct Lowering<'t> {
     /// the type whose code it is in and the position of the method being lowered, and lowering
     /// goes on past it; `None` otherwise, when the first error ends lowering.
     census: Option<RefCell<Vec<CensusError>>>,
+    /// Whether a census takes a panic while lowering a method for a rejection of the method. A
+    /// whole program's lowering, which goes on past rejections too (`tolerant_lower_program`),
+    /// lets it end the translation, as it would without them.
+    catch_panics: bool,
     /// Whether the method being lowered is a census's stub of one that lowering rejected.
     stubbing: Cell<bool>,
     /// The methods that are a census's stubs.
@@ -311,8 +315,9 @@ struct Lowering<'t> {
 }
 
 /// An error that lowering for a census records: the index of the type whose code it is in, the
-/// position of the method being lowered, and the error.
-type CensusError = (usize, Option<Pos>, Error);
+/// position of the method being lowered, the index of that method when the code rejected is part
+/// of its body alone, and the error.
+type CensusError = (usize, Option<Pos>, Option<usize>, Error);
 
 impl<'t> Lowering<'t> {
     /// What lowering adds once every declared method is lowered, for a file and a whole program

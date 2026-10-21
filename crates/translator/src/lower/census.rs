@@ -8,16 +8,30 @@ use super::*;
 
 impl<'t> Lowering<'t> {
     /// Records `error`, in code of the type with index `t`, when lowering for a census, with the
-    /// position of the method or lambda being lowered; passes it on otherwise.
+    /// position of the method or lambda being lowered; passes it on otherwise. The code left out
+    /// is part of that method's body alone.
     pub(super) fn reject(&self, t: usize, error: Error) -> Result<(), Error> {
-        self.reject_at(t, self.method_ctx.get().map(|m| self.methods[m].node.pos()), error)
+        let method = self.method_ctx.get();
+        self.record(t, method.map(|m| self.methods[m].node.pos()), method, error)
     }
 
-    /// `reject` in the code at `anchor`, the position of a method, a lambda or a class.
+    /// `reject` in the code at `anchor`, the position of a method, a lambda or a class, which
+    /// may be code of more than one method.
     pub(super) fn reject_at(&self, t: usize, anchor: Option<Pos>, error: Error) -> Result<(), Error> {
+        self.record(t, anchor, None, error)
+    }
+
+    /// `reject_at`, in the body of method `method` alone when it is given.
+    fn record(
+        &self,
+        t: usize,
+        anchor: Option<Pos>,
+        method: Option<usize>,
+        error: Error,
+    ) -> Result<(), Error> {
         match &self.census {
             Some(rejected) => {
-                rejected.borrow_mut().push((t, anchor, error));
+                rejected.borrow_mut().push((t, anchor, method, error));
                 Ok(())
             }
             None => Err(error),
@@ -31,6 +45,9 @@ impl<'t> Lowering<'t> {
         }
         // A panic of lowering is a rejection of the method like any other.
         let ctx = (self.method_ctx.get(), self.aliases.borrow().len());
+        if !self.catch_panics {
+            return self.stub_if_rejected(index, self.method(index));
+        }
         let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.method(index)));
         let lowered = lowered.unwrap_or_else(|panic| {
             self.method_ctx.set(ctx.0);
@@ -38,9 +55,15 @@ impl<'t> Lowering<'t> {
             let pos = self.methods[index].node.pos();
             Err(Error { pos, message: format!("the translator panicked: {}", panic_message(&*panic)) })
         });
+        self.stub_if_rejected(index, lowered)
+    }
+
+    /// Method `index` as lowering gave it, `lowered`, or when lowering rejected it, its stub.
+    fn stub_if_rejected(&self, index: usize, lowered: Result<Method, Error>) -> Result<Method, Error> {
         match lowered {
             Err(error) => {
-                self.reject_at(self.methods[index].owner, Some(self.methods[index].node.pos()), error)?;
+                let anchor = Some(self.methods[index].node.pos());
+                self.record(self.methods[index].owner, anchor, Some(index), error)?;
                 self.stubbed.borrow_mut().insert(index);
                 self.stubbing.set(true);
                 let stub = self.method(index);

@@ -68,6 +68,7 @@ impl<'t> Lowering<'t> {
             member_outers: Vec::new(),
             library: Vec::new(),
             census: None,
+            catch_panics: false,
             stubbing: Cell::new(false),
             stubbed: Default::default(),
         }
