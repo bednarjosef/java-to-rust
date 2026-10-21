@@ -45,7 +45,15 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
     let messages = RefCell::new(HashMap::new());
     for method in &class.methods {
         let Some(outermost) = outermost(class, method.class) else { continue };
-        let at = Messages { class, names, outermost: &outermost };
+        // The JDK's classes are compiled with the names of their locals (`-g`), so the JVM shows
+        // those. The classes of `java.lang` that a program gets are the translator's own
+        // (`java/Standard.java`, `java/Threads.java`), whose code is not the JDK's.
+        let decl = &class.types[method.class];
+        let jdk = super::exceptions::from_jdk(decl);
+        if jdk && decl.package == "java.lang" {
+            continue;
+        }
+        let at = Messages { class, names, outermost: &outermost, method, jdk };
         for s in &method.body {
             visit_stmt(
                 s,
@@ -71,7 +79,8 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
 }
 
 /// The qualified name of the outermost class that declares type `t`, by which `BytecodeNames`
-/// knows its code: `com.example.Main` for `com.example.Main.Inner`, `Main$1` or `Main$$Lambda`.
+/// knows its code: `com.example.Main` for `com.example.Main.Inner`, and for the local class
+/// `com.example.Main$1Local` or the lambda's `com.example.Main$$Lambda`.
 fn outermost(class: &Class, t: usize) -> Option<String> {
     let decl = &class.types[t];
     match &decl.origin {
@@ -97,6 +106,24 @@ struct Messages<'a> {
     names: &'a BytecodeNames,
     /// The outermost class of the method's class (see `outermost`).
     outermost: &'a str,
+    method: &'a Method,
+    /// The method is the JDK's, whose class file has the names of its locals. Its source is
+    /// taken to be that of the Java that runs the program (`CHECKED_JAVA`), which
+    /// `BytecodeNames` does not compile: what it names is not known, and its messages that need
+    /// it (a call, a static field, javac's own locals) are not certain.
+    jdk: bool,
+}
+
+/// A field as the class file has it.
+enum JavaField {
+    /// A field of that name.
+    Named(String),
+    /// The enclosing instance of a lambda's class, which in the class file is the `this` of the
+    /// method that holds the lambda's body.
+    This,
+    /// A local that a lambda captures, which in the class file is a parameter of the method that
+    /// holds the lambda's body: `Some` with its name there, `None` where that is not certain.
+    Captured(Option<String>),
 }
 
 /// Where a null came from, as the JVM shows it.
@@ -145,6 +172,19 @@ impl Messages<'_> {
                     Builtin::StringLength => "length",
                     Builtin::StringEquals => "equals",
                     Builtin::StringCharAt => "charAt",
+                    // `Arrays.copyOf` of a null, which fails in the JDK's code (`-g`, so the
+                    // parameter has its name): the copy of an array of objects first asks for its
+                    // class, the others read its length.
+                    Builtin::ArraysCopyOf => {
+                        let failure = match args[0].ty {
+                            Type::Array(element) if element.is_reference() => {
+                                "Cannot invoke \"Object.getClass()\""
+                            }
+                            _ => "Cannot read the array length",
+                        };
+                        out.insert(args[0].id, Some(format!("{failure} because \"original\" is null")));
+                        return;
+                    }
                     // `synchronized` on a null.
                     Builtin::MonitorEnter => {
                         return add(&args[0], Some("Cannot enter synchronized block".to_string()));
@@ -159,12 +199,27 @@ impl Messages<'_> {
                 };
                 add(&args[0], self.call(x.pos, method).map(|m| format!("Cannot invoke \"{m}\"")))
             }
+            ExprKind::Switch { selector, .. } => self.string_switch(selector, out),
             _ => {}
+        }
+    }
+
+    /// The message of a `switch` on a string that is null. javac keeps the string in a local of
+    /// its own (`s$`), and calls its `hashCode()` first.
+    fn string_switch(&self, selector: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
+        if selector.ty == Type::String
+            && let Some(local) = self.names.get(self.outermost, selector.pos, NameKind::Temp, "s$")
+        {
+            let message = format!("Cannot invoke \"String.hashCode()\" because \"{local}\" is null");
+            out.insert(selector.id, Some(message));
         }
     }
 
     /// The messages of the dereferences that statement `s` makes itself, by object.
     fn stmt(&self, s: &Stmt, out: &mut HashMap<ExprId, Option<String>>) {
+        if let Stmt::Switch { selector, .. } = s {
+            self.string_switch(selector, out);
+        }
         if let Stmt::Throw(e) = s {
             // The value is converted to `Throwable`, a cast that the class file does not have.
             let thrown = match &e.kind {
@@ -196,6 +251,14 @@ impl Messages<'_> {
         if detail == 0 {
             return Some(Source::Hidden);
         }
+        // A conversion between primitives is an instruction that the JVM does not follow back;
+        // unboxing is a call of its own (`intValue()`).
+        if let ExprKind::Cast(to, inner) = &e.kind
+            && transparent(e).is_none()
+        {
+            let primitive = |t: Type| t.is_numeric() || t == Type::Boolean;
+            return (primitive(*to) && primitive(inner.ty)).then_some(Source::Hidden);
+        }
         let e = transparent(e)?;
         if let Some(call) = self.called(e) {
             return Some(Source::Shown(call));
@@ -203,26 +266,24 @@ impl Messages<'_> {
         let shown = match &e.kind {
             ExprKind::This => "this".to_string(),
             ExprKind::Null => "null".to_string(),
-            // The constants that an instruction holds: `iconst`, `bipush`, `sipush`.
+            // The constants that an instruction holds: `iconst`, `bipush`, `sipush`; a larger
+            // one is loaded from the constant pool, which the JVM does not show.
             ExprKind::Int(v) if (-32768..=32767).contains(v) => v.to_string(),
-            ExprKind::Var(_) => {
-                let local = self.names.get(self.outermost, e.pos, NameKind::Local, "")?;
-                // Locals other than parameters come with their slots (not yet).
-                if !local.starts_with("<parameter") {
-                    return None;
-                }
-                local.to_string()
-            }
+            ExprKind::Int(_) => return Some(Source::Hidden),
+            ExprKind::Var(name) if self.jdk => self.jdk_local(name)?,
+            ExprKind::Var(_) => self.names.get(self.outermost, e.pos, NameKind::Local, "")?.to_string(),
             ExprKind::Static { name, .. } => {
                 self.names.get(self.outermost, e.pos, NameKind::Static, name)?.to_string()
             }
             ExprKind::Field { object, name } => {
-                if self.synthetic_field(object.ty, name) {
-                    return None;
-                }
+                let name = match self.java_field(object, name)? {
+                    JavaField::Named(name) => name,
+                    JavaField::This => return self.source(object, detail),
+                    JavaField::Captured(local) => return Some(Source::Shown(local?)),
+                };
                 match self.source(object, detail - 1)? {
                     Source::Shown(object) => format!("{object}.{name}"),
-                    Source::Hidden => name.clone(),
+                    Source::Hidden => name,
                 }
             }
             ExprKind::Index(array, index) => {
@@ -236,8 +297,8 @@ impl Messages<'_> {
                 };
                 format!("{array}[{index}]")
             }
-            // Values that the JVM does not follow back: computed ones.
-            ExprKind::Conditional(..) | ExprKind::Binary(..) | ExprKind::Unary(..) => {
+            // Values that the JVM does not follow back: computed ones, and new objects.
+            ExprKind::Conditional(..) | ExprKind::Binary(..) | ExprKind::Unary(..) | ExprKind::New { .. } => {
                 return Some(Source::Hidden);
             }
             _ => return None,
@@ -258,21 +319,86 @@ impl Messages<'_> {
         self.names.get(self.outermost, pos, NameKind::Call, name).map(str::to_string)
     }
 
-    /// Whether field `name` of an object of type `ty` is one that the translation adds to a
-    /// nested class, for its enclosing instance or a captured local, whose name the class file
-    /// does not have.
-    fn synthetic_field(&self, ty: Type, name: &str) -> bool {
-        let mut t = self.class.class_index(ty);
-        while let Some(c) = t {
-            let decl = &self.class.types[c];
-            if decl.captures.iter().any(|capture| capture.field == name)
+    /// The field `name` of `object` as the class file has it; `None` where that is not certain.
+    /// The translation adds fields to a nested class for its enclosing instance and for the locals
+    /// it captures. javac does too for a local or anonymous class (`val$x`, `this$0`), which reads
+    /// them through `this` except in its constructors (where it reads its parameters), but not for
+    /// a lambda, whose body is a method of the enclosing class that takes the captured locals as
+    /// parameters.
+    fn java_field(&self, object: &Expr, name: &str) -> Option<JavaField> {
+        let synthetic = |t: usize| {
+            let decl = &self.class.types[t];
+            decl.captures.iter().any(|c| c.field == name)
                 || (decl.outer.is_some() && name.trim_end_matches('_') == "outer")
-            {
-                return true;
+        };
+        let mut t = self.class.class_index(object.ty);
+        let mut own = true;
+        while let Some(c) = t {
+            if synthetic(c) {
+                // Only the current class's own, read through `this` outside a constructor.
+                let current = self.method.class;
+                if !own || c != current || !matches!(object.kind, ExprKind::This) || self.method.is_ctor {
+                    return None;
+                }
+                let decl = &self.class.types[c];
+                if decl.extends.is_some_and(|s| self.inherits_synthetic(s, name)) {
+                    return None;
+                }
+                let capture = decl.captures.iter().find(|c| c.field == name);
+                return match (&decl.origin, capture) {
+                    (Origin::Lambda { .. }, Some(c)) if self.jdk => {
+                        Some(JavaField::Captured(Some(c.name.clone())))
+                    }
+                    (Origin::Lambda { .. }, Some(_)) => Some(JavaField::Captured(
+                        self.names.get(self.outermost, object.pos, NameKind::Local, "").map(str::to_string),
+                    )),
+                    // The enclosing instance of a lambda's class: `this`, unless that is itself a
+                    // lambda's.
+                    (Origin::Lambda { .. }, None) => {
+                        let enclosing = decl.outer.map(|o| &self.class.types[o].origin);
+                        (name == "outer" && !matches!(enclosing, Some(Origin::Lambda { .. }) | None))
+                            .then_some(JavaField::This)
+                    }
+                    (Origin::Local { .. } | Origin::Anonymous { .. }, Some(c)) => {
+                        Some(JavaField::Named(format!("val${}", c.name)))
+                    }
+                    _ => None,
+                };
             }
-            t = decl.extends;
+            own = false;
+            t = self.class.types[c].extends;
         }
-        false
+        Some(JavaField::Named(name.to_string()))
+    }
+
+    /// The name of the local `name` of a method of the JDK in its source, which its class file
+    /// has; `None` for one that the translation may have renamed (`s2` for a second `s`, see
+    /// `lower::local_names`).
+    fn jdk_local(&self, name: &str) -> Option<String> {
+        let method = self.method;
+        let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
+        if base != name && !method.params.iter().any(|p| p.name == name) {
+            let mut declared = method.params.iter().any(|p| p.name == base);
+            for s in &method.body {
+                visit_stmt(s, &mut |_| {}, &mut |s| match s {
+                    Stmt::Local { name, .. } | Stmt::ForEach { name, .. } => declared |= name == base,
+                    Stmt::Try { catches, .. } => declared |= catches.iter().any(|c| c.name == base),
+                    _ => {}
+                });
+            }
+            if declared {
+                return None;
+            }
+        }
+        Some(name.to_string())
+    }
+
+    /// Whether class `t` or a superclass has the translation's field `name`.
+    fn inherits_synthetic(&self, t: usize, name: &str) -> bool {
+        let decl = &self.class.types[t];
+        decl.captures.iter().any(|c| c.field == name)
+            || (decl.outer.is_some() && name.trim_end_matches('_') == "outer")
+            || decl.extends.is_some_and(|s| self.inherits_synthetic(s, name))
     }
 }
 

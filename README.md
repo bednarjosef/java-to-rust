@@ -257,10 +257,11 @@ A small subset, end to end:
   after the body threw is added to that exception as suppressed, and `getSuppressed` returns it;
   `addSuppressed` of the exception itself or of `null` throws Java's `IllegalArgumentException` or
   `NullPointerException`. A `throw` of a value that may be null throws
-  `NullPointerException`. A `NullPointerException` of a null dereference that a `catch` reads the
-  message of has Java's (`Cannot invoke "Main$Box.size()" because "<parameter1>" is null`, as a
-  class compiled without `-g` names it), from a second javac run with code generation that tells
-  how the class file names the code; where that is not certain the program is rejected. A
+  `NullPointerException`. A `NullPointerException` of a null dereference that a `catch` may read
+  the message of has Java's (`Cannot invoke "Main$Box.size()" because "<local3>" is null`, as a
+  class compiled without `-g` names it, and with the names of the JDK's own locals in its code),
+  from a second javac run with code generation that tells how the class file names the code and
+  which slot each local has; where that is not certain the program is rejected. A
   `yield` or a constructor's `return` through a `finally` runs the
   `finally` first. A static initializer or a static field initializer that throws ends an uncaught
   program with `ExceptionInInitializerError`; where a `catch` of it, of `Error` or of `Throwable`
