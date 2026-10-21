@@ -644,6 +644,11 @@ pub enum Builtin {
     Println,
     Print,
     Exit,
+    /// The body of an instance method of a class that has no objects (`Reach::dormant`): it never
+    /// runs.
+    NoObject {
+        class: usize,
+    },
     /// Evaluates the lock of a `synchronized` block and throws if it is null; the value is dropped.
     NullCheck,
     MathAbs,
@@ -923,7 +928,11 @@ pub fn has_effects(e: &Expr) -> bool {
                 | ExprKind::Assign { .. }
                 | ExprKind::IncDec { .. }
                 | ExprKind::Builtin(
-                    Builtin::Print | Builtin::Println | Builtin::Exit | Builtin::Native(_),
+                    Builtin::Print
+                        | Builtin::Println
+                        | Builtin::Exit
+                        | Builtin::NoObject { .. }
+                        | Builtin::Native(_),
                     _
                 )
                 | ExprKind::Builtin(

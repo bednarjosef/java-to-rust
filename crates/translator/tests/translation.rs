@@ -1470,6 +1470,14 @@ fn unreachable_code_is_not_translated() {
 }
 
 #[test]
+fn anonymous_classes_are_reached_through_their_creation_and_calls() {
+    let rust = translate_project("anonymous", "app.Main");
+    assert_contains(&rust, &["fn run(", "fn area(", "write!(f, \"task {}\", self.name)"]);
+    // `audit` and `describe` are never called, nor is `never`, whose anonymous class uses `extra`.
+    assert_lacks(&rust, &["extra", "Audit", "audit", "describe", "fn never", "\"never\""]);
+}
+
+#[test]
 fn classes_with_one_name_in_two_packages() {
     let rust = translate_project("statics", "com.shop.Main");
     assert_contains(

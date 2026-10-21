@@ -299,7 +299,12 @@ impl<'t> Lowering<'t> {
         let is_abstract = node.get("body").is_none()
             && (node.has_flag("ABSTRACT") || in_interface && !is_static)
             && !abstract_in_enum;
+        let dormant = self.reach.is_some_and(|r| r.dormant(&self.types[info.owner].javac, node.0));
         let mut body = match node.get("body") {
+            Some(_) if dormant => {
+                let never = ExprKind::Builtin(Builtin::NoObject { class: info.owner }, Vec::new());
+                vec![Stmt::Expr(self.synth(never, node.pos(), Type::Void))]
+            }
             Some(body) => self.block(body)?,
             None if abstract_in_enum || is_abstract => Vec::new(),
             None => return unsupported(node, "methods without a body"),

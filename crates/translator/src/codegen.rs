@@ -497,7 +497,12 @@ impl<'a> Gen<'a> {
         // The body of a method or constructor that never runs may call what was never emitted,
         // such as the default methods of an interface on a class that implements it without
         // objects, or the methods of a superclass whose values are all of another subclass.
-        let never_runs = !m.is_static && m.name != "<clinit>" && !self.runs[m.class];
+        // Reach marks a method of a class without objects with a `NoObject` body.
+        let never_runs = !m.is_static && m.name != "<clinit>" && !self.runs[m.class]
+            || matches!(
+                &m.body[..],
+                [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, _), .. })]
+            );
         if never_runs {
             self.line("#[allow(unused_variables)]");
         }
@@ -523,8 +528,7 @@ impl<'a> Gen<'a> {
             self.line(&format!("{}();", statics::init_name(&self.class.types[t].name)));
         }
         if never_runs {
-            let name = &self.class.types[m.class].name;
-            self.line(&format!("unreachable!(\"no object of {name} is created\")"));
+            self.line(&no_object(&self.class.types[m.class].name));
         } else if m.is_ctor {
             self.constructor(m);
         } else {
@@ -564,6 +568,11 @@ impl<'a> Gen<'a> {
         }
         self.boxed = boxed_locals(m);
     }
+}
+
+/// The body of a method that never runs, as no object of the class named `name` is created.
+fn no_object(name: &str) -> String {
+    format!("unreachable!(\"no object of {name} is created\")")
 }
 
 /// A borrow scoped with braces, `{ x.borrow().f }`, is a function argument of its own in a
