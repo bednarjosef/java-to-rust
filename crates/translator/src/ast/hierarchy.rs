@@ -248,6 +248,7 @@ impl Class {
             Type::Class(name, _) | Type::Enum(name) => self.type_index(name),
             // An array that becomes an `Object` has a runtime class named after its type.
             Type::Array(_) => self.type_index(&ty.to_string()),
+            Type::StringBuilder => self.type_index(STRING_BUILDER),
             _ => self.type_index(runtime_name(ty)?),
         }
     }
@@ -260,6 +261,16 @@ impl Class {
             return None;
         }
         self.named_type(&decl.name)
+    }
+
+    /// The type of the shared handles of runtime class `c`, when its values are an array type's
+    /// or `StringBuilder`'s: mutable objects whose identity an `Object` keeps.
+    pub fn shared_of(&self, c: usize) -> Option<Type> {
+        let decl = &self.types[c];
+        if decl.kind == TypeKind::Runtime && decl.name == STRING_BUILDER {
+            return Some(Type::StringBuilder);
+        }
+        self.array_of(c)
     }
 
     /// The type that `Type`'s text names: a primitive, a string, a box, an array, or a class or

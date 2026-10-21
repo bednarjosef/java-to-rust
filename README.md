@@ -336,7 +336,9 @@ The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`,
 `java::StringBuilder`, a shared handle to UTF-16 units like an array: every variable, field and
 parameter that holds the builder sees it change, `reverse` keeps surrogate pairs in order, and a
 chain is Rust's chain (`sb.append_str("a").append(1)`), the handle cloned only where the builder
-is used as a value.
+is used as a value. A builder held as an `Object` (from a `Supplier<StringBuilder>`, in a
+collection) is the same handle in `Object`'s `StringBuilder` variant: `==`, `equals` and
+`hashCode` are its identity's, and it prints as its text.
 
 `split`, `replaceAll`, `replaceFirst` and `matches` run a small backtracking regular expression
 engine with a literal fast path: literals and escapes, `.`, `\d \s \w` and their negations, sets

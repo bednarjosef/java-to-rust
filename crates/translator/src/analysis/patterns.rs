@@ -76,12 +76,12 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
     // An array in an `Object` keeps its identity: it is shared.
     let holds_values = super::hierarchy::variants(class, facts, object)
         .into_iter()
-        .any(|c| class.types[c].kind == TypeKind::Runtime && class.array_of(c).is_none());
+        .any(|c| class.types[c].kind == TypeKind::Runtime && class.shared_of(c).is_none());
     // A static `Object` field that is only ever set to objects of the program's classes, such as
     // the sentinel `ImmutableCollections.EMPTY = new Object()`, is never a string or a box.
     let object_of_class = |e: &Expr| {
         matches!(&e.kind, ExprKind::Cast(Type::Class(name, _), inner)
-            if *name == OBJECT && matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_)))
+            if *name == OBJECT && matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_) | Type::StringBuilder))
     };
     let mut sentinels: HashSet<(usize, &str)> = HashSet::new();
     for (t, decl) in class.types.iter().enumerate() {
@@ -114,7 +114,7 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
         ExprKind::Null => false,
         ExprKind::Static { class, name } if sentinels.contains(&(*class, name.as_str())) => false,
         ExprKind::Cast(Type::Class(name, _), inner) if *name == OBJECT => {
-            !matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_))
+            !matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_) | Type::StringBuilder)
         }
         _ => matches!(e.ty, Type::Class(name, _) if name == OBJECT),
     };
@@ -131,10 +131,14 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                 s,
                 &mut |e| {
                     visit_expr(e, &mut |x| match &x.kind {
+                        // A builder is an `Rc`, which an `Object` that threads may share cannot hold.
                         ExprKind::Cast(Type::Class(name, _), inner)
-                            if *name == OBJECT && inner.ty == Type::StringBuilder =>
+                            if *name == OBJECT && inner.ty == Type::StringBuilder && facts.threaded =>
                         {
-                            found.get_or_insert((x.pos, "a `StringBuilder` as an `Object` value"));
+                            found.get_or_insert((
+                                x.pos,
+                                "a `StringBuilder` as an `Object` in a program with threads",
+                            ));
                         }
                         ExprKind::Binary(BinOp::Eq | BinOp::Ne, l, r)
                             if holds_values
