@@ -39,6 +39,9 @@ pub enum StringOp {
     EqualsIgnoreCase,
     Concat,
     ToCharArray,
+    /// The UTF-16 code units of a string as an `int[]`, which `s.chars()` streams (see
+    /// `program::reach::STRING_CHARS`).
+    CharCodes,
     /// `new String(chars)`, `String.valueOf(chars)` and `String.copyValueOf(chars)`, with an
     /// offset and count or without.
     FromChars,
@@ -132,6 +135,6 @@ pub enum BitsOp {
     ToStringRadix,
     /// `Integer.parseInt(s, radix)`.
     ParseRadix,
-    /// `Integer.parseInt(s, begin, end, radix)`: the indices of the substring that is read.
+    /// `Integer.parseInt(s, begin, end, radix)` and `Long.parseLong`, read from a `CharSequence`.
     ParseRange,
 }

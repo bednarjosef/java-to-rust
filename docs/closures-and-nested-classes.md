@@ -1295,3 +1295,69 @@ Decisions that change during the implementation are recorded here, milestone by 
   (`Supplier<StringBuilder>`: it would be an `Object`); a lambda converted to a JDK interface
   outside the template in single-file mode; creating a local class declared in a lambda where
   a local hides one of its captures.
+
+### Closure forms
+
+- **The first closure types are a subset of 4.2**: an interface is one when it has one abstract
+  method (besides `Object`'s, which `Comparator` declares again), or extends exactly one
+  interface and declares none, every class below it is a lambda's that implements one
+  interface, every interface above and below it is a closure type too, every `new` of such a
+  class is converted to the interface right away, and no value of it is converted to another
+  type than an interface above it (`Object`, printing, a collection), compared with `==`,
+  tested with `instanceof`, passed to a builtin or called with anything but its method and its
+  default methods; and each lambda's method uses `this` only to read its capture fields.
+  Whatever rules out one interface rules out those above and below it. Interfaces seen as
+  objects (condition 3 of 4.2 as written, and identity) stay enums for now.
+- **An interface that extends another names its closures**: `type UnaryOperator = Function;`, so
+  a `UnaryOperator` is passed where a `Function` is taken as it is, and calls the default
+  methods of `FunctionMethods`.
+- **A generic interface's closure is erased, per interface, not per instantiation** (4.4 asks
+  for the substituted types at each declaration site): `Function<Integer, Integer>` is the
+  alias `type Function = Rc<dyn Fn(Object) -> Object>;`, and a call boxes the arguments and
+  casts the result as the enum's dispatcher did. The lambda's method, which javac typed with the
+  substituted types, sits behind a bridge (4.1); the closure's body is the bridge's casts of the
+  arguments bound to the method's parameters, then the method's body, with the bridge's
+  conversion around its value:
+  `Rc::new(|t: Object| -> Object { let x: i32 = java::cast(t.as_integer(), "java.lang.Integer"); Object::Integer(x.wrapping_mul(x)) }) as Function`.
+  A result that needs no conversion (`Predicate.test`, `Consumer.accept`) takes the method's
+  body as the closure's whole body. A method that returns before its end, or throws, and whose
+  result is converted, is a closure called at once inside the outer one,
+  `Object::Integer((|x: i32| -> i32 { if x > k { return x.wrapping_sub(k); } .. })(java::cast(..)))`,
+  since its `return`s would leave the outer closure with the unconverted value.
+- **Only the stored form, `Rc<dyn Fn(A) -> R>`,** for every place: locals, parameters (`&Op`, as
+  the borrowing analysis already lends objects), fields, statics, elements and returns. The
+  parameter form `impl FnMut` and the local form `let f = |x| ..` of 4.3 are later refinements,
+  as is a type alias per signature instead of per interface (the alias is named after the
+  interface: `type ClosureFormsIntOp = Rc<dyn Fn(i32, i32) -> i32>;`). The argument and result types are
+  those of the interface's method as its dispatcher would take them (`Fn(&str) -> i32` for a
+  borrowed string parameter, `Result<_, Throwable>` when the method throws).
+- **A lambda is written where it is created** (`codegen/closures.rs`): the lambda class's method
+  is generated inside the creating expression with its own names and facts (the generator's
+  method state is set aside and restored), and its capture fields are locals bound before the
+  closure and moved in (`field_locals`), so `this.k` is `k` and `this.outer` is `outer`. A
+  local passed as it is moves in under its own name; the closure owns what the class's
+  constructor would have borrowed. A closure with no captures has no `move`, and a one-line
+  body stays on the closure's line. The value is `Rc::new(closure) as Op`, so that every place
+  gets the alias's type without an annotation.
+- **Default methods are an extension trait** (4.6): `trait PredicateMethods { fn negate(&self)
+  -> Predicate; .. }` beside the alias and `impl PredicateMethods for Predicate`, with only the
+  default methods the program calls. `self` is `&Rc<dyn Fn ..>`: `test(x)` is `self(x)`, and a
+  lambda that captures `this` gets `let outer = self.clone();`. A call is method syntax,
+  `empty.negate().and(longer)`, and a module that calls the default methods of a closure type
+  of another module imports its trait (`use crate::java_::util::function::PredicateMethods;`).
+  Two closure types with the same Rust type and a default method of the same name would make
+  such a call ambiguous; no two of `java.util.function` do, and no corpus program has such a
+  pair.
+- **A call clones a closure out of a `RefCell`** before running it,
+  `({ let f = a.borrow().op.clone(); f })(3)`, since the closure may reach the object again; a
+  local, a capture or a field of a plain object is called in place (`op(x)`, `(self.op)(x)`).
+- **Corpus**: `features/ClosureDefaultMethods.java` (default methods that create lambdas over
+  `this`, call each other and call the closure, and a static method);
+  `whole-program/FunctionChains.java` (`Predicate`, `IntPredicate` and `BiFunction` from the
+  JDK's sources with their default methods, `Function` with `UnaryOperator`);
+  `features/GenericClosures.java` (the generic interfaces of `java.util.function` and the
+  program's own: an early return, a lambda that throws behind a bridge, a single lambda of an
+  interface passed as an argument, a generic method calling its closure, a `UnaryOperator`
+  passed as a `Function`); `features/ClosureForms.java` (captures, `this` through `outer`, a
+  field and a final field of closures, an array of them, a closure returned from a method, a constructor
+  reference, a closure that throws a checked exception, a closure in a closure).

@@ -157,7 +157,7 @@ impl<'a> Gen<'a> {
                 } else {
                     parts
                 };
-                Code::atom(format!("{}({parts})", self.runtime("from_vec")))
+                Code::atom(format!("{}({parts})", self.array_maker("from_vec")))
             }
             StringOp::Join => self.join(args),
             StringOp::EqualsIgnoreCase => {
@@ -178,7 +178,15 @@ impl<'a> Gen<'a> {
             StringOp::ToCharArray => {
                 let s = self.text_ref(&args[0]);
                 let units = call(self, "units", vec![s]).text;
-                Code::atom(format!("{}({units})", self.runtime("from_vec")))
+                Code::atom(format!("{}({units})", self.array_maker("from_vec")))
+            }
+            StringOp::CharCodes => {
+                let s = self.text_ref(&args[0]);
+                let units = call(self, "units", vec![s]).text;
+                Code::atom(format!(
+                    "{}({units}.into_iter().map(i32::from).collect())",
+                    self.runtime("from_vec")
+                ))
             }
             StringOp::FromChars => {
                 let chars = self.slice_of(&args[0]);
@@ -196,7 +204,8 @@ impl<'a> Gen<'a> {
                     Some(charset) => self.charset_arg(charset),
                     None => format!("{}::Utf8", self.runtime("Charset")),
                 };
-                call(self, "get_bytes", vec![s, charset])
+                let bytes = call(self, "get_bytes", vec![s, charset]).text;
+                Code::atom(self.made_array(bytes))
             }
             StringOp::FromBytes => {
                 let bytes = self.slice_of(&args[0]);
@@ -518,7 +527,7 @@ impl<'a> Gen<'a> {
             return self.may_fail(id, "parse_radix", &format!("::<{rust}>"), &format!("{s}, {radix}"));
         }
         if op == BitsOp::ParseRange {
-            return self.parse_range(kind, args, id);
+            return self.parse_range_builtin(kind, args, id);
         }
         let v = self.value(&args[0], kind);
         let recv = self.recv(&v, kind);

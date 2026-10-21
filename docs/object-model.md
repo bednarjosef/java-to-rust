@@ -836,6 +836,69 @@ variants are the union over its concretes as for any type; `to_<super interface>
 conversions are generated on demand. A class implementing two interfaces appears in both
 enums. Interface methods are always object-level (interfaces have no instance fields).
 
+A class may implement an interface's method with a method it inherits from a superclass that
+does not implement the interface (`Spliterators.EmptySpliterator.OfInt`): javac's `overrides`
+of the superclass's method cannot list it, so `JavaTree` gives the class's symbol an `inherits`
+list of such pairs, and reachability and lowering add the interface's method to the overrides of
+the inherited one (with a bridge when erasure changes its signature). An interface that declares
+`Object`'s `equals` or `hashCode` again (`Comparator`) dispatches a class or enum without its
+own to `Object`'s.
+
+### 1.13 Dropping long chains
+
+Objects are freed by reference counting, and Rust frees an object's fields when it frees the
+object. Left alone, freeing the head of a linked list of a million nodes would free its `next`,
+which frees its `next`, a million frames deep, and the program would abort with a stack
+overflow on the 8 MB main stack. Java's collector has no such limit, so the translation must
+not either. The rule (`codegen/chains.rs`, runtime `chains.rs`):
+
+- **Which classes.** The *held classes* of a field type are the concrete classes whose objects
+  a value of it holds directly: the class an object type stands for, the variants of the enum
+  of a class type (program classes only, not strings, boxes or Java enums), and for an array
+  the held classes of its element type. A type variable of a real Rust generic holds none
+  (its instantiations are not followed). Concrete class `c` has an edge to each held class of
+  each of its fields, its own and those of the fields structs it embeds. A field of a struct
+  is a *link* when, for some concrete class whose objects have the field, one of its held
+  classes is that class or can reach it by edges: the field can lead back to an object of the
+  same class, directly (`Node next`) or through a cycle of classes (`Outer.inner` and
+  `Inner.outer`), and so a chain of such objects can be as long as the program makes it.
+- **What they get.** A struct with links gets `impl java::Unlink<'a>`, whose `unlink` calls
+  `java::Link::unlink_in(&mut self.f, chain)` for each link (and `unlink` of its embedded
+  `base` when that struct has links), and `impl Drop` calling `java::drop_links(self)`. A
+  struct without links of its own whose embedded fields struct has them gets only the
+  `Unlink`, which unlinks `base`; the fields struct's own `Drop` runs when the struct's
+  fields are dropped. The enum of a class type that is the type (or the array element type) of
+  a link gets `impl java::Link<'a>`, which matches the variants whose structs unlink and does
+  nothing for the others.
+- **How it frees.** `drop_links` moves the links out of the dying object onto a
+  `java::Chain`, a stack of `Rc<dyn Unlink>` on the heap, and frees the objects on it one at a
+  time, unlinking each before it is freed, so each object dies with its links already gone and
+  the drop depth stays constant. `Link` is implemented in the runtime for every form a link
+  has: `Option` (taken out), `Rc` of an object (pushed onto the chain), `Vec` and so
+  `java::Array` (the elements are drained onto the chain) and the generated enums. An object
+  goes on the chain only while the chain holds its last reference; any other reference keeps
+  it alive, and dropping the chain's only decrements the count, so a list that is still
+  reachable from somewhere else is not touched. A link that cannot be null (a plain `Rc`
+  field) cannot be taken out; when nothing else holds its object, the object is unlinked in
+  place. A cycle of non-null links cannot end, so such an object is on a reference cycle and
+  never freed, and the in-place unlinking goes at most one class cycle deep.
+- **Shallow structures stay recursive.** Rust's own recursive drop is the fastest way to free
+  a structure, and most structures are shallow (a balanced tree of a million nodes is 20
+  deep). A thread-local holds the highest stack address any `drop_links` on the thread has run
+  at. A `drop_links` that runs less than 128 KB of stack below it does nothing, and Rust drops
+  the fields recursively as it would without the `Drop`; one deeper than that moves the links
+  onto a chain, which frees the rest of the structure iteratively at that depth. So the drops
+  of a structure use at most 128 KB of stack below the shallowest drop of the thread, plus
+  constant space.
+- **What it costs.** Only the classes on cycles of field types change. Each object of such a
+  class that dies runs its `Drop`: near the top, one thread-local read and a compare; deeper,
+  the takes of its links and a heap stack that is allocated only when a link held the last
+  reference to its object. The binary trees benchmark, which frees millions of small trees, is the worst case;
+  its numbers are in docs/performance.md.
+- **Not covered.** A chain through a field whose type is a type variable of a real Rust
+  generic (`Box<T>` holding `Box<Box<...>>`), or through objects captured by a lambda. Reference
+  cycles are still never freed, as before.
+
 ## 2. Interaction with the existing analyses
 
 Where a change is "every site that matches `resolved: Some(callee)`", the sites are:
@@ -1622,6 +1685,13 @@ Generics are erased in lowering, and nothing after it knows they existed:
   `java::double_compare`, `java::bool_compare`, a difference of `char`s or ordinals), which throws
   `ClassCastException` when the argument is of another class. A program that only calls a class's
   `compareTo` directly translates as before.
+- `java.lang.Number` is a third synthetic interface of the same kind, `NUMBER`, planned when the
+  program uses it as the type of a value (a variable, a bound such as `T extends Number`, the
+  elements of a `List<? extends Number>`). The six numeric boxes implement it, and its abstract
+  `byteValue()` to `doubleValue()` have an arm per box in `codegen::dispatch::number_arm`: the
+  value converted with `as`, which converts as Java's primitive conversions do (a floating-point
+  value becomes a `byte` or a `short` through an `int`). A program class that extends `Number` is
+  still rejected, as is any extension of a runtime class.
 - Bridges are methods, not conversions in dispatcher arms: when a method overrides one whose erased
   parameter or return types differ (`Integer next()` implementing `T next()` of `Source<Integer>`,
   `compareTo(Point)` implementing `Comparable`'s), lowering adds a method to its class with the
@@ -1631,12 +1701,42 @@ Generics are erased in lowering, and nothing after it knows they existed:
   parameter or return type (`next_integer`, `compare_to_point`); the group names are now unique in
   every class tree the group reaches (`codegen::names`). This also lifts "covariant return types"
   for these overrides.
+- A varargs parameter of a type variable (`T... items`) is an array of its erasure, read where the
+  method declares it, not at the call; an array of references passed for it is passed on, as
+  javac infers `T` from it (and is then rejected below unless it is an `Object[]`).
 - Arrays do not convert: `String[]` is `java::Array<String>` and `Object[]` is
-  `java::Array<Option<Object>>`, so an array passed as an array of a type variable
-  (`<T> T first(T[] xs)` called with a `String[]`) is rejected ("an array passed as an array of a
-  type variable"), and so is an array of a type variable read as an array of its argument. An
-  array as an `Object` value stays rejected; the plan's `Variant::Array` is not done. A generic
-  array built as `(T[]) new Object[n]` is an `Object[]` and translates.
+  `java::Array<Option<Object>>`. A generic array built as `(T[]) new Object[n]` is an `Object[]`
+  and translates. Java's arrays of references are covariant, though (a `Version[]` is an
+  `Object[]`), and erasure makes the array of a type variable an `Object[]`, so
+  `list.toArray(new Version[0])` passes a `Version[]` where `T[]` is an `Object[]`, and
+  `toArray(a)` with an array big enough fills `a` and returns it. Copying at the boundary would
+  lose that identity. Instead, two different array types of references that meet (an argument,
+  an assignment, a return or a cast between the two, a use where javac substituted one for the
+  array of a type variable, which is an array of its bound, or an array passed for `Object...`)
+  are each an `Object[]` everywhere in the program: lowering notes each such type, and
+  `real_generics::retry` lowers the program again with it as `Object[]` (`lower::covariant`). So
+  `Integer[]` passed to `<T extends Comparable<T>> int countGreater(T[] array, T pivot)` makes
+  both `Integer[]` and `Comparable[]` `Object[]`s. Element reads get the checked cast back that
+  erasure writes, a for-each over such an array casts each element to the variable's type, and a
+  store converts to `Object`. A Rust generic that would take such an `Object[]` for an array of
+  its type variable is erased. Every other array keeps its exact type. Keeping the element class
+  in a tag beside the elements would need an array type of its own through all of the array code,
+  so it is not done, with two deviations: storing an object of another class in such an array
+  does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s
+  (`[Ljava.lang.Object;`). Arrays of strings are left out: the runtime's string methods make and
+  take `java::Array<String>` (`split`, `String.join`, `main`'s arguments), so a `String[]` passed
+  for an array of a type variable is still rejected ("an array passed as an array of a type
+  variable").
+- An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the
+  plan's `Variant::Array`, done as a runtime class beside the strings and the boxes rather than a
+  variant kind of its own: each array type that is converted to `Object` or cast back from it gets
+  a `TypeKind::Runtime` declaration named after the type (`int[]`, `String[][]`), collected while
+  lowering (`lower::object::note_object_array`) and added after `Object`'s other runtime types.
+  Its variant holds the shared `java::Array` (`Object::IntArray(java::Array<i32>)`, with
+  `as_int_array` and `to_int_array`), so the array keeps its identity: `==` and `equals` compare
+  with `Rc::ptr_eq`, `hashCode` is `java::identity_hash`, and it prints as Java's default
+  `toString`, its JVM name and hash (`[I@1b6d3586`). Arrays of a Rust generic's instantiation
+  (`Box<String>[]` under real generics) have no runtime class and are rejected.
 - A value read back out of a generic container is a cast from `Object` that may be null (the
   container's array has null elements), so reading an enum back (`Suit s = list.get(0)`) is
   rejected by the existing "casting a value that may be null to an enum"; strings, boxes and

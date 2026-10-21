@@ -23,6 +23,26 @@ pub(super) fn is_code_point_method(owner: &str, name: &str, args: &[Expr]) -> bo
     }
 }
 
+/// The op of the `int` overload of the `Character` method `name` that has a `char` form too (for
+/// `isLetter(int)`, `toUpperCase(int)`, `digit(int, int)` and the like), see `character_method`.
+pub(super) fn character_op(name: &str) -> Option<CodePointOp> {
+    Some(match name {
+        "isLetter" => CodePointOp::IsLetter,
+        "isDigit" => CodePointOp::IsDigit,
+        "isLetterOrDigit" => CodePointOp::IsLetterOrDigit,
+        "isWhitespace" => CodePointOp::IsWhitespace,
+        "isSpaceChar" => CodePointOp::IsSpaceChar,
+        "isUpperCase" => CodePointOp::IsUpperCase,
+        "isLowerCase" => CodePointOp::IsLowerCase,
+        "isAlphabetic" => CodePointOp::IsAlphabetic,
+        "toUpperCase" => CodePointOp::ToUpperCase,
+        "toLowerCase" => CodePointOp::ToLowerCase,
+        "getNumericValue" => CodePointOp::NumericValue,
+        "digit" => CodePointOp::Digit,
+        _ => return None,
+    })
+}
+
 impl<'t> Lowering<'t> {
     /// A call of a code point method, see `is_code_point_method`.
     pub(super) fn code_point_call(
@@ -33,6 +53,7 @@ impl<'t> Lowering<'t> {
     ) -> Result<Builtin, Error> {
         let name = symbol.name;
         let op = match name {
+            "toChars" if args.len() == 3 => CodePointOp::ToCharsInto,
             "toChars" => CodePointOp::ToChars,
             "toString" => CodePointOp::ToString,
             "charCount" => CodePointOp::CharCount,
@@ -43,7 +64,11 @@ impl<'t> Lowering<'t> {
             "isBmpCodePoint" => CodePointOp::IsBmp,
             _ => CodePointOp::IsSupplementary,
         };
-        let arity = if op == CodePointOp::ToCodePoint { 2 } else { 1 };
+        let arity = match op {
+            CodePointOp::ToCodePoint => 2,
+            CodePointOp::ToCharsInto => 3,
+            _ => 1,
+        };
         if args.len() != arity {
             return unsupported(node, &format!("the overload of `{name}` with {} arguments", args.len()));
         }

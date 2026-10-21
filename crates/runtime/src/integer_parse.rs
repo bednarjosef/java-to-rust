@@ -27,76 +27,20 @@ pub fn try_parse_radix<T: TryFrom<i128>>(s: Option<&str>, radix: i32) -> Result<
     T::try_from(value).map_err(|_| fail(for_input(s, radix)))
 }
 
-/// `Short.parseShort(s, radix)` and `Byte.parseByte(s, radix)`, where the program does not observe
-/// the `NumberFormatException`.
-pub fn parse_small<T: TryFrom<i128>>(s: Option<&str>, radix: i32) -> T {
-    try_parse_small(s, radix).unwrap_or_else(uncaught)
+/// `Short.parseShort(s, radix)` and `Byte.parseByte(s, radix)`. Java reads an `int` first, so a
+/// value beyond `int` is "For input string", and a value out of the type's range is reported as
+/// "Value out of range" with the string and the radix.
+pub fn try_parse_small_radix<T: TryFrom<i32>>(s: Option<&str>, radix: i32) -> Result<T, Exception> {
+    let value = try_parse_radix::<i32>(s, radix)?;
+    T::try_from(value).map_err(|_| {
+        let message = format!("Value out of range. Value:\"{}\" Radix:{radix}", s.unwrap_or_default());
+        Exception::new("java.lang.NumberFormatException", message)
+    })
 }
 
-/// `Short.parseShort(s, radix)` and `Byte.parseByte(s, radix)`: the string is read as an `int`
-/// first, so only a value that fits an `int` but not the narrower type gets Java's range message.
-pub fn try_parse_small<T: TryFrom<i128>>(s: Option<&str>, radix: i32) -> Result<T, Exception> {
-    let fail = |message: String| Exception::new("java.lang.NumberFormatException", message);
-    let Some(s) = s else { return Err(fail("Cannot parse null string".to_string())) };
-    let value = read(s, radix).map_err(fail)?;
-    if i32::try_from(value).is_err() {
-        return Err(fail(for_input(s, radix)));
-    }
-    T::try_from(value).map_err(|_| fail(format!("Value out of range. Value:\"{s}\" Radix:{radix}")))
-}
-
-/// `Integer.parseInt(s, begin, end, radix)` and `Long.parseLong(s, begin, end, radix)` for the
-/// integer type `T`, where the program does not observe the exception.
-pub fn parse_range<T: TryFrom<i128>>(s: &str, begin: i32, end: i32, radix: i32) -> T {
-    try_parse_range(s, begin, end, radix).unwrap_or_else(uncaught)
-}
-
-/// `parse_range` where the program observes the exception. Java checks the range of the indices
-/// first (`IndexOutOfBoundsException`), then the radix, then reads the units from `begin` to `end`
-/// with a sign and digits; a unit that is no digit, or a value that does not fit `T`, is an error
-/// at that unit, and so is a sign alone.
-pub fn try_parse_range<T: TryFrom<i128>>(s: &str, begin: i32, end: i32, radix: i32) -> Result<T, Exception> {
-    let units: Vec<u16> = s.encode_utf16().collect();
-    let length = units.len();
-    let (b, e) = (usize::try_from(begin), usize::try_from(end));
-    match (b, e) {
-        (Ok(b), Ok(e)) if b <= e && e <= length => {}
-        _ => {
-            let message = format!("Range [{begin}, {end}) out of bounds for length {length}");
-            return Err(Exception::new("java.lang.IndexOutOfBoundsException", message));
-        }
-    }
-    let (b, e) = (begin as usize, end as usize);
-    let fail = |message: String| Exception::new("java.lang.NumberFormatException", message);
-    check_radix(radix).map_err(fail)?;
-    let text = &units[b..e];
-    if text.is_empty() {
-        return Err(fail(for_input("", radix)));
-    }
-    let error_at = |index: usize| {
-        let shown = String::from_utf16_lossy(text);
-        fail(format!("Error at index {index} in: \"{shown}\""))
-    };
-    let (sign, first) = match text[0] {
-        c if c == u16::from(b'-') => (-1, 1),
-        c if c == u16::from(b'+') => (1, 1),
-        _ => (1, 0),
-    };
-    let mut value = 0i128;
-    for (index, &c) in text.iter().enumerate().skip(first) {
-        let d = digit(c, radix);
-        if d < 0 {
-            return Err(error_at(index));
-        }
-        value = value * i128::from(radix) + sign * i128::from(d);
-        if T::try_from(value).is_err() {
-            return Err(error_at(index));
-        }
-    }
-    if first == text.len() {
-        return Err(error_at(text.len()));
-    }
-    T::try_from(value).map_err(|_| error_at(0))
+/// `parse_small_radix` where the program does not observe the `NumberFormatException`.
+pub fn parse_small_radix<T: TryFrom<i32>>(s: Option<&str>, radix: i32) -> T {
+    try_parse_small_radix(s, radix).unwrap_or_else(uncaught)
 }
 
 /// The value of a string in `radix`, or Java's message for why it is rejected. Only the range of
@@ -200,61 +144,22 @@ mod tests {
     }
 
     #[test]
-    fn range_reads_the_indices_it_is_given() {
-        assert_eq!(try_parse_range::<i32>("x-12y", 1, 4, 10), Ok(-12));
-        assert_eq!(try_parse_range::<i64>("9223372036854775807", 0, 19, 10), Ok(i64::MAX));
-        assert_eq!(try_parse_range::<i32>("-2147483648", 0, 11, 10), Ok(i32::MIN));
-        assert_eq!(
-            message(try_parse_range::<i32>("abc", 2, 1, 10)),
-            "java.lang.IndexOutOfBoundsException: Range [2, 1) out of bounds for length 3"
-        );
-        assert_eq!(
-            message(try_parse_range::<i32>("abc", 0, 4, 10)),
-            "java.lang.IndexOutOfBoundsException: Range [0, 4) out of bounds for length 3"
-        );
-        assert_eq!(
-            message(try_parse_range::<i32>("a12", 0, 3, 10)),
-            "java.lang.NumberFormatException: Error at index 0 in: \"a12\""
-        );
-        assert_eq!(
-            message(try_parse_range::<i32>("12x", 0, 3, 10)),
-            "java.lang.NumberFormatException: Error at index 2 in: \"12x\""
-        );
-        assert_eq!(
-            message(try_parse_range::<i32>("2147483648", 0, 10, 10)),
-            "java.lang.NumberFormatException: Error at index 9 in: \"2147483648\""
-        );
-        assert_eq!(
-            message(try_parse_range::<i32>("-", 0, 1, 10)),
-            "java.lang.NumberFormatException: Error at index 1 in: \"-\""
-        );
-        assert_eq!(
-            message(try_parse_range::<i32>("7", 0, 0, 10)),
-            "java.lang.NumberFormatException: For input string: \"\""
-        );
-        assert_eq!(
-            message(try_parse_range::<i32>("7", 0, 1, 1)),
-            "java.lang.NumberFormatException: radix 1 less than Character.MIN_RADIX"
-        );
-    }
-
-    #[test]
     fn short_and_byte_report_their_own_range() {
-        assert_eq!(try_parse_small::<i16>(Some("-32768"), 10), Ok(i16::MIN));
+        assert_eq!(try_parse_small_radix::<i16>(Some("-32768"), 10), Ok(i16::MIN));
         assert_eq!(
-            message(try_parse_small::<i16>(Some("32768"), 10)),
+            message(try_parse_small_radix::<i16>(Some("32768"), 10)),
             "java.lang.NumberFormatException: Value out of range. Value:\"32768\" Radix:10"
         );
         assert_eq!(
-            message(try_parse_small::<i16>(Some("3000000000"), 10)),
+            message(try_parse_small_radix::<i16>(Some("3000000000"), 10)),
             "java.lang.NumberFormatException: For input string: \"3000000000\""
         );
         assert_eq!(
-            message(try_parse_small::<i16>(None, 10)),
+            message(try_parse_small_radix::<i16>(None, 10)),
             "java.lang.NumberFormatException: Cannot parse null string"
         );
         assert_eq!(
-            message(try_parse_small::<i8>(Some("ff"), 16)),
+            message(try_parse_small_radix::<i8>(Some("ff"), 16)),
             "java.lang.NumberFormatException: Value out of range. Value:\"ff\" Radix:16"
         );
     }

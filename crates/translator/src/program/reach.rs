@@ -7,9 +7,12 @@
 //! declaration reachable in turn: a worklist that runs until nothing new is found.
 
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
+mod by_name;
 mod sequential;
+
+pub use by_name::created_by_name;
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
 /// constructor) and javac's signature, such as `(int)void`.
@@ -45,6 +48,10 @@ pub struct Reach {
     /// Whether no stream of the program can be parallel, so that what a pipeline's
     /// `isParallel()` guards is not reached (`sequential.rs`).
     pub sequential: bool,
+    /// Classes that reachable code names, or makes live, that no unit declares, other than those
+    /// where reachability stops (`outside`): those that the sources do not have, and those whose
+    /// units javac has not given yet when it gives them as they are asked for (`javac::Session`).
+    pub missing: BTreeSet<String>,
 }
 
 impl Reach {
@@ -110,7 +117,6 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.ref.ReferenceQueue",
     "java.lang.ref.SoftReference",
     "java.lang.ref.WeakReference",
-    "java.util.Arrays",
     "sun.util.logging.PlatformLogger",
 ];
 
@@ -143,16 +149,64 @@ pub const TRANSLATED_ANYWAY: &[&str] = &["java.lang.reflect.Array"];
 
 /// Methods of translated classes whose calls the lowering replaces with the runtime's code
 /// (`lower/natives.rs`), so that reachability does not enter them, as with the runtime's classes.
-/// They take a `Class`, which the translation has no value for, and every call that `Unsafe`'s
-/// own initialization makes passes a class literal of an array class.
+/// They take a `Class`, which the translation has no value for: every call that `Unsafe`'s own
+/// initialization makes of the first two passes a class literal of an array class, and
+/// `objectFieldOffset` of a class literal and a field's name makes a field handle
+/// (`lower/handles.rs`).
 pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Unsafe", "arrayBaseOffset", "(java.lang.Class<?>)long"),
     ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int"),
+    ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.Class<?>,java.lang.String)long"),
+    ("java.util.HashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
 ];
 
-/// Whether the method is one of the `REPLACED_METHODS`.
+/// The methods that lowering replaces whatever their signature, as `REPLACED_METHODS`: the
+/// constants of an enum class, which the JDK reads through `SharedSecrets` and reflection.
+const REPLACED_BY_NAME: &[(&str, &str)] =
+    &[("java.util.EnumMap", "getKeyUniverse"), ("java.util.EnumSet", "getUniverse")];
+
+/// Whether the method is one of the `REPLACED_METHODS`, or an access of `Unsafe` through a
+/// field's offset, which the lowering replaces with the field.
 pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
     REPLACED_METHODS.contains(&(class, name, signature))
+        || REPLACED_BY_NAME.contains(&(class, name))
+        || unsafe_field_access(class, name, signature).is_some()
+}
+
+/// Whether the method is one of `Unsafe`'s reads or writes of a field at an offset:
+/// `get<Kind><Mode>(Object, long)` (`Some(false)`) or `put<Kind><Mode>(Object, long, value)`
+/// (`Some(true)`), of a primitive kind or `Reference`, plain, `Volatile`, `Acquire`, `Release` or
+/// `Opaque`.
+pub fn unsafe_field_access(class: &str, name: &str, signature: &str) -> Option<bool> {
+    if class != "jdk.internal.misc.Unsafe" {
+        return None;
+    }
+    let (put, rest) = match (name.strip_prefix("get"), name.strip_prefix("put")) {
+        (Some(rest), _) => (false, rest),
+        (_, Some(rest)) => (true, rest),
+        _ => return None,
+    };
+    let kinds = [
+        ("Reference", "java.lang.Object"),
+        ("Boolean", "boolean"),
+        ("Byte", "byte"),
+        ("Short", "short"),
+        ("Char", "char"),
+        ("Int", "int"),
+        ("Long", "long"),
+        ("Float", "float"),
+        ("Double", "double"),
+    ];
+    let (kind, ty) = kinds.into_iter().find(|(k, _)| rest.starts_with(k))?;
+    let mode = &rest[kind.len()..];
+    let modes: &[&str] =
+        if put { &["", "Volatile", "Release", "Opaque"] } else { &["", "Volatile", "Acquire", "Opaque"] };
+    let expected = if put {
+        format!("(java.lang.Object,long,{ty})void")
+    } else {
+        format!("(java.lang.Object,long){ty}")
+    };
+    (modes.contains(&mode) && signature == expected).then_some(put)
 }
 
 /// Static fields that are `false` in every translated program, so the code they guard never runs.
@@ -170,6 +224,47 @@ pub const FALSE_FLAGS: &[(&str, &str)] = &[
     ("java.util.stream.Tripwire", "ENABLED"),
     ("sun.nio.ch.FileChannelImpl", "jfrTracing"),
 ];
+
+/// Static fields that only the class data sharing archive sets, through the native
+/// `CDS.initializeFromArchive` at the start of their class's static initializer, which then tests
+/// each against null once to build the value itself when the archive had none. The runtime's
+/// `initializeFromArchive` sets nothing, so that test always finds null, and the branch that
+/// would use the archived value never runs.
+pub const ARCHIVED_FIELDS: &[(&str, &str)] = &[
+    ("java.lang.module.Configuration", "EMPTY_CONFIGURATION"),
+    ("java.util.ImmutableCollections", "archivedObjects"),
+    ("java.util.jar.Attributes.Name", "KNOWN_NAMES"),
+];
+
+/// Whether `condition` tests one of the `ARCHIVED_FIELDS` against null with `==` (`equal`) or
+/// `!=`.
+fn archived_null_test(condition: &Value, equal: bool) -> bool {
+    let kind = if equal { "EQUAL_TO" } else { "NOT_EQUAL_TO" };
+    let archived = |v: &Value| {
+        let symbol = &v["symbol"];
+        text(symbol, "kind") == "FIELD"
+            && ARCHIVED_FIELDS.contains(&(text(symbol, "owner"), text(symbol, "name")))
+    };
+    let null = |v: &Value| text(v, "kind") == "NULL_LITERAL";
+    let (left, right) = (&condition["leftOperand"], &condition["rightOperand"]);
+    text(condition, "kind") == kind && (archived(left) && null(right) || null(left) && archived(right))
+}
+
+/// The only branch of an `if` statement or a `?:` that can run, when its condition is never true
+/// (`never_true`: the `else` branch, `Null` for an `if` without one) or always true (a test that
+/// one of the `ARCHIVED_FIELDS` is null: the `then` branch).
+pub fn live_branch(node: &Value, sequential: bool) -> Option<&Value> {
+    if !matches!(text(node, "kind"), "IF" | "CONDITIONAL_EXPRESSION") {
+        return None;
+    }
+    let condition = &node["condition"];
+    let condition =
+        if text(condition, "kind") == "PARENTHESIZED" { &condition["expression"] } else { condition };
+    if never_true(condition, sequential) {
+        return Some(else_branch(node));
+    }
+    archived_null_test(condition, true).then(|| then_branch(node))
+}
 
 /// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
 /// branch can run: it reads one of the `FALSE_FLAGS`, or, when the program's streams are all
@@ -190,14 +285,20 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
                 && FALSE_FLAGS.contains(&(text(symbol, "owner"), text(symbol, "name")))
         }
         "METHOD_INVOCATION" => sequential && sequential::is_parallel_test(condition),
+        "NOT_EQUAL_TO" => archived_null_test(condition, false),
         "GREATER_THAN" => sequential && sequential::has_children_test(condition),
         _ => false,
     }
 }
 
 /// The branch of an `if` statement or a `?:` that can run when its condition is never true.
-pub fn else_branch(node: &Value) -> &Value {
+fn else_branch(node: &Value) -> &Value {
     &node[if text(node, "kind") == "IF" { "elseStatement" } else { "falseExpression" }]
+}
+
+/// The branch of an `if` statement or a `?:` that runs when its condition is true.
+fn then_branch(node: &Value) -> &Value {
+    &node[if text(node, "kind") == "IF" { "thenStatement" } else { "trueExpression" }]
 }
 
 /// The feature that the class with qualified name `class` belongs to, if it is not translated.
@@ -219,6 +320,22 @@ pub fn outside(class: &str) -> bool {
 pub fn provided(class: &str) -> bool {
     RUNTIME_CLASSES.contains(&class) || crate::lower::is_standard(class)
 }
+
+/// Whether the node is a call of `java.util.Arrays` that the runtime does rather than the JDK's
+/// source, such as `Arrays.sort` of an `int[]`.
+pub fn runtime_arrays_call(node: &Value) -> bool {
+    let symbol = &node["symbol"];
+    text(node, "kind") == "METHOD_INVOCATION" && text(symbol, "owner") == "java.util.Arrays" && {
+        let args: Vec<&str> =
+            node["arguments"].as_array().into_iter().flatten().map(|a| text(a, "javaType")).collect();
+        crate::lower::runtime_arrays_call(text(symbol, "name"), &args)
+    }
+}
+
+/// The JDK method that `String.chars()` runs (see `lower::strings`): it streams the string's
+/// UTF-16 code units, as an `int[]`.
+pub const STRING_CHARS: (&str, &str, &str) =
+    ("java.util.Arrays", "stream", "(int[])java.util.stream.IntStream");
 
 /// The methods that a for-each over an `Iterable` calls.
 pub const ITERATION: &[(&str, &str, &str)] = &[
@@ -251,6 +368,7 @@ pub fn reach(units: &[&Value], main: &str) -> Result<Reach, String> {
         walk.work.push(Item::Init(main.to_string()));
         walk.work.push(Item::Method(entry));
         walk.run();
+        walk.note_named();
         walk.reach.sequential = sequential;
         Ok(walk)
     };
@@ -258,7 +376,9 @@ pub fn reach(units: &[&Value], main: &str) -> Result<Reach, String> {
     if sequential::streams_stay_sequential(&sequential) {
         return Ok(sequential.reach);
     }
-    Ok(walk(false)?.reach)
+    let mut parallel = walk(false)?.reach;
+    parallel.missing.extend(sequential.reach.missing);
+    Ok(parallel)
 }
 
 /// A declaration that has become reachable and is still to be visited.
@@ -287,6 +407,13 @@ struct Walk<'t> {
     reach: Reach,
     /// Whether streams are assumed to stay sequential (`Reach::sequential`).
     sequential: bool,
+    /// The classes that reachable code creates objects of by class name (`by_name`).
+    by_name: HashSet<String>,
+    /// The string literals of reachable code that are names of classes.
+    named: HashSet<String>,
+    /// The string literals of reachable code that could be names of classes that no unit
+    /// declares (`by_name`).
+    literals: HashSet<String>,
 }
 
 impl<'t> Walk<'t> {
@@ -326,6 +453,18 @@ impl<'t> Walk<'t> {
                 _ => self.declare(member, Some(&class)),
             }
         }
+        // A method inherited from a superclass that implements a method of this class's interfaces.
+        for inherited in decl["symbol"]["inherits"].as_array().into_iter().flatten() {
+            let name = text(inherited, "name").to_string();
+            let implemented = &inherited["implements"];
+            let overridden =
+                (text(implemented, "owner").to_string(), name.clone(), text(implemented, "type").to_string());
+            let key = (text(inherited, "owner").to_string(), name, text(inherited, "type").to_string());
+            let overriders = self.overriders.entry(overridden).or_default();
+            if !overriders.contains(&key) {
+                overriders.push(key);
+            }
+        }
         let mut supertypes: Vec<String> = ["extendsClause", "implementsClause"]
             .iter()
             .flat_map(|header| match &decl[header] {
@@ -361,7 +500,9 @@ impl<'t> Walk<'t> {
     /// A class named by reachable code: it exists as a type, with its outer class and the types in
     /// its header.
     fn class(&mut self, class: String) {
-        let Some((decl, outer)) = self.classes.get(&class).map(|(d, o)| (*d, o.clone())) else { return };
+        let Some((decl, outer)) = self.classes.get(&class).map(|(d, o)| (*d, o.clone())) else {
+            return self.missing(&class);
+        };
         if !self.reach.classes.insert(class) {
             return;
         }
@@ -377,7 +518,7 @@ impl<'t> Walk<'t> {
     /// fields with initializers that may do something besides computing a value are kept even if
     /// nothing reads them. (When classes can extend others, the superclass is initialized first.)
     fn init(&mut self, class: String) {
-        let Some(&(decl, _)) = self.classes.get(&class) else { return };
+        let Some(&(decl, _)) = self.classes.get(&class) else { return self.missing(&class) };
         if !self.reach.initialized.insert(class.clone()) {
             return;
         }
@@ -409,10 +550,18 @@ impl<'t> Walk<'t> {
     fn method(&mut self, key: MethodKey) {
         let node = self.methods.get(&key).filter(|_| !replaced(&key.0, &key.1, &key.2));
         let Some(&node) = node else {
+            self.missing(&key.0);
             // What overrides a method of the runtime, such as `Object.toString`, can still run.
             if self.reach.external.insert(key.clone()) {
                 for overrider in self.overriders(&key) {
                     self.work.push(Item::Method(overrider));
+                }
+                // The thread that `start()` starts runs the thread's `run()`, which runs its
+                // `Runnable` (see `java/Threads.java` in the translator).
+                if key.0 == "java.lang.Thread" && key.1 == "start" {
+                    for class in ["java.lang.Thread", "java.lang.Runnable"] {
+                        self.work.push(Item::Method((class.into(), "run".into(), "()void".into())));
+                    }
                 }
             }
             return;
@@ -494,6 +643,7 @@ impl<'t> Walk<'t> {
             if !self.reach.live.insert(class.clone()) {
                 continue;
             }
+            self.missing(&class);
             for overrider in self.waiting.remove(&class).unwrap_or_default() {
                 self.work.push(Item::Method(overrider));
             }
@@ -502,7 +652,7 @@ impl<'t> Walk<'t> {
     }
 
     fn field(&mut self, key: FieldKey) {
-        let Some(&node) = self.fields.get(&key) else { return };
+        let Some(&node) = self.fields.get(&key) else { return self.missing(&key.0) };
         if !self.reach.fields.insert(key.clone()) {
             return;
         }
@@ -513,26 +663,40 @@ impl<'t> Walk<'t> {
         self.scan(node);
     }
 
+    /// Notes a class that reachable code needs, if no unit declares it (`Reach::missing`).
+    fn missing(&mut self, class: &str) {
+        if !self.classes.contains_key(class) && !outside(class) && !self.reach.missing.contains(class) {
+            self.reach.missing.insert(class.to_string());
+        }
+    }
+
     /// Makes every declaration that a node of this subtree refers to reachable. The local and
     /// anonymous classes declared inside are not scanned with it: their members are reached as
     /// those of any other class, a constructor by its `new` and an instance method by a call or
     /// by dispatch once the class is instantiated. (The body of an enum constant is not such a
     /// class, see `local_classes`, and is scanned with its constant.) Annotations are skipped:
     /// without reflection they do nothing at run time. So is the branch of an `if` or a `?:`
-    /// whose condition is never true (`never_true`).
+    /// that never runs (`live_branch`).
     fn scan(&mut self, value: &'t Value) {
         match value {
             Value::Object(_) if matches!(text(value, "kind"), "ANNOTATION" | "TYPE_ANNOTATION") => {}
             Value::Object(_)
                 if CLASS_KINDS.contains(&text(value, "kind"))
                     && self.classes.contains_key(&class_name(value)) => {}
-            // The branch that a condition that is never true guards is not reached, and neither
-            // is the condition, which the lowering drops: a flag's class need not exist.
-            Value::Object(_)
-                if matches!(text(value, "kind"), "IF" | "CONDITIONAL_EXPRESSION")
-                    && never_true(&value["condition"], self.sequential) =>
-            {
-                self.scan(else_branch(value));
+            // The branch that never runs is not reached, and neither is the condition, which the
+            // lowering drops: a flag's class need not exist.
+            Value::Object(_) if let Some(branch) = live_branch(value, self.sequential) => {
+                self.scan(branch);
+            }
+            // A call of `java.util.Arrays` that the runtime does (`lower::runtime_arrays_call`)
+            // reaches only what its arguments do.
+            Value::Object(_) if runtime_arrays_call(value) => self.scan(&value["arguments"]),
+            // An object created from a class name (`by_name`) reaches the constructors of the
+            // classes that the name can be, not reflection.
+            Value::Object(_) if let Some(name) = created_by_name(value) => {
+                self.created_by_name(value);
+                self.scan(&value["type"]);
+                self.scan(name);
             }
             Value::Object(fields) => {
                 // A for-each over an `Iterable` calls its iterator's methods, which javac's tree
@@ -547,6 +711,11 @@ impl<'t> Walk<'t> {
                             signature.to_string(),
                         )));
                     }
+                }
+                if text(value, "kind") == "STRING_LITERAL"
+                    && let Some(literal) = value["value"].as_str()
+                {
+                    self.named(literal);
                 }
                 // A lambda creates an object of a class that implements its interface with the
                 // interface's abstract method.
@@ -580,6 +749,10 @@ impl<'t> Walk<'t> {
     fn symbol(&mut self, symbol: &Value) {
         let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
         match text(symbol, "kind") {
+            "METHOD" if owner == "java.lang.String" && name == "chars" => {
+                let (class, method, signature) = STRING_CHARS;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
             "METHOD" | "CONSTRUCTOR" => {
                 self.work.push(Item::Method((owner, name, text(symbol, "type").to_string())));
             }
@@ -757,6 +930,53 @@ mod tests {
         assert!(reach.methods.contains(&method("Other", "run")), "{reach:?}");
         assert!(!reach.methods.contains(&method("Tracer", "trace")), "{reach:?}");
         assert!(!reach.classes.contains("Tracer"), "{reach:?}");
+    }
+
+    #[test]
+    fn only_the_branch_that_finds_no_archived_value_is_reached() {
+        let archived = json!({"kind": "IDENTIFIER",
+            "symbol": {"kind": "FIELD", "owner": "java.util.ImmutableCollections", "name": "archivedObjects", "static": true}});
+        let test = |kind: &str| {
+            json!({"kind": "PARENTHESIZED", "expression": {"kind": kind,
+                "leftOperand": archived, "rightOperand": {"kind": "NULL_LITERAL"}}})
+        };
+        let is_null = json!({"kind": "IF", "condition": test("EQUAL_TO"),
+            "thenStatement": call("Build", "run"), "elseStatement": call("Restore", "run")});
+        let not_null = json!({"kind": "IF", "condition": test("NOT_EQUAL_TO"),
+            "thenStatement": call("Restore", "again"), "elseStatement": call("Build", "again")});
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![is_null, not_null])]),
+            class("Build", &[("run", vec![]), ("again", vec![])]),
+            class("Restore", &[("run", vec![]), ("again", vec![])]),
+        ]});
+        let reach = reach(&[&unit], "Main").unwrap();
+        let method = |class: &str, name: &str| (class.to_string(), name.to_string(), "()void".to_string());
+        assert!(reach.methods.contains(&method("Build", "run")), "{reach:?}");
+        assert!(reach.methods.contains(&method("Build", "again")), "{reach:?}");
+        assert!(!reach.classes.contains("Restore"), "{reach:?}");
+    }
+
+    #[test]
+    fn a_call_of_arrays_that_the_runtime_does_is_not_followed_into_the_jdk() {
+        let sort = |arg: &str| {
+            json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "METHOD_INVOCATION",
+                "symbol": {"kind": "METHOD", "owner": "java.util.Arrays", "name": "sort", "type": "()void", "static": true},
+                "arguments": [{"kind": "IDENTIFIER", "javaType": arg}]}})
+        };
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![sort("int[]")])]),
+            class("java.util.Arrays", &[("sort", vec![call("DualPivot", "run")])]),
+            class("DualPivot", &[("run", vec![])]),
+        ]});
+        let runtime = reach(&[&unit], "Main").unwrap();
+        assert!(!runtime.classes.contains("DualPivot"), "{runtime:?}");
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![sort("Shape[]")])]),
+            class("java.util.Arrays", &[("sort", vec![call("DualPivot", "run")])]),
+            class("DualPivot", &[("run", vec![])]),
+        ]});
+        let translated = reach(&[&unit], "Main").unwrap();
+        assert!(translated.classes.contains("DualPivot"), "{translated:?}");
     }
 
     #[test]

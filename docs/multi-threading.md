@@ -1167,3 +1167,84 @@ lambdas nor inner classes.
 ## 12. Deviations
 
 Decisions that change during the implementation are recorded here, milestone by milestone.
+
+### The thread-aware runtime and process-wide statics
+
+- **No `threads` cargo feature.** The runtime decides at run time: the output buffer and the
+  descriptor table are thread-local until `start_thread` first runs, then process-wide
+  (`out::share_output`), so a single-threaded program pays nothing and needs no build switch.
+- **`java::Locked<T>` keeps `RefCell`'s API** (`borrow`, `borrow_mut`, `with_borrow`,
+  `with_borrow_mut`, `Ref::map`) instead of the `lock()` of section 2: it is a `RefCell` behind a
+  reentrant lock. The examples of 2.7 lock `this` twice in one statement (`this.lock().n =
+  this.lock().n + 1`), which a plain `Mutex` deadlocks on; the reentrant lock allows it, and the
+  generator emits the same text for `Rc<RefCell<C>>` and `Arc<java::Locked<C>>`, differing only
+  in the type names. The guards are the runtime's own, since `MutexGuard::map` is unstable.
+- **The watchdog** of 1.3 is a wait of more than `WATCHDOG` on a data lock in a build with debug
+  assertions, not a `try_lock` loop of the release lock.
+- **`java::ClassInit` is `start()`/`finish()`**, not `run(closure)`: the class's `init` function
+  begins with `if !C_INIT.start() { return; }` and ends with `C_INIT.finish();`, the shape of the
+  thread-local flag's guard, so the initializer body is generated once for both forms.
+- **Every static of a threaded program is process-wide.** The main-only refinement of 2.5 (a
+  static no thread's methods touch stays thread-local) waits for `thread_methods` of 4.3.
+
+### Threads by subclassing `Thread`
+
+- **`Thread` is smaller than 5.1**: no `ThreadGroup`, interrupts, state, handlers, `holdsLock`,
+  `ThreadLocal` or `Duration` sleep yet; each lands with the milestone that needs it. `join` is
+  the native `join0` on the runtime's record (a condvar on its alive flag), not `while
+  (isAlive()) wait()`, because monitors come later. `start` passes the new thread the `Thread`
+  object itself: `start0` gets a fifth argument, the call `t.run()`, which codegen puts in the
+  closure (`move || { let t = &t; java::set_current_thread(t.clone()); t.run(); }`).
+- **The main thread is `#3`** and prints as `Thread[#3,main,5,main]`, as on JDK 26 (the JVM's
+  own threads take 1 and 2); `Thread-N` numbering starts at 0. The null-name messages are the
+  JDK's (`'name' is null`, `name cannot be null`).
+- **An exception that ends a worker** prints `Exception in thread "<name>" ...` and unwinds the
+  worker with a private panic payload, which the spawn closure catches; the other threads go on
+  and the exit code is unaffected, as in Java. Any other panic in a worker is a translation bug
+  and ends the process with 101.
+- **`main` holds a `java::MainThread`** (`let _main = java::main_thread();`) instead of calling
+  `end_main`: its drop waits for the non-daemon threads and flushes, also when `main` returns
+  early.
+- **Shared arrays are chosen per program, not per site**: in a threaded program every array
+  that is not a plain `Vec` is a `java::SharedArray<T>` (`Arc<java::Locked<Vec<T>>>`, the last
+  row of 2.4), and the runtime's array functions take either form through the `Elements<T>`
+  trait. The atomic and read-only forms of 2.4 need the per-site facts of the escape milestone.
+- **The type-based closure walks superclasses except `Object`, and subtypes**, but not
+  interfaces upward: going up through `Object` or an interface would make every class shared.
+  Java enums are never shared: their values are plain Rust values, which every thread may hold.
+- **Methods that hold no lock across a wait.** A method of a shared class that loops, calls, reads
+  another object or an array, switches, or calls a blocking native (`sleep`, `join`, `start`) is
+  in `long_methods` and is never a `&self`/`&mut self` method of the fields struct, which would
+  hold the object's lock for the whole call; it takes the handle and locks per access. And in a
+  threaded program two borrows in one statement count as conflicting even when neither is
+  mutable (`codegen/objects.rs`, `conflicts`), with a blocking native counting as one, so
+  `java::join_thread(self.base().tid, 0)` reads the id in its own block first: the lock is never
+  held while the thread waits for another.
+- **`synchronized` is still the null check** until monitors land, as the milestone says: correct
+  for programs whose shared state one thread writes and another reads after `join`.
+- **Not yet shared**: a `StringBuilder` or a box compared by identity (both `Rc`s) in a static or
+  in a field of a shared class is rejected (`analysis/threads.rs`, `check`) until the escape
+  milestone gives them shared forms. The closure does not follow the type arguments of a generic
+  class yet; a program that needs it fails in rustc with `Rc<..> cannot be sent between threads
+  safely` (4.4).
+- **A closure type that threads may share** (a functional interface whose values are only
+  lambdas, `docs/closures-and-nested-classes.md` 4.2, reached through a capture, a field or a
+  static) is `Arc<dyn Fn(..) -> R + Send + Sync>` and its lambdas `Arc::new(move |..| ..)`; the
+  closure's captures are of shared types by the same type-based walk, so the closure is `Send`
+  and `Sync`. A closure type no thread reaches keeps its `Rc<dyn Fn>`, also in a threaded program.
+- **A `volatile` static is an ordinary `java::Atomic`** (acquire and release) until the volatile
+  milestone gives it `SeqCst`; a `volatile` field of a shared object is read and written under
+  the object's lock.
+
+### Volatile fields and the atomic natives
+
+- **Field handles came first**, ahead of monitors: `Charset.defaultCharset()` keeps its charset
+  in a `LazyConstant`, whose `get` reads its field with `Unsafe.getReferenceAcquire` at an
+  `objectFieldOffset`, so every reader, writer and `getBytes()` without a charset needs them.
+  `lower/handles.rs` makes a `static final` whose initializer is `objectFieldOffset(C.class, "f")`
+  a handle with no field of its own, as 5.3 says, and lowers `get<Kind><Mode>` and
+  `put<Kind><Mode>` through it to a plain read or write of `o.f`; reachability enters neither
+  `objectFieldOffset` nor the accessors. The field is not made atomic yet: in a program without
+  threads a plain access is exact, and in one with threads the access is under the object's lock,
+  which orders it at least as acquire, release and volatile ask. The compare-and-set and
+  get-and-add forms, `VarHandle`s and array handles come with `java.util.concurrent`.

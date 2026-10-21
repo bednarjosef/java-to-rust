@@ -7,7 +7,9 @@
 //! (with what they use in turn), as classes of the program: they are lowered, analysed and
 //! generated like the program's own, so a program's exception class extends them like any
 //! superclass. A standard class is abstract unless the program creates its objects, so that the
-//! enum of `Throwable` has a variant only for the classes whose objects exist.
+//! enum of `Throwable` has a variant only for the classes whose objects exist. `java.lang.Thread`
+//! comes the same way from `java/Threads.java` (see docs/multi-threading.md): it is a standard
+//! class too, though not an exception.
 //!
 //! The runtime raises some of them itself (`RAISED`): a division by zero, an index out of
 //! bounds, a malformed number. Where a `catch` or a `finally` of the program might see such a
@@ -46,10 +48,19 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StrictMath#floorMod",
         ],
     ),
-    ("java.lang.ArrayIndexOutOfBoundsException", &["ARRAY_ACCESS"]),
+    ("java.lang.ArrayIndexOutOfBoundsException", &["ARRAY_ACCESS", "java.lang.Character#toChars"]),
+    (
+        "java.lang.IndexOutOfBoundsException",
+        &[
+            "java.lang.Integer#parseInt",
+            "java.lang.Long#parseLong",
+            "java.lang.Integer#parseUnsignedInt",
+            "java.lang.Long#parseUnsignedLong",
+        ],
+    ),
     // A call or a field access on an object that may be null.
     ("java.lang.NullPointerException", &["METHOD_INVOCATION", "MEMBER_SELECT"]),
-    ("java.lang.IllegalArgumentException", &["enum#valueOf"]),
+    ("java.lang.IllegalArgumentException", &["enum#valueOf", "java.lang.Character#toChars"]),
     (
         "java.lang.StringIndexOutOfBoundsException",
         &[
@@ -59,8 +70,6 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.String#copyValueOf",
         ],
     ),
-    // The indices of `parseInt(s, begin, end, radix)` and `parseLong`.
-    ("java.lang.IndexOutOfBoundsException", &["java.lang.Integer#parseInt", "java.lang.Long#parseLong"]),
     (
         "java.lang.NumberFormatException",
         &[
@@ -79,43 +88,52 @@ fn package_of(simple: &str) -> &'static str {
     OTHER_PACKAGES.iter().find(|(s, _)| *s == simple).map_or("java.lang", |(_, p)| p)
 }
 
-/// The class declarations of `java/Standard.java`, renamed from the package `standard` to their
-/// real packages, as javac names the real classes in a program's tree.
+/// The class declarations of `java/Standard.java` and `java/Threads.java`, renamed from the
+/// packages `standard` and `threads` to their real packages, as javac names the real classes in a
+/// program's tree.
 fn template() -> &'static [Value] {
     static DECLS: OnceLock<Vec<Value>> = OnceLock::new();
     DECLS.get_or_init(|| {
-        let text = include_str!(concat!(env!("OUT_DIR"), "/standard.json"));
-        let mut tree: Value = serde_json::from_str(text).expect("build.rs writes the tree of Standard.java");
-        rename(&mut tree);
-        match tree["units"][0]["tree"]["typeDecls"].take() {
-            Value::Array(decls) => decls,
-            _ => panic!("the tree of Standard.java has its classes"),
+        let files = [
+            ("standard", include_str!(concat!(env!("OUT_DIR"), "/standard.json"))),
+            ("threads", include_str!(concat!(env!("OUT_DIR"), "/threads.json"))),
+        ];
+        let mut decls = Vec::new();
+        for (package, text) in files {
+            let mut tree: Value = serde_json::from_str(text).expect("build.rs writes the templates' trees");
+            rename(&mut tree, package);
+            match tree["units"][0]["tree"]["typeDecls"].take() {
+                Value::Array(found) => decls.extend(found),
+                _ => panic!("the tree of the template `{package}` has its classes"),
+            }
         }
+        decls
     })
 }
 
-/// Gives the classes of the package `standard` their real packages, in every name and type.
-fn rename(v: &mut Value) {
+/// Gives the classes of the template's package `from` their real packages, in every name and type.
+fn rename(v: &mut Value, from: &str) {
+    let prefix = format!("{from}.");
     match v {
         Value::String(s) => {
-            while let Some(at) = s.find("standard.") {
-                let rest = &s[at + "standard.".len()..];
+            while let Some(at) = s.find(&prefix) {
+                let rest = &s[at + prefix.len()..];
                 let end = rest.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(rest.len());
                 let simple = rest[..end].to_string();
-                s.replace_range(at..at + "standard".len(), package_of(&simple));
+                s.replace_range(at..at + from.len(), package_of(&simple));
             }
         }
-        Value::Array(items) => items.iter_mut().for_each(rename),
+        Value::Array(items) => items.iter_mut().for_each(|i| rename(i, from)),
         Value::Object(map) => {
             // A class's symbol names its package as its owner.
             if map.get("kind").and_then(Value::as_str) == Some("CLASS")
-                && map.get("owner").and_then(Value::as_str) == Some("standard")
+                && map.get("owner").and_then(Value::as_str) == Some(from)
             {
                 let simple = map.get("name").and_then(Value::as_str).unwrap_or_default();
                 let package = package_of(simple);
                 map.insert("owner".into(), Value::String(package.into()));
             }
-            map.values_mut().for_each(rename);
+            map.values_mut().for_each(|v| rename(v, from));
         }
         _ => {}
     }
@@ -322,7 +340,14 @@ impl Standard {
             return Standard::default();
         }
         // `toString` is how an uncaught exception is printed.
-        uses.members.insert(("java.lang.Throwable".into(), "toString".into(), "()java.lang.String".into()));
+        let throwable = |c: &String| standard_subclass(c, "java.lang.Throwable");
+        if uses.classes.iter().any(throwable) || uses.members.iter().any(|m| throwable(&m.0)) {
+            uses.members.insert((
+                "java.lang.Throwable".into(),
+                "toString".into(),
+                "()java.lang.String".into(),
+            ));
+        }
         let decls: Vec<(String, &'static Value)> = template().iter().map(|d| (qualified(d), d)).collect();
         let decl = |name: &str| decls.iter().find(|(n, _)| n == name).map(|(_, d)| *d);
         let mut scanned: HashSet<(String, String, String)> = HashSet::new();
@@ -351,6 +376,15 @@ impl Standard {
                 if let Some(s) = d["extendsClause"]["javaType"].as_str() {
                     uses.classes.insert(s.to_string());
                 }
+            }
+            // The thread that `start0` starts runs the thread's `run()`.
+            if uses.members.iter().any(|m| m.0 == "java.lang.Thread" && m.1 == "start0") {
+                uses.members.insert(("java.lang.Thread".into(), "run".into(), "()void".into()));
+            }
+            // A thread prints as its `toString`, which string conversion calls unseen.
+            if uses.classes.contains("java.lang.Thread") {
+                let to_string = ("java.lang.Thread".into(), "toString".into(), "()java.lang.String".into());
+                uses.members.insert(to_string);
             }
             for member in uses.members.clone() {
                 if !scanned.insert(member.clone()) {
@@ -464,9 +498,10 @@ impl<'t> Lowering<'t> {
         for &resource in resources.iter().rev() {
             body = self.with_resource(resource, body)?;
         }
-        let catches: Vec<Catch> = node.list("catches").map(|c| self.catch(c)).collect::<Result<_, _>>()?;
+        let catches: Vec<Catch> =
+            node.list("catches").filter_map(|c| self.catch(c).transpose()).collect::<Result<_, _>>()?;
         let finally = node.get("finallyBlock").map(|block| self.block(block)).transpose()?;
-        if !resources.is_empty() && catches.is_empty() && finally.is_none() {
+        if catches.is_empty() && finally.is_none() {
             return Ok(Stmt::Block(body));
         }
         Ok(Stmt::Try { body, catches, finally })
@@ -491,16 +526,28 @@ impl<'t> Lowering<'t> {
     /// }
     /// ```
     ///
-    /// The resource is a new object, so it is not null, as Java requires for `close` to run.
+    /// The resource is a new object, so it is not null, as Java requires for `close` to run. An
+    /// existing variable (`try (r)`, `try (this.r)`) is `final var r$resource = r`, and a null
+    /// value is not closed, as Java skips it: the `close` calls then test `r$resource`.
     fn with_resource(&self, resource: Node<'t>, body: Vec<Stmt>) -> Result<Vec<Stmt>, Error> {
-        let Some(init) = resource.get("initializer").filter(|_| resource.kind() == "VARIABLE") else {
-            return unsupported(resource, "try-with-resources over an existing variable");
-        };
-        if init.kind() != "NEW_CLASS" {
-            return unsupported(init, "a resource that is not a new object");
-        }
+        let existing = resource.kind() != "VARIABLE";
         let mut declared = Vec::new();
-        self.stmt_into(resource, &mut declared)?;
+        if existing {
+            let name = resource.symbol().map_or("resource", |s| s.name);
+            let value = self.expr(resource)?;
+            let ty = self.ty(resource, resource.java_type())?;
+            let value = self.convert(value, ty);
+            let name = format!("{name}$resource");
+            declared.push(Stmt::Local { ty, name, init: Some(value), pos: resource.pos() });
+        } else {
+            let Some(init) = resource.get("initializer") else {
+                return unsupported(resource, "this resource");
+            };
+            if init.kind() != "NEW_CLASS" {
+                return unsupported(init, "a resource that is not a new object");
+            }
+            self.stmt_into(resource, &mut declared)?;
+        }
         let [Stmt::Local { ty, name, pos, .. }] = &declared[..] else {
             return unsupported(resource, "this resource");
         };
@@ -545,7 +592,7 @@ impl<'t> Lowering<'t> {
         let on_throw = vec![
             Stmt::Expr(self.synth(set_failed, pos, Type::Void)),
             Stmt::Try {
-                body: vec![self.close_stmt(&name, ty, pos, close)],
+                body: vec![self.close_stmt(&name, ty, pos, close, existing)],
                 catches: vec![suppress],
                 finally: None,
             },
@@ -568,7 +615,7 @@ impl<'t> Lowering<'t> {
         );
         let close_unless_failed = Stmt::If {
             cond: self.synth(not_failed, pos, Type::Boolean),
-            then: Box::new(Stmt::Block(vec![self.close_stmt(&name, ty, pos, close)])),
+            then: Box::new(Stmt::Block(vec![self.close_stmt(&name, ty, pos, close, existing)])),
             otherwise: None,
         };
         declared.push(Stmt::Local {
@@ -585,8 +632,9 @@ impl<'t> Lowering<'t> {
         Ok(declared)
     }
 
-    /// `name.close();` for the program's `close` method `close` of the resource's type `ty`.
-    fn close_stmt(&self, name: &str, ty: Type, pos: Pos, close: usize) -> Stmt {
+    /// `name.close();` for the program's `close` method `close` of the resource's type `ty`; with
+    /// `guard`, `if (name != null) name.close();`, for a resource that may be null.
+    fn close_stmt(&self, name: &str, ty: Type, pos: Pos, close: usize, guard: bool) -> Stmt {
         let receiver = Box::new(self.synth(ExprKind::Var(name.to_string()), pos, ty));
         let call = ExprKind::MethodCall {
             receiver,
@@ -595,7 +643,18 @@ impl<'t> Lowering<'t> {
             resolved: Some(close),
             is_super: false,
         };
-        Stmt::Expr(self.synth(call, pos, Type::Void))
+        let close = Stmt::Expr(self.synth(call, pos, Type::Void));
+        if !guard {
+            return close;
+        }
+        let value = Box::new(self.synth(ExprKind::Var(name.to_string()), pos, ty));
+        let null = Box::new(self.synth(ExprKind::Null, pos, Type::Null));
+        let not_null = ExprKind::Binary(BinOp::Ne, value, null);
+        Stmt::If {
+            cond: self.synth(not_null, pos, Type::Boolean),
+            then: Box::new(Stmt::Block(vec![close])),
+            otherwise: None,
+        }
     }
 
     /// The program's `close()` of type `t`, declared there or inherited from a superclass.
@@ -612,14 +671,24 @@ impl<'t> Lowering<'t> {
         None
     }
 
-    fn catch(&self, node: Node<'t>) -> Result<Catch, Error> {
+    /// A `catch` clause, or `None` when every class it catches is one that a whole program does
+    /// not translate (`program::untranslated`), such as reflection's
+    /// `InvocationTargetException`: no translated code can throw one, so such an alternative is
+    /// left out.
+    fn catch(&self, node: Node<'t>) -> Result<Option<Catch>, Error> {
         let param = node.child("parameter")?;
         let ty_node = param.child("type")?;
-        let names: Vec<&str> = if ty_node.kind() == "UNION_TYPE" {
+        let mut names: Vec<&str> = if ty_node.kind() == "UNION_TYPE" {
             ty_node.list("typeAlternatives").map(|a| a.java_type()).collect()
         } else {
             vec![ty_node.java_type()]
         };
+        if self.reach.is_some() {
+            names.retain(|name| crate::program::untranslated(name).is_none());
+            if names.is_empty() {
+                return Ok(None);
+            }
+        }
         let mut types = Vec::new();
         for name in names {
             match self.type_index(name) {
@@ -629,7 +698,7 @@ impl<'t> Lowering<'t> {
         }
         let ty = self.ty(param, param.symbol().map_or("", |s| s.ty))?;
         let body = self.block(node.child("block")?)?;
-        Ok(Catch { types, name: param.str("name").to_string(), ty, body, pos: node.pos() })
+        Ok(Some(Catch { types, name: param.str("name").to_string(), ty, body, pos: node.pos() }))
     }
 
     /// `o.getClass().getName()` or `o.getClass().getSimpleName()`, as `Builtin::ClassName` of

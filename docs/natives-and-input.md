@@ -495,7 +495,16 @@ are instance methods of exceptions, trivial once `Throwable` objects exist. In o
    - Behaviour: with an archive, sets the class's archived static fields (such as
      `ImmutableCollections.archivedObjects`); without one, does nothing, and the caller builds the
      values itself (`if (archivedObjects == null) { ... }`).
-   - Rust: nothing. The argument is a class literal, so the call can be dropped.
+   - Rust: nothing. The argument is a class literal, so the call can be dropped. Since nothing
+     sets the archived fields, a null test of one right after the call is always true: the fields
+     whose class tests them directly (`ImmutableCollections.archivedObjects`,
+     `Attributes.Name.KNOWN_NAMES`, `Configuration.EMPTY_CONFIGURATION`) are listed in
+     `program::reach::ARCHIVED_FIELDS`, and reachability, the survey and the lowering keep only
+     the branch that builds the values (`live_branch`). Without it, `ImmutableCollections`'s
+     sentinel `EMPTY` also took `archivedObjects[0]`, which could be any `Object`, so
+     `e1 != EMPTY` in `List12` compared two values that might be strings and was rejected. The
+     classes that copy the field into a local first (`FDBigInteger`, `BaseLocale`) are not
+     covered; the runtime's boxes have no source to translate.
    - **Done** for 4 to 6: `java::cds_config_status()` and `java::cds_random_seed_for_dumping()`
      (both 0), and `initializeFromArchive(C.class)` is dropped before its argument is lowered;
      another argument than a class literal is rejected.
@@ -729,6 +738,12 @@ for when a program needs time zones.
   `ENABLED` is `Boolean.getBoolean` of a property that only `-D` sets, so it joins the JFR flags in
   `FALSE_FLAGS`, and the condition of a skipped branch is no longer scanned (the lowering drops
   it), so the class is not reached for its flag.
+- **`String.chars()`** (`program::STRING_CHARS`): `String` is the runtime's, so the JDK's
+  `chars()`, which streams the string's `byte[]` through `StringLatin1.CharsSpliterator`, is not
+  translated. The call is the JDK's `Arrays.stream(int[])` over the string's UTF-16 code units
+  instead, which streams the same values with the same spliterator characteristics (`ORDERED`,
+  `SIZED`, `SUBSIZED`, `IMMUTABLE`); reachability reaches that method for every `String.chars`
+  call. Without the JDK's sources the call is rejected.
 
 With these, `StreamPipeline` reaches 264 classes (176 instantiated), 1,144 methods and 4 natives,
 all in the runtime (the `CDS` ones and `Unsafe.registerNatives`), against the 372 classes and 28
@@ -760,6 +775,29 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   `LazyConstant` in which
   `Charset` keeps its default: `Unsafe.objectFieldOffset` and the acquire and release accesses of
   its `constant` field, which wait for the threads design's symbolic field offsets.
+- **Objects created from a class name** (`program/reach/by_name.rs`, `lower/by_name.rs`):
+  `(T) Class.forName(name).getDeclaredConstructor().newInstance()`, and the older
+  `(T) Class.forName(name).newInstance()`, is how `LocaleProviderAdapter.forType` creates the
+  adapter of each `LocaleProviderAdapter.Type`. A translated program is closed, so the lowering
+  makes it a `switch` over the name with a case for each of the program's top-level classes that
+  is neither abstract nor generic, is a `T` and has a constructor without parameters; any other
+  name ends the program with `java.lang.ClassNotFoundException: NAME is not a class of the
+  translated program` (`Builtin::UnknownClass`), never with an object of another class.
+  Reachability makes that constructor reachable for each such class whose binary name reachable
+  code writes as a string literal, as `LocaleProviderAdapter.Type`'s constants do; a name that
+  code computes (`SPILocaleProviderAdapter`'s `getCanonicalName() + "$" + ...`) finds nothing.
+  Since javac gives a library unit only for a class that reachability names, a literal that could
+  be the qualified name of a class that no unit declares yet is noted as missing when code
+  creates objects by name (`Walk::note_named`), and the next round has its unit.
+  A `catch` alternative of a class that a whole program does not translate, such as
+  `InvocationTargetException`, is left out: translated code cannot throw one. Test: the corpus
+  program `corpus/whole-program/ClassesByName.java` and
+  `objects_created_from_a_class_name_are_of_the_classes_that_code_names`. `ScannerGrades` now
+  reaches the five adapters, which reflection cut before: 1,179 classes and 62 natives (21 in the
+  runtime) instead of 1,027 and 60 (and the same 1,179 classes with the units that javac gives as
+  they are asked for, where main's `Unsafe` field accesses bring the natives to 44); the new natives are `UnixFileSystem.getBooleanAttributes0`,
+  through the data file that `Currency` reads, and `VM.getNanoTimeAdjustment`, which the runtime
+  has. It still stops at `Bundles`, which extends the untranslated `ResourceBundle`.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

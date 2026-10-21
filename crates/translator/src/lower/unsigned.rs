@@ -37,12 +37,14 @@ impl<'t> Lowering<'t> {
             "remainderUnsigned" => UnsignedOp::Remainder,
             "compareUnsigned" => UnsignedOp::Compare,
             "toUnsignedString" => UnsignedOp::ToString,
+            "parseUnsignedInt" | "parseUnsignedLong" if args.len() == 4 => UnsignedOp::ParseRange,
             "parseUnsignedInt" | "parseUnsignedLong" => UnsignedOp::Parse,
             _ => UnsignedOp::Widen,
         };
         let arity = match op {
             UnsignedOp::Divide | UnsignedOp::Remainder | UnsignedOp::Compare => 2..=2,
             UnsignedOp::ToString | UnsignedOp::Parse => 1..=2,
+            UnsignedOp::ParseRange => 4..=4,
             UnsignedOp::Widen => 1..=1,
         };
         if !arity.contains(&args.len()) {

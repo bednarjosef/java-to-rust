@@ -263,7 +263,8 @@ impl<'a> Gen<'a> {
             None => "10".to_string(),
         };
         // Java's `Short.parseShort` and `Byte.parseByte` have their own range message.
-        let function = if matches!(kind, Type::Short | Type::Byte) { "parse_small" } else { "parse_radix" };
+        let function =
+            if matches!(kind, Type::Short | Type::Byte) { "parse_small_radix" } else { "parse_radix" };
         self.may_fail(id, function, &format!("::<{}>", rust_type(kind)), &format!("{text}, {radix}"))
     }
 

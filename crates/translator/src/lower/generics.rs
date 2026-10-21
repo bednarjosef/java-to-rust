@@ -221,8 +221,10 @@ impl<'t> Lowering<'t> {
                 let Some(ret) = info.node.get("returnType") else { return Ok(None) };
                 Some(self.declared_type(ret, ret.java_type(), info.owner, Some(*index))?)
             }
+            // (A call that reads a field, as one through a field offset does, has the field's type
+            // already.)
             ExprKind::Field { .. } => {
-                let Some(symbol) = node.symbol() else { return Ok(None) };
+                let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD") else { return Ok(None) };
                 let Some(class) = self.type_index(symbol.owner) else { return Ok(None) };
                 Some(self.declared_type(node, symbol.ty, class, None)?)
             }
@@ -242,7 +244,18 @@ impl<'t> Lowering<'t> {
         if declared == ty || ty == Type::Void || self.has_param(declared) {
             return Ok(kind);
         }
-        if matches!(declared, Type::Array(_)) || matches!(ty, Type::Array(_)) {
+        if matches!(declared, Type::Array(_)) {
+            // The array of a type variable is an `Object[]`, and so is its argument's, which
+            // covariant arrays are once lowered again.
+            if self.meets_object_array(ty, declared) {
+                return Ok(kind);
+            }
+            return unsupported(node, "an array of a type variable used as an array of its argument");
+        }
+        // An array held as an `Object` (`Deque<int[]>`) is cast back to its type.
+        if Self::is_object(declared) {
+            self.object_array(node, ty)?;
+        } else if matches!(ty, Type::Array(_)) {
             return unsupported(node, "an array of a type variable used as an array of its argument");
         }
         let inner = self.synth(kind, node.pos(), declared);

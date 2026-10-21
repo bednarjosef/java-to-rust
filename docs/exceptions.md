@@ -426,8 +426,10 @@ Each step is mergeable on its own, with tests green and the corpus extended.
 6. **Causes, `getCause`, `printStackTrace`, constructors that throw**. Corpus:
    `features/ExceptionCauses.java`, `features/ThrowingConstructors.java`,
    `features/ThrowingConstructorChains.java`, `features/ThrowingConstructorsRegistered.java`.
-7. **try-with-resources** over the program's own `AutoCloseable` classes. Corpus:
-   `features/TryWithResources.java`.
+7. **try-with-resources** over the program's own `AutoCloseable` classes, declared or as an
+   existing variable (`try (r)`, `try (this.r)`). Corpus: `features/TryWithResources.java`,
+   `features/TryWithExistingLocal.java`, `features/TryWithExistingField.java`,
+   `features/TryWithExistingSuppressed.java`.
 8. **The leftovers**: instance field initializers and constructors that throw inside a `try`,
    static initializer failures caught as `ExceptionInInitializerError` and `NoClassDefFoundError`,
    the two checks of `addSuppressed`, and the null-string parse. Corpus:
@@ -606,14 +608,24 @@ Decisions that changed during the implementation, step by step.
   `try` per resource closes them in the reverse order, and a resource whose creation fails closes
   the ones before it; the statement's own `catch` clauses and `finally` go around all of that, as
   Java runs them after the resources are closed.
+- **An existing variable is the same**: `try (r) body`, and `try (this.r) body` or `try (r)` of a
+  final field, is `try (final var r$resource = r) body`, the declared path above with the
+  variable's value copied into a hidden local. The value is read when the statement starts, as
+  Java reads it; the body cannot change it, since Java requires it to be effectively final. A
+  `null` variable is not closed, so it throws no `NullPointerException`: the `close` is guarded
+  by `if (r$resource != null)`. Two resources
+  of one statement mix freely (a declared one and an existing one), and the close order is the
+  same.
 - **So only those are accepted**: a resource declared with a `new` object of the program's
-  class, whose `close()` is the program's (declared in the class or a superclass).
+  class, or an existing variable of such a class, whose `close()` is the program's (declared in
+  the class or a superclass).
   `AutoCloseable` and `Closeable` are accepted in `implements` and left out, as `Comparable` is,
   since the program calls `close` directly. `Throwable.addSuppressed` is the translator's own
   (`crates/translator/java/Standard.java`); its two checks are step 8.
-- **Still rejected**: a resource that is an existing variable (`try (r)`), one that is not a new
-  object, and a resource of a library class (the library's streams and scanners do not
-  translate). The survey's "try-with-resources" feature still counts every such statement, since
+- **Still rejected**: an existing variable of a library type such as `AutoCloseable`, which the
+  translator does not know as a type yet (a lambda of it is rejected the same way), and a
+  resource of a library class (the library's streams and scanners do not translate). The survey's
+  "try-with-resources" feature still counts every such statement, since
   the library's resources are what the survey's sources use.
 
 ### Step 8: the leftovers
@@ -655,7 +667,13 @@ Decisions that changed during the implementation, step by step.
 - **Null strings in number parsing**: `Integer`, `Long`, `Short` and `Byte` `parse...` and
   `valueOf` of `null` throw `NumberFormatException` with `Cannot parse null string`, as the JDK
   that is installed here (26) prints it. The brief's `: null` suffix is not in that text, so this
-  follows the installed JDK.
+  follows the installed JDK. A null string given to `parseInt(s, begin, end, radix)` or
+  `parseLong` is the `NullPointerException` of the runtime's `try_parse_range`; where a `catch`
+  sees it, the analysis records it as a dereference (`Facts::null_checked`) and the generator
+  writes the checked form (`codegen/parse_range.rs`).
+- **Threads**: in a program that starts a thread, the rewritten `<clinit>`'s two fields are
+  process-wide statics like the others (`java::Atomic<i32>` and `java::Locked<Option<String>>`).
+  Corpus: `threads/StaticInitializerErrorAcrossThreads.java`.
 - **Deviations**:
   - Java gives the `IllegalArgumentException` for a self-suppression the exception itself as its
     cause; the translation leaves the cause `null`.
@@ -668,6 +686,3 @@ Decisions that changed during the implementation, step by step.
     rewritten also gets an entry point, which may do the same for its callers.
   - `new AssertionError(message)` is rejected: `Standard.java` declares no `(String)`
     constructor for it yet.
-  - **Still rejected**: a null `CharSequence` passed to a parse overload with a range (Java throws
-    a catchable `NullPointerException`); lowering rejects the `CharSequence` type, so those
-    overloads cannot be translated, and the blocker is not in this step.
