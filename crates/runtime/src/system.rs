@@ -83,6 +83,7 @@ pub fn thread_yield() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn separators_and_names_are_fixed() {
