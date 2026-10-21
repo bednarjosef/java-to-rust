@@ -1,6 +1,8 @@
 //! Calls into the native layer: the JDK methods that bottom out in the JVM (`System.arraycopy`,
 //! `Math` and `StrictMath`, the bit conversions of `Double` and `Float`, identity hashes, clocks,
-//! `System.err` and the rest of `System.out`), recognised by the method's owner and name.
+//! `System.err` and the rest of `System.out`), recognised by the method's owner and name, and the
+//! natives of translated JDK classes (`declared_native`). A native method's declaration is never
+//! lowered; a call of one the runtime does not implement is rejected with its name.
 
 use super::{Lowering, Node, Symbol, error, unsupported};
 use crate::ast::*;
@@ -133,9 +135,72 @@ impl<'t> Lowering<'t> {
                 Native::OutWrite
             }
             ("java.io.PrintStream", "flush") if stream.is_some() => Native::OutFlush,
+            // A native of a translated class: the runtime's, or a rejection that names it.
+            (owner, name) if symbol.native && self.type_index(owner).is_some() => {
+                match declared_native(owner, name, symbol.ty) {
+                    Some(native) => native,
+                    None => {
+                        return unsupported(node, &format!("native method `{owner}.{name}{}`", symbol.ty));
+                    }
+                }
+            }
             _ => return Ok(None),
         };
         Ok(Some(Builtin::Native(native)))
+    }
+
+    /// A call whose argument is a class literal, which the translation has no value for, of a
+    /// method that needs only the class it names: `Unsafe.arrayBaseOffset(int[].class)` and
+    /// `arrayIndexScale`, whose null check cannot fail for a literal and which reachability
+    /// does not enter (`REPLACED_METHODS`), and the native `CDS.initializeFromArchive(C.class)`,
+    /// which does nothing. `None` for any other call; it runs before the arguments are lowered.
+    pub(super) fn class_literal_call(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        select: Node<'t>,
+    ) -> Result<Option<ExprKind>, Error> {
+        let method = match (symbol.owner, symbol.name, symbol.ty) {
+            ("jdk.internal.misc.CDS", "initializeFromArchive", _) => "CDS.initializeFromArchive",
+            ("jdk.internal.misc.Unsafe", "arrayBaseOffset", "(java.lang.Class<?>)long") => {
+                "Unsafe.arrayBaseOffset"
+            }
+            ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int") => {
+                "Unsafe.arrayIndexScale"
+            }
+            _ => return Ok(None),
+        };
+        let literal = node
+            .list("arguments")
+            .next()
+            .filter(|a| a.kind() == "MEMBER_SELECT" && a.str("identifier") == "class");
+        let Some(literal) = literal else {
+            return unsupported(node, &format!("`{method}` of anything but a class literal"));
+        };
+        if symbol.name == "initializeFromArchive" {
+            return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::Nothing), Vec::new())));
+        }
+        // `Unsafe` has no state: its receiver, a name or `Unsafe.getUnsafe()`, needs no evaluating.
+        let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        let stateless = receiver.is_none_or(|r| match r.symbol() {
+            Some(s) => s.kind == "FIELD" || s.name == "getUnsafe",
+            None => false,
+        });
+        if !stateless {
+            return unsupported(node, &format!("`{method}` on this receiver"));
+        }
+        let Some(element) = literal.child("expression")?.java_type().strip_suffix("[]") else {
+            return unsupported(node, &format!("`{method}` of a class that is not an array"));
+        };
+        let native = if symbol.name == "arrayBaseOffset" {
+            Native::ArrayBaseOffset
+        } else {
+            let primitive = ["boolean", "byte", "short", "char", "int", "long", "float", "double"];
+            Native::ArrayIndexScale(
+                primitive.into_iter().find(|p| *p == element).unwrap_or("java.lang.Object"),
+            )
+        };
+        Ok(Some(ExprKind::Builtin(Builtin::Native(native), Vec::new())))
     }
 
     /// A native of a stream or descriptor: the receiver goes first, as the descriptor the object

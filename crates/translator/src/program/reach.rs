@@ -9,6 +9,8 @@
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+mod sequential;
+
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
 /// constructor) and javac's signature, such as `(int)void`.
 pub type MethodKey = (String, String, String);
@@ -31,8 +33,12 @@ pub struct Reach {
     pub methods: HashSet<MethodKey>,
     pub fields: HashSet<FieldKey>,
     /// Methods that reachable code calls but that are not among the sources: those of the
-    /// classes the runtime provides (see `RUNTIME_CLASSES`), and any that are missing.
+    /// classes the runtime provides (see `RUNTIME_CLASSES`), and any that are missing; and the
+    /// `REPLACED_METHODS` that it calls.
     pub external: HashSet<MethodKey>,
+    /// Whether no stream of the program can be parallel, so that what a pipeline's
+    /// `isParallel()` guards is not reached (`sequential.rs`).
+    pub sequential: bool,
 }
 
 impl Reach {
@@ -96,17 +102,43 @@ pub const RUNTIME_CLASSES: &[&str] = &[
 /// What is not translated, by the prefix of qualified class names, with the feature it is:
 /// reachability stops there, as at the runtime's classes, and the survey counts its use. Library
 /// code reaches these on paths that only its data rules out, such as `TreeMap.addAll` reading
-/// from a stream that is null there.
+/// from a stream that is null there. Class and resource loading finds classes and data by name
+/// (`ResourceBundle` the locale data, `ServiceLoader` the providers), which is reflection in all
+/// but name: a closed-world translation knows its classes. (`java.lang.Module` is a prefix of
+/// `java.lang.ModuleLayer` too.)
 pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.io.ObjectInputStream", "serialization"),
     ("java.io.ObjectOutputStream", "serialization"),
     ("java.io.ObjectStreamClass", "serialization"),
+    ("java.lang.Module", "class loading"),
     ("java.lang.invoke.", "reflection"),
     ("java.lang.reflect.", "reflection"),
     ("java.security.", "security"),
+    ("java.util.ResourceBundle", "class loading"),
+    ("java.util.ServiceLoader", "class loading"),
+    ("jdk.internal.loader.", "class loading"),
     ("jdk.internal.reflect.", "reflection"),
     ("sun.security.", "security"),
 ];
+
+/// Classes under a prefix of `UNTRANSLATED` that are translated all the same:
+/// `java.lang.reflect.Array` creates arrays of a component type and measures them, which is what
+/// `Arrays.copyOf` and `Collection.toArray` need of it, not reflection.
+pub const TRANSLATED_ANYWAY: &[&str] = &["java.lang.reflect.Array"];
+
+/// Methods of translated classes whose calls the lowering replaces with the runtime's code
+/// (`lower/natives.rs`), so that reachability does not enter them, as with the runtime's classes.
+/// They take a `Class`, which the translation has no value for, and every call that `Unsafe`'s
+/// own initialization makes passes a class literal of an array class.
+pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
+    ("jdk.internal.misc.Unsafe", "arrayBaseOffset", "(java.lang.Class<?>)long"),
+    ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int"),
+];
+
+/// Whether the method is one of the `REPLACED_METHODS`.
+pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
+    REPLACED_METHODS.contains(&(class, name, signature))
+}
 
 /// Static fields that only Java Flight Recorder sets, through reflection when it starts
 /// (`jdk.internal.event.JFRTracing`): no code sets them otherwise, so in a translated program they
@@ -120,23 +152,38 @@ pub const FALSE_FLAGS: &[(&str, &str)] = &[
     ("sun.nio.ch.FileChannelImpl", "jfrTracing"),
 ];
 
-/// Whether an `if` statement's condition is never true, so that only its `else` branch can run:
-/// it reads one of the `FALSE_FLAGS`, alone or as an operand of `&&`.
-pub fn never_true(condition: &Value) -> bool {
+/// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
+/// branch can run: it reads one of the `FALSE_FLAGS`, or, when the program's streams are all
+/// `sequential` (see `sequential.rs`), it is a pipeline's `isParallel()`; alone, or as the first
+/// operand of `&&`, or as the second after one that only computes a value (the lowering drops the
+/// whole condition).
+pub fn never_true(condition: &Value, sequential: bool) -> bool {
     match text(condition, "kind") {
-        "PARENTHESIZED" => never_true(&condition["expression"]),
-        "CONDITIONAL_AND" => never_true(&condition["leftOperand"]) || never_true(&condition["rightOperand"]),
+        "PARENTHESIZED" => never_true(&condition["expression"], sequential),
+        "CONDITIONAL_AND" => {
+            let (left, right) = (&condition["leftOperand"], &condition["rightOperand"]);
+            never_true(left, sequential) || (never_true(right, sequential) && !has_effects(left))
+        }
         "IDENTIFIER" | "MEMBER_SELECT" => {
             let symbol = &condition["symbol"];
             text(symbol, "kind") == "FIELD"
                 && FALSE_FLAGS.contains(&(text(symbol, "owner"), text(symbol, "name")))
         }
+        "METHOD_INVOCATION" => sequential && sequential::is_parallel_test(condition),
         _ => false,
     }
 }
 
+/// The branch of an `if` statement or a `?:` that can run when its condition is never true.
+pub fn else_branch(node: &Value) -> &Value {
+    &node[if text(node, "kind") == "IF" { "elseStatement" } else { "falseExpression" }]
+}
+
 /// The feature that the class with qualified name `class` belongs to, if it is not translated.
 pub fn untranslated(class: &str) -> Option<&'static str> {
+    if TRANSLATED_ANYWAY.contains(&class) {
+        return None;
+    }
     UNTRANSLATED.iter().find(|(prefix, _)| class.starts_with(prefix)).map(|&(_, feature)| feature)
 }
 
@@ -156,25 +203,34 @@ pub fn provided(class: &str) -> bool {
 pub const CLASS_KINDS: &[&str] = &["CLASS", "INTERFACE", "ENUM", "RECORD", "ANNOTATION_TYPE"];
 
 /// What reachable code uses in the program made of these compilation units, starting from the
-/// `main` method of the class with qualified name `main`.
+/// `main` method of the class with qualified name `main`. Streams are first assumed to stay
+/// sequential; when the code so reached can make one parallel, the walk is made again without.
 pub fn reach(units: &[&Value], main: &str) -> Result<Reach, String> {
-    let mut walk = Walk::default();
-    for unit in units {
-        for decl in unit["typeDecls"].as_array().into_iter().flatten() {
-            walk.declare(decl, None);
+    let walk = |sequential: bool| -> Result<Walk, String> {
+        let mut walk = Walk { sequential, ..Walk::default() };
+        for unit in units {
+            for decl in unit["typeDecls"].as_array().into_iter().flatten() {
+                walk.declare(decl, None);
+            }
         }
+        if !walk.classes.contains_key(main) {
+            return Err(format!("the main class `{main}` is not among the sources"));
+        }
+        let entry = (main.to_string(), "main".to_string(), "(java.lang.String[])void".to_string());
+        if !walk.methods.contains_key(&entry) {
+            return Err(format!("`{main}` has no `public static void main(String[])`"));
+        }
+        walk.work.push(Item::Init(main.to_string()));
+        walk.work.push(Item::Method(entry));
+        walk.run();
+        walk.reach.sequential = sequential;
+        Ok(walk)
+    };
+    let sequential = walk(true)?;
+    if sequential::streams_stay_sequential(&sequential) {
+        return Ok(sequential.reach);
     }
-    if !walk.classes.contains_key(main) {
-        return Err(format!("the main class `{main}` is not among the sources"));
-    }
-    let entry = (main.to_string(), "main".to_string(), "(java.lang.String[])void".to_string());
-    if !walk.methods.contains_key(&entry) {
-        return Err(format!("`{main}` has no `public static void main(String[])`"));
-    }
-    walk.work.push(Item::Init(main.to_string()));
-    walk.work.push(Item::Method(entry));
-    walk.run();
-    Ok(walk.reach)
+    Ok(walk(false)?.reach)
 }
 
 /// A declaration that has become reachable and is still to be visited.
@@ -201,6 +257,8 @@ struct Walk<'t> {
     waiting: HashMap<String, Vec<MethodKey>>,
     work: Vec<Item>,
     reach: Reach,
+    /// Whether streams are assumed to stay sequential (`Reach::sequential`).
+    sequential: bool,
 }
 
 impl<'t> Walk<'t> {
@@ -214,6 +272,13 @@ impl<'t> Walk<'t> {
         }
         for member in members(decl) {
             let name = text(member, "name").to_string();
+            if !CLASS_KINDS.contains(&text(member, "kind")) {
+                let mut locals = Vec::new();
+                local_classes(member, &mut locals);
+                for local in locals {
+                    self.declare(local, Some(&class));
+                }
+            }
             match text(member, "kind") {
                 "METHOD" => {
                     let key = (class.clone(), name, symbol_type(member).to_string());
@@ -313,7 +378,8 @@ impl<'t> Walk<'t> {
     }
 
     fn method(&mut self, key: MethodKey) {
-        let Some(&node) = self.methods.get(&key) else {
+        let node = self.methods.get(&key).filter(|_| !replaced(&key.0, &key.1, &key.2));
+        let Some(&node) = node else {
             // What overrides a method of the runtime, such as `Object.toString`, can still run.
             if self.reach.external.insert(key.clone()) {
                 for overrider in self.overriders(&key) {
@@ -392,15 +458,18 @@ impl<'t> Walk<'t> {
 
     /// Makes every declaration that a node of this subtree refers to reachable. Local and
     /// anonymous classes inside are scanned whole, which over-approximates. Annotations are
-    /// skipped: without reflection they do nothing at run time. So is the branch of an `if` whose
-    /// condition is never true (`never_true`).
+    /// skipped: without reflection they do nothing at run time. So is the branch of an `if` or a
+    /// `?:` whose condition is never true (`never_true`).
     fn scan(&mut self, value: &'t Value) {
         match value {
             Value::Object(_) if matches!(text(value, "kind"), "ANNOTATION" | "TYPE_ANNOTATION") => {}
             // The branch that a condition that is never true guards is not reached.
-            Value::Object(_) if text(value, "kind") == "IF" && never_true(&value["condition"]) => {
+            Value::Object(_)
+                if matches!(text(value, "kind"), "IF" | "CONDITIONAL_EXPRESSION")
+                    && never_true(&value["condition"], self.sequential) =>
+            {
                 self.scan(&value["condition"]);
-                self.scan(&value["elseStatement"]);
+                self.scan(else_branch(value));
             }
             Value::Object(fields) => {
                 for (field, child) in fields {
@@ -428,6 +497,31 @@ impl<'t> Walk<'t> {
             }
             _ => {}
         }
+    }
+}
+
+/// The local and anonymous class declarations in the code of a member, outside the bodies of
+/// the classes found: they are declared with the member's class as their outer class, and
+/// `Walk::scan` reaches their members when it scans the code.
+fn local_classes<'t>(value: &'t Value, out: &mut Vec<&'t Value>) {
+    match value {
+        Value::Object(fields) => {
+            if CLASS_KINDS.contains(&text(value, "kind")) {
+                // javac names the body of an enum constant `<anonymous Planet>`: it belongs to
+                // the enum (see `lower::constant_bodies`).
+                if !symbol_type(value).starts_with('<') {
+                    out.push(value);
+                }
+                return;
+            }
+            for (field, child) in fields {
+                if field != "symbol" {
+                    local_classes(child, out);
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| local_classes(item, out)),
+        _ => {}
     }
 }
 
@@ -553,5 +647,97 @@ mod tests {
         assert!(reach.methods.contains(&method("Other", "run")), "{reach:?}");
         assert!(!reach.methods.contains(&method("Tracer", "trace")), "{reach:?}");
         assert!(!reach.classes.contains("Tracer"), "{reach:?}");
+    }
+
+    #[test]
+    fn class_loading_is_not_translated_and_reflect_array_is() {
+        assert_eq!(untranslated("java.util.ServiceLoader"), Some("class loading"));
+        assert_eq!(untranslated("java.util.ResourceBundle.Control"), Some("class loading"));
+        assert_eq!(untranslated("java.lang.ModuleLayer"), Some("class loading"));
+        assert_eq!(untranslated("jdk.internal.loader.BootLoader"), Some("class loading"));
+        assert_eq!(untranslated("java.lang.reflect.Method"), Some("reflection"));
+        assert_eq!(untranslated("java.lang.reflect.Array"), None);
+        assert_eq!(untranslated("java.util.ArrayList"), None);
+        // Reachability stops at the loader, and goes into `Array`.
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![call("java.util.ServiceLoader", "load"), call("java.lang.reflect.Array", "newInstance")])]),
+            class("java.util.ServiceLoader", &[("load", vec![call("Provider", "run")])]),
+            class("java.lang.reflect.Array", &[("newInstance", vec![call("Other", "run")])]),
+            class("Provider", &[("run", vec![])]),
+            class("Other", &[("run", vec![])]),
+        ]});
+        let reach = reach(&[&unit], "Main").unwrap();
+        let method = |class: &str| (class.to_string(), "run".to_string(), "()void".to_string());
+        assert!(!reach.classes.contains("java.util.ServiceLoader"), "{reach:?}");
+        assert!(!reach.methods.contains(&method("Provider")), "{reach:?}");
+        assert!(reach.classes.contains("java.lang.reflect.Array"), "{reach:?}");
+        assert!(reach.methods.contains(&method("Other")), "{reach:?}");
+    }
+
+    /// A pipeline in the shape of `java.util.stream.AbstractPipeline`: a `parallel` field that its
+    /// constructor sets from its argument and `parallel()` sets to true, `isParallel()`, and an
+    /// `evaluate()` that runs `Par.run()` when the pipeline is parallel and `Seq.run()` when not.
+    fn pipeline_class() -> Value {
+        let pipeline = "java.util.stream.AbstractPipeline";
+        let field = json!({"kind": "MEMBER_SELECT",
+            "symbol": {"kind": "FIELD", "owner": pipeline, "name": "parallel", "static": false}});
+        let assign = |value: Value| {
+            json!({"kind": "EXPRESSION_STATEMENT", "expression": {
+                "kind": "ASSIGNMENT", "variable": field.clone(), "expression": value}})
+        };
+        let parameter = json!({"kind": "IDENTIFIER", "name": "parallel",
+            "symbol": {"kind": "PARAMETER", "name": "parallel", "type": "boolean"}});
+        let is_parallel = json!({"kind": "METHOD_INVOCATION",
+            "symbol": {"kind": "METHOD", "owner": pipeline, "name": "isParallel", "type": "()boolean"}});
+        let evaluate = json!({"kind": "CONDITIONAL_EXPRESSION", "condition": is_parallel,
+            "trueExpression": call("Par", "run")["expression"],
+            "falseExpression": call("Seq", "run")["expression"]});
+        json!({"kind": "CLASS", "symbol": {"type": pipeline}, "members": [
+            {"kind": "VARIABLE", "name": "parallel", "symbol": {"type": "boolean"}},
+            {"kind": "METHOD", "name": "<init>", "symbol": {"type": "(boolean)void", "static": false},
+             "parameters": [{"kind": "VARIABLE", "name": "parallel", "symbol": {"type": "boolean"}}],
+             "body": {"kind": "BLOCK", "statements": [assign(parameter)]}},
+            {"kind": "METHOD", "name": "parallel", "symbol": {"type": "()void", "static": true},
+             "body": {"kind": "BLOCK", "statements": [assign(json!({"kind": "BOOLEAN_LITERAL", "value": true}))]}},
+            {"kind": "METHOD", "name": "evaluate", "symbol": {"type": "()void", "static": true},
+             "body": {"kind": "BLOCK", "statements": [{"kind": "EXPRESSION_STATEMENT", "expression": evaluate}]}},
+        ]})
+    }
+
+    /// `new AbstractPipeline(parallel)`, as a statement.
+    fn new_pipeline(parallel: bool) -> Value {
+        json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "NEW_CLASS",
+            "symbol": {"kind": "CONSTRUCTOR", "owner": "java.util.stream.AbstractPipeline",
+                       "name": "<init>", "type": "(boolean)void"},
+            "arguments": [{"kind": "BOOLEAN_LITERAL", "value": parallel}]}})
+    }
+
+    #[test]
+    fn sequential_streams_do_not_reach_the_parallel_paths() {
+        let pipeline = "java.util.stream.AbstractPipeline";
+        let reach_with = |statements: Vec<Value>| {
+            let unit = json!({"typeDecls": [
+                class("Main", &[("main", statements)]),
+                pipeline_class(),
+                class("Par", &[("run", vec![])]),
+                class("Seq", &[("run", vec![])]),
+            ]});
+            reach(&[&unit], "Main").unwrap()
+        };
+        let method = |class: &str| (class.to_string(), "run".to_string(), "()void".to_string());
+        let sequential = reach_with(vec![new_pipeline(false), call(pipeline, "evaluate")]);
+        assert!(sequential.sequential);
+        assert!(sequential.methods.contains(&method("Seq")), "{sequential:?}");
+        assert!(!sequential.methods.contains(&method("Par")), "{sequential:?}");
+        // A pipeline created parallel, or made parallel, reaches both.
+        for statements in [
+            vec![new_pipeline(true), call(pipeline, "evaluate")],
+            vec![new_pipeline(false), call(pipeline, "parallel"), call(pipeline, "evaluate")],
+        ] {
+            let parallel = reach_with(statements);
+            assert!(!parallel.sequential);
+            assert!(parallel.methods.contains(&method("Par")), "{parallel:?}");
+            assert!(parallel.methods.contains(&method("Seq")), "{parallel:?}");
+        }
     }
 }

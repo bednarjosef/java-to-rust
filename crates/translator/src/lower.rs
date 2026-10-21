@@ -23,9 +23,11 @@ use std::cell::{Cell, RefCell};
 
 mod arrays;
 mod boxing;
+mod captures;
 mod charsets;
 mod constant_bodies;
 mod initializers;
+mod inner;
 mod java_arrays;
 mod java_objects;
 mod natives;
@@ -52,6 +54,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let mut lowering = Lowering::declare(&decls)?;
         lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
         lowering.declare_standard()?;
+        lowering.name_nested();
+        lowering.plan_captures().map_err(|(_, e)| e)?;
         lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
         lowering.plan_object(&decls);
         let mut types: Vec<TypeDecl> =
@@ -85,6 +89,8 @@ struct Symbol<'t> {
     is_static: bool,
     /// Whether a method or constructor takes a variable number of arguments.
     varargs: bool,
+    /// Whether a method is `native`: the JVM implements it (see `natives.rs`).
+    native: bool,
     /// The declared type, such as `int` or, for a method, `(int,long)double`.
     ty: &'t str,
     /// The value of a compile-time constant variable, as text (`Character`s as their code unit).
@@ -133,6 +139,7 @@ impl<'t> Node<'t> {
             owner: s.str("owner"),
             is_static: s.0["static"].as_bool().unwrap_or(false),
             varargs: s.0["varargs"].as_bool().unwrap_or(false),
+            native: s.0["native"].as_bool().unwrap_or(false),
             ty: s.str("type"),
             constant: s.0.get("constant").and_then(Value::as_str),
         })
@@ -193,6 +200,12 @@ struct Lowering<'t> {
     failed: RefCell<real_generics::Real>,
     /// The pattern variables in scope that name a value without testing it (see `patterns`).
     aliases: RefCell<Vec<patterns::Alias>>,
+    /// The identifiers that read a local captured by the class whose code they are in, by
+    /// address (see `captures`).
+    capture_refs: std::collections::HashSet<*const Value>,
+    /// The `new` expressions, by address, with the captures of the created class that are
+    /// captures of the creating class there (see `captures`).
+    capture_sites: std::collections::HashSet<(*const Value, String)>,
 }
 
 impl<'t> Lowering<'t> {
@@ -265,9 +278,14 @@ impl<'t> Lowering<'t> {
             None if abstract_in_enum || is_abstract => Vec::new(),
             None => return unsupported(node, "methods without a body"),
         };
-        if is_ctor {
+        let params = if is_ctor {
             self.run_initializer_blocks(info.owner, &mut body)?;
-        }
+            self.start_constructor(info.owner, &mut body)?;
+            let (first, last) = self.synthetic_params(info.owner)?;
+            first.into_iter().chain(params).chain(last).collect()
+        } else {
+            params
+        };
         if let Some(param) = args_param.filter(|p| reads_name(&body, p.str("name"))) {
             body.insert(0, self.args_decl(param));
         }
@@ -315,7 +333,7 @@ impl<'t> Lowering<'t> {
                 if self.is_real(real_generics::Owner::Class(t)) && !self.class_type_params(t).is_empty() {
                     self.fail(real_generics::Owner::Class(t));
                 }
-                Ok(Type::class(name))
+                Ok(Type::class(&self.types[t].name))
             }
             "<nulltype>" => Ok(Type::Null),
             // `this` in the body of an enum constant, which is the constant.
@@ -368,9 +386,13 @@ impl<'t> Lowering<'t> {
                 };
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
             }
-            "EXPRESSION_STATEMENT" => Stmt::Expr(self.expr(node.child("expression")?)?),
+            "EXPRESSION_STATEMENT" => match self.expr(node.child("expression")?)? {
+                // A native that does nothing here, such as `registerNatives()`, leaves no trace.
+                Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
+                e => Stmt::Expr(e),
+            },
             // Reachability skipped the branch that the condition guards (`program::never_true`).
-            "IF" if crate::program::never_true(&node.0["condition"]) => match node.get("elseStatement") {
+            "IF" if self.never_true(node) => match node.get("elseStatement") {
                 Some(n) => self.single_stmt(n)?,
                 None => Stmt::Block(Vec::new()),
             },
@@ -419,7 +441,8 @@ impl<'t> Lowering<'t> {
             "TRY" => self.try_stmt(node)?,
             "THROW" => self.throw(node)?,
             "LABELED_STATEMENT" => self.labeled(node)?,
-            "CLASS" | "INTERFACE" | "ENUM" | "RECORD" => return unsupported(node, "local classes"),
+            // A local class is declared with the classes (see `inner`).
+            "CLASS" | "INTERFACE" | "ENUM" | "RECORD" => return Ok(()),
             kind => return unsupported(node, &kind_words(kind)),
         };
         out.push(stmt);
@@ -505,6 +528,16 @@ impl<'t> Lowering<'t> {
                 } else {
                     ExprKind::Cast(ty, Box::new(value))
                 }
+            }
+            // As with `if`, reachability skipped the branch that the condition guards.
+            "CONDITIONAL_EXPRESSION" if self.never_true(node) => {
+                let ty = self.ty(node, node.java_type())?;
+                let value = self.convert(self.expr(node.child("falseExpression")?)?, ty);
+                // The branch converts to the type of the whole, as `cond ? 1 : 2L` is a `long`.
+                if value.ty == ty {
+                    return Ok(value);
+                }
+                ExprKind::Cast(ty, Box::new(value))
             }
             "CONDITIONAL_EXPRESSION" => {
                 let ty = self.ty(node, node.java_type())?;
@@ -619,11 +652,15 @@ impl<'t> Lowering<'t> {
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
+        if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
+            return Ok(kind);
+        }
         let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
             let resolved = self.method_index(&symbol);
             let args = self.convert_args(resolved, args)?;
+            let args = self.with_synthetic(self.passed_on(self.current.get(), node.pos())?, args);
             return Ok(ExprKind::ThisCall { args, resolved });
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");

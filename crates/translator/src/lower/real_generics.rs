@@ -164,6 +164,9 @@ impl<'t> Lowering<'t> {
                 statics: Vec::new(),
                 enum_constants: None,
                 type_params: Vec::new(),
+                outer: None,
+                captures: Vec::new(),
+                origin: Origin::Member,
             });
         }
     }

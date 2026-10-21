@@ -813,7 +813,9 @@ impl<'a> Gen<'a> {
     /// `o.getClass().getSimpleName()`, the name of the class in its source.
     pub(super) fn class_name(&mut self, object: &'a Expr, simple: bool) -> Code {
         let binary = |decl: &TypeDecl| {
-            if simple {
+            if let Some((binary, simple_name)) = decl.origin.java_names() {
+                (if simple { simple_name } else { binary }).to_string()
+            } else if simple {
                 decl.name.rsplit('.').next().unwrap_or_default().to_string()
             } else if crate::lower::is_standard(&decl.name) {
                 decl.name.clone()

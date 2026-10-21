@@ -7,12 +7,22 @@ use crate::program::Reach;
 
 impl<'t> Lowering<'t> {
     /// Whether a member of the class `class` is lowered: in a whole program only reachable
-    /// members are, in a single file all of them.
+    /// members are, in a single file all of them. A native method never is: it has no body, and
+    /// its calls become the runtime's code or are rejected (`native_call`).
     pub(super) fn keeps(&self, member: Node<'t>, class: &str) -> bool {
+        if member.kind() == "METHOD" && member.has_flag("NATIVE") {
+            return false;
+        }
         if self.standard.has(class) {
             return self.standard.keeps(member, class);
         }
         self.reach.is_none_or(|reach| reach.member(class, member.0))
+    }
+
+    /// Whether the condition of an `if` or a `?:` is never true, so that reachability skipped the
+    /// branch it guards (`program::never_true`): that branch is not lowered either.
+    pub(super) fn never_true(&self, node: Node<'t>) -> bool {
+        crate::program::never_true(&node.0["condition"], self.reach.is_some_and(|r| r.sequential))
     }
 }
 
@@ -61,6 +71,8 @@ fn lower_with<'t>(
     lowering.standard = super::exceptions::Standard::select(reachable);
     lowering.declare_standard().map_err(|e| (None, e))?;
     unit_of.resize(lowering.types.len(), usize::MAX);
+    lowering.name_nested();
+    lowering.plan_captures().map_err(|(t, e)| ((unit_of[t] != usize::MAX).then_some(unit_of[t]), e))?;
     packages.resize(lowering.types.len(), String::new());
     lowering.entry = lowering.type_index(main);
     let unit = |t: usize| (unit_of[t] != usize::MAX).then_some(unit_of[t]);

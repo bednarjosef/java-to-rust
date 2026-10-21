@@ -33,7 +33,7 @@ pub enum Home {
 }
 
 /// Whether type `t` is a class with subclasses: its objects' fields are a struct of their own.
-pub fn is_inner(class: &Class, t: usize) -> bool {
+pub fn has_subclasses(class: &Class, t: usize) -> bool {
     class.types[t].kind == TypeKind::Class && class.hierarchy.has_subtypes(t)
 }
 
@@ -46,7 +46,7 @@ pub fn fields_structs(class: &Class) -> HashSet<usize> {
     let mut order: Vec<usize> = (0..class.types.len()).collect();
     order.sort_by_key(|&t| class.hierarchy.ancestors(t).len());
     for t in order {
-        if !is_inner(class, t) {
+        if !has_subclasses(class, t) {
             continue;
         }
         let decl = &class.types[t];
@@ -309,7 +309,7 @@ pub fn field_level(
             if method.is_static
                 || method.is_ctor
                 || method.is_abstract
-                || !is_inner(class, t)
+                || !has_subclasses(class, t)
                 || !structs.contains(&t)
             {
                 return false;
