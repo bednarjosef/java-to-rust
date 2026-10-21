@@ -582,8 +582,11 @@ impl<'t> Lowering<'t> {
     }
 
     /// Whether class `t` of the program says it implements `java.lang.Comparable`.
+    /// A box translated for its static members (`Character`) is not: its objects are the
+    /// runtime's, which compare themselves.
     pub(super) fn implements_comparable(&self, t: usize) -> bool {
         self.implements_directly(t, "java.lang.Comparable")
+            && super::boxing::boxed_type(&self.types[t].javac).is_none()
     }
 
     /// Whether type `t` of the program names the JDK interface `interface` in its `implements`
@@ -645,13 +648,11 @@ impl<'t> Lowering<'t> {
                     }
                     Some(i) => methods[i].overrides.push(c.compare_to),
                     None if self.types[t].node.has_flag("ABSTRACT") => {}
+                    // In a census, the class goes on without the bridge.
                     None => {
                         let pos = self.types[t].node.pos();
-                        return error(
-                            pos,
-                            "a `Comparable` class that inherits its `compareTo` not supported yet"
-                                .to_string(),
-                        );
+                        let message = "a `Comparable` class that inherits its `compareTo` not supported yet";
+                        self.reject_at(t, Some(pos), Error { pos, message: message.to_string() })?;
                     }
                 }
             }

@@ -155,6 +155,13 @@ impl<'t> Lowering<'t> {
 
     /// Checks an enum's members and constructors against what the translation supports.
     pub(super) fn check_enum(&self, index: usize, methods: &[Method]) -> Result<(), Error> {
+        // A census's stub of a constructor sets no field: the enum keeps its fields in tables.
+        let stubs = self.stubbed.borrow();
+        if let Some(&stub) =
+            stubs.iter().find(|&&m| m < methods.len() && methods[m].is_ctor && methods[m].class == index)
+        {
+            return error(methods[stub].pos, "a stub of an enum's constructor");
+        }
         let ty = Type::enum_type(&self.types[index].name);
         // A field that is not final is still one value per constant if only the constructor sets it.
         for m in methods.iter().filter(|m| !(m.is_ctor && m.class == index)) {
@@ -206,8 +213,13 @@ impl<'t> Lowering<'t> {
         if let Some(class) = self.enum_index(symbol.owner) {
             if symbol.is_static && symbol.name == "values" {
                 let ty = Type::enum_type(&self.types[class].name);
+                // The constants as `Object`s where the enum's arrays are `Object[]`s (`covariant`).
+                let element = self.covariant_array(Type::array(ty)).element();
                 let values = (0..self.enum_constant_names(class).count())
-                    .map(|ordinal| self.synth(ExprKind::EnumConstant { class, ordinal }, node.pos(), ty))
+                    .map(|ordinal| {
+                        let constant = self.synth(ExprKind::EnumConstant { class, ordinal }, node.pos(), ty);
+                        self.convert(constant, element)
+                    })
                     .collect();
                 return Ok(Some(ExprKind::ArrayLit(values)));
             }

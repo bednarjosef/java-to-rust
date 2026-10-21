@@ -46,7 +46,10 @@ signature. Everything else is decided here.
    callers observe it. The methods of an override group agree. The `toString` that making an
    object's text runs (`"" + o`, `println(o)`, `append(o)`, `String.valueOf(o)`) is not such a
    call: the text is `Display`, which cannot return an exception, so what that `toString` throws
-   ends the program there. Where a `toString` that the program wrote may run and may throw what a
+   ends the program there. So does what the `hashCode` throws that `Object`'s `toString` shows
+   for a class without a `toString` of its own (`Collections.ReverseComparator2`'s, which asks
+   its comparator), where the `hashCode` is a `Result` because a direct call of it is observed;
+   it counts as that object's `toString` below. Where a `toString` that the program wrote may run and may throw what a
    `catch` around the text, or around a call on the way to it, would catch, the program is
    rejected. The JDK's own `toString`s are not looked at: they throw only for bugs, such as a
    collection changed while it is shown (`ConcurrentModificationException`), which then end the

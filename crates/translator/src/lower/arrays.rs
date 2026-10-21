@@ -59,7 +59,7 @@ impl<'t> Lowering<'t> {
         // The elements of an `Object[]` that a covariant array is are cast to the variable's
         // type.
         let mut ty = ty;
-        if Self::is_object(*element) && *element != ty && ty.is_reference() {
+        if Self::is_object(*element) && *element != ty && Self::of_objects(ty) {
             let pos = variable.pos();
             let each = self.fresh_name(&name);
             let value = self.synth(ExprKind::Var(each.clone()), pos, *element);

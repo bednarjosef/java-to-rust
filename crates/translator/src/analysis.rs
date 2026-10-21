@@ -49,6 +49,9 @@ pub use whole_objects::whole_objects;
 pub struct Facts {
     /// Whether the program starts a thread (see `threads`).
     pub threaded: bool,
+    /// Whether the program interrupts a thread, so that `sleep`, `join` and `wait` may throw
+    /// `InterruptedException` (see `threads`).
+    pub interrupts: bool,
     /// The classes, by type index, whose objects two threads may reach: `Arc`s, with a
     /// `java::Locked` unless immutable.
     pub thread_shared: HashSet<usize>,
@@ -216,6 +219,13 @@ impl Facts {
 }
 
 pub fn analyze(class: &Class) -> Result<Facts, Error> {
+    analyze_all(class).map_err(|mut errors| errors.remove(0))
+}
+
+/// The facts, or the errors of the first analysis that rejects the program: all of them, where
+/// that analysis finds more than one (a census stubs them together, `program/census.rs`).
+pub fn analyze_all(class: &Class) -> Result<Facts, Vec<Error>> {
+    let one = |e: Error| vec![e];
     let mut facts = Facts {
         fields_structs: hierarchy::fields_structs(class),
         field_owners: hierarchy::field_owners(class),
@@ -225,17 +235,17 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
     ranges::analyze(class, &mut facts);
     representation(class, &mut facts);
-    validate(class, &facts)?;
-    patterns::check(class)?;
+    validate(class, &facts).map_err(one)?;
+    patterns::check(class).map_err(one)?;
     facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
     nullness::analyze(class, &mut facts);
-    patterns::check_object_values(class, &facts)?;
+    patterns::check_object_values(class, &facts).map_err(one)?;
     boxing::analyze(class, &mut facts);
     if facts.threaded {
-        threads::check(class, &facts)?;
+        threads::check(class, &facts).map_err(one)?;
     }
-    monitors::check(class, &facts)?;
+    monitors::check(class, &facts).map_err(one)?;
     facts.class_monitors = monitors::class_monitors(class, &facts);
     borrowed_params(class, &mut facts);
     facts.borrowed_objects = borrowed_objects(class, &facts);
@@ -255,6 +265,7 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
 /// `immutable` to `writers`, given `fields_structs`.
 fn representation(class: &Class, facts: &mut Facts) {
     facts.threaded = threads::threaded(class);
+    facts.interrupts = threads::interrupts(class);
     if facts.threaded {
         facts.thread_shared = threads::thread_shared(class);
         facts.long_methods = threads::long_methods(class, &facts.thread_shared);

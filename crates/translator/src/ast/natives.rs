@@ -19,8 +19,10 @@ pub enum Native {
     FloatToIntBits,
     FloatToRawIntBits,
     IntBitsToFloat,
-    /// `System.identityHashCode(o)` or an `o.hashCode()` that resolves to `Object`'s.
+    /// An `o.hashCode()` that resolves to `Object`'s.
     IdentityHash,
+    /// `System.identityHashCode(o)`, which is 0 for a null `o`.
+    SystemIdentityHash,
     CurrentTimeMillis,
     NanoTime,
     /// `Runtime.getRuntime().availableProcessors()`.
@@ -81,6 +83,11 @@ pub enum Native {
     ThreadAlive,
     ThreadJoin,
     ThreadRename,
+    /// `interrupt0(tid)`, `isInterrupted0(tid)`, and `clearInterrupt0()` of `Thread.interrupted()`,
+    /// which reads and clears the calling thread's status.
+    ThreadInterrupt,
+    ThreadIsInterrupted,
+    ThreadClearInterrupt,
     /// `o.wait()` and `o.wait(millis)`: the object, and the timeout in milliseconds (0 for none).
     MonitorWait,
     /// `o.notify()`, or with `all` `o.notifyAll()`: the object.
@@ -168,6 +175,9 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.lang.Thread", "alive0", "(long)boolean") => Native::ThreadAlive,
         ("java.lang.Thread", "join0", "(long,long)void") => Native::ThreadJoin,
         ("java.lang.Thread", "rename0", "(long,java.lang.String)void") => Native::ThreadRename,
+        ("java.lang.Thread", "interrupt0", "(long)void") => Native::ThreadInterrupt,
+        ("java.lang.Thread", "isInterrupted0", "(long)boolean") => Native::ThreadIsInterrupted,
+        ("java.lang.Thread", "clearInterrupt0", "()boolean") => Native::ThreadClearInterrupt,
         _ => return None,
     })
 }

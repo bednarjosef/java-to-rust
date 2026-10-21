@@ -1764,6 +1764,11 @@ Generics are erased in lowering, and nothing after it knows they existed:
   parameter or return type (`next_integer`, `compare_to_point`); the group names are now unique in
   every class tree the group reaches (`codegen::names`). This also lifts "covariant return types"
   for these overrides.
+- javac writes the type of an inner class of a generic class with the outer class's type
+  arguments (`EnumMap<K,V>.EntryIterator`, `RegularEnumSet<E>.EnumSetIterator<E>`); those are
+  dropped before the type is read (`lower::generics::without_outer_args`), so the inner class's
+  own arguments are the only ones (before, a generic inner class read as its outer class, and
+  its objects never became values of the interface it implements).
 - A varargs parameter of a type variable (`T... items`) is an array of its erasure, read where the
   method declares it, not at the call; an array of references passed for it is passed on, as
   javac infers `T` from it (and is then rejected below unless it is an `Object[]`).
@@ -1801,7 +1806,12 @@ Generics are erased in lowering, and nothing after it knows they existed:
   such a program pulls in the JDK's sorting code. Without the JDK's sources they are rejected
   ("a change in place of a `String[]` that is also an `Object[]`"). The strings in such an array are values of `Object`'s `String`
   class (`analysis::hierarchy::flows`). A program whose `String[]`s never meet another array type
-  translates as before.
+  translates as before. An array of an enum is covariant too (`Day.values()` passed for `E[]`
+  of `<E extends Enum<E>>`, or as an `Enum<?>[]`, as `EnumSet` keeps its universe): where it is
+  an `Object[]`, its constants are `Object`s (`values()` makes them so), cast back to the enum
+  where read. An enum value is never null in the translation, so a null element read as the
+  enum ends the program ("a null enum value"), while a test of one against `null` tests the
+  checked cast's `Option`.
 - An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the
   plan's `Variant::Array`, done as a runtime class beside the strings and the boxes rather than a
   variant kind of its own: each array type that is converted to `Object` or cast back from it gets

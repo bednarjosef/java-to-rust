@@ -907,6 +907,32 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   by comparing it with each of those classes (`c.equals(X.class)`), as the class's first use
   would (`Builtin::InitializeClass`); the receiver must be `MethodHandles.lookup()`, which has
   access to every class of the closed program. Test: `corpus/whole-program/EnsureInitialized.java`.
+- **`Character` is translated from the JDK, except for what the runtime does**
+  (`lower::runtime_character_method`, `program::reach::replaced`): it was one of the
+  `RUNTIME_CLASSES`, so `Pattern`'s `CharPredicates` (reached by `Scanner`) stopped at
+  `Character.UnicodeScript`, and `Character.getType`, `isTitleCase`, `isIdeographic`, the
+  identifier tests, `isMirrored`, `isDefined`, `isEmoji` and `reverseBytes` were rejected. A
+  whole program now has the JDK's `Character` with its nested classes (`UnicodeScript`,
+  `UnicodeBlock`, `Subset`) and the `CharacterData` classes whose tables they read; the box
+  itself, its instance methods and the `char` and code point methods that the runtime's tables
+  answer stay the runtime's, and reachability does not enter them. What it took:
+  `Class.getPrimitiveClass("char")`, the native behind `Character.TYPE`, is `char.class`; the
+  translated `Character` does not count as a `Comparable` class of the program (its objects are
+  the runtime's boxes), and the runtime box's class does not take its module path; a module with
+  more than 100 statics (`UnicodeBlock` has some 340) is written as several `thread_local!`
+  blocks, as one expands a static per recursion level and Rust stops at 128; a `toString` that may
+  return null shows `null` in `Display`; and an expression statement that is a cast (erasure's,
+  of `aliases.put("ADLM", ADLAM)` on a `Map<String, UnicodeScript>`) evaluates the call only,
+  as javac does, instead of rejecting the null previous value as a null enum. `new
+  String(codePoints, offset, count)` (`Pattern`'s character names and families) and the
+  deprecated `new String(ascii, hibyte, offset, count)` (`CharacterName`) are the runtime's,
+  as `String` is. `Character.getName` and `codePointOf` read `uniName.dat`, a data file that is
+  generated when the JDK is built and is not in its sources; a translated program has no
+  resources, so `Class.getResourceAsStream` ends the program with an `InternalError` naming the
+  resource (`Builtin::MissingResource`), which also covers `Currency`'s `currency.data` and the
+  ICU normalizer data of `ICUBinary`. `ScannerGrades` now stops first at `BigDecimal` extending
+  `Number`. Tests: `corpus/whole-program/CharacterFromJdk.java` and
+  `reading_a_resource_ends_the_program`.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

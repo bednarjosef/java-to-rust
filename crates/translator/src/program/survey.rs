@@ -1,11 +1,12 @@
-//! The survey of a program: which Java features the code reachable from `main` uses that the
-//! translator does not support yet, and which methods of the runtime's classes it calls. It
-//! measures what to support next, such as what stands between the translator and a library like
-//! the JDK; `--survey` prints it, and `--survey-json` writes the census as JSON.
+//! The survey of a program: what the code reachable from `main` reaches beyond the translated
+//! sources (classes that are not translated, such as reflection and serialization, and classes
+//! outside the sources), which methods of the runtime's classes it calls, and which natives it
+//! reaches; `--survey` prints it, and `--survey-json` writes it as JSON.
 //!
-//! The census is syntactic, on javac's trees: a piece of code (a method, a field initializer or an
+//! The survey is syntactic, on javac's trees: a piece of code (a method, a field initializer or an
 //! initializer block) counts a feature when it, or the declaration of its class, uses it. It does
-//! not run the lowering, so it misses the narrower rejections there. Code is either the program's
+//! not run the translator, so it does not say which language constructs the translator rejects:
+//! the census does (`census.rs`, `--census`), past every rejection. Code is either the program's
 //! own (its files and source roots) or library code (the files of its library roots), and each
 //! table is printed for both. Each feature names up to `EXAMPLES` places where reachable code uses
 //! it.
@@ -21,7 +22,7 @@ use super::reach::{
     CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, component_array, created_by_name, has_flag,
     live_branch, members, outside, provided, replaced, runtime_arrays_call, symbol_type, text, untranslated,
 };
-use crate::ast::runtime_native;
+use crate::ast::{Pos, runtime_native};
 use serde_json::{Value, json};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -39,22 +40,22 @@ pub struct Survey {
 
 /// Whether code is the program's own or comes from a library root.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-enum Part {
+pub(super) enum Part {
     Program,
     Library,
 }
 
 impl Part {
-    const ALL: [Part; 2] = [Part::Program, Part::Library];
+    pub(super) const ALL: [Part; 2] = [Part::Program, Part::Library];
 
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Part::Program => "program",
             Part::Library => "library",
         }
     }
 
-    fn title(self) -> &'static str {
+    pub(super) fn title(self) -> &'static str {
         match self {
             Part::Program => "Program",
             Part::Library => "Library",
@@ -108,6 +109,19 @@ fn canonical(path: &Path) -> PathBuf {
 /// The survey of the code reachable from `main`. `units` are javac's units, each with its `file`
 /// and its `tree`; `files` are the program's own files.
 pub fn survey(units: &[&Value], reach: &Reach, program: &Program, files: &[PathBuf]) -> Survey {
+    let census = scan(units, reach, program, files);
+    Survey { report: census.report(reach, &program.main), json: census.json(reach, &program.main) }
+}
+
+/// The name of each unit's file relative to the root it came from, as the survey prints it.
+pub(super) fn unit_files(units: &[&Value], program: &Program, files: &[PathBuf]) -> Vec<String> {
+    let layout = Layout::new(program, files);
+    units.iter().map(|u| layout.origin(u["file"].as_str().unwrap_or("")).file).collect()
+}
+
+/// The scan of the code reachable from `main` that the survey reports: its pieces, the runtime's
+/// methods it calls and the natives it reaches.
+pub(super) fn scan(units: &[&Value], reach: &Reach, program: &Program, files: &[PathBuf]) -> Census {
     let layout = Layout::new(program, files);
     let origins: Vec<Origin> =
         units.iter().map(|u| layout.origin(u["file"].as_str().unwrap_or(""))).collect();
@@ -115,25 +129,29 @@ pub fn survey(units: &[&Value], reach: &Reach, program: &Program, files: &[PathB
     for unit in units {
         census.declare(&unit["tree"]);
     }
-    for (unit, origin) in units.iter().zip(&origins) {
+    for (index, (unit, origin)) in units.iter().zip(&origins).enumerate() {
         for decl in unit["tree"]["typeDecls"].as_array().into_iter().flatten() {
-            census.class(decl, origin, reach);
+            census.class(decl, (index, origin), reach);
         }
     }
     census.chains(&program.main);
-    Survey { report: census.report(reach, &program.main), json: census.json(reach, &program.main) }
+    census
 }
 
 /// A reachable piece of code and the unsupported features it uses.
-struct Piece {
-    part: Part,
-    class: String,
+pub(super) struct Piece {
+    pub(super) part: Part,
+    pub(super) class: String,
     /// `method`, `constructor`, `field initializer`, `static block` or `instance block`.
-    kind: &'static str,
+    pub(super) kind: &'static str,
     /// The name of a method or field; empty for a block.
-    name: String,
+    pub(super) name: String,
     /// `file:line` of the piece.
-    location: String,
+    pub(super) location: String,
+    /// The index of its unit, and the first and the last position of its nodes: every node of
+    /// its code, local and anonymous classes and lambdas included, is between them.
+    pub(super) unit: usize,
+    pub(super) span: (Pos, Pos),
     /// Each feature the piece uses, with the place where it first does.
     features: BTreeMap<&'static str, String>,
 }
@@ -162,8 +180,8 @@ fn place(file: &str, node: &Value) -> String {
 }
 
 #[derive(Default)]
-struct Census {
-    pieces: Vec<Piece>,
+pub(super) struct Census {
+    pub(super) pieces: Vec<Piece>,
     /// The classes of the sources and libraries, local and anonymous ones included, to tell calls
     /// that leave them.
     declared: HashSet<String>,
@@ -172,7 +190,7 @@ struct Census {
     runtime: BTreeMap<(Part, String), usize>,
     /// Reachable methods that have no body in Java: the JVM implements them. With each, its
     /// node in the call graph and whether the runtime implements it (`ast::runtime_native`).
-    natives: Vec<(Part, String, String, bool)>,
+    pub(super) natives: Vec<(Part, String, String, bool)>,
     /// The call graph of the reachable code: from each node (a method, or a class's static or
     /// instance initialization, see `method_node`) to the nodes its code may run.
     edges: HashMap<String, BTreeSet<String>>,
@@ -203,7 +221,7 @@ impl Census {
         }
     }
 
-    fn class(&mut self, decl: &Value, origin: &Origin, reach: &Reach) {
+    fn class(&mut self, decl: &Value, (unit, origin): (usize, &Origin), reach: &Reach) {
         if !CLASS_KINDS.contains(&text(decl, "kind")) {
             return;
         }
@@ -211,10 +229,8 @@ impl Census {
         if !reach.classes.contains(&class) {
             return;
         }
-        let header: BTreeMap<&'static str, String> = class_features(decl, &self.declared)
-            .into_iter()
-            .map(|f| (f, place(&origin.file, decl)))
-            .collect();
+        let header: BTreeMap<&'static str, String> =
+            class_features(self, decl).into_iter().map(|f| (f, place(&origin.file, decl))).collect();
         for member in members(decl) {
             let kind = text(member, "kind");
             let reached = match kind {
@@ -239,7 +255,7 @@ impl Census {
                 "BLOCK" if member["static"].as_bool() == Some(true) => reach.initialized.contains(&class),
                 "BLOCK" => reach.instantiated.contains(&class),
                 _ => {
-                    self.class(member, origin, reach);
+                    self.class(member, (unit, origin), reach);
                     continue;
                 }
             };
@@ -253,9 +269,6 @@ impl Census {
                 refs: BTreeSet::new(),
                 sequential: reach.sequential,
             };
-            if kind == "BLOCK" && member["static"].as_bool() != Some(true) {
-                scan.feature("initializer blocks", member);
-            }
             self.body(member, &mut scan);
             for call in scan.calls {
                 *self.runtime.entry((origin.part, call)).or_default() += 1;
@@ -268,6 +281,8 @@ impl Census {
                 kind: piece_kind(member),
                 name: if kind == "BLOCK" { String::new() } else { text(member, "name").to_string() },
                 location: place(&origin.file, member),
+                unit,
+                span: span(member),
                 features: scan.features,
             });
         }
@@ -299,43 +314,18 @@ impl Census {
                     "MEMBER_REFERENCE" if crate::lower::computed_receiver(node, &|_, _| true).is_some() => {
                         scan.feature("computed method receivers", node)
                     }
-                    // An anonymous class body is a class node too, but no local declaration.
-                    "INTERFACE" | "ENUM" | "RECORD" if !is_anonymous(symbol_type(node)) => {
-                        scan.feature("local interfaces, enums and records", node)
+                    // Tests and casts against the program's classes, the runtime's and the
+                    // translator's translate; against another class, it is not translated.
+                    "INSTANCE_OF" if self.outside(text(&node["type"], "javaType")) => {
+                        scan.feature("instanceof on types outside the sources", node)
                     }
-                    "TRY" if node["resources"].as_array().is_some_and(|r| !r.is_empty()) => {
-                        scan.feature("try-with-resources", node)
-                    }
-                    // Tests and casts between the program's own classes translate, and from
-                    // `Object` to them, to strings and to boxes; a pattern binding its variable is
-                    // part of the test.
-                    "INSTANCE_OF" => {
-                        let value = text(&node["expression"], "javaType");
-                        let target = text(&node["type"], "javaType");
-                        if self.narrows(value, target) {
-                            if text(&node["pattern"], "kind") == "RECORD_PATTERN" {
-                                scan.feature("patterns", node);
-                            }
-                            self.body(&node["expression"], scan);
-                            return;
-                        }
-                        scan.feature("instanceof on types outside the sources", node);
-                    }
-                    "TYPE_CAST"
-                        if !is_primitive(ty)
-                            && ty != "java.lang.Object"
-                            && !self.narrows(text(&node["expression"], "javaType"), ty) =>
-                    {
-                        scan.feature("reference casts", node)
+                    "TYPE_CAST" if self.outside(ty) => {
+                        scan.feature("casts to types outside the sources", node)
                     }
                     // A for-each over one of the program's `Iterable`s calls its iterator.
-                    "ENHANCED_FOR_LOOP"
-                        if !text(&node["expression"], "javaType").ends_with(']')
-                            && !self.declared.contains(&raw(text(&node["expression"], "javaType"))) =>
-                    {
+                    "ENHANCED_FOR_LOOP" if self.outside(text(&node["expression"], "javaType")) => {
                         scan.feature("for-each over types outside the sources", node)
                     }
-                    "BINDING_PATTERN" | "RECORD_PATTERN" => scan.feature("patterns", node),
                     _ => {}
                 }
                 // The program's generic types are erased; one from elsewhere is not translated.
@@ -343,7 +333,7 @@ impl Census {
                 // and nor is the method type of a method's name (`(java.lang.Class<?>)int`, or
                 // `<T>(T)T` for a generic method), whose call has a type of its own.
                 if ty.contains('<') && !ty.starts_with(['<', '(']) && !self.erases(ty) {
-                    scan.feature("generic types", node);
+                    scan.feature("generic types outside the sources", node);
                 }
                 refer(&node["symbol"], scan);
                 if matches!(kind, "METHOD_INVOCATION" | "NEW_CLASS") {
@@ -354,14 +344,11 @@ impl Census {
                     let object_init = owner == "java.lang.Object" && name == "<init>";
                     if object_init {
                         // Nothing to report.
-                    } else if owner == "java.lang.Object"
-                        && !matches!(name, "equals" | "hashCode" | "toString")
-                    {
-                        // `getClass`, `clone`, and the monitor's `wait` and `notify`.
-                        scan.feature(
-                            if name == "getClass" { "reflection" } else { "methods of Object" },
-                            node,
-                        );
+                    } else if owner == "java.lang.Object" && matches!(name, "wait" | "notify" | "notifyAll") {
+                        scan.feature("monitor methods of Object", node);
+                    } else if owner == "java.lang.Object" {
+                        // `equals`, `hashCode`, `toString`, `getClass` and `clone` translate (the
+                        // census says where `clone` does not).
                     } else if let Some(feature) = untranslated(owner) {
                         scan.feature(feature, node);
                         scan.calls.insert(format!("({feature}) {owner}.{name}"));
@@ -371,7 +358,7 @@ impl Census {
                     {
                         let simple = owner.rsplit('.').next().unwrap_or(owner);
                         scan.calls.insert(format!("{simple}.{name}"));
-                    } else if !owner.is_empty() && !self.declared.contains(owner) {
+                    } else if !owner.is_empty() && !self.known(owner) {
                         scan.feature("classes outside the sources", node);
                         scan.calls.insert(format!("(outside) {owner}.{name}"));
                     }
@@ -387,18 +374,23 @@ impl Census {
         }
     }
 
-    /// Whether a test or a cast of a value of type `value` against type `target` translates:
-    /// both are the program's own types, or the value is an `Object` and the target is one of
-    /// them, a string or a box.
-    fn narrows(&self, value: &str, target: &str) -> bool {
-        let boxes = ["Boolean", "Byte", "Character", "Double", "Float", "Integer", "Long", "Short", "String"];
-        let (value, target) = (raw(value), raw(target));
-        let held = target.strip_prefix("java.lang.").is_some_and(|name| boxes.contains(&name));
-        // A cast to a type variable (`(T) items[i]`) is a cast to its erasure.
-        let variable = !target.contains('.') && !self.declared.contains(target.trim_end_matches("[]"));
-        let declared = |t: &str| self.declared.contains(t.trim_end_matches("[]"));
-        (declared(&value) || value.starts_with("java.lang.Object")) && (declared(&target) || variable)
-            || value == "java.lang.Object" && held
+    /// Whether a class is translated with the program: one of the sources' classes, or an
+    /// interface or class that lowering provides (`Runnable`, the standard exceptions).
+    fn known(&self, class: &str) -> bool {
+        self.declared.contains(class)
+            || crate::lower::is_functional(class)
+            || crate::lower::is_standard(class)
+    }
+
+    /// Whether a type, as a test, a cast or a for-each meets it, is a class that is not
+    /// translated: not a primitive, an array of them, `Object`, a type variable (whose erasure the
+    /// code uses), one of the runtime's classes or one that the translation has.
+    fn outside(&self, ty: &str) -> bool {
+        let class = raw(ty);
+        let class = class.trim_end_matches("[]");
+        let variable = !class.contains('.') && !self.declared.contains(class);
+        !(is_primitive(class) || variable || class == "java.lang.Object" || self.erases(class))
+            && !self.known(class)
     }
 
     /// Whether a parameterized type translates as far as its type arguments go: one of the
@@ -407,7 +399,7 @@ impl Census {
     fn erases(&self, ty: &str) -> bool {
         let raw = raw(ty);
         let raw = raw.trim_end_matches("[]");
-        self.declared.contains(raw) || raw == "java.lang.Comparable" || provided(raw)
+        self.known(raw) || raw == "java.lang.Comparable" || provided(raw)
     }
 
     /// The node of the call graph that a reachable member's code belongs to, with the edges that
@@ -456,7 +448,7 @@ impl Census {
 
     /// The chain of calls from `main` to a node, as the names of the methods and initializers on
     /// it; empty when the graph does not reach it.
-    fn chain(&self, node: &str) -> Vec<String> {
+    pub(super) fn chain(&self, node: &str) -> Vec<String> {
         let mut chain = Vec::new();
         let mut at = node;
         while let Some(parent) = self.parent.get(at) {
@@ -501,18 +493,23 @@ impl Census {
             self.natives.len(),
             self.natives.iter().filter(|n| n.3).count()
         );
+        _ = writeln!(
+            out,
+            "This survey says what the code reaches outside the translated sources; `--census` runs the \
+             translator over it and says what it rejects."
+        );
         _ = writeln!(out, "{total} pieces of code (methods, field initializers, initializer blocks):");
         for part in Part::ALL {
             let pieces = self.pieces(part).count();
             let free = self.pieces(part).filter(|p| p.features.is_empty()).count();
             _ = writeln!(
                 out,
-                "  {}: {pieces} pieces; {free} ({}) use no unsupported feature.",
+                "  {}: {pieces} pieces; {free} ({}) reach nothing outside the sources.",
                 part.title(),
                 percent(free, pieces)
             );
         }
-        _ = writeln!(out, "  Together: {free} ({}) use no unsupported feature.", percent(free, total));
+        _ = writeln!(out, "  Together: {free} ({}) reach nothing outside the sources.", percent(free, total));
         for part in Part::ALL {
             _ = writeln!(out, "\n{} code: features used by its pieces of code", part.title());
             self.feature_table(&mut out, part);
@@ -738,6 +735,37 @@ fn refer(symbol: &Value, scan: &mut Scan<'_>) {
     }
 }
 
+/// The first and the last position of the nodes of a tree.
+fn span(node: &Value) -> (Pos, Pos) {
+    fn visit(node: &Value, span: &mut (Pos, Pos)) {
+        match node {
+            Value::Object(fields) => {
+                if let Some(line) = node["line"].as_u64() {
+                    let pos =
+                        Pos { line: line as usize, column: node["column"].as_u64().unwrap_or(0) as usize };
+                    let key = |p: Pos| (p.line, p.column);
+                    if key(pos) < key(span.0) {
+                        span.0 = pos;
+                    }
+                    if key(pos) > key(span.1) {
+                        span.1 = pos;
+                    }
+                }
+                for (field, child) in fields {
+                    if field != "symbol" {
+                        visit(child, span);
+                    }
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| visit(item, span)),
+            _ => {}
+        }
+    }
+    let mut span = (Pos { line: usize::MAX, column: usize::MAX }, Pos::default());
+    visit(node, &mut span);
+    span
+}
+
 /// The kind of a piece of code, from the member that holds it.
 fn piece_kind(member: &Value) -> &'static str {
     match text(member, "kind") {
@@ -749,48 +777,32 @@ fn piece_kind(member: &Value) -> &'static str {
     }
 }
 
-/// The unsupported features of a class declaration, which every piece of its code shares.
-fn class_features(decl: &Value, declared: &HashSet<String>) -> BTreeSet<&'static str> {
+/// What a class declaration reaches outside the sources, which every piece of its code shares.
+fn class_features(census: &Census, decl: &Value) -> BTreeSet<&'static str> {
     let mut features = BTreeSet::new();
     let kind = text(decl, "kind");
-    if kind == "ANNOTATION_TYPE" {
-        features.insert("annotation types");
-    }
-    // The program's own interfaces translate, generic ones erased, and so does `Comparable`; one
-    // from elsewhere is not translated.
+    // The program's own interfaces translate, generic ones erased, and so do `Comparable` and the
+    // interfaces that lowering provides; one from elsewhere is not translated.
     for clause in decl["implementsClause"].as_array().into_iter().flatten() {
         let interface = raw(text(clause, "javaType"));
-        if !declared.contains(&interface) && interface != "java.lang.Comparable" {
+        if !census.known(&interface) && interface != "java.lang.Comparable" {
             features.insert("implementing interfaces outside the sources");
         }
     }
     // Class trees of the program's own classes translate; a superclass from elsewhere does not.
     if kind == "CLASS" && !decl["extendsClause"].is_null() {
-        let superclass = text(&decl["extendsClause"], "javaType");
-        let superclass = raw(superclass);
-        if !declared.contains(&superclass) && !crate::lower::is_standard(&superclass) {
+        let superclass = raw(text(&decl["extendsClause"], "javaType"));
+        if !census.known(&superclass) {
             features.insert("extending classes outside the sources");
         }
-    }
-    if kind == "ENUM" && members(decl).any(|m| !m["initializer"]["classBody"].is_null()) {
-        features.insert("enum constants with bodies");
     }
     features
 }
 
-/// Whether javac's name for a class is that of an anonymous class: its binary name `Main$1`, or
-/// `<anonymous Planet>` for the body of an enum constant.
-fn is_anonymous(name: &str) -> bool {
-    name.starts_with('<')
-        || name.rsplit_once('$').is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// A type without its type arguments: `Box<java.lang.Integer>[]` is `Box[]`.
+/// A type without its type arguments, those of its outer types too: `Box<java.lang.Integer>[]`
+/// is `Box[]`, and `Outer<T>.Inner<U>` is `Outer.Inner`.
 fn raw(ty: &str) -> String {
-    match (ty.find('<'), ty.rfind('>')) {
-        (Some(open), Some(close)) if open > 0 => format!("{}{}", &ty[..open], &ty[close + 1..]),
-        _ => ty.to_string(),
-    }
+    crate::lower::raw_type(ty)
 }
 
 fn is_primitive(ty: &str) -> bool {

@@ -94,10 +94,13 @@ struct Seen {
     all: bool,
 }
 
-pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
+/// Every error found, in the order of the code; the first is the one a translation reports.
+pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>> {
     if class.type_index("java.lang.Throwable").is_none() {
         return Ok(());
     }
+    let mut errors = Vec::new();
+    let mut reject = |pos: Pos, message: &str| errors.push(Error { pos, message: message.to_string() });
     let h = &class.hierarchy;
     let mut points: Vec<Vec<Point>> =
         (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
@@ -226,10 +229,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         let Raise::Text(shown) = &p.raise else { continue };
         let program = shown.iter().filter(|&&c| !from_jdk(&class.types[class.methods[c].class]));
         if program.flat_map(|&c| &escapes[c]).any(|k| caught(k, &p.frames) || observed(k, &seen[m])) {
-            return error(
-                p.pos,
-                "catching an exception that this toString may throw not supported yet".to_string(),
-            );
+            reject(p.pos, "catching an exception that this toString may throw not supported yet");
         }
     }
 
@@ -237,6 +237,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     let mut throwing: HashSet<usize> = (0..class.methods.len())
         .filter(|&m| guarded[m] || (!initializer[m] && escapes[m].iter().any(|k| observed(k, &seen[m]))))
         .collect();
+    // The methods that throw themselves, not only through an override.
+    let own = throwing.clone();
     let groups: Vec<usize> = throwing.iter().flat_map(|&m| h.group(m)).collect();
     throwing.extend(groups);
 
@@ -302,9 +304,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
                     let simple = name.rsplit('.').next().unwrap_or_default();
                     let exception =
                         if name == "?" { "an exception".to_string() } else { format!("the `{simple}`") };
-                    return error(
+                    reject(
                         p.pos,
-                        format!("catching {exception} that {} may throw not supported yet", p.what),
+                        &format!("catching {exception} that {} may throw not supported yet", p.what),
                     );
                 }
             }
@@ -313,20 +315,23 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             continue;
         }
         if method.is_main {
-            return error(method.pos, "a call of `main` that is caught not supported yet");
+            reject(method.pos, "a call of `main` that is caught not supported yet");
+            continue;
         }
         // An exception object is built where it is thrown, and an enum constant where the enum
         // is initialized, outside any `try` of the program.
         let throwable = class.type_index("java.lang.Throwable");
         let decl = &class.types[method.class];
         if method.is_ctor && throwable.is_some_and(|t| class.hierarchy.is_subtype(method.class, t)) {
-            return error(method.pos, "a constructor of an exception that throws not supported yet");
-        }
-        if method.is_ctor && decl.enum_constants.is_some() {
-            return error(method.pos, "a constructor of an enum that throws not supported yet");
+            reject(method.pos, "a constructor of an exception that throws not supported yet");
+        } else if method.is_ctor && decl.enum_constants.is_some() {
+            reject(method.pos, "a constructor of an enum that throws not supported yet");
         }
         if method.name == "toString" && method.params.is_empty() {
-            return error(method.pos, "a toString that throws an exception that is caught not supported yet");
+            // At the override that throws, which may not be the first of its group.
+            let thrower = h.group(m).into_iter().find(|g| own.contains(g)).unwrap_or(m);
+            let pos = class.methods[thrower].pos;
+            reject(pos, "a toString that throws an exception that is caught not supported yet");
         }
     }
 
@@ -384,10 +389,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             });
         }
         if let Some(pos) = found {
-            return error(
-                pos,
-                "the message of a `NullPointerException` that the runtime raises not supported yet",
-            );
+            reject(pos, "the message of a `NullPointerException` that the runtime raises not supported yet");
         }
     }
     // A `catch` may read the message of a dereference that its `try` catches, or of one whose
@@ -425,7 +427,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     let initializer_error = Kind::Runtime(INITIALIZER_ERROR);
     for (m, method) in class.methods.iter().enumerate() {
         if initializer[m] && !guarded[m] && !escapes[m].is_empty() && observed(&initializer_error, &seen[m]) {
-            return error(method.pos, "a static initializer that throws inside a `try` not supported yet");
+            reject(method.pos, "a static initializer that throws inside a `try` not supported yet");
         }
     }
     // The initializers of instance fields run in each constructor, outside its `try`s: what they
@@ -444,11 +446,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     for decl in &class.types {
         for constant in decl.enum_constants.iter().flatten() {
             if let Some(pos) = constant.values.iter().find_map(|e| initializer_raises(e, usize::MAX)) {
-                return error(pos, "an enum constant whose arguments throw not supported yet");
+                reject(pos, "an enum constant whose arguments throw not supported yet");
             }
         }
     }
 
+    if !errors.is_empty() {
+        return Err(errors);
+    }
     facts.throwing = throwing;
     facts.init_throwing = init_throwing;
     facts.live_tries = live_tries;
@@ -619,9 +624,15 @@ fn stmt_points(
     match s {
         Stmt::If { cond, then, otherwise } => {
             expr_points(class, facts, m, cond, frames, safe, out);
+            // A branch that a known condition never takes raises nothing (see `guards`).
+            let known = guards::known_condition(class, cond);
             let then_safe = narrowed(safe, cond, true, |v| assigns_stmt(then, v));
-            stmt_points(class, facts, m, then, frames, &then_safe, out);
-            if let Some(o) = otherwise {
+            if known != Some(false) {
+                stmt_points(class, facts, m, then, frames, &then_safe, out);
+            }
+            if let Some(o) = otherwise
+                && known != Some(true)
+            {
                 let else_safe = narrowed(safe, cond, false, |v| assigns_stmt(o, v));
                 stmt_points(class, facts, m, o, frames, &else_safe, out);
             }
@@ -928,7 +939,7 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
             | Builtin::EnumOrdinal
             | Builtin::EnumName
             | Builtin::EnumCompareTo
-            | Builtin::Native(Native::IdentityHash),
+            | Builtin::Native(Native::IdentityHash | Native::SystemIdentityHash),
             _,
         ) => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
@@ -942,12 +953,13 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
     }
 }
 
-/// The `toString` methods that showing a value of type `ty` may run.
+/// The `toString` methods that showing a value of type `ty` may run, and the `hashCode`s that
+/// `Object`'s `toString` shows.
 fn to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
     let Some(t) = class.class_index(ty) else { return Vec::new() };
     let mut out = Vec::new();
     for c in class.hierarchy.concretes(t) {
-        if let Some(i) = hierarchy::to_string_impl(class, c)
+        if let Some(i) = hierarchy::text_impl(class, c)
             && !out.contains(&i)
         {
             out.push(i);
