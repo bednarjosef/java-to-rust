@@ -603,7 +603,9 @@ impl<'t> Lowering<'t> {
             "INSTANCE_OF" => self.instance_of(node)?,
             "SWITCH_EXPRESSION" => self.switch_expr(node)?,
             "EQUAL_TO" | "NOT_EQUAL_TO" if classes::compares_classes(node) => self.class_comparison(node)?,
-            "EQUAL_TO" | "NOT_EQUAL_TO" if charsets::compares_charsets(node) => self.charset_comparison(node)?,
+            "EQUAL_TO" | "NOT_EQUAL_TO" if charsets::compares_charsets(node) => {
+                self.charset_comparison(node)?
+            }
             kind => {
                 let left = node.child("leftOperand");
                 let op = binary_op(node, kind);

@@ -44,11 +44,8 @@ impl<'t> Lowering<'t> {
             };
             return Ok(ExprKind::Builtin(Builtin::Charset(op), Vec::new()));
         }
-        let receiver = if symbol.is_static {
-            None
-        } else {
-            Some(node.child("methodSelect")?.child("expression")?)
-        };
+        let receiver =
+            if symbol.is_static { None } else { Some(node.child("methodSelect")?.child("expression")?) };
         let args: Vec<Node> = node.list("arguments").collect();
         let op = match (symbol.name, args.len(), receiver.is_some()) {
             ("forName", 1, false) => CharsetOp::ForName,
