@@ -726,6 +726,7 @@ impl<'a> Gen<'a> {
             self.display_impl(t, &variants);
         }
         self.raised_impl(t);
+        self.chain_enum_items(t, &variants);
     }
 
     /// The arms of a `match self` over the variants, each made by `arm` from the variant's class;

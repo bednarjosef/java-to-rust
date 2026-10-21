@@ -12,6 +12,7 @@ use std::fmt;
 
 mod boxed;
 mod builder;
+mod chains;
 mod character;
 mod character_classes;
 mod character_tables;
@@ -43,6 +44,7 @@ mod unsigned;
 mod vm;
 pub use boxed::*;
 pub use builder::{StringBuilder, same_builder};
+pub use chains::{Chain, Link, Unlink, drop_links};
 pub use character::*;
 pub use character_classes::*;
 pub use charset::*;
