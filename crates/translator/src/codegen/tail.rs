@@ -28,7 +28,8 @@ impl<'a> Gen<'a> {
         match stmt {
             Stmt::Return(Some(value), _) => {
                 let code = self.returned(value);
-                self.line(&code.text);
+                let text = self.ok(code.text);
+                self.line(&text);
             }
             Stmt::Block(stmts) => self.stmts(stmts, true),
             Stmt::If { cond, then, otherwise } => self.if_stmt(cond, then, otherwise.as_deref(), true),
@@ -57,8 +58,14 @@ impl<'a> Gen<'a> {
         let conflicts = self.stmt_conflicts(stmt);
         let outer = std::mem::replace(&mut self.guarded, conflicts);
         let code = self.returned(value);
-        self.line(&code.text);
+        let text = self.ok(code.text);
+        self.line(&text);
         self.guarded = outer;
+    }
+
+    /// The value `text` as the result of the current method: `Ok(text)` in a method that throws.
+    pub(super) fn ok(&self, text: String) -> String {
+        if self.throwing { format!("Ok({text})") } else { text }
     }
 
     /// The statements of a case of a switch expression, then its value. `T x = e; yield x;`, with
@@ -97,8 +104,7 @@ impl<'a> Gen<'a> {
     }
 
     /// An `if` and its `else if` chain. In tail position every branch is a value, so the `if` is
-    /// the value of the function. Only `narrow_if`'s forms are skipped there; they would need
-    /// their branches as statements.
+    /// the value of the function, also in `narrow_if`'s forms.
     pub(super) fn if_stmt(
         &mut self,
         cond: &'a Expr,
@@ -106,12 +112,13 @@ impl<'a> Gen<'a> {
         otherwise: Option<&'a Stmt>,
         tail: bool,
     ) {
-        if !tail && self.narrow_if(cond, then, otherwise) {
+        if self.narrow_if(cond, then, otherwise, tail) {
             return;
         }
-        let cond_text = self.condition(cond);
+        let (cond_text, narrowed) = self.guard(cond, then);
         self.line(&format!("if {cond_text} {{"));
         self.nested_in(then, tail);
+        self.unnarrow(narrowed);
         let mut otherwise = otherwise;
         while let Some(stmt) = otherwise {
             // `else { if .. }` is `else if ..`: the block holds nothing else.
@@ -122,10 +129,14 @@ impl<'a> Gen<'a> {
                 },
                 _ => stmt,
             };
-            if let Stmt::If { cond, then, otherwise: next } = stmt {
-                let cond_text = self.condition(cond);
+            // An `if` that `narrow_if` writes is nested in the `else`.
+            if let Stmt::If { cond, then, otherwise: next } = stmt
+                && !self.narrows_else(cond, next.as_deref())
+            {
+                let (cond_text, narrowed) = self.guard(cond, then);
                 self.line(&format!("}} else if {cond_text} {{"));
                 self.nested_in(then, tail);
+                self.unnarrow(narrowed);
                 otherwise = next.as_deref();
             } else {
                 self.line("} else {");

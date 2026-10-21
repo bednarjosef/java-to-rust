@@ -39,7 +39,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                     match target {
                         Place::Var(name) => vars.push((m, name.clone())),
                         Place::Field { object, name } => {
-                            if let Type::Class(owner) = object.ty {
+                            if let Some(owner) = class.field_owner_name(object.ty, name) {
                                 fields.push((owner.to_string(), name.clone()));
                             }
                         }
@@ -61,7 +61,9 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 ExprKind::Call { args, resolved: Some(callee), .. }
                 | ExprKind::MethodCall { args, resolved: Some(callee), .. }
                 | ExprKind::New { args, ctor: Some(callee), .. }
-                | ExprKind::ThisCall { args, resolved: Some(callee) } => {
+                | ExprKind::ThisCall { args, resolved: Some(callee) }
+                | ExprKind::SuperInit { args, resolved: Some(callee) } => {
+                    // The argument reaches every method the call may run.
                     for (i, arg) in args.iter().enumerate() {
                         if maybe_null(facts, m, arg) {
                             params.push((*callee, i));
@@ -106,7 +108,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             for f in decl.statics.iter().filter(|f| may_be_unset(f.ty)) {
                 // An eagerly initialized static starts at a placeholder, which an object has not.
                 let set = f.init.as_ref().is_some_and(|e| !maybe_null(facts, usize::MAX, e))
-                    && (!facts.eager_init.contains(&t) || !matches!(f.ty, Type::Class(_)));
+                    && (!facts.eager_init.contains(&t) || !matches!(f.ty, Type::Class(..)));
                 if !set {
                     statics.push((t, f.name.clone()));
                 }
@@ -114,9 +116,16 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
         }
         facts.nullable_vars.extend(vars);
         facts.nullable_vars.extend(declared);
+        // The methods of an override group share their parameters' and return value's nullness,
+        // so that a call may run any of them.
+        let params: Vec<(usize, usize)> = params
+            .into_iter()
+            .flat_map(|(m, i)| class.hierarchy.group(m).into_iter().map(move |g| (g, i)))
+            .collect();
         facts
             .nullable_vars
             .extend(params.into_iter().map(|(m, i)| (m, class.methods[m].params[i].name.clone())));
+        let returns: Vec<usize> = returns.into_iter().flat_map(|m| class.hierarchy.group(m)).collect();
         facts.nullable_returns.extend(returns);
         facts.nullable_fields.extend(fields);
         facts.nullable_statics.extend(statics);
@@ -137,7 +146,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
 /// The fields whose nullness is analyzed: strings, arrays and objects. A boxed field is always an
 /// `Option`.
 fn may_be_unset(ty: Type) -> bool {
-    matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(_))
+    matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(..))
 }
 
 /// Whether every constructor of class `t` sets the field `name` to a value that is not null
@@ -209,9 +218,7 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
         {
             true
         }
-        ExprKind::Field { object, name } => {
-            matches!(object.ty, Type::Class(owner) if facts.nullable_fields.contains(&(owner.to_string(), name.clone())))
-        }
+        ExprKind::Field { object, name } => facts.field_nullable(object.ty, name),
         ExprKind::Static { class, name } => facts.nullable_statics.contains(&(*class, name.clone())),
         ExprKind::Index(array, _) => facts.nullable_elements.contains(&array.ty.element()),
         ExprKind::Assign {

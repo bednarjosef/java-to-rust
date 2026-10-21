@@ -7,6 +7,8 @@ cd "$(dirname "$0")/.."
 
 fail() { echo "check failed: $1"; exit 1; }
 
+markers=$(git grep -nE '^(<<<<<<<|>>>>>>>) ' -- . ':!scripts/check.sh')
+[ -z "$markers" ] || { echo "$markers" | head -20; fail "merge conflict markers"; }
 cargo fmt --check >/dev/null 2>&1 || { cargo fmt --check 2>&1 | head -40; fail "cargo fmt (run \`cargo fmt\`)"; }
 out=$(cargo clippy --all-targets -q -- -D warnings 2>&1) || { echo "$out" | head -80; fail "clippy"; }
 out=$(cargo test -q 2>&1) || { echo "$out" | grep -vE '^\s*$|^running |^test result: ok' | head -120; fail "tests"; }

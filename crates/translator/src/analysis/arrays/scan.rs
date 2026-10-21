@@ -63,11 +63,13 @@ pub(super) struct Scan {
 }
 
 /// A call and what each argument is.
+#[derive(Clone)]
 pub(super) struct Call {
     pub callee: usize,
     pub args: Vec<Arg>,
 }
 
+#[derive(Clone)]
 pub(super) struct Arg {
     /// The array variable the argument is, or whose row it is.
     pub name: Option<String>,
@@ -196,8 +198,8 @@ struct Walk<'m> {
     bad: HashSet<String>,
     /// The expression of the simple statement being walked, where a variable may be moved.
     top: Option<&'m Expr>,
-    /// How many switches enclose the code being walked; the liveness analysis does not look
-    /// into them, so nothing is moved there.
+    /// How many switches and `try` statements enclose the code being walked; the liveness
+    /// analysis does not look into them, so nothing is moved there.
     switches: usize,
     scan: Scan,
 }
@@ -345,7 +347,18 @@ impl<'m> Walk<'m> {
             }
             Stmt::Labeled { body, .. } => self.stmt(body, ret),
             Stmt::Block(stmts) => self.block(stmts, ret),
-            Stmt::Yield(e) => self.expr(e),
+            Stmt::Yield(e) | Stmt::Throw(e) => self.expr(e),
+            Stmt::Try { body, catches, finally } => {
+                self.switches += 1;
+                self.block(body, ret);
+                for catch in catches {
+                    self.block(&catch.body, ret);
+                }
+                if let Some(f) = finally {
+                    self.block(f, ret);
+                }
+                self.switches -= 1;
+            }
             Stmt::Return(None, _)
             | Stmt::Break
             | Stmt::Continue
@@ -503,7 +516,8 @@ impl<'m> Walk<'m> {
             }
             ExprKind::Call { args, resolved: Some(callee), .. }
             | ExprKind::New { args, ctor: Some(callee), .. }
-            | ExprKind::ThisCall { args, resolved: Some(callee) } => self.call(*callee, args),
+            | ExprKind::ThisCall { args, resolved: Some(callee) }
+            | ExprKind::SuperInit { args, resolved: Some(callee) } => self.call(*callee, args),
             ExprKind::MethodCall { receiver, args, resolved: Some(callee), .. } => {
                 self.expr(receiver);
                 self.call(*callee, args);
@@ -515,11 +529,13 @@ impl<'m> Walk<'m> {
             ExprKind::Call { args, resolved: None, .. }
             | ExprKind::New { args, ctor: None, .. }
             | ExprKind::ThisCall { args, resolved: None }
+            | ExprKind::SuperInit { args, resolved: None }
             | ExprKind::Builtin(_, args)
             | ExprKind::NewArray(args)
             | ExprKind::ArrayLit(args) => args.iter().for_each(|a| self.expr(a)),
             ExprKind::Unary(_, x) | ExprKind::Cast(_, x) => self.expr(x),
             ExprKind::Field { object, .. } => self.expr(object),
+            ExprKind::InstanceOf { value, .. } => self.expr(value),
             ExprKind::Binary(_, l, r) => {
                 self.expr(l);
                 self.expr(r);
@@ -619,6 +635,7 @@ fn calls_with(e: &Expr, name: &str) -> bool {
         ExprKind::Call { args, .. }
         | ExprKind::New { args, .. }
         | ExprKind::ThisCall { args, .. }
+        | ExprKind::SuperInit { args, .. }
         | ExprKind::MethodCall { args, .. }
         | ExprKind::Builtin(_, args) => found |= args.iter().any(|a| mentions(a, name)),
         _ => {}
@@ -638,6 +655,7 @@ impl Arg {
             | ExprKind::MethodCall { .. }
             | ExprKind::New { .. }
             | ExprKind::ThisCall { .. }
+            | ExprKind::SuperInit { .. }
             | ExprKind::Assign { .. }
             | ExprKind::IncDec { .. }
             | ExprKind::Builtin(Builtin::ArraysFill | Builtin::ArraysSort | Builtin::Arrays(_), _) => {

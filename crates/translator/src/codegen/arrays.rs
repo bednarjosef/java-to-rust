@@ -14,7 +14,11 @@ impl<'a> Gen<'a> {
                 let elem = self.element_ty_name(*elem);
                 format!("{}<{elem}>", self.runtime("Array"))
             }
-            Type::Class(name) => self.object_type(name),
+            Type::Class(name, []) => self.object_type(name),
+            Type::Class(name, args) => {
+                let args: Vec<String> = args.iter().map(|&a| self.ty_name(a)).collect();
+                self.object_type_with(name, &format!("<{}>", args.join(", ")))
+            }
             Type::Enum(name) => struct_name(name),
             Type::Boxed(_) => self.boxed_name(ty),
             Type::StringBuilder => self.runtime("StringBuilder"),
@@ -91,7 +95,7 @@ impl<'a> Gen<'a> {
         }
         let handle = self.handle(array);
         let i = self.value(index, Type::Int).text;
-        Code::atom(format!("{}({handle}, {i})", self.runtime("get")))
+        self.may_fail(id, "get", "", &format!("{handle}, {i}"))
     }
 
     /// `a.length`.
@@ -158,7 +162,8 @@ impl<'a> Gen<'a> {
             i = self.bind_first(&mut binding, i, &["index", "slot", "at"]);
             v = self.bind_first(&mut binding, v, &["value", "item", "new"]);
         }
-        Self::bound_write(binding, format!("{}({handle}, {i}, {v})", self.runtime(helper)))
+        let call = self.may_fail(id, helper, "", &format!("{handle}, {i}, {v}")).text;
+        Self::bound_write(binding, call)
     }
 
     /// `a[i] op= v`, as a call of `update`, which reads the old element before it evaluates `v`.
@@ -176,6 +181,9 @@ impl<'a> Gen<'a> {
         if let Some(path) = self.plain_path(array) {
             return self.plain_update(path, op, index, ty, rhs, id, used);
         }
+        if self.raises_in(rhs) {
+            return self.update_in_steps(op, array, index, ty, rhs, id, used);
+        }
         let (mut binding, handle) = self.write_handle(array, has_effects(index) || has_effects(rhs));
         let mut i = self.value(index, Type::Int).text;
         if lends_array(index) {
@@ -183,7 +191,9 @@ impl<'a> Gen<'a> {
         }
         let old = self.fresh_name(&["old", "previous", "before"]);
         let new = self.element_update(op, ty, rhs, id, old);
-        Self::bound_write(binding, format!("{}({handle}, {i}, |{old}| {new})", self.runtime("update")))
+        let new = self.closure_value(id, new);
+        let call = self.may_fail(id, "update", "", &format!("{handle}, {i}, |{old}| {new}")).text;
+        Self::bound_write(binding, call)
     }
 
     /// `a[i]++`, `--a[i]` and the like.
@@ -208,8 +218,61 @@ impl<'a> Gen<'a> {
         }
         let old = self.fresh_name(&["old", "previous", "before"]);
         let new = self.step_value(ty, increment, id, old);
+        let new = self.closure_value(id, new);
         let helper = if prefix { "update" } else { "post_update" };
-        Self::bound_write(binding, format!("{}({handle}, {i}, |{old}| {new})", self.runtime(helper)))
+        let call = self.may_fail(id, helper, "", &format!("{handle}, {i}, |{old}| {new}")).text;
+        Self::bound_write(binding, call)
+    }
+
+    /// `a[i] op= v` on a shared array whose value `v` may fail where a handler sees it: the
+    /// element is read, the value computed and the element written one after the other, in
+    /// Java's order, so that the failure of `v` can go on (it could not from inside the closure
+    /// of `update`).
+    #[allow(clippy::too_many_arguments)]
+    fn update_in_steps(
+        &mut self,
+        op: BinOp,
+        array: &'a Expr,
+        index: &'a Expr,
+        ty: Type,
+        rhs: &'a Expr,
+        id: ExprId,
+        used: bool,
+    ) -> String {
+        let (binding, handle) = self.write_handle(array, true);
+        let i = self.value(index, Type::Int).text;
+        let slot = self.fresh_name(&["index", "slot", "at"]);
+        let old = self.fresh_name(&["old", "previous", "before"]);
+        let value = self.fresh_name(&["value", "item", "new"]);
+        let new = self.element_update(op, ty, rhs, id, old);
+        let get = self.may_fail(id, "get", "", &format!("{handle}, {slot}")).text;
+        let mut lets = vec![
+            binding.unwrap_or_default(),
+            format!("let {slot} = {i};"),
+            format!("let {old} = {get};"),
+            format!("let {value} = {new};"),
+        ];
+        let stored = if used { format!("{value}.clone()") } else { value.to_string() };
+        let set = self.may_fail(id, "set", "", &format!("{handle}, {slot}, {stored}")).text;
+        lets.push(format!("{set};"));
+        if used {
+            lets.push(value.to_string());
+        }
+        format!("{{ {} }}", lets.join(" "))
+    }
+
+    /// Whether some operation in `e` may fail where a handler sees it, so that `e` cannot be
+    /// computed inside a closure.
+    pub(super) fn raises_in(&self, e: &Expr) -> bool {
+        let mut found = false;
+        visit_expr(e, &mut |x| found |= self.facts.raising.contains(&x.id));
+        found
+    }
+
+    /// The new element `new` as the body of the closure of an element update: `Ok(new)` where
+    /// the update is the checked form (`may_fail`), whose closure returns a `Result`.
+    pub(super) fn closure_value(&self, id: ExprId, new: String) -> String {
+        if self.facts.raising.contains(&id) { format!("Ok({new})") } else { new }
     }
 
     /// `slot op= rhs` where Rust's compound assignment does what Java's does.
@@ -334,7 +397,8 @@ impl<'a> Gen<'a> {
 pub(super) fn name_part(ty: Type) -> String {
     match ty {
         Type::Array(elem) => format!("{}_array", name_part(*elem)),
-        Type::Class(name) | Type::Enum(name) => struct_name(name).to_lowercase(),
+        Type::Class(name, _) | Type::Enum(name) => struct_name(name).to_lowercase(),
+        Type::Boxed(_) => ty.to_string().to_lowercase(),
         _ => rust_type(ty).to_lowercase(),
     }
 }

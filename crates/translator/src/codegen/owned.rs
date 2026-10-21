@@ -18,16 +18,23 @@ impl<'a> Gen<'a> {
             Some((Stmt::Expr(Expr { kind: ExprKind::ThisCall { args, resolved }, .. }), rest)) => {
                 let index = resolved.expect("calls are resolved by the checker");
                 let args = self.call_args(index, args).join(", ");
-                (format!("{}({args})", self.qualified_fn(index)), rest, false)
+                let call = Code::atom(format!("{}({args})", self.qualified_fn(index)));
+                (self.raising(call, index).text, rest, false)
             }
             _ => {
                 let initialize = !self.inline_inits(m.class) && decl.fields.iter().any(|f| f.init.is_some());
-                let (literal, rest) = self.struct_literal(m, initialize);
+                let (base, body) = self.super_init(m.class, &m.body);
+                let (literal, rest) = self.struct_literal(m, initialize, base, body);
                 (literal, rest, initialize)
             }
         };
         let rest = without_final_return(rest);
         if rest.is_empty() && !initialize {
+            // A constructor that only delegates to one that throws returns its `Result`.
+            let start = match start.strip_suffix('?') {
+                Some(result) if self.throwing => result.to_string(),
+                _ => self.ok(start),
+            };
             self.line(&start);
             return;
         }
@@ -39,7 +46,8 @@ impl<'a> Gen<'a> {
         self.ctor_result = Some("this");
         self.stmts(rest, false);
         self.ctor_result = None;
-        self.line("this");
+        let this = self.ok("this".to_string());
+        self.line(&this);
     }
 
     /// The struct literal that a constructor starts from, and the statements of its body that are
@@ -48,7 +56,15 @@ impl<'a> Gen<'a> {
     /// order and then the assignments: an initializer that a later one reads, or that has effects
     /// when a later one reads a field, is computed into a local first, and so is every value with
     /// effects when the literal's field order would change their order.
-    fn struct_literal(&mut self, m: &'a Method, initialize: bool) -> (String, &'a [Stmt]) {
+    /// The superclass's fields struct, `base`, comes first, built by the constructor's `super(...)`
+    /// before anything else runs.
+    fn struct_literal(
+        &mut self,
+        m: &'a Method,
+        initialize: bool,
+        base: Option<String>,
+        body: &'a [Stmt],
+    ) -> (String, &'a [Stmt]) {
         let decl = &self.class.types[m.class];
         let fields = &decl.fields;
         let leading = crate::analysis::leading_assignments(self.class, m, self.facts);
@@ -69,6 +85,17 @@ impl<'a> Gen<'a> {
             })
             .collect();
         let sequential = read.iter().any(|&r| r);
+        // `super(...)` runs first: before any value that is computed into a local first.
+        let base_part = base.map(|b| {
+            let values = inits.iter().flatten().copied().chain(leading.iter().map(|&(_, v)| v));
+            if sequential || values.into_iter().any(has_effects) {
+                let temp = self.temp("base");
+                self.line(&format!("let {temp} = {b};"));
+                if temp == "base" { temp } else { format!("base: {temp}") }
+            } else {
+                format!("base: {b}")
+            }
+        });
         let mut bound: Vec<Option<String>> = vec![None; fields.len()];
         let mut taken = Vec::new();
         let bind = |g: &mut Self, i: usize, value: &'a Expr, taken: &mut Vec<String>| {
@@ -125,27 +152,32 @@ impl<'a> Gen<'a> {
             (0..fields.len()).filter(|&i| bound[i].is_none()).filter_map(|i| values[i]).collect();
         let conflicts = self.conflicts(&unbound);
         let outer = std::mem::replace(&mut self.guarded, conflicts);
-        let parts: Vec<String> = fields
-            .iter()
-            .enumerate()
-            .map(|(i, f)| {
-                let field = snake_case(&f.name);
-                let value = match (&bound[i], values[i]) {
-                    (Some(local), _) => local.clone(),
-                    (None, Some(e)) => self.field_value(e, f.ty, self.field_nullable(&decl.name, &f.name)),
-                    (None, None) => self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name)),
-                };
-                if value == field { field } else { format!("{field}: {value}") }
-            })
-            .collect();
+        let mut parts: Vec<String> = base_part.into_iter().collect();
+        parts.extend(
+            fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let field = snake_case(&f.name);
+                    let value = match (&bound[i], values[i]) {
+                        (Some(local), _) => local.clone(),
+                        (None, Some(e)) => {
+                            self.field_value(e, f.ty, self.field_nullable(&decl.name, &f.name))
+                        }
+                        (None, None) => self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name)),
+                    };
+                    if value == field { field } else { format!("{field}: {value}") }
+                })
+                .collect::<Vec<String>>(),
+        );
         self.guarded = outer;
         self.field_locals.clear();
         let literal = if parts.is_empty() {
-            format!("{} {{}}", struct_name(&decl.name))
+            format!("{} {{}}", self.struct_of(m.class))
         } else {
-            format!("{} {{ {} }}", struct_name(&decl.name), parts.join(", "))
+            format!("{} {{ {} }}", self.struct_of(m.class), parts.join(", "))
         };
-        (literal, &m.body[leading.len()..])
+        (literal, &body[leading.len()..])
     }
 
     /// Whether a statement list changes an object that `is_obj` picks out: a field write, or a call
@@ -176,7 +208,7 @@ impl<'a> Gen<'a> {
     /// Whether a local needs `mut`: it is reassigned, or it is an owned object that a later statement
     /// changes.
     pub(super) fn local_is_mut(&self, ty: Type, name: &str, rest: &[Stmt]) -> bool {
-        let owned = matches!(ty, Type::Class(c) if self.facts.owned.contains(c));
+        let owned = matches!(ty, Type::Class(c, _) if self.facts.owned.contains(c));
         assigns_any(rest, name)
             || (owned && self.changes_owned(rest, &|e| matches!(&e.kind, ExprKind::Var(v) if v == name)))
     }

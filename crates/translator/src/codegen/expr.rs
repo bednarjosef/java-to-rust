@@ -152,8 +152,10 @@ impl<'a> Gen<'a> {
             {
                 return format!("{name} += {}", self.str_ref(value));
             }
-            if matches!(value.ty, Type::Class(_)) {
-                let index = self.to_string_index(value);
+            if matches!(value.ty, Type::Class(..))
+                && self.enum_of(value).is_none()
+                && let Some(index) = self.to_string_index(value)
+            {
                 return format!("{name} += &{}", self.method_call(value, index, &[]).text);
             }
             let mut parts = Vec::new();
@@ -200,6 +202,12 @@ impl<'a> Gen<'a> {
 
     /// `e` as a value of type `ty`, applying Java's widening conversions.
     pub(super) fn value(&mut self, e: &'a Expr, ty: Type) -> Code {
+        // A value given to a Rust generic's type variable is of its own type, which a literal
+        // states, since nothing else may.
+        if self.is_type_param(ty) && !self.is_type_param(e.ty) {
+            let code = self.value(e, e.ty);
+            return if code.literal.is_some() { Code::atom(code.typed()) } else { code };
+        }
         if matches!(e.ty, Type::Boxed(_)) || matches!(ty, Type::Boxed(_)) {
             return self.boxing_value(e, ty);
         }
@@ -257,7 +265,9 @@ impl<'a> Gen<'a> {
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
                     // An object or array narrowed by a null check is a reference to the `Rc`.
-                    Type::Class(_) | Type::StringBuilder | Type::Array(_) if self.borrowed.contains(name) => {
+                    Type::Class(..) | Type::StringBuilder | Type::Array(_)
+                        if self.borrowed.contains(name) =>
+                    {
                         Code::atom(format!("{rust}.clone()"))
                     }
                     ty if self.clones(ty) && !self.facts.moves.contains(&e.id) => {
@@ -267,7 +277,7 @@ impl<'a> Gen<'a> {
                 }
             }
             ExprKind::This if matches!(e.ty, Type::Enum(_)) => Code::atom(self.this_name()),
-            ExprKind::This => Code::atom("this.clone()"),
+            ExprKind::This => Code::atom(format!("{}.clone()", self.this_name())),
             ExprKind::EnumConstant { class, ordinal } => Code::atom(self.constant_path(*class, *ordinal)),
             ExprKind::Field { object, name } => self.field_read(object, name, e.ty),
             ExprKind::Static { class, name } => self.static_read(*class, name, e.ty),
@@ -304,7 +314,8 @@ impl<'a> Gen<'a> {
                 self.format("format!", parts)
             }
             ExprKind::Binary(op, l, r) if is_null_test(*op, l, r) => self.null_test(*op, l, r),
-            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(_)) => {
+            ExprKind::Binary(BinOp::And, ..) if let Some(code) = self.bound_and(e) => code,
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(..)) => {
                 self.identity(*op, l, r)
             }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if l.ty == Type::StringBuilder => {
@@ -376,6 +387,17 @@ impl<'a> Gen<'a> {
             ExprKind::Length(array) => self.length(array),
             ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
+            // An upcast or a downcast between the program's types, or a string, a box or a
+            // primitive becoming an `Object`.
+            ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
+            // A downcast from an interface to an enum that implements it, or from `Object` to a
+            // string or a box.
+            ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_)), value)
+                if matches!(value.ty, Type::Class(..)) =>
+            {
+                self.class_cast(*to, value)
+            }
+            ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
                 if let Some(code) = self.narrowed_conditional(e, cond, a, b) {
@@ -408,18 +430,28 @@ impl<'a> Gen<'a> {
             ExprKind::Call { args, resolved, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
                 let args = self.call_args(index, args).join(", ");
-                Code::atom(format!("{}({args})", self.static_fn(index)))
+                let code = Code::atom(format!("{}({args})", self.static_fn(index)));
+                self.raising(code, index)
             }
-            ExprKind::MethodCall { receiver, args, resolved, .. } => {
+            ExprKind::MethodCall { receiver, args, resolved, is_super, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
-                if self.class.methods[index].is_static {
+                let code = if self.class.methods[index].is_static {
                     let args = self.call_args(index, args).join(", ");
                     Code::atom(format!("{}({args})", self.static_fn(index)))
+                } else if !*is_super && let Some(t) = self.enum_of(receiver) {
+                    self.enum_call(t, receiver, index, args)
                 } else {
-                    self.method_call(receiver, index, args)
-                }
+                    let target = self.dispatch(receiver, index, *is_super);
+                    if self.is_object_method(target) {
+                        return self.identity_call(receiver, target, args);
+                    }
+                    self.method_call(receiver, target, args)
+                };
+                self.raising(code, index)
             }
-            ExprKind::ThisCall { .. } => unreachable!("lowering keeps `this(...)` first in a constructor"),
+            ExprKind::ThisCall { .. } | ExprKind::SuperInit { .. } => {
+                unreachable!("lowering keeps `this(...)` and `super(...)` first in a constructor")
+            }
             ExprKind::Builtin(builtin, args) => self.builtin(*builtin, args, e.ty, e.id),
         }
     }
@@ -463,8 +495,8 @@ impl<'a> Gen<'a> {
                 if constant || self.facts.safe_division.contains(&id) {
                     infix(if op == BinOp::Div { "/" } else { "%" }, MUL, &left, &right)
                 } else {
-                    let f = self.runtime(if op == BinOp::Div { "div" } else { "rem" });
-                    Code::atom(format!("{f}({}, {})", left.typed(), right.text))
+                    let f = if op == BinOp::Div { "div" } else { "rem" };
+                    self.may_fail(id, f, "", &format!("{}, {}", left.typed(), right.text))
                 }
             }
             BinOp::Shl | BinOp::Shr | BinOp::UShr => self.shift(op, left, right, result),
@@ -534,6 +566,7 @@ impl<'a> Gen<'a> {
                 let mac = self.runtime(if builtin == Builtin::Println { "println!" } else { "print!" });
                 self.format(&mac, parts)
             }
+            Builtin::ObjectText => self.object_to_string(&args[0]),
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty)
             }
@@ -548,6 +581,7 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
             Builtin::NullCheck => self.null_check(&args[0]),
+            Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::MathAbs => {
                 let x = self.value(&args[0], ty);
                 // Math.abs(Integer.MIN_VALUE) is Integer.MIN_VALUE.
@@ -604,7 +638,7 @@ impl<'a> Gen<'a> {
             | Builtin::CharIsHighSurrogate
             | Builtin::CharIsLowSurrogate => self.char_builtin(builtin, args, id),
             Builtin::Native(native) => self.native(native, args, ty),
-            Builtin::String(op) => self.string_builtin(op, args),
+            Builtin::String(op) => self.string_builtin(op, args, id),
             // A chained call gives `&Self`; as a value, the builder is another handle to it.
             Builtin::Builder(op) if op.chains() => {
                 let code = self.builder_call(op, args);
@@ -612,7 +646,7 @@ impl<'a> Gen<'a> {
             }
             Builtin::Builder(op) => self.builder_call(op, args),
             Builtin::Format => self.format_builtin(args),
-            Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args),
+            Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args, id),
         }
     }
 }

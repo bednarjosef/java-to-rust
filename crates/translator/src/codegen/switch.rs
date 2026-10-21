@@ -23,6 +23,10 @@ pub(super) enum Kind<'a> {
     Value { machine: bool, ty: Type },
     /// A labeled statement that is not a loop: a labeled Rust block, left only by its label.
     Block,
+    /// The body of a `try` or a `catch` clause written as a labeled Rust block, which an
+    /// exception (and, with a `finally`, a jump or a `return`) leaves by its label: a jump out of
+    /// it to a loop must name the loop.
+    Try,
 }
 
 impl Kind<'_> {
@@ -31,7 +35,7 @@ impl Kind<'_> {
         match self {
             Kind::Loop(_) => true,
             Kind::Switch { machine } | Kind::Value { machine, .. } => machine,
-            Kind::Block => false,
+            Kind::Block | Kind::Try => false,
         }
     }
 }
@@ -59,6 +63,7 @@ fn leaves(body: &[Stmt]) -> bool {
                     | Stmt::BreakLabel(_)
                     | Stmt::ContinueLabel(_)
                     | Stmt::Yield(_)
+                    | Stmt::Throw(_)
             )
         ),
     }
@@ -82,6 +87,11 @@ fn breaks_out(stmt: &Stmt) -> bool {
         Stmt::Block(stmts) => stmts.iter().any(breaks_out),
         Stmt::If { then, otherwise, .. } => breaks_out(then) || otherwise.as_deref().is_some_and(breaks_out),
         Stmt::Labeled { body, .. } => !is_breakable(body) && breaks_out(body),
+        Stmt::Try { body, catches, finally } => {
+            body.iter().any(breaks_out)
+                || catches.iter().any(|c| c.body.iter().any(breaks_out))
+                || finally.iter().flatten().any(breaks_out)
+        }
         _ => false,
     }
 }
@@ -187,6 +197,19 @@ impl<'a> Gen<'a> {
         self.frames.push(Frame { kind, java, name: None, at: line_start + 4 * self.indent });
     }
 
+    /// Opens a frame for a block whose header, just written, ends with its `{`, where its label
+    /// goes: `let attempt: T = {`.
+    pub(super) fn open_block(&mut self, kind: Kind<'a>) {
+        let at = self.out.len() - 2;
+        debug_assert_eq!(&self.out[at..], "{\n");
+        self.frames.push(Frame { kind, java: None, name: None, at });
+    }
+
+    /// Gives the frame at `index` the Rust label `name`, which a `break` then names.
+    pub(super) fn name_frame(&mut self, index: usize, name: &str) {
+        self.frames[index].name = Some(name.to_string());
+    }
+
     /// Closes the innermost frame, writing its label in front of its header if a jump named it.
     pub(super) fn close(&mut self) {
         let frame = self.frames.pop().expect("a frame to close");
@@ -215,11 +238,14 @@ impl<'a> Gen<'a> {
     /// A jump to the frame at `index`: a `break`, or a `continue` after the loop's own steps, or a
     /// `break` that gives the switch expression `value`.
     pub(super) fn jump(&mut self, index: usize, cont: bool, value: Option<String>) {
+        if self.jump_through_finally(index, cont) {
+            return;
+        }
         if cont {
             match self.frames[index].kind {
                 Kind::Loop(Loop::For(update)) => {
                     for u in update {
-                        self.effect(u);
+                        self.update_effect(u);
                     }
                 }
                 Kind::Loop(Loop::DoWhile(cond)) => {
@@ -277,6 +303,10 @@ impl<'a> Gen<'a> {
         let target = self.frames.iter().rposition(|f| matches!(f.kind, Kind::Value { .. }));
         let Some(index) = target else { return self.line("break;") };
         let Kind::Value { ty, .. } = self.frames[index].kind else { unreachable!() };
+        if self.leaves_finally(index) {
+            let message = "a `yield` through a `finally` not supported yet".to_string();
+            self.rejected.get_or_insert(Error { pos: value.pos, message });
+        }
         let code = self.value(value, ty);
         self.jump(index, false, Some(code.text));
     }
@@ -328,6 +358,10 @@ impl<'a> Gen<'a> {
         self.chars = char_cases(selector, cases);
         self.exhaustive = exhaustive(self.class, selector, cases);
         let falls = cases.split_last().is_some_and(|(_, init)| init.iter().any(|c| !leaves(&c.body)));
+        // A `Ref` made by the selector would live through the whole `match`, while the cases may
+        // borrow the same object mutably: end each borrow inside the selector.
+        let outer = self.guarded;
+        self.guarded |= self.reads_through_borrow(selector);
         let text = if self.chars {
             let c = self.value(selector, Type::Char).text;
             format!("char::from_u32(u32::from({c}))")
@@ -345,6 +379,7 @@ impl<'a> Gen<'a> {
         } else {
             format!("&*{}", self.expr(selector).at(UNARY))
         };
+        self.guarded = outer;
         let yields_last = cases.iter().all(|c| matches!(c.body.last(), Some(Stmt::Yield(_))));
         if falls {
             self.machine(&text, cases, value);

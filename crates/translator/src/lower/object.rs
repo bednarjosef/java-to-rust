@@ -1,0 +1,379 @@
+//! `java.lang.Object`. A program that uses `Object` gets a type of its own for it, named
+//! `OBJECT`: an interface that every other type implements, so that the machinery of interfaces
+//! (an enum over the classes whose objects become values of it, conversions, dispatch,
+//! `instanceof`) covers it. Strings and boxes become `Object`s too, so each runtime class whose
+//! values can be one is a type of kind `Runtime` beside it. `Object`'s `equals` and `hashCode` are
+//! abstract methods of the type, which the program's `equals(Object)` and `hashCode()` override;
+//! a class that overrides neither compares and hashes by identity (see `codegen::dispatch`).
+//!
+//! `java.lang.Comparable`, when the program uses it as a type (a type variable's bound, mostly),
+//! is a type of the same kind, `COMPARABLE`, with an abstract `compareTo(Comparable)`: the
+//! program's enums and the classes that implement `Comparable` implement it, and so do strings and
+//! the boxes. A class's own `compareTo(C)` implements it through a bridge (see `bridges`).
+
+use super::*;
+use std::collections::HashSet;
+
+/// Where lowering puts `Object`: the index of its type and of its two methods, which follow the
+/// program's types and methods, and `Comparable`'s when the program uses it.
+#[derive(Clone, Copy)]
+pub(super) struct ObjectIndexes {
+    pub(super) decl: usize,
+    pub(super) equals: usize,
+    pub(super) hash_code: usize,
+    pub(super) comparable: Option<ComparableIndexes>,
+}
+
+/// The index of `Comparable`'s type, after the runtime classes, and of its `compareTo`.
+#[derive(Clone, Copy)]
+pub(super) struct ComparableIndexes {
+    pub(super) decl: usize,
+    pub(super) compare_to: usize,
+}
+
+/// Whether the declarations use `java.lang.Comparable` as a type: anywhere but in the
+/// `implements` clause of a class whose `compareTo` the program calls directly.
+pub(super) fn uses_comparable(decls: &[Node]) -> bool {
+    decls.iter().any(|d| mentions_comparable(d.0))
+}
+
+fn mentions_comparable(v: &Value) -> bool {
+    match v {
+        Value::Object(fields) => fields.iter().any(|(key, value)| match key.as_str() {
+            "implementsClause" | "symbol" => false,
+            "javaType" => value.as_str().is_some_and(|t| t.starts_with("java.lang.Comparable")),
+            _ => mentions_comparable(value),
+        }),
+        Value::Array(items) => items.iter().any(mentions_comparable),
+        _ => false,
+    }
+}
+
+/// Whether the declarations mention `java.lang.Object` other than through the constructor that
+/// every class calls: a value, a parameter or a call of one of its methods.
+pub(super) fn uses_object(decls: &[Node], real: &HashSet<*const Value>) -> bool {
+    decls.iter().any(|d| mentions_object(d.0, real))
+}
+
+fn mentions_object(v: &Value, real: &HashSet<*const Value>) -> bool {
+    if real.contains(&(v as *const Value)) {
+        return false;
+    }
+    let mentions_object = |v| mentions_object(v, real);
+    match v {
+        // A type variable erases to `Object`.
+        Value::Object(fields) if fields.get("kind").and_then(Value::as_str) == Some("TYPE_PARAMETER") => true,
+        Value::Object(fields) => {
+            if fields.get("kind").and_then(Value::as_str) == Some("CONSTRUCTOR")
+                && fields.get("owner").and_then(Value::as_str) == Some("java.lang.Object")
+            {
+                return false;
+            }
+            let names = ["javaType", "type", "owner"];
+            names.iter().any(|n| {
+                fields.get(*n).and_then(Value::as_str).is_some_and(|t| t.contains("java.lang.Object"))
+            }) || fields.values().any(mentions_object)
+        }
+        Value::Array(items) => items.iter().any(mentions_object),
+        _ => false,
+    }
+}
+
+impl<'t> Lowering<'t> {
+    /// Plans `Object` for a program that uses it: its type and methods come after the `types`
+    /// and `methods` declared so far.
+    pub(super) fn plan_object(&mut self, decls: &[Node<'t>]) {
+        let comparable = uses_comparable(decls);
+        if uses_object(decls, &self.real_type_parameters()) || comparable {
+            let decl = self.types.len();
+            let equals = self.methods.len();
+            let comparable = comparable.then_some(ComparableIndexes {
+                decl: decl + 1 + runtime_values().len(),
+                compare_to: equals + 2,
+            });
+            self.object = Some(ObjectIndexes { decl, equals, hash_code: equals + 1, comparable });
+        }
+    }
+
+    /// `Object`'s abstract `equals` and `hashCode`, appended to the lowered methods, which must be
+    /// exactly the declared ones; and the program's overrides of them.
+    pub(super) fn object_methods(&self, methods: &mut Vec<Method>) -> Result<(), Error> {
+        let Some(at) = self.object else { return Ok(()) };
+        debug_assert_eq!(methods.len(), at.equals);
+        let object = Type::class(OBJECT);
+        let method = |name: &str, params: Vec<Param>, ret: Type| Method {
+            name: name.to_string(),
+            params,
+            ret,
+            body: Vec::new(),
+            is_main: false,
+            is_static: false,
+            is_ctor: false,
+            class: at.decl,
+            pos: Pos::default(),
+            is_abstract: true,
+            overrides: Vec::new(),
+            type_params: Vec::new(),
+        };
+        for m in methods.iter_mut().filter(|m| !m.is_static && !m.is_ctor) {
+            match (m.name.as_str(), &m.params[..], m.ret) {
+                ("equals", [p], Type::Boolean) if p.ty == object => m.overrides.push(at.equals),
+                ("hashCode", [], Type::Int) => m.overrides.push(at.hash_code),
+                _ => {}
+            }
+        }
+        methods.push(method("equals", vec![Param { name: "other".to_string(), ty: object }], Type::Boolean));
+        methods.push(method("hashCode", Vec::new(), Type::Int));
+        if let Some(c) = at.comparable {
+            let param = Param { name: "other".to_string(), ty: Type::class(COMPARABLE) };
+            methods.push(Method { class: c.decl, ..method("compareTo", vec![param], Type::Int) });
+        }
+        self.bridges(methods)
+    }
+
+    /// The type of `Object` and the runtime classes, appended to the program's types, which every
+    /// type without a superclass implements.
+    pub(super) fn object_types(&self, types: &mut Vec<TypeDecl>) {
+        let Some(at) = self.object else { return };
+        debug_assert_eq!(types.len(), at.decl);
+        for t in types.iter_mut().filter(|t| t.extends.is_none()) {
+            t.implements.push(at.decl);
+        }
+        let decl = |name: &str, package: &str, kind: TypeKind, implements: Vec<usize>| TypeDecl {
+            name: name.to_string(),
+            package: package.to_string(),
+            kind,
+            is_abstract: kind == TypeKind::Interface,
+            extends: None,
+            implements,
+            fields: Vec::new(),
+            statics: Vec::new(),
+            enum_constants: None,
+            type_params: Vec::new(),
+            outer: None,
+            captures: Vec::new(),
+            origin: Origin::Member,
+        };
+        // The program's enums are comparable, and so are its classes that implement `Comparable`.
+        if let Some(c) = at.comparable {
+            for (t, decl) in types.iter_mut().enumerate() {
+                if decl.kind == TypeKind::Enum || self.implements_comparable(t) {
+                    decl.implements.push(c.decl);
+                }
+            }
+        }
+        types.push(decl(OBJECT, "", TypeKind::Interface, Vec::new()));
+        let runtime = std::iter::once(at.decl).chain(at.comparable.map(|c| c.decl)).collect::<Vec<_>>();
+        for (name, _) in runtime_values() {
+            types.push(decl(name, "", TypeKind::Runtime, runtime.clone()));
+        }
+        if let Some(c) = at.comparable {
+            debug_assert_eq!(types.len(), c.decl);
+            types.push(decl(COMPARABLE, "", TypeKind::Interface, vec![at.decl]));
+        }
+    }
+
+    /// Whether class `t` of the program says it implements `java.lang.Comparable`.
+    pub(super) fn implements_comparable(&self, t: usize) -> bool {
+        self.types[t]
+            .node
+            .list("implementsClause")
+            .any(|c| c.java_type().split('<').next() == Some("java.lang.Comparable"))
+    }
+
+    /// The bridges erasure needs, appended to `methods`: a method that overrides one whose erased
+    /// parameter or return types differ (`compareTo(Point)` implementing `Comparable`'s,
+    /// `Integer next()` implementing `T next()` of `Source<Integer>`) no longer overrides it; a
+    /// method of its class with the overridden signature does, converting the arguments and
+    /// calling it, as the bridge javac writes does. A class whose superclass's method already has
+    /// that bridge needs none of its own.
+    fn bridges(&self, methods: &mut Vec<Method>) -> Result<(), Error> {
+        let Some(at) = self.object else { return Ok(()) };
+        let original: Vec<Vec<usize>> = methods.iter().map(|m| m.overrides.clone()).collect();
+        let mut wanted: Vec<(usize, usize)> = Vec::new();
+        for (i, m) in methods.iter().enumerate().take(at.equals) {
+            for &o in &original[i] {
+                if !Self::same_signature(m, &methods[o]) {
+                    wanted.push((i, o));
+                }
+            }
+        }
+        // `compareTo(C)` of a class that implements `Comparable`.
+        if let Some(c) = at.comparable {
+            for t in (0..self.types.len()).filter(|&t| self.implements_comparable(t)) {
+                let declared = methods.iter().take(at.equals).position(|m| {
+                    m.class == t && m.name == "compareTo" && !m.is_static && m.params.len() == 1
+                });
+                match declared {
+                    Some(i) if !Self::same_signature(&methods[i], &methods[c.compare_to]) => {
+                        wanted.push((i, c.compare_to));
+                    }
+                    Some(i) => methods[i].overrides.push(c.compare_to),
+                    None if self.types[t].node.has_flag("ABSTRACT") => {}
+                    None => {
+                        let pos = self.types[t].node.pos();
+                        return error(
+                            pos,
+                            "a `Comparable` class that inherits its `compareTo` not supported yet"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        for &(i, o) in &wanted {
+            methods[i].overrides.retain(|&x| x != o);
+            // A method that this one overrides with the same signature has the bridge already.
+            if original[i].iter().any(|&k| {
+                k != o && original[k].contains(&o) && Self::same_signature(&methods[i], &methods[k])
+            }) {
+                continue;
+            }
+            let bridge = self.bridge(&methods[i], i, &methods[o], o);
+            methods.push(bridge);
+        }
+        Ok(())
+    }
+
+    /// Whether two methods take and return the same types.
+    fn same_signature(a: &Method, b: &Method) -> bool {
+        a.ret == b.ret
+            && a.params.len() == b.params.len()
+            && a.params.iter().zip(&b.params).all(|(p, q)| p.ty == q.ty)
+    }
+
+    /// The bridge in the class of method `m` (index `i`) for the method `o` (index `index`) that it
+    /// overrides: `o`'s signature, and a body that calls `m` with the arguments converted.
+    fn bridge(&self, m: &Method, i: usize, o: &Method, index: usize) -> Method {
+        let pos = m.pos;
+        let name = &self.types[m.class].name;
+        let this_ty = if self.enum_index(name).is_some() { Type::enum_type(name) } else { Type::class(name) };
+        let args = o
+            .params
+            .iter()
+            .zip(&m.params)
+            .map(|(p, to)| {
+                let var = self.synth(ExprKind::Var(p.name.clone()), pos, p.ty);
+                if p.ty == to.ty { var } else { self.synth(ExprKind::Cast(to.ty, Box::new(var)), pos, to.ty) }
+            })
+            .collect();
+        let receiver = Box::new(self.synth(ExprKind::This, pos, this_ty));
+        let call =
+            ExprKind::MethodCall { receiver, name: m.name.clone(), args, resolved: Some(i), is_super: false };
+        let call = self.synth(call, pos, m.ret);
+        let body = if o.ret == Type::Void {
+            vec![Stmt::Expr(call)]
+        } else {
+            vec![Stmt::Return(Some(self.convert(call, o.ret)), pos)]
+        };
+        let params = o.params.iter().map(|p| Param { name: p.name.clone(), ty: p.ty }).collect();
+        Method {
+            name: o.name.clone(),
+            params,
+            ret: o.ret,
+            body,
+            is_main: false,
+            is_static: false,
+            is_ctor: false,
+            class: m.class,
+            pos,
+            is_abstract: false,
+            overrides: vec![index],
+            type_params: Vec::new(),
+        }
+    }
+
+    /// Whether `ty` is `Object`.
+    pub(super) fn is_object(ty: Type) -> bool {
+        matches!(ty, Type::Class(name, _) if name == OBJECT)
+    }
+
+    /// `x.equals(o)` on a string or a box `x` with an argument of `Object`: `Object`'s `equals`
+    /// on `x` as an `Object`, which compares it with the string or box that `o` may hold.
+    pub(super) fn value_equals(
+        &self,
+        node: Node<'t>,
+        receiver: Option<Node<'t>>,
+        args: Vec<Expr>,
+    ) -> Result<ExprKind, Error> {
+        let (Some(at), Some(receiver)) = (self.object, receiver) else {
+            return unsupported(node, "this call");
+        };
+        let receiver = self.convert(self.expr(receiver)?, Type::class(OBJECT));
+        let name = "equals".to_string();
+        Ok(ExprKind::MethodCall {
+            receiver: Box::new(receiver),
+            name,
+            args,
+            resolved: Some(at.equals),
+            is_super: false,
+        })
+    }
+
+    /// `a.compareTo(b)` on a value of `Comparable` (a type variable bounded by it): `Comparable`'s
+    /// `compareTo`, with the argument converted to `Comparable`.
+    pub(super) fn comparable_call(
+        &self,
+        node: Node<'t>,
+        receiver: Option<Node<'t>>,
+        args: Vec<Expr>,
+    ) -> Result<ExprKind, Error> {
+        let Some(c) = self.object.and_then(|at| at.comparable) else {
+            return unsupported(node, "`Comparable` as a type");
+        };
+        let Some(receiver) = receiver else { return unsupported(node, "this call") };
+        let receiver = self.convert(self.expr(receiver)?, Type::class(COMPARABLE));
+        let args = args.into_iter().map(|a| self.convert(a, Type::class(COMPARABLE))).collect();
+        let name = "compareTo".to_string();
+        Ok(ExprKind::MethodCall {
+            receiver: Box::new(receiver),
+            name,
+            args,
+            resolved: Some(c.compare_to),
+            is_super: false,
+        })
+    }
+
+    /// A call of `Object`'s `equals`, `hashCode` or `toString` on a value whose class does not
+    /// declare it (javac names `Object` as the method's owner).
+    pub(super) fn object_call(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol,
+        receiver: Option<Node<'t>>,
+        args: Vec<Expr>,
+    ) -> Result<ExprKind, Error> {
+        let Some(at) = self.object else {
+            return unsupported(node, &format!("method `Object.{}`", symbol.name));
+        };
+        let receiver = match receiver {
+            Some(r) if r.kind() == "IDENTIFIER" && r.str("name") == "super" => {
+                return unsupported(node, &format!("`super.{}()` of `Object`", symbol.name));
+            }
+            Some(r) => self.expr(r)?,
+            None => self.this(node),
+        };
+        if !matches!(receiver.ty, Type::Class(..)) {
+            return unsupported(node, &format!("`{}` of a value of this type", symbol.name));
+        }
+        let (resolved, args) = match symbol.name {
+            "equals" => {
+                let args: Vec<Expr> =
+                    args.into_iter().map(|a| self.convert(a, Type::class(OBJECT))).collect();
+                (at.equals, args)
+            }
+            "hashCode" => (at.hash_code, args),
+            "toString" => return Ok(ExprKind::Builtin(Builtin::ObjectText, vec![receiver])),
+            "getClass" => return unsupported(node, "`getClass` (reflection)"),
+            name => return unsupported(node, &format!("method `Object.{name}`")),
+        };
+        let name = symbol.name.to_string();
+        Ok(ExprKind::MethodCall {
+            receiver: Box::new(receiver),
+            name,
+            args,
+            resolved: Some(resolved),
+            is_super: false,
+        })
+    }
+}

@@ -24,7 +24,11 @@ impl<'t> Lowering<'t> {
         if direct {
             return Ok(args);
         }
-        let rest = args.split_off(fixed);
+        let element = match ty {
+            Type::Array(element) => *element,
+            _ => Type::Void,
+        };
+        let rest = args.split_off(fixed).into_iter().map(|a| self.convert(a, element)).collect();
         let packed = self.synth(ExprKind::ArrayLit(rest), node.pos(), ty);
         args.push(packed);
         Ok(args)

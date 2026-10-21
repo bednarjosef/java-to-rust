@@ -38,6 +38,13 @@ impl<'a> Gen<'a> {
                 call(self, "float_to_int_bits", vec![x])
             }
             Native::IdentityHash => {
+                // The address of the class's struct, which `Object.hashCode` hashes too.
+                if self.enum_of(&args[0]).is_none()
+                    && let Some(c) = self.struct_class(&args[0])
+                {
+                    let address = self.receiver_address(&args[0], c);
+                    return call(self, "address_hash", vec![address]);
+                }
                 let object = match &args[0].kind {
                     ExprKind::Var(name) => format!("&{}", self.local(name)),
                     // `this` is already a reference to the `Rc`.
@@ -97,6 +104,35 @@ impl<'a> Gen<'a> {
             | Native::FileClose
             | Native::FileWrite
             | Native::FileWriteBytes => self.file_native(native, args),
+            // The lowering drops its statement; anywhere else it is the unit it returns.
+            Native::Nothing => Code::atom("()"),
+            Native::CdsConfigStatus => call(self, "cds_config_status", vec![]),
+            Native::CdsRandomSeed => call(self, "cds_random_seed_for_dumping", vec![]),
+            Native::ContinuationsSupported => call(self, "continuations_supported", vec![]),
+            Native::NanoTimeAdjustment => {
+                let offset = self.value(&args[0], Type::Long).text;
+                call(self, "nano_time_adjustment", vec![offset])
+            }
+            Native::ArrayBaseOffset => call(self, "array_base_offset", vec![]),
+            Native::ArrayIndexScale(element) => call(self, "array_index_scale", vec![rust_string(element)]),
+            Native::DescriptorHandle | Native::DescriptorAppend => {
+                let fd = self.value(&args[0], Type::Int).text;
+                call(
+                    self,
+                    if native == Native::DescriptorHandle { "fd_handle" } else { "fd_append" },
+                    vec![fd],
+                )
+            }
+            Native::Crc32Update => {
+                let ints = args.iter().map(|a| self.value(a, Type::Int).text).collect();
+                call(self, "crc32_update", ints)
+            }
+            Native::Crc32UpdateBytes => {
+                let crc = self.value(&args[0], Type::Int).text;
+                let bytes = self.slice_of(&args[1]);
+                let (off, len) = (self.value(&args[2], Type::Int).text, self.value(&args[3], Type::Int).text);
+                call(self, "crc32_update_bytes", vec![crc, bytes, off, len])
+            }
         }
     }
 

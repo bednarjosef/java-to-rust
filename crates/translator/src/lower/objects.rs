@@ -2,12 +2,20 @@
 //! expressions that refer to them. A class is identified by its qualified name as javac writes
 //! it (`Point`, or `Outer.Inner` for a nested class).
 
+use super::inner::NestKind;
 use super::*;
 
 /// A class declared in the file, in `Class::types` order.
 pub(super) struct TypeInfo<'t> {
+    /// The name of the declaration, which its `Type`s carry: javac's qualified name, or for a
+    /// local or anonymous class one that names it after its place (see `inner`).
     pub name: String,
+    /// The name that javac's symbols and types give the class: `name`, or the binary name of a
+    /// local or anonymous class (`Main$1Labeler`).
+    pub javac: String,
     pub node: Node<'t>,
+    /// How an inner, local or anonymous class is nested; `None` for any other class.
+    pub nested: Option<super::inner::Nested<'t>>,
 }
 
 /// A method or constructor of a class, in `Class::methods` order.
@@ -36,24 +44,28 @@ impl<'t> Lowering<'t> {
         Lowering {
             next_id: Cell::new(0),
             current: Cell::new(0),
+            method_ctx: Cell::new(None),
+            scope: Cell::new(None),
             in_ctor: Cell::new(false),
+            ret: Cell::new(Type::Void),
             types: Vec::new(),
             methods: Vec::new(),
             reach: None,
             entry: None,
+            standard: exceptions::Standard::default(),
+            closes: Default::default(),
+            object: None,
+            real: Default::default(),
+            failed: Default::default(),
+            capture_refs: Default::default(),
+            capture_sites: Default::default(),
         }
     }
 
     /// Declares a class, named `outer.Name` inside `outer` (a class or a package).
     pub(super) fn declare_type(&mut self, node: Node<'t>, outer: Option<&str>) -> Result<(), Error> {
-        if node.kind() != "CLASS" && node.kind() != "ENUM" {
+        if !matches!(node.kind(), "CLASS" | "ENUM" | "INTERFACE") {
             return unsupported(node, &kind_words(node.kind()));
-        }
-        if node.get("extendsClause").is_some()
-            || node.list("implementsClause").next().is_some()
-            || node.list("typeParameters").next().is_some()
-        {
-            return unsupported(node, "generic classes, inheritance and interfaces");
         }
         let simple = node.str("simpleName");
         let name = match outer {
@@ -61,93 +73,122 @@ impl<'t> Lowering<'t> {
             None => simple.to_string(),
         };
         let index = self.types.len();
-        self.types.push(TypeInfo { name: name.clone(), node });
+        self.types.push(TypeInfo { name: name.clone(), javac: name, node, nested: None });
+        self.declare_members(index)
+    }
+
+    /// Declares the members of the class `index`: its methods and constructors, its nested
+    /// classes, and the local and anonymous classes in its code.
+    pub(super) fn declare_members(&mut self, index: usize) -> Result<(), Error> {
+        let (node, name) = (self.types[index].node, self.types[index].javac.clone());
+        let in_local = self.types[index].nested.as_ref().is_some_and(|n| n.kind != NestKind::Inner);
         let members: Vec<Node<'t>> = node.list("members").filter(|m| self.keeps(*m, &name)).collect();
         for member in members {
             match member.kind() {
-                "METHOD" => self.methods.push(MethodInfo {
-                    owner: index,
-                    node: member,
-                    name: member.str("name"),
-                    sig: member.symbol().map_or("", |s| s.ty),
-                }),
-                "VARIABLE" | "EMPTY_STATEMENT" => {}
-                "ENUM" => self.declare_type(member, Some(&name))?,
+                "METHOD" => {
+                    self.methods.push(MethodInfo {
+                        owner: index,
+                        node: member,
+                        name: member.str("name"),
+                        sig: member.symbol().map_or("", |s| s.ty),
+                    });
+                    let method = self.methods.len() - 1;
+                    self.declare_local_classes(index, member, Some(method))?;
+                }
+                "VARIABLE" if enums::is_enum_constant(member) => {}
+                "VARIABLE" => self.declare_local_classes(index, member, None)?,
+                "EMPTY_STATEMENT" => {}
+                "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
+                    return unsupported(member, "member classes of local and anonymous classes");
+                }
+                "ENUM" | "INTERFACE" => self.declare_type(member, Some(&name))?,
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
-                "CLASS" => return unsupported(member, "inner classes"),
-                "BLOCK" if Self::is_static_block(member) => {}
-                "BLOCK" => self.check_initializer_block(node, member)?,
-                "INTERFACE" => return unsupported(member, "interfaces"),
+                "CLASS" => self.declare_inner(index, member)?,
+                "BLOCK" => {
+                    if !Self::is_static_block(member) {
+                        self.check_initializer_block(node, member)?;
+                    }
+                    self.declare_local_classes(index, member, None)?;
+                }
                 kind => return unsupported(member, &kind_words(kind)),
             }
         }
         Ok(())
     }
 
-    /// The index of the class with this qualified name, if the file declares it.
+    /// The index of the class with this name, if the file declares it: the name of its
+    /// declaration, or the name javac gives it.
     pub(super) fn type_index(&self, qualified: &str) -> Option<usize> {
-        self.types.iter().position(|t| t.name == qualified)
+        self.types.iter().position(|t| t.name == qualified || t.javac == qualified)
     }
 
     /// The index of the method or constructor that a symbol names, in `Class::methods`.
     pub(super) fn method_index(&self, symbol: &Symbol) -> Option<usize> {
         self.methods.iter().position(|m| {
-            self.types[m.owner].name == symbol.owner && m.name == symbol.name && m.sig == symbol.ty
+            self.types[m.owner].javac == symbol.owner && m.name == symbol.name && m.sig == symbol.ty
         })
-    }
-
-    /// Whether a class declares `public String toString()`, the text that printing and
-    /// concatenation use for its objects.
-    pub(super) fn has_to_string(&self, class: &str) -> bool {
-        self.methods.iter().any(|m| {
-            self.types[m.owner].name == class && m.name == "toString" && m.sig == "()java.lang.String"
-        })
-    }
-
-    /// Rejects printing or concatenating an object whose class has no `toString`: Java would print
-    /// a hash code there, which is not supported.
-    pub(super) fn check_text(&self, node: Node<'t>, ty: Type) -> Result<(), Error> {
-        match ty {
-            Type::Class(name) if !self.has_to_string(name) => {
-                unsupported(node, "printing an object without toString")
-            }
-            _ => Ok(()),
-        }
     }
 
     /// The declaration of a class: its instance fields and static fields, in source order.
     pub(super) fn type_decl(&self, index: usize) -> Result<TypeDecl, Error> {
         self.current.set(index);
         let node = self.types[index].node;
-        let (mut fields, mut statics) = (Vec::new(), Vec::new());
+        // The enclosing instance and the captured locals come first, set before anything runs.
+        let (mut fields, mut statics) = (self.synthetic_fields(index)?, Vec::new());
         let name = &self.types[index].name;
+        let moved = self.moves_initializers(index);
+        let javac = &self.types[index].javac;
         for member in node
             .list("members")
-            .filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m) && self.keeps(*m, name))
+            .filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m) && self.keeps(*m, javac))
         {
-            let field = self.field(member)?;
+            // Moved initializers run in the constructors (see `inner`).
+            let field = self.field(member, !(moved && !member.has_flag("STATIC")))?;
+            // A subclass's struct holds its superclass's fields as `base`.
+            if !member.has_flag("STATIC")
+                && field.name.eq_ignore_ascii_case("base")
+                && self.superclass(index)?.is_some()
+            {
+                return unsupported(member, "a field named `base` in a subclass");
+            }
             if member.has_flag("STATIC") { statics.push(field) } else { fields.push(field) }
         }
         // An enum's constants need its constructors, which `lower` lowers after this.
+        let kind = match node.kind() {
+            "ENUM" => TypeKind::Enum,
+            "INTERFACE" => TypeKind::Interface,
+            _ => TypeKind::Class,
+        };
+        // A standard exception class has objects only if the program creates them.
+        let unused_standard = self.standard.has(name) && !self.standard.instantiated.contains(name);
         Ok(TypeDecl {
             name: self.types[index].name.clone(),
             package: String::new(),
+            kind,
+            is_abstract: kind == TypeKind::Interface || node.has_flag("ABSTRACT") || unused_standard,
+            extends: self.superclass(index)?,
+            implements: self.interfaces(index)?,
             fields,
             statics,
             enum_constants: None,
+            type_params: self.class_type_params(index),
+            outer: self.nesting(index).filter(|n| n.outer).map(|n| n.enclosing),
+            captures: self.captures_of(index)?,
+            origin: self.origin(index),
         })
     }
 
-    fn field(&self, node: Node<'t>) -> Result<Field, Error> {
+    /// A field, with its initializer when `with_init`.
+    fn field(&self, node: Node<'t>, with_init: bool) -> Result<Field, Error> {
         let ty = self.ty(node, node.symbol().map_or("", |s| s.ty))?;
-        let init = node.get("initializer");
+        let init = node.get("initializer").filter(|_| with_init);
         let constant = Self::is_constant(node);
         let init = if constant {
             let text = node.symbol().and_then(|s| s.constant).unwrap_or_default();
             let kind = self.constant_literal(node, ty, text)?;
             Some(self.synth(kind, node.pos(), ty))
         } else {
-            init.map(|i| self.expr(i)).transpose()?
+            init.map(|i| Ok::<_, Error>(self.convert(self.expr(i)?, ty))).transpose()?
         };
         Ok(Field { name: node.str("name").to_string(), ty, init, constant, pos: node.pos() })
     }
@@ -167,7 +208,7 @@ impl<'t> Lowering<'t> {
             // Java evaluates an object in front of a static field and ignores it, even null;
             // one without effects is simply dropped.
             if let Some(r) = receiver
-                && r.symbol().is_none_or(|s| s.kind != "CLASS")
+                && r.symbol().is_none_or(|s| !matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM"))
                 && has_effects(&self.expr(r)?)
             {
                 return unsupported(node, "static fields through an expression with effects");
@@ -189,16 +230,22 @@ impl<'t> Lowering<'t> {
         if let Some(constant) = node.symbol().and_then(|s| self.enum_constant(&s)) {
             return Ok(constant);
         }
+        if let Some(captured) = self.capture_read(node)? {
+            return Ok(captured.kind);
+        }
         Ok(match self.field_place(node)? {
             Some(place) => read(place),
             None => ExprKind::Var(self.local(node)?),
         })
     }
 
-    /// A select: a field of an object or of a class.
+    /// A select: a field of an object or of a class, or `Outer.this`.
     pub(super) fn select(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         if let Some(constant) = node.symbol().and_then(|s| self.enum_constant(&s)) {
             return Ok(constant);
+        }
+        if let Some(outer) = self.qualified_this(node) {
+            return Ok(outer?.kind);
         }
         match self.field_place(node)? {
             Some(place) => Ok(read(place)),
@@ -208,25 +255,31 @@ impl<'t> Lowering<'t> {
 
     /// `new C(args)`.
     pub(super) fn new_object(&self, node: Node<'t>) -> Result<ExprKind, Error> {
-        if node.get("classBody").is_some() {
-            return unsupported(node, "anonymous classes");
-        }
-        if node.get("enclosingExpression").is_some() {
-            return unsupported(node, "qualified instance creation");
-        }
         let Some(symbol) = node.symbol() else { return unsupported(node, "this `new`") };
-        let Some(class) = self.type_index(symbol.owner) else {
+        // An anonymous class's `new` creates an object of the class its body declares.
+        let class = match node.get("classBody") {
+            Some(body) => self.type_index(&crate::program::class_name(body.0)),
+            None => self.type_index(symbol.owner),
+        };
+        let Some(class) = class else {
             return unsupported(node, &format!("`new {}`", symbol.owner));
         };
         let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let args = self.packed_args(node, &symbol, args)?;
-        Ok(ExprKind::New { class, args, ctor: self.method_index(&symbol) })
+        self.check_standard_member(node, &symbol)?;
+        let ctor = self.method_index(&symbol);
+        let args = self.convert_args(ctor, args)?;
+        let args = self.with_synthetic(self.creation_args(node, class)?, args);
+        Ok(ExprKind::New { class, args, ctor })
     }
 
-    /// `this` of the class whose members are being lowered.
+    /// `this` for the member that `node` names without an object: of the class whose members are
+    /// being lowered, or of the enclosing class that has the member (see `captures`).
     pub(super) fn this(&self, node: Node<'t>) -> Expr {
-        let name = &self.types[self.current.get()].name;
-        let ty = if self.enum_index(name).is_some() { Type::enum_type(name) } else { Type::class(name) };
+        if let Some(Ok(outer)) = self.implicit_this(node) {
+            return outer;
+        }
+        let ty = self.self_type(self.current.get());
         self.synth(ExprKind::This, node.pos(), ty)
     }
 

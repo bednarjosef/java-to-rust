@@ -77,7 +77,7 @@ fn pure(e: &Expr, index: usize, assigned: &HashSet<&str>, decl: &TypeDecl) -> bo
                 && (assigned.contains(name.as_str())
                     || decl.statics.iter().any(|f| f.name == *name && f.constant))
         }
-        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) => recur(x),
+        ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::InstanceOf { value: x, .. } => recur(x),
         // Integer division can divide by zero, which throws.
         ExprKind::Binary(op, l, r) => !matches!(op, BinOp::Div | BinOp::Rem) && recur(l) && recur(r),
         ExprKind::Conditional(c, a, b) => recur(c) && recur(a) && recur(b),
@@ -105,7 +105,8 @@ pub fn entry_inits(class: &Class, eager: &HashSet<usize>) -> HashSet<usize> {
             ExprKind::Call { resolved: Some(callee), .. }
             | ExprKind::MethodCall { resolved: Some(callee), .. }
             | ExprKind::New { ctor: Some(callee), .. }
-            | ExprKind::ThisCall { resolved: Some(callee), .. } => {
+            | ExprKind::ThisCall { resolved: Some(callee), .. }
+            | ExprKind::SuperInit { resolved: Some(callee), .. } => {
                 callers.entry(*callee).or_default().insert(from);
             }
             _ => {}
@@ -126,7 +127,7 @@ pub fn entry_inits(class: &Class, eager: &HashSet<usize>) -> HashSet<usize> {
     (0..class.methods.len())
         .filter(|&i| {
             let m = &class.methods[i];
-            eager.contains(&m.class)
+            std::iter::once(m.class).chain(class.hierarchy.ancestors(m.class)).any(|c| eager.contains(&c))
                 && (m.is_static || m.is_ctor)
                 && m.name != "<clinit>"
                 && (m.is_main

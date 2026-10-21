@@ -1,6 +1,7 @@
 //! Rust names for Java methods and locals: snake case, overload suffixes, keywords.
 
 use super::*;
+use std::collections::BTreeSet;
 
 pub(super) const RUST_KEYWORDS: &[&str] = &[
     "as", "async", "await", "box", "crate", "dyn", "fn", "gen", "impl", "in", "let", "loop", "macro",
@@ -58,38 +59,116 @@ fn unique_in(base: String, first: &mut HashSet<String>, second: &mut HashSet<Str
 
 /// Rust names for the class's methods. Overloads get their parameter types appended, since Rust
 /// has no overloading: `print(int)` and `print(double)` become `print_i32` and `print_f64`.
-pub(super) fn method_names(class: &Class) -> Vec<String> {
-    // Each class has its own `impl`, so names only need to be unique within their class.
+/// Instance methods are named within their class tree, one name per override group, so that every
+/// implementation of a method has the name its calls use. A superclass's method emitted in the
+/// `impl` of a subclass that overrides it (where only `super` calls reach it) gets the name of its
+/// class appended: `describe_in_shape`. So does a body emitted on the enum of a type when a class
+/// under the type overrides it, since the enum's dispatcher has the method's name, and a
+/// `toString` there, since `to_string` is the enum's `Display`. Also returns the name of each
+/// override group, by group id.
+pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashMap<usize, String>) {
+    let h = &class.hierarchy;
+    // Each class has its own `impl`, so names only need to be unique within their class tree.
     let mut used = vec![HashSet::new(); class.types.len()];
     let mut module_used: HashMap<&str, HashSet<String>> = HashMap::new();
     for m in class.methods.iter().filter(|m| m.is_main) {
         used[m.class].insert("main".to_string());
         module_used.entry(class.types[m.class].package.as_str()).or_default().insert("main".to_string());
     }
-    class
-        .methods
-        .iter()
-        .map(|m| {
-            if m.is_main {
-                return "main".to_string();
+    let mut group_names: HashMap<usize, String> = HashMap::new();
+    let mut names: Vec<String> = Vec::with_capacity(class.methods.len());
+    for (i, m) in class.methods.iter().enumerate() {
+        let instance = !m.is_ctor && !m.is_static;
+        if m.is_main {
+            names.push("main".to_string());
+            continue;
+        }
+        if instance && let Some(name) = group_names.get(&h.group_id(i)) {
+            names.push(name.clone());
+            continue;
+        }
+        // Constructors are named inside their class's `impl`, so they need not be unique.
+        let root = h.root(m.class);
+        let overloads = if instance {
+            let mut groups: Vec<usize> = (0..class.methods.len())
+                .filter(|&o| {
+                    let other = &class.methods[o];
+                    other.name == m.name
+                        && (other.class == m.class || (!other.is_static && h.root(other.class) == root))
+                })
+                .map(|o| h.group_id(o))
+                .collect();
+            groups.sort_unstable();
+            groups.dedup();
+            groups.len()
+        } else {
+            class.methods.iter().filter(|o| o.name == m.name && o.class == m.class).count()
+        };
+        let mut base = if m.is_ctor { "new".to_string() } else { snake_case(&m.name) };
+        if overloads > 1 {
+            for p in &m.params {
+                base = format!("{base}_{}", name_part(p.ty));
             }
-            // Constructors are named inside their class's `impl`, so they need not be unique.
-            let overloads = class.methods.iter().filter(|o| o.name == m.name && o.class == m.class).count();
-            let mut base = if m.is_ctor { "new".to_string() } else { snake_case(&m.name) };
-            if overloads > 1 {
-                for p in &m.params {
-                    base = format!("{base}_{}", name_part(p.ty));
-                }
+            // A method that a bridge of its class calls takes the same parameters as the bridge
+            // (`Integer next()` beside the bridge `Object next()`): its return type tells it apart.
+            let same_params = |o: &Method| {
+                o.params.len() == m.params.len() && o.params.iter().zip(&m.params).all(|(a, b)| a.ty == b.ty)
+            };
+            if instance
+                && class.methods.iter().enumerate().any(|(o, other)| {
+                    o != i
+                        && other.class == m.class
+                        && other.name == m.name
+                        && h.group_id(o) != h.group_id(i)
+                        && !other.is_static
+                        && same_params(other)
+                })
+            {
+                base = format!("{base}_{}", name_part(m.ret));
             }
-            if m.is_ctor {
-                base
-            } else if m.is_static {
-                // Static methods are functions of their package's module, shared by its classes.
-                let module = module_used.entry(class.types[m.class].package.as_str()).or_default();
-                unique_in(base, &mut used[m.class], module)
-            } else {
-                unique(base, &mut used[m.class])
+        }
+        names.push(if m.is_ctor {
+            base
+        } else if m.is_static {
+            // Static methods are functions of their package's module, shared by its classes.
+            let module = module_used.entry(class.types[m.class].package.as_str()).or_default();
+            unique_in(base, &mut used[m.class], module)
+        } else {
+            // The group's name is taken in the class tree of each of its methods.
+            let roots: BTreeSet<usize> =
+                h.group(i).into_iter().map(|o| h.root(class.methods[o].class)).collect();
+            let mut name = base.clone();
+            let mut n = 2;
+            while roots.iter().chain([&root]).any(|&r| used[r].contains(&name)) {
+                name = format!("{base}_{n}");
+                n += 1;
             }
-        })
-        .collect()
+            for &r in roots.iter().chain([&root]) {
+                used[r].insert(name.clone());
+            }
+            group_names.insert(h.group_id(i), name.clone());
+            name
+        });
+    }
+    for i in 0..class.methods.len() {
+        let m = &class.methods[i];
+        let shadowed = match homes[i] {
+            Home::Class(c) => {
+                c != m.class
+                    && (0..class.methods.len())
+                        .any(|o| o != i && homes[o] == Home::Class(c) && names[o] == names[i])
+            }
+            Home::Enum(t) => {
+                (m.name == "toString" && m.params.is_empty())
+                    || h.concretes(t).into_iter().any(|c| h.implementation(i, c) != Some(i))
+            }
+            _ => false,
+        };
+        if shadowed {
+            let simple = class.types[m.class].name.rsplit(['.', '$']).next().unwrap_or_default();
+            let base = format!("{}_in_{}", names[i], snake_case(simple));
+            names[i] = unique(base, &mut used[h.root(m.class)]);
+        }
+    }
+    (names, group_names)
 }

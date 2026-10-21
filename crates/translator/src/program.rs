@@ -6,7 +6,7 @@
 mod reach;
 mod survey;
 
-pub use reach::{Reach, class_name, never_true};
+pub use reach::{CLASS_KINDS, Reach, class_name, never_true};
 pub use survey::Survey;
 
 use crate::ast::{Error, Pos};
@@ -63,8 +63,8 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
     let class = lower::lower_program(&trees, &reach, &program.main).map_err(|(unit, error)| {
         ProgramError { file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string), error }
     })?;
-    let facts = analysis::analyze(&class);
-    Ok(codegen::generate(&class, &facts))
+    let facts = analysis::analyze(&class).map_err(|error| ProgramError { file: None, error })?;
+    codegen::generate(&class, &facts).map_err(|error| ProgramError { file: None, error })
 }
 
 /// The survey of what the code reachable from the program's `main` uses that the translator does

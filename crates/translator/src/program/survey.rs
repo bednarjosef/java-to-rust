@@ -18,9 +18,10 @@
 
 use super::Program;
 use super::reach::{
-    CLASS_KINDS, MethodKey, OBJECT_METHODS, RUNTIME_CLASSES, Reach, class_name, has_flag, members,
-    never_true, outside, symbol_type, text, untranslated,
+    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, else_branch, has_flag, members, never_true,
+    outside, provided, replaced, symbol_type, text, untranslated,
 };
+use crate::ast::runtime_native;
 use serde_json::{Value, json};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -144,6 +145,8 @@ struct Scan<'a> {
     features: BTreeMap<&'static str, String>,
     calls: BTreeSet<String>,
     refs: BTreeSet<String>,
+    /// Whether the program's streams stay sequential (`Reach::sequential`).
+    sequential: bool,
 }
 
 impl Scan<'_> {
@@ -168,8 +171,8 @@ struct Census {
     /// pieces of code that call each.
     runtime: BTreeMap<(Part, String), usize>,
     /// Reachable methods that have no body in Java: the JVM implements them. With each, its
-    /// node in the call graph.
-    natives: Vec<(Part, String, String)>,
+    /// node in the call graph and whether the runtime implements it (`ast::runtime_native`).
+    natives: Vec<(Part, String, String, bool)>,
     /// The call graph of the reachable code: from each node (a method, or a class's static or
     /// instance initialization, see `method_node`) to the nodes its code may run.
     edges: HashMap<String, BTreeSet<String>>,
@@ -208,8 +211,10 @@ impl Census {
         if !reach.classes.contains(&class) {
             return;
         }
-        let header: BTreeMap<&'static str, String> =
-            class_features(decl, outer).into_iter().map(|f| (f, place(&origin.file, decl))).collect();
+        let header: BTreeMap<&'static str, String> = class_features(decl, outer, &self.declared)
+            .into_iter()
+            .map(|f| (f, place(&origin.file, decl)))
+            .collect();
         for member in members(decl) {
             let kind = text(member, "kind");
             let reached = match kind {
@@ -222,6 +227,7 @@ impl Census {
                             origin.part,
                             format!("{class}.{}{}", key.1, key.2),
                             method_node(&key),
+                            runtime_native(&class, &key.1, &key.2),
                         ));
                     }
                     reach.methods.contains(&key)
@@ -245,9 +251,10 @@ impl Census {
                 features: header.clone(),
                 calls: BTreeSet::new(),
                 refs: BTreeSet::new(),
+                sequential: reach.sequential,
             };
-            if kind == "METHOD" && !member["typeParameters"].as_array().is_none_or(Vec::is_empty) {
-                scan.feature("generic methods", member);
+            if kind == "METHOD" && intersects(member) {
+                scan.feature("intersection types", member);
             }
             if kind == "BLOCK" && member["static"].as_bool() != Some(true) {
                 scan.feature("initializer blocks", member);
@@ -273,9 +280,12 @@ impl Census {
     fn body(&self, node: &Value, scan: &mut Scan<'_>) {
         match node {
             // Reachability skips the branch, and so does the translation.
-            Value::Object(_) if text(node, "kind") == "IF" && never_true(&node["condition"]) => {
+            Value::Object(_)
+                if matches!(text(node, "kind"), "IF" | "CONDITIONAL_EXPRESSION")
+                    && never_true(&node["condition"], scan.sequential) =>
+            {
                 self.body(&node["condition"], scan);
-                self.body(&node["elseStatement"], scan);
+                self.body(else_branch(node), scan);
             }
             Value::Object(fields) => {
                 let kind = text(node, "kind");
@@ -288,27 +298,44 @@ impl Census {
                         scan.feature("inner classes", node)
                     }
                     // An anonymous class body is a class node too: it is counted above.
-                    "CLASS" | "INTERFACE" | "ENUM" | "RECORD" if !symbol_type(node).starts_with('<') => {
-                        scan.feature("local classes", node)
+                    "INTERFACE" | "ENUM" | "RECORD" if !is_anonymous(symbol_type(node)) => {
+                        scan.feature("local interfaces, enums and records", node)
                     }
-                    "TRY" | "THROW" => scan.feature("exceptions", node),
-                    "INSTANCE_OF" => scan.feature("instanceof", node),
-                    "TYPE_CAST" if !is_primitive(ty) => scan.feature("reference casts", node),
+                    "TRY" if node["resources"].as_array().is_some_and(|r| !r.is_empty()) => {
+                        scan.feature("try-with-resources", node)
+                    }
+                    // Tests and casts between the program's own classes translate, and from
+                    // `Object` to them, to strings and to boxes; a pattern binding its variable is
+                    // part of the test.
+                    "INSTANCE_OF" => {
+                        let value = text(&node["expression"], "javaType");
+                        let target = text(&node["type"], "javaType");
+                        if self.narrows(value, target) {
+                            if text(&node["pattern"], "kind") == "RECORD_PATTERN" {
+                                scan.feature("patterns", node);
+                            }
+                            self.body(&node["expression"], scan);
+                            return;
+                        }
+                        scan.feature("instanceof on types outside the sources", node);
+                    }
+                    "TYPE_CAST"
+                        if !is_primitive(ty)
+                            && ty != "java.lang.Object"
+                            && !self.narrows(text(&node["expression"], "javaType"), ty) =>
+                    {
+                        scan.feature("reference casts", node)
+                    }
                     "ENHANCED_FOR_LOOP" if !text(&node["expression"], "javaType").ends_with(']') => {
                         scan.feature("for-each over collections", node)
                     }
                     "BINDING_PATTERN" | "RECORD_PATTERN" => scan.feature("patterns", node),
-                    "METHOD_INVOCATION" if text(&node["methodSelect"]["expression"], "name") == "super" => {
-                        scan.feature("super calls", node)
-                    }
                     _ => {}
                 }
+                // The program's generic types are erased; one from elsewhere is not translated.
                 // javac names an anonymous class `<anonymous Sink>`: that is not a generic type.
-                if ty.contains('<') && !ty.starts_with('<') {
+                if ty.contains('<') && !ty.starts_with('<') && !self.erases(ty) {
                     scan.feature("generic types", node);
-                }
-                if ty == "java.lang.Object" {
-                    scan.feature("Object values", node);
                 }
                 refer(&node["symbol"], scan);
                 if matches!(kind, "METHOD_INVOCATION" | "NEW_CLASS") {
@@ -319,10 +346,18 @@ impl Census {
                     let object_init = owner == "java.lang.Object" && name == "<init>";
                     if object_init {
                         // Nothing to report.
+                    } else if owner == "java.lang.Object"
+                        && !matches!(name, "equals" | "hashCode" | "toString")
+                    {
+                        // `getClass`, `clone`, and the monitor's `wait` and `notify`.
+                        scan.feature(
+                            if name == "getClass" { "reflection" } else { "methods of Object" },
+                            node,
+                        );
                     } else if let Some(feature) = untranslated(owner) {
                         scan.feature(feature, node);
                         scan.calls.insert(format!("({feature}) {owner}.{name}"));
-                    } else if RUNTIME_CLASSES.contains(&owner) {
+                    } else if provided(owner) || replaced(owner, name, text(symbol, "type")) {
                         let simple = owner.rsplit('.').next().unwrap_or(owner);
                         scan.calls.insert(format!("{simple}.{name}"));
                     } else if !owner.is_empty() && !self.declared.contains(owner) {
@@ -339,6 +374,28 @@ impl Census {
             Value::Array(items) => items.iter().for_each(|item| self.body(item, scan)),
             _ => {}
         }
+    }
+
+    /// Whether a test or a cast of a value of type `value` against type `target` translates:
+    /// both are the program's own types, or the value is an `Object` and the target is one of
+    /// them, a string or a box.
+    fn narrows(&self, value: &str, target: &str) -> bool {
+        let boxes = ["Boolean", "Byte", "Character", "Double", "Float", "Integer", "Long", "Short", "String"];
+        let (value, target) = (raw(value), raw(target));
+        let held = target.strip_prefix("java.lang.").is_some_and(|name| boxes.contains(&name));
+        // A cast to a type variable (`(T) items[i]`) is a cast to its erasure.
+        let variable = !target.contains('.') && !self.declared.contains(target.trim_end_matches("[]"));
+        let declared = |t: &str| self.declared.contains(t.trim_end_matches("[]"));
+        (declared(&value) || value.starts_with("java.lang.Object")) && (declared(&target) || variable)
+            || value == "java.lang.Object" && held
+    }
+
+    /// Whether a parameterized type translates: one of the program's generic types, erased, or
+    /// `Comparable`.
+    fn erases(&self, ty: &str) -> bool {
+        let raw = raw(ty);
+        let raw = raw.trim_end_matches("[]");
+        self.declared.contains(raw) || raw == "java.lang.Comparable"
     }
 
     /// The node of the call graph that a reachable member's code belongs to, with the edges that
@@ -423,12 +480,14 @@ impl Census {
         let free = self.pieces.iter().filter(|p| p.features.is_empty()).count();
         _ = writeln!(
             out,
-            "Reachable from {main}: {} classes ({} instantiated), {} methods, {} fields, {} native methods.",
+            "Reachable from {main}: {} classes ({} instantiated), {} methods, {} fields, {} native methods \
+             ({} in the runtime).",
             reach.classes.len(),
             reach.instantiated.len(),
             reach.methods.len(),
             reach.fields.len(),
-            self.natives.len()
+            self.natives.len(),
+            self.natives.iter().filter(|n| n.3).count()
         );
         _ = writeln!(out, "{total} pieces of code (methods, field initializers, initializer blocks):");
         for part in Part::ALL {
@@ -483,15 +542,15 @@ impl Census {
         _ = writeln!(out, "\nNative methods reached:");
         for part in Part::ALL {
             _ = writeln!(out, "{}:", part.title());
-            let mut natives: Vec<(&str, &str)> = self
+            let mut natives: Vec<(&str, &str, bool)> = self
                 .natives
                 .iter()
-                .filter(|(p, _, _)| *p == part)
-                .map(|(_, name, node)| (name.as_str(), node.as_str()))
+                .filter(|(p, ..)| *p == part)
+                .map(|(_, name, node, runtime)| (name.as_str(), node.as_str(), *runtime))
                 .collect();
             natives.sort();
-            for (native, node) in natives {
-                _ = writeln!(out, "  {native}");
+            for (native, node, runtime) in natives {
+                _ = writeln!(out, "  {native}{}", if runtime { "  (in the runtime)" } else { "" });
                 let chain = self.chain(node);
                 if !chain.is_empty() {
                     _ = writeln!(out, "      via {}", chain.join(" -> "));
@@ -602,9 +661,10 @@ impl Census {
                 "method": method,
                 "pieces": n,
             })).collect::<Vec<_>>(),
-            "natives": self.natives.iter().map(|(part, method, node)| json!({
+            "natives": self.natives.iter().map(|(part, method, node, runtime)| json!({
                 "source": part.name(),
                 "method": method,
+                "runtime": runtime,
                 "chain": self.chain(node),
             })).collect::<Vec<_>>(),
             "external": external.iter().map(|key| json!({
@@ -678,23 +738,32 @@ fn piece_kind(member: &Value) -> &'static str {
 }
 
 /// The unsupported features of a class declaration, which every piece of its code shares.
-fn class_features(decl: &Value, outer: Option<&Value>) -> BTreeSet<&'static str> {
+fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String>) -> BTreeSet<&'static str> {
     let mut features = BTreeSet::new();
     let kind = text(decl, "kind");
     match kind {
-        "INTERFACE" => _ = features.insert("interfaces"),
         "ANNOTATION_TYPE" => _ = features.insert("annotation types"),
         "RECORD" => _ = features.insert("records"),
         _ => {}
     }
-    if !decl["implementsClause"].as_array().is_none_or(Vec::is_empty) {
-        features.insert("interfaces");
+    // The program's own interfaces translate, generic ones erased, and so does `Comparable`; one
+    // from elsewhere is not translated.
+    for clause in decl["implementsClause"].as_array().into_iter().flatten() {
+        let interface = raw(text(clause, "javaType"));
+        if !declared.contains(&interface) && interface != "java.lang.Comparable" {
+            features.insert("implementing interfaces outside the sources");
+        }
     }
-    if kind == "CLASS" && (!decl["extendsClause"].is_null() || has_flag(decl, "ABSTRACT")) {
-        features.insert("inheritance");
+    // Class trees of the program's own classes translate; a superclass from elsewhere does not.
+    if kind == "CLASS" && !decl["extendsClause"].is_null() {
+        let superclass = text(&decl["extendsClause"], "javaType");
+        let superclass = superclass.split('<').next().unwrap_or(superclass);
+        if !declared.contains(superclass) && !crate::lower::is_standard(superclass) {
+            features.insert("extending classes outside the sources");
+        }
     }
-    if !decl["typeParameters"].as_array().is_none_or(Vec::is_empty) {
-        features.insert("generic classes");
+    if intersects(decl) {
+        features.insert("intersection types");
     }
     let in_class = outer.is_some_and(|o| matches!(text(o, "kind"), "CLASS" | "ENUM" | "RECORD"));
     if kind == "CLASS" && in_class && !has_flag(decl, "STATIC") {
@@ -704,6 +773,30 @@ fn class_features(decl: &Value, outer: Option<&Value>) -> BTreeSet<&'static str>
         features.insert("enum constants with bodies");
     }
     features
+}
+
+/// Whether javac's name for a class is that of an anonymous class: its binary name `Main$1`, or
+/// `<anonymous Planet>` for the body of an enum constant.
+fn is_anonymous(name: &str) -> bool {
+    name.starts_with('<')
+        || name.rsplit_once('$').is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether a declaration has a type variable with more than one bound (`T extends A & B`).
+fn intersects(decl: &Value) -> bool {
+    decl["typeParameters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|p| p["bounds"].as_array().is_some_and(|b| b.len() > 1))
+}
+
+/// A type without its type arguments: `Box<java.lang.Integer>[]` is `Box[]`.
+fn raw(ty: &str) -> String {
+    match (ty.find('<'), ty.rfind('>')) {
+        (Some(open), Some(close)) if open > 0 => format!("{}{}", &ty[..open], &ty[close + 1..]),
+        _ => ty.to_string(),
+    }
 }
 
 fn is_primitive(ty: &str) -> bool {
