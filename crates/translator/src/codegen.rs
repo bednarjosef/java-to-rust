@@ -52,6 +52,7 @@ mod modules;
 mod natives;
 mod objects;
 mod owned;
+mod parse_range;
 mod patterns;
 mod plain_arrays;
 mod sliced_loops;

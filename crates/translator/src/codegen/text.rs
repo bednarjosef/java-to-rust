@@ -509,9 +509,16 @@ impl<'a> Gen<'a> {
         let bits = if kind == Type::Long { 64 } else { 32 };
         let rust = rust_type(kind);
         if op == BitsOp::ParseRadix {
-            let s = self.text_ref(&args[0]);
+            let s = if self.nullable(&args[0]) {
+                self.option_ref(&args[0])
+            } else {
+                format!("Some({})", self.str_ref(&args[0]))
+            };
             let radix = self.int_arg(&args[1]);
-            return self.may_fail(id, "parse_radix", &format!("::<{rust}>"), &format!("Some({s}), {radix}"));
+            return self.may_fail(id, "parse_radix", &format!("::<{rust}>"), &format!("{s}, {radix}"));
+        }
+        if op == BitsOp::ParseRange {
+            return self.parse_range(kind, args, id);
         }
         let v = self.value(&args[0], kind);
         let recv = self.recv(&v, kind);
@@ -558,7 +565,7 @@ impl<'a> Gen<'a> {
                 let f = self.runtime("to_string_radix");
                 Code::atom(format!("{f}({wide}, {radix})"))
             }
-            BitsOp::ParseRadix => unreachable!("handled above"),
+            BitsOp::ParseRadix | BitsOp::ParseRange => unreachable!("handled above"),
         }
     }
 }

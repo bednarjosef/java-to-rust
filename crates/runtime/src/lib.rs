@@ -54,7 +54,9 @@ pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_flo
 pub use format::{Arg, format};
 pub use initializer::*;
 pub use integer::*;
-pub use integer_parse::{parse_radix, try_parse_radix};
+pub use integer_parse::{
+    parse_radix, parse_range, parse_small, try_parse_radix, try_parse_range, try_parse_small,
+};
 pub use java_arrays::*;
 pub use math::*;
 pub use natives::*;

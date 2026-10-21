@@ -956,6 +956,15 @@ fn runtime_failures(
                     out.push(("java.lang.ArithmeticException", "this division", true, x.id));
                 }
             }
+            // The string is dereferenced first (a null one is the checked `NullPointerException`),
+            // then the indices, the radix and the digits are read.
+            Builtin::Bits(BitsOp::ParseRange, _) => {
+                if args.first().is_some_and(null) {
+                    out.push((NPE, "this parse", true, x.id));
+                }
+                out.push(("java.lang.IndexOutOfBoundsException", "this parse", true, x.id));
+                out.push(("java.lang.NumberFormatException", "this parse", true, x.id));
+            }
             _ => {
                 // A null argument throws, except where the method takes null (an `equals`, the
                 // elements of `join`, the text of `Arrays.toString`).
@@ -965,6 +974,8 @@ fn runtime_failures(
                         | Builtin::ArraysToString
                         | Builtin::Arrays(ArraysOp::Equals | ArraysOp::HashCode | ArraysOp::DeepToString)
                         | Builtin::Boxed(BoxedOp::Equals, _)
+                        // A null string is the `NumberFormatException` of `parse_radix`.
+                        | Builtin::Bits(BitsOp::ParseRadix, _)
                 );
                 let checked = if takes_null || matches!(builtin, Builtin::String(StringOp::Join)) {
                     &args[..args.len().min(1)]

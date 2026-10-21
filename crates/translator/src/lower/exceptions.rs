@@ -59,6 +59,8 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.String#copyValueOf",
         ],
     ),
+    // The indices of `parseInt(s, begin, end, radix)` and `parseLong`.
+    ("java.lang.IndexOutOfBoundsException", &["java.lang.Integer#parseInt", "java.lang.Long#parseLong"]),
     (
         "java.lang.NumberFormatException",
         &[

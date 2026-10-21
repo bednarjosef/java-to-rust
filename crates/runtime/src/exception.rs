@@ -112,7 +112,7 @@ mod tests {
     use super::*;
 
     fn parse(s: &str) -> Result<i32, Exception> {
-        crate::try_parse_number::<i32>(s)
+        crate::try_parse_radix::<i32>(Some(s), 10)
     }
 
     #[test]
@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(crate::try_ascii_char_at("ab", 1), Ok(b'b' as u16));
         assert_eq!(
             message(crate::try_parse_radix::<i32>(None, 10)),
-            "java.lang.NumberFormatException: Cannot parse null string: null"
+            "java.lang.NumberFormatException: Cannot parse null string"
         );
         assert_eq!(
             message(crate::try_parse_radix::<i32>(Some("3000000000"), 10)),

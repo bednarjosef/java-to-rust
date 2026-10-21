@@ -130,7 +130,7 @@ impl<'a> Gen<'a> {
                 self.box_code_if_boxed(code, kind, ty)
             }
             BoxedOp::ParseRadix => {
-                let code = self.parse_radix(kind, &args[0], &args[1], id);
+                let code = self.parse_radix(kind, &args[0], Some(&args[1]), id);
                 self.box_code_if_boxed(code, kind, ty)
             }
             BoxedOp::Box => {
@@ -228,33 +228,43 @@ impl<'a> Gen<'a> {
     /// `Integer.parseInt(s)` and the like. A null string is `null` to `parseBoolean`, which is
     /// false, and a `NullPointerException` to the others.
     fn parse(&mut self, kind: Type, arg: &'a Expr, id: ExprId) -> Code {
-        let text = if kind == Type::Boolean && self.nullable(arg) {
-            format!("{}.unwrap_or(\"\")", self.option_ref(arg))
-        } else if self.nullable(arg) {
-            self.deref(arg)
-        } else {
-            self.str_ref(arg)
-        };
         match kind {
-            Type::Boolean => Code::atom(format!("{}({text})", self.runtime("parse_boolean"))),
-            Type::Double => self.may_fail(id, "parse_double", "", &text),
-            Type::Float => self.may_fail(id, "parse_float", "", &text),
-            _ => self.may_fail(id, "parse_number", &format!("::<{}>", rust_type(kind)), &text),
+            Type::Boolean => {
+                let text = if self.nullable(arg) {
+                    format!("{}.unwrap_or(\"\")", self.option_ref(arg))
+                } else {
+                    self.str_ref(arg)
+                };
+                Code::atom(format!("{}({text})", self.runtime("parse_boolean")))
+            }
+            Type::Double | Type::Float => {
+                let text = if self.nullable(arg) { self.deref(arg) } else { self.str_ref(arg) };
+                let function = if kind == Type::Double { "parse_double" } else { "parse_float" };
+                self.may_fail(id, function, "", &text)
+            }
+            _ => self.parse_radix(kind, arg, None, id),
         }
     }
 
-    /// `Integer.parseInt(s, radix)` for an integer `kind`: the string is passed as an `Option`, so
-    /// that a null string is the runtime's `NumberFormatException`, as in Java.
-    fn parse_radix(&mut self, kind: Type, text: &'a Expr, radix: &'a Expr, id: ExprId) -> Code {
+    /// `Integer.parseInt(s, radix)` for an integer `kind`, and `parseInt(s)` with no radix, which
+    /// is radix 10. The string is passed as an `Option`, so that a null string is the runtime's
+    /// `NumberFormatException`, as in Java.
+    pub(super) fn parse_radix(
+        &mut self,
+        kind: Type,
+        text: &'a Expr,
+        radix: Option<&'a Expr>,
+        id: ExprId,
+    ) -> Code {
         let text =
             if self.nullable(text) { self.option_ref(text) } else { format!("Some({})", self.str_ref(text)) };
-        let radix = self.value(radix, Type::Int);
-        self.may_fail(
-            id,
-            "parse_radix",
-            &format!("::<{}>", rust_type(kind)),
-            &format!("{text}, {}", radix.text),
-        )
+        let radix = match radix {
+            Some(radix) => self.value(radix, Type::Int).text,
+            None => "10".to_string(),
+        };
+        // Java's `Short.parseShort` and `Byte.parseByte` have their own range message.
+        let function = if matches!(kind, Type::Short | Type::Byte) { "parse_small" } else { "parse_radix" };
+        self.may_fail(id, function, &format!("::<{}>", rust_type(kind)), &format!("{text}, {radix}"))
     }
 
     /// `a == b` for two primitives of `kind`, for `equals`: `Double.equals` compares bits.
