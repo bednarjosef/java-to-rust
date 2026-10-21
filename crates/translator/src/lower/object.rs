@@ -352,6 +352,34 @@ impl<'t> Lowering<'t> {
                 _ => {}
             }
         }
+        // The `length()` and `charAt(int)` that a class implementing `CharSequence` declares or
+        // inherits implement the interface's.
+        if let Some(s) = at.char_sequence {
+            for t in (0..self.types.len()).filter(|&t| self.implements_directly(t, "java.lang.CharSequence"))
+            {
+                for (i, (name, param, ret)) in CHAR_SEQUENCE_METHODS.into_iter().enumerate() {
+                    let mut class = Some(t);
+                    while let Some(c) = class {
+                        let found = methods.iter().take(at.equals).position(|m| {
+                            m.class == c
+                                && m.name == name
+                                && !m.is_static
+                                && !m.is_ctor
+                                && m.ret == ret
+                                && m.params.len() == usize::from(param.is_some())
+                                && m.params.iter().all(|p| p.ty == Type::Int)
+                        });
+                        if let Some(m) = found {
+                            if !methods[m].overrides.contains(&(s.methods + i)) {
+                                methods[m].overrides.push(s.methods + i);
+                            }
+                            break;
+                        }
+                        class = self.superclass(c)?;
+                    }
+                }
+            }
+        }
         methods.push(method("equals", vec![Param { name: "other".to_string(), ty: object }], Type::Boolean));
         methods.push(method("hashCode", Vec::new(), Type::Int));
         if let Some(c) = at.comparable {
@@ -439,6 +467,14 @@ impl<'t> Lowering<'t> {
                 }
             }
         }
+        // Its classes that implement `CharSequence`, such as the JDK's `CharBuffer`.
+        if let Some(s) = at.char_sequence {
+            for (t, decl) in types.iter_mut().enumerate() {
+                if self.implements_directly(t, "java.lang.CharSequence") {
+                    decl.implements.push(s.decl);
+                }
+            }
+        }
         types.push(decl(OBJECT, "", TypeKind::Interface, Vec::new()));
         let runtime = std::iter::once(at.decl).chain(at.comparable.map(|c| c.decl)).collect::<Vec<_>>();
         for (name, _) in runtime_values() {
@@ -508,10 +544,16 @@ impl<'t> Lowering<'t> {
 
     /// Whether class `t` of the program says it implements `java.lang.Comparable`.
     pub(super) fn implements_comparable(&self, t: usize) -> bool {
+        self.implements_directly(t, "java.lang.Comparable")
+    }
+
+    /// Whether type `t` of the program names the JDK interface `interface` in its `implements`
+    /// clause (an interface's `extends` clause).
+    fn implements_directly(&self, t: usize, interface: &str) -> bool {
         self.types[t]
             .node
             .list("implementsClause")
-            .any(|c| c.java_type().split('<').next() == Some("java.lang.Comparable"))
+            .any(|c| c.java_type().split('<').next() == Some(interface))
     }
 
     /// The bridges erasure needs, appended to `methods`: a method that overrides one whose erased

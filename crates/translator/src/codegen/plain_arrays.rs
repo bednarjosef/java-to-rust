@@ -575,7 +575,7 @@ impl<'a> Gen<'a> {
         let Some(reads) = self.facts.element_loops.get(&cond.id).cloned() else { return false };
         let ExprKind::Binary(_, _, end) = &cond.kind else { return false };
         let ExprKind::Length(array) = &end.kind else { return false };
-        if element(array.ty).is_reference() {
+        if element(array.ty).is_reference() || self.nullable_element(element(array.ty)) {
             return false;
         }
         let ExprKind::Var(name) = &array.kind else { return false };

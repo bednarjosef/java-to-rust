@@ -52,7 +52,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 // arrays.
                 ExprKind::NewArray(sizes) => {
                     let elem = x.ty.element_at(sizes.len());
-                    if elem.is_reference() {
+                    if nullable_type(elem) {
                         elements.push(elem);
                     }
                 }
