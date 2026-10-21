@@ -176,7 +176,8 @@ A small subset, end to end:
   array on both sides, but without its element class: storing an object of another class in it
   does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s. Arrays of strings
   are not converted this way yet. `==` between two `Object`s that may both be strings or boxes (whose identity the
-  translation does not keep, except in the shortcut `a == b || a.equals(b)`) is rejected. The
+  translation does not keep, except in the shortcut `a == b || a.equals(b)` and in `TreeMap`'s own
+  comparisons of the keys of its entries, which are distinct values) is rejected. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
   and a use where javac substituted a type argument gets the checked cast back

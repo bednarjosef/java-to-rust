@@ -188,6 +188,13 @@ impl<'a> Gen<'a> {
                     self.runtime("from_vec")
                 ))
             }
+            StringOp::JoinRange => {
+                let texts: Vec<String> = args[..3].iter().map(|a| self.text_ref(a)).collect();
+                let elements = self.slice_of(&args[3]);
+                let size = self.int_arg(&args[4]);
+                let f = self.runtime("join_range");
+                Code::atom(format!("{f}({}, {elements}, {size})", texts.join(", ")))
+            }
             StringOp::Lines => {
                 let s = self.text_ref(&args[0]);
                 let lines = call(self, "lines", vec![s]).text;
