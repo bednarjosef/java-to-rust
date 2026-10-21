@@ -831,6 +831,8 @@ fn expr_points(
         // What a started thread runs raises nothing where the thread is started: an exception
         // that escapes it ends that thread (the runtime prints it), whatever catches the start.
         ExprKind::Builtin(Builtin::Native(Native::ThreadStart), args) => children.extend(&args[..4]),
+        // The runtime runs the dispatch of an uncaught exception later, on the thread it ends.
+        ExprKind::Builtin(Builtin::Native(Native::InstallUncaught), _) => {}
         ExprKind::Call { args, .. }
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }

@@ -58,7 +58,7 @@ mod varargs;
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub(crate) use clinit_errors::rewritten_clinit;
-pub use exceptions::{is_standard, standard_names, standard_subclass};
+pub use exceptions::{is_standard, standard_local_name, standard_names, standard_subclass};
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
 pub use program::lower_program;

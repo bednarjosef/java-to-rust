@@ -65,7 +65,7 @@ pub(super) fn split(name: &str) -> (String, &str) {
         && CONTEXT
             .with_borrow(|c| c.as_ref().is_none_or(|c| c.packages.get(name).is_some_and(String::is_empty)));
     if crate::lower::is_standard(name) || provided {
-        let simple = name.rsplit('.').next().unwrap_or(name);
+        let simple = crate::lower::standard_local_name(name);
         let root = CONTEXT.with_borrow(|c| {
             c.as_ref().and_then(|c| c.current.as_deref()).is_some_and(|current| !current.is_empty())
         });

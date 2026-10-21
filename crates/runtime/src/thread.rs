@@ -14,7 +14,7 @@
 //! with the process.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicUsize, Ordering};
@@ -187,6 +187,78 @@ pub fn start_thread(tid: i64, name: String, daemon: bool, body: impl FnOnce() + 
 /// The payload with which a thread that an exception ends unwinds to its start, once the message
 /// is printed.
 struct Uncaught;
+
+/// What the translation of a program that sets an uncaught-exception handler gives the runtime
+/// (`Thread.installUncaught0()`): a function that dispatches an exception that nothing caught to
+/// the handlers, on the thread it ends (`false` when the value is not one it can make an object
+/// of), and one that names the class of an exception.
+type Dispatch = fn(&dyn Any) -> bool;
+type ClassName = fn(&dyn Any) -> Option<String>;
+
+static UNCAUGHT_HOOK: Mutex<Option<(Dispatch, ClassName)>> = Mutex::new(None);
+
+thread_local! {
+    /// Whether the thread runs its uncaught-exception handler.
+    static DISPATCHING: Cell<bool> = const { Cell::new(false) };
+    /// The exception that the handler is given, as `uncaught0()` returns it.
+    static PENDING: RefCell<Option<Box<dyn Any>>> = const { RefCell::new(None) };
+}
+
+/// `Thread.installUncaught0()`: from now on, an exception that nothing catches goes to the
+/// handlers.
+pub fn set_uncaught_hook(dispatch: Dispatch, class_name: ClassName) {
+    *lock(&UNCAUGHT_HOOK) = Some((dispatch, class_name));
+}
+
+/// Makes `e` the exception that `uncaught0()` returns on this thread.
+pub fn set_pending_uncaught<T: 'static>(e: T) {
+    PENDING.with_borrow_mut(|p| *p = Some(Box::new(e)));
+}
+
+/// `uncaught0()`: the exception that ends the calling thread, which its handler is given.
+pub fn pending_uncaught<T: Clone + 'static>() -> T {
+    PENDING.with_borrow(|p| p.as_ref().and_then(|e| e.downcast_ref::<T>()).cloned())
+        .expect("the runtime sets the exception before it runs the handler")
+}
+
+/// `printUncaught0(name, e)`: what the thread group prints for an exception without a handler.
+pub fn print_uncaught(name: &str, e: &impl std::fmt::Display) {
+    crate::flush();
+    eprintln!("Exception in thread \"{name}\" {e}");
+}
+
+/// Hands an exception that nothing caught to the program's handlers, once it has set one; `true`
+/// when they had it, and the thread is to end without printing it. An exception that the
+/// handler itself lets escape ends the thread with the JVM's message naming its class.
+pub(crate) fn dispatch_uncaught<E: std::fmt::Display + 'static>(e: &E) -> bool {
+    let Some((dispatch, class_name)) = *lock(&UNCAUGHT_HOOK) else { return false };
+    if DISPATCHING.get() {
+        let any = e as &dyn Any;
+        let class = class_name(any)
+            .or_else(|| any.downcast_ref::<crate::Exception>().map(|x| x.class.to_string()))
+            .unwrap_or_else(|| e.to_string());
+        let name = current_record().name();
+        crate::flush();
+        eprintln!("\nException: {class} thrown from the UncaughtExceptionHandler in thread \"{name}\"");
+        return true;
+    }
+    DISPATCHING.set(true);
+    let handled = dispatch(e as &dyn Any);
+    DISPATCHING.set(false);
+    handled
+}
+
+/// Ends the calling thread once the handlers have had its exception: a thread the program started
+/// ends, and the main thread ends the program with 1 once the other threads have ended.
+pub(crate) fn end_dispatched() -> ! {
+    crate::flush();
+    if on_worker() {
+        std::panic::resume_unwind(Box::new(Uncaught))
+    }
+    await_threads();
+    crate::flush();
+    std::process::exit(1)
+}
 
 /// Ends the calling thread, started by the program, because of an exception that nothing caught:
 /// the message is printed, and the other threads go on.

@@ -122,7 +122,10 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::ThreadRename
             | Native::ThreadInterrupt
             | Native::ThreadIsInterrupted
-            | Native::ThreadClearInterrupt,
+            | Native::ThreadClearInterrupt
+            | Native::InstallUncaught
+            | Native::UncaughtException
+            | Native::PrintUncaught,
         ) => None,
         // A monitor that the thread does not hold (and for `wait` a negative timeout, and an
         // interrupt, which `runtime_failures` adds).

@@ -233,6 +233,14 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     indexing::analyze(class, &mut facts);
     moves::analyze(class, &mut facts);
     exceptions::analyze(class, &mut facts)?;
+    // An uncaught-exception handler gets the failures of the runtime as objects of their classes.
+    if threads::handles_uncaught(class) {
+        for new in &class.raised {
+            if let ExprKind::New { class: c, .. } = new.kind {
+                facts.raised_classes.insert(c);
+            }
+        }
+    }
     // The exceptions that the runtime raises are values of `Throwable` too.
     if !facts.raised_classes.is_empty() {
         facts.flows = hierarchy::flows(class, &facts.field_level, &facts.raised_classes);
