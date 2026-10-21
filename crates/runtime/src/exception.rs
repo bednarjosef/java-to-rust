@@ -48,9 +48,20 @@ pub fn throw_uncaught(e: impl fmt::Display) -> ! {
     die(e)
 }
 
+///
+/// On a thread that the program started, only that thread ends, with the thread's name in the
+/// message; the others go on. On the main thread of a program that started threads, the JVM
+/// waits for the other non-daemon threads before it exits with 1, and so does this.
 pub(crate) fn die(e: impl fmt::Display) -> ! {
+    if crate::thread::on_worker() {
+        crate::thread::end_worker(e)
+    }
+    let name =
+        if crate::thread::threads_started() { crate::thread::current_record().name() } else { "main".into() };
     crate::flush();
-    eprintln!("Exception in thread \"main\" {e}");
+    eprintln!("Exception in thread \"{name}\" {e}");
+    crate::thread::await_threads();
+    crate::flush();
     std::process::exit(1)
 }
 

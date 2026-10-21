@@ -1,14 +1,14 @@
 //! The file descriptors behind the natives of `java.io.FileInputStream`, `FileOutputStream` and
-//! `FileDescriptor` (`ast::Native::File*`). A descriptor is an index into a table that belongs to
-//! the thread, as the JVM's is: 0, 1 and 2 are standard input, output and error. Standard output
+//! `FileDescriptor` (`ast::Native::File*`). A descriptor is an index into a table of the process, as
+//! the JVM's is: 0, 1 and 2 are standard input, output and error. Standard output
 //! goes through `out` so that it stays in order with `println!`; standard input is read through a
 //! buffered reader that only the table uses. A failure is a Java exception (`Failure`), which the
 //! generated code raises with `or_throw`.
 
 use crate::{out, throw};
-use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::sync::{LazyLock, Mutex};
 
 pub const STDIN_FD: i32 = 0;
 pub const STDOUT_FD: i32 = 1;
@@ -30,16 +30,16 @@ enum Entry {
     Write(File),
 }
 
-/// The descriptors of one thread. `stdin` is a parameter so that tests can supply their input.
+/// The descriptors of the process. `stdin` is a parameter so that tests can supply their input.
 pub struct FdTable {
-    stdin: Box<dyn BufRead>,
+    stdin: Box<dyn BufRead + Send>,
     /// Indexed by descriptor; `None` once closed.
     entries: Vec<Option<Entry>>,
 }
 
-thread_local! {
-    static FDS: RefCell<FdTable> = RefCell::new(FdTable::new(Box::new(BufReader::new(io::stdin()))));
-}
+/// The table every thread of the program uses.
+static FDS: LazyLock<Mutex<FdTable>> =
+    LazyLock::new(|| Mutex::new(FdTable::new(Box::new(BufReader::new(io::stdin())))));
 
 fn closed() -> Failure {
     Failure { class: "java.io.IOException", message: "Stream Closed".to_string() }
@@ -74,7 +74,7 @@ pub fn or_throw<T>(result: Result<T, Failure>) -> T {
 }
 
 impl FdTable {
-    pub fn new(stdin: Box<dyn BufRead>) -> Self {
+    pub fn new(stdin: Box<dyn BufRead + Send>) -> Self {
         FdTable { stdin, entries: vec![Some(Entry::Stdin), Some(Entry::Stdout), Some(Entry::Stderr)] }
     }
 
@@ -257,7 +257,7 @@ fn open_flags(fd: i32) -> Option<u32> {
 }
 
 fn with<T>(f: impl FnOnce(&mut FdTable) -> T) -> T {
-    FDS.with_borrow_mut(f)
+    f(&mut FDS.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// The descriptor of a file to read, for `FileInputStream.open0`.

@@ -4,7 +4,7 @@
 //! `Vec` of `Vec`s, whose rows are reached with `row` and `row_mut`.
 
 use crate::Exception;
-use crate::array::{Array, from_vec, position, size, try_position, try_size};
+use crate::array::{Array, SharedArray, from_vec, position, shared_from_vec, size, try_position, try_size};
 
 /// `new T[len]` as a `Vec`, filled with the default value `zero`.
 #[inline]
@@ -162,3 +162,36 @@ macro_rules! shared_as_is {
 }
 
 shared_as_is!(i8, i16, i32, i64, u16, f32, f64, bool, String, Option<String>);
+
+/// `Share` in a program with threads: a plain array made a `SharedArray`.
+pub trait ShareAcross {
+    type Shared;
+    fn share_across(self) -> Self::Shared;
+}
+
+/// `v` as an array of a program with threads.
+#[inline]
+pub fn share_across<T: ShareAcross>(v: T) -> T::Shared {
+    v.share_across()
+}
+
+impl<T: ShareAcross> ShareAcross for Vec<T> {
+    type Shared = SharedArray<T::Shared>;
+    fn share_across(self) -> SharedArray<T::Shared> {
+        shared_from_vec(self.into_iter().map(ShareAcross::share_across).collect())
+    }
+}
+
+macro_rules! shared_across_as_is {
+    ($($t:ty),*) => {
+        $(impl ShareAcross for $t {
+            type Shared = $t;
+            #[inline]
+            fn share_across(self) -> $t {
+                self
+            }
+        })*
+    };
+}
+
+shared_across_as_is!(i8, i16, i32, i64, u16, f32, f64, bool, String, Option<String>);

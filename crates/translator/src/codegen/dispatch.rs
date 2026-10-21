@@ -389,10 +389,11 @@ impl<'a> Gen<'a> {
             return struct_name(&self.class.types[c].name);
         }
         let structure = self.struct_of(c);
+        let (pointer, cell) = (self.pointer(c), self.cell(c));
         if self.facts.immutable.contains(&self.class.types[c].name) {
-            format!("Rc<{structure}>")
+            format!("{pointer}<{structure}>")
         } else {
-            format!("Rc<RefCell<{structure}>>")
+            format!("{pointer}<{cell}<{structure}>>")
         }
     }
 
@@ -681,6 +682,9 @@ impl<'a> Gen<'a> {
 
     /// The enum of type `t` and the items of it that the code uses.
     pub(super) fn type_enum_items(&mut self, t: usize) {
+        if self.facts.closure_types.contains(&t) {
+            return self.closure_alias(t);
+        }
         let name = struct_name(&self.class.types[t].name);
         let variants = self.enum_variants(t);
         self.gap();
@@ -769,10 +773,12 @@ impl<'a> Gen<'a> {
         }
         self.gap();
         let vis = self.vis();
+        // The borrows of a `java::Locked` are the runtime's.
+        let java = if self.facts.thread_shared.contains(&root) { "java::" } else { "" };
         self.line(&match (mutable, immutable) {
             (false, true) => format!("{vis}fn base(&self) -> &{structure} {{"),
-            (false, false) => format!("{vis}fn base(&self) -> Ref<'_, {structure}> {{"),
-            _ => format!("{vis}fn base_mut(&self) -> RefMut<'_, {structure}> {{"),
+            (false, false) => format!("{vis}fn base(&self) -> {java}Ref<'_, {structure}> {{"),
+            _ => format!("{vis}fn base_mut(&self) -> {java}RefMut<'_, {structure}> {{"),
         });
         self.indent += 1;
         self.match_arms(t, &variants, &|g: &mut Self, c| {
@@ -782,9 +788,9 @@ impl<'a> Gen<'a> {
                 (false, true, true) => "o.as_ref()".to_string(),
                 (false, true, false) => format!("&o.{path}"),
                 (false, false, true) => "o.borrow()".to_string(),
-                (false, false, false) => format!("Ref::map(o.borrow(), |o| &o.{path})"),
+                (false, false, false) => format!("{java}Ref::map(o.borrow(), |o| &o.{path})"),
                 (true, _, true) => "o.borrow_mut()".to_string(),
-                (true, _, false) => format!("RefMut::map(o.borrow_mut(), |o| &mut o.{path})"),
+                (true, _, false) => format!("{java}RefMut::map(o.borrow_mut(), |o| &mut o.{path})"),
             };
             (text, true)
         });
@@ -1006,6 +1012,7 @@ impl<'a> Gen<'a> {
             Some(Type::Double | Type::Float) => "o.to_bits() == b.to_bits()",
             Some(Type::Array(_)) => "Rc::ptr_eq(o, b)",
             _ if self.holds_value(c) => "o == b",
+            _ if self.facts.thread_shared.contains(&c) => "Arc::ptr_eq(o, b)",
             _ => "Rc::ptr_eq(o, b)",
         };
         self.equals_test(c, &place, optional, same)
@@ -1042,7 +1049,7 @@ impl<'a> Gen<'a> {
         if self.facts.owned.contains(&self.class.types[c].name) {
             format!("std::ptr::from_ref({handle})")
         } else if self.facts.immutable.contains(&self.class.types[c].name) {
-            format!("Rc::as_ptr({handle})")
+            format!("{}::as_ptr({handle})", self.pointer(c))
         } else {
             // A method call borrows the handle itself; `&x.as_ptr()` would be a reference to the pointer.
             format!("{}.as_ptr()", handle.strip_prefix('&').unwrap_or(handle))
@@ -1203,9 +1210,16 @@ impl<'a> Gen<'a> {
             self.indent += 1;
             for &c in variants {
                 let v = self.variant(t, c);
-                // An array is a shared handle, the same array only when it is the same handle.
-                let value = self.holds_value(c) && self.class.array_of(c).is_none();
-                let same = if value { "a == b" } else { "Rc::ptr_eq(a, b)" };
+                // An array is a shared handle, the same array only when it is the same handle; in a
+                // program with threads, an `Arc`, as a shared object is.
+                let array = self.class.array_of(c).is_some();
+                let same = match () {
+                    _ if self.holds_value(c) && !array => "a == b",
+                    _ if self.facts.thread_shared.contains(&c) || array && self.facts.threaded => {
+                        "Arc::ptr_eq(a, b)"
+                    }
+                    _ => "Rc::ptr_eq(a, b)",
+                };
                 self.line(&format!("({v}(a), {v}(b)) => {same},"));
             }
             if variants.len() > 1 {

@@ -88,8 +88,8 @@ impl<'a> Gen<'a> {
             {
                 out.push(Part::Arg(self.object_text(receiver)))
             }
-            // An enum prints through its `Display`, which is its name.
-            _ if matches!(e.ty, Type::Enum(_)) => out.push(Part::Arg(self.expr(e))),
+            // An enum prints through its `Display`, which is its name; so does a charset.
+            _ if matches!(e.ty, Type::Enum(_) | Type::Charset) => out.push(Part::Arg(self.expr(e))),
             // A builder shows its text as it is when it is converted, before later operands run.
             _ if e.ty == Type::StringBuilder => {
                 let sb = self.builder_recv(e);

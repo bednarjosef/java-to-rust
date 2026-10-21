@@ -52,7 +52,7 @@ fn a_lambda_is_a_variant_of_its_interface() {
 }
 
 #[test]
-fn a_method_reference_is_a_lambda_class() {
+fn a_method_reference_is_a_closure_of_the_call_it_makes() {
     let rust = translate(
         "class A {
             interface Measure { int of(String s); }
@@ -70,32 +70,64 @@ fn a_method_reference_is_a_lambda_class() {
     assert_contains(
         &rust,
         &[
-            "fn of(&self, a: &str) -> i32 {\n        a.len() as i32\n    }",
-            "fn of(&self, a: &str) -> i32 {\n        twice(a)\n    }",
-            "struct MakeLambdaInMain {",
-            "AMeasure::MeasureLambdaInMain2(Rc::new(MeasureLambdaInMain2::new()))",
+            "type AMeasure = Rc<dyn Fn(&str) -> i32>;",
+            "let length = Rc::new(|a: &str| -> i32 { a.len() as i32 }) as AMeasure;",
+            "let doubled = Rc::new(|a: &str| -> i32 { twice(a) }) as AMeasure;",
+            "Rc::new(|a: i32| -> Rc<APoint> { Rc::new(APoint::new(a)) }) as AMake",
+            "length(\"abc\")",
         ],
     );
+    assert_lacks(&rust, &["struct MeasureLambdaInMain", "enum AMeasure"]);
 }
 
 #[test]
-fn a_lambda_parameter_is_cast_from_the_erased_descriptor() {
+fn a_generic_interfaces_closure_converts_its_arguments_and_its_result() {
     let rust = translate(
-        "import java.util.function.Function;
+        "import java.util.function.Consumer;
+        import java.util.function.Function;
         class A {
             public static void main(String[] args) {
                 Function<Integer, Integer> square = x -> x * x;
                 System.out.println(square.apply(7));
+                Consumer<String> show = s -> System.out.println(s.length());
+                show.accept(\"abc\");
             }
         }",
     );
     assert_contains(
         &rust,
         &[
-            "fn apply_integer(&self, x: i32) -> i32 {",
-            "fn apply(&self, t: Object) -> Object {",
-            "Object::Integer(self.apply_integer(java::cast(t.as_integer(), \"java.lang.Integer\")))",
-            "square.apply(Object::Integer(7))",
+            "type Function = Rc<dyn Fn(Object) -> Object>;",
+            "let square = Rc::new(|t: Object| -> Object { let x: i32 = java::cast(t.as_integer(), \"java.lang.Integer\"); Object::Integer(x.wrapping_mul(x)) }) as Function;",
+            "square(Object::Integer(7))",
+            "let show = Rc::new(|t: Object| {\n        let s: &str = &java::cast(t.as_string(), \"java.lang.String\");\n        java::println!(\"{}\", java::string_length(s));\n    }) as Consumer;",
+        ],
+    );
+    assert_lacks(&rust, &["fn apply_integer", "struct FunctionLambdaInMain"]);
+}
+
+#[test]
+fn a_lambda_that_returns_early_behind_a_bridge_is_a_closure_called_at_once() {
+    let rust = translate(
+        "import java.util.function.Function;
+        class A {
+            public static void main(String[] args) {
+                Function<Integer, Integer> f = x -> {
+                    if (x > 4) {
+                        return x - 4;
+                    }
+                    return 4 - x;
+                };
+                System.out.println(f.apply(1));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "Object::Integer((|x: i32| -> i32 {",
+            "return x.wrapping_sub(4);",
+            "})(java::cast(t.as_integer(), \"java.lang.Integer\")))",
         ],
     );
 }
@@ -112,12 +144,12 @@ fn a_marker_interface_is_dropped_from_an_intersection_cast() {
             }
         }",
     );
-    assert_contains(&rust, &["fn apply(&self, a: i32) -> i32 {"]);
+    assert_contains(&rust, &["let op = Rc::new(|a: i32| -> i32 { a + 1 }) as AOp;"]);
     assert_lacks(&rust, &["Serializable"]);
 }
 
 #[test]
-fn a_lambda_holds_the_locals_it_captures_in_fields() {
+fn a_lambda_moves_the_locals_it_captures_into_its_closure() {
     let rust = translate(
         "class A {
             interface Op { int apply(int a); }
@@ -132,10 +164,9 @@ fn a_lambda_holds_the_locals_it_captures_in_fields() {
     assert_contains(
         &rust,
         &[
-            "struct OpLambdaInMain {\n    k: i32,\n    name: String,\n}",
-            "fn new(k: i32, name: &str) -> OpLambdaInMain {",
-            "OpLambdaInMain::new(k, &name)",
-            "self.k",
+            "type AOp = Rc<dyn Fn(i32) -> i32>;",
+            "let op = Rc::new(move |a: i32| -> i32 { a.wrapping_add(k).wrapping_add(java::string_length(&name)) }) as AOp;",
+            "op(1)",
         ],
     );
 }
@@ -158,10 +189,9 @@ fn a_lambda_reaches_the_enclosing_object_through_outer() {
     assert_contains(
         &rust,
         &[
-            "struct OpLambdaInAdder {\n    outer: Rc<RefCell<A>>,\n}",
-            "AOp::OpLambdaInAdder(Rc::new(OpLambdaInAdder::new(this.clone())))",
-            "self.outer.borrow().base",
-            "self.outer.borrow().scaled(a)",
+            "{ let outer = this.clone(); Rc::new(move |a: i32| -> i32 { a.wrapping_add(outer.borrow().base) }) as AOp }",
+            "{ let outer = this.clone(); Rc::new(move |a: i32| -> i32 { outer.borrow().scaled(a) }) as AOp }",
+            "A::adder(&o)(1)",
         ],
     );
 }
@@ -181,7 +211,12 @@ fn a_lambda_in_a_lambda_takes_its_captures_from_the_outer_one() {
             }
         }",
     );
-    assert_contains(&rust, &["IntUnaryOperatorLambdaInMain2::new(x, self.k)"]);
+    assert_contains(
+        &rust,
+        &[
+            "let inner = Rc::new(move |z: i32| -> i32 { z.wrapping_add(x).wrapping_add(k) }) as IntUnaryOperator;",
+        ],
+    );
 }
 
 #[test]
@@ -226,5 +261,78 @@ fn a_default_or_static_method_of_a_jdk_interface_needs_the_jdks_sources() {
     assert!(
         message.contains("the static method `java.util.Comparator.naturalOrder` is the JDK's code"),
         "{message}"
+    );
+}
+
+#[test]
+fn a_closure_read_from_a_field_is_taken_out_before_the_call() {
+    let rust = translate(
+        "class A {
+            interface Op { int apply(int a); }
+            Op op = a -> a * 2;
+            int total;
+            void run() { total += op.apply(total + 1); }
+            static int twice(A a) { return a.op.apply(3); }
+            public static void main(String[] args) {
+                A a = new A();
+                A shared = a;
+                a.run();
+                System.out.println(shared.total + twice(a));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "op: AOp,",
+            "type AOp = Rc<dyn Fn(i32) -> i32>;",
+            "(self.op)(self.total.wrapping_add(1))",
+            "({ let f = a.borrow().op.clone(); f })(3)",
+        ],
+    );
+}
+
+#[test]
+fn a_functional_interface_whose_values_are_seen_as_objects_stays_an_enum() {
+    let rust = translate(
+        "class A {
+            interface Op { int apply(int a); }
+            public static void main(String[] args) {
+                Op op = a -> a + 1;
+                Object o = op;
+                System.out.println(op.apply(1) + \" \" + (o == op));
+            }
+        }",
+    );
+    assert_contains(&rust, &["struct OpLambdaInMain {"]);
+    assert_lacks(&rust, &["type AOp ="]);
+}
+
+#[test]
+fn the_default_methods_of_a_closure_type_are_its_extension_trait() {
+    let rust = translate(
+        "class A {
+            interface Check {
+                boolean test(int x);
+                default Check negate() { return x -> !test(x); }
+                default String describe(int x) { return test(x) ? \"yes\" : \"no\"; }
+            }
+            public static void main(String[] args) {
+                Check even = x -> x % 2 == 0;
+                System.out.println(even.negate().test(3) + even.describe(2));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "type ACheck = Rc<dyn Fn(i32) -> bool>;",
+            "trait ACheckMethods {\n    fn negate(&self) -> ACheck;\n    fn describe(&self, x: i32) -> String;\n}",
+            "impl ACheckMethods for ACheck {\n    fn negate(&self) -> ACheck {",
+            "{ let outer = self.clone(); Rc::new(move |x: i32| -> bool { !outer(x) }) as ACheck }",
+            "if self(x) {",
+            "even.negate()(3)",
+            "even.describe(2)",
+        ],
     );
 }

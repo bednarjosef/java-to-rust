@@ -14,6 +14,7 @@ mod chains;
 mod character;
 mod charsets;
 mod classes;
+mod closures;
 mod code;
 mod code_point;
 mod covariant;
@@ -112,6 +113,8 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         exhaustive: false,
         chain: false,
         field_locals: HashMap::new(),
+        bound_params: None,
+        traits: std::collections::BTreeSet::new(),
         ctor_result: None,
         printing: false,
         guarded: false,
@@ -256,6 +259,12 @@ struct Gen<'a> {
     /// The locals that hold the fields that a constructor's initializers computed first, by
     /// Java field name: the later initializers read them there.
     field_locals: HashMap<String, String>,
+    /// In a closure's body, the lambda's method whose parameters are bound to the converted
+    /// arguments already (see `closures::inline_call`).
+    bound_params: Option<usize>,
+    /// The extension traits of closure types in other modules that the module being written
+    /// calls default methods of, by path (see `closures::closure_trait`).
+    traits: std::collections::BTreeSet<String>,
     /// In a constructor, what a `return` gives back: the object being built.
     ctor_result: Option<&'static str>,
     /// Whether the text being formatted is printed.
@@ -537,6 +546,12 @@ impl<'a> Gen<'a> {
         {
             self.line(&format!("{}();", statics::init_name(&self.class.types[t].name)));
         }
+        // The program ends when its last thread does, not when `main` returns.
+        if m.is_main && self.facts.threaded {
+            let guard = self.runtime("main_thread");
+            self.line(&format!("let _main = {guard}();"));
+        }
+        let initializes = m.name == "<clinit>" && self.facts.threaded;
         if !never_runs {
             self.written.insert(index);
         }
@@ -545,7 +560,10 @@ impl<'a> Gen<'a> {
         } else if m.is_ctor {
             self.constructor(m);
         } else {
-            self.stmts(&m.body, true);
+            self.stmts(&m.body, !initializes);
+            if initializes {
+                self.init_done(name);
+            }
             if self.throwing && m.ret == Type::Void && exceptions::completes_all(&m.body) {
                 self.line("Ok(())");
             }
