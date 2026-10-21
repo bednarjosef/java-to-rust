@@ -3698,12 +3698,14 @@ fn identity_of_object_values_that_may_be_strings_is_rejected() {
 }
 
 #[test]
-fn an_array_as_an_object_is_rejected() {
-    let err = java_to_rust::translate(
+fn an_array_as_an_object_prints_as_its_jvm_name_and_hash() {
+    let rust = translate(
         "class M { public static void main(String[] x) { Object a = new int[2]; System.out.println(a); } }",
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("an array as an `Object` value not supported yet"), "{err}");
+    );
+    assert_contains(
+        &rust,
+        &["Object::IntArray(o) => f.write_str(&java::default_text(\"[I\", java::identity_hash(o))),"],
+    );
 }
 
 const GENERICS: &str = "
