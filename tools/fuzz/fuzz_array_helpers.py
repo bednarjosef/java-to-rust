@@ -58,7 +58,8 @@ class ArrayHelperGen:
             self.helper(role, dims, elem, index)
 
     def elem_for_keep(self):
-        names = [t for _, t, _ in self.statics if t.endswith('[]') and dims_of(t) == 1]
+        names = [t for _, t, _ in self.statics if t.endswith('[]') and dims_of(t) == 1
+                 and elem_of(t) in ELEMS]
         return elem_of(self.pick(names)) if names else 'int'
 
 

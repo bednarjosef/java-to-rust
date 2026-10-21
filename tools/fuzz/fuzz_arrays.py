@@ -140,6 +140,8 @@ class ArrayGen(ArrayHelperGen):
         for n, t, w in self.all_vars():
             if '[]' not in t or (writable and (not w or n in self.walked)):
                 continue
+            if elem_of(t) not in ELEMS:  # arrays of objects belong to fuzz_objects.py
+                continue
             if elem is not None and elem_of(t) != elem:
                 continue
             if dims is not None and dims_of(t) != dims:
