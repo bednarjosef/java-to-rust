@@ -10,7 +10,7 @@ use super::real_generics::Owner;
 use super::*;
 
 /// The type arguments in javac's `java.lang.Integer,Box<T>`, split at the commas outside `<>`.
-fn split_args(args: &str) -> Vec<&str> {
+pub(super) fn split_args(args: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let (mut depth, mut start) = (0, 0);
     for (i, c) in args.char_indices() {

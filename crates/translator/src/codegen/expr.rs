@@ -276,7 +276,7 @@ impl<'a> Gen<'a> {
             ExprKind::Static { class, name } => self.static_read(*class, name, e.ty),
             ExprKind::New { args, ctor, .. } => {
                 let ctor = ctor.expect("constructors are resolved by the checker");
-                self.new_object(ctor, args)
+                self.new_object(ctor, args, e.ty)
             }
             ExprKind::Unary(op, operand) => {
                 let code = self.value(operand, e.ty);

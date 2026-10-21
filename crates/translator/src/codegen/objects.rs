@@ -919,19 +919,50 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// `new C(args)`, which calls the constructor that the checker chose. A constructor that builds
-    /// a plain value is wrapped here, unless the class is owned.
-    pub(super) fn new_object(&mut self, ctor: usize, args: &'a [Expr]) -> Code {
+    /// `new C(args)` of type `ty`, which calls the constructor that the checker chose. A
+    /// constructor that builds a plain value is wrapped here, unless the class is owned.
+    pub(super) fn new_object(&mut self, ctor: usize, args: &'a [Expr], ty: Type) -> Code {
         let c = self.class.methods[ctor].class;
         let rep = self.enum_for(c);
-        self.new_object_as(ctor, args, rep)
+        let turbofish = self.constructor_turbofish(ctor, args, ty);
+        self.build_object(ctor, args, rep, &turbofish)
     }
 
     /// `new_object`, as a value of the enum of type `rep` if not `None` (an object of a class
     /// with subclasses is a value of its class's enum; an upcast makes it one of a superclass's).
     pub(super) fn new_object_as(&mut self, ctor: usize, args: &'a [Expr], rep: Option<usize>) -> Code {
+        self.build_object(ctor, args, rep, "")
+    }
+
+    /// The type arguments of `new C<..>(args)` of a Rust generic, `::<String>`, where the
+    /// arguments do not decide them all: a type parameter that no parameter of the constructor
+    /// has as its type, or one that only gets `null` (`new Box<>(null)` is `Box::new(None)`).
+    /// Empty where rustc infers them.
+    fn constructor_turbofish(&mut self, ctor: usize, args: &'a [Expr], ty: Type) -> String {
+        let c = self.class.methods[ctor].class;
+        let params = &self.class.types[c].type_params;
+        let Type::Class(_, targs) = ty else { return String::new() };
+        if params.is_empty() || targs.len() != params.len() {
+            return String::new();
+        }
+        let decided = params.iter().all(|&p| {
+            self.class.methods[ctor].params.iter().zip(args).any(|(q, a)| q.ty == p && !is_null(a))
+        });
+        if decided {
+            return String::new();
+        }
+        let names: Vec<String> = targs.iter().map(|&a| self.ty_name(a)).collect();
+        format!("::<{}>", names.join(", "))
+    }
+
+    fn build_object(&mut self, ctor: usize, args: &'a [Expr], rep: Option<usize>, turbofish: &str) -> Code {
         let args = self.call_args(ctor, args).join(", ");
-        let call = format!("{}({args})", self.qualified_fn(ctor));
+        let path = self.qualified_fn(ctor);
+        let path = match path.rsplit_once("::") {
+            Some((owner, name)) if !turbofish.is_empty() => format!("{owner}{turbofish}::{name}"),
+            _ => path,
+        };
+        let call = format!("{path}({args})");
         let call = self.raising(Code::atom(call), ctor).text;
         let c = self.class.methods[ctor].class;
         let name = &self.class.types[c].name;
@@ -1664,5 +1695,14 @@ impl<'a> Gen<'a> {
         if self.out.ends_with("}\n") || self.out.ends_with(";\n") {
             self.out.push('\n');
         }
+    }
+}
+
+/// Whether `e` is `null`, converted or not.
+fn is_null(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Null => true,
+        ExprKind::Cast(_, inner) => is_null(inner),
+        _ => false,
     }
 }
