@@ -153,12 +153,19 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Unsafe", "arrayBaseOffset", "(java.lang.Class<?>)long"),
     ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int"),
     ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.Class<?>,java.lang.String)long"),
+    ("java.util.HashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
 ];
+
+/// The methods that lowering replaces whatever their signature, as `REPLACED_METHODS`: the
+/// constants of an enum class, which the JDK reads through `SharedSecrets` and reflection.
+const REPLACED_BY_NAME: &[(&str, &str)] =
+    &[("java.util.EnumMap", "getKeyUniverse"), ("java.util.EnumSet", "getUniverse")];
 
 /// Whether the method is one of the `REPLACED_METHODS`, or an access of `Unsafe` through a
 /// field's offset, which the lowering replaces with the field.
 pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
     REPLACED_METHODS.contains(&(class, name, signature))
+        || REPLACED_BY_NAME.contains(&(class, name))
         || unsafe_field_access(class, name, signature).is_some()
 }
 

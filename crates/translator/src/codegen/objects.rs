@@ -93,6 +93,7 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Boolean => "false",
         Type::String => "String::new()",
         Type::StringBuilder => "java::StringBuilder::new()",
+        Type::JavaClass => "java::Class::OBJECT",
         Type::Boxed(_) | Type::Class(..) => "None",
         // A charset is never null, so its field starts as a placeholder; lowering rejects a
         // `Charset` field without an initializer, which assigns the field before it is read.

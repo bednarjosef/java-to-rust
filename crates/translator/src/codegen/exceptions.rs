@@ -340,7 +340,7 @@ impl<'a> Gen<'a> {
             self.need(Need::Display(t));
         }
         // A static initializer's exception ends the program as `ExceptionInInitializerError`.
-        if self.class.methods[self.method].name == "<clinit>" {
+        if self.class.is_initializer(self.method) {
             let initializer =
                 if name == "throw_uncaught" { "throw_initializer" } else { "initializer_uncaught" };
             return self.runtime(initializer);
@@ -898,7 +898,7 @@ impl<'a> Gen<'a> {
             (if simple { simple_name } else { binary }).to_string()
         } else if simple {
             decl.name.rsplit('.').next().unwrap_or_default().to_string()
-        } else if crate::lower::is_standard(&decl.name) {
+        } else if decl.kind == TypeKind::Runtime || crate::lower::is_standard(&decl.name) {
             decl.name.clone()
         } else if decl.package.is_empty() {
             decl.name.replace('.', "$")

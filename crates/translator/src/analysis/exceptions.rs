@@ -89,7 +89,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         }
     };
     let caught = |k: &Kind, frames: &[Frame]| frames.iter().any(|f| f.catches.iter().any(|&t| matches(k, t)));
-    let initializer: Vec<bool> = class.methods.iter().map(|m| m.name == "<clinit>").collect();
+    let initializer: Vec<bool> = (0..class.methods.len()).map(|m| class.is_initializer(m)).collect();
     let raised = |p: &Point, escapes: &[BTreeSet<Kind>]| -> BTreeSet<Kind> {
         match &p.raise {
             Raise::Throw(t) => h.concretes(*t).into_iter().map(Kind::Class).collect(),
@@ -706,6 +706,18 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
     let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..));
     match &x.kind {
         ExprKind::Builtin(Builtin::ClassName { .. } | Builtin::ClassLiteralName { .. }, _) => Vec::new(),
+        // The class, identity or ordinal of an object, which no `toString` gives.
+        ExprKind::Builtin(
+            Builtin::GetClass
+            | Builtin::SameClass { .. }
+            | Builtin::ClassMethod(_)
+            | Builtin::ComparableClassFor
+            | Builtin::EnumOrdinal
+            | Builtin::EnumName
+            | Builtin::EnumCompareTo
+            | Builtin::Native(Native::IdentityHash),
+            _,
+        ) => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
             [&**l, &**r].into_iter().filter(is_object).collect()
@@ -955,6 +967,10 @@ fn runtime_failures(
             | Builtin::ClassName { .. }
             | Builtin::ClassLiteralName { .. }
             | Builtin::SameClass { .. }
+            | Builtin::GetClass
+            | Builtin::ClassLiteral(_)
+            | Builtin::ClassMethod(_)
+            | Builtin::ComparableClassFor
             // A null is a value to them, and an object's own method is a call of its own.
             | Builtin::ObjectsEquals
             | Builtin::ObjectsHashCode => {}
