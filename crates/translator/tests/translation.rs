@@ -4245,15 +4245,19 @@ fn wildcards_and_raw_types_erase() {
 }
 
 #[test]
-fn an_array_passed_as_an_array_of_a_type_variable_is_rejected() {
-    let err = java_to_rust::translate(
+fn a_string_array_passed_as_an_array_of_a_type_variable_is_an_object_array() {
+    let rust = translate(
         "class M { static <T> T first(T[] xs) { return xs[0]; }
             public static void main(String[] x) { String[] s = {\"a\"}; System.out.println(first(s)); } }",
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("an array passed as an array of a type variable not supported yet"),
-        "{err}"
+    );
+    // The erased `T[]` is an `Object[]`, which the `String[]` meets, so it is one too.
+    assert_contains(
+        &rust,
+        &[
+            "fn first(xs: &[Object]) -> Object {",
+            "let s: Vec<Object> = vec![Object::String(String::from(\"a\"))];",
+            "java::cast(first(&s).as_string(), \"java.lang.String\")",
+        ],
     );
 }
 
