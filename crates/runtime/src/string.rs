@@ -5,7 +5,7 @@
 //!
 //! Out-of-range indices throw `StringIndexOutOfBoundsException` with Java's message.
 
-use crate::{is_java_whitespace, throw};
+use crate::{is_java_whitespace, throw, throw_exception};
 
 /// The UTF-16 code units of `s`.
 pub fn units(s: &str) -> Vec<u16> {
@@ -438,13 +438,18 @@ pub fn compare_to_ignore_case(a: &str, b: &str) -> i32 {
         }
         return x.len() as i32 - y.len() as i32;
     }
-    let (x, y) = (units(a), units(b));
+    compare_units_ci(&units(a), &units(b))
+}
+
+/// `compareToIgnoreCase` of two runs of code units: units that differ are compared through
+/// upper and then lower case, as the code points they belong to.
+fn compare_units_ci(x: &[u16], y: &[u16]) -> i32 {
     let (mut k1, mut k2) = (0, 0);
     while k1 < x.len() && k2 < y.len() {
         let (c1, c2) = (x[k1] as u32, y[k2] as u32);
         if c1 != c2 && compare_code_point_ci(c1, c2) != 0 {
-            let (cp1, skip1) = code_point_including(&x, k1);
-            let (cp2, skip2) = code_point_including(&y, k2);
+            let (cp1, skip1) = code_point_including(x, k1);
+            let (cp2, skip2) = code_point_including(y, k2);
             k1 += skip1 as usize;
             k2 += skip2 as usize;
             let diff = compare_code_point_ci(cp1, cp2);
@@ -456,6 +461,11 @@ pub fn compare_to_ignore_case(a: &str, b: &str) -> i32 {
         k2 += 1;
     }
     x.len() as i32 - y.len() as i32
+}
+
+/// `s.contentEquals(text)`: whether the texts are equal.
+pub fn content_equals(a: &str, b: &str) -> bool {
+    a == b
 }
 
 /// `a.equalsIgnoreCase(b)`.
@@ -515,6 +525,190 @@ pub fn try_get_chars(
     let at = dst_begin as usize;
     dst[at..at + count as usize].copy_from_slice(&units[begin as usize..end as usize]);
     Ok(())
+}
+
+/// `s.getBytes(begin, end, dst, dst_begin)`, the deprecated form that keeps the low byte of each
+/// code unit.
+pub fn get_low_bytes(s: &str, begin: i32, end: i32, dst: &mut [i8], dst_begin: i32) {
+    let units = units(s);
+    check_begin_end(begin, end, units.len()).unwrap_or_else(|e| throw_exception(e));
+    let count = end - begin;
+    if dst_begin < 0 || dst_begin as i64 + count as i64 > dst.len() as i64 {
+        let message = format!("Range [{dst_begin}, {dst_begin} + {count}) out of bounds for length {}", dst.len());
+        throw("java.lang.StringIndexOutOfBoundsException", &message);
+    }
+    let at = dst_begin as usize;
+    for (d, &u) in dst[at..at + count as usize].iter_mut().zip(&units[begin as usize..end as usize]) {
+        *d = u as i8;
+    }
+}
+
+fn is_high(c: u16) -> bool {
+    (0xD800..0xDC00).contains(&c)
+}
+
+fn is_low(c: u16) -> bool {
+    (0xDC00..0xE000).contains(&c)
+}
+
+fn pair(high: u16, low: u16) -> i32 {
+    0x10000 + ((high as i32 - 0xD800) << 10) + (low as i32 - 0xDC00)
+}
+
+/// The `StringIndexOutOfBoundsException` of an index outside `0..length`.
+fn check_index(index: i32, length: usize) -> usize {
+    if index < 0 || index as i64 >= length as i64 {
+        let message = format!("Index {index} out of bounds for length {length}");
+        throw("java.lang.StringIndexOutOfBoundsException", &message);
+    }
+    index as usize
+}
+
+/// `codePointAt(index)` of the code units `units`: a high surrogate followed by a low one is
+/// their pair; any other unit is its own code point.
+pub(crate) fn code_point_at_units(units: &[u16], index: i32) -> i32 {
+    let i = check_index(index, units.len());
+    match units.get(i + 1) {
+        Some(&low) if is_high(units[i]) && is_low(low) => pair(units[i], low),
+        _ => units[i] as i32,
+    }
+}
+
+/// `codePointBefore(index)` of the code units `units`: the code point that ends before `index`.
+pub(crate) fn code_point_before_units(units: &[u16], index: i32) -> i32 {
+    let i = check_index(index.wrapping_sub(1), units.len());
+    match i.checked_sub(1).map(|h| units[h]) {
+        Some(high) if is_low(units[i]) && is_high(high) => pair(high, units[i]),
+        _ => units[i] as i32,
+    }
+}
+
+/// `codePointCount(begin, end)` of the code units `units`: a surrogate pair counts once, a lone
+/// surrogate once too.
+pub(crate) fn code_point_count_units(units: &[u16], begin: i32, end: i32) -> i32 {
+    if begin < 0 || begin > end || end as i64 > units.len() as i64 {
+        let message = format!("Range [{begin}, {end}) out of bounds for length {}", units.len());
+        throw("java.lang.IndexOutOfBoundsException", &message);
+    }
+    let range = &units[begin as usize..end as usize];
+    let pairs = range.windows(2).filter(|w| is_high(w[0]) && is_low(w[1])).count();
+    (range.len() - pairs) as i32
+}
+
+/// `offsetByCodePoints(index, offset)` of the code units `units`, as
+/// `Character.offsetByCodePoints` walks them; out of range is an `IndexOutOfBoundsException`
+/// without a message.
+pub(crate) fn offset_by_code_points_units(units: &[u16], index: i32, offset: i32) -> i32 {
+    let out = || -> ! { throw_exception(crate::Exception::bare("java.lang.IndexOutOfBoundsException")) };
+    let length = units.len();
+    if index < 0 || index as usize > length {
+        out();
+    }
+    let mut x = index as usize;
+    if offset >= 0 {
+        for _ in 0..offset {
+            if x >= length {
+                out();
+            }
+            x += 1;
+            if is_high(units[x - 1]) && x < length && is_low(units[x]) {
+                x += 1;
+            }
+        }
+    } else {
+        for _ in offset..0 {
+            if x == 0 {
+                out();
+            }
+            x -= 1;
+            if is_low(units[x]) && x > 0 && is_high(units[x - 1]) {
+                x -= 1;
+            }
+        }
+    }
+    x as i32
+}
+
+/// `s.codePointAt(index)`.
+pub fn code_point_at(s: &str, index: i32) -> i32 {
+    code_point_at_units(&units(s), index)
+}
+
+/// `s.codePointBefore(index)`.
+pub fn code_point_before(s: &str, index: i32) -> i32 {
+    code_point_before_units(&units(s), index)
+}
+
+/// `s.codePointCount(begin, end)`.
+pub fn code_point_count(s: &str, begin: i32, end: i32) -> i32 {
+    code_point_count_units(&units(s), begin, end)
+}
+
+/// `s.offsetByCodePoints(index, offset)`.
+pub fn offset_by_code_points(s: &str, index: i32, offset: i32) -> i32 {
+    offset_by_code_points_units(&units(s), index, offset)
+}
+
+/// `s.regionMatches(ignore_case, toffset, other, ooffset, len)`: whether the `len` code units of
+/// `s` from `toffset` equal those of `other` from `ooffset`, ignoring case as `compareToIgnoreCase`
+/// does when `ignore_case`.
+pub fn region_matches(s: &str, ignore_case: bool, toffset: i32, other: &str, ooffset: i32, len: i32) -> bool {
+    let (a, b) = (units(s), units(other));
+    if ooffset < 0 || toffset < 0 || toffset as i64 > a.len() as i64 - len as i64 || ooffset as i64 > b.len() as i64 - len as i64 {
+        return false;
+    }
+    if len <= 0 {
+        return true;
+    }
+    let (a, b) = (&a[toffset as usize..][..len as usize], &b[ooffset as usize..][..len as usize]);
+    if !ignore_case {
+        return a == b;
+    }
+    compare_units_ci(a, b) == 0
+}
+
+/// `s.stripIndent()`: the lines of `s` without the white space that all its non-blank lines (and
+/// a blank last line) begin with, nor any at their ends, joined by `\n`. A string that ends with
+/// a line terminator keeps every line's indentation, and ends with `\n`.
+pub fn strip_indent(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    let opt_out = s.ends_with(['\n', '\r']);
+    let lines = lines(s);
+    let white = |c: char| is_java_whitespace(c as u32);
+    // White space is one code unit per character, so counting characters counts units.
+    let leading = |line: &str| line.chars().take_while(|&c| white(c)).count();
+    let outdent = if opt_out {
+        0
+    } else {
+        let mut outdent = lines
+            .iter()
+            .filter(|line| leading(line) != line.chars().count())
+            .map(|line| leading(line))
+            .min()
+            .unwrap_or(usize::MAX);
+        let last = lines.last().expect("a string that is not empty has a line");
+        if last.chars().all(white) {
+            outdent = outdent.min(last.chars().count());
+        }
+        outdent
+    };
+    let mut out: Vec<String> = Vec::new();
+    for line in &lines {
+        let trimmed = line.trim_end_matches(white);
+        if trimmed.chars().all(white) {
+            out.push(String::new());
+        } else {
+            let skip = outdent.min(leading(line));
+            out.push(trimmed.chars().skip(skip).collect());
+        }
+    }
+    let mut text = out.join("\n");
+    if opt_out {
+        text.push('\n');
+    }
+    text
 }
 
 /// `new String(codePoints, offset, count)`, which throws for a range outside the array and for

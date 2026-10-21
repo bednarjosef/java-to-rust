@@ -192,6 +192,9 @@ fn mentions_object(v: &Value, real: &HashSet<*const Value>) -> bool {
             names.iter().any(|n| {
                 fields.get(*n).and_then(Value::as_str).is_some_and(|t| t.contains("java.lang.Object"))
             }) || fields.get("javaType").and_then(Value::as_str).is_some_and(is_enum)
+                // `Enum.hashCode()` is `Object`'s (see `enums`).
+                || fields.get("owner").and_then(Value::as_str) == Some("java.lang.Enum")
+                    && fields.get("name").and_then(Value::as_str) == Some("hashCode")
                 || fields.values().any(mentions_object)
         }
         Value::Array(items) => items.iter().any(mentions_object),

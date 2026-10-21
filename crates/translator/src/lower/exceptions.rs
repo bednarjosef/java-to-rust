@@ -77,6 +77,14 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.Long#parseLong",
             "java.lang.Integer#parseUnsignedInt",
             "java.lang.Long#parseUnsignedLong",
+            "java.lang.String#codePointCount",
+            "java.lang.String#offsetByCodePoints",
+            "java.lang.AbstractStringBuilder#codePointCount",
+            "java.lang.StringBuilder#codePointCount",
+            "java.lang.AbstractStringBuilder#offsetByCodePoints",
+            "java.lang.StringBuilder#offsetByCodePoints",
+            "java.lang.AbstractStringBuilder#getChars",
+            "java.lang.StringBuilder#getChars",
         ],
     ),
     // A call, a field access, an array access or a switch on a reference that may be null.
@@ -90,6 +98,10 @@ const RAISED: &[(&str, &[&str])] = &[
         &[
             "enum#valueOf",
             "java.lang.Character#toChars",
+            "java.lang.AbstractStringBuilder#appendCodePoint",
+            "java.lang.StringBuilder#appendCodePoint",
+            "java.lang.AbstractStringBuilder#repeat",
+            "java.lang.StringBuilder#repeat",
             "java.lang.Object#wait",
             // A range the wrong way round (`ArraysOp::ranged`).
             "java.util.Arrays#fill",
@@ -111,6 +123,15 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.String#substring",
             "java.lang.String#valueOf",
             "java.lang.String#copyValueOf",
+            "java.lang.String#codePointAt",
+            "java.lang.String#codePointBefore",
+            "java.lang.String#getBytes",
+            "java.lang.AbstractStringBuilder#codePointAt",
+            "java.lang.StringBuilder#codePointAt",
+            "java.lang.AbstractStringBuilder#codePointBefore",
+            "java.lang.StringBuilder#codePointBefore",
+            "java.lang.AbstractStringBuilder#getChars",
+            "java.lang.StringBuilder#getChars",
         ],
     ),
     // The natives of the descriptor streams (`fd.rs`): reading or writing a closed or failing
@@ -157,7 +178,7 @@ const RAISED_WHEN_INTERRUPTED: &[(&str, &[&str])] = &[
 
 /// The classes of `RAISED` that the runtime may raise without a message as well, which are built
 /// with the constructor without arguments then, so that `getMessage()` is null.
-const BARE: &[&str] = &["java.lang.InterruptedException"];
+const BARE: &[&str] = &["java.lang.InterruptedException", "java.lang.IndexOutOfBoundsException"];
 
 /// The package of the standard class with this simple name.
 fn package_of(simple: &str) -> &'static str {
