@@ -189,6 +189,12 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("java.util.concurrent.ConcurrentHashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
     // A saved property is a property (`lower/system.rs`).
     ("jdk.internal.misc.VM", "getSavedProperty", "(java.lang.String)java.lang.String"),
+    // Nothing is garbage collected, so a file's descriptor needs no cleaner (`lower/natives.rs`).
+    ("java.io.FileCleanable", "register", "(java.io.FileDescriptor)void"),
+    // No virtual thread blocks a carrier thread (`lower/natives.rs`).
+    ("jdk.internal.misc.Blocker", "begin", "()boolean"),
+    ("jdk.internal.misc.Blocker", "begin", "(boolean)boolean"),
+    ("jdk.internal.misc.Blocker", "end", "(boolean)void"),
 ];
 
 /// The class and the field that `node` is the offset of, when it is a call of `Unsafe`'s
@@ -613,6 +619,20 @@ pub fn writes_string_array(node: &Value) -> bool {
             .and_then(|a| a.first())
             .is_some_and(|a| text(a, "javaType") == "java.lang.String[]")
 }
+
+/// The translator's `System.getProperties()` (`java/overlay/java/lang/TranslatedProperties.java`,
+/// see `lower::system`).
+pub const TRANSLATED_PROPERTIES: JdkMethod =
+    ("java.lang.TranslatedProperties", "all", "()java.util.Properties");
+
+/// The methods of `JavaLangAccess` that are the translator's static methods of the same name and
+/// type in `TRANSLATED_LANG_ACCESS_CLASS` (`java/overlay/jdk/internal/access/`), as
+/// `SharedSecrets.getJavaLangAccess()` is null in a translated program (see `lower.rs`).
+pub const TRANSLATED_LANG_ACCESS: &[&str] =
+    &["countPositives", "countNonZeroAscii", "uncheckedNewStringWithLatin1Bytes", "inflateBytesToChars"];
+
+/// The class of `TRANSLATED_LANG_ACCESS`.
+pub const TRANSLATED_LANG_ACCESS_CLASS: &str = "jdk.internal.access.TranslatedLangAccess";
 
 /// A method of the JDK, by class, name and javac's type of it.
 pub type JdkMethod = (&'static str, &'static str, &'static str);
@@ -1397,6 +1417,19 @@ impl<'t> Walk<'t> {
                 for (class, method, signature) in *methods {
                     self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
                 }
+            }
+            // The translator's properties (see `lower::system`).
+            "METHOD" if owner == "java.lang.System" && name == "getProperties" => {
+                let (class, method, signature) = TRANSLATED_PROPERTIES;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
+            // The translator's code for what `JavaLangAccess` does (see `lower.rs`).
+            "METHOD"
+                if owner == "jdk.internal.access.JavaLangAccess"
+                    && TRANSLATED_LANG_ACCESS.contains(&name.as_str()) =>
+            {
+                let signature = text(symbol, "type").to_string();
+                self.work.push(Item::Method((TRANSLATED_LANG_ACCESS_CLASS.into(), name, signature)));
             }
             // Formatted where it is called, and printed by `PRINT_FORMATTED`.
             "METHOD" if owner == "java.io.PrintStream" && matches!(name.as_str(), "printf" | "format") => {

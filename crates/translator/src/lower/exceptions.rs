@@ -145,9 +145,26 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.io.FileInputStream#skip0",
             "java.io.FileOutputStream#write",
             "java.io.FileOutputStream#writeBytes",
+            "java.io.RandomAccessFile#read0",
+            "java.io.RandomAccessFile#readBytes0",
+            "java.io.RandomAccessFile#write0",
+            "java.io.RandomAccessFile#writeBytes0",
+            "java.io.RandomAccessFile#getFilePointer",
+            "java.io.RandomAccessFile#seek0",
+            "java.io.RandomAccessFile#length0",
+            "java.io.RandomAccessFile#setLength0",
+            "java.io.UnixFileSystem#createFileExclusively0",
+            "java.io.UnixFileSystem#canonicalize0",
         ],
     ),
-    ("java.io.FileNotFoundException", &["java.io.FileInputStream#open0", "java.io.FileOutputStream#open0"]),
+    (
+        "java.io.FileNotFoundException",
+        &[
+            "java.io.FileInputStream#open0",
+            "java.io.FileOutputStream#open0",
+            "java.io.RandomAccessFile#open0",
+        ],
+    ),
     (
         "java.lang.NumberFormatException",
         &[

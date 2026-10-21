@@ -185,12 +185,23 @@ pub fn new_string(bytes: &[i8], charset: Charset) -> String {
 
 /// `new String(bytes, offset, length, charset)`, which throws for a range outside the array.
 pub fn new_string_range(bytes: &[i8], offset: i32, length: i32, charset: Charset) -> String {
+    try_new_string_range(bytes, offset, length, charset).unwrap_or_else(crate::uncaught)
+}
+
+/// `new_string_range` where the program observes the `StringIndexOutOfBoundsException` of a range
+/// outside the array.
+pub fn try_new_string_range(
+    bytes: &[i8],
+    offset: i32,
+    length: i32,
+    charset: Charset,
+) -> Result<String, crate::Exception> {
     let len = bytes.len() as i64;
     if offset < 0 || length < 0 || i64::from(offset) > len - i64::from(length) {
         let message = format!("Range [{offset}, {offset} + {length}) out of bounds for length {len}");
-        throw("java.lang.StringIndexOutOfBoundsException", &message);
+        return Err(crate::Exception::new("java.lang.StringIndexOutOfBoundsException", message));
     }
-    charset.decode(&bytes[offset as usize..(offset + length) as usize])
+    Ok(charset.decode(&bytes[offset as usize..(offset + length) as usize]))
 }
 
 /// A code point as a character; the callers only pass valid scalar values.

@@ -300,7 +300,12 @@ impl<'a> Gen<'a> {
                             [charset] => self.charset_arg(charset),
                             _ => format!("{}::Utf8", self.runtime("Charset")),
                         };
-                        call(self, "new_string_range", vec![bytes, offset, length, charset])
+                        self.may_fail(
+                            id,
+                            "new_string_range",
+                            "",
+                            &format!("{bytes}, {offset}, {length}, {charset}"),
+                        )
                     }
                     Some([charset]) => {
                         let charset = self.charset_arg(charset);

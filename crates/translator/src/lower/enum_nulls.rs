@@ -5,8 +5,8 @@
 //! method that returns `null`, with the methods it overrides and that override it.
 //!
 //! Such a value is only set, tested against `null`, compared with `==` or `!=`, printed or
-//! concatenated; one read from a field, an element or a call may also be stored in another such
-//! place, returned from such a method, or dropped, as a call's result is. Those uses have a
+//! concatenated; one read from a field, an element or a call may also be stored in a local or in
+//! another such place, returned from such a method, or dropped, as a call's result is. Those uses have a
 //! `None` case in the generated code. Any other use would give an enum value a `None`, so it is
 //! rejected, and so is `null` given to an enum anywhere else (a parameter, a conditional).
 
@@ -24,9 +24,18 @@ pub(super) struct Places {
 }
 
 impl Places {
-    /// Whether the field `name` of class `owner` may hold `null`.
-    pub(super) fn holds_null(&self, owner: &str, name: &str) -> bool {
-        self.fields.contains(&(owner.to_string(), name.to_string()))
+    /// Whether `place` is one of the places, which a nullable local may then be stored in.
+    fn holds(&self, class: &Class, place: &Place) -> bool {
+        match place {
+            Place::Field { object, name } => class
+                .field_owner_name(object.ty, name)
+                .is_some_and(|owner| self.fields.contains(&(owner.to_string(), name.clone()))),
+            Place::Static { class: c, name } => {
+                self.fields.contains(&(class.types[*c].name.clone(), name.clone()))
+            }
+            Place::Index(array, _) => self.elements.contains(&array.ty.element()),
+            Place::Var(_) => false,
+        }
     }
 
     /// Whether `e` reads one of the places: a field, a static, an element or a call.
@@ -55,9 +64,10 @@ impl Places {
     }
 }
 
-/// The places of the program that may hold `null`, until nothing changes.
-pub(super) fn places(class: &Class) -> Places {
-    let mut places = Places::default();
+/// The places of the program that may hold `null`, until nothing changes, from the fields that
+/// start as `null` (by declaring class and name).
+pub(super) fn places(class: &Class, starting_null: Vec<(String, String)>) -> Places {
+    let mut places = Places { fields: starting_null.into_iter().collect(), ..Places::default() };
     loop {
         let before = (places.fields.len(), places.elements.len(), places.methods.len());
         let mut fields = Vec::new();
@@ -122,13 +132,14 @@ pub(super) fn places(class: &Class) -> Places {
 /// nullable enum local, or a read of one of `places`, is used outside them.
 pub(super) fn escape(class: &Class, m: usize, places: &Places) -> Option<Pos> {
     let method = &class.methods[m];
-    // The enum locals that are assigned `null`, with the positions of those assignments.
+    // The enum locals that are assigned `null` or a read of a place, with the positions of those
+    // assignments.
     let assigned = RefCell::new(Vec::new());
     walk(
         method,
         &mut |x| {
             if let ExprKind::Assign { op: None, target: Place::Var(name), value } = &x.kind
-                && matches!(value.kind, ExprKind::Null)
+                && places.null(class, value)
                 && matches!(x.ty, Type::Enum(_))
             {
                 assigned.borrow_mut().push((name.clone(), x.pos));
@@ -136,7 +147,7 @@ pub(super) fn escape(class: &Class, m: usize, places: &Places) -> Option<Pos> {
         },
         &mut |s| {
             if let Stmt::Local { ty: Type::Enum(_), name, init: Some(init), .. } = s
-                && matches!(init.kind, ExprKind::Null)
+                && places.null(class, init)
             {
                 assigned.borrow_mut().push((name.clone(), init.pos));
             }
@@ -164,12 +175,18 @@ pub(super) fn escape(class: &Class, m: usize, places: &Places) -> Option<Pos> {
     walk(
         method,
         &mut |x| match &x.kind {
-            ExprKind::Assign { op: None, target: Place::Var(_), value } if is_null(value) => allow(value),
+            ExprKind::Assign { op: None, target: Place::Var(_), value } if places.null(class, value) => {
+                allow(value)
+            }
             ExprKind::Assign {
                 op: None,
-                target: Place::Field { .. } | Place::Static { .. } | Place::Index(..),
+                target: target @ (Place::Field { .. } | Place::Static { .. } | Place::Index(..)),
                 value,
-            } if matches!(x.ty, Type::Enum(_)) && places.null(class, value) => allow(value),
+            } if matches!(x.ty, Type::Enum(_))
+                && (places.null(class, value) || (is_local(value) && places.holds(class, target))) =>
+            {
+                allow(value)
+            }
             ExprKind::Binary(BinOp::Eq | BinOp::Ne, a, b) if is_enum(a) && is_enum(b) => {
                 for operand in [a, b] {
                     if nullable(operand) || is_null(operand) {
@@ -197,7 +214,9 @@ pub(super) fn escape(class: &Class, m: usize, places: &Places) -> Option<Pos> {
             _ => {}
         },
         &mut |s| match s {
-            Stmt::Local { ty: Type::Enum(_), init: Some(init), .. } if is_null(init) => allow(init),
+            Stmt::Local { ty: Type::Enum(_), init: Some(init), .. } if places.null(class, init) => {
+                allow(init)
+            }
             Stmt::Return(Some(value), _) if places.methods.contains(&m) && places.null(class, value) => {
                 allow(value)
             }

@@ -988,6 +988,19 @@ fn expr_points(
         ExprKind::Builtin(Builtin::Native(Native::ThreadStart), args) => children.extend(&args[..4]),
         // The runtime runs the dispatch of an uncaught exception later, on the thread it ends.
         ExprKind::Builtin(Builtin::Native(Native::InstallUncaught), _) => {}
+        // The store of an atomic update of an element through `Unsafe` checks neither the array
+        // nor the index, as the JVM's does not (see `failures::library_failure`): its operands
+        // are evaluated, and the store raises nothing.
+        ExprKind::Builtin(Builtin::ElementUpdate(_), args) => {
+            for a in args {
+                match &a.kind {
+                    ExprKind::Assign { target: Place::Index(array, index), value, .. } => {
+                        children.extend([&**array, &**index, &**value])
+                    }
+                    _ => children.push(a),
+                }
+            }
+        }
         ExprKind::Call { args, .. }
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }
@@ -1020,10 +1033,12 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
     let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..));
     match &x.kind {
         ExprKind::Builtin(Builtin::ClassName { .. } | Builtin::ClassLiteralName { .. }, _) => Vec::new(),
-        // The class, identity or ordinal of an object, which no `toString` gives, and its monitor.
+        // The class, identity or ordinal of an object, which no `toString` gives, its monitor, and
+        // the `Thread` that a thread is given or starts with.
         ExprKind::Builtin(
             Builtin::MonitorEnter
             | Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. } | Native::HoldsLock)
+            | Builtin::Native(Native::SetCurrentThread | Native::ThreadStart)
             | Builtin::GetClass
             | Builtin::SameClass { .. }
             | Builtin::ClassMethod(_)

@@ -336,11 +336,88 @@ impl<'t> Lowering<'t> {
         args.push(self.synth(call, node.pos(), Type::Void));
     }
 
-    /// A native of `FileInputStream`, `FileOutputStream` or `FileDescriptor`, which acts on the
-    /// descriptor of its object: the number in the `fd` field of the stream's `FileDescriptor`
-    /// (or of the `FileDescriptor` itself), which goes first among the arguments. `open0` stores
-    /// the number it opens there, and `close0` sets it to -1 once it is closed, as the JVM's
-    /// natives do. `None` for any other method.
+    /// `Blocker.begin()`, `begin(blocking)` and `end(attempted)`, which the JDK's file streams and
+    /// channels call around each operation that may block, so that a virtual thread may give
+    /// its carrier thread to another: a translated program has no virtual threads, so `begin`
+    /// is `false` and `end(false)` does nothing, and `Blocker`'s initialization, which needs the
+    /// JVM's `JavaLangAccess`, never runs (`REPLACED_METHODS`). An argument is evaluated, then
+    /// the value is given.
+    pub(super) fn blocker_call(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        args: &mut Vec<Expr>,
+    ) -> Result<Option<ExprKind>, Error> {
+        if symbol.owner != "jdk.internal.misc.Blocker" {
+            return Ok(None);
+        }
+        let pos = node.pos();
+        let value = match (symbol.name, symbol.ty) {
+            ("begin", "()boolean" | "(boolean)boolean") => {
+                self.synth(ExprKind::Bool(false), pos, Type::Boolean)
+            }
+            ("end", "(boolean)void") => {
+                self.synth(ExprKind::Builtin(Builtin::Native(Native::Nothing), Vec::new()), pos, Type::Void)
+            }
+            _ => return unsupported(node, &format!("`Blocker.{}`", symbol.name)),
+        };
+        let mut block: Vec<Stmt> = std::mem::take(args).into_iter().map(Stmt::Expr).collect();
+        if block.is_empty() {
+            return Ok(Some(value.kind));
+        }
+        block.push(if value.ty == Type::Void { Stmt::Expr(value) } else { Stmt::Yield(value) });
+        Ok(Some(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        }))
+    }
+
+    /// A native of `java.io.UnixFileSystem` (`ast::FILE_SYSTEM`), whose `File` arguments become
+    /// the paths they hold, the `path` field that `File.getPath()` returns. `None` for any other
+    /// method; a native of the class that the runtime does not implement is rejected.
+    ///
+    /// Also `FileCleanable.register(fd)`, which each file stream calls once it is open so that
+    /// the JDK's cleaner thread closes the descriptor after the stream is garbage collected: it
+    /// does nothing (`REPLACED_METHODS`), as nothing is collected that way in a translated
+    /// program. A stream that the program never closes stays open until the program ends. Its
+    /// argument is the stream's `fd` field or a parameter, which reads nothing else.
+    pub(super) fn file_system_call(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        args: &mut Vec<Expr>,
+    ) -> Result<Option<ExprKind>, Error> {
+        if (symbol.owner, symbol.name) == ("java.io.FileCleanable", "register") {
+            if !matches!(&args[..], [arg] if matches!(arg.kind, ExprKind::Var(_) | ExprKind::Field { .. })) {
+                return unsupported(node, "`FileCleanable.register` of anything but a variable or a field");
+            }
+            return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::Nothing), Vec::new())));
+        }
+        if !symbol.native || symbol.owner != "java.io.UnixFileSystem" || symbol.name == "initIDs" {
+            return Ok(None);
+        }
+        let Some(&name) = crate::ast::FILE_SYSTEM.iter().find(|&&n| n == symbol.name) else {
+            return unsupported(
+                node,
+                &format!("native method `java.io.UnixFileSystem.{}{}`", symbol.name, symbol.ty),
+            );
+        };
+        for arg in args.iter_mut() {
+            if matches!(arg.ty, Type::Class(..)) {
+                let pos = arg.pos;
+                let file = Box::new(std::mem::replace(arg, self.synth(ExprKind::Null, pos, Type::String)));
+                let path = Place::Field { object: file, name: "path".into() };
+                *arg = self.synth(super::objects::read(path), pos, Type::String);
+            }
+        }
+        Ok(Some(ExprKind::Builtin(Builtin::Native(Native::FileSystem(name)), std::mem::take(args))))
+    }
+
+    /// A native of `FileInputStream`, `FileOutputStream`, `RandomAccessFile` or `FileDescriptor`,
+    /// which acts on the descriptor of its object: the number in the `fd` field of the stream's
+    /// `FileDescriptor` (or of the `FileDescriptor` itself), which goes first among the arguments.
+    /// `open0` stores the number it opens there, and `close0` sets it to -1 once it is closed, as
+    /// the JVM's natives do. `None` for any other method.
     pub(super) fn descriptor_call(
         &self,
         node: Node<'t>,
@@ -375,17 +452,33 @@ impl<'t> Lowering<'t> {
                 args.truncate(3);
                 Native::FileWriteBytes
             }
+            ("java.io.RandomAccessFile", "open0") => Native::FileOpenRandom,
+            ("java.io.RandomAccessFile", "read0") => Native::FileRead,
+            ("java.io.RandomAccessFile", "readBytes0") => Native::FileReadBytes,
+            ("java.io.RandomAccessFile", "write0") => Native::FileWrite,
+            ("java.io.RandomAccessFile", "writeBytes0") => Native::FileWriteBytes,
+            ("java.io.RandomAccessFile", "getFilePointer") => Native::FilePosition,
+            ("java.io.RandomAccessFile", "seek0") => Native::FileSeek,
+            ("java.io.RandomAccessFile", "length0") => Native::FileLength,
+            ("java.io.RandomAccessFile", "setLength0") => Native::FileSetLength,
             _ => return Ok(None),
         };
         let pos = node.pos();
-        if let Some(r) = receiver
-            && !(r.kind() == "IDENTIFIER" && r.str("name") == "this")
-        {
-            return unsupported(r, "a native of a stream on another object than `this`");
-        }
+        // `getFilePointer` is public, so a program calls it on its own `RandomAccessFile`; the
+        // others are private, and called on `this`.
+        // Taken by the one read of the descriptor that a native on another object makes.
+        let object = std::cell::Cell::new(match receiver {
+            Some(r) if !(r.kind() == "IDENTIFIER" && r.str("name") == "this") => {
+                if native != Native::FilePosition {
+                    return unsupported(r, "a native of a stream on another object than `this`");
+                }
+                Some(self.expr(r)?)
+            }
+            _ => None,
+        });
         let descriptor_ty = self.ty(node, "java.io.FileDescriptor")?;
         let descriptor = || {
-            let object = self.this(node);
+            let object = object.take().unwrap_or_else(|| self.this(node));
             if symbol.owner == "java.io.FileDescriptor" {
                 return object;
             }
@@ -396,7 +489,7 @@ impl<'t> Lowering<'t> {
         let call =
             |args: Vec<Expr>, ty: Type| self.synth(ExprKind::Builtin(Builtin::Native(native), args), pos, ty);
         Ok(Some(match native {
-            Native::FileOpenRead | Native::FileOpenWrite => {
+            Native::FileOpenRead | Native::FileOpenWrite | Native::FileOpenRandom => {
                 let value = Box::new(call(std::mem::take(args), Type::Int));
                 ExprKind::Assign { op: None, target: number(), value }
             }

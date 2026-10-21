@@ -10,6 +10,11 @@ impl<'a> Gen<'a> {
     /// string, wrapped in `Some` where the elements of arrays of that type may be null.
     pub(super) fn main_args_vec(&mut self, ty: Type) -> String {
         let args = format!("{}()", self.runtime("main_args"));
+        self.string_vec_as(ty, args)
+    }
+
+    /// `args`, a `Vec<String>`, as a `Vec` of the elements of the array type `ty`.
+    pub(super) fn string_vec_as(&mut self, ty: Type, args: String) -> String {
         // A `String[]` that is an `Object[]` (see `lower::covariant`).
         if element(ty) != Type::String {
             let each = self.string_as_object("s");
