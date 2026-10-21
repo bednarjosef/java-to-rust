@@ -69,7 +69,7 @@ impl<'t> Lowering<'t> {
                 if !matches!(args[0].ty, Type::Class(..)) {
                     return unsupported(node, "`System.identityHashCode` of anything but an object");
                 }
-                Native::IdentityHash
+                Native::SystemIdentityHash
             }
             ("java.lang.Object", "hashCode") => {
                 let object = match receiver {
@@ -168,6 +168,10 @@ impl<'t> Lowering<'t> {
                     Some(Native::ThreadStart) => {
                         self.thread_body(node, args);
                         Native::ThreadStart
+                    }
+                    Some(Native::InstallUncaught) => {
+                        self.uncaught_dispatch(node, args);
+                        Native::InstallUncaught
                     }
                     Some(native) => native,
                     None => {
@@ -311,6 +315,20 @@ impl<'t> Lowering<'t> {
             resolved: run,
             is_super: false,
         };
+        args.push(self.synth(call, node.pos(), Type::Void));
+    }
+
+    /// What the runtime runs, once `Thread.installUncaught0()` has run, on a thread that an
+    /// exception nothing catches ends: `Thread.dispatchUncaught()`, added as the argument of the
+    /// native (`InstallUncaught`) so that every analysis sees the call and what it reaches.
+    fn uncaught_dispatch(&self, node: Node<'t>, args: &mut Vec<Expr>) {
+        let dispatch = self.methods.iter().position(|m| {
+            self.types[m.owner].javac == "java.lang.Thread"
+                && m.name == "dispatchUncaught"
+                && m.sig == "()void"
+        });
+        let call =
+            ExprKind::Call { name: "dispatchUncaught".to_string(), args: Vec::new(), resolved: dispatch };
         args.push(self.synth(call, node.pos(), Type::Void));
     }
 

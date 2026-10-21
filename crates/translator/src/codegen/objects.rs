@@ -638,7 +638,11 @@ impl<'a> Gen<'a> {
             return format!("{}({option})", self.runtime("non_null"));
         };
         self.dereferenced.insert(id);
-        let call = format!("{}({option})", self.runtime("try_non_null"));
+        // Java's message, where a `catch` may read it.
+        let call = match ids.iter().find_map(|id| self.facts.npe_messages.get(id)) {
+            Some(Some(message)) => format!("{}({option}, {message:?})", self.runtime("try_non_null_message")),
+            _ => format!("{}({option})", self.runtime("try_non_null")),
+        };
         self.passed_on(Code::atom(call))
     }
 
@@ -667,7 +671,7 @@ impl<'a> Gen<'a> {
             .filter(|(id, _)| !self.dereferenced.contains(id) && !unwritten.contains(id));
         if let Some(pos) = missed.map(|(_, &pos)| pos).min_by_key(|p| (p.line, p.column)) {
             let message = "catching the `NullPointerException` of this dereference not supported yet";
-            self.rejected.get_or_insert(Error { pos, message: message.to_string() });
+            self.rejected.push(Error { pos, message: message.to_string() });
         }
     }
 

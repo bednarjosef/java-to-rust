@@ -138,7 +138,10 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::ThreadRename
             | Native::ThreadInterrupt
             | Native::ThreadIsInterrupted
-            | Native::ThreadClearInterrupt,
+            | Native::ThreadClearInterrupt
+            | Native::InstallUncaught
+            | Native::UncaughtException
+            | Native::PrintUncaught,
         ) => None,
         // A monitor that the thread does not hold (and for `wait` a negative timeout, and an
         // interrupt, which `runtime_failures` adds).
@@ -155,6 +158,7 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::FloatToRawIntBits
             | Native::IntBitsToFloat
             | Native::IdentityHash
+            | Native::SystemIdentityHash
             | Native::CurrentTimeMillis
             | Native::NanoTime
             | Native::AvailableProcessors
@@ -410,6 +414,7 @@ pub(super) fn runtime_failures(
                         // A null string is the `NumberFormatException` of `parse_radix`.
                         | Builtin::Bits(BitsOp::ParseRadix, _)
                         | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
+                        | Builtin::Native(Native::SystemIdentityHash)
                 );
                 let checked = if takes_null || matches!(builtin, Builtin::String(StringOp::Join) | Builtin::Format) {
                     &args[..args.len().min(1)]
@@ -428,6 +433,7 @@ pub(super) fn runtime_failures(
                     let checked = matches!(
                         builtin,
                         Builtin::String(StringOp::Substring | StringOp::FromChars)
+                            | Builtin::ArraysCopyOf
                             | Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _)
                             | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
                             | Builtin::CodePoint(CodePointOp::ToCharsInto)

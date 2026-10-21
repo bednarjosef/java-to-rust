@@ -2828,6 +2828,87 @@ fn survey_json_writes_the_census_to_the_file_given() {
     assert!(written["pieces"].as_array().is_some_and(|p| !p.is_empty()), "{written}");
 }
 
+/// A program in package `p` whose `main` reaches three methods that the translator rejects, each
+/// for its own reason, and one that it translates.
+fn census_sources(dir: &str) -> std::path::PathBuf {
+    write_sources(
+        dir,
+        &[
+            (
+                "p/Main.java",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        Other.process();\n        Other.split(a);\n        Other.same();\n        Other.fine();\n    }\n}\n",
+            ),
+            (
+                "p/Other.java",
+                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void same() {\n        String s = \"x\";\n        System.out.println(s.intern() == \"x\");\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\n",
+            ),
+        ],
+    )
+}
+
+/// The census of a program, which must not fail.
+fn census(program: &java_to_rust::Program) -> java_to_rust::program::Census {
+    java_to_rust::census_program(program).unwrap_or_else(|e| panic!("census failed: {e}"))
+}
+
+#[test]
+fn the_census_reports_every_rejection_not_only_the_first() {
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![census_sources("census")],
+        ..Default::default()
+    };
+    // The translation stops at the first rejection.
+    let error = java_to_rust::translate_program(&program).expect_err("ProcessBuilder is not supported");
+    assert!(error.to_string().ends_with("type `java.lang.ProcessBuilder` not supported yet"), "{error}");
+    let census = census(&program);
+    let report = &census.report;
+    // Lowering, an analysis and the generator each reject one method; `main` and `fine` translate.
+    assert_lacks(report, &["Incomplete"]);
+    assert_contains(
+        report,
+        &[
+            "  Program: 5 pieces; 2 (40.0%) translate, 3 rejected.",
+            "type `…` not supported yet\n          at p/Other.java:4:9",
+            "catching an exception that this call of the library may throw not supported yet\n          at p/Other.java:7",
+            "== on strings compares references; not supported yet\n          at p/Other.java:12",
+        ],
+    );
+    let pieces = census.json["pieces"].as_array().expect("pieces");
+    let errors = |name: &str| {
+        let piece =
+            pieces.iter().find(|p| p["name"] == name).unwrap_or_else(|| panic!("no {name} in {pieces:?}"));
+        piece["errors"].as_array().expect("errors").len()
+    };
+    assert_eq!(
+        (errors("process"), errors("split"), errors("same"), errors("fine"), errors("main")),
+        (1, 1, 1, 0, 0)
+    );
+    assert_eq!(census.json["complete"], true);
+    assert_eq!(census.json["totals"]["program"]["rejected"], 3);
+}
+
+#[test]
+fn census_json_writes_the_census_to_the_file_given() {
+    let dir = census_sources("census_cli");
+    let json = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("census_cli.json");
+    let _ = std::fs::remove_file(&json);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "p.Main", "--source"])
+        .arg(&dir)
+        .arg("--census-json")
+        .arg(&json)
+        .output()
+        .expect("runs the translator");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Census of the code reachable from p.Main"), "{stdout}");
+    let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    assert_eq!(written["main"], "p.Main");
+    let rejections = written["rejections"].as_array().expect("rejections");
+    assert_eq!(rejections.len(), 3, "{written}");
+}
+
 #[test]
 fn an_enum_field_assigned_outside_its_constructor_is_a_table() {
     let rust = java_to_rust::translate(
@@ -3639,8 +3720,8 @@ fn a_null_dereference_that_a_catch_sees_is_a_checked_non_null() {
 }
 
 #[test]
-fn the_message_of_a_null_dereference_is_rejected_and_a_created_ones_is_not() {
-    let program = |message: &str| {
+fn the_message_of_a_null_dereference_is_javas_or_rejected_and_a_created_ones_is_its_own() {
+    let program = |second: &str, message: &str| {
         format!(
             "class A {{
                 A next;
@@ -3648,7 +3729,7 @@ fn the_message_of_a_null_dereference_is_rejected_and_a_created_ones_is_not() {
                 static int second(A a) {{
                     try {{
                         if (a.v > 0) {{ throw new NullPointerException(\"given\"); }}
-                        return a.next.v;
+                        {second}
                     }} catch (NullPointerException e) {{
                         System.out.println({message});
                         return -1;
@@ -3660,12 +3741,19 @@ fn the_message_of_a_null_dereference_is_rejected_and_a_created_ones_is_not() {
             }}"
         )
     };
-    let err = java_to_rust::translate(&program("e.getMessage()")).unwrap_err().to_string();
+    let rust = java_to_rust::translate(&program("return a.next.v;", "e.getMessage()")).unwrap();
+    assert!(rust.contains(r#"Cannot read field \"v\" because \"<parameter1>.next\" is null"#), "{rust}");
+    // A parameter that its method assigns is `<localN>` or `<parameterN>` by the path that ran.
+    let err = java_to_rust::translate(&program("a = a.next; return a.v;", "e.getMessage()"))
+        .unwrap_err()
+        .to_string();
     assert!(
-        err.contains("the message of a `NullPointerException` that the runtime raises not supported yet"),
+        err.contains("the message of the `NullPointerException` of this dereference not supported yet"),
         "{err}"
     );
-    java_to_rust::translate(&program("\"caught\"")).expect("a catch that does not read the message");
+    let rust = java_to_rust::translate(&program("a = a.next; return a.v;", "\"caught\""))
+        .expect("a catch that does not read the message");
+    assert!(!rust.contains("try_non_null_message"), "{rust}");
 }
 
 #[test]
@@ -4235,6 +4323,31 @@ fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at
             "fn first(a: &[Object]) -> Object {",
             "let words: java::Array<Object> = java::from_vec((&java::from_vec(java::split(\"b a\", \" \", 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>());",
             "java::join(\",\", &java::from_vec((&words.borrow()).iter().map(|s| java::cast(s.as_string(), \"java.lang.String\")).collect::<Vec<_>>()).borrow())",
+        ],
+    );
+}
+
+#[test]
+fn an_enum_array_passed_for_a_type_variables_array_is_an_object_array_of_its_constants() {
+    let rust = translate(
+        "public class Main {
+            enum Day { MON, TUE }
+            static <T> T last(T[] a) { return a[a.length - 1]; }
+            public static void main(String[] args) {
+                Day[] days = Day.values();
+                Day[] some = new Day[2];
+                System.out.println(last(days).ordinal() + \" \" + (some[0] == null) + \" \" + last(new Integer[] {1}));
+            }
+        }",
+    );
+    // `Day[]` meets `Integer[]` at `T[]`: its constants are `Object`s, cast back where read, and
+    // a null test of an element tests the checked cast.
+    assert_contains(
+        &rust,
+        &[
+            "let days: Vec<Option<Object>> = vec![Some(Object::Day(MainDay::Mon)), Some(Object::Day(MainDay::Tue))];",
+            "java::null_enum(last(&days).as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\"))) as i32",
+            "some[0].as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\")).is_none()",
         ],
     );
 }

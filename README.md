@@ -257,7 +257,12 @@ A small subset, end to end:
   after the body threw is added to that exception as suppressed, and `getSuppressed` returns it;
   `addSuppressed` of the exception itself or of `null` throws Java's `IllegalArgumentException` or
   `NullPointerException`. A `throw` of a value that may be null throws
-  `NullPointerException`, and a `yield` or a constructor's `return` through a `finally` runs the
+  `NullPointerException`. A `NullPointerException` of a null dereference that a `catch` may read
+  the message of has Java's (`Cannot invoke "Main$Box.size()" because "<local3>" is null`, as a
+  class compiled without `-g` names it, and with the names of the JDK's own locals in its code),
+  from a second javac run with code generation that tells how the class file names the code and
+  which slot each local has; where that is not certain the program is rejected. A
+  `yield` or a constructor's `return` through a `finally` runs the
   `finally` first. A static initializer or a static field initializer that throws ends an uncaught
   program with `ExceptionInInitializerError`; where a `catch` of it, of `Error` or of `Throwable`
   observes it, the first use throws it and every later use throws `NoClassDefFoundError`. A
@@ -294,7 +299,14 @@ A small subset, end to end:
   `interrupt`, `isInterrupted` and `Thread.interrupted()` are Java's: an interrupt ends a
   `sleep`, `join` or `wait` with `InterruptedException` and clears the status, and a thread keeps
   its status before it starts and after it ends. In a program that never calls `interrupt`,
-  `sleep`, `join` and `wait` are translated as never throwing it. Sequentially consistent
+  `sleep`, `join` and `wait` are translated as never throwing it. Uncaught-exception handlers
+  are Java's: a thread's own handler, else its `ThreadGroup` (whose `uncaughtException` a subclass
+  may override), else the default handler gets the exception that ends a thread, `main`'s
+  included, and a handler that throws prints the JVM's `Exception: <class> thrown from the
+  UncaughtExceptionHandler in thread "<name>"`; a failure of the runtime whose class the
+  translation does not declare (one no `catch` or `finally` could see either) still ends the
+  thread with the message and skips the handlers. Thread groups have a name, a parent and
+  Java's `toString`, and a thread joins its creator's group. Sequentially consistent
   `volatile`, the atomics and `java.util.concurrent` are next; the design is in [docs/multi-threading.md](docs/multi-threading.md).
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`), and so are
   `System.out.println(char[])` and `System.err.print`/`println`, which also print a `char[]`.
@@ -332,7 +344,9 @@ A small subset, end to end:
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
-every expression and the declaration every name and call refers to. `lower.rs` maps that tree onto
+every expression and the declaration every name and call refers to (and, only for a program that
+reads the message of a `NullPointerException`, `java/BytecodeNames.java` compiles it again with
+code generation, for the names that the message takes from the class file). `lower.rs` maps that tree onto
 the supported subset (`ast.rs`), the analyses prove facts about the program (`analysis.rs`), and
 the generator writes Rust (`codegen.rs`) that uses the runtime crate (`crates/runtime`) for what
 Rust lacks: Java's double and float printing, integer division that throws, `Math.max`/`min` on
@@ -646,18 +660,30 @@ referent until `clear`, as on a JVM whose collector never needs the memory. Nor 
 shows that no stream can become parallel (`program/reach/sequential.rs`); otherwise reachability
 runs again without that assumption.
 
-`--survey` prints what the code reachable from `main` uses that is not supported yet instead of
-translating it: for the program's own code and for its library code, separately, per feature
-(generic classes, exceptions, lambdas, ...) the classes and pieces of code
-(methods, field initializers, initializer blocks) that use it, those it alone blocks, and up to
-three example places (`file:line`, relative to the source or library root). It also prints the
-order of features that frees the most code at each step, the methods of the runtime's classes
-and of the untranslated ones that are called, and the native methods reached, each with the
-shortest chain of calls from `main` that reaches it and whether the runtime implements it
-(`program/survey.rs`). `--survey-json <file>`
-writes the same census as JSON for scripts: the pieces with their class, kind, name, location and
-features, the runtime calls, the natives, the methods outside the sources that are called and the
-classes whose objects are created, with their chains. It is a syntactic census, so it misses the narrower rejections of the lowering.
+`--census` runs the translation of the code reachable from `main` past every rejection and
+prints what it rejects: lowering, the analyses and the generator run as for a translation, and
+each method, constructor or lambda that one of them rejects is recorded and replaced by a stub
+with its signature and a body that never runs (a rejected field initializer or initializer block
+is left out), so every rejection after it is one the translation would meet once the code before
+it translates. Its report gives, for the program's own code and for its library code separately,
+the pieces of code (methods, constructors, field initializers, initializer blocks) that translate
+and the rejections, grouped by message (the names in backquotes left out), with the number of
+pieces each blocks and example places (`file:line:column`, relative to the source or library
+root), and the native methods reached, each with whether the runtime has it
+(`program/census.rs`). It ends early only at a rejection that no stub takes away, which it says.
+`--census-json <file>` writes it as JSON for scripts; `scripts/jdk-coverage.py` runs it over the
+target programs and writes `docs/jdk-coverage.md`, how much of the JDK code they reach translates.
+
+`--survey` is the quicker syntactic view: what the reachable code reaches outside the translated
+sources (classes, generic types, interfaces and casts outside them, monitor methods, ...), per
+feature with the classes and pieces that use it, the order of features that frees the most code
+at each step, the methods of the runtime's classes and of the untranslated ones that are called,
+and the native methods reached, each with the shortest chain of calls from `main` that reaches it
+and whether the runtime implements it (`program/survey.rs`). `--survey-json <file>` writes the
+same as JSON: the pieces with their class, kind, name, location and features, the runtime calls,
+the natives, the methods outside the sources that are called and the classes whose objects are
+created, with their chains. It does not lower anything, so it misses what the translator rejects
+inside the sources; that is the census.
 `docs/natives-and-input.md` is the census of the natives that the target programs reach and of
 what reading standard input pulls in.
 
@@ -719,7 +745,7 @@ Each construct below is rejected at translation with an error that names it:
   interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
-- of threads: `wait(millis, nanos)`, thread groups, uncaught exception handlers,
+- of threads: `wait(millis, nanos)`, thread groups beyond their name, parent and handler,
   `ThreadLocal` and the `java.util.concurrent` classes; a `StringBuilder`, or a box compared by
   identity, that threads may share; `synchronized` on a string, a box, an array, an enum
   constant or a `Class` other than a class literal, where the monitor would be kept.
@@ -728,9 +754,8 @@ Also rejected: `Charset.aliases()`, `null` as a `Charset` (and a `Charset` field
 that starts out null), catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and
 charsets beyond the six above.
 
-Checked by `--survey` on the JDK's sources: the library code that `HashMap` reaches uses
-interfaces, generic classes, inheritance, exceptions, inner classes and reflection, so none of it
-translates yet.
+`docs/jdk-coverage.md` has the census of the JDK code that the target programs reach: what share
+of it translates, and the rejections that block the rest.
 
 ### Build and test
 
@@ -741,6 +766,7 @@ run. Building the translator needs `javac` (JDK 21 or newer) on PATH.
 cargo run -p java-to-rust -- Program.java                 # print the Rust translation
 cargo run -p java-to-rust -- Program.java --crate out/    # write a Cargo project
 cargo run -p java-to-rust -- --main com.example.Main --source src/ [--library jdk-src/] [-o out.rs | --crate out/]
+cargo run -p java-to-rust -- --census --main Main --source src/ --library jdk-src/java.base
 cargo run -p java-to-rust -- --survey --main Main --source src/ --library jdk-src/java.base
 cargo test                                                # needs a JDK: runs corpus/ on both
 ```
@@ -771,6 +797,10 @@ as its command-line arguments, on `java` and as the translated binary alike.
 - [docs/natural-rust.md](docs/natural-rust.md): making the output read like hand-written Rust
   (names, layout, a separate JDK crate, non-null values, `Vec` and `for`), how to measure it, and
   a later port mode that writes natural Rust everywhere and lists each change in behaviour.
+- [docs/translator-speed-and-memory.md](docs/translator-speed-and-memory.md): how fast the
+  translator runs and how much memory it needs, the steps to cut both, an estimate at the scale of
+  the Minecraft server, and the goal of translating javac so that it uses less memory than on the
+  JVM.
 - [docs/closures-and-nested-classes.md](docs/closures-and-nested-classes.md): captures, inner,
   local and anonymous classes, lambdas, method references and for-each over `Iterable`, after
   the object model.

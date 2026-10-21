@@ -1806,7 +1806,12 @@ Generics are erased in lowering, and nothing after it knows they existed:
   such a program pulls in the JDK's sorting code. Without the JDK's sources they are rejected
   ("a change in place of a `String[]` that is also an `Object[]`"). The strings in such an array are values of `Object`'s `String`
   class (`analysis::hierarchy::flows`). A program whose `String[]`s never meet another array type
-  translates as before.
+  translates as before. An array of an enum is covariant too (`Day.values()` passed for `E[]`
+  of `<E extends Enum<E>>`, or as an `Enum<?>[]`, as `EnumSet` keeps its universe): where it is
+  an `Object[]`, its constants are `Object`s (`values()` makes them so), cast back to the enum
+  where read. An enum value is never null in the translation, so a null element read as the
+  enum ends the program ("a null enum value"), while a test of one against `null` tests the
+  checked cast's `Option`.
 - An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the
   plan's `Variant::Array`, done as a runtime class beside the strings and the boxes rather than a
   variant kind of its own: each array type that is converted to `Object` or cast back from it gets

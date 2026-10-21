@@ -504,7 +504,7 @@ impl<'a> Gen<'a> {
                 self.need(Need::Display(t));
             } else if *element != Type::String {
                 let message = "this array as the arguments of `String.format` not supported yet";
-                self.rejected.get_or_insert(Error { pos: array.pos, message: message.to_string() });
+                self.rejected.push(Error { pos: array.pos, message: message.to_string() });
             }
             let slice = self.slice_of(array);
             let f = self.runtime("format_objects");

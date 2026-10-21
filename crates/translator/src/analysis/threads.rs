@@ -44,6 +44,16 @@ pub(super) fn interrupts(class: &Class) -> bool {
     })
 }
 
+/// Whether the program sets an uncaught-exception handler: some method calls the native that
+/// gives the runtime the dispatch to the handlers (`Native::InstallUncaught`).
+pub(super) fn handles_uncaught(class: &Class) -> bool {
+    class.methods.iter().any(|m| {
+        any_expr(&m.body, &mut |x| {
+            matches!(x.kind, ExprKind::Builtin(Builtin::Native(Native::InstallUncaught), _))
+        })
+    })
+}
+
 /// The classes, by type index, whose objects two threads may reach in a threaded program.
 pub(super) fn thread_shared(class: &Class) -> HashSet<usize> {
     let h = &class.hierarchy;

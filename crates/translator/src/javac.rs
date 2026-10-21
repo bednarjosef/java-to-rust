@@ -2,7 +2,10 @@
 //! returns the typed syntax tree it prints as JSON, with the members that javac adds to records
 //! later (`records`).
 
+mod bytecode_names;
 mod records;
+
+pub use bytecode_names::{BytecodeNames, CHECKED_JAVA, NameKind, program_names, source_names};
 
 use crate::ast::{Error, Pos};
 use serde_json::Value;
@@ -14,22 +17,27 @@ use std::thread::JoinHandle;
 
 /// The command that runs `JavaTree`.
 fn java_tree() -> Command {
+    java("JavaTree", &[])
+}
+
+/// The command that runs `main`, one of the programs of `java/` that `build.rs` compiles, with
+/// the JVM's `options`.
+fn java(main: &str, options: &[&str]) -> Command {
     let mut command = Command::new("java");
     // A short-lived JVM: skip the optimizing compiler, the parallel collector and perf data
     // (whose lock-file warnings go to stdout when many JVMs run at once).
-    command.args([
-        "-XX:TieredStopAtLevel=1",
-        "-XX:+UseSerialGC",
-        "-XX:-UsePerfData",
-        // `JavaTree` attributes the classes of a program one by one, with javac's own `analyze`.
-        "--add-exports",
-        "jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
-        "-cp",
-        env!("OUT_DIR"),
-        "JavaTree",
-    ]);
+    command.args(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData"]);
+    // `JavaTree` attributes the classes of a program one by one, with javac's own `analyze`;
+    // `BytecodeNames` reads what javac's code generator decided.
+    for package in JAVAC_PACKAGES {
+        command.args(["--add-exports", &format!("jdk.compiler/com.sun.tools.javac.{package}=ALL-UNNAMED")]);
+    }
+    command.args(options).args(["-cp", env!("OUT_DIR"), main]);
     command
 }
+
+/// The packages of javac's implementation that the programs of `java/` use.
+const JAVAC_PACKAGES: [&str; 5] = ["api", "code", "tree", "util", "jvm"];
 
 pub fn tree(source: &str) -> Result<Value, Error> {
     let fail = |message: String| Error { pos: Pos::default(), message };
