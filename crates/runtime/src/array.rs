@@ -1,7 +1,7 @@
 //! Java arrays. An array is a shared handle to its elements: copying the handle gives a second
 //! name for the same array, as in Java, and every access is bounds-checked the way Java checks it.
 
-use crate::{Exception, uncaught};
+use crate::{Exception, throw, uncaught};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -25,10 +25,21 @@ pub fn tabulate<T>(len: i32, make: impl FnMut(usize) -> T) -> Array<T> {
 }
 
 /// The length of an array being created; Java throws for a negative length.
+#[inline]
 pub(crate) fn size(len: i32) -> usize {
-    try_size(len).unwrap_or_else(uncaught)
+    if len < 0 {
+        negative_size(len);
+    }
+    len as usize
 }
 
+#[cold]
+#[inline(never)]
+fn negative_size(len: i32) -> ! {
+    throw("java.lang.NegativeArraySizeException", &len.to_string())
+}
+
+/// `size` where the program observes the `NegativeArraySizeException`.
 pub(crate) fn try_size(len: i32) -> Result<usize, Exception> {
     if len < 0 {
         return Err(Exception::new("java.lang.NegativeArraySizeException", len.to_string()));
@@ -37,16 +48,28 @@ pub(crate) fn try_size(len: i32) -> Result<usize, Exception> {
 }
 
 /// The position of element `i` in an array of `len` elements, checked the way Java checks it.
+/// A negative `i` becomes a huge `usize`, so one comparison checks both ends. The check is
+/// inlined into every access and the throw is kept out of line, so an access that stays in
+/// bounds costs a compare and a branch that is never taken.
+#[inline]
 pub(crate) fn position(len: usize, i: i32) -> usize {
-    try_position(len, i).unwrap_or_else(uncaught)
+    if (i as usize) < len { i as usize } else { out_of_bounds(len, i) }
 }
 
+/// Throws Java's `ArrayIndexOutOfBoundsException` for index `i` of an array of `len` elements.
+#[cold]
+#[inline(never)]
+fn out_of_bounds(len: usize, i: i32) -> ! {
+    throw("java.lang.ArrayIndexOutOfBoundsException", &format!("Index {i} out of bounds for length {len}"))
+}
+
+/// `position` where the program observes the `ArrayIndexOutOfBoundsException`.
 pub(crate) fn try_position(len: usize, i: i32) -> Result<usize, Exception> {
-    if i < 0 || i as usize >= len {
-        let message = format!("Index {i} out of bounds for length {len}");
-        return Err(Exception::new("java.lang.ArrayIndexOutOfBoundsException", message));
+    if (i as usize) < len {
+        return Ok(i as usize);
     }
-    Ok(i as usize)
+    let message = format!("Index {i} out of bounds for length {len}");
+    Err(Exception::new("java.lang.ArrayIndexOutOfBoundsException", message))
 }
 
 /// `new T[len]` where the program observes the `NegativeArraySizeException` of a negative length.
@@ -60,11 +83,13 @@ pub fn try_tabulate<T>(len: i32, make: impl FnMut(usize) -> T) -> Result<Array<T
 }
 
 /// `a.length`.
+#[inline]
 pub fn len<T>(a: &Array<T>) -> i32 {
     a.borrow().len() as i32
 }
 
 /// `a[i]`.
+#[inline]
 pub fn get<T: Clone>(a: &Array<T>, i: i32) -> T {
     let items = a.borrow();
     items[position(items.len(), i)].clone()
@@ -85,6 +110,7 @@ pub fn try_set<T>(a: &Array<T>, i: i32, v: T) -> Result<(), Exception> {
 }
 
 /// `a[i] = v`. Java evaluates `a`, `i` and `v` before the check, and so do the arguments.
+#[inline]
 pub fn set<T>(a: &Array<T>, i: i32, v: T) {
     let mut items = a.borrow_mut();
     let i = position(items.len(), i);

@@ -18,6 +18,7 @@
 mod arrays;
 mod borrowing;
 mod boxing;
+mod constants;
 mod exceptions;
 pub mod hierarchy;
 mod indexing;
@@ -32,6 +33,7 @@ mod statics;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
+pub use arrays::{RowIndex, Slice, SlicedLoop};
 pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
 
 #[derive(Default)]
@@ -40,7 +42,8 @@ pub struct Facts {
     /// never overflow.
     pub no_overflow: HashSet<ExprId>,
     /// The values that the index of each array indexing or element assignment takes, from the
-    /// range analysis: (lowest, highest), empty when `lowest > highest`.
+    /// range analysis: (lowest, highest), empty when `lowest > highest`. Each size of a
+    /// `new T[n]` has its values here too, keyed by the size expression.
     pub index_ranges: HashMap<ExprId, (i64, i64)>,
     /// Reads of string, array and object variables that are last uses: the value is moved, not
     /// cloned (see `moves`).
@@ -73,14 +76,24 @@ pub struct Facts {
     /// The element types (strings, objects and arrays) whose arrays can hold null: their
     /// elements are `Option`s, in every array of that element type.
     pub nullable_elements: HashSet<Type>,
-    /// Array locals, as (method, name), that no other name can see: plain `Vec`s. The flag says
-    /// whether an element of the array is ever assigned.
+    /// Array locals and borrowed array parameters, as (method, name), that no other name can
+    /// see: plain `Vec`s (of `Vec`s, for arrays of arrays). The flag says whether an element of
+    /// the array, at any depth, is ever assigned.
     pub plain_arrays: HashMap<(usize, String), bool>,
-    /// `a[i]` expressions that a counting loop over the plain array `a` proves in bounds.
+    /// Accesses of plain arrays (`a[i]` reads, element assignments and rows `m[i]` of `m[i][j]`)
+    /// whose index is always in bounds.
     pub in_bounds: HashSet<ExprId>,
     /// Array parameters, as (method, parameter) indexes, that are plain at every call: `&[T]`, or
     /// `&mut [T]` when the flag says the elements are written.
     pub borrowed_arrays: HashMap<(usize, usize), bool>,
+    /// The variables of for-each loops over plain arrays of arrays, as (method, name): each
+    /// borrows the rows in turn (`for row in m.iter()`), as `&Vec<T>` or `&mut Vec<T>`.
+    pub row_loops: HashSet<(usize, String)>,
+    /// Innermost counting loops over plain arrays whose accesses are all in bounds when a check
+    /// made before the loop passes: the loop then runs over slices, keyed by its condition.
+    pub sliced_loops: HashMap<ExprId, SlicedLoop>,
+    /// Methods that return arrays nobody else holds: they return the plain `Vec`.
+    pub owned_returns: HashSet<usize>,
     /// Counting loops over a plain array whose body only reads `a[i]`, keyed by the loop
     /// condition: the reads that can become elements of `for x in a.iter()`.
     pub element_loops: HashMap<ExprId, Vec<ExprId>>,

@@ -1340,7 +1340,7 @@ fn a_last_use_moves_instead_of_cloning() {
             }
         }",
     );
-    assert_contains(&rust, &["    made\n", "let b: java::Array<i32> = a;"]);
+    assert_contains(&rust, &["    made\n", "let b: Vec<i32> = a;"]);
     assert_lacks(&rust, &["made.clone()", "a.clone()"]);
 }
 
@@ -1450,7 +1450,7 @@ fn packages_become_nested_modules() {
             // Imported, statically imported and fully qualified names are paths from the crate root.
             "crate::com::example::util::Counter::new(\"clicks\")",
             "crate::com::example::util::square(7)",
-            "crate::com::example::util::NUMBERS_LIMIT.wrapping_sub(",
+            "crate::com::example::util::NUMBERS_LIMIT - crate::com::example::util::square(3)",
             "crate::com::example::util::cube(3)",
             // Names in the same package are not.
             "line(\"total\", clicks.total())",

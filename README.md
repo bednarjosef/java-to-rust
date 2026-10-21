@@ -55,8 +55,18 @@ local returned at the end is written as its value. A switch with one labelled ca
 `if let`, and a braced case body is read as its statements. On the 157 corpus programs,
 `scripts/clippy-corpus.sh` counts 201 clippy and rustc warnings in the generated code, down from
 262 before this work (`needless_return` 57 → 0, `single_match` 2 → 0, `never_loop` 1 → 0).
-What remains is mostly expression code (`eq_op`, `approx_constant`, `unused_parens`) and
-reference-typed locals (`let_and_return`), which need the nullness and aliasing work first.
+
+Expressions read the same way. Parentheses appear only where precedence needs them. `x = x op v`
+is written `x op= v` where Rust's compound assignment does the same, and a shift by a literal
+count is written with the count Java masks to. A comparison with `true` or `false` becomes the
+other operand or its negation. A range proof lets `+ - *` stand in for `wrapping_*`, for example
+when a counter is bounded by a `static final` constant. Operations that could overflow in Java
+stay wrapping. On the 184 corpus programs the expression work took the count from 216 to 197
+(`unused_parens` 7 → 0, `bool_comparison` 2 → 1, `assign_op_pattern` 7 → 3).
+
+What remains is mostly code Java itself writes (`eq_op`, `approx_constant`,
+`zero_divided_by_zero`), object and array code (`unnecessary_to_owned`), and reference-typed
+locals (`let_and_return`), which need the nullness and aliasing work first.
 
 ## Testing
 
@@ -250,12 +260,24 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
 - Arrays (`int[]`, `long[]`, `double[]`, `boolean[]`, `String[]`, and arrays of arrays) are shared
   references in the faithful form, `java::Array<T>`: a shared cell whose clones see each other's
   writes. The aliasing analysis (`analysis/arrays.rs`) finds local arrays that no other name can
-  see, and those become a plain `Vec<T>`. Indexing a `Vec` is `a[i as usize]` where a counting
-  loop over `a.length` proves the index in bounds, and `java::at`/`java::put` otherwise. Bounds
-  and size errors go through `java::throw`, so they exit with code 1 as Java does. A parameter
-  becomes `&[T]` or `&mut [T]` when every call passes a distinct plain array, and a counting loop
-  that only reads `a[i]` becomes `for x in a.iter().cloned()`. Arrays that are returned, copied,
-  or given to `java.util.Arrays` stay shared for now. Arrays of strings, objects or arrays hold
+  see, and those become a plain `Vec<T>`, or `Vec<Vec<T>>` (at any depth) for arrays of arrays
+  of primitives or strings whose rows are only reached through the array. A plain local may take
+  a new array, a literal, another plain local that is dead afterwards (`a = b; b = c;` moves the
+  `Vec`), or the result of a method that returns only arrays it made, which then returns the
+  `Vec`. A plain array that meets code needing a shared one is converted once with `java::share`.
+  A second name that is used later (`int[] b = a;`, a row kept in a variable, a field, `==`,
+  `java.util.Arrays`) keeps the array shared, so writes through one name show through the other.
+  Indexing a `Vec` is `a[i as usize]` where the bounds analysis (`analysis/arrays/bounds.rs`)
+  proves the index in range (loop and `if` guards, lengths of rows, declared sizes), and
+  `java::at`/`java::put`/`java::modify` otherwise, whose failing path is cold and out of line.
+  Bounds and size errors go through `java::throw`, so they exit with code 1 as Java does. A
+  parameter becomes `&[T]`, `&mut [T]`, `&[Vec<T>]` or `&mut [Vec<T>]` when every call can lend
+  it a plain array or a row of one, a counting loop that only reads `a[i]` becomes
+  `for x in a.iter().cloned()`, and a for-each over the rows of a plain array borrows them
+  (`for row in m.iter()`). An innermost counting loop that reaches a plain array only at its
+  index checks once, before it starts, that the whole range is in bounds, and then runs over
+  slices with no checks (`let b_row = &b[k][..n];`); otherwise it runs with Java's checks
+  (`analysis/arrays/slices.rs`). Arrays of strings, objects or arrays hold
   `Option`s when some array of that element type may hold null (`new String[n]`,
   `new int[n][]`, or a stored value that may be null), and plain values otherwise.
 - `java.util.Arrays` on arrays of primitives and strings (`lower/java_arrays.rs`,
@@ -396,5 +418,6 @@ translation and the Cargo build run in parallel, one thread per CPU. All the Rus
 one Cargo project under `target/tmp/corpus`, kept between runs, so a program is rebuilt only when
 its translation changes: a warm run takes about as long as translating the corpus. The report
 lists every failing program with the first differing lines of output. `CORPUS_FILTER=text cargo
-test --test corpus` runs only the programs whose name contains `text`.
+test --test corpus` runs only the programs whose name contains `text`, and `CORPUS_THREADS=n`
+limits it to n threads (one per CPU by default).
 `crates/translator/tests/translation.rs` pins down what the output looks like.
