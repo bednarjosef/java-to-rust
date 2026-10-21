@@ -311,9 +311,7 @@ fn method_points(class: &Class, facts: &Facts, m: usize) -> Vec<Point> {
     let method = &class.methods[m];
     let mut out = Vec::new();
     let mut frames = Vec::new();
-    for s in &method.body {
-        stmt_points(class, facts, m, s, &mut frames, &[], &mut out);
-    }
+    block_points(class, facts, m, &method.body, &mut frames, &[], &mut out);
     // A constructor runs the initializers of its class's fields, unless it starts with `this(..)`.
     if method.is_ctor
         && !matches!(method.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })))
@@ -331,8 +329,93 @@ fn method_points(class: &Class, facts: &Facts, m: usize) -> Vec<Point> {
 /// that `assigned` says the code they hold for may assign.
 fn narrowed(safe: &[String], cond: &Expr, when: bool, assigned: impl Fn(&str) -> bool) -> Vec<String> {
     let mut out = safe.to_vec();
-    out.extend(non_null_names(cond, when).into_iter().filter(|v| !assigned(v)).map(str::to_string));
+    for (v, fact) in proved(cond, when) {
+        if !assigned(v) {
+            out.push(fact);
+        }
+    }
     out
+}
+
+/// What `safe` holds for a variable that is an instance of the class `name`, besides not null.
+fn instance_fact(v: &str, name: &str) -> String {
+    format!("{v} instanceof {name}")
+}
+
+/// What `cond` proves when it is `when`, by variable: that it is not null (its null tests), and
+/// for a top-level `instanceof` when true, that it is an instance of the class too; through a
+/// `!`, what its operand proves.
+fn proved(cond: &Expr, when: bool) -> Vec<(&str, String)> {
+    if let ExprKind::Unary(UnOp::Not, inner) = &cond.kind {
+        return proved(inner, !when);
+    }
+    let mut out: Vec<(&str, String)> =
+        non_null_names(cond, when).into_iter().map(|v| (v, v.to_string())).collect();
+    if when {
+        let mut parts = Vec::new();
+        super::nullness::conjuncts(cond, &mut parts);
+        for (k, part) in parts.iter().enumerate() {
+            if let ExprKind::InstanceOf { value, ty, .. } = &part.kind
+                && let ExprKind::Var(v) = &value.kind
+                && !parts[k + 1..].iter().any(|later| assigns(later, v))
+            {
+                out.push((v, v.clone()));
+                if let Type::Class(name, _) = ty {
+                    out.push((v, instance_fact(v, name)));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether `e` is a variable that `safe` knows not null, or a cast of one.
+fn is_tested(e: &Expr, safe: &[String]) -> bool {
+    match &e.kind {
+        ExprKind::Var(v) => safe.contains(v),
+        // A cast of a reference keeps its null.
+        ExprKind::Cast(to, value) if to.is_reference() => is_tested(value, safe),
+        _ => false,
+    }
+}
+
+/// Whether `s` never completes normally: it returns, throws, breaks or continues.
+fn leaves(s: &Stmt) -> bool {
+    match s {
+        Stmt::Return(..) | Stmt::Throw(_) | Stmt::Break | Stmt::Continue => true,
+        Stmt::BreakLabel(_) | Stmt::ContinueLabel(_) => true,
+        Stmt::Block(stmts) => stmts.last().is_some_and(leaves),
+        _ => false,
+    }
+}
+
+/// The points of a block's statements: after `if (cond) return;`, what `cond` proves when false
+/// holds for the statements that follow, until one of them assigns the variable.
+fn block_points(
+    class: &Class,
+    facts: &Facts,
+    m: usize,
+    stmts: &[Stmt],
+    frames: &mut Vec<Frame>,
+    safe: &[String],
+    out: &mut Vec<Point>,
+) {
+    let mut safe = safe.to_vec();
+    for (k, s) in stmts.iter().enumerate() {
+        stmt_points(class, facts, m, s, frames, &safe, out);
+        let rest = &stmts[k + 1..];
+        let assigned = |v: &str| rest.iter().any(|r| assigns_stmt(r, v));
+        match s {
+            Stmt::If { cond, then, otherwise: None } if leaves(then) => {
+                safe = narrowed(&safe, cond, false, assigned);
+            }
+            // A local set to a value known not null, such as `Point p = (Point) o;`.
+            Stmt::Local { name, init: Some(init), .. } if is_tested(init, &safe) && !assigned(name) => {
+                safe.push(name.clone());
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The points of statement `s`, with the `try`s around it (`frames`) and the variables known not
@@ -420,6 +503,7 @@ fn stmt_points(
                 stmt_points(class, facts, m, b, frames, safe, out);
             }
         }
+        Stmt::Block(stmts) => block_points(class, facts, m, stmts, frames, safe, out),
         _ => {
             // The expressions of this statement, then its nested statements.
             visit_own(s, &mut |e| expr_points(class, facts, m, e, frames, safe, out));
@@ -681,7 +765,7 @@ fn runtime_failures(
 ) -> Vec<(&'static str, &'static str, bool)> {
     const NPE: &str = "java.lang.NullPointerException";
     const INDEX: &str = "java.lang.ArrayIndexOutOfBoundsException";
-    let tested = |e: &Expr| matches!(&e.kind, ExprKind::Var(v) if safe.contains(v));
+    let tested = |e: &Expr| is_tested(e, safe);
     let null = |e: &Expr| {
         (m != usize::MAX && !tested(e) && maybe_null(facts, m, e)) || matches!(e.kind, ExprKind::Null)
     };
@@ -851,10 +935,16 @@ fn runtime_failures(
     {
         out.push((NPE, "this field access", false));
     }
-    // A cast to a class that the value's type is not under may fail.
+    // A cast to a class that the value's type is not under may fail, unless an `instanceof`
+    // tested the variable.
+    let instance = |to: &Type, value: &Expr| match (to, &value.kind) {
+        (Type::Class(name, _), ExprKind::Var(v)) => safe.contains(&instance_fact(v, name)),
+        _ => false,
+    };
     if let ExprKind::Cast(to, value) = &x.kind
         && let (Some(t), Some(s)) = (class.class_index(*to), class.class_index(value.ty))
         && !class.hierarchy.is_subtype(s, t)
+        && !instance(to, value)
     {
         out.push(("java.lang.ClassCastException", "this cast", false));
     }
