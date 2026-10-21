@@ -53,6 +53,8 @@ const RAISED: &[(&str, &[&str])] = &[
         &["ARRAY_ACCESS", "java.lang.Character#toChars", "java.lang.System#arraycopy"],
     ),
     ("java.lang.NegativeArraySizeException", &["NEW_ARRAY", "java.util.Arrays#copyOf"]),
+    // `super.clone()` of an object whose class is not `Cloneable`.
+    ("java.lang.CloneNotSupportedException", &["java.lang.Object#clone"]),
     (
         "java.lang.IndexOutOfBoundsException",
         &[

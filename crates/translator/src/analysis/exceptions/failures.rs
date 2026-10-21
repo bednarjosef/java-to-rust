@@ -307,6 +307,15 @@ pub(super) fn runtime_failures(
                 _,
             ) => {}
             Builtin::MonitorEnter => out.push((NPE, "this synchronized", true, args[0].id)),
+            // An object of a class that is not `Cloneable` refuses to be copied.
+            Builtin::ObjectClone => {
+                let refused = class
+                    .class_index(args[0].ty)
+                    .is_some_and(|t| class.hierarchy.concretes(t).iter().any(|&c| !class.types[c].cloneable));
+                if refused {
+                    out.push(("java.lang.CloneNotSupportedException", "this clone", true, x.id));
+                }
+            }
             Builtin::NullChecked | Builtin::Unmatched => {
                 if null(&args[0]) {
                     out.push((NPE, "this null check", true, args[0].id));
