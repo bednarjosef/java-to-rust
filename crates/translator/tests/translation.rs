@@ -1051,11 +1051,11 @@ fn constructors_keep_java_order_in_their_struct_literal() {
             public static void main(String[] a) { P p = new P(5); System.out.println(p.a + p.b + p.c); }
         }",
     );
-    // All three are taken into the literal; `a` is assigned by a call after `c`'s, but its field
-    // comes first in the literal, so the calls run first, in Java's order.
+    // All three are taken into the literal, whose values are in the order of the assignments;
+    // `a` is assigned by a call after `c`'s, and the calls run first, in Java's order.
     assert_contains(
         &rust,
-        &["let c = next();\n        let a = next();\n        let this = P { a, b: x, c };", "        this\n"],
+        &["let c = next();\n        let a = next();\n        let this = P { b: x, c, a };", "        this\n"],
     );
 }
 

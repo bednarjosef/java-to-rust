@@ -230,6 +230,10 @@ pub(super) fn check_closures(code: &str) -> Result<(), Error> {
                 let head = before.ends_with(['(', ',', '=', '{']) || before.ends_with(" move");
                 if head && let Some(end) = code[i + 1..].find('|') {
                     i += end + 2;
+                    // A closure that returns a `Result` (as `caught` writes) is left by its `?`.
+                    if code[i..].trim_start().starts_with("-> Result<") {
+                        continue;
+                    }
                     let block = code[i..].trim_start().starts_with('{');
                     closures.push((if block { depth + 1 } else { depth }, block));
                     continue;
@@ -392,6 +396,10 @@ impl<'a> Gen<'a> {
     /// A `Result` whose error is a `Throwable` (`code`), whose `Ok` value is used and whose error
     /// goes on from here: it leaves the enclosing `try` block or the method, or ends the program.
     pub(super) fn passed_on(&mut self, code: Code) -> String {
+        // Inside `java::catching` (see `caught`), the closure returns it.
+        if !self.catching_now.is_empty() {
+            return format!("{}?", code.at(ATOM));
+        }
         match self.innermost_attempt() {
             Some((label, _)) => format!("{}({}, '{label})", self.runtime("or_break!"), code.text),
             None if self.throwing => format!("{}?", code.at(ATOM)),
@@ -434,15 +442,28 @@ impl<'a> Gen<'a> {
     /// `code`, the operation `id` of `Facts::catching`, run inside `java::catching`, whose failure
     /// goes on from here as a thrown exception does. An operation whose own code passes a
     /// failure on (`?`, `or_break!`) cannot be in its closure, and is rejected.
-    pub(super) fn caught(&mut self, id: ExprId, code: Code) -> Code {
-        if code.text.contains('?') || code.text.contains("or_break!") {
+    pub(super) fn caught(&mut self, id: ExprId, code: Code, mark: usize) -> Code {
+        // Lines written before the operation (from `mark`) run outside the closure.
+        let before = &self.out[mark..];
+        if code.text.contains("or_break!") || before.contains('?') || before.contains("or_break!") {
             let pos = self.facts.catching[&id];
             let message = "catching the exception of an operation that holds another one that is caught not supported yet";
             self.rejected.get_or_insert(Error { pos, message: message.to_string() });
             return code;
         }
         self.dereferenced.insert(id);
-        let call = format!("{}(|| {})", self.runtime("catching"), code.text);
+        let call = if code.text.contains('?') {
+            // An operand that throws (`passed_on` writes `?` inside) leaves the closure with its
+            // exception, which goes on as the operation's own would.
+            let throwable = self.throwable_type();
+            format!(
+                "{}(|| -> Result<_, {throwable}> {{ Ok({}) }}).map_err({throwable}::from).and_then(|r| r)",
+                self.runtime("catching"),
+                code.text
+            )
+        } else {
+            format!("{}(|| {})", self.runtime("catching"), code.text)
+        };
         Code::atom(self.passed_on(Code::atom(call)))
     }
 
