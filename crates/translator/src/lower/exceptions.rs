@@ -56,7 +56,16 @@ const RAISED: &[(&str, &[&str])] = &[
     ),
     (
         "java.lang.ArrayIndexOutOfBoundsException",
-        &["ARRAY_ACCESS", "java.lang.Character#toChars", "java.lang.System#arraycopy"],
+        &[
+            "ARRAY_ACCESS",
+            "java.lang.Character#toChars",
+            "java.lang.System#arraycopy",
+            // A range outside the array (`ArraysOp::ranged`).
+            "java.util.Arrays#fill",
+            "java.util.Arrays#sort",
+            "java.util.Arrays#copyOfRange",
+            "java.util.Arrays#binarySearch",
+        ],
     ),
     ("java.lang.NegativeArraySizeException", &["NEW_ARRAY", "java.util.Arrays#copyOf"]),
     // `super.clone()` of an object whose class is not `Cloneable`.
@@ -78,7 +87,16 @@ const RAISED: &[(&str, &[&str])] = &[
     ("java.lang.ClassCastException", &["TYPE_CAST"]),
     (
         "java.lang.IllegalArgumentException",
-        &["enum#valueOf", "java.lang.Character#toChars", "java.lang.Object#wait"],
+        &[
+            "enum#valueOf",
+            "java.lang.Character#toChars",
+            "java.lang.Object#wait",
+            // A range the wrong way round (`ArraysOp::ranged`).
+            "java.util.Arrays#fill",
+            "java.util.Arrays#sort",
+            "java.util.Arrays#copyOfRange",
+            "java.util.Arrays#binarySearch",
+        ],
     ),
     // A monitor that the thread does not hold.
     (

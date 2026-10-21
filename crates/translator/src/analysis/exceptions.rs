@@ -26,7 +26,10 @@
 //! nothing catches does. Where a `toString` that the program wrote may throw what a `catch`
 //! around the text, or around a call on the way to it, would catch, the program is rejected. The
 //! JDK's own `toString`s throw only for bugs (a collection changed while it is shown) and are not
-//! looked at. An explicit `o.toString()` is an ordinary call.
+//! looked at. An explicit `o.toString()` is an ordinary call, except that one of the JDK's own
+//! `toString`s lets out only what the program's code that it runs throws, and the `catch` clauses
+//! around the call are not looked for in its own code. The JDK's static initializers run on the
+//! JDK's own constants and flags, and so none of the program's code: one lets out nothing.
 
 mod entry;
 mod failures;
@@ -129,21 +132,59 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         }
     };
 
-    // What escapes each method.
+    // The JDK's own `toString`s throw only for bugs, as for an object's text (see the module's
+    // comment): a call of one lets out only what the program's code that it runs throws, and
+    // what the caller's `catch` clauses catch is not looked for in its own code. So do the JDK's
+    // static initializers, which run on the JDK's own constants and flags and so run none of the
+    // program's code: one lets out nothing, although the calls of interfaces in it reach the
+    // program's implementations too (`Function.apply` reaches each lambda of the program).
+    let jdk: Vec<bool> = class.methods.iter().map(|m| from_jdk(&class.types[m.class])).collect();
+    let bugs_only: Vec<bool> = class
+        .methods
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let to_string = m.name == "toString" && m.params.is_empty() && !m.is_static;
+            jdk[i] && (to_string || initializer[i] && !guarded[i])
+        })
+        .collect();
+
+    // What escapes each method, and of that, what the program's code throws: all of it for a
+    // method of the program, and for one of the JDK what escapes the program's methods it calls.
     let escapes_of = |points: &[Vec<Point>]| {
         let mut escapes: Vec<BTreeSet<Kind>> = vec![BTreeSet::new(); class.methods.len()];
+        let mut from_program: Vec<BTreeSet<Kind>> = vec![BTreeSet::new(); class.methods.len()];
         loop {
             let mut changed = false;
             for m in 0..class.methods.len() {
                 let mut out = BTreeSet::new();
+                let mut program = BTreeSet::new();
                 for p in &points[m] {
                     out.extend(raised(p, &escapes).into_iter().filter(|k| !caught(k, &p.frames)));
+                    if let Raise::Call(callees) = &p.raise {
+                        let through = callees.iter().flat_map(|&c| from_program[c].iter().cloned());
+                        program.extend(through.filter(|k| !caught(k, &p.frames)));
+                    }
                 }
-                if initializer[m] && !guarded[m] && !out.is_empty() {
-                    out = BTreeSet::from([Kind::Runtime(INITIALIZER_ERROR)]);
+                if !jdk[m] {
+                    program = out.clone();
                 }
-                if out != escapes[m] {
+                if bugs_only[m] {
+                    if initializer[m] {
+                        program.clear();
+                    }
+                    out = program.clone();
+                }
+                if initializer[m] && !guarded[m] {
+                    for set in [&mut out, &mut program] {
+                        if !set.is_empty() {
+                            *set = BTreeSet::from([Kind::Runtime(INITIALIZER_ERROR)]);
+                        }
+                    }
+                }
+                if out != escapes[m] || program != from_program[m] {
                     escapes[m] = out;
+                    from_program[m] = program;
                     changed = true;
                 }
             }
@@ -194,7 +235,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         for m in 0..class.methods.len() {
             for p in &points[m] {
                 let Raise::Call(callees) = &p.raise else { continue };
-                let mut here = seen[m].clone();
+                let mut here = if bugs_only[m] { Seen::default() } else { seen[m].clone() };
                 for f in &p.frames {
                     here.types.extend(f.catches.iter().copied());
                     here.all |= f.finally;
@@ -274,7 +315,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 let Raise::Runtime { checked, id, .. } = p.raise else { continue };
                 let seen_here = catcher.is_some()
                     || p.frames.iter().any(|f| f.finally)
-                    || observed(&Kind::Runtime(name), &seen[m]);
+                    || (!bugs_only[m] && observed(&Kind::Runtime(name), &seen[m]));
                 let raised_class = class.type_index(name).filter(|&c| class.hierarchy.is_concrete(c));
                 if seen_here
                     && checked
@@ -341,7 +382,31 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // form only.
     let npe = Kind::Runtime("java.lang.NullPointerException");
     let mut reading_tries = HashSet::new();
+    // A suppressed exception is read only through `getSuppressed` (the runtime's stack traces do
+    // not show it), so adding one to the exception that is thrown on (a try-with-resources'
+    // `closing` catch) reads neither, unless the program gets them back.
+    let mut suppressed_read = false;
     for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        suppressed_read |=
+                            matches!(&x.kind, ExprKind::MethodCall { name, .. } if name == "getSuppressed")
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    for (m, method) in class.methods.iter().enumerate() {
+        // A static initializer of the JDK throws only for bugs (see `bugs_only`): the `catch`
+        // that a rewritten one has (section 0.9), which gives what it catches as the cause of
+        // its `ExceptionInInitializerError`, sees no `NullPointerException`.
+        if jdk[m] && initializer[m] {
+            continue;
+        }
         let mut found = None;
         for s in &method.body {
             visit_stmt(s, &mut |_| {}, &mut |s| {
@@ -356,16 +421,34 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 }
                 for catch in catches.iter().filter(|c| c.types.iter().any(|&t| matches(&npe, t))) {
                     // Any use of the exception may read its message (`getMessage`, its text, a
-                    // method it is passed to), except throwing it on.
+                    // method it is passed to), except throwing it on and suppressing (above).
                     let mut rethrown = HashSet::new();
+                    let mut suppressing = HashSet::new();
                     for b in &catch.body {
-                        visit_stmt(b, &mut |_| {}, &mut |s| {
-                            if let Stmt::Throw(e) = s {
-                                let thrown = if let ExprKind::Cast(_, inner) = &e.kind { inner } else { e };
-                                rethrown.insert(thrown.id);
-                            }
-                        });
+                        visit_stmt(
+                            b,
+                            &mut |e| {
+                                visit_expr(e, &mut |x| {
+                                    if let ExprKind::MethodCall { name, receiver, args, .. } = &x.kind
+                                        && name == "addSuppressed"
+                                    {
+                                        suppressing.insert(receiver.id);
+                                        if !suppressed_read {
+                                            suppressing.extend(args.iter().map(|a| a.id));
+                                        }
+                                    }
+                                })
+                            },
+                            &mut |s| {
+                                if let Stmt::Throw(e) = s {
+                                    let thrown =
+                                        if let ExprKind::Cast(_, inner) = &e.kind { inner } else { e };
+                                    rethrown.insert(thrown.id);
+                                }
+                            },
+                        );
                     }
+                    rethrown.extend(suppressing);
                     for b in &catch.body {
                         visit_stmt(
                             b,

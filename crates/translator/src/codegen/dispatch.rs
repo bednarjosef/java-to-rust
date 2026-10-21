@@ -109,16 +109,25 @@ impl<'a> Gen<'a> {
     }
 
     /// The path of the variant of class `c` in the enum of `t`: `Shape::Circle`. A variant is
-    /// named after its class, with the class's outer classes when two variants share a name.
+    /// named after its class, with the class's outer classes when two variants share a name, and
+    /// with its package too when two classes of different packages share that
+    /// (`JavaUtilStreamAbstractSetInEntrySet`).
     pub(super) fn variant(&self, t: usize, c: usize) -> String {
         self.need(Need::Enum(t));
+        let variants = hierarchy::variants(self.class, self.facts, t);
+        let shared = |name: &dyn Fn(usize) -> String| {
+            let own = name(c);
+            variants.iter().filter(|&&o| name(o) == own).count() > 1
+        };
         let simple = |c: usize| self.simple_name(c);
-        let name = simple(c);
-        let shared =
-            hierarchy::variants(self.class, self.facts, t).into_iter().filter(|&o| simple(o) == name).count()
-                > 1;
-        let name =
-            if shared { modules::split(&self.class.types[c].name).1.replace(['.', '$'], "") } else { name };
+        let in_package = |c: usize| modules::split(&self.class.types[c].name).1.replace(['.', '$'], "");
+        let name = if !shared(&simple) {
+            simple(c)
+        } else if !shared(&in_package) {
+            in_package(c)
+        } else {
+            self.class.types[c].name.split(['.', '$']).map(capitalized).collect()
+        };
         format!("{}::{name}", struct_name(&self.class.types[t].name))
     }
 
