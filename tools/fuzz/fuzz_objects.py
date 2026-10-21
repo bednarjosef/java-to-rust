@@ -648,7 +648,8 @@ class ObjectGen(ObjectDeclGen, ObjectStmtGen):
         if kind == 'string':
             return f'{self.word(d - 1)}.compareTo({self.word(d - 1)})'
         if 'maxOf' in self.helpers:
-            return f'maxOf({self.int_value(d - 1)}, {self.int_value(d - 1)})'
+            # Unboxed, as the caller may cast it to a smaller type, which an Integer cannot be.
+            return f'((int) maxOf({self.int_value(d - 1)}, {self.int_value(d - 1)}))'
         return None
 
     def object_bool(self, d):
