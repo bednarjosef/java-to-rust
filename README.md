@@ -310,10 +310,16 @@ and `%a` are rejected in a constant format. A format argument keeps its Java typ
 Strings and bytes meet through `getBytes()`, `getBytes(charset)` and `getBytes("name")`, and
 `new String(bytes)`, `new String(bytes, charset)`, `new String(bytes, offset, length, charset)`
 and the name forms, for UTF-8, US-ASCII, ISO-8859-1, UTF-16 (with its byte order mark), UTF-16BE
-and UTF-16LE. The `StandardCharsets` constants and `Charset.forName` are charsets only in those
-arguments: a `Charset` kept in a variable or passed elsewhere is rejected. Encoding replaces
-unmappable characters as Java does, and decoding replaces malformed input as Java's `String` does
-(`crates/runtime/src/charset.rs`).
+and UTF-16LE. A `Charset` is a value like any other: it can be kept in a variable, a field or an
+array, passed to and returned from methods, compared with `==`, `!=` and `equals`, and asked for
+`name()`, `displayName()`, `toString()` and `hashCode()`. `Charset.forName` and `isSupported`
+resolve aliases and letter case as Java does (`utf8`, `latin1`, `ASCII`). An unknown or malformed
+name throws `UnsupportedCharsetException` or `IllegalCharsetNameException` with Java's message,
+which here ends the program uncaught with exit code 1, since the translation cannot catch them.
+`Charset.defaultCharset()` is UTF-8, as Java answers from version 18 on (JEP 400). The runtime
+knows only the six charsets above, so `forName` rejects other names, such as `windows-1252`, that
+Java supports. A `Charset` is never null. Encoding replaces unmappable characters as Java does,
+and decoding replaces malformed input as Java's `String` does (`crates/runtime/src/charset.rs`).
 
 #### Enums
 
@@ -588,8 +594,10 @@ Each construct below is rejected at translation with an error that names it:
   above.
 
 Also rejected: the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and
-the like), `Character.toChars(int, char[], int)`, `Charset` values kept in variables, and the
-unsigned and parse methods with other argument counts.
+the like), `Character.toChars(int, char[], int)`, `Charset.aliases()`, `null` as a `Charset` (and a
+`Charset` field or array element that starts out null), catching `UnsupportedCharsetException` or
+`IllegalCharsetNameException`, charsets beyond the six above, and the unsigned and parse methods
+with other argument counts.
 
 Checked by `--survey` on the JDK's sources: the library code that `HashMap` reaches uses
 interfaces, generic classes, inheritance, exceptions, inner classes and reflection, so none of it
