@@ -68,11 +68,27 @@ Earlier table: the array-ownership branch (`fd9bace`), a single run at load 72, 
 
 Causes of the changes:
 
-- **Statics (+68%) is a real slowdown.** The generated Rust is the same as the earlier
-  translator's (`diff` shows no change). In back-to-back runs of the two translators, the median
-  went from 1550 to 2090 ms, so the cause is in the runtime. A copy of the runtime with the old
-  `throw` body recovers about 170 ms: `throw` now calls `exception::die`. The other 370 ms are in
-  the new `array.rs` (`post_update` and `set`), which was not isolated further.
+- **Statics (+68%) is a real slowdown, but the hot loop does no extra work.** The generated Rust
+  is the same as the earlier translator's. Counted with `perf_event_open` (`perf` is not installed
+  here, so the count is read directly from the kernel), both runtimes retire the same instructions:
+  47,531,803,862 for `fd9bace` and 47,531,804,122 for HEAD, in the per-commit bisect builds. The
+  `statics::main` code is identical in both binaries apart from two string addresses. The cycle
+  counts differ: in interleaved runs at load 15, `fd9bace` took 8.7 to 9.0 billion cycles and HEAD
+  took 10.6 to 10.9 billion.
+  - The hot loop starts at a different offset in the two binaries (`0x17540` and `0x173e0`), so
+    the difference looks like code placement. Building the same HEAD crate with
+    `-C llvm-args=-align-all-functions=6` brought it back to 8.5 to 8.9 billion cycles. That is a
+    build setting, not a runtime change, and it was not applied: it affects every benchmark.
+  - The throw path and the accessors are already `#[cold]`/`#[inline(never)]` (throw) and
+    `#[inline]` (`position`, `get`, `set`), since before `fd9bace`, and no call into them is in
+    the hot loop. So there was no throw or accessor change to fix.
+  - Across the runtime commits since `fd9bace`, the instruction count is 47.5 billion from
+    `3f5f715` on. Cycles for those same commits range from 7.6 to 13.5 billion on the loaded
+    machine, with no commit that stands out. No commit is named as the cause.
+  - The earlier split (about 170 ms for `throw`, 370 ms for `array.rs`) came from wall-clock runs.
+    The instruction counts do not support it, so it should not be read as a measured cause.
+  - Not done: the per-benchmark instruction comparison of the other programs in
+    `scripts/benchmark.py`. No runtime change was made, so nothing could have become slower.
 - **SortMillion (+42%), Collatz (+32%), Sieve (+23%), BinaryTrees (+190%) did not get slower in
   Rust.** The generated Rust is the same as the earlier translator's, except for Collatz
   (`n = n / 2` is now `n /= 2`, the same operation). BinaryTrees ran at 5.8 s on both translators
