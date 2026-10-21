@@ -165,6 +165,7 @@ impl<'t> Lowering<'t> {
         for member in node
             .list("members")
             .filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m) && self.keeps(*m, javac))
+            .filter(|m| self.handle_declaration(*m).is_none())
         {
             // Moved initializers run in the constructors (see `inner`).
             let field = self.field(member, !(moved && !member.has_flag("STATIC")))?;
@@ -231,6 +232,7 @@ impl<'t> Lowering<'t> {
         };
         let name = symbol.name.to_string();
         if symbol.is_static {
+            self.check_handle_use(node)?;
             // Java evaluates an object in front of a static field and ignores it, even null;
             // one without effects is simply dropped.
             if let Some(r) = receiver

@@ -678,6 +678,9 @@ fn expr_points(
             children.push(receiver);
             children.extend(args);
         }
+        // What a started thread runs raises nothing where the thread is started: an exception
+        // that escapes it ends that thread (the runtime prints it), whatever catches the start.
+        ExprKind::Builtin(Builtin::Native(Native::ThreadStart), args) => children.extend(&args[..4]),
         ExprKind::Call { args, .. }
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }
@@ -790,7 +793,10 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             ArraysOp::Equals | ArraysOp::HashCode | ArraysOp::SortAll | ArraysOp::BinarySearch,
         ) => None,
         Builtin::Arrays(ArraysOp::DeepToString | ArraysOp::Clone) => None,
-        Builtin::Bits(BitsOp::ParseRadix, _) => Some("java.lang.NumberFormatException"),
+        Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _) => Some("java.lang.NumberFormatException"),
+        Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _) => {
+            Some("java.lang.NumberFormatException")
+        }
         Builtin::EnumValueOf => Some("java.lang.IllegalArgumentException"),
         Builtin::Bits(..) => None,
         Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => None,
@@ -802,6 +808,25 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         Builtin::Native(Native::Math { name: "clamp", .. }) => Some("java.lang.IllegalArgumentException"),
         // The others are functions on numbers, which never throw.
         Builtin::Native(Native::Math { .. }) => None,
+        // A negative time. Nothing interrupts a thread of a translated program, so `sleep` never
+        // throws `InterruptedException`.
+        Builtin::Native(Native::Sleep { .. }) => Some("java.lang.IllegalArgumentException"),
+        // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail.
+        Builtin::Native(
+            Native::OnSpinWait
+            | Native::ThreadYield
+            | Native::ThreadNumber
+            | Native::ThreadId
+            | Native::MainThreadId
+            | Native::HasCurrentThread
+            | Native::SetCurrentThread
+            | Native::CurrentThread
+            | Native::ThreadStart
+            | Native::ThreadAlive
+            | Native::ThreadJoin
+            | Native::ThreadRename,
+        ) => None,
+        Builtin::CodePoint(CodePointOp::ToCharsInto) => Some("java.lang.IllegalArgumentException"),
         Builtin::CodePoint(
             CodePointOp::CharCount
             | CodePointOp::ToCodePoint
@@ -809,8 +834,24 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | CodePointOp::LowSurrogate
             | CodePointOp::IsValid
             | CodePointOp::IsBmp
-            | CodePointOp::IsSupplementary,
+            | CodePointOp::IsSupplementary
+            | CodePointOp::IsLetter
+            | CodePointOp::IsDigit
+            | CodePointOp::IsLetterOrDigit
+            | CodePointOp::IsWhitespace
+            | CodePointOp::IsSpaceChar
+            | CodePointOp::IsUpperCase
+            | CodePointOp::IsLowerCase
+            | CodePointOp::IsAlphabetic
+            | CodePointOp::ToUpperCase
+            | CodePointOp::ToLowerCase
+            | CodePointOp::NumericValue
+            | CodePointOp::Digit,
         ) => None,
+        // A name that is not a charset: `UnsupportedCharsetException`, `IllegalCharsetNameException`
+        // or, for null, `IllegalArgumentException`. Not checked, so a catch of it is rejected.
+        Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported) => Some("?"),
+        Builtin::Charset(_) => None,
         _ => Some("?"),
     }
 }
@@ -957,6 +998,14 @@ fn runtime_failures(
                 }
             }
             _ => {
+                // Writing past the end of the array throws, as `Character.toChars` does.
+                if matches!(builtin, Builtin::CodePoint(CodePointOp::ToCharsInto)) {
+                    out.push(("java.lang.ArrayIndexOutOfBoundsException", "this call of the library", true, x.id));
+                }
+                // A begin or end outside the string throws, as `parseInt(s, begin, end, radix)` does.
+                if matches!(builtin, Builtin::Bits(BitsOp::ParseRange, _) | Builtin::Unsigned(UnsignedOp::ParseRange, _)) {
+                    out.push(("java.lang.IndexOutOfBoundsException", "this call of the library", true, x.id));
+                }
                 // A null argument throws, except where the method takes null (an `equals`, the
                 // elements of `join`, the text of `Arrays.toString`).
                 let takes_null = matches!(
@@ -965,6 +1014,7 @@ fn runtime_failures(
                         | Builtin::ArraysToString
                         | Builtin::Arrays(ArraysOp::Equals | ArraysOp::HashCode | ArraysOp::DeepToString)
                         | Builtin::Boxed(BoxedOp::Equals, _)
+                        | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
                 );
                 let checked = if takes_null || matches!(builtin, Builtin::String(StringOp::Join)) {
                     &args[..args.len().min(1)]
@@ -980,7 +1030,9 @@ fn runtime_failures(
                     let checked = matches!(
                         builtin,
                         Builtin::String(StringOp::Substring | StringOp::FromChars)
-                            | Builtin::Bits(BitsOp::ParseRadix, _)
+                            | Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _)
+                            | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
+                            | Builtin::CodePoint(CodePointOp::ToCharsInto)
                             | Builtin::EnumValueOf
                     );
                     out.push((failure, "this call of the library", checked, x.id));

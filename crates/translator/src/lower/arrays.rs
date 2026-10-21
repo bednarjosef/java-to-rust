@@ -113,7 +113,7 @@ impl<'t> Lowering<'t> {
         if !literal && !of_variable {
             return unsupported(node, &format!("`Arrays.{}` into a class that is computed", symbol.name));
         }
-        let args: Vec<Expr> = nodes.into_iter().map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
+        let args: Vec<Expr> = nodes.into_iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         if args[0].ty != self.ty(node, node.java_type())? {
             return unsupported(node, &format!("`Arrays.{}` into an array of another type", symbol.name));
         }

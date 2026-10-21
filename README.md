@@ -28,8 +28,8 @@ shared and mutable, and a reference that may be null is an `Option` of it. An ar
 counting, not by a garbage collector, so a cycle of objects is never freed. The runtime crate
 (`crates/runtime`) supplies what Rust lacks: Java's exact number semantics (wrapping integer
 overflow, Java's float rules and printing), strings, `StringBuilder`, `String.format`, regular
-expressions and charsets with Java's results. Collections and threads are not translated yet (see
-"Not yet" below).
+expressions and charsets with Java's results. Threads are real threads, and the objects they share
+are `Arc`s with a lock; collections are not translated yet (see "Not yet" below).
 
 ### Level 2: analysis-driven Rust
 
@@ -114,7 +114,9 @@ included). A program that warms up also reports the time of its timed kernel. Me
 measured.
 
 `docs/performance.md` has the table from one run on the `array-ownership` branch, and the causes
-of the slow cases. `NodeList` does not compile yet.
+of the slow cases. Freeing a long chain of objects, such as `NodeList`'s list, does not
+overflow the stack: classes on a cycle of field types get an iterative `Drop`
+(docs/object-model.md, "1.13 Dropping long chains").
 
 ## First milestone
 
@@ -138,8 +140,8 @@ A small subset, end to end:
 - **Classes**: static and instance methods, overloading, varargs, fields with initializers,
   instance initializer blocks, static fields, constructors (including `this(...)`), `new`,
   object-typed fields and `null` objects, and a user `toString` in `println` and concatenation.
-  `synchronized (x)` checks `x` for null and runs the block: a program has one thread, so the lock
-  does nothing. An override may return a subtype of the overridden method's return type (a
+  `synchronized (x)` checks `x` for null and runs the block; it does not lock yet (see "Threads").
+  An override may return a subtype of the overridden method's return type (a
   covariant return): the override's value is converted to the overridden method's representation,
   so a caller that goes through the supertype sees the same value as Java's. In a class that
   implements `Cloneable` with no superclass and no subclasses, `super.clone()` (or `clone()` with no
@@ -240,6 +242,23 @@ A small subset, end to end:
   exception or an enum that throws something a caller catches, and a `try` or `catch` that observes
   an `ExceptionInInitializerError`. A constructor that throws returns a `Result`, as a method does. The design is in
   [docs/exceptions.md](docs/exceptions.md).
+- **Threads** are the platform's: a class that extends `Thread` and overrides `run`, or a
+  `Thread` given a `Runnable` (a class or a lambda), with `start`, `join` (with and without a
+  timeout), `isAlive`, `currentThread`, `getName`/`setName`, `setDaemon`/`isDaemon`, `getId`,
+  `threadId`, `getPriority`/`setPriority`, `toString` and `sleep`, as Java names and numbers them
+  (`Thread-0`, `Thread[#3,main,5,main]`). `java.lang.Thread` is `crates/translator/java/Threads.java`,
+  written in Java over the runtime's natives (`thread.rs`) and given to the program as
+  `Standard.java` is. The program ends when its last thread that is not a daemon ends; an exception
+  that ends a thread prints `Exception in thread "<name>" ...` and the other threads go on. In a
+  program that starts a thread, the classes that threads may share (`Thread` and its subclasses,
+  the classes of statics, and what their fields reach) are `Arc<java::Locked<C>>`, or `Arc<C>` when
+  immutable, and every other class keeps `Rc<RefCell<C>>`; arrays are `java::SharedArray<T>`; and
+  statics are process-wide (`java::Atomic<T>` for primitives, `java::Locked<T>` otherwise, and a
+  `java::ClassInit` that runs a class's initializer once). A program without threads translates
+  exactly as before. `synchronized` does not lock yet, and a `volatile` static is read with
+  acquire and written with release, as every static is. Monitors, interrupts, sequentially
+  consistent `volatile`, the atomics and `java.util.concurrent` are next; the design is in
+  [docs/multi-threading.md](docs/multi-threading.md).
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`), and so are
   `System.out.println(char[])` and `System.err.print`/`println`, which also print a `char[]`.
   `System.err` is written as it is, after `System.out` is flushed, so the two stay in order.
@@ -253,15 +272,19 @@ A small subset, end to end:
     `max`/`min`, `parseDouble`, `parseFloat`, `parseBoolean`, `logicalAnd`/`logicalOr`/
     `logicalXor`, and the `valueOf` of both with Java's grammar and rounding (whitespace,
     suffixes, hexadecimal floats).
-  - `Integer` and `Long`: parsing with a radix, the bit and radix methods (`toHexString`,
-    `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), and the unsigned methods
-    (`divideUnsigned`, `remainderUnsigned`, `compareUnsigned`, `toUnsignedString`,
-    `parseUnsignedInt`, `toUnsignedLong`, `toUnsignedInt`), which `Byte` and `Short` share.
-  - `Character`: the code point methods (`toChars`, `toString(int)`, `charCount`,
-    `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint`, ...), the tests
+  - `Integer` and `Long`: parsing with a radix and over a `begin`/`end` range of a `String`
+    (`parseInt(s, begin, end, radix)`, `valueOf(s, radix)`), the bit and radix methods
+    (`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), and the unsigned
+    methods (`divideUnsigned`, `remainderUnsigned`, `compareUnsigned`, `toUnsignedString`,
+    `parseUnsignedInt` with a radix or a range, `toUnsignedLong`, `toUnsignedInt`), which `Byte` and
+    `Short` share. Their `NumberFormatException` and `IndexOutOfBoundsException` messages are Java's.
+  - `Short` and `Byte`: `parseShort`/`parseByte` and `valueOf`, with or without a radix.
+  - `Character`: the code point methods (`toChars`, `toChars(int, char[], int)`, `toString(int)`,
+    `charCount`, `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint`, ...), the tests
     `isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`, `digit`,
-    `forDigit` and `getNumericValue`, case conversion, and the `MIN_VALUE`, `MAX_VALUE` and
-    `MIN_NORMAL` constants of the wrapper classes.
+    `forDigit` and `getNumericValue`, with their `int` code point overloads (`isLetter(int)`,
+    `toUpperCase(int)`, `digit(int, int)`, ...), case conversion, and the `MIN_VALUE`, `MAX_VALUE`
+    and `MIN_NORMAL` constants of the wrapper classes.
   - `String`: searching, slicing, case, trimming, replacing, comparing, `split`, `replaceAll`,
     `matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf` and `new String(char[])`,
     and `String.valueOf(char[])` and `valueOf(char[], offset, count)` (which throw as Java does
@@ -287,10 +310,11 @@ keeps the same bits, so they become `b = b.wrapping_add(x as i8)` and `b = b.wra
 Strings are Rust strings, so a lone surrogate `char` turns into `?` when it is printed or
 concatenated (as Java's UTF-8 output prints it), even where Java would later pair it up. The
 `Character` methods are exact on Latin-1, ASCII and fullwidth letters and digits, and
-`isWhitespace` excludes no-break spaces as Java does. Beyond Latin-1, `isLetter`, `isAlphabetic`
-and `isDigit` use Rust's Unicode tables, which are not Java's general categories, so they can
-differ from Java there; `Character.digit` recognises only ASCII and fullwidth letters and digits,
-so it can differ from Java on other decimal digits.
+`isWhitespace` excludes no-break spaces as Java does. The letter, digit, numeric value and case
+tables are generated from the JDK's own data, so the `Character` tests and conversions, including
+the `int` overloads for supplementary code points, follow Java's. Case conversion uses Rust's
+Unicode tables with Java's exceptions added, and `isAlphabetic` uses Rust's `is_alphabetic`; both
+can differ from Java on code points the corpus does not test.
 
 The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`, `charAt` agree on
 `"né😀e"`), and throw what Java throws (`StringIndexOutOfBoundsException` with Java's message).
@@ -316,10 +340,16 @@ and `%a` are rejected in a constant format. A format argument keeps its Java typ
 Strings and bytes meet through `getBytes()`, `getBytes(charset)` and `getBytes("name")`, and
 `new String(bytes)`, `new String(bytes, charset)`, `new String(bytes, offset, length, charset)`
 and the name forms, for UTF-8, US-ASCII, ISO-8859-1, UTF-16 (with its byte order mark), UTF-16BE
-and UTF-16LE. The `StandardCharsets` constants and `Charset.forName` are charsets only in those
-arguments: a `Charset` kept in a variable or passed elsewhere is rejected. Encoding replaces
-unmappable characters as Java does, and decoding replaces malformed input as Java's `String` does
-(`crates/runtime/src/charset.rs`).
+and UTF-16LE. A `Charset` is a value like any other: it can be kept in a variable, a field or an
+array, passed to and returned from methods, compared with `==`, `!=` and `equals`, and asked for
+`name()`, `displayName()`, `toString()` and `hashCode()`. `Charset.forName` and `isSupported`
+resolve aliases and letter case as Java does (`utf8`, `latin1`, `ASCII`). An unknown or malformed
+name throws `UnsupportedCharsetException` or `IllegalCharsetNameException` with Java's message,
+which here ends the program uncaught with exit code 1, since the translation cannot catch them.
+`Charset.defaultCharset()` is UTF-8, as Java answers from version 18 on (JEP 400). The runtime
+knows only the six charsets above, so `forName` rejects other names, such as `windows-1252`, that
+Java supports. A `Charset` is never null. Encoding replaces unmappable characters as Java does,
+and decoding replaces malformed input as Java's `String` does (`crates/runtime/src/charset.rs`).
 
 #### Enums
 
@@ -418,7 +448,11 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
 - Class hierarchies (`ast/hierarchy.rs`, `analysis/hierarchy.rs`). A class with subclasses keeps
   its fields in a struct of its own, `ShapeFields`, which the struct of each subclass embeds as
   `base` (`Circle { base: ShapeFields::new("circle"), radius }`), and its constructors build that
-  struct. Its methods that use the object only for its fields and for calls of such methods that
+  struct. When a constructor of such a class uses `this` as a value or calls a method that a
+  subclass overrides, its class tree builds objects as Java does instead (`analysis/whole_objects.rs`):
+  the object is allocated with every field zero, null or false, then each class's constructor body
+  runs on it, the superclass's first, as a method (`construct_stage(&self, ..)`), so an override
+  that the superclass's constructor calls sees the subclass's fields unset. Its methods that use the object only for its fields and for calls of such methods that
   nothing overrides live on that struct (`c.borrow_mut().base.move_()`); the others are emitted for
   the concrete class, where `this` is the whole object, a superclass's method that the subclass
   overrides under a name of its own for `super` calls (`withdraw_in_account`). Where every value of
@@ -486,8 +520,19 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   default or static methods is rejected with a pointer to whole-program mode. Translated whole
   with the JDK's sources, those methods are the JDK's own code, lambdas in interface methods
   included (`Comparator.comparing(Person::name).thenComparingInt(Person::age)`,
-  `f.andThen(g)`, `Predicate.not(p)`, `Iterable.forEach`; `corpus/whole-program`). Not yet: other
-  receivers, `super` in a lambda and the closure forms (`impl FnMut`, `Rc<dyn Fn>`).
+  `f.andThen(g)`, `Predicate.not(p)`, `Iterable.forEach`; `corpus/whole-program`).
+- Closure types (`analysis/closures.rs`, `codegen/closures.rs`): a functional interface whose
+  values are only lambdas and method references, which nothing sees as objects (no conversion to
+  `Object`, no `==`, no `instanceof`), with one abstract method, no default method and no
+  interface above or below it, is a type alias, `type IntOp = Rc<dyn Fn(i32, i32) -> i32>;`; a
+  generic one takes and returns the erased types (`type Function = Rc<dyn Fn(Object) ->
+  Object>;`), the lambda's body after its bridge's casts of the arguments. Each lambda is a closure written where it is created, its captures moved in
+  (`Rc::new(move |a: i32, b: i32| -> i32 { a.wrapping_add(b).wrapping_add(k) }) as IntOp`, `this`
+  as `outer`), and a call is a call of the closure (`op(acc, x)`). Every other functional
+  interface keeps the class per lambda. Not yet: other receivers, `super` in a lambda, JDK
+  interfaces with default methods and interfaces that extend another (`UnaryOperator`) as
+  closure types, typed closures for a generic interface's instantiations, and the parameter and
+  local forms (`impl FnMut`, a plain `let f = |x| ..`).
 
 ### Whole programs
 
@@ -590,12 +635,13 @@ Each construct below is rejected at translation with an error that names it:
   interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
-- threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls
-  above.
+- of threads: `wait`/`notify`, `interrupt`, thread groups, uncaught exception handlers,
+  `ThreadLocal` and the `java.util.concurrent` classes; a `StringBuilder`, or a box compared by
+  identity, that threads may share.
 
-Also rejected: the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and
-the like), `Character.toChars(int, char[], int)`, `Charset` values kept in variables, and the
-unsigned and parse methods with other argument counts.
+Also rejected: `Charset.aliases()`, `null` as a `Charset` (and a `Charset` field or array element
+that starts out null), catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and
+charsets beyond the six above.
 
 Checked by `--survey` on the JDK's sources: the library code that `HashMap` reaches uses
 interfaces, generic classes, inheritance, exceptions, inner classes and reflection, so none of it

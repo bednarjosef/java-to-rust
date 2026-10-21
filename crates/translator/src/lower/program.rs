@@ -79,7 +79,9 @@ fn lower_with<'t>(
     lowering.standard = super::exceptions::Standard::select(reachable.iter().copied());
     lowering.declare_standard().map_err(|e| (None, e))?;
     let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
-    lowering.functional = super::functional::Functional::select(reachable.iter().copied(), &declared);
+    // The standard classes may name interfaces too (`Thread` holds a `Runnable`).
+    let trees = reachable.iter().copied().chain(lowering.standard.classes.iter().map(|(_, d)| *d));
+    lowering.functional = super::functional::Functional::select(trees, &declared);
     lowering.declare_functional().map_err(|e| (None, e))?;
     lowering.declare_plain_object(reachable.iter().copied()).map_err(|e| (None, e))?;
     unit_of.resize(lowering.types.len(), usize::MAX);

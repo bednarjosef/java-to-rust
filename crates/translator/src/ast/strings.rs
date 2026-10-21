@@ -132,4 +132,6 @@ pub enum BitsOp {
     ToStringRadix,
     /// `Integer.parseInt(s, radix)`.
     ParseRadix,
+    /// `Integer.parseInt(s, begin, end, radix)` and `Long.parseLong`, read from a `CharSequence`.
+    ParseRange,
 }

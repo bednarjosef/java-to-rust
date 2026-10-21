@@ -157,7 +157,7 @@ impl<'a> Gen<'a> {
                 } else {
                     parts
                 };
-                Code::atom(format!("{}({parts})", self.runtime("from_vec")))
+                Code::atom(format!("{}({parts})", self.array_maker("from_vec")))
             }
             StringOp::Join => self.join(args),
             StringOp::EqualsIgnoreCase => {
@@ -178,7 +178,7 @@ impl<'a> Gen<'a> {
             StringOp::ToCharArray => {
                 let s = self.text_ref(&args[0]);
                 let units = call(self, "units", vec![s]).text;
-                Code::atom(format!("{}({units})", self.runtime("from_vec")))
+                Code::atom(format!("{}({units})", self.array_maker("from_vec")))
             }
             StringOp::FromChars => {
                 let chars = self.slice_of(&args[0]);
@@ -196,7 +196,8 @@ impl<'a> Gen<'a> {
                     Some(charset) => self.charset_arg(charset),
                     None => format!("{}::Utf8", self.runtime("Charset")),
                 };
-                call(self, "get_bytes", vec![s, charset])
+                let bytes = call(self, "get_bytes", vec![s, charset]).text;
+                Code::atom(self.made_array(bytes))
             }
             StringOp::FromBytes => {
                 let bytes = self.slice_of(&args[0]);
@@ -513,6 +514,9 @@ impl<'a> Gen<'a> {
             let radix = self.int_arg(&args[1]);
             return self.may_fail(id, "parse_radix", &format!("::<{rust}>"), &format!("Some({s}), {radix}"));
         }
+        if op == BitsOp::ParseRange {
+            return self.parse_range_builtin(kind, args, id);
+        }
         let v = self.value(&args[0], kind);
         let recv = self.recv(&v, kind);
         let format = |spec: &str| {
@@ -558,7 +562,7 @@ impl<'a> Gen<'a> {
                 let f = self.runtime("to_string_radix");
                 Code::atom(format!("{f}({wide}, {radix})"))
             }
-            BitsOp::ParseRadix => unreachable!("handled above"),
+            BitsOp::ParseRadix | BitsOp::ParseRange => unreachable!("handled above"),
         }
     }
 }

@@ -1,5 +1,6 @@
-//! `synchronized (x) { ... }`. A program has one thread, so the lock does nothing: the statement
-//! evaluates `x` once and throws a `NullPointerException` when it is null, then the block runs.
+//! `synchronized (x) { ... }`. The lock does nothing yet, which is right for a program with one
+//! thread (see docs/multi-threading.md, section 3, for monitors): the statement evaluates `x` once
+//! and throws a `NullPointerException` when it is null, then the block runs.
 
 use super::*;
 

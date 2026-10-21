@@ -451,12 +451,61 @@ fn new(r: f64) -> Circle {
   rule (`analysis::leading_assignments`) skips the `super(...)` statement, which lowering
   represents as `ExprKind::SuperInit { args, resolved }` as the first statement (like
   `ThisCall`).
-- The superclass's constructor must build a plain value (`plain_constructors`): a constructor
-  of a class with subclasses that uses `this` as a value, calls a method with overriders or an
-  abstract one on `this`, or whose class has field initializers that do so, is rejected:
-  "constructors of a class with subclasses that use `this` as a value or call overridable
-  methods". (Java runs the subclass's override on a half-built object; nothing idiomatic
-  expresses that.)
+- The superclass's constructor builds a plain value (`plain_constructors`) wherever it can: it
+  uses `this` only for the struct being built, calls on `this` only methods that borrow that
+  struct, and so do its class's field initializers. A constructor of a class with subclasses
+  that uses `this` as a value or calls a method with overriders or an abstract one on `this`
+  cannot: Java runs the subclass's override on the object while it is being built, and the
+  object does not exist yet when its fields struct is a value of its own. Such a class tree
+  gets the second constructor form below.
+- The second constructor form (`analysis/whole_objects.rs`, before the analyses): the object is
+  allocated first, with every field zero, null or false, then the superclass's constructor body
+  runs on the whole object, then the subclass's, as Java runs them. It applies to the classes
+  with subclasses (with fields structs) of the class trees where a constructor needs it, and to
+  their direct subclasses without subclasses; every other class keeps the form above, so code
+  that translated before translates the same. In those trees:
+  - each constructor of a class with subclasses becomes an instance method
+    `construct_<class>`, whose `super(..)` or `this(..)` is a call of the matching
+    `construct_<class>` on `this`, followed (unless it calls `this(..)`) by the class's field
+    initializers, then its body; the class gets one constructor without parameters that builds
+    the zero fields struct;
+  - a constructor of a class without subclasses builds its struct with the zero `base`, sets its
+    enclosing instance and captured locals (javac sets them before `super(..)` too), calls the
+    superclass's `construct_<class>` with the arguments of its `super(..)`, runs its own field
+    initializers, then its body;
+  - `new C(..)` of a class with subclasses that has objects of its own calls a function
+    `new_<class>` that builds the zero object and calls its `construct_<class>`.
+
+  The field initializers of these classes run as statements after the superclass's part (in a
+  method `initialize_fields` when several constructors run them), so a method that a superclass's
+  constructor calls sees the subclass's fields zero, null or false, as in Java; an object field
+  is then an `Option`. The rewrite is plain Java (constructors split into an allocation and
+  methods), so the analyses and the generator need nothing new:
+
+  ```rust
+  impl Sorted {
+      fn new(previous: Stage) -> Rc<RefCell<Sorted>> {
+          let obj = Rc::new(RefCell::new(Sorted { base: StageFields::new(), limit: 0 }));
+          let this = &obj;
+          Stage::Sorted(this.clone()).construct_stage(Some(previous));
+          this.borrow_mut().limit = 7;
+          obj
+      }
+  }
+
+  impl Stage {
+      fn construct_stage(&self, previous: Option<Stage>) {
+          self.base_mut().previous = previous.clone();
+          if let Some(previous) = previous.as_ref() {
+              previous.base_mut().next = Some(self.clone());
+          }
+          self.base_mut().stateful = self.is_stateful();
+      }
+  }
+  ```
+
+  A class with subclasses that has an enclosing instance or captured locals and needs this form
+  is still rejected: its synthetic fields would have to be set before the superclass's part.
 - A class whose own constructors use `this` as a value keeps today's non-plain form
   (`codegen/objects.rs::constructor`): `let obj = Rc::new(RefCell::new(Circle { base:
   BaseFields::new("circle"), r: 0.0 }));` then `field_inits`, then the body on `this`.
@@ -787,6 +836,61 @@ variants are the union over its concretes as for any type; `to_<super interface>
 conversions are generated on demand. A class implementing two interfaces appears in both
 enums. Interface methods are always object-level (interfaces have no instance fields).
 
+### 1.13 Dropping long chains
+
+Objects are freed by reference counting, and Rust frees an object's fields when it frees the
+object. Left alone, freeing the head of a linked list of a million nodes would free its `next`,
+which frees its `next`, a million frames deep, and the program would abort with a stack
+overflow on the 8 MB main stack. Java's collector has no such limit, so the translation must
+not either. The rule (`codegen/chains.rs`, runtime `chains.rs`):
+
+- **Which classes.** The *held classes* of a field type are the concrete classes whose objects
+  a value of it holds directly: the class an object type stands for, the variants of the enum
+  of a class type (program classes only, not strings, boxes or Java enums), and for an array
+  the held classes of its element type. A type variable of a real Rust generic holds none
+  (its instantiations are not followed). Concrete class `c` has an edge to each held class of
+  each of its fields, its own and those of the fields structs it embeds. A field of a struct
+  is a *link* when, for some concrete class whose objects have the field, one of its held
+  classes is that class or can reach it by edges: the field can lead back to an object of the
+  same class, directly (`Node next`) or through a cycle of classes (`Outer.inner` and
+  `Inner.outer`), and so a chain of such objects can be as long as the program makes it.
+- **What they get.** A struct with links gets `impl java::Unlink<'a>`, whose `unlink` calls
+  `java::Link::unlink_in(&mut self.f, chain)` for each link (and `unlink` of its embedded
+  `base` when that struct has links), and `impl Drop` calling `java::drop_links(self)`. A
+  struct without links of its own whose embedded fields struct has them gets only the
+  `Unlink`, which unlinks `base`; the fields struct's own `Drop` runs when the struct's
+  fields are dropped. The enum of a class type that is the type (or the array element type) of
+  a link gets `impl java::Link<'a>`, which matches the variants whose structs unlink and does
+  nothing for the others.
+- **How it frees.** `drop_links` moves the links out of the dying object onto a
+  `java::Chain`, a stack of `Rc<dyn Unlink>` on the heap, and frees the objects on it one at a
+  time, unlinking each before it is freed, so each object dies with its links already gone and
+  the drop depth stays constant. `Link` is implemented in the runtime for every form a link
+  has: `Option` (taken out), `Rc` of an object (pushed onto the chain), `Vec` and so
+  `java::Array` (the elements are drained onto the chain) and the generated enums. An object
+  goes on the chain only while the chain holds its last reference; any other reference keeps
+  it alive, and dropping the chain's only decrements the count, so a list that is still
+  reachable from somewhere else is not touched. A link that cannot be null (a plain `Rc`
+  field) cannot be taken out; when nothing else holds its object, the object is unlinked in
+  place. A cycle of non-null links cannot end, so such an object is on a reference cycle and
+  never freed, and the in-place unlinking goes at most one class cycle deep.
+- **Shallow structures stay recursive.** Rust's own recursive drop is the fastest way to free
+  a structure, and most structures are shallow (a balanced tree of a million nodes is 20
+  deep). A thread-local holds the highest stack address any `drop_links` on the thread has run
+  at. A `drop_links` that runs less than 128 KB of stack below it does nothing, and Rust drops
+  the fields recursively as it would without the `Drop`; one deeper than that moves the links
+  onto a chain, which frees the rest of the structure iteratively at that depth. So the drops
+  of a structure use at most 128 KB of stack below the shallowest drop of the thread, plus
+  constant space.
+- **What it costs.** Only the classes on cycles of field types change. Each object of such a
+  class that dies runs its `Drop`: near the top, one thread-local read and a compare; deeper,
+  the takes of its links and a heap stack that is allocated only when a link held the last
+  reference to its object. The binary trees benchmark, which frees millions of small trees, is the worst case;
+  its numbers are in docs/performance.md.
+- **Not covered.** A chain through a field whose type is a type variable of a real Rust
+  generic (`Box<T>` holding `Box<Box<...>>`), or through objects captured by a lambda. Reference
+  cycles are still never freed, as before.
+
 ## 2. Interaction with the existing analyses
 
 Where a change is "every site that matches `resolved: Some(callee)`", the sites are:
@@ -839,8 +943,8 @@ any overrider".
   union over its targets (the dispatcher takes `&self` of the enum and borrows inside, so the
   generator treats a dispatcher call like a call of a non-`self` method: `borrows_here` counts
   `(1, writes)`); `writers`/`isolated` propagate through `callees`.
-- `plain_constructors` must hold for every class with subclasses (else the rejection of 1.4,
-  raised in `analysis::validate`).
+- `plain_constructors` must hold for every class with subclasses once the class trees that need
+  it have the second constructor form of 1.4 (`analysis::validate` checks it).
 - `self_methods` for a field-level method of `DFields`: the same test as for a leaf class's
   method, with `touches` compared against the family's concretes. An object-level method on an
   enum is never a `self_method` in today's sense (its `self` is the enum, `ThisForm::Enum`).
@@ -1270,9 +1374,11 @@ numbers written into the commit message.
 
 ## 4. Risks and fallbacks
 
-- **Superclass constructors that leak `this` or call overridable methods**: rejected (1.4),
-  not translated wrongly. JDK: `AbstractList`, `AbstractMap`, `ArrayList`, `HashMap`
-  constructors only set fields, so this does not block the collections.
+- **Superclass constructors that leak `this` or call overridable methods**: their class tree gets
+  the second constructor form (1.4), which runs each constructor body on the whole object; such
+  a class with an enclosing instance or captured locals is still rejected. JDK: the stream
+  pipeline's `AbstractPipeline` constructor links the previous stage to `this` and calls the
+  overridable `opIsStateful()`, so the stream classes use that form.
 - **Field-level versus object-level misclassification**: an object-level body is always
   correct (it has the whole object); field-level is an optimization. If in doubt classify as
   object-level. A field-level body must never call a method that has overriders: the
