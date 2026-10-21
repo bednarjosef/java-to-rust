@@ -168,6 +168,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     let mut raising_tries = HashSet::new();
     let mut raising = HashSet::new();
     let mut null_checked = std::collections::HashMap::new();
+    let mut catching = std::collections::HashMap::new();
     // The `try`s whose `catch` gets a `NullPointerException` that the runtime raises.
     let mut runtime_npe_tries = HashSet::new();
     let mut raised_classes = BTreeSet::new();
@@ -201,6 +202,15 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
                         }
                     } else {
                         raising.insert(id);
+                    }
+                    raised_classes.insert(c);
+                } else if seen_here && let Some(c) = raised_class {
+                    // No checked form of its own: the operation runs inside `java::catching`.
+                    catching.insert(id, p.pos);
+                    if let Some(f) = catcher
+                        && name == "java.lang.NullPointerException"
+                    {
+                        runtime_npe_tries.insert(f.id);
                     }
                     raised_classes.insert(c);
                 } else if seen_here {
@@ -310,6 +320,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     facts.raising_tries = raising_tries;
     facts.raising = raising;
     facts.null_checked = null_checked;
+    facts.catching = catching;
     facts.raised_classes = raised_classes;
     Ok(())
 }
@@ -905,6 +916,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         // or, for null, `IllegalArgumentException`. Not checked, so a catch of it is rejected.
         Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported) => Some("?"),
         Builtin::Charset(_) => None,
+        Builtin::ArraysCopyOf => Some("java.lang.NegativeArraySizeException"),
+        Builtin::Native(Native::ArrayCopy) => Some("java.lang.ArrayIndexOutOfBoundsException"),
         // A literal format that fits its arguments' types never throws.
         Builtin::Format => match &args[0].kind {
             ExprKind::Str(format)
@@ -1129,7 +1142,7 @@ fn runtime_failures(
     | ExprKind::IncDec { target: Place::Field { object, .. }, .. } = &x.kind
         && null(object)
     {
-        out.push((NPE, "this field access", false, x.id));
+        out.push((NPE, "this field access", object_checked(object), object.id));
     }
     // A cast to a class that the value's type is not under may fail, unless an `instanceof`
     // tested the variable.

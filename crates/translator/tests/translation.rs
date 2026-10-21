@@ -3480,16 +3480,23 @@ fn an_eager_static_object_starts_empty_and_is_not_null_once_initialized() {
 #[test]
 fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
-    let err = reject(
+    // A failure without a checked form of its own runs inside `java::catching`.
+    let rust = translate(
         "class A { public static void main(String[] a) {
             try { int[] v = new int[a.length - 1]; System.out.println(v.length); }
             catch (NegativeArraySizeException e) { System.out.println(\"negative\"); }
         } }",
     );
+    assert_contains(&rust, &["java::or_break!(java::catching(|| "]);
+    // One whose class is not known is not.
+    let err = reject(
+        "class A { public static void main(String[] a) {
+            try { System.out.println(\"a,b\".split(a[0]).length); }
+            catch (RuntimeException e) { System.out.println(\"bad pattern\"); }
+        } }",
+    );
     assert!(
-        err.contains(
-            "catching the `NegativeArraySizeException` that this array creation may throw not supported yet"
-        ),
+        err.contains("catching an exception that this call of the library may throw not supported yet"),
         "{err}"
     );
     // A string that may be null is dereferenced with the checked form where a catch sees it.

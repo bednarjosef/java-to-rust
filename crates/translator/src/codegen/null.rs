@@ -504,7 +504,13 @@ impl<'a> Gen<'a> {
             {
                 let source = self.pattern_source(value, ty);
                 let rest = self.and_chain(&parts[k + 1..]);
-                texts.push(format!("{source}.is_some_and(|{}| {rest})", self.local(name)));
+                let name = self.local(name);
+                // A failure that goes on from the rest (`?`, `or_break!`) cannot leave a closure.
+                texts.push(if rest.contains('?') || rest.contains("or_break!") {
+                    format!("match {source} {{ Some({name}) => {rest}, None => false }}")
+                } else {
+                    format!("{source}.is_some_and(|{name}| {rest})")
+                });
                 break;
             }
             texts.push(self.expr(part).at(AND + 1));

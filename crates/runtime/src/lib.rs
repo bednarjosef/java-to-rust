@@ -12,6 +12,7 @@ use std::fmt;
 
 mod boxed;
 mod builder;
+mod catching;
 mod chains;
 mod character;
 mod character_classes;
@@ -49,6 +50,7 @@ mod unsigned;
 mod vm;
 pub use boxed::*;
 pub use builder::{StringBuilder, same_builder};
+pub use catching::catching;
 pub use chains::{Chain, Link, Unlink, drop_links};
 pub use character::*;
 pub use character_classes::*;
@@ -256,6 +258,7 @@ pub fn exit(code: i32) -> ! {
 
 /// Ends the program the way an uncaught Java exception of the standard class `class` does.
 pub fn throw(class: &str, message: &str) -> ! {
+    catching::raise(class, message);
     exception::die(format_args!("{class}: {message}"))
 }
 

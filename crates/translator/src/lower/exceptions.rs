@@ -48,7 +48,11 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StrictMath#floorMod",
         ],
     ),
-    ("java.lang.ArrayIndexOutOfBoundsException", &["ARRAY_ACCESS", "java.lang.Character#toChars"]),
+    (
+        "java.lang.ArrayIndexOutOfBoundsException",
+        &["ARRAY_ACCESS", "java.lang.Character#toChars", "java.lang.System#arraycopy"],
+    ),
+    ("java.lang.NegativeArraySizeException", &["NEW_ARRAY", "java.util.Arrays#copyOf"]),
     (
         "java.lang.IndexOutOfBoundsException",
         &[
