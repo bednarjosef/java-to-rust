@@ -37,7 +37,10 @@ impl<'t> Lowering<'t> {
         if symbol.owner == "java.lang.Object" && symbol.name == "getClass" {
             return Ok(Some(self.get_class(node, receiver)?));
         }
-        if matches!((symbol.owner, symbol.name), ("java.util.EnumMap", "getKeyUniverse") | ("java.util.EnumSet", "getUniverse")) {
+        if matches!(
+            (symbol.owner, symbol.name),
+            ("java.util.EnumMap", "getKeyUniverse") | ("java.util.EnumSet", "getUniverse")
+        ) {
             return Ok(Some(self.enum_universe(node)?));
         }
         if (symbol.owner, symbol.name) == ("java.util.HashMap", "comparableClassFor") {
@@ -114,9 +117,11 @@ impl<'t> Lowering<'t> {
                     self.convert(constant, element)
                 })
                 .collect();
-            let literal = self.synth(ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new()), pos, Type::JavaClass);
+            let literal =
+                self.synth(ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new()), pos, Type::JavaClass);
             let var = self.synth(ExprKind::Var(name.clone()), pos, Type::JavaClass);
-            let test = self.synth(ExprKind::Binary(BinOp::Eq, Box::new(var), Box::new(literal)), pos, Type::Boolean);
+            let test =
+                self.synth(ExprKind::Binary(BinOp::Eq, Box::new(var), Box::new(literal)), pos, Type::Boolean);
             let values = self.synth(ExprKind::ArrayLit(constants), pos, array);
             let rest = self.synth(chain, pos, chain_ty);
             chain_ty = array;

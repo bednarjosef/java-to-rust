@@ -116,7 +116,9 @@ fn uses_enum(v: &Value) -> bool {
     match v {
         Value::Object(fields) => fields.iter().any(|(key, value)| match key.as_str() {
             "symbol" => false,
-            "javaType" => value.as_str().is_some_and(|t| t == "java.lang.Enum" || t.starts_with("java.lang.Enum<")),
+            "javaType" => {
+                value.as_str().is_some_and(|t| t == "java.lang.Enum" || t.starts_with("java.lang.Enum<"))
+            }
             _ => uses_enum(value),
         }),
         Value::Array(items) => items.iter().any(uses_enum),
@@ -586,7 +588,11 @@ impl<'t> Lowering<'t> {
                 let hash = self.synth(hash, pos, Type::Int);
                 let hex = ExprKind::Builtin(Builtin::Bits(BitsOp::ToHexString, Type::Int), vec![hash]);
                 let hex = self.synth(hex, pos, Type::String);
-                let left = self.synth(ExprKind::Binary(BinOp::Add, Box::new(name), Box::new(at_sign)), pos, Type::String);
+                let left = self.synth(
+                    ExprKind::Binary(BinOp::Add, Box::new(name), Box::new(at_sign)),
+                    pos,
+                    Type::String,
+                );
                 Ok(ExprKind::Binary(BinOp::Add, Box::new(left), Box::new(hex)))
             }
             name => unsupported(node, &format!("`super.{name}()` of `Object`")),

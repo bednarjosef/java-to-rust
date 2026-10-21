@@ -126,8 +126,10 @@ pub fn entry_inits(class: &Class, eager: &HashSet<usize>) -> HashSet<usize> {
     }
     // An enum whose constants are built by its static initialization (`lower/enum_tables.rs`):
     // its constants exist before it, so its instance methods initialize it too.
-    let with_tables: HashSet<usize> =
-        (0..class.methods.len()).filter(|&m| class.builds_constants(m)).map(|m| class.methods[m].class).collect();
+    let with_tables: HashSet<usize> = (0..class.methods.len())
+        .filter(|&m| class.builds_constants(m))
+        .map(|m| class.methods[m].class)
+        .collect();
     let tables = |c: usize| with_tables.contains(&c);
     (0..class.methods.len())
         .filter(|&i| {

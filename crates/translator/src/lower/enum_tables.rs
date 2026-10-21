@@ -44,14 +44,19 @@ impl<'t> Lowering<'t> {
             let array = Type::array(field.ty);
             let init = match field.ty {
                 Type::Enum(name) => {
-                    let Some(e) = self.enum_index(name).filter(|&e| self.enum_constant_names(e).next().is_some())
+                    let Some(e) =
+                        self.enum_index(name).filter(|&e| self.enum_constant_names(e).next().is_some())
                     else {
                         return error(field.pos, "an enum field of an enum without constants");
                     };
                     if field.init.is_none() && !ctors_set(methods, index, &field.name) {
-                        return error(field.pos, "an enum field of an enum that a constructor may leave unset");
+                        return error(
+                            field.pos,
+                            "an enum field of an enum that a constructor may leave unset",
+                        );
                     }
-                    let first = || self.synth(ExprKind::EnumConstant { class: e, ordinal: 0 }, field.pos, field.ty);
+                    let first =
+                        || self.synth(ExprKind::EnumConstant { class: e, ordinal: 0 }, field.pos, field.ty);
                     ExprKind::ArrayLit((0..count).map(|_| first()).collect())
                 }
                 _ => ExprKind::NewArray(vec![self.synth(ExprKind::Int(count as i32), field.pos, Type::Int)]),
@@ -77,7 +82,11 @@ impl<'t> Lowering<'t> {
                     let this = self.synth(ExprKind::This, value.pos, enum_ty);
                     let target = Place::Field { object: Box::new(this), name };
                     let pos = value.pos;
-                    Stmt::Expr(self.synth(ExprKind::Assign { op: None, target, value: Box::new(value) }, pos, ty))
+                    Stmt::Expr(self.synth(
+                        ExprKind::Assign { op: None, target, value: Box::new(value) },
+                        pos,
+                        ty,
+                    ))
                 })
                 .collect();
             methods.push(Method {
@@ -96,7 +105,8 @@ impl<'t> Lowering<'t> {
             });
             methods.len() - 1
         });
-        let ctors: Vec<usize> = (0..methods.len()).filter(|&m| methods[m].class == index && methods[m].is_ctor).collect();
+        let ctors: Vec<usize> =
+            (0..methods.len()).filter(|&m| methods[m].class == index && methods[m].is_ctor).collect();
         // Every field access on a value of this enum goes through the tables.
         for method in methods.iter_mut() {
             for stmt in &mut method.body {
@@ -105,10 +115,8 @@ impl<'t> Lowering<'t> {
         }
         for &c in ctors.iter().chain(&fields_init) {
             let method = &mut methods[c];
-            let starts_with_this_call = matches!(
-                method.body.first(),
-                Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. }))
-            );
+            let starts_with_this_call =
+                matches!(method.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })));
             if method.is_ctor {
                 method.is_ctor = false;
                 method.is_static = true;
@@ -116,7 +124,11 @@ impl<'t> Lowering<'t> {
                 method.params.insert(0, Param { name: ORDINAL.to_string(), ty: Type::Int });
                 if let (Some(f), false) = (fields_init, starts_with_this_call) {
                     let ordinal = self.synth(ExprKind::Var(ORDINAL.to_string()), method.pos, Type::Int);
-                    let call = ExprKind::Call { name: fields_builder.clone(), args: vec![ordinal], resolved: Some(f) };
+                    let call = ExprKind::Call {
+                        name: fields_builder.clone(),
+                        args: vec![ordinal],
+                        resolved: Some(f),
+                    };
                     method.body.insert(0, Stmt::Expr(self.synth(call, method.pos, Type::Void)));
                 }
             }
@@ -128,7 +140,9 @@ impl<'t> Lowering<'t> {
                 rewrite_stmt(stmt, &mut |e| {
                     if matches!(e.kind, ExprKind::This) {
                         let constants = (0..count)
-                            .map(|ordinal| self.synth(ExprKind::EnumConstant { class: index, ordinal }, e.pos, enum_ty))
+                            .map(|ordinal| {
+                                self.synth(ExprKind::EnumConstant { class: index, ordinal }, e.pos, enum_ty)
+                            })
                             .collect();
                         let values = self.synth(ExprKind::ArrayLit(constants), e.pos, Type::array(enum_ty));
                         let ordinal = self.synth(ExprKind::Var(ORDINAL.to_string()), e.pos, Type::Int);
@@ -138,7 +152,9 @@ impl<'t> Lowering<'t> {
             }
         }
         // The constants, built in order before the rest of the static initialization.
-        for (ordinal, member) in self.types[index].node.list("members").filter(|m| enums::is_enum_constant(*m)).enumerate() {
+        for (ordinal, member) in
+            self.types[index].node.list("members").filter(|m| enums::is_enum_constant(*m)).enumerate()
+        {
             let init = member.child("initializer")?;
             let args: Vec<Expr> = init.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
             let Some(ctor) = init.symbol().and_then(|s| self.enum_constructor(index, &s)) else {
@@ -180,7 +196,8 @@ impl<'t> Lowering<'t> {
         };
         let row = |object: Expr, name: &str, ty: Type| {
             let pos = object.pos;
-            let array = self.synth(ExprKind::Static { class: index, name: table(name) }, pos, Type::array(ty));
+            let array =
+                self.synth(ExprKind::Static { class: index, name: table(name) }, pos, Type::array(ty));
             let ordinal = self.synth(ExprKind::Builtin(Builtin::EnumOrdinal, vec![object]), pos, Type::Int);
             (array, ordinal)
         };
@@ -196,7 +213,8 @@ impl<'t> Lowering<'t> {
                     && on_enum(object, name)
                 {
                     let ty = self.enum_field_type(index, name);
-                    let object = std::mem::replace(object.as_mut(), self.synth(ExprKind::Null, pos, Type::Null));
+                    let object =
+                        std::mem::replace(object.as_mut(), self.synth(ExprKind::Null, pos, Type::Null));
                     let (array, ordinal) = row(object, &name.clone(), ty);
                     *target = Place::Index(Box::new(array), Box::new(ordinal));
                 }
@@ -220,7 +238,9 @@ impl<'t> Lowering<'t> {
     fn constant_init(&self, e: &mut Expr, builder: &str) {
         let pos = e.pos;
         match &mut e.kind {
-            ExprKind::Builtin(Builtin::EnumOrdinal, args) if matches!(args[..], [Expr { kind: ExprKind::This, .. }]) => {
+            ExprKind::Builtin(Builtin::EnumOrdinal, args)
+                if matches!(args[..], [Expr { kind: ExprKind::This, .. }]) =>
+            {
                 e.kind = ExprKind::Var(ORDINAL.to_string());
             }
             ExprKind::ThisCall { args, resolved } => {
@@ -239,9 +259,10 @@ fn ctors_set(methods: &[Method], index: usize, name: &str) -> bool {
     methods.iter().filter(|m| m.class == index && m.is_ctor).all(|m| {
         m.body.iter().any(|s| match s {
             Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. }) => true,
-            Stmt::Expr(Expr { kind: ExprKind::Assign { op: None, target: Place::Field { object, name: n }, .. }, .. }) => {
-                matches!(object.kind, ExprKind::This) && n == name
-            }
+            Stmt::Expr(Expr {
+                kind: ExprKind::Assign { op: None, target: Place::Field { object, name: n }, .. },
+                ..
+            }) => matches!(object.kind, ExprKind::This) && n == name,
             _ => false,
         })
     })

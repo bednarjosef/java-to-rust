@@ -165,9 +165,13 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
 /// values are strings or boxes.
 fn shortcut(e: &Expr) -> Option<ExprId> {
     // Its negation too, `a != b && .. !a.equals(b) ..`, as `EnumMap.equals` writes it.
-    let (ExprKind::Binary(BinOp::Or, l, r) | ExprKind::Binary(BinOp::And, l, r)) = &e.kind else { return None };
+    let (ExprKind::Binary(BinOp::Or, l, r) | ExprKind::Binary(BinOp::And, l, r)) = &e.kind else {
+        return None;
+    };
     let negated = matches!(e.kind, ExprKind::Binary(BinOp::And, ..));
-    let (ExprKind::Binary(BinOp::Eq, a, b) | ExprKind::Binary(BinOp::Ne, a, b)) = &l.kind else { return None };
+    let (ExprKind::Binary(BinOp::Eq, a, b) | ExprKind::Binary(BinOp::Ne, a, b)) = &l.kind else {
+        return None;
+    };
     if negated != matches!(l.kind, ExprKind::Binary(BinOp::Ne, ..)) {
         return None;
     }

@@ -251,11 +251,15 @@ impl<'a> Gen<'a> {
     /// An enum's builtin on an `Enum` that is an `Object` (of the enum of type `t`): a `match`
     /// on the enums it can be.
     fn erased_enum_builtin(&mut self, builtin: Builtin, args: &'a [Expr], t: usize) -> Code {
-        let enums: Vec<usize> =
-            self.enum_variants(t).into_iter().filter(|&c| self.class.types[c].kind == TypeKind::Enum).collect();
+        let enums: Vec<usize> = self
+            .enum_variants(t)
+            .into_iter()
+            .filter(|&c| self.class.types[c].kind == TypeKind::Enum)
+            .collect();
         let ordinal = |g: &mut Self, e: &'a Expr| {
             let obj = g.object(e);
-            let mut arms: Vec<String> = enums.iter().map(|&c| format!("{}(e) => e as i32", g.variant(t, c))).collect();
+            let mut arms: Vec<String> =
+                enums.iter().map(|&c| format!("{}(e) => e as i32", g.variant(t, c))).collect();
             arms.push(format!("_ => {}(\"java.lang.Enum\")", g.runtime("cast_failed")));
             format!("(match {obj} {{ {} }})", arms.join(", "))
         };

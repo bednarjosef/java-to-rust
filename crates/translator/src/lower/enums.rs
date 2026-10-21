@@ -239,12 +239,20 @@ impl<'t> Lowering<'t> {
             "equals" | "hashCode" if erased => {
                 let at = self.object.expect("an `Object` has its methods");
                 let (resolved, args) = match symbol.name {
-                    "equals" => (at.equals, args.drain(..).map(|a| self.convert(a, Type::class(OBJECT))).collect()),
+                    "equals" => {
+                        (at.equals, args.drain(..).map(|a| self.convert(a, Type::class(OBJECT))).collect())
+                    }
                     _ => (at.hash_code, Vec::new()),
                 };
                 let name = symbol.name.to_string();
                 let receiver = Box::new(self.convert(receiver, Type::class(OBJECT)));
-                return Ok(Some(ExprKind::MethodCall { receiver, name, args, resolved: Some(resolved), is_super: false }));
+                return Ok(Some(ExprKind::MethodCall {
+                    receiver,
+                    name,
+                    args,
+                    resolved: Some(resolved),
+                    is_super: false,
+                }));
             }
             _ => return Ok(None),
         };
