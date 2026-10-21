@@ -187,6 +187,10 @@ impl<'t> Node<'t> {
     }
 }
 
+/// What the rejection of an `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]`
+/// says, where the runtime would do it (see `Reach::string_array_writes`).
+pub const STRING_ARRAY_WRITE: &str = "a change in place of a `String[]` that is also an `Object[]`";
+
 fn unsupported<T>(node: Node, what: &str) -> Result<T, Error> {
     error(node.pos(), format!("{what} not supported yet"))
 }
@@ -856,11 +860,12 @@ impl<'t> Lowering<'t> {
             ("java.lang.Math", "sqrt") => Builtin::MathSqrt,
             ("java.lang.Math", "pow") => Builtin::MathPow,
             // Where the JDK's `Arrays` is translated, a call that the runtime does not do is one of
-            // it, such as a sort with a `Comparator`.
+            // it, such as a sort with a `Comparator`, and so is a sort or a fill of a `String[]`
+            // that is an `Object[]` where reachability kept the JDK's for it.
             ("java.util.Arrays", name)
                 if self.type_index(symbol.owner).is_none() || {
                     let types: Vec<&str> = node.list("arguments").map(|a| a.java_type()).collect();
-                    arrays::runtime_arrays_call(name, &types)
+                    arrays::runtime_arrays_call(name, &types) && !self.jdk_string_array_write(node)
                 } =>
             {
                 let (writes, copies) =

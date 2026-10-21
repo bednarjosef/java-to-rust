@@ -193,7 +193,8 @@ A small subset, end to end:
   variable (`first(String[])` for `<T> T first(T[])`) makes its type an `Object[]` throughout the
   program when another array type meets it there (see `docs/object-model.md`); a `String[]` that
   is an `Object[]` is copied where the runtime's string methods take or give one, and sorting or
-  filling one in place with `java.util.Arrays` is rejected. A generic class or method that only stores, returns and passes on the values of its type
+  filling one in place with `java.util.Arrays` runs the JDK's methods for an `Object[]` (rejected
+  without the JDK's sources). A generic class or method that only stores, returns and passes on the values of its type
   variables (a stack, a pair, a node, `<T> T choose(boolean, T, T)`) is a Rust generic instead
   (`struct Stack<T>`, `impl<T: Clone> Stack<T>`, `fn choose<T: Clone>(..)`), and its uses keep the
   substituted types with no casts. One that needs more of them (their text, `equals`, a bound, a

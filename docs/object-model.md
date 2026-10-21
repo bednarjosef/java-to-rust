@@ -1756,9 +1756,13 @@ Generics are erased in lowering, and nothing after it knows they existed:
   `Builtin::ObjectArrayOf` putting each in `Object::String`), and `main`'s arguments are made as
   `Object`s. A copy keeps the elements but not the array's identity, which only matters where the
   builtin keeps or changes the array: those that read it (`join`, `toString`, `equals`,
-  `hashCode`, `copyOf`) and those that make a new one (`split`) are copied, and those that change
-  it in place (`Arrays.sort`, `Arrays.fill`) are rejected ("a change in place of a `String[]`
-  that is also an `Object[]`"). The strings in such an array are values of `Object`'s `String`
+  `hashCode`, `copyOf`) and those that make a new one (`split`) are copied. Those that change it
+  in place (`Arrays.sort`, `Arrays.fill`) run the JDK's methods for an `Object[]` instead
+  (`ComparableTimSort`, the fill loop) where the JDK's sources are translated: reachability
+  leaves those calls to the runtime, so when the lowering finds one, `translate_program`
+  reaches and lowers the program again with them kept (`Reach::string_array_writes`), and only
+  such a program pulls in the JDK's sorting code. Without the JDK's sources they are rejected
+  ("a change in place of a `String[]` that is also an `Object[]`"). The strings in such an array are values of `Object`'s `String`
   class (`analysis::hierarchy::flows`). A program whose `String[]`s never meet another array type
   translates as before.
 - An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the
