@@ -1838,7 +1838,9 @@ per-instantiation variants are not done, and a generic that needs them stays era
   are not all mentioned by its parameters' types, which Rust infers them from. Lowering then runs
   again with the failed candidates erased, until nothing fails; a lowering error with candidates
   left is retried with all of them erased, so a real generic never turns a translated program into
-  a rejected one.
+  a rejected one. Later, the array of a type variable passed for an erased array (`Arrays.asList`'s
+  `T[]` to its list's `E[]`, an `Object[]`) fails only the generics it mentions instead of being
+  such an error, so the program's other real generics stay real.
 - The type parameters are bounded by `Clone` only (`impl<T: Clone> Box<T>`, `fn pick<T: Clone>`),
   and every use of a type variable's value clones it, as for any value of a class whose
   representation is an `Rc`. A literal passed for a type variable gets its type suffix (`3i32`),

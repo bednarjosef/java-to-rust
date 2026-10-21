@@ -8,6 +8,10 @@ use super::*;
 
 /// The Rust variant for an enum constant: `RED` is `Red`, and `VERY_BIG` is `VeryBig`.
 pub(super) fn variant_name(constant: &str) -> String {
+    // `SELF` would be `Self`, Rust's keyword.
+    if constant == "SELF" {
+        return "Self_".to_string();
+    }
     constant
         .split('_')
         .map(|word| {

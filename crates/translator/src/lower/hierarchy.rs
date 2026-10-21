@@ -183,6 +183,19 @@ impl<'t> Lowering<'t> {
         for (a, &ty) in args.iter().zip(&types) {
             self.fail_on_covariant(a.ty, ty);
         }
+        // The array of a Rust generic's type variable passed for an erased array (`asList`'s `T[]`
+        // to `Arrays.ArrayList`'s `E[]`, an `Object[]`) erases the generic: it is lowered again.
+        for (a, &ty) in args.iter().zip(&types) {
+            if matches!((a.ty, ty), (Type::Array(_), Type::Array(_)))
+                && self.has_param(a.ty)
+                && !self.has_param(ty)
+            {
+                let mut owners = Vec::new();
+                self.owners_in(a.ty, &mut owners);
+                owners.into_iter().for_each(|o| self.fail(o));
+                return Ok(args);
+            }
+        }
         // Arrays do not convert: a `Version[]` is an `Object[]` in the translation only when it is
         // covariant (see `covariant`).
         if let Some(arg) = args.iter().zip(&types).find_map(|(a, &ty)| {
