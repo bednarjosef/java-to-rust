@@ -1,7 +1,8 @@
-// `==` on `Object` values where no string or box can reach either side: an identity map in the
+// `==` on `Object` values where no string or box can reach one side: an identity map in the
 // manner of Are We Fast Yet's IdentityDictionary, whose keys are only ever the program's objects,
 // while its values and other `Object`s of the program are strings and boxes. Its `==` is plain
-// identity, so two equal-looking keys are different keys.
+// identity, so two equal-looking keys are different keys. The same for an identity set that
+// inherits `add` from a set that also holds boxes, as Are We Fast Yet's IdentitySet does.
 public class ObjectIdentityOfObjectsOnly {
     static class Entry {
         final int hash;
@@ -45,6 +46,51 @@ public class ObjectIdentityOfObjectsOnly {
         }
     }
 
+    static class Set {
+        private final Object[] items = new Object[8];
+        int size;
+
+        boolean contains(Object o) {
+            for (int i = 0; i < size; i++) {
+                if (items[i].equals(o)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void add(Object o) {
+            if (!contains(o)) {
+                items[size++] = o;
+            }
+        }
+
+        boolean has(int i, Object o) {
+            return i < size && test(items[i], o);
+        }
+
+        boolean test(Object item, Object o) {
+            return item.equals(o);
+        }
+    }
+
+    static class IdentitySet extends Set {
+        @Override
+        boolean contains(Object o) {
+            for (int i = 0; i < 8; i++) {
+                if (has(i, o)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        @Override
+        boolean test(Object item, Object o) {
+            return o == item;
+        }
+    }
+
     static class Block {
         final String name;
 
@@ -67,6 +113,14 @@ public class ObjectIdentityOfObjectsOnly {
         map.put(a, a.customHash(), 3);
         System.out.println(map.get(a, a.customHash()) + " " + map.get(alsoA, alsoA.customHash()) + " "
                 + map.get(bb, bb.customHash()));
+        Set numbers = new Set();
+        numbers.add(300);
+        numbers.add(300);
+        IdentitySet blocks = new IdentitySet();
+        blocks.add(a);
+        blocks.add(alsoA);
+        blocks.add(a);
+        System.out.println(numbers.size + " " + blocks.size + " " + blocks.contains(a) + " " + blocks.contains(bb));
         Object text = "text";
         Object number = 42;
         System.out.println(text.equals("text") + " " + number.equals(42) + " " + map.get(bb, 2).equals("two"));

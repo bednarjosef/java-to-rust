@@ -128,8 +128,8 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
     let fences = fence_keys(class, &sentinel);
     // Which places may hold a string or a box, computed when a comparison needs it.
     let values = std::cell::OnceCell::new();
-    let may_hold_value = |m: usize, e: &Expr| {
-        values.get_or_init(|| super::object_values::analyze(class, facts)).may_be_value(class, m, e)
+    let may_both_hold_values = |m: usize, l: &Expr, r: &Expr| {
+        values.get_or_init(|| super::object_values::analyze(class, facts)).may_both_be_values(class, m, l, r)
     };
     let mut found = None;
     for (m, method) in class.methods.iter().enumerate() {
@@ -154,8 +154,7 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                                 && may_be_value(r)
                                 && !shortcuts.contains(&x.id)
                                 && !(in_sorted_map && sorted_key(l, &fences) && sorted_key(r, &fences))
-                                && may_hold_value(m, l)
-                                && may_hold_value(m, r) =>
+                                && may_both_hold_values(m, l, r) =>
                         {
                             found.get_or_insert((
                                 x.pos,
