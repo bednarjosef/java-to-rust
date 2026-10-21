@@ -148,6 +148,7 @@ class ObjectDeclGen:
                         line = line[4:]
                     self.emit(line)
         self.emit_helpers()
+        self.exception_decls()
         self.kinds, self.methods, self.obj_hooks = saved
         if self.chance(0.5):
             t = self.pick([d.name for d in self.decls.values()])
@@ -202,7 +203,9 @@ class ObjectDeclGen:
         self.indent += 1
         saved = self.enter_body([], None)
         for f, t in c.fields:
-            if self.chance(0.7):
+            if t == '?String':
+                self.emit(f'String {f};')
+            elif t == 'String' or self.chance(0.7):
                 self.emit(f'{t} {f} = {self.value_of(t, 1)};')
             else:
                 self.emit(f'{t} {f};')
@@ -257,7 +260,7 @@ class ObjectDeclGen:
             fields = [f for f, _ in self.visible_fields(c)]
             shown = ' + " " + '.join(fields[:2]) if fields else '""'
             self.emit(f'System.out.println("new {c.name} " + {shown});')
-        if self.chance(0.12):
+        if self.chance(0.04):
             calls = [k for k in self.visible_group_names(c) if self.groups[k]['ret'] == 'int'
                      and 'peer' not in self.groups[k]['params']]
             if calls:
@@ -401,7 +404,7 @@ class ObjectDeclGen:
         for f, t in self.visible_fields(c):
             if t == 'String':
                 tests.append(f'{f}.equals({other}.{f})')
-            elif t != 'double':
+            elif t not in ('double', '?String'):
                 tests.append(f'{f} == {other}.{f}')
         self.emit(f'return {" && ".join(tests) if tests else "true"};')
         self.indent -= 1

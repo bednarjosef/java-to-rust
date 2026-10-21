@@ -94,8 +94,8 @@ With `--strings`, also:
 Every index is reduced into range with `Math.floorMod`, so string programs do not throw (apart
 from the deliberate exceptions above).
 
-With `--objects` (`fuzz_objects.py` for the types, expressions and statements,
-`fuzz_object_decls.py` for the declarations), also:
+With `--objects` (`fuzz_objects.py` for the types and expressions,
+`fuzz_object_decls.py` for the declarations, `fuzz_object_stmts.py` for the statements), also:
 
 - One or two class trees of one to three levels as static nested classes: abstract and concrete
   classes, fields of primitive and `String` type with and without initializers (which may
@@ -123,8 +123,15 @@ With `--objects` (`fuzz_objects.py` for the types, expressions and statements,
   elements from `new C[n]`), for and for-each loops over them; overloads of a static `which` on a
   superclass chain, `Object`, `int`, `long` and `String`; an `Object` static field holding an
   object; `describe(Object)` with a chain of patterns
-- Deliberate exceptions: a failing cast (`ClassCastException`) or a null dereference
-  (`NullPointerException`), uncaught, at the statement that `zero0` would use
+- Exceptions (`fuzz_exceptions.py`, in most programs): the program's own `Fail extends
+  RuntimeException` with a field, `Worse extends Fail` and a checked `Checked extends Exception`;
+  methods that throw them; `try` blocks that throw behind a condition, call those methods or
+  divide by zero, with `catch` clauses from the most specific (`Worse`, `Fail`, `Checked`,
+  `ArithmeticException`, `RuntimeException`) printing the message, the exception or its field,
+  and sometimes `finally`. Rarely a failing cast or a null dereference inside a `try` that
+  catches it, which the translator rejects for now
+- Deliberate exceptions: a failing cast (`ClassCastException`), a null dereference
+  (`NullPointerException`) or a `Fail`, uncaught, at the statement that `zero0` would use
 
 An object is printed only when every class it may be has a `toString` of the program's, so no
 identity hash is printed; values that may be null are only dereferenced behind a null test.
