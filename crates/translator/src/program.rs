@@ -63,9 +63,12 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
     let (units, reach) = load(program)?;
     let units: Vec<&Value> = units.iter().collect();
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
-    let mut class =
-        phase("lower", || lower::lower_program(&trees, &reach, &program.main)).map_err(|(unit, error)| {
-            ProgramError { file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string), error }
+    // The program's files are the first units (`load`).
+    let program_units = source_files(program)?.len();
+    let mut class = phase("lower", || lower::lower_program(&trees, program_units, &reach, &program.main))
+        .map_err(|(unit, error)| ProgramError {
+            file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string),
+            error,
         })?;
     phase("whole objects", || analysis::whole_objects(&mut class))
         .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;

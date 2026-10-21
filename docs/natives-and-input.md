@@ -880,6 +880,19 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   `corpus/whole-program/CaseInLocale.java` (null locales: `Locale.ROOT` itself initializes
   `Locale`, whose `ConcurrentHashMap` reaches `AtomicInteger`, a class that extends `Number`, which
   the object model does not take yet) and the runtime's unit test of the mapping.
+- **`==` on strings in the JDK's code is value equality** (`Lowering::library_string_comparison`):
+  a deviation from Java, where it compares references. A translated string is a value with no
+  identity, so the program's own `a == b` on two strings stays rejected. The JDK compares by
+  reference only strings it interned, the parts of a `Locale` (`ResourceBundle.Control.toBundleName`:
+  `language == ""`, `Calendar`'s `getLanguage() == "th"`, `StringLatin1`'s `lang == "tr"`) and
+  `Charset`'s canonical names, or as a shortcut before comparing the characters
+  (`LocaleUtils.caseIgnoreMatch`), where value equality gives the JVM's answer; so in a unit from
+  `--library` it is `Objects.equals` of the two, null included. It would be wrong where the
+  library makes a string with an identity of its own to tell apart, a `new String(..)` kept as a
+  marker: of the 456 files that `LocaleNumbers` and `ScannerGrades` reach, the 14 `new String(..)`
+  are text read or built (`Reader.lines`, `DataInputStream.readUTF`, `Pattern`'s group names,
+  `ZoneInfoFile`'s ids, `LocaleResources`' patterns), none kept to be compared by reference. Test:
+  `library_code_compares_strings_by_value_and_the_programs_own_code_cannot`.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 
