@@ -70,6 +70,7 @@ impl<'t> Lowering<'t> {
             census: None,
             stubbing: Cell::new(false),
             stubbed: Default::default(),
+            annotation_types: Default::default(),
         }
     }
 
@@ -117,6 +118,10 @@ impl<'t> Lowering<'t> {
                     self.declare_lambdas(member, index, None)?;
                 }
                 "EMPTY_STATEMENT" => {}
+                // Does nothing when the program runs (see `annotation_types`).
+                "ANNOTATION_TYPE" => {
+                    self.annotation_types.insert(crate::program::class_name(member.0));
+                }
                 "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
                     // Named after its outer class once that is named (see `inner::name_nested`).
                     self.member_outers.push((self.types.len(), index));
@@ -312,6 +317,11 @@ impl<'t> Lowering<'t> {
                      `--main` and `--library`"
                 );
                 error(node.pos(), message)
+            }
+            None if let Some(owner) =
+                node.symbol().map(|s| s.owner).filter(|o| self.annotation_types.contains(*o)) =>
+            {
+                unsupported(node, &format!("a field of the annotation type `{owner}`"))
             }
             None => unsupported(node, "fields"),
         }

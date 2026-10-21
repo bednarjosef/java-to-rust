@@ -1728,6 +1728,64 @@ fn a_required_module_that_is_not_given_is_named() {
 }
 
 #[test]
+fn annotation_types_used_only_as_annotations_are_left_out_of_a_whole_program() {
+    let dir = write_sources(
+        "annotation-types",
+        &[
+            (
+                "app/Tag.java",
+                "package app;\nimport java.lang.annotation.*;\n@Retention(RetentionPolicy.RUNTIME)\npublic @interface Tag {\n    String value() default \"\";\n}\n",
+            ),
+            (
+                "app/Main.java",
+                "package app;\n@Tag(\"main\")\npublic class Main {\n    @interface Note { int level(); }\n    @Note(level = 2) @Tag static int twice(@Tag int x) { return 2 * x; }\n    public static void main(String[] a) { System.out.println(twice(4)); }\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "app.Main".into(),
+        sources: vec![dir.join("app")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["fn twice(x: i32) -> i32", "twice(4)"]);
+    assert_lacks(&rust, &["Tag", "Note", "level", "Retention"]);
+}
+
+#[test]
+fn annotation_types_used_as_values_are_rejected_where_the_code_uses_them() {
+    let rejected = |name: &str, main: &str| {
+        let tag = "package app;\npublic @interface Tag {\n    String value() default \"\";\n    StringBuilder NAMES = new StringBuilder();\n}\n";
+        let dir = write_sources(name, &[("app/Tag.java", tag), ("app/Main.java", main)]);
+        let program =
+            java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+        java_to_rust::translate_program(&program).expect_err("a value of an annotation type").to_string()
+    };
+    let error = rejected(
+        "annotation-variable",
+        "package app;\npublic class Main {\n    public static void main(String[] a) {\n        Tag t = Main.class.getAnnotation(Tag.class);\n        System.out.println(t == null);\n    }\n}\n",
+    );
+    assert!(
+        error.ends_with("app/Main.java:4:9: using the annotation type `app.Tag` other than as an annotation not supported yet"),
+        "{error}"
+    );
+    let error = rejected(
+        "annotation-field",
+        "package app;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Tag.NAMES.length());\n    }\n}\n",
+    );
+    assert!(
+        error.ends_with("app/Main.java:4:28: a field of the annotation type `app.Tag` not supported yet"),
+        "{error}"
+    );
+    let error = rejected(
+        "annotation-implemented",
+        "package app;\npublic class Main implements Tag {\n    public String value() { return \"v\"; }\n    public Class<? extends java.lang.annotation.Annotation> annotationType() { return Tag.class; }\n    public static void main(String[] a) { System.out.println(new Main().value()); }\n}\n",
+    );
+    assert!(error.ends_with("app/Main.java:2:30: implementing `app.Tag` not supported yet"), "{error}");
+}
+
+#[test]
 fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
     let library = (
         "lib/lib/Tags.java",

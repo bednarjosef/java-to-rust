@@ -145,7 +145,10 @@ A small subset, end to end:
   instance initializer blocks, static fields, constructors (including `this(...)`), `new`,
   object-typed fields and `null` objects, and a user `toString` in `println` and concatenation.
   `synchronized (x)` checks `x` for null and runs the block, holding `x`'s monitor where the
-  program can tell (see "Threads").
+  program can tell (see "Threads"). Annotations and annotation types (`@interface`, top-level
+  or nested) are left out, as they do nothing when the program runs; code that uses an
+  annotation type otherwise (a variable of one, a field of one, a class implementing one) is
+  rejected.
   An override may return a subtype of the overridden method's return type (a
   covariant return): the override's value is converted to the overridden method's representation,
   so a caller that goes through the supertype sees the same value as Java's. `super.clone()` (or

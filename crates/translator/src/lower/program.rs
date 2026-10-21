@@ -132,7 +132,11 @@ fn lower_into<'t>(
         let unit = Node(unit);
         let package = unit.get("packageName").map(dotted).unwrap_or_default();
         for decl in unit.list("typeDecls") {
-            if reach.classes.contains(&crate::program::class_name(decl.0)) {
+            // An annotation type does nothing when the program runs: annotations are left out,
+            // and a value of one is rejected where the code has it (`Lowering::annotation_types`).
+            if decl.kind() == "ANNOTATION_TYPE" {
+                lowering.annotation_types.insert(crate::program::class_name(decl.0));
+            } else if reach.classes.contains(&crate::program::class_name(decl.0)) {
                 let outer = (!package.is_empty()).then_some(package.as_str());
                 lowering.declare_type(decl, outer).map_err(|e| (Some(index), e))?;
             }
@@ -173,7 +177,7 @@ fn lower_into<'t>(
     let decls: Vec<Node> = units
         .iter()
         .flat_map(|u| Node(u).list("typeDecls"))
-        .filter(|d| reach.classes.contains(&crate::program::class_name(d.0)))
+        .filter(|d| d.kind() != "ANNOTATION_TYPE" && reach.classes.contains(&crate::program::class_name(d.0)))
         .collect();
     lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
     let planned: Vec<Node> = decls.iter().copied().chain(lowering.functional_decls()).collect();
@@ -207,7 +211,7 @@ fn lower_into<'t>(
 /// The members of a class declaration (and of its nested classes) that are reachable.
 fn reachable_members<'t>(decl: Node<'t>, reach: &Reach, out: &mut Vec<&'t Value>) {
     let class = crate::program::class_name(decl.0);
-    if !reach.classes.contains(&class) {
+    if decl.kind() == "ANNOTATION_TYPE" || !reach.classes.contains(&class) {
         return;
     }
     for member in decl.list("members") {

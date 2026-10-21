@@ -84,6 +84,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
     let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
     real_generics::retry(|real, covariant| {
         let mut lowering = Lowering::declare(&decls)?;
+        let annotations = unit.list("typeDecls").filter(|n| n.kind() == "ANNOTATION_TYPE");
+        lowering.annotation_types.extend(annotations.map(|n| crate::program::class_name(n.0)));
         lowering.covariant = covariant.clone();
         lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
         lowering.declare_standard()?;
@@ -309,6 +311,9 @@ struct Lowering<'t> {
     stubbing: Cell<bool>,
     /// The methods that are a census's stubs.
     stubbed: RefCell<std::collections::BTreeSet<usize>>,
+    /// The annotation types (`@interface`) that were left out, by javac's name: an annotation
+    /// does nothing when the program runs, but a value of one is not translated.
+    annotation_types: std::collections::HashSet<String>,
 }
 
 /// An error that lowering for a census records: the index of the type whose code it is in, the
@@ -527,6 +532,9 @@ impl<'t> Lowering<'t> {
             _ if let Some(erased) = self.erased(node, name) => erased,
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
             "java.lang.Object" => unsupported(node, "Object"),
+            _ if self.annotation_types.contains(name) => {
+                unsupported(node, &format!("using the annotation type `{name}` other than as an annotation"))
+            }
             _ => unsupported(node, &format!("type `{name}`")),
         }
     }
