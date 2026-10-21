@@ -185,6 +185,11 @@ pub enum Native {
     Crc32Update,
     /// `CRC32.updateBytes0(crc, b, off, len)`.
     Crc32UpdateBytes,
+    /// `Reference.hasReferencePendingList()`: a translated program has no garbage collector that
+    /// discovers references, so no reference is ever pending.
+    NoPendingReferences,
+    /// `SecureRandom.getSeed(numBytes)`: seed bytes from the operating system (`random.rs`).
+    SecureSeed,
 }
 
 /// The native methods of translated JDK classes that the runtime implements and whose calls
@@ -214,6 +219,7 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("jdk.internal.misc.Unsafe", "fullFence", "()void") => Native::FullFence,
         ("java.util.zip.CRC32", "update", "(int,int)int") => Native::Crc32Update,
         ("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int") => Native::Crc32UpdateBytes,
+        ("java.lang.ref.Reference", "hasReferencePendingList", "()boolean") => Native::NoPendingReferences,
         ("java.lang.Thread", "nextThreadNum", "()int") => Native::ThreadNumber,
         ("java.lang.Thread", "nextThreadId", "()long") => Native::ThreadId,
         ("java.lang.Thread", "mainId0", "()long") => Native::MainThreadId,
@@ -332,6 +338,7 @@ pub const MATH_FUNCTIONS: &[&str] = &[
     "clamp",
     "toRadians",
     "toDegrees",
+    "scalb",
 ];
 
 #[cfg(test)]

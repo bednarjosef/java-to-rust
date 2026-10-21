@@ -48,6 +48,7 @@ mod initializers;
 mod inner;
 mod java_arrays;
 mod java_objects;
+mod libraries;
 mod local_types;
 mod natives;
 mod patterns;
@@ -975,6 +976,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.file_system_call(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.library_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(kind) = self.blocker_call(node, &symbol, &mut args)? {

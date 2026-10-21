@@ -108,6 +108,8 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.util.Arrays#sort",
             "java.util.Arrays#copyOfRange",
             "java.util.Arrays#binarySearch",
+            // A negative count of seed bytes (`Native::SecureSeed`).
+            "java.security.SecureRandom#getSeed",
         ],
     ),
     // A monitor that the thread does not hold.

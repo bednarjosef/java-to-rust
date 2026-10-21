@@ -151,6 +151,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         // A negative time (and an interrupt, which `runtime_failures` adds in a program that
         // interrupts).
         Builtin::Native(Native::Sleep { .. }) => Some("java.lang.IllegalArgumentException"),
+        // A negative count.
+        Builtin::Native(Native::SecureSeed) => Some("java.lang.IllegalArgumentException"),
         // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail, but for
         // the interrupt of `join0`, which `runtime_failures` adds.
         Builtin::Native(
@@ -212,7 +214,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::DescriptorHandle
             | Native::DescriptorAppend
             | Native::FullFence
-            | Native::Crc32Update,
+            | Native::Crc32Update
+            | Native::NoPendingReferences,
         ) => None,
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
         // of a closed descriptor does nothing.
@@ -568,6 +571,7 @@ pub(super) fn runtime_failures(
                                     | Native::FileSeek
                                     | Native::FileSetLength
                                     | Native::FileSystem(_)
+                                    | Native::SecureSeed
                             )
                     ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })));
                     out.push((failure, "this call of the library", checked, x.id));

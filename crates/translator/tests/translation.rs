@@ -5061,3 +5061,28 @@ fn a_static_method_asking_for_its_caller_gets_the_calling_class() {
     );
     assert!(walked.contains("StackWalker.walk"), "{walked}");
 }
+
+#[test]
+fn scalb_is_the_runtime_port_in_both_widths() {
+    let rust = translate(
+        "public class Main {
+            public static void main(String[] a) {
+                System.out.println(Math.scalb(1.5, 10) + StrictMath.scalb(2.0, 3));
+                System.out.println(Math.scalb(1.5f, -3));
+            }
+        }",
+    );
+    assert_contains(&rust, &["java::scalb(1.5, 10)", "java::scalb(2.0, 3)", "java::scalb_f32(1.5, -3)"]);
+}
+
+#[test]
+fn seeds_come_from_the_operating_system() {
+    let rust = translate(
+        "import java.security.SecureRandom;
+        public class Main {
+            public static void main(String[] a) { System.out.println(SecureRandom.getSeed(16).length); }
+        }",
+    );
+    assert_contains(&rust, &["or_throw(java::try_secure_seed(16))"]);
+    assert_lacks(&rust, &["SecureRandom"]);
+}
