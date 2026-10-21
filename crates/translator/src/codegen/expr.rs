@@ -652,6 +652,7 @@ impl<'a> Gen<'a> {
                 let code = self.value(&args[0], Type::Int);
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
+            Builtin::MainArgs => self.main_args(ty),
             Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
             Builtin::UnknownClass => {
                 let name = self.value(&args[0], Type::String);

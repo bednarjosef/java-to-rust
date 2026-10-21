@@ -71,6 +71,14 @@ impl JavaCache {
         for arg in JVM_ARGS {
             fingerprint.field(arg.as_bytes());
         }
+        // The program's own arguments, which change its output. None (the usual case) adds nothing
+        // to the key, so the entries of programs without arguments stay valid.
+        if !p.args.is_empty() {
+            fingerprint.field(b"arguments");
+            for arg in &p.args {
+                fingerprint.field(arg.as_bytes());
+            }
+        }
         for file in files {
             let path = file.strip_prefix(root).ok()?;
             fingerprint.field(path.to_string_lossy().as_bytes());
