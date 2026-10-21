@@ -74,9 +74,9 @@ public class JavaTree {
     }
 
     /**
-     * Whole-program mode: {@code java JavaTree --program [--sourcepath PATH] FILE...} compiles all
-     * the files in one javac run, loading the other classes they use from the source path, and
-     * prints {@code {"units":[{"file":...,"tree":...},...]}}: the files given, in order, then every
+     * Whole-program mode: {@code java JavaTree --program [--sourcepath PATH] [--module-info FILE]
+     * FILE...} compiles all the files in one javac run, loading the other classes they use from the
+     * source path, and prints {@code {"units":[{"file":...,"tree":...},...]}}: the files given, in order, then every
      * unit javac loaded from the source path and attributed. Compile errors are printed as
      * {@code FILE:LINE:COLUMN: message}.
      *
@@ -84,15 +84,25 @@ public class JavaTree {
      * thousands of the JDK's for a program that uses a collection. With {@code --serve} only the
      * given files are attributed at first, and the others as they are asked for (see
      * {@link #serve}).
+     *
+     * <p>Every root of the source path may be a module's, with a {@code module-info.java}: javac
+     * would compile in the module of the first one it finds, and read the classes of other modules
+     * from the JDK's class files instead of their sources on the path. So javac sees none of them,
+     * except the one that {@code --module-info FILE} names (the JDK's {@code java.base}, whose
+     * packages javac compiles only inside that module): all the sources are one module, that one
+     * or the unnamed module (see {@link #oneModule}).
      */
     private static void program(List<String> args) throws Exception {
         List<String> options = new ArrayList<>(List.of("-proc:none", "-Xlint:none", "-XDshould-stop.at=FLOW"));
         List<File> files = new ArrayList<>();
         boolean serve = false;
+        File moduleInfo = null;
         for (int i = 0; i < args.size(); i++) {
             if (args.get(i).equals("--sourcepath") && i + 1 < args.size()) {
                 options.add("-sourcepath");
                 options.add(args.get(++i));
+            } else if (args.get(i).equals("--module-info") && i + 1 < args.size()) {
+                moduleInfo = new File(args.get(++i));
             } else if (args.get(i).equals("--serve")) {
                 serve = true;
             } else {
@@ -102,8 +112,8 @@ public class JavaTree {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         StandardJavaFileManager fileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8);
-        JavacTask task = (JavacTask) compiler.getTask(null, fileManager, diagnostics, options, null,
-                fileManager.getJavaFileObjectsFromFiles(files));
+        JavacTask task = (JavacTask) compiler.getTask(null, oneModule(fileManager, moduleInfo), diagnostics,
+                options, null, fileManager.getJavaFileObjectsFromFiles(files));
         // Units that javac loads from the source path are attributed too, but only reported here.
         Set<CompilationUnitTree> analyzed = new LinkedHashSet<>();
         task.addTaskListener(new TaskListener() {
@@ -131,6 +141,34 @@ public class JavaTree {
             }
         }
         print(Trees.instance(task), units, stdout);
+    }
+
+    /**
+     * The file manager that shows javac no {@code module-info.java} on the source path but
+     * {@code moduleInfo}, when that is given. javac looks for one there to choose the module that
+     * the sources it compiles are in (and lists none when it lists a package's sources, since its
+     * name is not a class's).
+     */
+    private static JavaFileManager oneModule(StandardJavaFileManager fileManager, File moduleInfo) {
+        URI kept = moduleInfo == null ? null : moduleInfo.getAbsoluteFile().toPath().normalize().toUri();
+        return new ForwardingJavaFileManager<>(fileManager) {
+            @Override
+            public JavaFileObject getJavaFileForInput(Location location, String className, JavaFileObject.Kind kind)
+                    throws IOException {
+                if (location != StandardLocation.SOURCE_PATH || !className.equals("module-info")) {
+                    return super.getJavaFileForInput(location, className, kind);
+                }
+                if (kept == null || kind != JavaFileObject.Kind.SOURCE) {
+                    return null;
+                }
+                for (JavaFileObject file : super.list(location, "", Set.of(kind), false)) {
+                    if (file.isNameCompatible("module-info", kind) && file.toUri().normalize().equals(kept)) {
+                        return file;
+                    }
+                }
+                return null;
+            }
+        };
     }
 
     /**

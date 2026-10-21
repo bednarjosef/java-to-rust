@@ -84,6 +84,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
     let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
     real_generics::retry(|real, covariant| {
         let mut lowering = Lowering::declare(&decls)?;
+        let annotations = unit.list("typeDecls").filter(|n| n.kind() == "ANNOTATION_TYPE");
+        lowering.annotation_types.extend(annotations.map(|n| crate::program::class_name(n.0)));
         lowering.covariant = covariant.clone();
         lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
         lowering.declare_standard()?;
@@ -311,8 +313,15 @@ struct Lowering<'t> {
     catch_panics: bool,
     /// Whether the method being lowered is a census's stub of one that lowering rejected.
     stubbing: Cell<bool>,
+    /// In a census, the classes whose declaration lowering rejected (one that extends or
+    /// implements a class that is not translated), with the error: such a class extends and
+    /// implements none of those, and all of its code is rejected with it (see `census`).
+    rejected_classes: RefCell<std::collections::BTreeMap<usize, Error>>,
     /// The methods that are a census's stubs.
     stubbed: RefCell<std::collections::BTreeSet<usize>>,
+    /// The annotation types (`@interface`) that were left out, by javac's name: an annotation
+    /// does nothing when the program runs, but a value of one is not translated.
+    annotation_types: std::collections::HashSet<String>,
 }
 
 /// An error that lowering for a census records: the index of the type whose code it is in, the
@@ -532,15 +541,26 @@ impl<'t> Lowering<'t> {
             _ if let Some(erased) = self.erased(node, name) => erased,
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
             "java.lang.Object" => unsupported(node, "Object"),
+            _ if self.annotation_types.contains(name) => {
+                unsupported(node, &format!("using the annotation type `{name}` other than as an annotation"))
+            }
             _ => unsupported(node, &format!("type `{name}`")),
         }
     }
 
     fn block(&self, node: Node<'t>) -> Result<Vec<Stmt>, Error> {
         let mut out = Vec::new();
+        // The `if`s that test a property that is never set run only their `else` branch.
+        let unset = crate::program::unset_property_ifs(node.0);
         for stmt in node.list("statements") {
             if is_super_call(stmt) {
                 out.extend(self.super_init(stmt)?);
+                continue;
+            }
+            if unset.iter().any(|s| std::ptr::eq(*s, stmt.0)) {
+                if let Some(otherwise) = stmt.get("elseStatement") {
+                    self.stmt_into(otherwise, &mut out)?;
+                }
                 continue;
             }
             self.stmt_into(stmt, &mut out)?;
@@ -571,6 +591,8 @@ impl<'t> Lowering<'t> {
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
             }
             "EXPRESSION_STATEMENT" if let Some(set_all) = self.set_all(node)? => set_all,
+            // The value of a field handle is no field's (see `handles`).
+            "EXPRESSION_STATEMENT" if self.handle_definition(node) => return Ok(()),
             "EXPRESSION_STATEMENT" => match self.expr(node.child("expression")?)? {
                 // A native that does nothing here, such as `registerNatives()`, leaves no trace.
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
@@ -1006,6 +1028,16 @@ impl<'t> Lowering<'t> {
             // which `StringJoiner` reaches through `SharedSecrets` (`String` is the runtime's).
             ("jdk.internal.access.JavaLangAccess", "join") if args.len() == 5 => {
                 Builtin::String(StringOp::JoinRange)
+            }
+            // There are no virtual threads: a thread's carrier is the thread itself
+            // (`ThreadLocalRandom` keeps its seeds in the carrier).
+            ("jdk.internal.access.JavaLangAccess", "currentCarrierThread") => {
+                let resolved = self.methods.iter().position(|m| {
+                    self.types[m.owner].javac == "java.lang.Thread"
+                        && m.name == "currentThread"
+                        && m.sig == "()java.lang.Thread"
+                });
+                return Ok(ExprKind::Call { name: "currentThread".to_string(), args, resolved });
             }
             (
                 "java.lang.StringBuilder"

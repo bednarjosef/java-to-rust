@@ -159,6 +159,7 @@ fn lingers(x: &Expr) -> bool {
         ExprKind::Builtin(Builtin::Native(native), _) => matches!(
             native,
             Native::Sleep { .. }
+                | Native::Park
                 | Native::MonitorWait
                 | Native::ThreadJoin
                 | Native::ThreadStart

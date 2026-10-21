@@ -842,6 +842,7 @@ impl<'a> Gen<'a> {
             self.line("}");
         }
         self.identity_impl(t, &variants);
+        self.monitor_impl(t, &variants);
         if self.wanted.contains(&Need::Display(t)) {
             self.display_impl(t, &variants);
         }
@@ -1422,6 +1423,41 @@ impl<'a> Gen<'a> {
             self.indent -= 1;
             self.line("}");
         }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// The monitor of an object of the type, where the program keeps the monitors of its objects
+    /// (`synchronized (node)` on a `ConcurrentHashMap` bin): the monitor of the variant's handle.
+    /// A type with a variant that is not such a handle (a value, or an immutable object shared as
+    /// it is) has none.
+    fn monitor_impl(&mut self, t: usize, variants: &[usize]) {
+        if variants.is_empty() || !self.facts.kept_monitor_of(t) {
+            return;
+        }
+        for &c in variants {
+            let payload = self.payload(c);
+            if !(payload.starts_with("Rc<") || payload.starts_with("Arc<java::Locked<")) {
+                return;
+            }
+        }
+        let name = struct_name(&self.class.types[t].name);
+        let (has, of) = (self.runtime("HasMonitor"), self.runtime("MonitorOf"));
+        self.gap();
+        self.line(&format!("impl {has} for {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn monitor(&self) -> {of}<'_> {{"));
+        self.indent += 1;
+        self.line("match self {");
+        self.indent += 1;
+        for &c in variants {
+            let v = self.variant(t, c);
+            self.line(&format!("{v}(o) => {has}::monitor(o),"));
+        }
+        self.indent -= 1;
+        self.line("}");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;

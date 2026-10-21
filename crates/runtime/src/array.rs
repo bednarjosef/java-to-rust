@@ -249,6 +249,62 @@ pub fn post_update<T: Clone>(a: &impl Elements<T>, i: i32, f: impl FnOnce(T) -> 
     old
 }
 
+// The atomic updates of an element that `Unsafe` makes at an element offset. Each reads, compares
+// and writes the element under one borrow of the array, which in a program with threads is one
+// hold of the array's lock: no other access of the array, from any thread, comes between the read
+// and the write, as with Java's atomic instructions. `same` is Java's `==` on the elements.
+
+/// `Unsafe.compareAndSet<Kind>`: whether `a[i]` was `expected`, in which case it is now `value`.
+pub fn compare_and_set_element<T>(
+    a: &impl Elements<T>,
+    i: i32,
+    expected: T,
+    value: T,
+    same: impl FnOnce(&T, &T) -> bool,
+) -> bool {
+    let mut items = a.items_mut();
+    let k = position(items.len(), i);
+    let swapped = same(&items[k], &expected);
+    if swapped {
+        items[k] = value;
+    }
+    swapped
+}
+
+/// `Unsafe.compareAndExchange<Kind>`: the old `a[i]`, which is now `value` if it was `expected`.
+pub fn compare_and_exchange_element<T: Clone>(
+    a: &impl Elements<T>,
+    i: i32,
+    expected: T,
+    value: T,
+    same: impl FnOnce(&T, &T) -> bool,
+) -> T {
+    let mut items = a.items_mut();
+    let k = position(items.len(), i);
+    let old = items[k].clone();
+    if same(&old, &expected) {
+        items[k] = value;
+    }
+    old
+}
+
+/// `Unsafe.getAndSet<Kind>`: the old `a[i]`, which is now `value`.
+pub fn get_and_set_element<T>(a: &impl Elements<T>, i: i32, value: T) -> T {
+    let mut items = a.items_mut();
+    let k = position(items.len(), i);
+    std::mem::replace(&mut items[k], value)
+}
+
+/// `Unsafe.getAndAdd<Kind>`: the old `a[i]`, which is now `add(old, delta)` (Java's wrapping
+/// addition).
+pub fn get_and_add_element<T: Copy>(a: &impl Elements<T>, i: i32, delta: T, add: fn(T, T) -> T) -> T {
+    let mut items = a.items_mut();
+    let k = position(items.len(), i);
+    let old = items[k];
+    items[k] = add(old, delta);
+    old
+}
+
 /// `a[i] op= ...` where the program observes the exceptions of the index or of `f` (a division
 /// by zero).
 pub fn try_update<T: Clone>(

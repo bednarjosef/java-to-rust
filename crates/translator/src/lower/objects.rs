@@ -71,6 +71,8 @@ impl<'t> Lowering<'t> {
             catch_panics: false,
             stubbing: Cell::new(false),
             stubbed: Default::default(),
+            annotation_types: Default::default(),
+            rejected_classes: Default::default(),
         }
     }
 
@@ -118,6 +120,10 @@ impl<'t> Lowering<'t> {
                     self.declare_lambdas(member, index, None)?;
                 }
                 "EMPTY_STATEMENT" => {}
+                // Does nothing when the program runs (see `annotation_types`).
+                "ANNOTATION_TYPE" => {
+                    self.annotation_types.insert(crate::program::class_name(member.0));
+                }
                 "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
                     // Named after its outer class once that is named (see `inner::name_nested`).
                     self.member_outers.push((self.types.len(), index));
@@ -167,14 +173,16 @@ impl<'t> Lowering<'t> {
         let (mut fields, mut statics) = (self.synthetic_fields(index)?, Vec::new());
         let name = &self.types[index].name;
         let moved = self.moves_initializers(index);
+        // A census's rejected class keeps its fields, without their initializers.
+        let rejected = self.rejected_classes.borrow().contains_key(&index);
         let javac = &self.types[index].javac;
         for member in node
             .list("members")
             .filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m) && self.keeps(*m, javac))
-            .filter(|m| self.handle_declaration(*m).is_none())
+            .filter(|m| self.handle_declaration(index, *m).is_none())
         {
             // Moved initializers run in the constructors (see `inner`).
-            let field = self.field(member, !(moved && !member.has_flag("STATIC")))?;
+            let field = self.field(member, !rejected && !(moved && !member.has_flag("STATIC")))?;
             // A subclass's struct holds its superclass's fields as `base`.
             if !member.has_flag("STATIC")
                 && field.name.eq_ignore_ascii_case("base")
@@ -313,6 +321,19 @@ impl<'t> Lowering<'t> {
                      `--main` and `--library`"
                 );
                 error(node.pos(), message)
+            }
+            // Another compile-time constant of a library class (`Double.PRECISION`) is its value,
+            // as javac would have written it.
+            None if let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD" && s.is_static)
+                && let Some(text) = symbol.constant =>
+            {
+                let ty = self.signature_type(node, symbol.ty)?;
+                self.constant_literal(node, ty, text)
+            }
+            None if let Some(owner) =
+                node.symbol().map(|s| s.owner).filter(|o| self.annotation_types.contains(*o)) =>
+            {
+                unsupported(node, &format!("a field of the annotation type `{owner}`"))
             }
             None => unsupported(node, "fields"),
         }

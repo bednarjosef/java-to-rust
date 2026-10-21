@@ -186,7 +186,10 @@ A small subset, end to end:
   instance initializer blocks, static fields, constructors (including `this(...)`), `new`,
   object-typed fields and `null` objects, and a user `toString` in `println` and concatenation.
   `synchronized (x)` checks `x` for null and runs the block, holding `x`'s monitor where the
-  program can tell (see "Threads").
+  program can tell (see "Threads"). Annotations and annotation types (`@interface`, top-level
+  or nested) are left out, as they do nothing when the program runs; code that uses an
+  annotation type otherwise (a variable of one, a field of one, a class implementing one) is
+  rejected.
   An override may return a subtype of the overridden method's return type (a
   covariant return): the override's value is converted to the overridden method's representation,
   so a caller that goes through the supertype sees the same value as Java's. `super.clone()` (or
@@ -701,7 +704,12 @@ type, so only the classes, methods, constructors and fields that `main` can reac
 translated. Library roots (`--library`, meant for the JDK's own sources) are only on the source
 path: javac attributes a file from them only when reachability asks for one of its classes, a
 few dozen of the JDK's units where javac by itself would attribute thousands (see "Translating
-whole programs" in docs/performance.md). Packages become
+whole programs" in docs/performance.md). A source or library root may be a module's, with a
+`module-info.java` (the JDK's are): the translation is of one closed program, so javac compiles
+every root as part of one module, `java.base` when the JDK's sources are a library and the
+unnamed module otherwise, and reads each class from its source (`program/modules.rs`). A
+package of a module whose sources are not given is an error that names the module to pass as
+`--library`. Packages become
 nested modules in one output file (`com.example.util` is `mod com { pub(crate) mod example
 { pub(crate) mod util { .. } } }`); a class of another package is named by its path from the crate
 root, such as `crate::com::example::util::Counter::new(..)`, and items in packages are
@@ -734,12 +742,15 @@ prints what it rejects: lowering, the analyses and the generator run as for a tr
 each method, constructor or lambda that one of them rejects is recorded and replaced by a stub
 with its signature and a body that never runs (a rejected field initializer or initializer block
 is left out), so every rejection after it is one the translation would meet once the code before
-it translates. Its report gives, for the program's own code and for its library code separately,
+it translates. A class whose declaration is rejected (it extends or implements a class that is
+not translated) is recorded as a rejection of each of its pieces of code, which are stubbed, and
+the census goes on with the class extending and implementing none of those. Its report gives, for the program's own code and for its library code separately,
 the pieces of code (methods, constructors, field initializers, initializer blocks) that translate
 and the rejections, grouped by message (the names in backquotes left out), with the number of
 pieces each blocks and example places (`file:line:column`, relative to the source or library
 root), and the native methods reached, each with whether the runtime has it
-(`program/census.rs`). It ends early only at a rejection that no stub takes away, which it says.
+(`program/census.rs`). It ends early only at a rejection that no stub takes away, which it says,
+with the error's file, line and column (the file, when one file alone has code there).
 `--census-json <file>` writes it as JSON for scripts; `scripts/jdk-coverage.py` runs it over the
 target programs and writes `docs/jdk-coverage.md`, how much of the JDK code they reach translates.
 
@@ -804,6 +815,8 @@ as with `-XX:-VMContinuations`); `VM.getNanoTimeAdjustment` (HotSpot's, from the
 `CRC32.update` and `updateBytes0` (zlib's CRC-32). `Unsafe.arrayBaseOffset` and
 `arrayIndexScale` of an array class literal are HotSpot's layout (16, and 1 to 8 by element, 4
 for references) and are answered at the call, so their `Class`-taking natives are not reached.
+`Unsafe.park` and `unpark` park the current thread and unpark a thread by its id, as
+`LockSupport` does.
 `String.intern()` is the string itself; `==` on two strings stays rejected.
 
 ### Not yet

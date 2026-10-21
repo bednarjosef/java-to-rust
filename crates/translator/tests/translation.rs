@@ -1007,7 +1007,7 @@ fn methods_that_reach_their_object_another_way_take_the_shared_handle() {
         &[
             "fn register(this: &Rc<RefCell<P>>) {\n        share(this);",
             // `o` may be `this`, which the method then must not hold borrowed.
-            "fn copy(this: &Rc<RefCell<P>>, o: &Rc<RefCell<P>>) {\n        this.borrow_mut().x = { o.borrow().x };",
+            "fn copy(this: &Rc<RefCell<P>>, o: &Rc<RefCell<P>>) {\n        this.borrow_mut().x = { let value = o.borrow().x; value };",
             "P::register(&p);",
             "P::copy(&q, &p);",
         ],
@@ -1646,6 +1646,143 @@ fn library_roots_are_read_only_where_used() {
         &["crate::lib::shout(\"hi\")", "mod lib {", "pub(crate) fn shout(s: &str) -> String"],
     );
     assert_lacks(&rust, &["unused", "Broken"]);
+}
+
+/// A program whose source root is a module that requires a library's module, both with a
+/// `module-info.java` (without the JDK's sources, so both are compiled in the unnamed module).
+fn module_sources(dir: &str) -> std::path::PathBuf {
+    write_sources(
+        dir,
+        &[
+            (
+                "app/module-info.java",
+                "/** The application. */\nmodule com.example.app {\n    requires org.lib;\n}\n",
+            ),
+            (
+                "app/com/example/app/Main.java",
+                "package com.example.app;\nimport org.lib.text.Shout;\npublic class Main {\n    public static void main(String[] a) { System.out.println(Shout.shout(\"hi\")); }\n}\n",
+            ),
+            ("lib/module-info.java", "module org.lib {\n    exports org.lib.text;\n}\n"),
+            (
+                "lib/org/lib/text/Shout.java",
+                "package org.lib.text;\npublic class Shout {\n    public static String shout(String s) { return s + \"!\"; }\n}\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn library_roots_that_are_modules_are_read_as_sources() {
+    let dir = module_sources("module-roots");
+    let program = java_to_rust::Program {
+        main: "com.example.app.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &["crate::org::lib::text::shout(\"hi\")", "pub(crate) fn shout(s: &str) -> String"],
+    );
+    let report = survey(&program).report;
+    assert_contains(&report, &["  Library: 1 pieces; 1 (100.0%) reach nothing outside the sources."]);
+}
+
+#[test]
+fn a_required_module_that_is_not_given_is_named() {
+    let dir = module_sources("module-missing");
+    let program = java_to_rust::Program {
+        main: "com.example.app.Main".into(),
+        sources: vec![dir.join("app")],
+        ..Default::default()
+    };
+    let error = java_to_rust::translate_program(&program).expect_err("org.lib is not given");
+    assert!(
+        error.to_string().ends_with(
+            "Main.java:2:20: package org.lib.text does not exist; module com.example.app requires module org.lib, \
+             whose sources are not given: pass the root of its sources as --library"
+        ),
+        "{error}"
+    );
+    // A package of a module that javac has only as class files, here the JDK's `java.base`, whose
+    // `jdk.internal.misc` is not exported.
+    let dir = write_sources(
+        "module-not-visible",
+        &[(
+            "app/p/Main.java",
+            "package p;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(jdk.internal.misc.VM.isBooted());\n    }\n}\n",
+        )],
+    );
+    let program =
+        java_to_rust::Program { main: "p.Main".into(), sources: vec![dir.join("app")], ..Default::default() };
+    let error = java_to_rust::translate_program(&program).expect_err("java.base is not given");
+    assert!(
+        error.to_string().ends_with(
+            "Main.java:4:40: package jdk.internal.misc is in module java.base, whose sources are not given: \
+             pass the root of its sources as --library"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn annotation_types_used_only_as_annotations_are_left_out_of_a_whole_program() {
+    let dir = write_sources(
+        "annotation-types",
+        &[
+            (
+                "app/Tag.java",
+                "package app;\nimport java.lang.annotation.*;\n@Retention(RetentionPolicy.RUNTIME)\npublic @interface Tag {\n    String value() default \"\";\n}\n",
+            ),
+            (
+                "app/Main.java",
+                "package app;\n@Tag(\"main\")\npublic class Main {\n    @interface Note { int level(); }\n    @Note(level = 2) @Tag static int twice(@Tag int x) { return 2 * x; }\n    public static void main(String[] a) { System.out.println(twice(4)); }\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "app.Main".into(),
+        sources: vec![dir.join("app")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["fn twice(x: i32) -> i32", "twice(4)"]);
+    assert_lacks(&rust, &["Tag", "Note", "level", "Retention"]);
+}
+
+#[test]
+fn annotation_types_used_as_values_are_rejected_where_the_code_uses_them() {
+    let rejected = |name: &str, main: &str| {
+        let tag = "package app;\npublic @interface Tag {\n    String value() default \"\";\n    StringBuilder NAMES = new StringBuilder();\n}\n";
+        let dir = write_sources(name, &[("app/Tag.java", tag), ("app/Main.java", main)]);
+        let program =
+            java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+        java_to_rust::translate_program(&program).expect_err("a value of an annotation type").to_string()
+    };
+    let error = rejected(
+        "annotation-variable",
+        "package app;\npublic class Main {\n    public static void main(String[] a) {\n        Tag t = Main.class.getAnnotation(Tag.class);\n        System.out.println(t == null);\n    }\n}\n",
+    );
+    assert!(
+        error.ends_with("app/Main.java:4:9: using the annotation type `app.Tag` other than as an annotation not supported yet"),
+        "{error}"
+    );
+    let error = rejected(
+        "annotation-field",
+        "package app;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Tag.NAMES.length());\n    }\n}\n",
+    );
+    assert!(
+        error.ends_with("app/Main.java:4:28: a field of the annotation type `app.Tag` not supported yet"),
+        "{error}"
+    );
+    let error = rejected(
+        "annotation-implemented",
+        "package app;\npublic class Main implements Tag {\n    public String value() { return \"v\"; }\n    public Class<? extends java.lang.annotation.Annotation> annotationType() { return Tag.class; }\n    public static void main(String[] a) { System.out.println(new Main().value()); }\n}\n",
+    );
+    assert!(error.ends_with("app/Main.java:2:30: implementing `app.Tag` not supported yet"), "{error}");
 }
 
 #[test]
@@ -2889,6 +3026,46 @@ fn the_census_reports_every_rejection_not_only_the_first() {
 }
 
 #[test]
+fn the_census_rejects_a_class_whose_declaration_is_rejected_with_its_code_and_goes_on() {
+    let dir = write_sources(
+        "census_class",
+        &[
+            (
+                "p/Main.java",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(new Loader().n() + Other.fine());\n        Number x = Integer.valueOf(5);\n        System.out.println(x.intValue());\n    }\n}\n",
+            ),
+            (
+                "p/Loader.java",
+                "package p;\nclass Loader extends java.security.SecureClassLoader {\n    int count = 3;\n    { count++; }\n    int n() { return count; }\n}\n",
+            ),
+            ("p/Other.java", "package p;\nclass Other {\n    static int fine() { return 4; }\n}\n"),
+        ],
+    );
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    let error = java_to_rust::translate_program(&program).expect_err("SecureClassLoader is not translated");
+    assert!(
+        error
+            .to_string()
+            .ends_with("p/Loader.java:2:22: extending `java.security.SecureClassLoader` not supported yet"),
+        "{error}"
+    );
+    // The class's constructor, field initializer, initializer block and method are rejected with
+    // it, and `main`, which uses the class, and `fine` translate. (With `Number` in the program,
+    // lowering asks for the superclass of every class with a method without parameters, which
+    // once ended the census at this error.)
+    let census = census(&program);
+    assert_lacks(&census.report, &["Incomplete"]);
+    assert_contains(
+        &census.report,
+        &[
+            "  Program: 6 pieces; 2 (33.3%) translate, 4 rejected.",
+            "       4  extending `…` not supported yet\n          at p/Loader.java:2:22\n",
+        ],
+    );
+    assert_eq!(census.json["complete"], true);
+}
+
+#[test]
 fn census_json_writes_the_census_to_the_file_given() {
     let dir = census_sources("census_cli");
     let json = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("census_cli.json");
@@ -3190,6 +3367,25 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             public final void putReferenceRelease(Object o, long offset, Object x) { putReferenceVolatile(o, offset, x); }
             public native int getInt(Object o, long offset);
             public native void putIntVolatile(Object o, long offset, int x);
+            public final native boolean compareAndSetReference(Object o, long offset, Object expected, Object x);
+        }",
+    ),
+    (
+        "lib/jdk/internal/misc/Slots.java",
+        "package jdk.internal.misc;
+        public final class Slots {
+            private static final Unsafe U = Unsafe.getUnsafe();
+            public static final class Cell { final String name; public Cell(String n) { name = n; } public String toString() { return name; } }
+            private static final long BASE = U.arrayBaseOffset(Cell[].class);
+            private static final int SHIFT = 31 - Integer.numberOfLeadingZeros(U.arrayIndexScale(Cell[].class));
+            private static final int SCALE = U.arrayIndexScale(Cell[].class);
+            private final Cell[] slots = new Cell[4];
+            public boolean claim(int i, Cell o) {
+                return U.compareAndSetReference(slots, ((long) i << SHIFT) + BASE, null, o);
+            }
+            public Cell at(int i) { return (Cell) U.getReferenceAcquire(slots, BASE + (long) i * SCALE); }
+            public void set(int i, Cell o) { U.putReferenceRelease(slots, ((long) i << SHIFT) + BASE, o); }
+            public Cell stray(int i) { return (Cell) U.getReferenceAcquire(slots, BASE + i); }
         }",
     ),
     (
@@ -3315,6 +3511,40 @@ fn an_access_through_a_field_offset_is_the_field() {
         &["LAZY_VALUE", "LAZY_COUNT", "field_offset", "fn get_reference_acquire", "fn get_int"],
     );
     assert_contains(&rust, &["self.value", "self.count"]);
+}
+
+#[test]
+fn an_access_at_an_element_offset_is_the_element() {
+    let rust = translate_with_natives(
+        "jdk-element-handles",
+        "Slots s = new Slots(); s.set(1, new Slots.Cell(\"b\"));
+        System.out.println(s.claim(0, new Slots.Cell(\"a\")) + \" \" + s.claim(0, new Slots.Cell(\"c\")) + \" \" + s.at(0) + s.at(1));",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    // The update reads, compares and writes the element in one runtime call, which holds the
+    // array for all of it; reads and writes are of the element.
+    assert_contains(
+        &rust,
+        &[
+            "java::compare_and_set_element(&self.slots, i, None, Some(o), ",
+            "java::set(&self.slots, i, Some(o));",
+            "java::get(&self.slots, i)",
+        ],
+    );
+    assert_lacks(&rust, &["fn compare_and_set_reference", "fn get_reference_acquire"]);
+}
+
+#[test]
+fn offset_arithmetic_that_is_no_element_offset_is_rejected() {
+    let error = translate_with_natives("jdk-element-stray", "System.out.println(new Slots().stray(1));")
+        .expect_err("must be rejected");
+    assert!(
+        error.ends_with(
+            "`Unsafe.getReferenceAcquire` with an offset that is neither a field's nor an array element's \
+             not supported yet"
+        ),
+        "{error}"
+    );
 }
 
 #[test]
@@ -4615,7 +4845,10 @@ fn a_field_assigned_from_a_borrow_of_itself_ends_the_borrow_first() {
             System.out.println(c.pop() + c.pop()); } }",
     );
     // The `Ref` of the old head must end before the field is written.
-    assert_contains(&rust, &["self.head = { java::non_null(self.head.as_ref()).borrow().next.clone() };"]);
+    assert_contains(
+        &rust,
+        &["self.head = { let value = java::non_null(self.head.as_ref()).borrow().next.clone(); value };"],
+    );
 }
 
 #[test]

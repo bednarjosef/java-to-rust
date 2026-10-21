@@ -108,6 +108,12 @@ impl<'t> Lowering<'t> {
                 Native::HoldsLock
             }
             ("java.lang.Thread", "yield") => Native::ThreadYield,
+            // `LockSupport`'s, on the runtime's permit of a thread (`java_runtime::park`).
+            ("jdk.internal.misc.Unsafe", "park") if symbol.ty == "(boolean,long)void" => Native::Park,
+            ("jdk.internal.misc.Unsafe", "unpark") if symbol.ty == "(java.lang.Object)void" => {
+                args[0] = self.thread_id(node)?;
+                Native::Unpark
+            }
             ("java.io.PrintStream", name @ ("print" | "println"))
                 if stream == Some("err") && symbol.ty == "(char[])void" =>
             {
@@ -217,6 +223,29 @@ impl<'t> Lowering<'t> {
         let text = ExprKind::Binary(BinOp::Add, Box::new(prefix), Box::new(self.as_text(message)));
         let text = self.synth(text, pos, Type::String);
         Ok(Some(ExprKind::Builtin(Builtin::Native(Native::ErrPrint { newline: true }), vec![text])))
+    }
+
+    /// The id of the thread that `Unsafe.unpark(thread)` (`node`) passes, a variable of the
+    /// translator's `Thread`: its field `tid`.
+    fn thread_id(&self, node: Node<'t>) -> Result<Expr, Error> {
+        let arg = node.list("arguments").next().filter(|a| a.kind() == "IDENTIFIER");
+        let thread = match arg {
+            Some(arg) => self.expr(arg)?,
+            None => return unsupported(node, "`Unsafe.unpark` of anything but a variable"),
+        };
+        let class = self.type_index("java.lang.Thread");
+        let of_thread = match thread.ty {
+            Type::Class(name, _) => self
+                .type_index(name)
+                .is_some_and(|t| Some(t) == class || class.is_some_and(|c| self.is_subclass(t, c))),
+            _ => false,
+        };
+        if !of_thread {
+            return unsupported(node, "`Unsafe.unpark` of a value that is not a `Thread`");
+        }
+        let pos = node.pos();
+        let tid = super::objects::read(Place::Field { object: Box::new(thread), name: "tid".to_string() });
+        Ok(self.synth(tid, pos, Type::Long))
     }
 
     /// A call whose argument is a class literal, which the translation has no value for, of a
