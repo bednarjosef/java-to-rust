@@ -1580,6 +1580,9 @@ Generics are erased in lowering, and nothing after it knows they existed:
   parameter or return type (`next_integer`, `compare_to_point`); the group names are now unique in
   every class tree the group reaches (`codegen::names`). This also lifts "covariant return types"
   for these overrides.
+- A varargs parameter of a type variable (`T... items`) is an array of its erasure, read where the
+  method declares it, not at the call; an array of references passed for it is passed on, as
+  javac infers `T` from it (and is then rejected below unless it is an `Object[]`).
 - Arrays do not convert: `String[]` is `java::Array<String>` and `Object[]` is
   `java::Array<Option<Object>>`, so an array passed as an array of a type variable
   (`<T> T first(T[] xs)` called with a `String[]`) is rejected ("an array passed as an array of a
