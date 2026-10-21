@@ -33,6 +33,28 @@ impl<'a> Gen<'a> {
         self.facts.nullable_elements.contains(&elem)
     }
 
+    /// Whether `a = value` computes the value from `a` itself where `a` is a shared array: a
+    /// borrow of its cell lent to a call (`&a.borrow()`) lives to the end of the statement, so the
+    /// value is bound before the assignment.
+    pub(super) fn lends_itself(&self, target: &str, ty: Type, value: &Expr) -> bool {
+        matches!(ty, Type::Array(_)) && self.plain(target).is_none() && {
+            let mut found = false;
+            visit_expr(value, &mut |x| match &x.kind {
+                ExprKind::Call { args, .. }
+                | ExprKind::MethodCall { args, .. }
+                | ExprKind::Builtin(_, args) => found |= args.iter().any(|a| mentions(a, target)),
+                _ => {}
+            });
+            found
+        }
+    }
+
+    /// Whether `a[i] = e` used as a value stores `Some(e)` and gives `e` back: the elements of
+    /// type `elem` may be null, while `e` cannot be.
+    pub(super) fn stores_some(&self, e: &Expr, elem: Type) -> bool {
+        self.nullable_element(elem) && !self.nullable(e)
+    }
+
     /// `e` as an element of type `elem`: in `Some` where the elements may be null.
     pub(super) fn element_value(&mut self, e: &'a Expr, elem: Type) -> String {
         if self.nullable_element(elem) { self.optional_to(e, elem).text } else { self.value(e, elem).text }
@@ -125,8 +147,12 @@ impl<'a> Gen<'a> {
         }
         let (binding, handle) = self.write_handle(array, has_effects(index) || has_effects(rhs));
         let i = self.value(index, Type::Int).text;
-        let v = self.element_value(rhs, ty);
-        let helper = if used { "store" } else { "set" };
+        // The value of the assignment is an `Option` only where the stored value may be null.
+        let (helper, v) = if used && self.stores_some(rhs, ty) {
+            ("store_some", self.value(rhs, ty).text)
+        } else {
+            (if used { "store" } else { "set" }, self.element_value(rhs, ty))
+        };
         Self::bound_write(binding, format!("{}({handle}, {i}, {v})", self.runtime(helper)))
     }
 

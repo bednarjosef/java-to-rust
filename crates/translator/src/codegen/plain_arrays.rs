@@ -386,11 +386,14 @@ impl<'a> Gen<'a> {
         }
         let mentioned =
             path.rows.iter().any(|(i, _)| mentions(i, root)) || mentions(index, root) || mentions(rhs, root);
+        // The value of the assignment is an `Option` only where the stored value may be null.
+        let some = used && !row && self.stores_some(rhs, ty);
+        let put = if some { "put_some" } else { "put" };
         if !mentioned {
             let reference = self.path_ref(&path, true);
             let i = self.value(index, Type::Int).text;
-            let v = self.assigned_element(rhs, ty);
-            let helper = if row && !used { "assign" } else { "put" };
+            let v = if some { self.value(rhs, ty).text } else { self.assigned_element(rhs, ty) };
+            let helper = if row && !used { "assign" } else { put };
             return format!("{}({reference}, {i}, {v})", self.runtime(helper));
         }
         let (mut lets, place) = self.bound_rows(&path);
@@ -404,10 +407,10 @@ impl<'a> Gen<'a> {
             slot.to_string()
         };
         let value = self.fresh_name(&["value", "item", "new"]);
-        let v = self.assigned_element(rhs, ty);
+        let v = if some { self.value(rhs, ty).text } else { self.assigned_element(rhs, ty) };
         lets.push(format!("let {value} = {v};"));
         let reference = self.bound_ref(&path, &place, true);
-        format!("{{ {} {}({reference}, {slot}, {value}) }}", lets.join(" "), self.runtime("put"))
+        format!("{{ {} {}({reference}, {slot}, {value}) }}", lets.join(" "), self.runtime(put))
     }
 
     /// The value stored by `a[i] = rhs` into a plain array: an element, or a row moved in.

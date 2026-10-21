@@ -44,6 +44,14 @@ pub fn put<T: Clone>(a: &mut [T], i: i32, v: T) -> T {
     v
 }
 
+/// `a[i] = v` as an expression, where the elements may be null and `v` is not: yields `v`.
+#[inline]
+pub fn put_some<T: Clone>(a: &mut [Option<T>], i: i32, v: T) -> T {
+    let k = position(a.len(), i);
+    a[k] = Some(v.clone());
+    v
+}
+
 /// `a[i] = v` as a statement, which moves `v` into the array: a row of an array of arrays.
 #[inline]
 pub fn assign<T>(a: &mut [T], i: i32, v: T) {

@@ -80,11 +80,16 @@ impl<'a> Gen<'a> {
             if let Some(text) = self.self_update(&name, target, ty, value) {
                 return text;
             }
+            let lends = self.lends_itself(target, ty, value);
             let value = if self.optional_var(self.method, ty, target) {
                 self.optional(value)
             } else {
                 self.value(value, ty)
             };
+            if lends {
+                let bound = self.fresh_name(&["value", "item", "new"]);
+                return format!("{{ let {bound} = {}; {name} = {bound} }}", value.text);
+            }
             return format!("{name} = {}", value.text);
         };
         if ty == Type::String {
@@ -412,7 +417,8 @@ impl<'a> Gen<'a> {
     /// Reads a variable after assigning it, for an assignment used as a value.
     pub(super) fn read(&self, target: &str, ty: Type) -> String {
         let name = self.local(target);
-        if ty == Type::String { format!("{name}.clone()") } else { name }
+        // An array assigned inside an expression is shared, and its handle is cloned.
+        if ty == Type::String || matches!(ty, Type::Array(_)) { format!("{name}.clone()") } else { name }
     }
 
     pub(super) fn binary(&mut self, op: BinOp, l: Operand, r: Operand, result: Type, id: ExprId) -> Code {

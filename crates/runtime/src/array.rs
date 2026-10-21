@@ -137,6 +137,13 @@ pub fn store<T: Clone>(a: &Array<T>, i: i32, v: T) -> T {
     v
 }
 
+/// `a[i] = v` as an expression, where the elements may be null and `v` is not: the value of the
+/// assignment is `v` itself, not an `Option`.
+pub fn store_some<T: Clone>(a: &Array<Option<T>>, i: i32, v: T) -> T {
+    set(a, i, Some(v.clone()));
+    v
+}
+
 /// The elements of `a` in order, read one at a time as a for-each loop reads them. The length
 /// is fixed when the loop starts, and the loop holds its own handle, as Java's does.
 pub fn each<T: Clone>(a: Array<T>) -> impl Iterator<Item = T> {
