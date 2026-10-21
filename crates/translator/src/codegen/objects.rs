@@ -638,7 +638,11 @@ impl<'a> Gen<'a> {
             return format!("{}({option})", self.runtime("non_null"));
         };
         self.dereferenced.insert(id);
-        let call = format!("{}({option})", self.runtime("try_non_null"));
+        // Java's message, where a `catch` may read it.
+        let call = match ids.iter().find_map(|id| self.facts.npe_messages.get(id)) {
+            Some(Some(message)) => format!("{}({option}, {message:?})", self.runtime("try_non_null_message")),
+            _ => format!("{}({option})", self.runtime("try_non_null")),
+        };
         self.passed_on(Code::atom(call))
     }
 

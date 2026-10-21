@@ -290,8 +290,13 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let mut raising = HashSet::new();
     let mut null_checked = std::collections::HashMap::new();
     let mut catching = std::collections::HashMap::new();
-    // The `try`s whose `catch` gets a `NullPointerException` that the runtime raises.
+    // The `try`s whose `catch` gets a `NullPointerException` that the runtime raises, those of
+    // them that get one without the checked form (whose message is the runtime's), and the
+    // objects of `null_checked` with the `try` that catches their exception in their method, and
+    // their method.
     let mut runtime_npe_tries = HashSet::new();
+    let mut unchecked_npe_tries = HashSet::new();
+    let mut npe_catchers: Vec<(ExprId, Option<usize>, usize)> = Vec::new();
     let mut raised_classes = BTreeSet::new();
     for (m, method) in class.methods.iter().enumerate() {
         for p in &points[m] {
@@ -318,6 +323,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 {
                     if name == "java.lang.NullPointerException" {
                         null_checked.insert(id, p.pos);
+                        npe_catchers.push((id, catcher.map(|f| f.id), m));
                         if let Some(f) = catcher {
                             runtime_npe_tries.insert(f.id);
                         }
@@ -332,6 +338,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                         && name == "java.lang.NullPointerException"
                     {
                         runtime_npe_tries.insert(f.id);
+                        unchecked_npe_tries.insert(f.id);
                     }
                     raised_classes.insert(c);
                 } else if seen_here {
@@ -370,34 +377,55 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     }
 
     // Java's message of a `NullPointerException` that the runtime raises describes the
-    // dereference ("Cannot invoke ..."); the message of one that code creates is its own.
+    // dereference ("Cannot invoke ..."); the message of one that code creates is its own. Where
+    // a `catch` reads it, the translation writes Java's message (`npe_messages`), for the checked
+    // form only.
     let npe = Kind::Runtime("java.lang.NullPointerException");
+    let mut reading_tries = HashSet::new();
     for method in &class.methods {
         let mut found = None;
         for s in &method.body {
             visit_stmt(s, &mut |_| {}, &mut |s| {
                 let Stmt::Try { catches, .. } = s else { return };
-                if !runtime_npe_tries.contains(&(s as *const Stmt as usize)) {
+                let id = s as *const Stmt as usize;
+                // A `try` that a dereference of its own reaches, or any where one leaves its
+                // method, which a call in the `try` may reach.
+                if !runtime_npe_tries.contains(&id)
+                    && npe_catchers.iter().all(|(_, catcher, _)| catcher.is_some())
+                {
                     return;
                 }
-                let Some(catch) = catches.iter().find(|c| c.types.iter().any(|&t| matches(&npe, t))) else {
-                    return;
-                };
-                for b in &catch.body {
-                    visit_stmt(
-                        b,
-                        &mut |e| {
-                            visit_expr(e, &mut |x| {
-                                if let ExprKind::MethodCall { receiver, name, .. } = &x.kind
-                                    && matches!(name.as_str(), "getMessage" | "getLocalizedMessage")
-                                    && matches!(&receiver.kind, ExprKind::Var(v) if *v == catch.name)
-                                {
-                                    found.get_or_insert(x.pos);
-                                }
-                            })
-                        },
-                        &mut |_| {},
-                    );
+                for catch in catches.iter().filter(|c| c.types.iter().any(|&t| matches(&npe, t))) {
+                    // Any use of the exception may read its message (`getMessage`, its text, a
+                    // method it is passed to), except throwing it on.
+                    let mut rethrown = HashSet::new();
+                    for b in &catch.body {
+                        visit_stmt(b, &mut |_| {}, &mut |s| {
+                            if let Stmt::Throw(e) = s {
+                                let thrown = if let ExprKind::Cast(_, inner) = &e.kind { inner } else { e };
+                                rethrown.insert(thrown.id);
+                            }
+                        });
+                    }
+                    for b in &catch.body {
+                        visit_stmt(
+                            b,
+                            &mut |e| {
+                                visit_expr(e, &mut |x| {
+                                    if matches!(&x.kind, ExprKind::Var(v) if *v == catch.name)
+                                        && !rethrown.contains(&x.id)
+                                    {
+                                        reading_tries.insert(id);
+                                        facts.npe_message_read.get_or_insert(x.pos);
+                                        if unchecked_npe_tries.contains(&id) {
+                                            found.get_or_insert(x.pos);
+                                        }
+                                    }
+                                })
+                            },
+                            &mut |_| {},
+                        );
+                    }
                 }
             });
         }
@@ -405,6 +433,34 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             reject(pos, "the message of a `NullPointerException` that the runtime raises not supported yet");
         }
     }
+    // A `catch` may read the message of a dereference that its `try` catches, or of one whose
+    // exception leaves its method, in a method that a call in the `try` may run.
+    let mut reached = HashSet::new();
+    let mut calls: Vec<usize> = points
+        .iter()
+        .flatten()
+        .filter(|p| p.frames.iter().any(|f| reading_tries.contains(&f.id) && !f.catches.is_empty()))
+        .flat_map(|p| match &p.raise {
+            Raise::Call(callees) => callees.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
+    while let Some(m) = calls.pop() {
+        if reached.insert(m) {
+            calls.extend(points[m].iter().flat_map(|p| match &p.raise {
+                Raise::Call(callees) => callees.clone(),
+                _ => Vec::new(),
+            }));
+        }
+    }
+    facts.npe_message_needed = npe_catchers
+        .iter()
+        .filter(|(_, catcher, m)| match catcher {
+            Some(t) => reading_tries.contains(t),
+            None => reached.contains(m),
+        })
+        .map(|&(id, ..)| id)
+        .collect();
 
     // A static initializer's exception reaches the program as `ExceptionInInitializerError`,
     // which ends it here: one that a `catch` (of `Error`, `LinkageError`, `Throwable`) or a
@@ -906,7 +962,7 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
 }
 
 /// Whether `decl` is a class of the JDK, which no program may declare.
-fn from_jdk(decl: &TypeDecl) -> bool {
+pub(super) fn from_jdk(decl: &TypeDecl) -> bool {
     ["java", "javax", "jdk", "sun"]
         .iter()
         .any(|root| decl.package == *root || decl.package.starts_with(&format!("{root}.")))

@@ -94,9 +94,10 @@ signature. Everything else is decided here.
    checks the key's class, and of `Collectors` were rejected when a stream was first used inside a
    `try` with a `finally`.)
 10. **Rejected for now**, each with a message naming the construct: observing the message of a
-    `NullPointerException` the runtime raises (Java's helpful message names bytecode locals;
-    `getMessage()` in a `catch` that such an exception reaches is rejected, while the message of
-    one that code creates, as `Objects.requireNonNull(x, "msg")` does, is its own),
+    `NullPointerException` the runtime raises where Java's is not certain (Java's helpful
+    message names the class file's code; see "The messages of `NullPointerException`" in
+    section 4; the message of one that code creates, as `Objects.requireNonNull(x, "msg")`
+    does, is its own),
     catching `StackOverflowError`, `OutOfMemoryError` or `VirtualMachineError` (the translation
     cannot raise them), a `toString` that throws an exception that a call of it observes (for one
     of the JDK's, an exception of the program's code that it runs), or a
@@ -734,3 +735,47 @@ Decisions that changed during the implementation, step by step.
   - The analysis takes the `Error` clause of a rewritten `<clinit>` to rethrow any `Error`, so a
     method may return a `Result` where it need not. An uncaught static initializer that is not
     rewritten also gets an entry point, which may do the same for its callers.
+
+### The messages of `NullPointerException`
+
+- **Java's message comes from the class file**: the JVM describes the instruction that met the
+  null and, when it can tell, where the null came from: `Cannot invoke "Main$Box.size()" because
+  "<parameter1>.next" is null`, `Cannot read field "name" because the return value of
+  "Main.find(String)" is null`, `Cannot load from int array because "Main$Box.shared" is null`.
+  A class compiled without `-g` (as `javac` and the source launcher compile by default) has no
+  names of locals: a parameter is `<parameterN>`, a local `<localN>`, its slot.
+- **Written where a `catch` may read it**: a `catch` of such an exception that uses it in any
+  way other than throwing it on (`getMessage`, printing it, passing it to a method;
+  `Facts::npe_message_read`) makes the checked dereferences (`Facts::null_checked`) whose
+  exception it may get carry Java's text (`java::try_non_null_message`): those that its `try`
+  catches, and those whose exception leaves a method that a call in the `try` may run
+  (`Facts::npe_message_needed`). The others stay bare. Only then does the translation compile
+  the program a second time, with javac's code generator (`java/BytecodeNames.java`,
+  `javac::BytecodeNames`), which tells how the class file names each method
+  (`Gen.binaryQualifier`, and the erased descriptor), each static field and each local: the
+  slot that `Gen` gives it, read after code generation, so the slots are javac's own and not a
+  copy of its rules. A lambda's body is a method whose first parameters are the locals it
+  captures; a local or anonymous class reads a captured local as its field `this.val$x`;
+  javac's own locals are named too (the `s$` whose `hashCode` a string `switch` calls). The rest
+  of the message follows the JVM's rules (`analysis/npe_messages.rs`): a chain of fields is
+  shown up to five steps back (`next.next.next.next.name`), an element with its index when that
+  is a constant, a local or a call (`[...]` otherwise), the value of `c ? a : b` not at all (the
+  message has no `because`), and a pattern switch's `Objects.requireNonNull` has no message.
+- **The JDK's code**: the JDK's classes are compiled with the names of their locals, so the JVM
+  shows those (`because "original" is null`); the translated library is taken to be the source
+  of the Java that runs the program, which the corpus and `targets/` already assume.
+  `Arrays.copyOf` of a null array has the text of the JDK's code (`Cannot invoke
+  "Object.getClass()"` for an array of objects, `Cannot read the array length` for one of
+  primitives). The classes of `java.lang` that a program gets are the translator's own
+  (`java/Standard.java`), so a message from their code is not known.
+- **Checked against Java 26** (`javac::CHECKED_JAVA`): with another Java the texts may differ,
+  and a program whose `catch` reads one is not translated.
+- **Rejected** where a `catch` may read a message that is not certain: a dereference of a
+  parameter that its method assigns (the JVM then names it `<localN>` or `<parameterN>`
+  depending on the path that ran), of a local declared in a `finally` (javac copies the block
+  for every way out of the `try`, each copy with its own slots) or in an instance initializer
+  (copied into every constructor), of a local of the JDK's code that the translation may have
+  renamed (`s2` for a second `s`), of the enclosing instance of a nested class, a dereference
+  in the code of `java.lang`, and a failure of the runtime without the checked form (unboxing,
+  a library call given null). Corpus: `features/RuntimeNullPointerMessages.java`,
+  `features/LocalNullPointerMessages.java`.

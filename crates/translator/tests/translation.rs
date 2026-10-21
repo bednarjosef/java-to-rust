@@ -3720,8 +3720,8 @@ fn a_null_dereference_that_a_catch_sees_is_a_checked_non_null() {
 }
 
 #[test]
-fn the_message_of_a_null_dereference_is_rejected_and_a_created_ones_is_not() {
-    let program = |message: &str| {
+fn the_message_of_a_null_dereference_is_javas_or_rejected_and_a_created_ones_is_its_own() {
+    let program = |second: &str, message: &str| {
         format!(
             "class A {{
                 A next;
@@ -3729,7 +3729,7 @@ fn the_message_of_a_null_dereference_is_rejected_and_a_created_ones_is_not() {
                 static int second(A a) {{
                     try {{
                         if (a.v > 0) {{ throw new NullPointerException(\"given\"); }}
-                        return a.next.v;
+                        {second}
                     }} catch (NullPointerException e) {{
                         System.out.println({message});
                         return -1;
@@ -3741,12 +3741,19 @@ fn the_message_of_a_null_dereference_is_rejected_and_a_created_ones_is_not() {
             }}"
         )
     };
-    let err = java_to_rust::translate(&program("e.getMessage()")).unwrap_err().to_string();
+    let rust = java_to_rust::translate(&program("return a.next.v;", "e.getMessage()")).unwrap();
+    assert!(rust.contains(r#"Cannot read field \"v\" because \"<parameter1>.next\" is null"#), "{rust}");
+    // A parameter that its method assigns is `<localN>` or `<parameterN>` by the path that ran.
+    let err = java_to_rust::translate(&program("a = a.next; return a.v;", "e.getMessage()"))
+        .unwrap_err()
+        .to_string();
     assert!(
-        err.contains("the message of a `NullPointerException` that the runtime raises not supported yet"),
+        err.contains("the message of the `NullPointerException` of this dereference not supported yet"),
         "{err}"
     );
-    java_to_rust::translate(&program("\"caught\"")).expect("a catch that does not read the message");
+    let rust = java_to_rust::translate(&program("a = a.next; return a.v;", "\"caught\""))
+        .expect("a catch that does not read the message");
+    assert!(!rust.contains("try_non_null_message"), "{rust}");
 }
 
 #[test]
