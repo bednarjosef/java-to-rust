@@ -24,3 +24,15 @@ pub enum ArraysOp {
     /// `a.clone()`: a shallow copy, whose rows are shared when the elements are arrays.
     Clone,
 }
+
+impl ArraysOp {
+    /// Whether the method takes a range `from`, `to` of the array, which throws
+    /// `IllegalArgumentException` when `from > to` and `ArrayIndexOutOfBoundsException` when it is
+    /// outside the array.
+    pub fn ranged(self) -> bool {
+        matches!(
+            self,
+            ArraysOp::SortRange | ArraysOp::FillRange | ArraysOp::CopyOfRange | ArraysOp::BinarySearchRange
+        )
+    }
+}

@@ -701,9 +701,17 @@ impl<'t> Lowering<'t> {
             .zip(&m.params)
             .map(|(p, to)| {
                 let var = self.synth(ExprKind::Var(p.name.clone()), pos, p.ty);
-                if p.ty == to.ty { var } else { self.synth(ExprKind::Cast(to.ty, Box::new(var)), pos, to.ty) }
+                if p.ty == to.ty {
+                    return var;
+                }
+                // An array that the bridge casts to another array type (`Integer[]` for the
+                // `Object[]` of `T[]`, as `Node.OfInt.copyInto` takes it) is one array that
+                // both methods write: the two types meet, and each is an `Object[]`.
+                self.meets_object_array(p.ty, to.ty);
+                self.synth(ExprKind::Cast(to.ty, Box::new(var)), pos, to.ty)
             })
             .collect();
+        self.meets_object_array(m.ret, o.ret);
         let receiver = Box::new(self.synth(ExprKind::This, pos, this_ty));
         let call =
             ExprKind::MethodCall { receiver, name: m.name.clone(), args, resolved: Some(i), is_super: false };

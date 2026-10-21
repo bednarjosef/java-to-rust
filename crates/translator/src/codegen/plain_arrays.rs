@@ -282,28 +282,29 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Var(name) => self.local(name),
             ExprKind::Builtin(Builtin::MainArgs, _) => self.main_args_vec(e.ty),
-            ExprKind::Call { args, resolved: Some(index), .. } => self.owned_call(*index, args),
+            ExprKind::Call { args, resolved: Some(index), .. } => {
+                let call = self.static_call(*index, args);
+                self.raising(call, *index).text
+            }
             ExprKind::MethodCall { receiver, args, resolved: Some(index), is_super, .. } => {
-                if self.closure_type(receiver.ty).is_some() {
-                    self.closure_call(receiver, *index, args).text
+                let call = if self.closure_type(receiver.ty).is_some() {
+                    self.closure_call(receiver, *index, args)
                 } else if self.inlined(receiver, *index) {
-                    self.inline_call(*index, args).text
+                    self.inline_call(*index, args)
                 } else if self.class.methods[*index].is_static {
-                    self.owned_call(*index, args)
+                    self.static_call(*index, args)
                 } else if !*is_super && let Some(t) = self.enum_of(receiver) {
-                    self.enum_call(t, receiver, *index, args).text
+                    self.enum_call(t, receiver, *index, args)
                 } else {
                     // The method of the receiver's class, which an interface's method is not.
                     let target = self.dispatch(receiver, *index, *is_super);
-                    self.method_call(receiver, target, args).text
-                }
+                    self.method_call(receiver, target, args)
+                };
+                // A method that throws returns its array in a `Result`.
+                self.raising(call, *index).text
             }
             _ => unreachable!("the analysis makes plain arrays only of owned values"),
         }
-    }
-
-    fn owned_call(&mut self, index: usize, args: &'a [Expr]) -> String {
-        self.static_call(index, args).text
     }
 
     /// `new T[n]` or `new T[n][m]...` as nested `vec!`s. A size that may be negative is checked
