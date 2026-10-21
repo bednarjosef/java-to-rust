@@ -14,6 +14,7 @@ mod generics;
 mod hierarchy;
 mod lambdas;
 mod object;
+mod object_clone;
 mod objects;
 mod real_generics;
 mod statics;
@@ -538,8 +539,11 @@ impl<'t> Lowering<'t> {
                 let value = self.expr(node.child("expression")?)?;
                 // A cast between the program's types, up, down or across: `Cast` converts as the
                 // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
-                // `Integer` and unboxes.
-                if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
+                // `Integer` and unboxes. `(C) super.clone()` is already a `C`: the copy has the
+                // node's type, so the cast is the copy itself.
+                if matches!(value.kind, ExprKind::Builtin(Builtin::ObjectClone, _)) {
+                    value.kind
+                } else if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
                     let boxed = self.synth(
                         ExprKind::Cast(Type::boxed(ty), Box::new(value)),
                         node.pos(),
@@ -689,6 +693,9 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ThisCall { args, resolved });
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        if symbol.owner == "java.lang.Object" && symbol.name == "clone" {
+            return self.object_clone(node, receiver);
+        }
         if symbol.owner == "java.lang.Object" && self.object.is_some() {
             return self.object_call(node, &symbol, receiver, args);
         }

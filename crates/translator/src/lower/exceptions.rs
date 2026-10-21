@@ -50,7 +50,15 @@ const RAISED: &[(&str, &[&str])] = &[
     // A call or a field access on an object that may be null.
     ("java.lang.NullPointerException", &["METHOD_INVOCATION", "MEMBER_SELECT"]),
     ("java.lang.IllegalArgumentException", &["enum#valueOf"]),
-    ("java.lang.StringIndexOutOfBoundsException", &["java.lang.String#charAt", "java.lang.String#substring"]),
+    (
+        "java.lang.StringIndexOutOfBoundsException",
+        &[
+            "java.lang.String#charAt",
+            "java.lang.String#substring",
+            "java.lang.String#valueOf",
+            "java.lang.String#copyValueOf",
+        ],
+    ),
     (
         "java.lang.NumberFormatException",
         &[

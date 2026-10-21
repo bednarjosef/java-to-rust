@@ -130,7 +130,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The name of the conversion to the enum of `t`: `to_shape`.
-    fn to_name(&self, t: usize) -> String {
+    pub(super) fn to_name(&self, t: usize) -> String {
         let simple = self.class.types[t].name.rsplit(['.', '$']).next().unwrap_or_default();
         format!("to_{}", snake_case(simple).trim_end_matches('_'))
     }
@@ -536,6 +536,7 @@ impl<'a> Gen<'a> {
         let h = &self.class.hierarchy;
         if let [only] = self.enum_targets(t, resolved)[..]
             && self.homes[only] == Home::Enum(t)
+            && self.same_ret(only, resolved)
             && self.enum_variants(t).into_iter().all(|c| h.implementation(resolved, c).is_some())
         {
             self.need(Need::Body(only));
@@ -785,7 +786,10 @@ impl<'a> Gen<'a> {
         self.line(&format!("{}fn {name}(&self{all}){ret} {{", self.vis()));
         self.indent += 1;
         self.match_arms(t, &variants, &|g: &mut Self, c| match g.class.hierarchy.implementation(r, c) {
-            Some(i) => g.arm_call(t, c, i, &args),
+            Some(i) => {
+                let (text, uses) = g.arm_call(t, c, i, &args);
+                (g.covariant_ret(i, r, text), uses)
+            }
             None => (g.builtin_arm(r, c), true),
         });
         self.indent -= 1;

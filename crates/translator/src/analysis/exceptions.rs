@@ -709,10 +709,12 @@ fn constant_pattern(builtin: &Builtin, args: &[Expr]) -> bool {
     }
 }
 
-fn library_failure(builtin: &Builtin) -> Option<&'static str> {
+fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
     match builtin {
         Builtin::String(op) => match op {
-            StringOp::Substring | StringOp::FromChars => Some("java.lang.StringIndexOutOfBoundsException"),
+            StringOp::Substring => Some("java.lang.StringIndexOutOfBoundsException"),
+            // `valueOf(chars)` copies the whole array; only an offset and a count can be out of range.
+            StringOp::FromChars if args.len() == 3 => Some("java.lang.StringIndexOutOfBoundsException"),
             StringOp::Repeat => Some("java.lang.IllegalArgumentException"),
             // A malformed pattern, a bad group in a replacement, an unknown charset.
             StringOp::ReplaceAll
@@ -922,12 +924,12 @@ fn runtime_failures(
                 if !takes_null && checked.iter().any(null) {
                     out.push((NPE, "this call", false, x.id));
                 }
-                if let Some(failure) = library_failure(builtin)
+                if let Some(failure) = library_failure(builtin, args)
                     && !constant_pattern(builtin, args)
                 {
                     let checked = matches!(
                         builtin,
-                        Builtin::String(StringOp::Substring)
+                        Builtin::String(StringOp::Substring | StringOp::FromChars)
                             | Builtin::Bits(BitsOp::ParseRadix, _)
                             | Builtin::EnumValueOf
                     );
