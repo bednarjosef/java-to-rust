@@ -121,6 +121,9 @@ class Error extends Throwable {
 }
 
 class LinkageError extends Error {
+    public LinkageError() {
+    }
+
     public LinkageError(String message, Throwable cause) {
         super(message, cause);
     }
@@ -137,6 +140,9 @@ class ExceptionInInitializerError extends LinkageError {
 }
 
 class NoClassDefFoundError extends LinkageError {
+    public NoClassDefFoundError() {
+    }
+
     public NoClassDefFoundError(String message, Throwable cause) {
         super(message, cause);
     }
@@ -302,13 +308,6 @@ class IllegalMonitorStateException extends RuntimeException {
         super(s);
     }
 
-    public IllegalMonitorStateException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public IllegalMonitorStateException(Throwable cause) {
-        super(cause);
-    }
 }
 
 class IndexOutOfBoundsException extends RuntimeException {
