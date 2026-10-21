@@ -152,6 +152,12 @@ impl Hierarchy {
         !self.overriders[m].is_empty()
     }
 
+    /// Makes the abstract method `m` concrete, as a census stubs one that an analysis rejects
+    /// (`program/census.rs`).
+    pub fn make_concrete(&mut self, m: usize) {
+        self.method_abstract[m] = false;
+    }
+
     /// The implementation an object of concrete class `c` runs for a call resolved to `m`: the
     /// member of `m`'s group declared nearest in `c`'s superclass chain, or else a default
     /// method of one of its interfaces. `None` when there is none in the program.

@@ -648,13 +648,11 @@ impl<'t> Lowering<'t> {
                     }
                     Some(i) => methods[i].overrides.push(c.compare_to),
                     None if self.types[t].node.has_flag("ABSTRACT") => {}
+                    // In a census, the class goes on without the bridge.
                     None => {
                         let pos = self.types[t].node.pos();
-                        return error(
-                            pos,
-                            "a `Comparable` class that inherits its `compareTo` not supported yet"
-                                .to_string(),
-                        );
+                        let message = "a `Comparable` class that inherits its `compareTo` not supported yet";
+                        self.reject_at(t, Some(pos), Error { pos, message: message.to_string() })?;
                     }
                 }
             }

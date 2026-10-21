@@ -646,18 +646,30 @@ referent until `clear`, as on a JVM whose collector never needs the memory. Nor 
 shows that no stream can become parallel (`program/reach/sequential.rs`); otherwise reachability
 runs again without that assumption.
 
-`--survey` prints what the code reachable from `main` uses that is not supported yet instead of
-translating it: for the program's own code and for its library code, separately, per feature
-(generic classes, exceptions, lambdas, ...) the classes and pieces of code
-(methods, field initializers, initializer blocks) that use it, those it alone blocks, and up to
-three example places (`file:line`, relative to the source or library root). It also prints the
-order of features that frees the most code at each step, the methods of the runtime's classes
-and of the untranslated ones that are called, and the native methods reached, each with the
-shortest chain of calls from `main` that reaches it and whether the runtime implements it
-(`program/survey.rs`). `--survey-json <file>`
-writes the same census as JSON for scripts: the pieces with their class, kind, name, location and
-features, the runtime calls, the natives, the methods outside the sources that are called and the
-classes whose objects are created, with their chains. It is a syntactic census, so it misses the narrower rejections of the lowering.
+`--census` runs the translation of the code reachable from `main` past every rejection and
+prints what it rejects: lowering, the analyses and the generator run as for a translation, and
+each method, constructor or lambda that one of them rejects is recorded and replaced by a stub
+with its signature and a body that never runs (a rejected field initializer or initializer block
+is left out), so every rejection after it is one the translation would meet once the code before
+it translates. Its report gives, for the program's own code and for its library code separately,
+the pieces of code (methods, constructors, field initializers, initializer blocks) that translate
+and the rejections, grouped by message (the names in backquotes left out), with the number of
+pieces each blocks and example places (`file:line:column`, relative to the source or library
+root), and the native methods reached, each with whether the runtime has it
+(`program/census.rs`). It ends early only at a rejection that no stub takes away, which it says.
+`--census-json <file>` writes it as JSON for scripts; `scripts/jdk-coverage.py` runs it over the
+target programs and writes `docs/jdk-coverage.md`, how much of the JDK code they reach translates.
+
+`--survey` is the quicker syntactic view: what the reachable code reaches outside the translated
+sources (classes, generic types, interfaces and casts outside them, monitor methods, ...), per
+feature with the classes and pieces that use it, the order of features that frees the most code
+at each step, the methods of the runtime's classes and of the untranslated ones that are called,
+and the native methods reached, each with the shortest chain of calls from `main` that reaches it
+and whether the runtime implements it (`program/survey.rs`). `--survey-json <file>` writes the
+same as JSON: the pieces with their class, kind, name, location and features, the runtime calls,
+the natives, the methods outside the sources that are called and the classes whose objects are
+created, with their chains. It does not lower anything, so it misses what the translator rejects
+inside the sources; that is the census.
 `docs/natives-and-input.md` is the census of the natives that the target programs reach and of
 what reading standard input pulls in.
 
@@ -728,9 +740,8 @@ Also rejected: `Charset.aliases()`, `null` as a `Charset` (and a `Charset` field
 that starts out null), catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and
 charsets beyond the six above.
 
-Checked by `--survey` on the JDK's sources: the library code that `HashMap` reaches uses
-interfaces, generic classes, inheritance, exceptions, inner classes and reflection, so none of it
-translates yet.
+`docs/jdk-coverage.md` has the census of the JDK code that the target programs reach: what share
+of it translates, and the rejections that block the rest.
 
 ### Build and test
 
@@ -741,6 +752,7 @@ run. Building the translator needs `javac` (JDK 21 or newer) on PATH.
 cargo run -p java-to-rust -- Program.java                 # print the Rust translation
 cargo run -p java-to-rust -- Program.java --crate out/    # write a Cargo project
 cargo run -p java-to-rust -- --main com.example.Main --source src/ [--library jdk-src/] [-o out.rs | --crate out/]
+cargo run -p java-to-rust -- --census --main Main --source src/ --library jdk-src/java.base
 cargo run -p java-to-rust -- --survey --main Main --source src/ --library jdk-src/java.base
 cargo test                                                # needs a JDK: runs corpus/ on both
 ```
