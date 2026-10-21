@@ -534,7 +534,8 @@ pub fn get_low_bytes(s: &str, begin: i32, end: i32, dst: &mut [i8], dst_begin: i
     check_begin_end(begin, end, units.len()).unwrap_or_else(|e| throw_exception(e));
     let count = end - begin;
     if dst_begin < 0 || dst_begin as i64 + count as i64 > dst.len() as i64 {
-        let message = format!("Range [{dst_begin}, {dst_begin} + {count}) out of bounds for length {}", dst.len());
+        let message =
+            format!("Range [{dst_begin}, {dst_begin} + {count}) out of bounds for length {}", dst.len());
         throw("java.lang.StringIndexOutOfBoundsException", &message);
     }
     let at = dst_begin as usize;
@@ -654,7 +655,11 @@ pub fn offset_by_code_points(s: &str, index: i32, offset: i32) -> i32 {
 /// does when `ignore_case`.
 pub fn region_matches(s: &str, ignore_case: bool, toffset: i32, other: &str, ooffset: i32, len: i32) -> bool {
     let (a, b) = (units(s), units(other));
-    if ooffset < 0 || toffset < 0 || toffset as i64 > a.len() as i64 - len as i64 || ooffset as i64 > b.len() as i64 - len as i64 {
+    if ooffset < 0
+        || toffset < 0
+        || toffset as i64 > a.len() as i64 - len as i64
+        || ooffset as i64 > b.len() as i64 - len as i64
+    {
         return false;
     }
     if len <= 0 {

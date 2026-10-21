@@ -131,7 +131,8 @@ impl<'t> Lowering<'t> {
             name: descriptor.str("name"),
             sig: descriptor.str("substituted"),
         });
-        let lambda = LambdaInfo { node, class: index, ctor, method: ctor + 1, params, code, member, receiver: None };
+        let lambda =
+            LambdaInfo { node, class: index, ctor, method: ctor + 1, params, code, member, receiver: None };
         self.lambdas.push(lambda);
         Ok(())
     }
@@ -145,7 +146,8 @@ impl<'t> Lowering<'t> {
         let mut taken: Vec<(*const Value, HashSet<&'t str>)> = Vec::new();
         for i in 0..self.lambdas.len() {
             let l = &self.lambdas[i];
-            let Some(qualifier) = computed_receiver(l.node.0, &|owner, name| self.is_final_field(owner, name))
+            let Some(qualifier) =
+                computed_receiver(l.node.0, &|owner, name| self.is_final_field(owner, name))
             else {
                 continue;
             };
@@ -169,7 +171,8 @@ impl<'t> Lowering<'t> {
             let descriptor = node.child("descriptor").map_err(|e| (class, e))?;
             let (param_types, _) = signature(descriptor.str("substituted"));
             let params = l.params.clone();
-            let code = self.reference_call(node, &param_types, &params, Some(name)).map_err(|e| (class, e))?;
+            let code =
+                self.reference_call(node, &param_types, &params, Some(name)).map_err(|e| (class, e))?;
             let l = &mut self.lambdas[i];
             l.code = Node(code);
             l.receiver = Some((name, Node(qualifier)));

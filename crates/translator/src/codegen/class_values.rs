@@ -268,8 +268,13 @@ impl<'a> Gen<'a> {
         }
         if self.class.types[c].kind == TypeKind::Enum {
             names.extend(
-                ["java.lang.Enum", "java.lang.Comparable", "java.io.Serializable", "java.lang.constant.Constable"]
-                    .map(String::from),
+                [
+                    "java.lang.Enum",
+                    "java.lang.Comparable",
+                    "java.io.Serializable",
+                    "java.lang.constant.Constable",
+                ]
+                .map(String::from),
             );
         }
         names.push("java.lang.Object".to_string());
@@ -291,9 +296,12 @@ impl<'a> Gen<'a> {
         const CONSTABLE: &str = "java.lang.constant.Constable";
         const DESC: &str = "java.lang.constant.ConstantDesc";
         const NUM: &str = "java.lang.Number";
-        let ty = if ty.is_numeric() || matches!(ty, Type::Boolean | Type::Char) { Type::boxed(ty) } else { ty };
+        let ty =
+            if ty.is_numeric() || matches!(ty, Type::Boolean | Type::Char) { Type::boxed(ty) } else { ty };
         let mut names = match ty {
-            Type::String => list(&["java.lang.String", SERIAL, COMPARE, "java.lang.CharSequence", CONSTABLE, DESC]),
+            Type::String => {
+                list(&["java.lang.String", SERIAL, COMPARE, "java.lang.CharSequence", CONSTABLE, DESC])
+            }
             Type::StringBuilder => list(&[
                 "java.lang.StringBuilder",
                 "java.lang.AbstractStringBuilder",
@@ -327,7 +335,8 @@ impl<'a> Gen<'a> {
                 let mut names = vec![array_name(self, *element)];
                 if element.is_reference() || matches!(*element, Type::Enum(_)) {
                     for name in self.type_names(*element) {
-                        let name = if name.starts_with('[') { format!("[{name}") } else { format!("[L{name};") };
+                        let name =
+                            if name.starts_with('[') { format!("[{name}") } else { format!("[L{name};") };
                         if !names.contains(&name) {
                             names.push(name);
                         }

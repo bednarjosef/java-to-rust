@@ -431,7 +431,9 @@ impl Matcher<'_> {
             Node::LineBreak => match input.get(pos) {
                 // `\r\n` is tried first, then `\r` alone.
                 Some('\r') => (input.get(pos + 1) == Some(&'\n') && k(pos + 2)) || k(pos + 1),
-                Some(&c) => matches!(c, '\n' | '\u{B}' | '\u{C}' | '\u{85}' | '\u{2028}' | '\u{2029}') && k(pos + 1),
+                Some(&c) => {
+                    matches!(c, '\n' | '\u{B}' | '\u{C}' | '\u{85}' | '\u{2028}' | '\u{2029}') && k(pos + 1)
+                }
                 None => false,
             },
             // A group that has not matched (or does not exist) matches nothing.

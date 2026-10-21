@@ -373,7 +373,11 @@ impl StringBuilder {
         if dst_begin < 0 || dst_begin as i64 + count as i64 > dst.len() as i64 {
             throw(
                 "java.lang.IndexOutOfBoundsException",
-                &format!("Range [{dst_begin}, {}) out of bounds for length {}", dst_begin as i64 + count as i64, dst.len()),
+                &format!(
+                    "Range [{dst_begin}, {}) out of bounds for length {}",
+                    dst_begin as i64 + count as i64,
+                    dst.len()
+                ),
             );
         }
         let at = dst_begin as usize;

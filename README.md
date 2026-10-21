@@ -196,7 +196,10 @@ A small subset, end to end:
   `intValue()` and the others convert as Java does, and over the program's classes that extend
   `Number` (the JDK's `AtomicInteger` and `BigInteger`), whose own `intValue()` to
   `doubleValue()` run; `Number`'s `byteValue()` and `shortValue()` narrow `intValue()`, and a
-  class that overrides them is rejected. A method
+  class that overrides them is rejected. `CharSequence` is such an enum too, over strings,
+  builders and the program's classes that implement it: `length()`, `charAt` and `subSequence` run
+  the class's own, or the string's or builder's (a `subSequence` that returns a `String` is
+  rejected), and `toString()` gives the text. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &
@@ -388,6 +391,10 @@ can differ from Java on code points the corpus does not test.
 
 The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`, `charAt` agree on
 `"né😀e"`), and throw what Java throws (`StringIndexOutOfBoundsException` with Java's message).
+`codePointAt`, `codePointBefore`, `codePointCount` and `offsetByCodePoints` (of strings and
+builders) pair surrogates as Java does; `regionMatches` ignores case as `compareToIgnoreCase` does;
+`contentEquals` of a `CharSequence` that is neither a string nor a builder compares with its
+`toString()`, which the interface's contract makes its characters.
 `toUpperCase` and `toLowerCase` are the root-locale mappings; with a `Locale` (in a whole
 program) they are too, but for Turkish, Azeri and Lithuanian, which end the program. A `StringBuilder` is a
 `java::StringBuilder`, a shared handle to UTF-16 units like an array: every variable, field and
@@ -449,7 +456,8 @@ methods initialize it first. Unlike Java, using a constant (`Shape.SQUARE`, `val
 
 `java.lang.Enum` as a type (the JDK's `EnumMap` and `EnumSet`, `<E extends Enum<E>>`) is an enum
 over the program's enums, like `Object`; `ordinal()`, `name()`, `compareTo` and
-`getDeclaringClass()` on it match on the enums it can be, and the constants of an enum's class,
+`getDeclaringClass()` on it match on the enums it can be, and `equals` and `hashCode` of any enum
+constant are `Object`'s identity ones, and the constants of an enum's class,
 which the JDK reads through `SharedSecrets`, are those of the program's enum whose class it is. A
 cast to an enum of a value that may be null (a key from a generic collection) ends the program
 if the value is null, as an enum that comes out of an `Object` is never an `Option`.

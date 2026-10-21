@@ -608,7 +608,8 @@ impl<'t> Walk<'_, 't> {
             "IDENTIFIER" => {
                 let name = node.str("name");
                 // `this` (and `super`) in a lambda is the object of the class whose code holds it.
-                if matches!(name, "this" | "super") && l.nesting(self.class).is_some_and(|n| n.kind == inner::NestKind::Lambda)
+                if matches!(name, "this" | "super")
+                    && l.nesting(self.class).is_some_and(|n| n.kind == inner::NestKind::Lambda)
                 {
                     self.need(l.lambda_holder(self.class));
                 }
