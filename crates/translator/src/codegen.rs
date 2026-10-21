@@ -114,6 +114,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         chain: false,
         field_locals: HashMap::new(),
         bound_params: None,
+        traits: std::collections::BTreeSet::new(),
         ctor_result: None,
         printing: false,
         guarded: false,
@@ -261,6 +262,9 @@ struct Gen<'a> {
     /// In a closure's body, the lambda's method whose parameters are bound to the converted
     /// arguments already (see `closures::inline_call`).
     bound_params: Option<usize>,
+    /// The extension traits of closure types in other modules that the module being written
+    /// calls default methods of, by path (see `closures::closure_trait`).
+    traits: std::collections::BTreeSet<String>,
     /// In a constructor, what a `return` gives back: the object being built.
     ctor_result: Option<&'static str>,
     /// Whether the text being formatted is printed.

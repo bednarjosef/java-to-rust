@@ -5,12 +5,13 @@
 //! An interface is one when every value of it comes from a lambda or a method reference converted
 //! to it, and nothing does with a value of it anything but call its method, store it and pass it
 //! on: no conversion to another type (to `Object`, for printing, `equals` or a collection), no
-//! `==`, no `instanceof`. The interface declares one abstract method and no default method, and
-//! extends no other interface, nor does any interface extend it; each lambda class implements it
+//! `==`, no `instanceof`, no call but of its method and its default methods. The interface
+//! declares one abstract method besides `Object`'s, and extends no other interface, nor does any interface extend it; each lambda class implements it
 //! alone, and its method reads its object only through the fields that hold its captures. A
 //! generic interface's closure takes and returns the erased types: the lambda's method, which
 //! javac typed with the substituted ones, is behind a bridge, and the closure's body is the
-//! bridge's conversions around it. Everything else keeps the object model's form, an enum with a
+//! bridge's conversions around it. Its default methods are those of an extension trait of the
+//! closure type, whose `self` is the closure (`codegen::closures`). Everything else keeps the object model's form, an enum with a
 //! variant per lambda class.
 
 use crate::ast::*;
@@ -29,8 +30,9 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
         {
             continue;
         }
-        let own: Vec<&Method> = class.methods.iter().filter(|m| m.class == t && !m.is_static).collect();
-        if own.len() != 1 || !own[0].is_abstract {
+        // One abstract method besides `Object`'s, which `Comparator` declares again.
+        let abstracts = class.methods.iter().filter(|m| m.class == t && is_functional_method(m)).count();
+        if abstracts != 1 {
             continue;
         }
         // No interface extends it, and every class below it is a lambda's that implements it alone.
@@ -49,8 +51,12 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
     if candidates.is_empty() {
         return candidates;
     }
-    let abstract_method =
-        |t: usize| class.methods.iter().position(|m| m.class == t && !m.is_static).expect("one method");
+    let abstract_method = |t: usize| closure_method(class, t);
+    // A default method of the interface takes the closure as `this`.
+    let callable = |t: usize, m: usize| {
+        let method = &class.methods[m];
+        m == abstract_method(t) || (method.class == t && !method.is_static && !method.is_abstract)
+    };
     let of = |ty: Type| class.class_index(ty).filter(|t| candidates.contains(t));
     let lambda_of = |c: usize| candidates.iter().copied().find(|&t| h.is_subtype(c, t));
     // The interfaces some use rules out, and how many `new`s of each lambda class are converted
@@ -89,7 +95,7 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
         }
         ExprKind::MethodCall { receiver, resolved, .. } => {
             if let Some(t) = of(receiver.ty)
-                && *resolved != Some(abstract_method(t))
+                && !resolved.is_some_and(|m| callable(t, m))
             {
                 ruled_out.insert(t);
             }
@@ -148,6 +154,22 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
     }
     candidates.retain(|t| !ruled_out.contains(t));
     candidates
+}
+
+/// The abstract method of closure type `t`, which its closures run.
+pub fn closure_method(class: &Class, t: usize) -> usize {
+    class
+        .methods
+        .iter()
+        .position(|m| m.class == t && is_functional_method(m))
+        .expect("a functional interface's method")
+}
+
+/// Whether `m` is abstract and not one of `Object`'s public methods declared again.
+fn is_functional_method(m: &Method) -> bool {
+    let object_method =
+        matches!((m.name.as_str(), m.params.len()), ("equals", 1) | ("hashCode", 0) | ("toString", 0));
+    m.is_abstract && !m.is_static && !object_method
 }
 
 /// The call of a bridge `m` to the method it converts the arguments and the result for: `m`'s one
