@@ -91,8 +91,8 @@ fn record(tid: i64) -> Option<Arc<Record>> {
 /// `RECORDS` is locked, so a thread's status moves between its record and this set atomically.
 static IDLE_INTERRUPTED: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
-/// Whether the program has ever interrupted a thread; until it has, nothing waits for an interrupt
-/// and `sleep` is the platform's.
+/// Whether the program has ever interrupted a thread; until it has, no status needs reading. (What
+/// waits still registers where an interrupt would wake it, since one may come during the wait.)
 static INTERRUPTS: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
@@ -217,16 +217,16 @@ const INTERRUPTED: &str = "java.lang.InterruptedException";
 /// (Java's `join` is a `wait` on the `Thread` object while the thread is alive).
 pub fn try_join_thread(tid: i64, millis: i64) -> Result<(), crate::Exception> {
     let Some(record) = record(tid) else { return Ok(()) };
-    let me = interrupts_used().then(current_record);
-    if let Some(me) = &me {
-        *lock(&me.joining) = Some(record.clone());
-    }
+    // Registered whether or not the program has interrupted a thread yet: an interrupt that comes
+    // while this thread waits must find where to wake it.
+    let me = current_record();
+    *lock(&me.joining) = Some(record.clone());
     let deadline = (millis > 0).then(|| Instant::now() + Duration::from_millis(millis as u64));
     let mut alive = lock(&record.alive);
     let mut outcome = Ok(());
     while *alive {
         // `interrupt` sets the status, then notifies under this mutex: no wakeup is lost.
-        if me.as_ref().is_some_and(|me| me.interrupted.swap(false, Ordering::SeqCst)) {
+        if me.interrupted.swap(false, Ordering::SeqCst) {
             outcome = Err(crate::Exception::bare(INTERRUPTED));
             break;
         }
@@ -242,9 +242,7 @@ pub fn try_join_thread(tid: i64, millis: i64) -> Result<(), crate::Exception> {
         }
     }
     drop(alive);
-    if let Some(me) = &me {
-        *lock(&me.joining) = None;
-    }
+    *lock(&me.joining) = None;
     outcome
 }
 
@@ -276,11 +274,9 @@ pub fn try_sleep_nanos(millis: i64, nanos: i32) -> Result<(), crate::Exception> 
     sleep_for(Duration::new(millis as u64, nanos as u32))
 }
 
+/// Always on the record, even before the program's first interrupt: one that comes while the
+/// thread sleeps must wake it.
 fn sleep_for(time: Duration) -> Result<(), crate::Exception> {
-    if !interrupts_used() {
-        std::thread::sleep(time);
-        return Ok(());
-    }
     if interruptible_sleep(time) {
         return Err(crate::Exception::new(INTERRUPTED, "sleep interrupted"));
     }
@@ -476,13 +472,16 @@ mod tests {
 
     #[test]
     fn an_interrupt_ends_a_sleep_and_a_join() {
+        // Whether the interrupt comes before the sleep or during it, the sleep ends with it.
         let sleeper = next_thread_id();
+        let (ready, started) = std::sync::mpsc::channel();
         let (tx, rx) = std::sync::mpsc::channel();
         start_thread(sleeper, "sleeper".into(), false, move || {
+            ready.send(()).unwrap();
             let slept = try_sleep(60_000);
             tx.send((slept, thread_interrupted())).unwrap();
         });
-        std::thread::sleep(Duration::from_millis(20));
+        started.recv().unwrap();
         interrupt_thread(sleeper);
         let (slept, status) = rx.recv().unwrap();
         assert_eq!(slept.unwrap_err().message.as_deref(), Some("sleep interrupted"));
@@ -492,11 +491,13 @@ mod tests {
         let joiner = next_thread_id();
         let main_waits = next_thread_id();
         start_thread(main_waits, "long".into(), true, || std::thread::sleep(Duration::from_secs(60)));
+        let (ready, started) = std::sync::mpsc::channel();
         let (tx, rx) = std::sync::mpsc::channel();
         start_thread(joiner, "joiner".into(), false, move || {
+            ready.send(()).unwrap();
             tx.send(try_join_thread(main_waits, 0).is_err()).unwrap();
         });
-        std::thread::sleep(Duration::from_millis(20));
+        started.recv().unwrap();
         interrupt_thread(joiner);
         assert!(rx.recv().unwrap());
         join_thread(joiner, 0);

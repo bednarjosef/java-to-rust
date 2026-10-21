@@ -684,8 +684,8 @@ platform libm), which agree with it on all but about 0.1 percent of arguments, a
 the JVM sets itself (`java.version`, `java.vendor`, ...) is rejected at translation. The memory
 figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
 JVM's, and `gc()` does nothing. `Runtime.halt` flushes the output and exits without shutdown
-hooks. `Thread.sleep` (both forms), `onSpinWait` and `yield` are the platform's, and once the
-program has interrupted a thread, `sleep` waits on the thread's record, which an interrupt wakes. The runtime's
+hooks. `onSpinWait` and `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
+thread's record, which an interrupt wakes. The runtime's
 descriptor table (`fd.rs`) backs the `FileInputStream`, `FileOutputStream` and `FileDescriptor`
 natives: stdin has its own buffered reader, stdout writes through the buffered `System.out` so
 its order is kept with `println`, stderr is written as it is (unbuffered, like Java's), and files

@@ -1313,7 +1313,8 @@ Decisions that change during the implementation are recorded here, milestone by 
 - **Only a program that interrupts pays**: `Facts::interrupts` holds when some method calls
   `interrupt0`, and only then do `sleep`, `join` and `wait` have `InterruptedException` among
   their failures (with the checked forms `java::try_sleep` and `java::try_join_thread`), and does
-  lowering declare it as raised. Until the first interrupt at run time, `sleep` is the platform's.
+  lowering declare it as raised. `sleep`, `join` and `wait` register where an interrupt would wake
+  them even before the program's first interrupt, since one may come while they wait.
 - **Found on the way**: the `Link` of an enum whose variants are thread-shared pushed `Arc`s with
   the `Rc` form; it now uses `Chain::push_shared` for them (a lambda run by a thread that
   captures a `Thread`).
