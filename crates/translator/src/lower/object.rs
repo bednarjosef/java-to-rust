@@ -14,7 +14,10 @@
 //! `java.lang.Number`, when the program uses it as a type (`List<? extends Number>`'s elements,
 //! `T extends Number`), is a third such type, `NUMBER`, which the numeric boxes implement, with
 //! the abstract `byteValue()` to `doubleValue()` that each box answers by converting its value
-//! (see `codegen::dispatch`).
+//! (see `codegen::dispatch`). A class of the program that extends `Number` (the JDK's
+//! `AtomicInteger` and `BigInteger`) implements it too, with the `intValue()` to `doubleValue()`
+//! that it declares or inherits; `Number`'s own `byteValue()` and `shortValue()`, which narrow
+//! `intValue()`, are lowered to that narrowing for every `Number`, since the boxes' agree with it.
 //! `java.lang.CharSequence`, when the program uses it as a type (`StringJoiner`'s parameters),
 //! is another, `CHAR_SEQUENCE`, which strings and builders implement, with an abstract `length()`
 //! and `charAt(int)` that each answers as the runtime's string or builder does; its `toString()`
@@ -380,6 +383,34 @@ impl<'t> Lowering<'t> {
                 }
             }
         }
+        // The `intValue()` to `doubleValue()` of a class that extends `Number`, or of a subclass,
+        // implement the interface's.
+        if let Some(n) = at.number {
+            for method in methods.iter_mut().take(at.equals) {
+                if method.is_static
+                    || method.is_ctor
+                    || !method.params.is_empty()
+                    || !self.extends_number(method.class)?
+                {
+                    continue;
+                }
+                let Some(i) =
+                    NUMBER_METHODS.iter().position(|&(name, ret)| method.name == name && method.ret == ret)
+                else {
+                    continue;
+                };
+                // A call through `Number` narrows `intValue()` instead (see `number_call`).
+                if i < 2 {
+                    return Err(Error {
+                        pos: method.pos,
+                        message: format!("overriding `Number.{}` not supported yet", method.name),
+                    });
+                }
+                if !method.overrides.contains(&(n.methods + i)) {
+                    method.overrides.push(n.methods + i);
+                }
+            }
+        }
         methods.push(method("equals", vec![Param { name: "other".to_string(), ty: object }], Type::Boolean));
         methods.push(method("hashCode", Vec::new(), Type::Int));
         if let Some(c) = at.comparable {
@@ -475,6 +506,14 @@ impl<'t> Lowering<'t> {
                 }
             }
         }
+        // Its classes that extend `Number`, such as the JDK's `AtomicInteger`.
+        if let Some(n) = at.number {
+            for (t, decl) in types.iter_mut().enumerate() {
+                if self.extends_directly(t, "java.lang.Number") {
+                    decl.implements.push(n.decl);
+                }
+            }
+        }
         types.push(decl(OBJECT, "", TypeKind::Interface, Vec::new()));
         let runtime = std::iter::once(at.decl).chain(at.comparable.map(|c| c.decl)).collect::<Vec<_>>();
         for (name, _) in runtime_values() {
@@ -554,6 +593,27 @@ impl<'t> Lowering<'t> {
             .node
             .list("implementsClause")
             .any(|c| c.java_type().split('<').next() == Some(interface))
+    }
+
+    /// Whether class `t` of the program names the JDK class `class` in its `extends` clause.
+    fn extends_directly(&self, t: usize, class: &str) -> bool {
+        self.types[t]
+            .node
+            .get("extendsClause")
+            .is_some_and(|c| c.java_type().split('<').next() == Some(class))
+    }
+
+    /// Whether class `t` of the program extends `java.lang.Number`, directly or through a
+    /// superclass.
+    pub(super) fn extends_number(&self, t: usize) -> Result<bool, Error> {
+        let mut class = Some(t);
+        while let Some(c) = class {
+            if self.extends_directly(c, "java.lang.Number") {
+                return Ok(true);
+            }
+            class = self.superclass(c)?;
+        }
+        Ok(false)
     }
 
     /// The bridges erasure needs, appended to `methods`: a method that overrides one whose erased
@@ -774,14 +834,26 @@ impl<'t> Lowering<'t> {
         let Some(i) = NUMBER_METHODS.iter().position(|(name, _)| *name == symbol.name) else {
             return unsupported(node, &format!("method `Number.{}`", symbol.name));
         };
-        let Some(receiver) = receiver else { return unsupported(node, "this call") };
-        let receiver = self.convert(self.expr(receiver)?, Type::class(NUMBER));
-        Ok(ExprKind::MethodCall {
+        let receiver = match receiver {
+            Some(receiver) => self.expr(receiver)?,
+            // In a class that extends `Number`.
+            None => self.this(node),
+        };
+        let receiver = self.convert(receiver, Type::class(NUMBER));
+        // `byteValue()` and `shortValue()` narrow `intValue()`: `Number`'s do, and each box's
+        // gives the same, as Java narrows a `long`, `float` or `double` through an `int`.
+        let narrowed = (i < 2).then_some(NUMBER_METHODS[i].1);
+        let i = if narrowed.is_some() { 2 } else { i };
+        let call = ExprKind::MethodCall {
             receiver: Box::new(receiver),
-            name: symbol.name.to_string(),
+            name: NUMBER_METHODS[i].0.to_string(),
             args: Vec::new(),
             resolved: Some(n.methods + i),
             is_super: false,
+        };
+        Ok(match narrowed {
+            Some(ty) => ExprKind::Cast(ty, Box::new(self.synth(call, node.pos(), Type::Int))),
+            None => call,
         })
     }
 

@@ -8,7 +8,8 @@ mod survey;
 
 pub use reach::{
     CLASS_KINDS, LOCALE_LANGUAGE, Reach, STRING_STREAMS, class_for_name, class_name, component_array,
-    created_by_name, live_branch, unsafe_field_access, untranslated, writes_string_array,
+    created_by_name, is_ensure_initialized, literal_class, live_branch, unsafe_field_access, untranslated,
+    writes_string_array,
 };
 pub use survey::Survey;
 

@@ -10,10 +10,12 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod by_name;
+mod initialize;
 mod sequential;
 mod stubs;
 
 pub use by_name::{class_for_name, created_by_name};
+pub use initialize::{is_ensure_initialized, literal_class};
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
 /// constructor) and javac's signature, such as `(int)void`.
@@ -62,6 +64,9 @@ pub struct Reach {
     /// which are only ever null, with the instance methods that it calls on them, by name and
     /// signature (`stubs.rs`).
     pub stubs: BTreeMap<String, BTreeSet<(String, String)>>,
+    /// Classes that reachable code initializes through a `Class` value, which it gives
+    /// `MethodHandles.Lookup.ensureInitialized` (`initialize.rs`).
+    pub ensured: BTreeSet<String>,
 }
 
 impl Reach {
@@ -612,6 +617,12 @@ struct Walk<'t> {
     /// The string literals of reachable code that could be names of classes that no unit
     /// declares (`by_name`).
     literals: HashSet<String>,
+    /// The method whose code is being scanned.
+    scanning: Option<MethodKey>,
+    /// The parameters, by method and position, that a method gives `ensureInitialized`, and the
+    /// class literals that reachable code passes to each parameter (`initialize.rs`).
+    initializing: HashSet<(MethodKey, usize)>,
+    class_arguments: HashMap<(MethodKey, usize), BTreeSet<String>>,
 }
 
 impl<'t> Walk<'t> {
@@ -909,7 +920,9 @@ impl<'t> Walk<'t> {
                 self.work.push(Item::Method(overrider));
             }
         }
+        let outer = self.scanning.replace(key);
         self.scan(node);
+        self.scanning = outer;
     }
 
     /// Whether `class` is a class whose objects come from its constructors, which reachability
@@ -1065,6 +1078,7 @@ impl<'t> Walk<'t> {
                 if text(value, "kind") == "VARIABLE" {
                     self.stub_type(text(&value["symbol"], "type"));
                 }
+                self.initialization(value);
                 // A class that `Class.forName` names exists, and is initialized if the call says
                 // so (`lower::by_name`).
                 if let Some((class, initialize)) = class_for_name(value) {
