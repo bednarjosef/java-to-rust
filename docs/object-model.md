@@ -1740,6 +1740,13 @@ Generics are erased in lowering, and nothing after it knows they existed:
   with `Rc::ptr_eq`, `hashCode` is `java::identity_hash`, and it prints as Java's default
   `toString`, its JVM name and hash (`[I@1b6d3586`). Arrays of a Rust generic's instantiation
   (`Box<String>[]` under real generics) have no runtime class and are rejected.
+  `System.arraycopy` where the source or the destination is such an `Object` (the JDK's code
+  generic over the kind of array, `SpinedBuffer.OfPrimitive`'s `T_ARR`) converts both to `Object`
+  and matches their variants: two arrays of one type are copied as any two arrays are, anything
+  else throws `ArrayStoreException` (`codegen::dispatch::object_array_copy`). Deviations: the
+  message is always "arraycopy: type mismatch", and a copy between two different reference array
+  types throws even where every element would fit (an `Object[]` of `Integer`s into an
+  `Integer[]`); arrays of references that meet are one `Object[]` type anyway.
 - A value read back out of a generic container is a cast from `Object` that may be null (the
   container's array has null elements), so reading an enum back (`Suit s = list.get(0)`) is
   rejected by the existing "casting a value that may be null to an enum"; strings, boxes and

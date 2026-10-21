@@ -618,7 +618,9 @@ The native layer, the JDK methods that bottom out in the JVM, is hand-written in
 (`lower/natives.rs`): `System.arraycopy` (between shared or plain arrays of the same element type,
 overlap as through a temporary, bounds checked first; between arrays of different reference types,
 such as a `String[]` and an `Object[]`, it is rejected, because the two are different Rust types and
-the copy would need the element type at run time to throw `ArrayStoreException`), the `Double` and `Float` bit conversions, `Math` and
+the copy would need the element type at run time to throw `ArrayStoreException`; between arrays
+held as `Object`s it copies when both are arrays of one type and throws `ArrayStoreException`
+otherwise), the `Double` and `Float` bit conversions, `Math` and
 `StrictMath`, `System.identityHashCode` and an inherited `hashCode()` (derived from the object's
 address: stable for the object's life, but like Java's different on every run), the clocks,
 `availableProcessors`, the line separator, `System.err` and `System.out.write`/`flush`.
