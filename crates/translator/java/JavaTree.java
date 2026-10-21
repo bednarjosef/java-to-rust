@@ -274,6 +274,10 @@ public class JavaTree {
         if (e instanceof ExecutableElement m && m.isVarArgs()) {
             out.append(",\"varargs\":true");
         }
+        // A native method has no body: the JVM implements it, and so must the runtime.
+        if (e.getModifiers().contains(Modifier.NATIVE)) {
+            out.append(",\"native\":true");
+        }
         out.append(",\"type\":");
         string(e.asType().toString(), out);
         if (declaration && e.getKind() == ElementKind.METHOD && owner instanceof TypeElement t) {

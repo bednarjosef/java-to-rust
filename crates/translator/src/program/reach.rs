@@ -31,7 +31,8 @@ pub struct Reach {
     pub methods: HashSet<MethodKey>,
     pub fields: HashSet<FieldKey>,
     /// Methods that reachable code calls but that are not among the sources: those of the
-    /// classes the runtime provides (see `RUNTIME_CLASSES`), and any that are missing.
+    /// classes the runtime provides (see `RUNTIME_CLASSES`), and any that are missing; and the
+    /// `REPLACED_METHODS` that it calls.
     pub external: HashSet<MethodKey>,
 }
 
@@ -106,6 +107,20 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("jdk.internal.reflect.", "reflection"),
     ("sun.security.", "security"),
 ];
+
+/// Methods of translated classes whose calls the lowering replaces with the runtime's code
+/// (`lower/natives.rs`), so that reachability does not enter them, as with the runtime's classes.
+/// They take a `Class`, which the translation has no value for, and every call that `Unsafe`'s
+/// own initialization makes passes a class literal of an array class.
+pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
+    ("jdk.internal.misc.Unsafe", "arrayBaseOffset", "(java.lang.Class<?>)long"),
+    ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int"),
+];
+
+/// Whether the method is one of the `REPLACED_METHODS`.
+pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
+    REPLACED_METHODS.contains(&(class, name, signature))
+}
 
 /// Static fields that only Java Flight Recorder sets, through reflection when it starts
 /// (`jdk.internal.event.JFRTracing`): no code sets them otherwise, so in a translated program they
@@ -306,7 +321,8 @@ impl<'t> Walk<'t> {
     }
 
     fn method(&mut self, key: MethodKey) {
-        let Some(&node) = self.methods.get(&key) else {
+        let node = self.methods.get(&key).filter(|_| !replaced(&key.0, &key.1, &key.2));
+        let Some(&node) = node else {
             // What overrides a method of the runtime, such as `Object.toString`, can still run.
             if self.reach.external.insert(key.clone()) {
                 for overrider in self.overriders(&key) {

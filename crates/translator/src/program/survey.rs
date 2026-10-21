@@ -19,8 +19,9 @@
 use super::Program;
 use super::reach::{
     CLASS_KINDS, MethodKey, OBJECT_METHODS, RUNTIME_CLASSES, Reach, class_name, has_flag, members,
-    never_true, outside, symbol_type, text, untranslated,
+    never_true, outside, replaced, symbol_type, text, untranslated,
 };
+use crate::ast::runtime_native;
 use serde_json::{Value, json};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -168,8 +169,8 @@ struct Census {
     /// pieces of code that call each.
     runtime: BTreeMap<(Part, String), usize>,
     /// Reachable methods that have no body in Java: the JVM implements them. With each, its
-    /// node in the call graph.
-    natives: Vec<(Part, String, String)>,
+    /// node in the call graph and whether the runtime implements it (`ast::runtime_native`).
+    natives: Vec<(Part, String, String, bool)>,
     /// The call graph of the reachable code: from each node (a method, or a class's static or
     /// instance initialization, see `method_node`) to the nodes its code may run.
     edges: HashMap<String, BTreeSet<String>>,
@@ -222,6 +223,7 @@ impl Census {
                             origin.part,
                             format!("{class}.{}{}", key.1, key.2),
                             method_node(&key),
+                            runtime_native(&class, &key.1, &key.2),
                         ));
                     }
                     reach.methods.contains(&key)
@@ -322,7 +324,8 @@ impl Census {
                     } else if let Some(feature) = untranslated(owner) {
                         scan.feature(feature, node);
                         scan.calls.insert(format!("({feature}) {owner}.{name}"));
-                    } else if RUNTIME_CLASSES.contains(&owner) {
+                    } else if RUNTIME_CLASSES.contains(&owner) || replaced(owner, name, text(symbol, "type"))
+                    {
                         let simple = owner.rsplit('.').next().unwrap_or(owner);
                         scan.calls.insert(format!("{simple}.{name}"));
                     } else if !owner.is_empty() && !self.declared.contains(owner) {
@@ -423,12 +426,14 @@ impl Census {
         let free = self.pieces.iter().filter(|p| p.features.is_empty()).count();
         _ = writeln!(
             out,
-            "Reachable from {main}: {} classes ({} instantiated), {} methods, {} fields, {} native methods.",
+            "Reachable from {main}: {} classes ({} instantiated), {} methods, {} fields, {} native methods \
+             ({} in the runtime).",
             reach.classes.len(),
             reach.instantiated.len(),
             reach.methods.len(),
             reach.fields.len(),
-            self.natives.len()
+            self.natives.len(),
+            self.natives.iter().filter(|n| n.3).count()
         );
         _ = writeln!(out, "{total} pieces of code (methods, field initializers, initializer blocks):");
         for part in Part::ALL {
@@ -483,15 +488,15 @@ impl Census {
         _ = writeln!(out, "\nNative methods reached:");
         for part in Part::ALL {
             _ = writeln!(out, "{}:", part.title());
-            let mut natives: Vec<(&str, &str)> = self
+            let mut natives: Vec<(&str, &str, bool)> = self
                 .natives
                 .iter()
-                .filter(|(p, _, _)| *p == part)
-                .map(|(_, name, node)| (name.as_str(), node.as_str()))
+                .filter(|(p, ..)| *p == part)
+                .map(|(_, name, node, runtime)| (name.as_str(), node.as_str(), *runtime))
                 .collect();
             natives.sort();
-            for (native, node) in natives {
-                _ = writeln!(out, "  {native}");
+            for (native, node, runtime) in natives {
+                _ = writeln!(out, "  {native}{}", if runtime { "  (in the runtime)" } else { "" });
                 let chain = self.chain(node);
                 if !chain.is_empty() {
                     _ = writeln!(out, "      via {}", chain.join(" -> "));
@@ -602,9 +607,10 @@ impl Census {
                 "method": method,
                 "pieces": n,
             })).collect::<Vec<_>>(),
-            "natives": self.natives.iter().map(|(part, method, node)| json!({
+            "natives": self.natives.iter().map(|(part, method, node, runtime)| json!({
                 "source": part.name(),
                 "method": method,
+                "runtime": runtime,
                 "chain": self.chain(node),
             })).collect::<Vec<_>>(),
             "external": external.iter().map(|key| json!({

@@ -2428,3 +2428,153 @@ fn initializer_blocks_run_in_constructors() {
         err.to_string().contains("a field initializer after an instance initializer block not supported yet")
     );
 }
+
+#[test]
+fn intern_is_the_string_itself_and_string_identity_stays_rejected() {
+    let rust = translate(
+        "class A { public static void main(String[] a) {
+            String s = \"x\" + a.length;
+            String t = s.intern();
+            System.out.println(t + s.intern().length());
+        } }",
+    );
+    assert_contains(&rust, &["let t = s.clone();", "s.len() as i32"]);
+    // A string is a value in the translation, so `==` on two strings, which compares references
+    // in Java (and is what `intern` exists for), is rejected rather than guessed.
+    let err = java_to_rust::translate(
+        "class A { public static void main(String[] a) { String s = \"x\"; System.out.println(s.intern() == \"x\"); } }",
+    )
+    .expect_err("== on strings must be rejected");
+    assert!(err.to_string().contains("== on strings compares references; not supported yet"), "{err}");
+}
+
+/// Stand-ins for JDK classes with natives, in packages that java.base does not export, so that
+/// javac reads them from the library root rather than from the JDK.
+const NATIVE_STAND_INS: &[(&str, &str)] = &[
+    (
+        "lib/jdk/internal/misc/CDS.java",
+        "package jdk.internal.misc;
+        public class CDS {
+            private static final int configStatus = getCDSConfigStatus();
+            private static native int getCDSConfigStatus();
+            public static native long getRandomSeedForDumping();
+            public static native void initializeFromArchive(Class<?> c);
+            static { initializeFromArchive(CDS.class); }
+            public static boolean usingArchive() { return (configStatus & 2) != 0; }
+        }",
+    ),
+    (
+        "lib/jdk/internal/misc/Unsafe.java",
+        "package jdk.internal.misc;
+        public final class Unsafe {
+            private static native void registerNatives();
+            static { registerNatives(); }
+            private Unsafe() {}
+            private static final Unsafe theUnsafe = new Unsafe();
+            public static Unsafe getUnsafe() { return theUnsafe; }
+            public long arrayBaseOffset(Class<?> c) {
+                if (c == null) { throw new NullPointerException(); }
+                return arrayBaseOffset0(c);
+            }
+            public int arrayIndexScale(Class<?> c) {
+                if (c == null) { throw new NullPointerException(); }
+                return arrayIndexScale0(c);
+            }
+            public static final long ARRAY_INT_BASE_OFFSET = theUnsafe.arrayBaseOffset(int[].class);
+            public static final int ARRAY_BOOLEAN_INDEX_SCALE = theUnsafe.arrayIndexScale(boolean[].class);
+            public static final int ARRAY_OBJECT_INDEX_SCALE = getUnsafe().arrayIndexScale(String[][].class);
+            private native int arrayBaseOffset0(Class<?> c);
+            private native int arrayIndexScale0(Class<?> c);
+            public static native long getuid();
+            public static long badOffset() { return theUnsafe.arrayBaseOffset(new int[0].getClass()); }
+            public static int badScale() { return theUnsafe.arrayIndexScale(String.class); }
+        }",
+    ),
+    (
+        "lib/jdk/internal/misc/VM.java",
+        "package jdk.internal.misc;
+        public class VM {
+            static { initialize(); }
+            private static native void initialize();
+            public static native long getNanoTimeAdjustment(long offsetInSeconds);
+        }",
+    ),
+    (
+        "lib/jdk/internal/vm/ContinuationSupport.java",
+        "package jdk.internal.vm;
+        public class ContinuationSupport {
+            private static final boolean SUPPORTED = isSupported0();
+            public static boolean isSupported() { return SUPPORTED; }
+            private static native boolean isSupported0();
+        }",
+    ),
+];
+
+/// Translates a `main` of these statements over the native stand-ins.
+fn translate_with_natives(dir: &str, statements: &str) -> Result<String, String> {
+    let main = format!(
+        "import jdk.internal.misc.*;\nimport jdk.internal.vm.ContinuationSupport;\npublic class Main {{\n    public static void main(String[] a) {{\n        {statements}\n    }}\n}}\n"
+    );
+    let mut files = NATIVE_STAND_INS.to_vec();
+    files.push(("app/Main.java", &main));
+    let dir = write_sources(dir, &files);
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    java_to_rust::translate_program(&program).map_err(|e| e.to_string())
+}
+
+#[test]
+fn natives_of_jdk_classes_become_runtime_calls() {
+    let rust = translate_with_natives(
+        "jdk-natives",
+        "System.out.println(CDS.usingArchive() + \" \" + CDS.getRandomSeedForDumping());
+        System.out.println(Unsafe.ARRAY_INT_BASE_OFFSET + Unsafe.ARRAY_BOOLEAN_INDEX_SCALE + Unsafe.ARRAY_OBJECT_INDEX_SCALE);
+        System.out.println(VM.getNanoTimeAdjustment(0) > 0);
+        System.out.println(ContinuationSupport.isSupported());",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &[
+            "Cell::new(java::cds_config_status())",
+            "java::cds_random_seed_for_dumping()",
+            // `Unsafe`'s array layout, from the class literals; the receiver is not evaluated.
+            "Cell::new(java::array_base_offset())",
+            "Cell::new(java::array_index_scale(\"boolean\"))",
+            "Cell::new(java::array_index_scale(\"java.lang.Object\"))",
+            "java::nano_time_adjustment(0)",
+            "Cell::new(java::continuations_supported())",
+        ],
+    );
+    // Registering natives, `VM.initialize` and restoring from an archive do nothing, and neither
+    // the native declarations nor the methods replaced at their calls are translated.
+    assert_lacks(
+        &rust,
+        &["register_natives", "initialize", "from_archive", "fn array_base_offset", "fn array_index_scale"],
+    );
+}
+
+#[test]
+fn natives_the_runtime_lacks_are_rejected_by_name() {
+    let rejection =
+        |dir: &str, statements: &str| translate_with_natives(dir, statements).expect_err("must be rejected");
+    let error = rejection("jdk-natives-missing", "System.out.println(Unsafe.getuid());");
+    assert!(
+        error.ends_with("native method `jdk.internal.misc.Unsafe.getuid()long` not supported yet"),
+        "{error}"
+    );
+    let error = rejection("jdk-natives-no-literal", "System.out.println(Unsafe.badOffset());");
+    assert!(
+        error.ends_with("`Unsafe.arrayBaseOffset` of anything but a class literal not supported yet"),
+        "{error}"
+    );
+    let error = rejection("jdk-natives-no-array", "System.out.println(Unsafe.badScale());");
+    assert!(
+        error.ends_with("`Unsafe.arrayIndexScale` of a class that is not an array not supported yet"),
+        "{error}"
+    );
+}

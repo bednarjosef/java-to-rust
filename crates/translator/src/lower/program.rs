@@ -7,9 +7,11 @@ use crate::program::Reach;
 
 impl<'t> Lowering<'t> {
     /// Whether a member of the class `class` is lowered: in a whole program only reachable
-    /// members are, in a single file all of them.
+    /// members are, in a single file all of them. A native method never is: it has no body, and
+    /// its calls become the runtime's code or are rejected (`native_call`).
     pub(super) fn keeps(&self, member: Node<'t>, class: &str) -> bool {
-        self.reach.is_none_or(|reach| reach.member(class, member.0))
+        let native = member.kind() == "METHOD" && member.has_flag("NATIVE");
+        !native && self.reach.is_none_or(|reach| reach.member(class, member.0))
     }
 }
 
