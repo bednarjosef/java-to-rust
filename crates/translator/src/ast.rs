@@ -48,6 +48,8 @@ pub enum Type {
     Boxed(&'static Type),
     /// `java.lang.StringBuilder`, a shared and mutable text (`java::StringBuilder`).
     StringBuilder,
+    /// `java.lang.Class<?>`, the class of a value (`java::Class`; see `lower::classes`).
+    JavaClass,
     /// `java.nio.charset.Charset`, a value (`java::Charset`) that is never null; its operations
     /// are `Builtin::Charset`.
     Charset,
@@ -136,6 +138,7 @@ impl Type {
                 | Type::Null
                 | Type::Boxed(_)
                 | Type::StringBuilder
+                | Type::JavaClass
         )
     }
 
@@ -216,6 +219,7 @@ impl fmt::Display for Type {
             Type::Null => f.write_str("null"),
             Type::StringBuilder => f.write_str("StringBuilder"),
             Type::Charset => f.write_str("Charset"),
+            Type::JavaClass => f.write_str("Class"),
             Type::Boxed(primitive) => f.write_str(match primitive {
                 Type::Int => "Integer",
                 Type::Char => "Character",
@@ -275,9 +279,28 @@ pub const OBJECT: &str = "Object";
 /// uses it as a type, beside `OBJECT`.
 pub const COMPARABLE: &str = "Comparable";
 
+/// The name of the type of `java.lang.Enum`'s values, which lowering adds to a program that uses
+/// it as a type (as the JDK's `EnumMap` and `EnumSet` do), beside `OBJECT`: an interface that the
+/// program's enums implement.
+pub const ENUM: &str = "Enum";
 /// The name of the type of `java.lang.Number`'s values, which lowering adds to a program that uses
 /// it as a type, beside `OBJECT`: the numeric boxes are its values.
 pub const NUMBER: &str = "Number";
+
+/// The name of the function that builds a constant of the enum `name` with tables
+/// (`lower/enum_tables.rs`): its constructor, `initShapeConstant` for `Main.Shape`.
+pub fn constant_builder(name: &str) -> String {
+    format!("init{}Constant", simple_enum_name(name))
+}
+
+/// The name of the function that runs the field initializers of the enum `name` with tables.
+pub fn fields_builder(name: &str) -> String {
+    format!("init{}Fields", simple_enum_name(name))
+}
+
+fn simple_enum_name(name: &str) -> &str {
+    name.rsplit(['.', '$']).next().unwrap_or(name)
+}
 
 /// The runtime classes whose values an `Object` can hold, with the Java type of those values.
 pub fn runtime_values() -> [(&'static str, Type); 9] {
@@ -653,6 +676,10 @@ pub enum Builtin {
     NoObject {
         class: usize,
     },
+    /// The default of a creation from a class name (`lower::by_name`): the name, its argument,
+    /// is of no class of the translated program, and the program ends with a
+    /// `ClassNotFoundException` that nothing catches.
+    UnknownClass,
     /// Evaluates the lock of a `synchronized` block and throws if it is null; the value is dropped.
     NullCheck,
     MathAbs,
@@ -761,6 +788,43 @@ pub enum Builtin {
     SameClass {
         same: bool,
     },
+    /// `[o]`: `o.getClass()`, a `java::Class`.
+    GetClass,
+    /// `[]`: the class literal `T.class` of the type, a `java::Class`.
+    ClassLiteral(Type),
+    /// `[class, args...]`: a method of `java.lang.Class`.
+    ClassMethod(ClassOp),
+    /// `[x]`: `HashMap.comparableClassFor(x)`, the class of `x` if it says `implements
+    /// Comparable` itself, else `null`; the JDK's reads the type argument through reflection.
+    ComparableClassFor,
+}
+
+/// The methods of `java.lang.Class` that a program can use without reflection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassOp {
+    GetName,
+    GetSimpleName,
+    /// `null` for `Object`, an interface or a primitive type.
+    GetSuperclass,
+    /// `null` for a class that is not an array.
+    GetComponentType,
+    IsArray,
+    IsInterface,
+    IsPrimitive,
+    IsEnum,
+    ToString,
+    HashCode,
+    /// `[class, other]`: `equals`, of two classes.
+    Equals,
+    /// `desiredAssertionStatus()`: assertions are off, as in a JVM started without `-ea`.
+    DesiredAssertionStatus,
+}
+
+impl ClassOp {
+    /// Whether the result can be `null`.
+    pub fn nullable(self) -> bool {
+        matches!(self, ClassOp::GetSuperclass | ClassOp::GetComponentType)
+    }
 }
 
 /// The methods of the boxed classes. The kind of the boxes comes from the types of the operands
@@ -936,6 +1000,7 @@ pub fn has_effects(e: &Expr) -> bool {
                         | Builtin::Println
                         | Builtin::Exit
                         | Builtin::NoObject { .. }
+                        | Builtin::UnknownClass
                         | Builtin::Native(_),
                     _
                 )

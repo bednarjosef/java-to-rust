@@ -307,3 +307,52 @@ fn a_functional_interface_whose_values_are_seen_as_objects_stays_an_enum() {
     assert_contains(&rust, &["struct OpLambdaInMain {"]);
     assert_lacks(&rust, &["type AOp ="]);
 }
+
+#[test]
+fn the_default_methods_of_a_closure_type_are_its_extension_trait() {
+    let rust = translate(
+        "class A {
+            interface Check {
+                boolean test(int x);
+                default Check negate() { return x -> !test(x); }
+                default String describe(int x) { return test(x) ? \"yes\" : \"no\"; }
+            }
+            public static void main(String[] args) {
+                Check even = x -> x % 2 == 0;
+                System.out.println(even.negate().test(3) + even.describe(2));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "type ACheck = Rc<dyn Fn(i32) -> bool>;",
+            "trait ACheckMethods {\n    fn negate(&self) -> ACheck;\n    fn describe(&self, x: i32) -> String;\n}",
+            "impl ACheckMethods for ACheck {\n    fn negate(&self) -> ACheck {",
+            "{ let outer = self.clone(); Rc::new(move |x: i32| -> bool { !outer(x) }) as ACheck }",
+            "if self(x) {",
+            "even.negate()(3)",
+            "even.describe(2)",
+        ],
+    );
+}
+
+#[test]
+fn an_interface_that_extends_a_closure_type_names_its_closures() {
+    let rust = translate(
+        "import java.util.function.Function;
+        import java.util.function.UnaryOperator;
+        class A {
+            static String run(Function<String, String> f) { return f.apply(\"x\"); }
+            public static void main(String[] args) {
+                UnaryOperator<String> twice = s -> s + s;
+                System.out.println(run(twice) + run(s -> s));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["type Function = Rc<dyn Fn(Object) -> Object>;", "type UnaryOperator = Function;", "run(&twice)"],
+    );
+    assert_lacks(&rust, &["enum Function", "struct UnaryOperatorLambdaInMain"]);
+}

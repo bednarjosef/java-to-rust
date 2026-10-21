@@ -1,6 +1,7 @@
 //! Functional interfaces that are closure types (`analysis::closures`): the interface is a type
-//! alias, `type Op = Rc<dyn Fn(i32, i32) -> i32>;`, a lambda or method reference converted to it
-//! is a closure, and a call of the interface's method calls the closure.
+//! alias, `type Op = Rc<dyn Fn(i32, i32) -> i32>;` (`Arc<dyn Fn(i32, i32) -> i32 + Send + Sync>`
+//! when threads may share its values), a lambda or method reference converted to it is a closure,
+//! and a call of the interface's method calls the closure.
 //!
 //! The closure's body is the lambda class's method, written where the lambda is created with the
 //! method's own names and facts, and its captures are bound before it: the fields that held them
@@ -59,7 +60,7 @@ impl<'a> Gen<'a> {
 
     /// The method of closure type `t` that its values run.
     fn closure_method(&self, t: usize) -> usize {
-        self.class.methods.iter().position(|m| m.class == t && !m.is_static).expect("a closure type's method")
+        closures::closure_method(self.class, t)
     }
 
     /// `type Op = Rc<dyn Fn(i32, i32) -> i32>;`: the parameters and the result of the interface's
@@ -74,14 +75,82 @@ impl<'a> Gen<'a> {
             .collect();
         let ret = self.ret_text(m);
         let name = struct_name(&self.class.types[t].name);
+        // An interface that extends another has its closures: `type UnaryOperator = Function;`.
+        let above =
+            self.class.types[t].implements.iter().copied().find(|i| self.facts.closure_types.contains(i));
+        let ty = match above {
+            Some(above) => {
+                self.need(Need::Enum(above));
+                self.closure_name(above)
+            }
+            None => {
+                // A closure that threads may share is one that any thread may call.
+                let (handle, bounds) = if self.facts.thread_shared.contains(&t) {
+                    ("Arc", " + Send + Sync")
+                } else {
+                    ("Rc", "")
+                };
+                format!("{handle}<dyn Fn({}){ret}{bounds}>", params.join(", "))
+            }
+        };
         self.gap();
-        self.line(&format!("{}type {name} = Rc<dyn Fn({}){ret}>;", self.vis(), params.join(", ")));
+        self.line(&format!("{}type {name} = {ty};", self.vis()));
+        self.closure_trait(t, &name);
+    }
+
+    /// The default methods of closure type `t` (named `name`) that the program calls, as an
+    /// extension trait of the closure type, `trait OpMethods`, whose `self` is the closure.
+    fn closure_trait(&mut self, t: usize, name: &str) {
+        let mut defaults: Vec<usize> = (self.wanted.iter())
+            .filter_map(|need| match *need {
+                Need::Body(i) if self.class.methods[i].class == t && !self.class.methods[i].is_static => {
+                    Some(i)
+                }
+                _ => None,
+            })
+            .collect();
+        if defaults.is_empty() {
+            return;
+        }
+        defaults.sort();
+        let vis = self.vis();
+        let mut signatures = Vec::new();
+        let mut bodies = String::new();
+        self.indent += 1;
+        for i in defaults {
+            let mark = self.out.len();
+            self.gap();
+            self.method(i);
+            let text = self.out.split_off(mark);
+            // Trait methods have the trait's visibility.
+            let text = text.replacen(&format!("{vis}fn "), "fn ", 1);
+            if let Some(line) = text.lines().find(|l| l.trim_start().starts_with("fn ")) {
+                signatures.push(format!("{};", line.trim().trim_end_matches('{').trim_end()));
+            }
+            bodies.push_str(&text);
+        }
+        self.indent -= 1;
+        self.gap();
+        self.line(&format!("{vis}trait {name}Methods {{"));
+        self.indent += 1;
+        for signature in &signatures {
+            self.line(signature);
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.gap();
+        self.line(&format!("impl {name}Methods for {name} {{"));
+        self.out.push_str(bodies.trim_start_matches('\n'));
+        self.line("}");
     }
 
     /// `f.apply(x)` on a closure: `f(x)`. A closure read from a field is taken out of its object
     /// before the call, which may reach the object again.
     pub(super) fn closure_call(&mut self, receiver: &'a Expr, index: usize, args: &'a [Expr]) -> Code {
+        let t = self.closure_type(receiver.ty).expect("a closure's type");
         let callee = match &receiver.kind {
+            // In a default method, the closure itself.
+            ExprKind::This => self.this_name().to_string(),
             ExprKind::Var(_) => self.object(receiver),
             ExprKind::Field { object, name }
                 if matches!(object.kind, ExprKind::This) && self.field_locals.contains_key(name) =>
@@ -101,6 +170,18 @@ impl<'a> Gen<'a> {
             _ => self.expr(receiver).receiver(),
         };
         let args = self.call_args(index, args).join(", ");
+        if index != self.closure_method(t) {
+            // A default method, of the extension trait.
+            // The trait of the interface that declares it, which `t` may extend.
+            let declaring = self.class.methods[index].class;
+            self.need(Need::Body(index));
+            self.need(Need::Enum(declaring));
+            let path = format!("{}Methods", self.closure_name(declaring));
+            if path.contains("::") {
+                self.traits.insert(path);
+            }
+            return Code::atom(format!("{callee}.{}({args})", self.fn_names[index]));
+        }
         Code::atom(format!("{callee}({args})"))
     }
 
@@ -196,8 +277,9 @@ impl<'a> Gen<'a> {
         self.restore(saved);
         let moving = if moving { "move " } else { "" };
         let body = self.braced(&text);
+        let handle = if self.facts.thread_shared.contains(&t) { "Arc" } else { "Rc" };
         let closure =
-            format!("Rc::new({moving}|{}|{ret} {body}) as {}", params.join(", "), self.closure_name(t));
+            format!("{handle}::new({moving}|{}|{ret} {body}) as {}", params.join(", "), self.closure_name(t));
         if prelude.is_empty() {
             return Code::new(closure, AS);
         }

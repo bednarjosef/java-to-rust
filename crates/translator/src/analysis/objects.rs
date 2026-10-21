@@ -4,6 +4,8 @@
 //! The classes of one class tree are immutable together or not at all, so that an enum over
 //! them reaches the fields they share in one way.
 
+use super::Facts;
+use super::hierarchy::{Home, home};
 use crate::ast::*;
 use std::collections::HashSet;
 
@@ -17,6 +19,41 @@ pub fn immutable_classes(class: &Class) -> HashSet<String> {
         })
         .map(|t| class.types[t].name.clone())
         .collect()
+}
+
+/// The immutable concrete classes with a method that calls on `this` a body living on the enum of
+/// a type: that call needs the object's handle to make the enum's value, which a method that
+/// borrows the object as `&self` does not have. Their class trees cannot be immutable.
+pub fn calls_needing_handles(class: &Class, facts: &Facts) -> HashSet<usize> {
+    let h = &class.hierarchy;
+    let mut out = HashSet::new();
+    for m in 0..class.methods.len() {
+        let Home::Class(c) = home(class, facts, m) else { continue };
+        if !facts.immutable.contains(&class.types[c].name) || out.contains(&c) {
+            continue;
+        }
+        let mut needs = false;
+        for s in &class.methods[m].body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::MethodCall { receiver, resolved: Some(r), is_super, .. } = &x.kind
+                            && matches!(receiver.kind, ExprKind::This)
+                        {
+                            let target = if *is_super { Some(*r) } else { h.implementation(*r, c) };
+                            needs |= target.is_some_and(|t| matches!(home(class, facts, t), Home::Enum(_)));
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+        if needs {
+            out.insert(c);
+        }
+    }
+    out
 }
 
 fn is_immutable(class: &Class, t: usize) -> bool {

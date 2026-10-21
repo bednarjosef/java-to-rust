@@ -15,6 +15,9 @@
 //! `T extends Number`), is a third such type, `NUMBER`, which the numeric boxes implement, with
 //! the abstract `byteValue()` to `doubleValue()` that each box answers by converting its value
 //! (see `codegen::dispatch`).
+//! `java.lang.Enum`, when the program uses it as a type, is a type of the same kind, `ENUM`, with
+//! no methods of its own: the program's enums implement it, and `lower::enums` lowers the calls
+//! of `Enum`'s methods on its values.
 
 use super::*;
 use std::collections::HashSet;
@@ -28,6 +31,8 @@ pub(super) struct ObjectIndexes {
     pub(super) hash_code: usize,
     pub(super) comparable: Option<ComparableIndexes>,
     pub(super) number: Option<NumberIndexes>,
+    /// The index of `Enum`'s type, after `Number`'s, when the program uses it.
+    pub(super) enumeration: Option<usize>,
 }
 
 /// The index of `Number`'s type, after `Comparable`'s or the runtime classes, and of the first of
@@ -106,6 +111,21 @@ fn mentions_comparable(v: &Value) -> bool {
     }
 }
 
+/// Whether the declarations use `java.lang.Enum` as a type, a type variable's bound included.
+fn uses_enum(v: &Value) -> bool {
+    match v {
+        Value::Object(fields) => fields.iter().any(|(key, value)| match key.as_str() {
+            "symbol" => false,
+            "javaType" => {
+                value.as_str().is_some_and(|t| t == "java.lang.Enum" || t.starts_with("java.lang.Enum<"))
+            }
+            _ => uses_enum(value),
+        }),
+        Value::Array(items) => items.iter().any(uses_enum),
+        _ => false,
+    }
+}
+
 /// Whether the declarations mention `java.lang.Object` other than through the constructor that
 /// every class calls: a value, a parameter or a call of one of its methods.
 pub(super) fn uses_object(decls: &[Node], real: &HashSet<*const Value>) -> bool {
@@ -130,9 +150,12 @@ fn mentions_object(v: &Value, real: &HashSet<*const Value>) -> bool {
                 return false;
             }
             let names = ["javaType", "type", "owner"];
+            // An `Enum` is an `Object` too.
+            let is_enum = |t: &str| t == "java.lang.Enum" || t.starts_with("java.lang.Enum<");
             names.iter().any(|n| {
                 fields.get(*n).and_then(Value::as_str).is_some_and(|t| t.contains("java.lang.Object"))
-            }) || fields.values().any(mentions_object)
+            }) || fields.get("javaType").and_then(Value::as_str).is_some_and(is_enum)
+                || fields.values().any(mentions_object)
         }
         Value::Array(items) => items.iter().any(mentions_object),
         _ => false,
@@ -214,7 +237,12 @@ impl<'t> Lowering<'t> {
             let after = usize::from(comparable.is_some());
             let number =
                 number.then_some(NumberIndexes { decl: runtime + after, methods: equals + 2 + after });
-            self.object = Some(ObjectIndexes { decl, equals, hash_code: equals + 1, comparable, number });
+            let enumeration = decls
+                .iter()
+                .any(|d| uses_enum(d.0))
+                .then_some(runtime + after + usize::from(number.is_some()));
+            self.object =
+                Some(ObjectIndexes { decl, equals, hash_code: equals + 1, comparable, number, enumeration });
         }
     }
 
@@ -247,6 +275,7 @@ impl<'t> Lowering<'t> {
     /// `Object`'s abstract `equals` and `hashCode`, appended to the lowered methods, which must be
     /// exactly the declared ones; and the program's overrides of them.
     pub(super) fn object_methods(&self, methods: &mut Vec<Method>) -> Result<(), Error> {
+        self.inherited_implementations(methods);
         let Some(at) = self.object else { return Ok(()) };
         debug_assert_eq!(methods.len(), at.equals);
         let object = Type::class(OBJECT);
@@ -284,6 +313,38 @@ impl<'t> Lowering<'t> {
             }
         }
         self.bridges(methods)
+    }
+
+    /// The methods that a class inherits from a superclass that does not implement the interface
+    /// of the class whose method they implement (javac lists these with the class): they override
+    /// that method too, which gives the class its implementation.
+    fn inherited_implementations(&self, methods: &mut [Method]) {
+        let find = |owner: &str, name: &str, sig: &str| {
+            self.methods
+                .iter()
+                .position(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == sig)
+        };
+        for t in &self.types {
+            let Some(list) = t.node.get("symbol").and_then(|s| s.0["inherits"].as_array()) else { continue };
+            for entry in list {
+                let (Some(name), Some(owner), Some(sig)) =
+                    (entry["name"].as_str(), entry["owner"].as_str(), entry["type"].as_str())
+                else {
+                    continue;
+                };
+                let implemented = &entry["implements"];
+                let (Some(i_owner), Some(i_sig)) =
+                    (implemented["owner"].as_str(), implemented["type"].as_str())
+                else {
+                    continue;
+                };
+                if let (Some(m), Some(x)) = (find(owner, name, sig), find(i_owner, name, i_sig))
+                    && !methods[m].overrides.contains(&x)
+                {
+                    methods[m].overrides.push(x);
+                }
+            }
+        }
     }
 
     /// The type of `Object` and the runtime classes, appended to the program's types, which every
@@ -333,6 +394,14 @@ impl<'t> Lowering<'t> {
         if let Some(n) = at.number {
             debug_assert_eq!(types.len(), n.decl);
             types.push(decl(NUMBER, "", TypeKind::Interface, vec![at.decl]));
+        }
+        if let Some(e) = at.enumeration {
+            for t in types.iter_mut().filter(|t| t.kind == TypeKind::Enum) {
+                t.implements.push(e);
+            }
+            debug_assert_eq!(types.len(), e);
+            let implements = std::iter::once(at.decl).chain(at.comparable.map(|c| c.decl)).collect();
+            types.push(decl(ENUM, "", TypeKind::Interface, implements));
         }
         // The arrays that become `Object`s, each named after its type (`int[]`).
         for ty in self.object_arrays.borrow().iter() {
@@ -410,6 +479,8 @@ impl<'t> Lowering<'t> {
                 }
             }
         }
+        // The bridges written, by the method they call and the signature they have.
+        let mut written: Vec<(usize, usize)> = Vec::new();
         for &(i, o) in &wanted {
             methods[i].overrides.retain(|&x| x != o);
             // A method that this one overrides with the same signature has the bridge already.
@@ -418,7 +489,16 @@ impl<'t> Lowering<'t> {
             }) {
                 continue;
             }
+            // So has a method that overrides two methods with the same erased signature (an
+            // abstract class's `R evaluate(..)` and its interface's): one bridge overrides both.
+            if let Some(&(_, b)) =
+                written.iter().find(|&&(j, b)| j == i && Self::same_signature(&methods[b], &methods[o]))
+            {
+                methods[b].overrides.push(o);
+                continue;
+            }
             let bridge = self.bridge(&methods[i], i, &methods[o], o);
+            written.push((i, methods.len()));
             methods.push(bridge);
         }
         Ok(())
@@ -523,6 +603,46 @@ impl<'t> Lowering<'t> {
         })
     }
 
+    /// `super.m()` of `Object`'s `hashCode`, `equals` or `toString` in a class that overrides
+    /// it: the identity hash of `this`, identity, and `getClass().getName() + "@" +
+    /// Integer.toHexString(hashCode())`.
+    fn object_super_call(&self, node: Node<'t>, symbol: &Symbol, args: Vec<Expr>) -> Result<ExprKind, Error> {
+        let at = self.object.expect("`object_call` checked `Object`");
+        let this = self.this(node);
+        let pos = node.pos();
+        match symbol.name {
+            "hashCode" => Ok(ExprKind::Builtin(Builtin::Native(Native::IdentityHash), vec![this])),
+            "equals" => {
+                let this = self.convert(this, Type::class(OBJECT));
+                let other = args.into_iter().next().expect("`equals` has an argument");
+                let other = self.convert(other, Type::class(OBJECT));
+                Ok(ExprKind::Binary(BinOp::Eq, Box::new(this), Box::new(other)))
+            }
+            "toString" => {
+                let name = ExprKind::Builtin(Builtin::ClassName { simple: false }, vec![self.this(node)]);
+                let name = self.synth(name, pos, Type::String);
+                let at_sign = self.synth(ExprKind::Str("@".to_string()), pos, Type::String);
+                let hash = ExprKind::MethodCall {
+                    receiver: Box::new(this),
+                    name: "hashCode".to_string(),
+                    args: Vec::new(),
+                    resolved: Some(at.hash_code),
+                    is_super: false,
+                };
+                let hash = self.synth(hash, pos, Type::Int);
+                let hex = ExprKind::Builtin(Builtin::Bits(BitsOp::ToHexString, Type::Int), vec![hash]);
+                let hex = self.synth(hex, pos, Type::String);
+                let left = self.synth(
+                    ExprKind::Binary(BinOp::Add, Box::new(name), Box::new(at_sign)),
+                    pos,
+                    Type::String,
+                );
+                Ok(ExprKind::Binary(BinOp::Add, Box::new(left), Box::new(hex)))
+            }
+            name => unsupported(node, &format!("`super.{name}()` of `Object`")),
+        }
+    }
+
     /// A call of one of `Number`'s `NUMBER_METHODS`, on a value converted to `Number`.
     pub(super) fn number_call(
         &self,
@@ -561,7 +681,7 @@ impl<'t> Lowering<'t> {
         };
         let receiver = match receiver {
             Some(r) if r.kind() == "IDENTIFIER" && r.str("name") == "super" => {
-                return unsupported(node, &format!("`super.{}()` of `Object`", symbol.name));
+                return self.object_super_call(node, symbol, args);
             }
             Some(r) => self.expr(r)?,
             None => self.this(node),

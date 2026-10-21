@@ -18,8 +18,8 @@
 
 use super::Program;
 use super::reach::{
-    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, has_flag, live_branch, members, outside,
-    provided, replaced, runtime_arrays_call, symbol_type, text, untranslated,
+    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, created_by_name, has_flag, live_branch,
+    members, outside, provided, replaced, runtime_arrays_call, symbol_type, text, untranslated,
 };
 use crate::ast::runtime_native;
 use serde_json::{Value, json};
@@ -281,6 +281,9 @@ impl Census {
                 self.body(&node["condition"], scan);
                 self.body(branch, scan);
             }
+            // An object created from a class name translates (`reach::by_name`): only the name is
+            // code.
+            Value::Object(_) if let Some(name) = created_by_name(node) => self.body(name, scan),
             Value::Object(fields) => {
                 let kind = text(node, "kind");
                 let ty = text(node, "javaType");

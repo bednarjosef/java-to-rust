@@ -1227,6 +1227,11 @@ Decisions that change during the implementation are recorded here, milestone by 
   milestone gives them shared forms. The closure does not follow the type arguments of a generic
   class yet; a program that needs it fails in rustc with `Rc<..> cannot be sent between threads
   safely` (4.4).
+- **A closure type that threads may share** (a functional interface whose values are only
+  lambdas, `docs/closures-and-nested-classes.md` 4.2, reached through a capture, a field or a
+  static) is `Arc<dyn Fn(..) -> R + Send + Sync>` and its lambdas `Arc::new(move |..| ..)`; the
+  closure's captures are of shared types by the same type-based walk, so the closure is `Send`
+  and `Sync`. A closure type no thread reaches keeps its `Rc<dyn Fn>`, also in a threaded program.
 - **A `volatile` static is an ordinary `java::Atomic`** (acquire and release) until the volatile
   milestone gives it `SeqCst`; a `volatile` field of a shared object is read and written under
   the object's lock.

@@ -1501,6 +1501,36 @@ fn classes_with_one_name_in_two_packages() {
     );
 }
 
+#[test]
+fn objects_created_from_a_class_name_are_of_the_classes_that_code_names() {
+    let java = "package app;\n\
+        abstract class Shape { abstract String name(); }\n\
+        class Circle extends Shape { String name() { return \"circle\"; } }\n\
+        class Square extends Shape { String name() { return \"square\"; } }\n\
+        public class Main {\n\
+            static Shape make(String n) throws Exception {\n\
+                return (Shape) Class.forName(n).getDeclaredConstructor().newInstance();\n\
+            }\n\
+            public static void main(String[] a) throws Exception {\n\
+                System.out.println(make(a.length > 0 ? a[0] : \"app.Circle\").name());\n\
+            }\n\
+        }\n";
+    let dir = write_sources("by-name", &[("app/Main.java", java)]);
+    let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &[
+            "\"app.Circle\" => {",
+            "Rc::new(Circle::new());",
+            "java::throw_uncaught(format!(\"java.lang.ClassNotFoundException: {} is not a class of the translated program\"",
+        ],
+    );
+    // No code names `Square`, so no name can create one.
+    assert_lacks(&rust, &["Square", "square"]);
+}
+
 /// Writes Java files into a fresh directory under the test's temporary directory.
 fn write_sources(dir: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(dir);
@@ -2595,8 +2625,8 @@ fn survey_json_writes_the_census_to_the_file_given() {
 }
 
 #[test]
-fn an_enum_field_assigned_outside_its_constructor_is_rejected() {
-    let error = java_to_rust::translate(
+fn an_enum_field_assigned_outside_its_constructor_is_a_table() {
+    let rust = java_to_rust::translate(
         "public class A {
             enum Planet {
                 MERCURY(3.0);
@@ -2607,11 +2637,10 @@ fn an_enum_field_assigned_outside_its_constructor_is_rejected() {
             public static void main(String[] args) { Planet.MERCURY.grow(); }
         }",
     )
-    .expect_err("an enum field that changes is rejected");
-    assert!(
-        error.to_string().contains("assigning an enum field outside its constructor not supported yet"),
-        "{error}"
-    );
+    .expect("an enum field that changes is a table");
+    assert!(rust.contains("fn init_planet_constant(constant_ordinal: i32, mass: f64)"), "{rust}");
+    assert!(rust.contains("init_planet_constant(0, 3.0);"), "{rust}");
+    assert!(rust.contains("A_PLANET_MASS_OF_CONSTANTS"), "{rust}");
 }
 
 #[test]
@@ -3516,17 +3545,26 @@ fn a_try_with_resources_closes_each_resource_in_a_finally() {
         }",
     );
     assert_contains(&rust, &["r_failed", "add_suppressed"]);
-    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
-    let err = reject(
+    let rust = translate(
         "class A {
-            static class R implements AutoCloseable { public void close() {} }
+            static class R implements AutoCloseable { public void close() { System.out.println(2); } }
             public static void main(String[] args) {
                 R r = new R();
                 try (r) { System.out.println(1); }
             }
         }",
     );
-    assert!(err.contains("try-with-resources over an existing variable not supported yet"), "{err}");
+    assert_contains(&rust, &["r_resource", "r_resource_failed", "close()"]);
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
+    let err = reject(
+        "class A {
+            public static void main(String[] args) throws Exception {
+                AutoCloseable tick = new java.io.StringWriter();
+                try (tick) { System.out.println(2); }
+            }
+        }",
+    );
+    assert!(err.contains("not supported yet"), "{err}");
 }
 
 #[test]
@@ -3656,8 +3694,8 @@ fn pattern_variables_are_read_only_where_the_translation_binds_them() {
 }
 
 #[test]
-fn a_cast_of_a_value_that_may_be_null_to_an_enum_is_rejected() {
-    let err = java_to_rust::translate(
+fn a_cast_of_a_value_that_may_be_null_to_an_enum_ends_the_program_on_null() {
+    let rust = java_to_rust::translate(
         "interface S {}
         enum E implements S { X }
         class M {
@@ -3665,11 +3703,8 @@ fn a_cast_of_a_value_that_may_be_null_to_an_enum_is_rejected() {
             public static void main(String[] x) { E e = (E) pick(1); System.out.println(e); }
         }",
     )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("casting a value that may be null to an enum not supported yet"),
-        "{err}"
-    );
+    .unwrap();
+    assert!(rust.contains("java::null_enum("), "{rust}");
 }
 
 const OBJECTS: &str = "
@@ -3890,6 +3925,31 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
 }
 
 #[test]
+fn an_array_of_references_used_as_an_object_array_is_one_everywhere() {
+    let rust = translate(
+        "class V { int n; V(int n) { this.n = n; } }
+        public class Main {
+            static int count(Object[] xs) { return xs.length; }
+            public static void main(String[] args) {
+                V[] vs = { new V(1) };
+                Object[] mixed = { \"s\", vs[0] };
+                System.out.println(count(vs) + count(mixed) + vs[0].n);
+            }
+        }",
+    );
+    // `V[]` meets `Object[]`, so it is one: the same array is passed, and a read casts back.
+    assert_contains(
+        &rust,
+        &[
+            "fn count(xs: &[Object]) -> i32 {",
+            "let vs: Vec<Object> = vec![Object::V(Rc::new(V::new(1)))];",
+            "count(&vs)",
+            "java::cast(vs[0].as_v(), \"V\").n",
+        ],
+    );
+}
+
+#[test]
 fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
     let rust = translate(GENERICS);
     // The method with the substituted types keeps its own signature; a bridge with the erased
@@ -4070,4 +4130,11 @@ fn an_element_that_may_be_null_is_passed_as_the_receiver_that_it_is() {
         }",
     );
     assert_contains(&rust, &["PBox::start(java::non_null(boxes[i as usize].as_ref()));"]);
+}
+
+#[test]
+fn string_chars_needs_the_jdk_sources() {
+    let err = java_to_rust::translate("class A { public static void main(String[] a) { \"abc\".chars(); } }")
+        .expect_err("`String.chars` streams with the JDK's code");
+    assert!(err.to_string().contains("translate the program with the JDK's sources"), "{err}");
 }
