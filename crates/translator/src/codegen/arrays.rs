@@ -385,7 +385,7 @@ impl<'a> Gen<'a> {
             }
             Builtin::ArraysCopyOf => {
                 let len = self.value(&args[1], Type::Int).text;
-                let zero = zero_value(elem);
+                let zero = self.element_zero(elem);
                 Code::atom(format!("{}({handle}, {len}, {zero})", self.runtime("copy_of")))
             }
             _ => unreachable!("only the Arrays builtins are handled here"),
