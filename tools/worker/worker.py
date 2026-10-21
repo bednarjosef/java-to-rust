@@ -8,6 +8,7 @@ those back after every compaction and that keep it from finishing before its wor
 and `scripts/check.sh` passes (hook.py), and a compaction threshold under 100K tokens.
 
     tools/worker/worker.py start NAME BRIEF.md [--effort high] [--model MODEL] [--base REF]
+                                [--allow 'COMMAND *']...
     tools/worker/worker.py status            # every worker: state, commits, checklist, tokens
     tools/worker/worker.py usage [NAME]      # token usage per worker, in detail
     tools/worker/worker.py cost TRANSCRIPT...  # tokens and API-equivalent cost of any transcript
@@ -174,7 +175,7 @@ def cmd_start(args):
     settings_file = STATE / f"{name}.settings.json"
     settings_file.write_text(json.dumps(settings(name), indent=2))
     reply_to = args.reply_to or caller_session()
-    allow = TOOLS[:-1] + [f"Bash({c})" for c in COMMANDS] + [
+    allow = TOOLS[:-1] + [f"Bash({c})" for c in COMMANDS + args.allow] + [
         f"Edit(/{wt}/**)", f"Write(/{wt}/**)", f"Read(/{wt}/**)"]
     flags = [
         "--bg", "--name", f"{name}-worker", "--model", args.model, "--effort", args.effort,
@@ -368,6 +369,8 @@ def main():
     a.add_argument("--model", default=MODEL)
     a.add_argument("--base", default="HEAD")
     a.add_argument("--reply-to")
+    a.add_argument("--allow", action="append", default=[], metavar="COMMAND",
+                   help="one more Bash command pattern the worker may run, such as a build limiter")
     sub.add_parser("status")
     a = sub.add_parser("usage")
     a.add_argument("name", nargs="?")

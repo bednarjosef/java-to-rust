@@ -62,7 +62,8 @@ impl<'t> Lowering<'t> {
             ("toString", 1) if printable => Builtin::ArraysToString,
             ("fill", 2) if printable => Builtin::ArraysFill,
             ("sort", 1) if elem.is_numeric() => Builtin::ArraysSort,
-            ("copyOf", 2) if primitive && args[1].ty == Type::Int => Builtin::ArraysCopyOf,
+            // Of references too: the elements are copied as they are, and the new ones are null.
+            ("copyOf", 2) if crate::types::assignable(args[1].ty, Type::Int) => Builtin::ArraysCopyOf,
             _ => return self.java_arrays_call(node, name, args),
         };
         Ok(ExprKind::Builtin(builtin, args))
