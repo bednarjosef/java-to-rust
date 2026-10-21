@@ -35,7 +35,14 @@ pub(super) fn completes(stmt: &Stmt) -> bool {
         | Stmt::ContinueLabel(_)
         | Stmt::Yield(_) => false,
         Stmt::Expr(Expr {
-            kind: ExprKind::Builtin(Builtin::Exit | Builtin::NoObject { .. } | Builtin::UnknownClass, _),
+            kind:
+                ExprKind::Builtin(
+                    Builtin::Exit
+                    | Builtin::NoObject { .. }
+                    | Builtin::UnknownClass
+                    | Builtin::MissingResource,
+                    _,
+                ),
             ..
         }) => false,
         Stmt::Block(stmts) => completes_all(stmts),

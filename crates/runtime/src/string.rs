@@ -464,6 +464,40 @@ pub fn try_from_chars_range(chars: &[u16], offset: i32, count: i32) -> Result<St
     Ok(from_units(&chars[offset as usize..(offset + count) as usize]))
 }
 
+/// `new String(codePoints, offset, count)`, which throws for a range outside the array and for
+/// an invalid code point.
+pub fn from_code_points(points: &[i32], offset: i32, count: i32) -> String {
+    let range = range_of(points.len(), offset, count).unwrap_or_else(crate::uncaught);
+    let mut s = String::new();
+    for &point in &points[range] {
+        if !(0..=0x10FFFF).contains(&point) {
+            let message = format!("Not a valid Unicode code point: 0x{point:X}");
+            crate::throw("java.lang.IllegalArgumentException", &message);
+        }
+        // A lone surrogate becomes '?', as `from_units` makes it.
+        s.push(char::from_u32(point as u32).unwrap_or('?'));
+    }
+    s
+}
+
+/// `new String(ascii, hibyte, offset, count)`: each `char` is `hibyte`'s low byte over a byte.
+pub fn from_high_byte(bytes: &[i8], hibyte: i32, offset: i32, count: i32) -> String {
+    let range = range_of(bytes.len(), offset, count).unwrap_or_else(crate::uncaught);
+    let high = ((hibyte & 0xff) as u16) << 8;
+    let units: Vec<u16> = bytes[range].iter().map(|&b| high | u16::from(b as u8)).collect();
+    from_units(&units)
+}
+
+/// The elements `offset .. offset + count` of an array of length `len`, or the
+/// `StringIndexOutOfBoundsException` that a constructor of `String` throws for them.
+fn range_of(len: usize, offset: i32, count: i32) -> Result<std::ops::Range<usize>, crate::Exception> {
+    if offset < 0 || count < 0 || offset as i64 + count as i64 > len as i64 {
+        let message = format!("offset {offset}, count {count}, length {len}");
+        return Err(crate::Exception::new("java.lang.StringIndexOutOfBoundsException", message));
+    }
+    Ok(offset as usize..(offset + count) as usize)
+}
+
 /// `String.join(prefix, suffix, delimiter, elements, size)` of the JDK: the first `size` of
 /// `elements` joined by `delimiter`, between `prefix` and `suffix`.
 pub fn join_range<T: JoinItem>(

@@ -55,6 +55,25 @@ impl<'t> Lowering<'t> {
         })
     }
 
+    /// `Class.getPrimitiveClass("char")`, the native behind the boxes' `TYPE` fields, is the class
+    /// literal `char.class`.
+    pub(super) fn primitive_class(&self, node: Node<'t>) -> Result<ExprKind, Error> {
+        let name = node.list("arguments").next().filter(|n| n.kind() == "STRING_LITERAL");
+        let ty = match name.and_then(|n| n.0["value"].as_str()) {
+            Some("boolean") => Type::Boolean,
+            Some("byte") => Type::Byte,
+            Some("char") => Type::Char,
+            Some("short") => Type::Short,
+            Some("int") => Type::Int,
+            Some("long") => Type::Long,
+            Some("float") => Type::Float,
+            Some("double") => Type::Double,
+            Some("void") => Type::Void,
+            _ => return unsupported(node, "`Class.getPrimitiveClass` of this name"),
+        };
+        Ok(ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new()))
+    }
+
     /// The call `node`, `Class.forName("a.B", initialize, loader)` or `Class.forName("a.B")`,
     /// as `{ loader; init a.B; a.B.class }`, and an end of the program for a name of no class of the
     /// program; `None` when the name is not a string literal. The

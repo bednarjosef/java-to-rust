@@ -701,6 +701,10 @@ pub enum Builtin {
     /// is of no class of the translated program, and the program ends with a
     /// `ClassNotFoundException` that nothing catches.
     UnknownClass,
+    /// `[class, name]`: `Class.getResourceAsStream(name)`. A translated program has no resources
+    /// (the JDK's data files are not in its source), so the program ends with an `InternalError`
+    /// that nothing catches. `class` is the name of the class, a string literal.
+    MissingResource,
     /// `[]`: runs the static initialization of the class, as its first use would, for
     /// `Class.forName` with a name that the code spells out (`lower::by_name`).
     InitializeClass {
@@ -1029,6 +1033,7 @@ pub fn has_effects(e: &Expr) -> bool {
                         | Builtin::Exit
                         | Builtin::NoObject { .. }
                         | Builtin::UnknownClass
+                        | Builtin::MissingResource
                         | Builtin::InitializeClass { .. }
                         | Builtin::Native(_),
                     _

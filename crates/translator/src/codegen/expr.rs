@@ -674,6 +674,13 @@ impl<'a> Gen<'a> {
                 let message = "java.lang.ClassNotFoundException: {} is not a class of the translated program";
                 Code::atom(format!("{}(format!({message:?}, {}))", self.runtime("throw_uncaught"), name.text))
             }
+            Builtin::MissingResource => {
+                let (class, name) = (self.value(&args[0], Type::String), self.value(&args[1], Type::String));
+                let message =
+                    "java.lang.InternalError: the resource {} of {} is not part of the translated program";
+                let format = format!("format!({message:?}, {}, {})", name.text, class.text);
+                Code::atom(format!("{}({format})", self.runtime("throw_uncaught")))
+            }
             Builtin::MonitorEnter => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),

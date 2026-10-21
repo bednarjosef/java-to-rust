@@ -197,3 +197,42 @@ fn a_program_using_collections_has_only_reachable_units_attributed() {
     assert!(units < 200, "javac attributed {units} units:\n{stderr}");
     assert!(elapsed.as_secs() < 120, "the translation took {elapsed:?}:\n{stderr}");
 }
+
+/// A translated program has no resources: `Class.getResourceAsStream` ends it, naming the
+/// resource, as `Character.getName` does when it reads `uniName.dat`, a data file of the JDK that
+/// is generated when the JDK is built and is not in its sources.
+#[test]
+fn reading_a_resource_ends_the_program() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-resource");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    let java = "public class Main {
+    public static void main(String[] args) throws Exception {
+        java.io.InputStream in = Main.class.getResourceAsStream(\"table.dat\");
+        if (in != null) {
+            in.close();
+        }
+    }
+}
+";
+    std::fs::write(sources.join("Main.java"), java).unwrap();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
+    for wanted in ["is not part of the translated program", "\"table.dat\"", "String::from(\"Main\")"] {
+        assert!(rust.contains(wanted), "no {wanted} in the translation");
+    }
+}

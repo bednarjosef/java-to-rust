@@ -392,6 +392,10 @@ impl<'a> Gen<'a> {
                 // A field updated through a borrow of its own is a block.
                 self.line(&if text.starts_with("{ let ") { text } else { format!("{text};") });
             }
+            // No statement is a cast, so this one is erasure's, of a call whose result is not used
+            // (`map.put(k, v)` of a `Map<K, V>`), which javac does not check: a previous value of
+            // null is no null enum value.
+            ExprKind::Cast(_, value) => self.effect(value),
             // A chained builder call is made for its effect on the builder.
             ExprKind::Builtin(Builtin::Builder(op), args) if op.chains() => {
                 let code = self.builder_call(*op, args);

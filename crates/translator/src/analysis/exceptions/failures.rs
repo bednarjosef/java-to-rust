@@ -60,6 +60,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             // `valueOf(chars)` copies the whole array; only an offset and a count can be out of range.
             StringOp::FromChars if args.len() == 3 => Some("java.lang.StringIndexOutOfBoundsException"),
             StringOp::Repeat => Some("java.lang.IllegalArgumentException"),
+            // A range outside the array, an invalid code point.
+            StringOp::FromCodePoints | StringOp::FromHighByte => Some("?"),
             // A malformed pattern, a bad group in a replacement, an unknown charset.
             StringOp::ReplaceAll
             | StringOp::ReplaceFirst
@@ -127,6 +129,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             Some("java.lang.IllegalMonitorStateException")
         }
         Builtin::Native(Native::HoldsLock) => None,
+        // An object's identity hash (a null one is the receiver's `NullPointerException`).
+        Builtin::Native(Native::IdentityHash) => None,
         Builtin::CodePoint(CodePointOp::ToCharsInto) => Some("java.lang.IllegalArgumentException"),
         Builtin::CodePoint(
             CodePointOp::CharCount
@@ -270,6 +274,7 @@ pub(super) fn runtime_failures(
             | Builtin::MainArgs
             | Builtin::NoObject { .. }
             | Builtin::UnknownClass
+            | Builtin::MissingResource
             | Builtin::InitializeClass { .. }
             | Builtin::ClassName { .. }
             | Builtin::ClassLiteralName { .. }

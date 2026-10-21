@@ -42,7 +42,14 @@ pub(super) fn enter(class: &Class) -> Option<Scope> {
     if class.types.iter().all(|t| t.package.is_empty()) {
         return None;
     }
-    let packages = class.types.iter().map(|t| (t.name.clone(), t.package.clone())).collect();
+    // A runtime value's class is the runtime's, whatever its name: the JDK's `Character`, which
+    // is translated for its static members, is the box's class too.
+    let packages = class
+        .types
+        .iter()
+        .filter(|t| t.kind != TypeKind::Runtime)
+        .map(|t| (t.name.clone(), t.package.clone()))
+        .collect();
     CONTEXT.with_borrow_mut(|c| *c = Some(Context { packages, current: None }));
     Some(Scope)
 }
