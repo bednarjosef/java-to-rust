@@ -34,5 +34,11 @@ public class SystemProperties {
 
         // The default of a key that is set is not used.
         System.out.println("set, default ignored: " + quoted(System.getProperty("file.separator", "?")));
+
+        // `Boolean.getBoolean` is true only for a property set to "true", which only `-D` does.
+        String flag = "jdk.compat.DecimalFormat";
+        System.out.println("getBoolean: " + Boolean.getBoolean("no.such.flag") + " "
+                + Boolean.getBoolean(flag) + " " + Boolean.getBoolean("os.name") + " "
+                + Boolean.getBoolean(null) + " " + Boolean.getBoolean(quoted(flag)));
     }
 }

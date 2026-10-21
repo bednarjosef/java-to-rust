@@ -49,14 +49,25 @@ impl<'t> Lowering<'t> {
         symbol: &Symbol<'t>,
         args: &mut [Expr],
     ) -> Result<Option<ExprKind>, Error> {
-        // `Boolean.getBoolean(key)`, true when the property is `"true"`: false for an unset key.
+        // `Boolean.getBoolean(key)`, true when the property is `"true"`. The JVM sets no property
+        // to `"true"` (`java -XshowSettings:properties` lists none), only `-D` on the command line
+        // does, which a translated program has no equivalent of, and the translation has no
+        // `System.setProperty`: so it is false for every key, null included, as for a program run
+        // without options. `jdk.compat.DecimalFormat`, which `DigitList` reads, is such a key. A
+        // key whose evaluation has effects is still evaluated.
         if (symbol.owner, symbol.name) == ("java.lang.Boolean", "getBoolean") {
-            return match args.first().map(|arg| &arg.kind) {
-                Some(ExprKind::Str(key)) if UNSET_KEYS.contains(&key.as_str()) => {
-                    Ok(Some(ExprKind::Bool(false)))
-                }
-                _ => unsupported(node, "`Boolean.getBoolean` of a key that may be set"),
-            };
+            let Some(key) = args.first_mut() else { return unsupported(node, "this `Boolean.getBoolean`") };
+            if !has_effects(key) {
+                return Ok(Some(ExprKind::Bool(false)));
+            }
+            let pos = node.pos();
+            let key = std::mem::replace(key, self.synth(ExprKind::Null, pos, Type::String));
+            let block =
+                vec![Stmt::Expr(key), Stmt::Yield(self.synth(ExprKind::Bool(false), pos, Type::Boolean))];
+            return Ok(Some(ExprKind::Switch {
+                selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+                cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+            }));
         }
         if (symbol.owner, symbol.name) != ("java.lang.System", "getProperty") {
             return Ok(None);
