@@ -17,6 +17,9 @@ mod character_classes;
 mod character_tables;
 mod charset;
 mod code_point;
+mod code_point_case_tables;
+mod code_point_chars;
+mod code_point_tables;
 mod exact;
 mod exception;
 mod fd;
@@ -45,6 +48,7 @@ pub use code_point::{
     char_count, code_point_string, high_surrogate, is_bmp_code_point, is_supplementary_code_point,
     is_valid_code_point, low_surrogate, to_chars, to_code_point,
 };
+pub use code_point_chars::*;
 pub use exact::*;
 pub use exception::*;
 pub use fd::*;

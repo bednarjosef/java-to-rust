@@ -755,6 +755,7 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         Builtin::Native(Native::Math { name: "clamp", .. }) => Some("java.lang.IllegalArgumentException"),
         // The others are functions on numbers, which never throw.
         Builtin::Native(Native::Math { .. }) => None,
+        Builtin::CodePoint(CodePointOp::ToCharsInto) => Some("java.lang.IllegalArgumentException"),
         Builtin::CodePoint(
             CodePointOp::CharCount
             | CodePointOp::ToCodePoint
@@ -762,7 +763,19 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | CodePointOp::LowSurrogate
             | CodePointOp::IsValid
             | CodePointOp::IsBmp
-            | CodePointOp::IsSupplementary,
+            | CodePointOp::IsSupplementary
+            | CodePointOp::IsLetter
+            | CodePointOp::IsDigit
+            | CodePointOp::IsLetterOrDigit
+            | CodePointOp::IsWhitespace
+            | CodePointOp::IsSpaceChar
+            | CodePointOp::IsUpperCase
+            | CodePointOp::IsLowerCase
+            | CodePointOp::IsAlphabetic
+            | CodePointOp::ToUpperCase
+            | CodePointOp::ToLowerCase
+            | CodePointOp::NumericValue
+            | CodePointOp::Digit,
         ) => None,
         _ => Some("?"),
     }
@@ -907,6 +920,10 @@ fn runtime_failures(
                 }
             }
             _ => {
+                // Writing past the end of the array throws, as `Character.toChars` does.
+                if matches!(builtin, Builtin::CodePoint(CodePointOp::ToCharsInto)) {
+                    out.push(("java.lang.ArrayIndexOutOfBoundsException", "this call of the library", true, x.id));
+                }
                 // A null argument throws, except where the method takes null (an `equals`, the
                 // elements of `join`, the text of `Arrays.toString`).
                 let takes_null = matches!(
@@ -931,6 +948,7 @@ fn runtime_failures(
                         builtin,
                         Builtin::String(StringOp::Substring | StringOp::FromChars)
                             | Builtin::Bits(BitsOp::ParseRadix, _)
+                            | Builtin::CodePoint(CodePointOp::ToCharsInto)
                             | Builtin::EnumValueOf
                     );
                     out.push((failure, "this call of the library", checked, x.id));
