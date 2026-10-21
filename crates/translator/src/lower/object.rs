@@ -275,6 +275,7 @@ impl<'t> Lowering<'t> {
     /// `Object`'s abstract `equals` and `hashCode`, appended to the lowered methods, which must be
     /// exactly the declared ones; and the program's overrides of them.
     pub(super) fn object_methods(&self, methods: &mut Vec<Method>) -> Result<(), Error> {
+        self.inherited_implementations(methods);
         let Some(at) = self.object else { return Ok(()) };
         debug_assert_eq!(methods.len(), at.equals);
         let object = Type::class(OBJECT);
@@ -312,6 +313,38 @@ impl<'t> Lowering<'t> {
             }
         }
         self.bridges(methods)
+    }
+
+    /// The methods that a class inherits from a superclass that does not implement the interface
+    /// of the class whose method they implement (javac lists these with the class): they override
+    /// that method too, which gives the class its implementation.
+    fn inherited_implementations(&self, methods: &mut [Method]) {
+        let find = |owner: &str, name: &str, sig: &str| {
+            self.methods
+                .iter()
+                .position(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == sig)
+        };
+        for t in &self.types {
+            let Some(list) = t.node.get("symbol").and_then(|s| s.0["inherits"].as_array()) else { continue };
+            for entry in list {
+                let (Some(name), Some(owner), Some(sig)) =
+                    (entry["name"].as_str(), entry["owner"].as_str(), entry["type"].as_str())
+                else {
+                    continue;
+                };
+                let implemented = &entry["implements"];
+                let (Some(i_owner), Some(i_sig)) =
+                    (implemented["owner"].as_str(), implemented["type"].as_str())
+                else {
+                    continue;
+                };
+                if let (Some(m), Some(x)) = (find(owner, name, sig), find(i_owner, name, i_sig))
+                    && !methods[m].overrides.contains(&x)
+                {
+                    methods[m].overrides.push(x);
+                }
+            }
+        }
     }
 
     /// The type of `Object` and the runtime classes, appended to the program's types, which every
@@ -446,6 +479,8 @@ impl<'t> Lowering<'t> {
                 }
             }
         }
+        // The bridges written, by the method they call and the signature they have.
+        let mut written: Vec<(usize, usize)> = Vec::new();
         for &(i, o) in &wanted {
             methods[i].overrides.retain(|&x| x != o);
             // A method that this one overrides with the same signature has the bridge already.
@@ -454,7 +489,16 @@ impl<'t> Lowering<'t> {
             }) {
                 continue;
             }
+            // So has a method that overrides two methods with the same erased signature (an
+            // abstract class's `R evaluate(..)` and its interface's): one bridge overrides both.
+            if let Some(&(_, b)) =
+                written.iter().find(|&&(j, b)| j == i && Self::same_signature(&methods[b], &methods[o]))
+            {
+                methods[b].overrides.push(o);
+                continue;
+            }
             let bridge = self.bridge(&methods[i], i, &methods[o], o);
+            written.push((i, methods.len()));
             methods.push(bridge);
         }
         Ok(())

@@ -48,13 +48,25 @@ pub(super) enum Owner {
 }
 
 /// Lowers with every candidate, then without those that fail, until none does; an error with
-/// real generics is retried with all of them erased.
+/// real generics is retried with all of them erased. A lowering that finds arrays that meet an
+/// `Object[]` is retried with them as `Object[]`s first (see `covariant`).
 pub(super) fn retry<E>(
-    mut run: impl FnMut(Option<&Real>) -> Result<(Class, Real, Real), E>,
+    mut run: impl FnMut(Option<&Real>, &super::covariant::Covariant) -> Result<(Class, Real, Real), E>,
 ) -> Result<Class, E> {
     let mut real: Option<Real> = None;
+    let mut covariant = super::covariant::Covariant::default();
+    let mut attempt = 0;
     loop {
-        match run(real.as_ref()) {
+        attempt += 1;
+        let result =
+            crate::timings::phase(&format!("lowering attempt {attempt}"), || run(real.as_ref(), &covariant));
+        let noted: Vec<Type> =
+            covariant.noted.take().into_iter().filter(|ty| !covariant.known.contains(ty)).collect();
+        if !noted.is_empty() {
+            covariant.known.extend(noted);
+            continue;
+        }
+        match result {
             Ok((class, _, failed)) if failed.is_empty() => return Ok(class),
             Ok((_, used, failed)) => real = Some(used.without(&failed)),
             Err(e) if real.as_ref().is_some_and(Real::is_empty) => return Err(e),

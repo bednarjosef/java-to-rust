@@ -87,8 +87,7 @@ The test programs come from:
   or `Function.andThen`, translated whole with the sources of `java.base` by a test of their own
   (`tests/whole_program.rs`). The JDK's sources cannot be in the repository, so the test runs
   only when `JAVA_BASE_SOURCES` names their root (`JAVA_BASE_SOURCES=… cargo test --test
-  whole_program`) and otherwise says it skipped; at about a minute per program, it runs at merges
-  rather than in every check;
+  whole_program`) and otherwise says it skipped; it runs at merges rather than in every check;
 - `tools/fuzz`: random programs generated from a seed (`fuzz.py`, with `fuzz_strings.py` for
   strings and builders under `--strings`, `fuzz_arrays.py` for arrays of up to three dimensions,
   their aliases, rows, loops and helper methods under `--arrays`, and `fuzz_objects.py` for
@@ -168,7 +167,11 @@ A small subset, end to end:
   without fields, `PlainObject`, equal only to itself and printed as `java.lang.Object@..`, as the
   JDK's lock objects and placeholder values (`HashSet`'s `PRESENT`) need. An array becomes an
   `Object` too (`Object::IntArray(..)`), shared and compared by identity, so a `Deque<int[]>` holds
-  its arrays. `==` between two `Object`s that may both be strings or boxes (whose identity the
+  its arrays. An array of references that the program uses as an `Object[]` (a `Version[]` passed
+  to `toArray(T[])` or to a method that takes `Object[]`) is an `Object[]` throughout, the same
+  array on both sides, but without its element class: storing an object of another class in it
+  does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s. Arrays of strings
+  are not converted this way yet. `==` between two `Object`s that may both be strings or boxes (whose identity the
   translation does not keep, except in the shortcut `a == b || a.equals(b)`) is rejected. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
@@ -233,12 +236,14 @@ A small subset, end to end:
   sees (a division by zero, an array index out of bounds, `charAt` or `substring` out of range, a
   malformed number) is the standard exception Java throws, with Java's message; elsewhere it ends
   the program as before. try-with-resources closes the program's own resources (a new object of
-  the program's class) in the reverse order, before its `catch` clauses and `finally`; a `close`
+  the program's class, or an existing variable of it, `try (r)`; a null one is not closed) in the
+  reverse order, before its `catch` clauses and `finally`; a `close`
   that throws after the body threw is added to that exception as suppressed, and `getSuppressed`
   returns it. A `throw` of a value that may be null throws `NullPointerException`, and a `yield` or
   a constructor's `return` through a `finally` runs the `finally` first. A static initializer or a
   static field initializer that throws ends an uncaught program with
-  `ExceptionInInitializerError`. Rejected for now, by name: other try-with-resources, catching or
+  `ExceptionInInitializerError`. Rejected for now, by name: try-with-resources over a library type
+  (an `AutoCloseable` variable or lambda), catching or
   letting a `finally` see a null dereference, a negative array size, a failed cast or a failure of
   the library other than these, a `toString`, an instance field initializer or a constructor of an
   exception or an enum that throws something a caller catches, and a `try` or `catch` that observes
@@ -437,15 +442,16 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   `codegen/java_arrays.rs`, `runtime/src/java_arrays.rs`): `equals` and `hashCode` (Java's exact
   formula, bit equality for floats, null arrays and null elements), `sort` for every primitive
   type and `String` (Java's order: `-0.0` before `0.0`, NaN last, UTF-16 order for strings), whole
-  or by range with Java's range checks, `fill` by range, `copyOfRange` on primitives,
+  or by range with Java's range checks, `fill` by range, `copyOfRange` on any array,
   `binarySearch` in both forms (`-(insertion point) - 1` when absent), and `deepToString` on
   arrays of primitive or `String` rows. `a.clone()` is a shallow copy; rows of a 2-D array are
   shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`.
-  `copyOf` works on any array, and `copyOf(a, n, type)` is the same copy (its class is dropped).
+  `copyOf` works on any array, and `copyOf(a, n, type)` and `copyOfRange(a, from, to, type)` are
+  the same copies as without the class, which is dropped.
   Translated with the JDK's sources, every other call of `Arrays` (a sort with a `Comparator`, a
   sort of objects, `asList`) is a call of the translated `java/util/Arrays.java`, and
   reachability follows only those (`lower::runtime_arrays_call`). Not yet without the JDK:
-  `copyOfRange` on `String` arrays, `equals(null, b)`, `asList` and `stream`.
+  `equals(null, b)`, `asList` and `stream`.
 - Objects (`analysis/objects.rs`, `analysis/owned.rs`, `analysis/borrowing.rs`). The faithful form
   of an object is `Rc<RefCell<C>>`, because Java references are shared and mutable. A class whose
   objects never change after construction is shared as `Rc<C>`: its fields are written only by its
@@ -562,7 +568,9 @@ them in one run, with the source roots as its source path, and a reachability pa
 (`program/reach.rs`) starts at `main` and follows every resolved call, `new`, field access and
 type, so only the classes, methods, constructors and fields that `main` can reach are lowered and
 translated. Library roots (`--library`, meant for the JDK's own sources) are only on the source
-path: javac reads a file from them when the program uses one of its classes. Packages become
+path: javac attributes a file from them only when reachability asks for one of its classes, a
+few dozen of the JDK's units where javac by itself would attribute thousands (see "Translating
+whole programs" in docs/performance.md). Packages become
 nested modules in one output file (`com.example.util` is `mod com { pub(crate) mod example
 { pub(crate) mod util { .. } } }`); a class of another package is named by its path from the crate
 root, such as `crate::com::example::util::Counter::new(..)`, and items in packages are

@@ -166,10 +166,14 @@ impl<'t> Lowering<'t> {
     pub(super) fn convert_args(&self, index: Option<usize>, args: Vec<Expr>) -> Result<Vec<Expr>, Error> {
         let Some(index) = index else { return Ok(args) };
         let types = self.param_types(index)?;
-        // Arrays do not convert: a `String[]` is not an `Object[]` in the translation.
+        for (a, &ty) in args.iter().zip(&types) {
+            self.fail_on_covariant(a.ty, ty);
+        }
+        // Arrays do not convert: a `Version[]` is an `Object[]` in the translation only when it is
+        // covariant (see `covariant`).
         if let Some(arg) = args.iter().zip(&types).find_map(|(a, &ty)| {
             let mismatch = matches!(a.ty, Type::Array(_)) && matches!(ty, Type::Array(_)) && a.ty != ty;
-            (mismatch && !self.has_param(ty)).then_some(a)
+            (mismatch && !self.has_param(ty) && !self.meets_object_array(a.ty, ty)).then_some(a)
         }) {
             return error(
                 arg.pos,
@@ -191,6 +195,9 @@ impl<'t> Lowering<'t> {
         // A Rust generic's type variable takes any value as it is.
         if self.param_owner(to).is_some() {
             return e;
+        }
+        if e.ty != to {
+            self.meets_object_array(e.ty, to);
         }
         let differs = match (e.ty, to) {
             (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE || b == NUMBER => {
