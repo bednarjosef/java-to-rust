@@ -225,6 +225,9 @@ struct Lowering<'t> {
     /// The `new` expressions, by address, with the captures of the created class that are
     /// captures of the creating class there (see `captures`).
     capture_sites: std::collections::HashSet<(*const Value, String)>,
+    /// The member classes of local and anonymous classes, each with its outer class, by index:
+    /// they are named after that class (see `inner::name_nested`).
+    member_outers: Vec<(usize, usize)>,
 }
 
 impl<'t> Lowering<'t> {

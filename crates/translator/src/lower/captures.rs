@@ -402,11 +402,15 @@ impl<'t> Walk<'_, 't> {
         }
     }
 
-    /// The code declares or creates an object of the nested class `class` at `site`: its
-    /// captures that are not locals here are captured here too, and the instances it needs.
-    fn uses_class(&mut self, class: usize, site: Option<Node<'t>>, declared_here: bool) -> Result<(), Error> {
-        let l = self.lowering;
-        let Some(nested) = l.nesting(class) else { return Ok(()) };
+    /// The captures of the nested class `class` that the code at `site` passes on: those that are
+    /// not locals there are captured by the code's class too.
+    fn uses_captures(
+        &mut self,
+        class: usize,
+        site: Option<Node<'t>>,
+        declared_here: bool,
+    ) -> Result<(), Error> {
+        let Some(nested) = self.lowering.nesting(class) else { return Ok(()) };
         for c in &nested.captures {
             if !self.in_scope(c.name) {
                 self.free(c.name, c.node);
@@ -420,6 +424,15 @@ impl<'t> Walk<'_, 't> {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// The code declares or creates an object of the nested class `class` at `site`: its
+    /// captures that are not locals here are captured here too, and the instances it needs.
+    fn uses_class(&mut self, class: usize, site: Option<Node<'t>>, declared_here: bool) -> Result<(), Error> {
+        let l = self.lowering;
+        let Some(nested) = l.nesting(class) else { return Ok(()) };
+        self.uses_captures(class, site, declared_here)?;
         if declared_here {
             // Declared in this code: its enclosing instance is this class's object, and what it
             // needs beyond that is needed here.
@@ -509,6 +522,8 @@ impl<'t> Walk<'_, 't> {
                         if nested.outer && !explicit {
                             self.need(nested.enclosing);
                         }
+                        // A member class of a local class captures what that class does.
+                        self.uses_captures(class, Some(node), declared_here)?;
                     } else {
                         self.uses_class(class, Some(node), declared_here)?;
                     }

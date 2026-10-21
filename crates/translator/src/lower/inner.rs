@@ -70,9 +70,11 @@ pub(super) const OUTER: &str = "outer";
 impl<'t> Lowering<'t> {
     /// Declares the inner (non-static member) class `member` of class `outer`.
     pub(super) fn declare_inner(&mut self, outer: usize, member: Node<'t>) -> Result<(), Error> {
-        let name = format!("{}.{}", self.types[outer].javac, member.str("simpleName"));
+        // A class in a local class has javac's binary name, with `$` before its simple name.
+        let separator = if self.types[outer].javac.contains('$') { '$' } else { '.' };
+        let javac = format!("{}{separator}{}", self.types[outer].javac, member.str("simpleName"));
         let nested = self.nested(NestKind::Inner, outer, None, true, None);
-        self.types.push(TypeInfo { name: name.clone(), javac: name, node: member, nested: Some(nested) });
+        self.types.push(TypeInfo { name: javac.clone(), javac, node: member, nested: Some(nested) });
         self.declare_members(self.types.len() - 1)
     }
 
@@ -133,6 +135,12 @@ impl<'t> Lowering<'t> {
         // A local class's name can say the name of the class it is in, which may be hoisted.
         self.name_hoisted();
         for t in 0..self.types.len() {
+            // A member of a local or anonymous class is declared after it, so its name is final.
+            if let Some(&(_, outer)) = self.member_outers.iter().find(|(member, _)| *member == t) {
+                self.types[t].name =
+                    format!("{}.{}", self.types[outer].name, self.types[t].node.str("simpleName"));
+                continue;
+            }
             let Some(nested) = &self.types[t].nested else { continue };
             let place = self.place_name(nested);
             let base = match nested.kind {

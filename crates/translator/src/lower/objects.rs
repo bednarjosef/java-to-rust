@@ -63,6 +63,7 @@ impl<'t> Lowering<'t> {
             lambdas: Vec::new(),
             capture_refs: Default::default(),
             capture_sites: Default::default(),
+            member_outers: Vec::new(),
         }
     }
 
@@ -111,7 +112,13 @@ impl<'t> Lowering<'t> {
                 }
                 "EMPTY_STATEMENT" => {}
                 "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
-                    return unsupported(member, "member classes of local and anonymous classes");
+                    // Named after its outer class once that is named (see `inner::name_nested`).
+                    self.member_outers.push((self.types.len(), index));
+                    if member.kind() == "CLASS" && !member.has_flag("STATIC") {
+                        self.declare_inner(index, member)?;
+                    } else {
+                        self.declare_type(member, Some(&name))?;
+                    }
                 }
                 "ENUM" | "INTERFACE" | "RECORD" => self.declare_type(member, Some(&name))?,
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
