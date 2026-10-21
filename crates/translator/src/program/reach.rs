@@ -333,6 +333,30 @@ pub fn provided(class: &str) -> bool {
     RUNTIME_CLASSES.contains(&class) || crate::lower::is_standard(class)
 }
 
+/// The array `a` and the length `n` of `Array.newInstance(a.getClass().getComponentType(), n)`,
+/// the new array of `a`'s own class that the JDK's collections make in `toArray(T[])` and its
+/// sorts make for their work (see `lower::arrays::component_array`): it reaches what `a` and `n`
+/// do, and not `java.lang.reflect.Array` or `Class`.
+pub fn component_array(node: &Value) -> Option<(&Value, &Value)> {
+    let call = |v: &Value, owner: &str, name: &str| {
+        text(v, "kind") == "METHOD_INVOCATION"
+            && text(&v["symbol"], "owner") == owner
+            && text(&v["symbol"], "name") == name
+            && v["methodSelect"]["kind"] == "MEMBER_SELECT"
+    };
+    if !call(node, "java.lang.reflect.Array", "newInstance") {
+        return None;
+    }
+    let [component, length] = &node["arguments"].as_array()?[..] else { return None };
+    let class = &component["methodSelect"]["expression"];
+    if !call(component, "java.lang.Class", "getComponentType") || !call(class, "java.lang.Object", "getClass")
+    {
+        return None;
+    }
+    let array = &class["methodSelect"]["expression"];
+    text(array, "javaType").ends_with("[]").then_some((array, length))
+}
+
 /// Whether the node is a call of `java.util.Arrays` that the runtime does rather than the JDK's
 /// source, such as `Arrays.sort` of an `int[]`.
 pub fn runtime_arrays_call(node: &Value) -> bool {
@@ -344,10 +368,37 @@ pub fn runtime_arrays_call(node: &Value) -> bool {
     }
 }
 
-/// The JDK method that `String.chars()` runs (see `lower::strings`): it streams the string's
-/// UTF-16 code units, as an `int[]`.
-pub const STRING_CHARS: (&str, &str, &str) =
-    ("java.util.Arrays", "stream", "(int[])java.util.stream.IntStream");
+/// A method of the JDK, by class, name and javac's type of it.
+pub type JdkMethod = (&'static str, &'static str, &'static str);
+
+/// The methods of `String` that stream with the JDK's methods (see `lower::strings`), and those
+/// methods, each called on what the one before returns. `chars()` streams the string's UTF-16 code
+/// units as an `int[]`. `lines()` streams its lines, an `Object[]` of strings, through an iterator,
+/// so that the stream's size is unknown, as with the JDK's own spliterator.
+pub const STRING_STREAMS: [(&str, &[JdkMethod]); 2] = [
+    ("chars", &[("java.util.Arrays", "stream", "(int[])java.util.stream.IntStream")]),
+    (
+        "lines",
+        &[
+            ("java.util.Spliterators", "spliterator", "<T>(java.lang.Object[],int)java.util.Spliterator<T>"),
+            (
+                "java.util.Spliterators",
+                "iterator",
+                "<T>(java.util.Spliterator<? extends T>)java.util.Iterator<T>",
+            ),
+            (
+                "java.util.Spliterators",
+                "spliteratorUnknownSize",
+                "<T>(java.util.Iterator<? extends T>,int)java.util.Spliterator<T>",
+            ),
+            (
+                "java.util.stream.StreamSupport",
+                "stream",
+                "<T>(java.util.Spliterator<T>,boolean)java.util.stream.Stream<T>",
+            ),
+        ],
+    ),
+];
 
 /// The methods that a for-each over an `Iterable` calls.
 pub const ITERATION: &[(&str, &str, &str)] = &[
@@ -700,6 +751,10 @@ impl<'t> Walk<'t> {
             Value::Object(_) if let Some(branch) = live_branch(value, self.sequential) => {
                 self.scan(branch);
             }
+            Value::Object(_) if let Some((array, length)) = component_array(value) => {
+                self.scan(array);
+                self.scan(length);
+            }
             // A call of `java.util.Arrays` that the runtime does (`lower::runtime_arrays_call`)
             // reaches only what its arguments do.
             Value::Object(_) if runtime_arrays_call(value) => self.scan(&value["arguments"]),
@@ -764,9 +819,13 @@ impl<'t> Walk<'t> {
     fn symbol(&mut self, symbol: &Value) {
         let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
         match text(symbol, "kind") {
-            "METHOD" if owner == "java.lang.String" && name == "chars" => {
-                let (class, method, signature) = STRING_CHARS;
-                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            "METHOD"
+                if owner == "java.lang.String"
+                    && let Some((_, methods)) = STRING_STREAMS.iter().find(|(m, _)| *m == name) =>
+            {
+                for (class, method, signature) in *methods {
+                    self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
+                }
             }
             "METHOD" | "CONSTRUCTOR" => {
                 self.stub_method(symbol);
@@ -970,6 +1029,29 @@ mod tests {
         assert!(reach.methods.contains(&method("Build", "run")), "{reach:?}");
         assert!(reach.methods.contains(&method("Build", "again")), "{reach:?}");
         assert!(!reach.classes.contains("Restore"), "{reach:?}");
+    }
+
+    #[test]
+    fn a_new_array_of_another_arrays_class_does_not_reach_reflection() {
+        let select = |expression: Value, owner: &str, name: &str| {
+            json!({"kind": "METHOD_INVOCATION",
+                "symbol": {"kind": "METHOD", "owner": owner, "name": name, "type": "()void"},
+                "methodSelect": {"kind": "MEMBER_SELECT", "expression": expression}, "arguments": []})
+        };
+        let array = json!({"kind": "IDENTIFIER", "javaType": "java.lang.Object[]"});
+        let component =
+            select(select(array, "java.lang.Object", "getClass"), "java.lang.Class", "getComponentType");
+        let mut make = select(json!({"kind": "IDENTIFIER"}), "java.lang.reflect.Array", "newInstance");
+        make["arguments"] = json!([component, call("Size", "run")["expression"]]);
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![json!({"kind": "EXPRESSION_STATEMENT", "expression": make})])]),
+            class("java.lang.reflect.Array", &[("newInstance", vec![call("Native", "run")])]),
+            class("Native", &[("run", vec![])]),
+            class("Size", &[("run", vec![])]),
+        ]});
+        let reach = reach(&[&unit], "Main").unwrap();
+        assert!(!reach.classes.contains("Native"), "{reach:?}");
+        assert!(reach.classes.contains("Size"), "{reach:?}");
     }
 
     #[test]

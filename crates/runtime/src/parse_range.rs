@@ -159,3 +159,51 @@ fn exceeds(units: &[u16], kind: &str) -> Exception {
     let text = String::from_utf16_lossy(units);
     Exception::new(NUMBER_FORMAT, format!("String value {text} exceeds range of unsigned {kind}."))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message<T: std::fmt::Debug>(r: Result<T, Exception>) -> String {
+        r.unwrap_err().to_string()
+    }
+
+    #[test]
+    fn range_reads_the_indices_it_is_given() {
+        assert_eq!(try_parse_range::<i32>(Some("x-12y"), 1, 4, 10, 32), Ok(-12));
+        assert_eq!(try_parse_range::<i64>(Some("9223372036854775807"), 0, 19, 10, 64), Ok(i64::MAX));
+        assert_eq!(try_parse_range::<i32>(Some("-2147483648"), 0, 11, 10, 32), Ok(i32::MIN));
+        assert_eq!(
+            message(try_parse_range::<i32>(Some("abc"), 2, 1, 10, 32)),
+            "java.lang.IndexOutOfBoundsException: Range [2, 1) out of bounds for length 3"
+        );
+        assert_eq!(
+            message(try_parse_range::<i32>(Some("abc"), 0, 4, 10, 32)),
+            "java.lang.IndexOutOfBoundsException: Range [0, 4) out of bounds for length 3"
+        );
+        assert_eq!(
+            message(try_parse_range::<i32>(Some("a12"), 0, 3, 10, 32)),
+            "java.lang.NumberFormatException: Error at index 0 in: \"a12\""
+        );
+        assert_eq!(
+            message(try_parse_range::<i32>(Some("12x"), 0, 3, 10, 32)),
+            "java.lang.NumberFormatException: Error at index 2 in: \"12x\""
+        );
+        assert_eq!(
+            message(try_parse_range::<i32>(Some("2147483648"), 0, 10, 10, 32)),
+            "java.lang.NumberFormatException: Error at index 9 in: \"2147483648\""
+        );
+        assert_eq!(
+            message(try_parse_range::<i32>(Some("-"), 0, 1, 10, 32)),
+            "java.lang.NumberFormatException: Error at index 1 in: \"-\""
+        );
+        assert_eq!(
+            message(try_parse_range::<i32>(Some("7"), 0, 0, 10, 32)),
+            "java.lang.NumberFormatException: For input string: \"\""
+        );
+        assert_eq!(
+            message(try_parse_range::<i32>(Some("7"), 0, 1, 1, 32)),
+            "java.lang.NumberFormatException: radix 1 less than Character.MIN_RADIX"
+        );
+    }
+}

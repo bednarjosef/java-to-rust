@@ -67,7 +67,8 @@ impl<'t> Lowering<'t> {
         }
         // `Object` may also hold a string, a box or an array.
         let target = matches!(ty, Type::Class(..) | Type::Enum(_))
-            || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_) | Type::Array(_)));
+            || (Self::is_object(value.ty)
+                && matches!(ty, Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_)));
         if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
             return unsupported(node, "instanceof on these types");
         }
