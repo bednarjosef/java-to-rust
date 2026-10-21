@@ -1007,7 +1007,7 @@ impl<'a> Gen<'a> {
             let args = self.call_args(index, args).join(", ");
             let obj = self.object(receiver);
             let path = self.method_path(receiver, index);
-            return Code::atom(format!("{obj}.{path}{}({args})", self.fn_names[index]));
+            return Code::atom(format!("{obj}.{path}{}({args})", self.call_name(index)));
         }
         let borrow = if mutating { ".borrow_mut()" } else { ".borrow()" };
         let Type::Class(class, _) = receiver.ty else { unreachable!("a receiver has a class type") };
@@ -1019,8 +1019,14 @@ impl<'a> Gen<'a> {
         let obj = self.object(receiver);
         let args = self.call_args(index, args).join(", ");
         let path = self.method_path(receiver, index);
-        let call = format!("{obj}{borrow}.{path}{}({args})", self.fn_names[index]);
+        let call = format!("{obj}{borrow}.{path}{}({args})", self.call_name(index));
         Code::atom(if self.guarded { format!("{{ {call} }}") } else { call })
+    }
+
+    /// The name by which method `index` is called on its object: a `toString` that is the class's
+    /// `Display` (see `displays`) is `to_string`, as `super.toString()` calls it.
+    fn call_name(&self, index: usize) -> &str {
+        if self.displays(index) { "to_string" } else { &self.fn_names[index] }
     }
 
     /// A method call whose arguments are bound before the call borrows its object, in Java's order:
@@ -1052,7 +1058,7 @@ impl<'a> Gen<'a> {
         }
         self.guarded = outer;
         let path = self.method_path(receiver, index);
-        lines.push(format!("{obj}{borrow}.{path}{}({})", self.fn_names[index], bound.join(", ")));
+        lines.push(format!("{obj}{borrow}.{path}{}({})", self.call_name(index), bound.join(", ")));
         Code::atom(format!("{{ {} }}", lines.join(" ")))
     }
 
