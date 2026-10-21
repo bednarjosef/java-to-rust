@@ -81,9 +81,10 @@ signature. Everything else is decided here.
    failure, and every later use throws `NoClassDefFoundError`. A `finally` around the use is
    rejected unless the program catches one of those classes.
 10. **Rejected for now**, each with a message naming the construct: observing the message of a
-    `NullPointerException` the runtime raises (Java's helpful message names bytecode locals;
-    `getMessage()` in a `catch` that such an exception reaches is rejected, while the message of
-    one that code creates, as `Objects.requireNonNull(x, "msg")` does, is its own),
+    `NullPointerException` the runtime raises where Java's is not certain (Java's helpful
+    message names the class file's code; see "The messages of `NullPointerException`" in
+    section 4; the message of one that code creates, as `Objects.requireNonNull(x, "msg")`
+    does, is its own),
     catching `StackOverflowError`, `OutOfMemoryError` or `VirtualMachineError` (the translation
     cannot raise them), a `toString` that throws an exception that a call of it observes, or a
     `toString` of the program that throws what a `catch` around an object's text, or around a
@@ -720,3 +721,31 @@ Decisions that changed during the implementation, step by step.
   - The analysis takes the `Error` clause of a rewritten `<clinit>` to rethrow any `Error`, so a
     method may return a `Result` where it need not. An uncaught static initializer that is not
     rewritten also gets an entry point, which may do the same for its callers.
+
+### The messages of `NullPointerException`
+
+- **Java's message comes from the class file**: the JVM describes the instruction that met the
+  null and, when it can tell, where the null came from: `Cannot invoke "Main$Box.size()" because
+  "<parameter1>.next" is null`, `Cannot read field "name" because the return value of
+  "Main.find(String)" is null`, `Cannot load from int array because "Main$Box.shared" is null`.
+  A class compiled without `-g` (as `javac` and the source launcher compile by default) has no
+  names of locals: a parameter is `<parameterN>`, a local `<localN>`, its slot.
+- **Written where a `catch` reads it**: a `catch` that calls `getMessage` on such an exception
+  (`Facts::npe_message_read`) makes every checked dereference (`Facts::null_checked`) carry
+  Java's text (`java::try_non_null_message`); the others stay bare. Only then does the
+  translation compile the program a second time, with javac's code generator
+  (`java/BytecodeNames.java`, `javac::BytecodeNames`), which tells how the class file names each
+  method (`Gen.binaryQualifier`, and the erased descriptor), each static field and each local.
+  The rest of the message follows the JVM's rules (`analysis/npe_messages.rs`): a chain of
+  fields is shown up to five steps back (`next.next.next.next.name`), an element with its index
+  when that is a constant, a local or a call (`[...]` otherwise), the value of `c ? a : b` not
+  at all (the message has no `because`), and a pattern switch's `Objects.requireNonNull` has no
+  message.
+- **Checked against Java 26** (`javac::CHECKED_JAVA`): with another Java the texts may differ,
+  and a program whose `catch` reads one is not translated.
+- **Rejected** where a `catch` may read a message that is not certain: a dereference of a local
+  other than a parameter (not yet), of a parameter that its method assigns (the JVM then names
+  it `<localN>` or `<parameterN>` depending on the path that ran), of a field that the
+  translation adds to a nested class (its enclosing instance, its captured locals), and a
+  failure of the runtime without the checked form (unboxing, a library call given null).
+  Corpus: `features/RuntimeNullPointerMessages.java`.

@@ -1,0 +1,403 @@
+import com.sun.source.util.TaskEvent;
+import com.sun.source.util.TaskListener;
+import com.sun.tools.javac.api.JavacTaskImpl;
+import com.sun.tools.javac.code.Flags;
+import com.sun.tools.javac.code.Kinds;
+import com.sun.tools.javac.code.Symbol;
+import com.sun.tools.javac.code.Symbol.ClassSymbol;
+import com.sun.tools.javac.code.Symbol.MethodSymbol;
+import com.sun.tools.javac.code.Symbol.VarSymbol;
+import com.sun.tools.javac.code.Type;
+import com.sun.tools.javac.code.Types;
+import com.sun.tools.javac.jvm.Gen;
+import com.sun.tools.javac.tree.JCTree;
+import com.sun.tools.javac.tree.JCTree.*;
+import com.sun.tools.javac.tree.TreeInfo;
+import com.sun.tools.javac.tree.TreeScanner;
+import java.io.*;
+import java.lang.reflect.Method;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import javax.tools.*;
+
+/**
+ * The names that the JVM's messages of a {@code NullPointerException} give the program's code
+ * ("Cannot invoke \"Main$Box.size()\" because \"&lt;local2&gt;\" is null"), which a class file
+ * compiled without {@code -g} decides: compiles the program as {@code javac} does, code
+ * generation included, and prints what javac's code generator gave its code.
+ *
+ * <p>Usage: {@code java BytecodeNames FILE...}, or the source on standard input for one file.
+ * Prints one line, {@code {"java":"26","entries":[[CLASS,LINE,COLUMN,KIND,NAME,TEXT],...]}}:
+ * the Java version, then for each use in the source (by the outermost class it is in, and the
+ * line and column where it starts) of
+ * <ul>
+ * <li>{@code local}: a local variable or parameter named {@code NAME}, {@code TEXT} being how the
+ * JVM names it, {@code <parameterN>} (the Nth parameter of the method of the class file, which
+ * for a lambda's body starts with the locals it captures) or {@code <localN>} (its slot); not
+ * javac's own variables, whose names have a {@code $};
+ * <li>{@code temp}: a variable that javac adds for a statement, holding the value of the
+ * expression that starts there ({@code arr$}, the array of a for-each loop; {@code s$}, the
+ * string of a switch), named as a local;
+ * <li>{@code call}: a call of the method {@code NAME}, {@code TEXT} being the method as the class
+ * file refers to it, {@code Main$Box.size()};
+ * <li>{@code static}: a static field, {@code Main$Box.shared}.
+ * </ul>
+ * {@code TEXT} is {@code null} where the JVM's name is not certain: a variable that javac's code
+ * generator writes more than once (in a {@code finally} block, which it copies to every exit,
+ * or an instance initializer, copied into every constructor) or that it gives no slot, and a
+ * parameter that the method assigns, which the JVM names as a local where an assignment may
+ * have run.
+ */
+public class BytecodeNames {
+    public static void main(String[] args) throws Exception {
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
+        StandardJavaFileManager standard = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8);
+        // The class files are not needed: only what the code generator decided on the way.
+        JavaFileManager discarding = new ForwardingJavaFileManager<>(standard) {
+            @Override
+            public JavaFileObject getJavaFileForOutput(Location location, String className, JavaFileObject.Kind kind,
+                    FileObject sibling) {
+                return new SimpleJavaFileObject(URI.create("discarded:///" + className.replace('.', '/') + kind.extension), kind) {
+                    @Override
+                    public OutputStream openOutputStream() {
+                        return OutputStream.nullOutputStream();
+                    }
+                };
+            }
+        };
+        Iterable<? extends JavaFileObject> sources;
+        if (args.length > 0) {
+            List<File> files = new ArrayList<>();
+            for (String a : args) {
+                files.add(new File(a));
+            }
+            sources = standard.getJavaFileObjectsFromFiles(files);
+        } else {
+            String source = new String(System.in.readAllBytes(), StandardCharsets.UTF_8);
+            sources = List.of(new SimpleJavaFileObject(URI.create("string:///Main.java"), JavaFileObject.Kind.SOURCE) {
+                @Override
+                public CharSequence getCharContent(boolean ignoreEncodingErrors) {
+                    return source;
+                }
+
+                @Override
+                public boolean isNameCompatible(String simpleName, Kind kind) {
+                    return true;
+                }
+            });
+        }
+        JavacTaskImpl task = (JavacTaskImpl) compiler.getTask(null, discarding, diagnostics,
+                List.of("-proc:none", "-Xlint:none", "-nowarn"), null, sources);
+        BytecodeNames names = new BytecodeNames(task);
+        task.addTaskListener(names.listener());
+        task.generate();
+        for (Diagnostic<? extends JavaFileObject> d : diagnostics.getDiagnostics()) {
+            if (d.getKind() == Diagnostic.Kind.ERROR) {
+                System.err.println(d.getLineNumber() + ":" + d.getColumnNumber() + ": " + d.getMessage(Locale.ROOT));
+                System.exit(1);
+            }
+        }
+        StringBuilder out = new StringBuilder("{\"java\":\"").append(Runtime.version().feature()).append("\",\"entries\":[");
+        boolean first = true;
+        for (Map.Entry<List<Object>, String> e : names.entries.entrySet()) {
+            out.append(first ? "" : ",").append('[');
+            first = false;
+            List<Object> key = e.getKey();
+            string((String) key.get(0), out);
+            out.append(',').append(key.get(1)).append(',').append(key.get(2)).append(',');
+            string((String) key.get(3), out);
+            out.append(',');
+            string((String) key.get(4), out);
+            out.append(',');
+            if (e.getValue() == null) {
+                out.append("null");
+            } else {
+                string(e.getValue(), out);
+            }
+            out.append(']');
+        }
+        out.append("]}\n");
+        PrintStream stdout = new PrintStream(new FileOutputStream(FileDescriptor.out), false, StandardCharsets.UTF_8);
+        stdout.print(out);
+        stdout.flush();
+    }
+
+    private static void string(String s, StringBuilder out) {
+        out.append('"');
+        for (char c : s.toCharArray()) {
+            if (c == '"' || c == '\\') {
+                out.append('\\').append(c);
+            } else if (c < 0x20) {
+                out.append(String.format("\\u%04x", (int) c));
+            } else {
+                out.append(c);
+            }
+        }
+        out.append('"');
+    }
+
+    private final Types types;
+    private final Gen gen;
+    /** javac's {@code Gen.binaryQualifier}: the class that a class file names as a member's owner. */
+    private final Method qualifier;
+    /** The classes of the program, by symbol, as attributed (lowering changes them in place). */
+    private final Map<Symbol, JCClassDecl> classes = new HashMap<>();
+    /** Where each node of the attributed trees starts, as line and column. */
+    private final Map<JCTree, long[]> starts = new IdentityHashMap<>();
+    /** The members of each class as lowered, which the code generator discards once done. */
+    private final Map<JCClassDecl, com.sun.tools.javac.util.List<JCTree>> lowered = new HashMap<>();
+    /** The entries: class, line, column, kind and name, to the text or null. */
+    private final Map<List<Object>, String> entries = new LinkedHashMap<>();
+
+    private BytecodeNames(JavacTaskImpl task) throws ReflectiveOperationException {
+        types = Types.instance(task.getContext());
+        gen = Gen.instance(task.getContext());
+        qualifier = Gen.class.getDeclaredMethod("binaryQualifier", Symbol.class, Type.class);
+        qualifier.setAccessible(true);
+    }
+
+    private TaskListener listener() {
+        return new TaskListener() {
+            @Override
+            public void started(TaskEvent e) {
+                if (e.getKind() != TaskEvent.Kind.GENERATE) {
+                    return;
+                }
+                JCClassDecl c = classes.get((Symbol) e.getTypeElement());
+                if (c == null) {
+                    return;
+                }
+                lowered.put(c, c.defs);
+                // Flow analysis numbers variables in the same field that the code generator gives
+                // slots in: a variable left at -1 got none.
+                new TreeScanner() {
+                    @Override
+                    public void visitVarDef(JCVariableDecl tree) {
+                        if (tree.sym != null && tree.sym.owner.kind == Kinds.Kind.MTH) {
+                            tree.sym.adr = -1;
+                        }
+                        super.visitVarDef(tree);
+                    }
+
+                    @Override
+                    public void visitClassDef(JCClassDecl tree) {
+                        if (tree == c) {
+                            super.visitClassDef(tree);
+                        }
+                    }
+                }.scan(c);
+            }
+
+            @Override
+            public void finished(TaskEvent e) {
+                if (e.getKind() == TaskEvent.Kind.ANALYZE) {
+                    JCCompilationUnit unit = (JCCompilationUnit) e.getCompilationUnit();
+                    new TreeScanner() {
+                        @Override
+                        public void scan(JCTree tree) {
+                            if (tree != null) {
+                                int start = TreeInfo.getStartPos(tree);
+                                if (start >= 0) {
+                                    starts.put(tree, position(unit, start));
+                                }
+                                if (tree instanceof JCClassDecl c) {
+                                    classes.put(c.sym, c);
+                                }
+                            }
+                            super.scan(tree);
+                        }
+                    }.scan(unit);
+                } else if (e.getKind() == TaskEvent.Kind.GENERATE) {
+                    JCClassDecl c = classes.get((Symbol) e.getTypeElement());
+                    if (c != null) {
+                        report(c, lowered.remove(c), (JCCompilationUnit) e.getCompilationUnit());
+                    }
+                }
+            }
+        };
+    }
+
+    private static long[] position(JCCompilationUnit unit, int at) {
+        return new long[] {unit.getLineMap().getLineNumber(at), unit.getLineMap().getColumnNumber(at)};
+    }
+
+    /** The entries of the members of class {@code c}, lowered to {@code defs} and generated. */
+    private void report(JCClassDecl c, com.sun.tools.javac.util.List<JCTree> defs, JCCompilationUnit unit) {
+        String outermost = c.sym.outermostClass().flatname.toString();
+        for (JCTree def : defs) {
+            List<VarSymbol> params = new ArrayList<>();
+            // The variables whose slots are not certain.
+            Set<Symbol> uncertain = new HashSet<>();
+            JCTree body;
+            if (def instanceof JCMethodDecl m && m.body != null) {
+                body = m.body;
+                for (JCVariableDecl p : m.params) {
+                    params.add(p.sym);
+                }
+            } else if (def instanceof JCBlock || def instanceof JCVariableDecl) {
+                body = def;
+                // An instance initializer is copied into every constructor.
+                if ((TreeInfo.flags(def) & Flags.STATIC) == 0) {
+                    new TreeScanner() {
+                        @Override
+                        public void visitVarDef(JCVariableDecl v) {
+                            uncertain.add(v.sym);
+                            super.visitVarDef(v);
+                        }
+                    }.scan(def);
+                }
+            } else {
+                continue;
+            }
+            new TreeScanner() {
+                private void assigned(JCTree target) {
+                    if (TreeInfo.skipParens((JCExpression) target) instanceof JCIdent id && params.contains(id.sym)) {
+                        uncertain.add(id.sym);
+                    }
+                }
+
+                @Override
+                public void visitAssign(JCAssign t) {
+                    assigned(t.lhs);
+                    super.visitAssign(t);
+                }
+
+                @Override
+                public void visitAssignop(JCAssignOp t) {
+                    assigned(t.lhs);
+                    super.visitAssignop(t);
+                }
+
+                @Override
+                public void visitUnary(JCUnary t) {
+                    if (t.getTag().isIncOrDecUnaryOp()) {
+                        assigned(t.arg);
+                    }
+                    super.visitUnary(t);
+                }
+
+                @Override
+                public void visitTry(JCTry t) {
+                    super.visitTry(t);
+                    if (t.finalizer != null) {
+                        new TreeScanner() {
+                            @Override
+                            public void visitVarDef(JCVariableDecl v) {
+                                uncertain.add(v.sym);
+                                super.visitVarDef(v);
+                            }
+                        }.scan(t.finalizer);
+                    }
+                }
+            }.scan(body);
+            new TreeScanner() {
+                private void entry(JCTree at, String kind, String name, String text) {
+                    long[] start = starts.get(at);
+                    if (start == null) {
+                        // A name that lowering wrote anew, such as a lambda's captured local in
+                        // its body, is where the name it stands for was.
+                        if (!(at instanceof JCIdent)) {
+                            return;
+                        }
+                        start = position(unit, at.pos);
+                    }
+                    List<Object> key = List.of(outermost, start[0], start[1], kind, name);
+                    if (entries.containsKey(key) && !Objects.equals(entries.get(key), text)) {
+                        text = null;
+                    }
+                    entries.put(key, text);
+                }
+
+                private String local(VarSymbol v) {
+                    if (v.adr < 0 || uncertain.contains(v)) {
+                        return null;
+                    }
+                    int index = params.indexOf(v);
+                    return index >= 0 ? "<parameter" + (index + 1) + ">" : "<local" + v.adr + ">";
+                }
+
+                @Override
+                public void visitIdent(JCIdent t) {
+                    // The names with a `$` are javac's own (`arr$`), the temps.
+                    if (t.sym instanceof VarSymbol v && v.owner.kind == Kinds.Kind.MTH) {
+                        if (!t.name.toString().contains("$")) {
+                            entry(t, "local", t.name.toString(), local(v));
+                        }
+                    } else if (t.sym instanceof VarSymbol v && v.isStatic() && v.getConstValue() == null) {
+                        entry(t, "static", t.name.toString(), member(v, c.sym.type));
+                    }
+                    super.visitIdent(t);
+                }
+
+                @Override
+                public void visitSelect(JCFieldAccess t) {
+                    if (t.sym instanceof VarSymbol v && v.isStatic() && v.getConstValue() == null) {
+                        entry(t, "static", t.name.toString(), member(v, t.selected.type));
+                    }
+                    super.visitSelect(t);
+                }
+
+                @Override
+                public void visitVarDef(JCVariableDecl t) {
+                    // A variable that lowering added, which the attributed tree does not have.
+                    if (t.sym != null && !starts.containsKey(t) && t.init != null) {
+                        entry(TreeInfo.skipParens(t.init), "temp", t.name.toString().replaceAll("[0-9]", ""), local(t.sym));
+                    }
+                    super.visitVarDef(t);
+                }
+
+                @Override
+                public void visitApply(JCMethodInvocation t) {
+                    if (TreeInfo.symbol(t.meth) instanceof MethodSymbol m && !m.isDynamic()) {
+                        Type site = t.meth instanceof JCFieldAccess f ? f.selected.type : c.sym.type;
+                        // A call that lowering wrote, such as the `iterator()` of a for-each
+                        // loop, starts where its receiver does.
+                        JCTree at = starts.containsKey(t) || !(t.meth instanceof JCFieldAccess f) ? t : f.selected;
+                        entry(at, "call", m.name.toString(), member(m, site));
+                    }
+                    super.visitApply(t);
+                }
+            }.scan(body);
+        }
+    }
+
+    /** A field or method as a class file refers to it, and the JVM's messages show it. */
+    private String member(Symbol s, Type site) {
+        Symbol q;
+        try {
+            q = (Symbol) qualifier.invoke(gen, s, site);
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
+        String owner = className(types.erasure(q.owner.type));
+        if (q instanceof VarSymbol) {
+            return owner + "." + q.name;
+        }
+        StringBuilder out = new StringBuilder(owner).append('.').append(q.name).append('(');
+        String separator = "";
+        for (Type p : q.externalType(types).getParameterTypes()) {
+            out.append(separator).append(className(types.erasure(p)));
+            separator = ", ";
+        }
+        return out.append(')').toString();
+    }
+
+    /** A type as the JVM's messages show it: its binary name, without {@code java.lang.} for
+     * {@code Object} and {@code String}. */
+    private static String className(Type t) {
+        if (t instanceof Type.ArrayType a) {
+            return className(a.elemtype) + "[]";
+        }
+        if (t.isPrimitive() || !(t.tsym instanceof ClassSymbol c)) {
+            return t.toString();
+        }
+        String name = c.flatname.toString();
+        return switch (name) {
+            case "java.lang.Object" -> "Object";
+            case "java.lang.String" -> "String";
+            default -> name;
+        };
+    }
+}

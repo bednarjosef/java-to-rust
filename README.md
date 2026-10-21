@@ -257,7 +257,11 @@ A small subset, end to end:
   after the body threw is added to that exception as suppressed, and `getSuppressed` returns it;
   `addSuppressed` of the exception itself or of `null` throws Java's `IllegalArgumentException` or
   `NullPointerException`. A `throw` of a value that may be null throws
-  `NullPointerException`, and a `yield` or a constructor's `return` through a `finally` runs the
+  `NullPointerException`. A `NullPointerException` of a null dereference that a `catch` reads the
+  message of has Java's (`Cannot invoke "Main$Box.size()" because "<parameter1>" is null`, as a
+  class compiled without `-g` names it), from a second javac run with code generation that tells
+  how the class file names the code; where that is not certain the program is rejected. A
+  `yield` or a constructor's `return` through a `finally` runs the
   `finally` first. A static initializer or a static field initializer that throws ends an uncaught
   program with `ExceptionInInitializerError`; where a `catch` of it, of `Error` or of `Throwable`
   observes it, the first use throws it and every later use throws `NoClassDefFoundError`. A
@@ -327,7 +331,9 @@ A small subset, end to end:
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
-every expression and the declaration every name and call refers to. `lower.rs` maps that tree onto
+every expression and the declaration every name and call refers to (and, only for a program that
+reads the message of a `NullPointerException`, `java/BytecodeNames.java` compiles it again with
+code generation, for the names that the message takes from the class file). `lower.rs` maps that tree onto
 the supported subset (`ast.rs`), the analyses prove facts about the program (`analysis.rs`), and
 the generator writes Rust (`codegen.rs`) that uses the runtime crate (`crates/runtime`) for what
 Rust lacks: Java's double and float printing, integer division that throws, `Math.max`/`min` on

@@ -235,7 +235,7 @@ impl fmt::Display for Type {
 }
 
 /// A position in the Java source, 1-based, for error messages.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Pos {
     pub line: usize,
     pub column: usize,

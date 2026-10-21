@@ -84,7 +84,14 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Str
     phase("whole objects", || analysis::whole_objects(&mut class))
         .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
     let located = |error: Error| ProgramError { file: locate(&units, &class, error.pos), error };
-    let facts = phase("analyze", || analysis::analyze(&class)).map_err(located)?;
+    let mut facts = phase("analyze", || analysis::analyze(&class)).map_err(located)?;
+    // A `catch` reads the message of a `NullPointerException`: it names the class file's code.
+    if facts.npe_message_read.is_some() {
+        let names = phase("class files", || {
+            javac::program_names(&source_files(program)?).map_err(|error| ProgramError { file: None, error })
+        })?;
+        phase("messages", || analysis::npe_messages(&class, &mut facts, &names)).map_err(located)?;
+    }
     phase("codegen", || codegen::generate(&class, &facts)).map_err(located)
 }
 
