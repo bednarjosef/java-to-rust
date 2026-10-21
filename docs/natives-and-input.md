@@ -798,6 +798,19 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   they are asked for, where main's `Unsafe` field accesses bring the natives to 44); the new natives are `UnixFileSystem.getBooleanAttributes0`,
   through the data file that `Currency` reads, and `VM.getNanoTimeAdjustment`, which the runtime
   has. It still stops at `Bundles`, which extends the untranslated `ResourceBundle`.
+- **Untranslated classes as types are stubs** (`program/reach/stubs.rs`, `lower/stubs.rs`): no
+  translated code can create an object of a class that is not translated, so a variable of such
+  a type is only ever null. Reachability records each such class that reachable code declares a
+  variable of (a parameter, local or field), with the instance methods that it calls on one, and
+  the lowering declares it as a class in its package without constructors or fields, whose
+  methods are dormant: a call throws `NullPointerException` on the null receiver, and
+  `instanceof` is false, as in Java. Its static members, constructors, generic and array types
+  stay rejected. `TreeMap.buildFromSorted` takes the `ObjectInputStream` that deserialization
+  reads a map from, and every call that copies a sorted map (`TreeMap(SortedMap)`, `putAll`,
+  `clone`, `TreeSet.addAll`) passes null; `TokenizerParser` and `WordFrequency` stopped at its
+  parameter and now stop at a panic of `analysis/whole_objects.rs` on `HashMap.ValueIterator`, whose
+  superclass `HashMap.HashIterator` is an inner class too. Test: the corpus program
+  `corpus/whole-program/UntranslatedNulls.java`.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

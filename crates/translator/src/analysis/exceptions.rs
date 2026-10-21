@@ -367,6 +367,16 @@ fn instance_fact(v: &str, name: &str) -> String {
     format!("{v} instanceof {name}")
 }
 
+/// The name of the class or interface that an `instanceof` or a cast tests: one of the program,
+/// a runtime class (a string or a box) or an enum.
+fn instance_name(ty: Type) -> Option<&'static str> {
+    match ty {
+        Type::Class(name, _) | Type::Enum(name) => Some(name),
+        Type::String | Type::Boxed(_) => runtime_name(ty),
+        _ => None,
+    }
+}
+
 /// What `cond` proves when it is `when`, by variable: that it is not null (its null tests), and
 /// for a top-level `instanceof` when true, that it is an instance of the class too; through a
 /// `!`, what its operand proves.
@@ -385,7 +395,7 @@ fn proved(cond: &Expr, when: bool) -> Vec<(&str, String)> {
                 && !parts[k + 1..].iter().any(|later| assigns(later, v))
             {
                 out.push((v, v.clone()));
-                if let Type::Class(name, _) = ty {
+                if let Some(name) = instance_name(*ty) {
                     out.push((v, instance_fact(v, name)));
                 }
             }
@@ -455,6 +465,16 @@ fn stmt_points(
     safe: &[String],
     out: &mut Vec<Point>,
 ) {
+    // A switch on a string that is null throws, as its selector is dereferenced.
+    if let Stmt::Switch { selector, .. } = s
+        && selector.ty == Type::String
+        && !is_tested(selector, safe)
+        && maybe_null(facts, m, selector)
+    {
+        let raise =
+            Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: selector.id };
+        out.push(Point { raise, pos: selector.pos, what: "this switch", frames: frames.clone() });
+    }
     match s {
         Stmt::If { cond, then, otherwise } => {
             expr_points(class, facts, m, cond, frames, safe, out);

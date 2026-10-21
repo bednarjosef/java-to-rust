@@ -16,12 +16,14 @@ mod generics;
 mod handles;
 mod hierarchy;
 mod lambdas;
+mod local_names;
 mod object;
 mod object_clone;
 mod objects;
 mod real_generics;
 mod statics;
 mod strings;
+mod stubs;
 mod suppress;
 mod unsigned;
 
@@ -286,7 +288,9 @@ impl<'t> Lowering<'t> {
         let outer = self.method_ctx.replace(Some(index));
         let method = self.method_in_scope(index);
         self.method_ctx.set(outer);
-        method
+        let mut method = method?;
+        local_names::distinct_locals(&mut method);
+        Ok(method)
     }
 
     fn method_in_scope(&self, index: usize) -> Result<Method, Error> {

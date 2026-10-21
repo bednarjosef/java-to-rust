@@ -1142,8 +1142,7 @@ Decisions that change during the implementation are recorded here, milestone by 
   `int`, `long`, `double`, `float`, `char`, `boolean` and `String`. Still rejected in a body:
   blocks, member classes, static fields, fields of other types, and initializers that are not
   pure, since a side effect would repeat on each read.
-- **Still rejected:** a nested class extending one nested in another class (the two `outer`
-  fields would differ); a field named `outer` in a nested class with an enclosing instance; an
+- **Still rejected:** a field named `outer` in a nested class with an enclosing instance; an
   enclosing instance needed in static code (which javac rejects as well); and `Outer.this` or
   `Outer.super` from an inner class that itself extends `Outer` (`enclosing_instance` stops at
   the first subclass of `Outer`, which is then `this`, not the enclosing object).
@@ -1160,6 +1159,36 @@ Decisions that change during the implementation are recorded here, milestone by 
   object holds the inner one, which holds `outer`), which `Rc` never frees where Java's
   collector would; a `HashMap` that caches its `keySet()` leaks with its view. Programs print
   the same; memory is the cost, as with any other cycle of objects in the translation.
+
+### Inner classes extending inner classes
+
+- **A superclass is found by its erasure wherever javac writes type arguments**: javac names an
+  inner class of a generic class `java.util.AbstractList<E>.Itr`, which cutting at the first
+  `<` turned into `AbstractList`, so the JDK's `ListItr extends Itr` was a subclass of the outer
+  class itself (a `base` of `AbstractListFields`, a `new` without its enclosing instance, a
+  variant of `Collection` without `Display`). `captures::raw` drops every type argument list.
+- **A class nested in another class than its superclass holds its own enclosing instance**, as
+  planned in 2.4, but in a field of its own name: `outer` stays the superclass's (in `base`), and
+  the subclass's is `outer_` (`outer__` a level further, `Nested::outer_field`), since the
+  generator reads fields by name. This covers an inner class of an inner class extending the
+  outermost one (`Batch.Repeated extends Step`), an inner class of a subclass of the outer
+  class extending the superclass's inner class, local and anonymous classes in an inner class's
+  methods, and an inner class of an unrelated class (`c.super(..)`). A plain `super(..)` passes
+  the enclosing instance reached through the subclass's own `outer`, converted to the outer
+  class's type (an enum of a class tree, from a subclass of it).
+- **`o.super(..)` decides who holds what**: a class whose constructors all give the superclass
+  its enclosing instance needs none of its own for it (a local class in static code, a static
+  nested class), and an inner class of the same outer class that does keeps its own `outer_`,
+  since the two objects may differ. A qualified `super(..)` of a superclass whose code never
+  uses its enclosing instance, which then does not hold it, drops the qualifier when it has no
+  effects.
+- **`o.new Inner() { .. }`**: javac's constructor of the anonymous class takes `o` as its first
+  declared parameter (`x0`) and calls `x0.super(..)`; `new` passes `o` there, before the
+  declared arguments (`anonymous_enclosing`). The anonymous class holds an enclosing instance of
+  its own only when its code uses one.
+- **Still rejected:** an inner class with subclasses whose constructor uses `this` as a value or
+  calls an overridable method (the second constructor form of `analysis/whole_objects.rs`, which
+  needs a zero value for every field, and `outer` has none).
 
 ### Anonymous classes
 
@@ -1338,7 +1367,10 @@ Decisions that change during the implementation are recorded here, milestone by 
   local passed as it is moves in under its own name; the closure owns what the class's
   constructor would have borrowed. A closure with no captures has no `move`, and a one-line
   body stays on the closure's line. The value is `Rc::new(closure) as Op`, so that every place
-  gets the alias's type without an annotation.
+  gets the alias's type without an annotation; the captures are bound in a block around it,
+  `{ let outer = self.clone(); Rc::new(move |x| ..) as Op }`, except where the closure is a
+  function's final value: there they are statements of the function, and the result type
+  converts `Rc::new(move |x| ..)` without `as`.
 - **Default methods are an extension trait** (4.6): `trait PredicateMethods { fn negate(&self)
   -> Predicate; .. }` beside the alias and `impl PredicateMethods for Predicate`, with only the
   default methods the program calls. `self` is `&Rc<dyn Fn ..>`: `test(x)` is `self(x)`, and a
@@ -1348,6 +1380,14 @@ Decisions that change during the implementation are recorded here, milestone by 
   Two closure types with the same Rust type and a default method of the same name would make
   such a call ambiguous; no two of `java.util.function` do, and no corpus program has such a
   pair.
+- **A closure type that threads may share** (`Facts::thread_shared` holds it or an interface
+  above or below it, which share its closures) is `Arc<dyn Fn(..) -> R + Send + Sync>` and its
+  closures `Arc::new(..)`, the handle chosen in one place (`closure_handle`); its captures are of
+  shared types by the same walk. Others keep `Rc`, also in a threaded program
+  (`docs/multi-threading.md`). Corpus: `threads/ClosuresAcrossThreads.java`,
+  `threads/ClosureMethodsAcrossThreads.java` (default methods on shared closures),
+  `threads/OperatorsAcrossThreads.java` (a `UnaryOperator` that a thread runs makes `Function`
+  an `Arc` too).
 - **A call clones a closure out of a `RefCell`** before running it,
   `({ let f = a.borrow().op.clone(); f })(3)`, since the closure may reach the object again; a
   local, a capture or a field of a plain object is called in place (`op(x)`, `(self.op)(x)`).
