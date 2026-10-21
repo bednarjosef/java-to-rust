@@ -27,8 +27,19 @@ impl<'a> Gen<'a> {
         let outer = std::mem::replace(&mut self.guarded, conflicts);
         match stmt {
             Stmt::Return(Some(value), _) => {
-                let code = self.returned(value);
-                let text = self.ok(code.text);
+                let text = match self.returned_closure(value) {
+                    // The captures of a returned closure are bound on lines of their own.
+                    Some((prelude, closure)) => {
+                        for line in prelude {
+                            self.line(&line);
+                        }
+                        self.ok(closure)
+                    }
+                    None => {
+                        let code = self.returned(value);
+                        self.ok(code.text)
+                    }
+                };
                 self.line(&text);
             }
             Stmt::Block(stmts) => self.stmts(stmts, true),

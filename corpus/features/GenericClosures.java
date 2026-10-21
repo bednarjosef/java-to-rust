@@ -6,8 +6,7 @@ import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
 // Generic functional interfaces whose values are only lambdas: closures over the erased types,
-// the lambda's body behind the conversions of its bridge. UnaryOperator extends Function, so
-// both stay enums here.
+// the lambda's body behind the conversions of its bridge. A UnaryOperator is a Function.
 public class GenericClosures {
     interface Transform<T> {
         T apply(T value);
@@ -55,6 +54,10 @@ public class GenericClosures {
         }
     }
 
+    static String ask(Function<String, String> f, String s) {
+        return f.apply(s) + "?";
+    }
+
     static int sum(Pair<Integer, Integer> p, int a, int b) {
         return p.combine(a, b);
     }
@@ -93,6 +96,7 @@ public class GenericClosures {
         System.out.println(g.show("hello"));
         UnaryOperator<String> upper = String::toUpperCase;
         System.out.println(upper.apply("shout"));
+        System.out.println(sign(x -> -x, 5) + " " + ask(upper, "why"));
         int limit = 2;
         Task<String> flaky = attempt -> {
             if (attempt < limit) {

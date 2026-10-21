@@ -3545,17 +3545,26 @@ fn a_try_with_resources_closes_each_resource_in_a_finally() {
         }",
     );
     assert_contains(&rust, &["r_failed", "add_suppressed"]);
-    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
-    let err = reject(
+    let rust = translate(
         "class A {
-            static class R implements AutoCloseable { public void close() {} }
+            static class R implements AutoCloseable { public void close() { System.out.println(2); } }
             public static void main(String[] args) {
                 R r = new R();
                 try (r) { System.out.println(1); }
             }
         }",
     );
-    assert!(err.contains("try-with-resources over an existing variable not supported yet"), "{err}");
+    assert_contains(&rust, &["r_resource", "r_resource_failed", "close()"]);
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
+    let err = reject(
+        "class A {
+            public static void main(String[] args) throws Exception {
+                AutoCloseable tick = new java.io.StringWriter();
+                try (tick) { System.out.println(2); }
+            }
+        }",
+    );
+    assert!(err.contains("not supported yet"), "{err}");
 }
 
 #[test]
@@ -4121,4 +4130,11 @@ fn an_element_that_may_be_null_is_passed_as_the_receiver_that_it_is() {
         }",
     );
     assert_contains(&rust, &["PBox::start(java::non_null(boxes[i as usize].as_ref()));"]);
+}
+
+#[test]
+fn string_chars_needs_the_jdk_sources() {
+    let err = java_to_rust::translate("class A { public static void main(String[] a) { \"abc\".chars(); } }")
+        .expect_err("`String.chars` streams with the JDK's code");
+    assert!(err.to_string().contains("translate the program with the JDK's sources"), "{err}");
 }

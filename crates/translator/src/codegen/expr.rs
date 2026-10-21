@@ -400,6 +400,12 @@ impl<'a> Gen<'a> {
             {
                 self.closure(t, *ctor, args)
             }
+            // A closure is one of the closure type its interface extends too.
+            ExprKind::Cast(to @ Type::Class(..), value)
+                if self.closure_type(*to).is_some() && self.closure_type(value.ty).is_some() =>
+            {
+                self.expr(value)
+            }
             ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
             // A cast to an enum of a value that may be null, which an enum value is not.
             ExprKind::Cast(to @ Type::Enum(_), value)

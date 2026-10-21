@@ -451,6 +451,12 @@ fn new(r: f64) -> Circle {
   rule (`analysis::leading_assignments`) skips the `super(...)` statement, which lowering
   represents as `ExprKind::SuperInit { args, resolved }` as the first statement (like
   `ThisCall`).
+- A leading assignment may read fields that earlier leading assignments set, as `EnumMap`'s
+  constructor does (`keyUniverse = getKeyUniverse(keyType); vals = new
+  Object[keyUniverse.length]`): the literal then computes the initializers with effects or that
+  read a static first, as Java runs them before the body, and then each leading value into a
+  local that the later ones read in place of the field. Every field is set before anything can
+  read it, so the nullness analysis sees those fields as never null.
 - The superclass's constructor builds a plain value (`plain_constructors`) wherever it can: it
   uses `this` only for the struct being built, calls on `this` only methods that borrow that
   struct, and so do its class's field initializers. A constructor of a class with subclasses
@@ -835,6 +841,14 @@ variant holding the Copy value: `Shape::Color(Color)`, and its arm calls the enu
 variants are the union over its concretes as for any type; `to_<super interface>()`
 conversions are generated on demand. A class implementing two interfaces appears in both
 enums. Interface methods are always object-level (interfaces have no instance fields).
+
+A class may implement an interface's method with a method it inherits from a superclass that
+does not implement the interface (`Spliterators.EmptySpliterator.OfInt`): javac's `overrides`
+of the superclass's method cannot list it, so `JavaTree` gives the class's symbol an `inherits`
+list of such pairs, and reachability and lowering add the interface's method to the overrides of
+the inherited one (with a bridge when erasure changes its signature). An interface that declares
+`Object`'s `equals` or `hashCode` again (`Comparator`) dispatches a class or enum without its
+own to `Object`'s.
 
 ### 1.13 Dropping long chains
 
