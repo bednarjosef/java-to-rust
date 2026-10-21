@@ -115,7 +115,10 @@ fn keep_live(class: &mut crate::ast::Class, rejected: Vec<lower::Rejected>) -> R
             return rejected.into_iter().next().map_or(Ok(()), Err);
         }
     };
-    let total = rejected.len();
+    let distinct = |rejected: &[lower::Rejected]| {
+        rejected.iter().map(|r| r.error.message.as_str()).collect::<std::collections::HashSet<_>>().len()
+    };
+    let (total, distinct_total) = (rejected.len(), distinct(&rejected));
     let mut running: Vec<lower::Rejected> =
         rejected.into_iter().filter(|r| live.runs(r.ty, r.method)).collect();
     // A call that lowering left unresolved is rejected where it can run.
@@ -127,8 +130,12 @@ fn keep_live(class: &mut crate::ast::Class, rejected: Vec<lower::Rejected>) -> R
         method: None,
     }));
     if crate::timings::enabled() {
-        let (live, methods, running) = (live.methods.len(), class.methods.len(), running.len());
-        eprintln!("timing: live methods: {live} of {methods}, {total} rejections, {running} of them can run");
+        let (live, methods) = (live.methods.len(), class.methods.len());
+        let (count, kinds) = (running.len(), distinct(&running));
+        eprintln!(
+            "timing: live methods: {live} of {methods}; {total} rejections ({distinct_total} distinct), \
+             {count} of them can run ({kinds} distinct)"
+        );
     }
     if let Some(first) = running.into_iter().next() {
         return Err(first);

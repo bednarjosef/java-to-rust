@@ -19,6 +19,12 @@
 //! Where the walk meets a method entered on an object that the analysis did not follow it for, the
 //! facts do not tell, and nothing is left out (`live_methods` is an error).
 //!
+//! An instance method runs on an object, so where the facts allow a class that no running code
+//! creates an object of, its methods wait until some code does. The objects of the program's
+//! classes come from a `new` (reflection's `newInstance` is lowered to one, see `lower/by_name.rs`),
+//! from the runtime raising an exception (`Class::raised`, which are `new`s too), from an enum's
+//! static initialization (its constants), or from a copy of an object that exists (`clone`).
+//!
 //! What runs besides the calls in the code:
 //!
 //! - A type's static initialization, with that of every type above it, once a static method of
@@ -49,6 +55,9 @@ pub struct LiveMethods {
     pub initialized: HashSet<usize>,
     /// The concrete classes that can have objects.
     pub instantiated: HashSet<usize>,
+    /// The types above a class that can have objects, itself included: those whose instance
+    /// field initializers can run.
+    pub constructed: HashSet<usize>,
     /// The types any of whose code can run: those initialized, those with a method that can run,
     /// and those above a class that can have objects.
     pub touched: HashSet<usize>,
@@ -80,11 +89,13 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
         state: RefCell::new(State {
             work: Vec::new(),
             seen: HashSet::new(),
+            waiting: HashMap::new(),
             unknown: None,
             live: LiveMethods {
                 methods: HashSet::new(),
                 initialized: HashSet::new(),
                 instantiated: HashSet::new(),
+                constructed: HashSet::new(),
                 touched: HashSet::new(),
                 unresolved: Vec::new(),
             },
@@ -111,11 +122,10 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
     if let Some(unknown) = unknown {
         return Err(unknown);
     }
+    live.constructed = live.instantiated.iter().flat_map(|&c| supers[c].iter().copied()).collect();
     let mut touched: HashSet<usize> = live.initialized.clone();
     touched.extend(live.methods.iter().map(|&m| class.methods[m].class));
-    for &c in &live.instantiated {
-        touched.extend(supers[c].iter().copied());
-    }
+    touched.extend(live.constructed.iter().copied());
     live.touched = touched;
     Ok(live)
 }
@@ -123,6 +133,13 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
 /// Gives every method that cannot run a body that never runs (`Builtin::NoObject`), and returns
 /// how many it changed. A `<clinit>` that cannot run is among them: no code reads or writes the
 /// statics of its class, so nothing calls its `init`.
+///
+/// The instance field initializers of a class that no object can be created of, nor of a class
+/// below it, never run either, and are dropped: the fields get their defaults in a constructor
+/// that never runs. Such a class may still have a struct, when its type names a value that is
+/// always null, and its initializers may use what is no longer emitted. An enum's objects are its
+/// constants, which its static initialization makes (`EnumConstant::values`), not a `new`: enums
+/// and their constants' classes keep theirs.
 pub fn prune(class: &mut Class, live: &LiveMethods) -> usize {
     let mut next_id = largest_id(class) + 1;
     let mut pruned = 0;
@@ -134,6 +151,16 @@ pub fn prune(class: &mut Class, live: &LiveMethods) -> usize {
         method.body = vec![Stmt::Expr(Expr { kind: never, pos: method.pos, ty: Type::Void, id: next_id })];
         next_id += 1;
         pruned += 1;
+    }
+    let is_enum = |t: usize| class.types[t].kind == TypeKind::Enum;
+    let unconstructed: Vec<usize> = (0..class.types.len())
+        .filter(|&t| !live.constructed.contains(&t))
+        .filter(|&t| !is_enum(t) && !class.hierarchy.ancestors(t).into_iter().any(is_enum))
+        .collect();
+    for t in unconstructed {
+        for field in &mut class.types[t].fields {
+            pruned += usize::from(field.init.take().is_some());
+        }
     }
     pruned
 }
@@ -193,6 +220,9 @@ struct State {
     /// The methods to scan, each with the class of the object it runs on (`STATIC`: none).
     work: Vec<(usize, usize)>,
     seen: HashSet<(usize, usize)>,
+    /// The instance methods called on objects of a class that no object of is created yet, by
+    /// that class: they run once one is.
+    waiting: HashMap<usize, Vec<usize>>,
     /// The first thing that the walk met that the facts do not answer.
     unknown: Option<String>,
     live: LiveMethods,
@@ -210,6 +240,11 @@ impl Walk<'_> {
         }
         let ctx = if method.is_static { STATIC } else { ctx };
         let mut state = self.state.borrow_mut();
+        // A method runs on an object only once one is created.
+        if ctx != STATIC && !state.live.instantiated.contains(&ctx) {
+            state.waiting.entry(ctx).or_default().push(m);
+            return;
+        }
         // The facts of a method are for the objects that the analysis followed it on.
         if !self.values.contexts[m].contains(&ctx) && state.unknown.is_none() {
             let on = self.class.types.get(ctx).map_or("no object", |d| d.name.as_str());
@@ -241,6 +276,13 @@ impl Walk<'_> {
             for value in decl.enum_constants.iter().flatten().flat_map(|c| &c.values) {
                 self.code(STATIC, STATIC, value);
             }
+            // An enum's static initialization creates its constants, objects of the enum and
+            // of the classes of their bodies.
+            if decl.kind == TypeKind::Enum {
+                for c in class.hierarchy.concretes(t) {
+                    self.instantiate(c);
+                }
+            }
         }
     }
 
@@ -250,6 +292,10 @@ impl Walk<'_> {
         self.initialize(c);
         if !self.state.borrow_mut().live.instantiated.insert(c) {
             return;
+        }
+        let waiting = self.state.borrow_mut().waiting.remove(&c).unwrap_or_default();
+        for m in waiting {
+            self.reach(m, c);
         }
         for &t in &self.supers[c] {
             for init in self.class.types[t].fields.iter().filter_map(|f| f.init.as_ref()) {
