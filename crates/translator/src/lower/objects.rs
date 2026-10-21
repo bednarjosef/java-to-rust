@@ -171,7 +171,7 @@ impl<'t> Lowering<'t> {
         for member in node
             .list("members")
             .filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m) && self.keeps(*m, javac))
-            .filter(|m| self.handle_declaration(*m).is_none())
+            .filter(|m| self.handle_declaration(index, *m).is_none())
         {
             // Moved initializers run in the constructors (see `inner`).
             let field = self.field(member, !(moved && !member.has_flag("STATIC")))?;
@@ -313,6 +313,14 @@ impl<'t> Lowering<'t> {
                      `--main` and `--library`"
                 );
                 error(node.pos(), message)
+            }
+            // Another compile-time constant of a library class (`Double.PRECISION`) is its value,
+            // as javac would have written it.
+            None if let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD" && s.is_static)
+                && let Some(text) = symbol.constant =>
+            {
+                let ty = self.signature_type(node, symbol.ty)?;
+                self.constant_literal(node, ty, text)
             }
             None => unsupported(node, "fields"),
         }

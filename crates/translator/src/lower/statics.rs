@@ -51,7 +51,7 @@ impl<'t> Lowering<'t> {
                     && !Self::is_constant(m)
                     && !enums::is_enum_constant(m)
                     && self.keeps(m, &self.types[index].javac)
-                    && self.handle_declaration(m).is_none()
+                    && self.handle_declaration(index, m).is_none()
             }
             _ => false,
         })
@@ -81,7 +81,7 @@ impl<'t> Lowering<'t> {
                 "VARIABLE"
                     if !Self::is_constant(member)
                         && self.keeps(member, &self.types[index].javac)
-                        && self.handle_declaration(member).is_none() =>
+                        && self.handle_declaration(index, member).is_none() =>
                 {
                     let Some(init) = member.get("initializer") else { continue };
                     let ty = match self.ty(member, member.symbol().map_or("", |s| s.ty)) {

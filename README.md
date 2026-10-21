@@ -804,6 +804,8 @@ as with `-XX:-VMContinuations`); `VM.getNanoTimeAdjustment` (HotSpot's, from the
 `CRC32.update` and `updateBytes0` (zlib's CRC-32). `Unsafe.arrayBaseOffset` and
 `arrayIndexScale` of an array class literal are HotSpot's layout (16, and 1 to 8 by element, 4
 for references) and are answered at the call, so their `Class`-taking natives are not reached.
+`Unsafe.park` and `unpark` park the current thread and unpark a thread by its id, as
+`LockSupport` does.
 `String.intern()` is the string itself; `==` on two strings stays rejected.
 
 ### Not yet

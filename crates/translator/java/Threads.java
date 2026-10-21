@@ -26,6 +26,12 @@ class Thread {
     // The thread's group; null for the group `main`.
     private ThreadGroup group;
     private UncaughtExceptionHandler uncaughtExceptionHandler;
+    // The fields of the JDK's `Thread` that `ThreadLocalRandom` and `LockSupport` read and write
+    // through `Unsafe` at their offsets (see `lower/handles.rs`).
+    long threadLocalRandomSeed;
+    int threadLocalRandomProbe;
+    int threadLocalRandomSecondarySeed;
+    Object parkBlocker;
 
     public Thread() {
         this((Runnable) null, genName());
