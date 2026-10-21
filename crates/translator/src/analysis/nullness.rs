@@ -125,7 +125,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             }
         }
         for (t, decl) in class.types.iter().enumerate() {
-            for f in decl.fields.iter().filter(|f| may_be_unset(f.ty)) {
+            for f in decl.fields.iter().filter(|f| may_be_unset(f.ty) || starts_null_enum(f)) {
                 if !set_by_construction(class, facts, t, &f.name) {
                     fields.push((decl.name.clone(), f.name.clone()));
                 }
@@ -178,6 +178,12 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
 /// `Option`.
 fn may_be_unset(ty: Type) -> bool {
     matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(..) | Type::JavaClass)
+}
+
+/// An enum field that starts as `null`, with no initializer or `null`: an `Option` unless every
+/// constructor sets it first (see `lower::enum_nulls`).
+fn starts_null_enum(f: &Field) -> bool {
+    matches!(f.ty, Type::Enum(_)) && f.init.as_ref().is_none_or(|e| matches!(e.kind, ExprKind::Null))
 }
 
 /// Whether every constructor of class `t` sets the field `name` to a value that is not null
@@ -253,6 +259,8 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
         ExprKind::Builtin(Builtin::ElementUpdate(_), _) => {
             facts.nullable_elements.contains(&updated_element(e))
         }
+        // `File.list()` of what is not a readable directory.
+        ExprKind::Builtin(Builtin::Native(Native::FileSystem("list0")), _) => true,
         // A boxed field is always an `Option`: its default is `null`, and so is an assignment of
         // `null` to it.
         _ if matches!(e.ty, Type::Boxed(_))

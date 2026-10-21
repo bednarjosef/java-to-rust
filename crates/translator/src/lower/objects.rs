@@ -180,7 +180,7 @@ impl<'t> Lowering<'t> {
         for member in node
             .list("members")
             .filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m) && self.keeps(*m, javac))
-            .filter(|m| self.handle_declaration(index, *m).is_none())
+            .filter(|m| !self.is_handle(index, *m))
         {
             // Moved initializers run in the constructors (see `inner`).
             let field = self.field(member, !rejected && !(moved && !member.has_flag("STATIC")))?;

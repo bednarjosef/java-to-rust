@@ -63,7 +63,9 @@ use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
 pub use census::panic_message;
 pub(crate) use clinit_errors::rewritten_clinit;
-pub use exceptions::{is_standard, standard_local_name, standard_names, standard_subclass};
+pub use exceptions::{
+    is_standard, standard_field_type, standard_local_name, standard_names, standard_subclass,
+};
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
@@ -571,6 +573,10 @@ impl<'t> Lowering<'t> {
                 }
                 continue;
             }
+            // A field found by reflection only to make a handle of it, which is no value.
+            if self.handle_field_local(node, stmt) {
+                continue;
+            }
             self.stmt_into(stmt, &mut out)?;
         }
         Ok(out)
@@ -903,6 +909,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.handle_access(node, &symbol)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.var_handle_access(node, &symbol)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);
         }
@@ -963,6 +972,12 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.descriptor_call(node, &symbol, receiver, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.file_system_call(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.blocker_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {
@@ -1039,6 +1054,21 @@ impl<'t> Lowering<'t> {
             // which `StringJoiner` reaches through `SharedSecrets` (`String` is the runtime's).
             ("jdk.internal.access.JavaLangAccess", "join") if args.len() == 5 => {
                 Builtin::String(StringOp::JoinRange)
+            }
+            // What the JVM's `JavaLangAccess` does, which a translated program does not have
+            // (`program::TRANSLATED_LANG_ACCESS`). Its object, a static field, reads nothing else.
+            ("jdk.internal.access.JavaLangAccess", name)
+                if crate::program::TRANSLATED_LANG_ACCESS.contains(&name) =>
+            {
+                let class = crate::program::TRANSLATED_LANG_ACCESS_CLASS;
+                let resolved = self
+                    .methods
+                    .iter()
+                    .position(|m| self.types[m.owner].javac == class && m.name == name && m.sig == symbol.ty);
+                if resolved.is_none() {
+                    return unsupported(node, &format!("`JavaLangAccess.{name}` outside a whole program"));
+                }
+                return Ok(ExprKind::Call { name: name.to_string(), args, resolved });
             }
             // There are no virtual threads: a thread's carrier is the thread itself
             // (`ThreadLocalRandom` keeps its seeds in the carrier).

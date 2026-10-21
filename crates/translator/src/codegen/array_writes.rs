@@ -68,7 +68,7 @@ impl<'a> Gen<'a> {
         let mut i = self.value(index, Type::Int).text;
         let mut old = expected.map(|e| self.element_value(e, elem));
         let mut v = match update {
-            FieldUpdate::GetAndAdd => self.value(value, elem).text,
+            FieldUpdate::GetAndAdd | FieldUpdate::GetAndBitwise(_) => self.value(value, elem).text,
             _ => self.element_value(value, elem),
         };
         if lends_array(index) || lends_array(value) || expected.is_some_and(lends_array) {
@@ -76,12 +76,16 @@ impl<'a> Gen<'a> {
             old = old.map(|o| self.bind_first(&mut binding, o, &["expected", "old", "before"]));
             v = self.bind_first(&mut binding, v, &["value", "item", "new"]);
         }
-        let call = match update {
-            FieldUpdate::GetAndAdd => {
-                let add = if elem == Type::Long { "i64::wrapping_add" } else { "i32::wrapping_add" };
-                format!("{}({handle}, {i}, {v}, {add})", self.runtime("get_and_add_element"))
+        let (name, operands) = match update {
+            FieldUpdate::GetAndAdd | FieldUpdate::GetAndBitwise(_) => {
+                let op = match update {
+                    FieldUpdate::GetAndBitwise(op) => format!("|a, b| a {} b", op.java()),
+                    _ if elem == Type::Long => "i64::wrapping_add".to_string(),
+                    _ => "i32::wrapping_add".to_string(),
+                };
+                ("get_and_add_element", format!("{handle}, {i}, {v}, {op}"))
             }
-            FieldUpdate::GetAndSet => format!("{}({handle}, {i}, {v})", self.runtime("get_and_set_element")),
+            FieldUpdate::GetAndSet => ("get_and_set_element", format!("{handle}, {i}, {v}")),
             FieldUpdate::CompareAndSet | FieldUpdate::CompareAndExchange => {
                 let name = if update == FieldUpdate::CompareAndSet {
                     "compare_and_set_element"
@@ -90,10 +94,43 @@ impl<'a> Gen<'a> {
                 };
                 let old = old.expect("a compare form has an expected value");
                 let same = self.element_identity(elem);
-                format!("{}({handle}, {i}, {old}, {v}, {same})", self.runtime(name))
+                (name, format!("{handle}, {i}, {old}, {v}, {same}"))
             }
         };
+        // The index is out of bounds as the store's would be (`analysis::exceptions`).
+        let call = self.may_fail(store.id, name, "", &operands).text;
         Code::atom(Self::bound_write(binding, call))
+    }
+
+    /// `Builtin::ByteView`: the runtime's read of the value of type `ty` in the bytes of the array
+    /// from the index of the element access among `args`, or its write of the value that the
+    /// store there casts to a byte (see `lower::handles`). Its exceptions are the access's.
+    pub(super) fn byte_view_call(&mut self, ty: Type, big_endian: bool, args: &'a [Expr]) -> Code {
+        let view = format!("::<{}>", rust_type(ty));
+        match &args[0].kind {
+            ExprKind::Index(array, index) => {
+                let handle = self.handle(array);
+                let i = self.value(index, Type::Int).text;
+                self.may_fail(args[0].id, "byte_view_get", &view, &format!("{handle}, {i}, {big_endian}"))
+            }
+            ExprKind::Assign { target: Place::Index(array, index), value, .. } => {
+                let ExprKind::Cast(_, value) = &value.kind else {
+                    unreachable!("a view's value is cast to the element's type")
+                };
+                let (mut binding, handle) =
+                    self.write_handle(array, has_effects(index) || has_effects(value));
+                let mut i = self.value(index, Type::Int).text;
+                let mut v = self.value(value, ty).text;
+                if lends_array(index) || lends_array(value) {
+                    i = self.bind_first(&mut binding, i, &["index", "slot", "at"]);
+                    v = self.bind_first(&mut binding, v, &["value", "item", "new"]);
+                }
+                let operands = format!("{handle}, {i}, {v}, {big_endian}");
+                let call = self.may_fail(args[0].id, "byte_view_set", "", &operands);
+                Code::atom(Self::bound_write(binding, call.text))
+            }
+            _ => unreachable!("a view reads or writes an element"),
+        }
     }
 
     /// The closure that tells whether two elements of type `elem` are the same, as Java's `==`

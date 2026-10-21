@@ -833,7 +833,7 @@ pub enum Builtin {
     /// cast A to B`) unless `x` is null or `class.isInstance(x)`. `lower::classes` writes the cast
     /// that gives the value after it.
     ClassCheck,
-    /// `[x]`: `HashMap.comparableClassFor(x)`, the class of `x` if it says `implements
+    /// `[x]`: `HashMap.comparableClassFor(x)` (and `ConcurrentHashMap`'s, the same), the class of `x` if it says `implements
     /// Comparable` itself, else `null`; the JDK's reads the type argument through reflection.
     ComparableClassFor,
     /// `[expected, a[i] = x]` (the compare forms) or `[a[i] = x]` (`a[i] += delta` for
@@ -842,6 +842,15 @@ pub enum Builtin {
     /// makes, as an assignment, for the analyses to see; its value is the old element, or for
     /// compare-and-set whether it was `expected`.
     ElementUpdate(crate::program::FieldUpdate),
+    /// `[a[i]]` (a read) or `[a[i] = (byte) v]` (a write): the value of type `ty` (`short`,
+    /// `char`, `int`, `long`, `float` or `double`) whose bytes are those of the `byte[]` `a` from
+    /// index `i` on, in big-endian order or not, as a `VarHandle` of
+    /// `MethodHandles.byteArrayViewVarHandle` reads and writes it (`lower::handles`). The operand
+    /// is the element access at `i`, for the analyses to see the array read or written there.
+    ByteView {
+        ty: Type,
+        big_endian: bool,
+    },
 }
 
 /// The methods of `java.lang.Class` that a program can use without reflection.

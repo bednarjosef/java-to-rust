@@ -587,24 +587,32 @@ lowered. `java.lang.Thread`:
   `interrupt`, `isInterrupted`, `interrupted`, `currentThread`, `sleep` (`long`, `long,int`,
   `Duration`), `yield`, `onSpinWait`, `holdsLock`, `getName`/`setName`, `isDaemon`/`setDaemon`
   (`IllegalThreadStateException` after start), `getId`/`threadId`, `getPriority`/`setPriority`,
-  `getThreadGroup`, `getState` (`NEW`, `RUNNABLE`, `TERMINATED`; `WAITING`, `TIMED_WAITING` and
-  `BLOCKED` from the record's blocking state), `getUncaughtExceptionHandler`/`set...`,
+  `getThreadGroup`, `getState` (`NEW` before the start and `TERMINATED` after the end, when the
+  runtime has no record of the thread; else the state in the record, a byte that `sleep`, `park`,
+  `join`, `wait` and a contended monitor entry set around their waits: `TIMED_WAITING`,
+  `WAITING` or `BLOCKED`, and `RUNNABLE` otherwise), `getContextClassLoader`/`set...` (a slot:
+  the main thread's is the application's loader, `ClassLoader.getSystemClassLoader()`, and a new
+  thread starts with its parent's; `ClassLoader` is that value and nothing more, so loading a
+  class through it is rejected), `getUncaughtExceptionHandler`/`set...`,
   `getDefaultUncaughtExceptionHandler`/`set...`, `toString` (`Thread[#1,main,5,main]`),
   `dispatchUncaughtException` (the handler chain ending in `ThreadGroup.uncaughtException`,
   which prints `Exception in thread "<name>" ` and `e.printStackTrace()` to standard error
   exactly as the JDK's does), `checkAccess` (nothing);
 - `java.lang.ThreadGroup`: `name`, `parent`, `getName`, `getParent`, `uncaughtException`,
   `getMaxPriority`. The main thread's group is `main`, as in Java.
-- `java.lang.ThreadLocal<T>`: `get`, `set`, `remove`, `initialValue`, `withInitial(Supplier)`
-  (a subclass whose `initialValue` calls the supplier). Storage is the runtime's per-thread map
-  from the `ThreadLocal` object's key to a type-erased value (`thread_local_get::<T>(key)`,
-  `thread_local_set`, `thread_local_remove`), so the JDK's `ThreadLocalMap` with its weak
-  references is not translated. `InheritableThreadLocal` is rejected.
+- `java.lang.ThreadLocal<T>`: the JDK's own, translated, which keeps a thread's values in the
+  thread's `threadLocals` field (a `ThreadLocal.ThreadLocalMap`), as the JDK's `Thread` does:
+  the translator's `Thread` declares that field with its accessors, and `terminatingThreadLocals`
+  likewise (`java/ThreadLocalStub.java` gives `Threads.java` the map's name). It declares
+  `inheritableThreadLocals` too, which `ForkJoinWorkerThread` clears through `Unsafe`, but not its
+  accessors, and a new thread copies nothing from its parent: `InheritableThreadLocal` is
+  rejected. `ForkJoinWorkerThread`'s constructor `(ThreadGroup, Runnable, String, long,
+  boolean)` is `(ThreadGroup, Runnable, String)`.
 
 Rejected, each with a message naming it: virtual threads (`Thread.ofVirtual`,
 `startVirtualThread`, `Executors.newVirtualThreadPerTaskExecutor`), `Thread.Builder`,
 `ScopedValue`, `StructuredTaskScope`, `getStackTrace`, `getAllStackTraces`, `dumpStack`,
-`stop`/`suspend`/`resume`, `ThreadGroup` enumeration, `setContextClassLoader`.
+`stop`/`suspend`/`resume`, `ThreadGroup` enumeration, what a `ClassLoader` does.
 
 ### 5.2 Natives and their Rust
 
@@ -665,6 +673,15 @@ them; they lower to `unreachable!`). `jdk.internal.vm.SharedThreadContainer` (wh
 `ThreadPoolExecutor` and `ForkJoinPool` use to start threads) is a synthetic class with
 `create(name)`, `start(thread)` (= `thread.start()`), `close()`, `threadCount()`.
 `@Contended` and `@ReservedStackAccess` are annotations and reach nothing.
+
+As implemented, the handles are no type of the lowering but static fields left out, whose
+declarations `lower/handles.rs` reads at each use (its module comment has the details): field
+offsets, the offsets and bases of static fields (`staticFieldOffset`, `staticFieldBase`),
+element offsets written out, made by a one-line method (`slotOffset`) or held in a `long` local,
+and `VarHandle` constants of fields, of array elements and of views of a `byte[]` as numbers
+(`byteArrayViewVarHandle`). The fields and arrays stay plain: an access holds the object's or the
+array's lock, and an atomic update is a method or runtime call that holds it for the whole read,
+compare and write.
 
 ### 5.4 What then translates as-is, and what is pruned
 

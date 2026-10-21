@@ -83,6 +83,8 @@ pub enum Native {
     ThreadStart,
     /// `alive0(tid)`, `join0(tid, millis)` and `rename0(tid, name)`.
     ThreadAlive,
+    /// `state0(tid)`: what the thread is doing, by `Thread.State`'s ordinal, or 0 without a record.
+    ThreadState,
     ThreadJoin,
     ThreadRename,
     /// `interrupt0(tid)`, `isInterrupted0(tid)`, and `clearInterrupt0()` of `Thread.interrupted()`,
@@ -119,6 +121,9 @@ pub enum Native {
     FileOpenRead,
     /// `FileOutputStream.open0(name, append)`: creates or opens the file and returns its descriptor.
     FileOpenWrite,
+    /// `RandomAccessFile.open0(name, mode)`: opens the file to read, or to read and write, and
+    /// returns its descriptor.
+    FileOpenRandom,
     /// The natives of a stream that act on its descriptor, which is their first argument: the
     /// stream's `fd` as an `int` (the object model supplies it); `read0()`.
     FileRead,
@@ -138,6 +143,13 @@ pub enum Native {
     FileIsRegular,
     FileLength,
     FilePosition,
+    /// `RandomAccessFile.seek0(pos)` and `setLength0(n)`; its `read0`, `readBytes0`, `write0`,
+    /// `writeBytes0`, `length0` and `getFilePointer` are `FileRead` and the others.
+    FileSeek,
+    FileSetLength,
+    /// A native of `java.io.UnixFileSystem` by its name (`getBooleanAttributes0`, `list0`, ...),
+    /// whose `File` arguments are their paths (`java_runtime::fs`).
+    FileSystem(&'static str),
     /// The natives of the stream under the translator's `System.out` and `System.err` objects
     /// (`java/overlay/java/io/StandardOutput.java`), the runtime's buffered standard output and
     /// error (`java_runtime::out`): `write0(fd, b)`, `writeBytes0(fd, b, off, len)`,
@@ -166,6 +178,9 @@ pub enum Native {
     DescriptorHandle,
     /// `FileDescriptor.getAppend(fd)`.
     DescriptorAppend,
+    /// `Unsafe.fullFence()`, and so its `loadFence()` and `storeFence()`: a fence that orders
+    /// every memory access before it against every one after it.
+    FullFence,
     /// `CRC32.update(crc, b)`.
     Crc32Update,
     /// `CRC32.updateBytes0(crc, b, off, len)`.
@@ -196,6 +211,7 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.io.StandardOutput", "writeBytes0", "(int,byte[],int,int)void") => Native::StandardWriteBytes,
         ("java.io.StandardOutput", "flush0", "(int)void") => Native::StandardFlush,
         ("java.io.StandardOutput", "close0", "(int)void") => Native::StandardClose,
+        ("jdk.internal.misc.Unsafe", "fullFence", "()void") => Native::FullFence,
         ("java.util.zip.CRC32", "update", "(int,int)int") => Native::Crc32Update,
         ("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int") => Native::Crc32UpdateBytes,
         ("java.lang.Thread", "nextThreadNum", "()int") => Native::ThreadNumber,
@@ -208,6 +224,7 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
             Native::ThreadStart
         }
         ("java.lang.Thread", "alive0", "(long)boolean") => Native::ThreadAlive,
+        ("java.lang.Thread", "state0", "(long)int") => Native::ThreadState,
         ("java.lang.Thread", "join0", "(long,long)void") => Native::ThreadJoin,
         ("java.lang.Thread", "rename0", "(long,java.lang.String)void") => Native::ThreadRename,
         ("java.lang.Thread", "interrupt0", "(long)void") => Native::ThreadInterrupt,
@@ -224,10 +241,11 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
 }
 
 /// Whether the runtime implements a native method of a translated JDK class: one of
-/// `declared_native`, or a stream native of `java.io`, which `lower/natives.rs` lowers with the
-/// descriptor of the stream's object.
+/// `declared_native`, a stream native of `java.io`, which `lower/natives.rs` lowers with the
+/// descriptor of the stream's object, or a native of `java.io.UnixFileSystem` (`FILE_SYSTEM`).
 pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
     declared_native(class, name, signature).is_some()
+        || (class == "java.io.UnixFileSystem" && FILE_SYSTEM.contains(&name))
         || matches!(
             (class, name),
             (
@@ -237,6 +255,11 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
             )
                 | ("java.io.FileOutputStream", "open0" | "write" | "writeBytes" | "close0")
                 | ("java.io.FileDescriptor", "close0")
+                | (
+                    "java.io.RandomAccessFile",
+                    "open0" | "read0" | "readBytes0" | "write0" | "writeBytes0" | "getFilePointer"
+                        | "seek0" | "length0" | "setLength0"
+                )
                 // Lowered as code on the referent (`lower::references`).
                 | ("java.lang.ref.Reference", "get0" | "refersTo0" | "clear0")
                 | ("java.lang.ref.PhantomReference", "refersTo0" | "clear0")
@@ -244,6 +267,25 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
                 | ("jdk.internal.misc.Unsafe", "park" | "unpark")
         )
 }
+
+/// The natives of `java.io.UnixFileSystem` that the runtime implements (`Native::FileSystem`).
+/// `getSpace0`, which needs `statvfs`, is not one of them.
+pub const FILE_SYSTEM: &[&str] = &[
+    "getBooleanAttributes0",
+    "checkAccess0",
+    "getLastModifiedTime0",
+    "getLength0",
+    "setPermission0",
+    "createFileExclusively0",
+    "delete0",
+    "list0",
+    "createDirectory0",
+    "rename0",
+    "setLastModifiedTime0",
+    "setReadOnly0",
+    "canonicalize0",
+    "getNameMax0",
+];
 
 /// The `Math` and `StrictMath` functions the native layer covers (beyond `abs`, `max`, `min`).
 pub const MATH_FUNCTIONS: &[&str] = &[

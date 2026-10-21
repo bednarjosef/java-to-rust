@@ -18,7 +18,7 @@ fn textual(ty: Type) -> bool {
 
 impl<'t> Lowering<'t> {
     /// The text of a constant string argument: a literal, or a constant variable.
-    fn constant_text(&self, node: Option<Node<'t>>) -> Option<String> {
+    pub(super) fn constant_text(&self, node: Option<Node<'t>>) -> Option<String> {
         let node = node?;
         match node.kind() {
             "STRING_LITERAL" => node.0["value"].as_str().map(str::to_string),

@@ -1263,6 +1263,18 @@ impl<'a> Gen<'a> {
             while names.contains(&temp) {
                 temp.push('_');
             }
+            // A string that may be null, read from a borrowed object, is borrowed from the
+            // borrow's guard, which ends with the `let`: the string is copied out first.
+            if let Some(owned) = text.strip_suffix(".as_deref()")
+                && owned.contains(".borrow()")
+            {
+                let value = format!("{temp}_value");
+                lines.push(format!("let {value} = {owned}.clone();"));
+                lines.push(format!("let {temp} = {value}.as_deref();"));
+                names.extend([value, temp.clone()]);
+                bound.push(temp);
+                continue;
+            }
             lines.push(format!("let {temp} = {text};"));
             names.push(temp.clone());
             bound.push(temp);

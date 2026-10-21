@@ -4,8 +4,8 @@
 //!
 //! Each started thread has a record, kept by its id in a registry while it runs, that holds what
 //! the JVM keeps for it: its name (for the message of an exception that ends it), whether it is
-//! alive, the permit of `park`/`unpark`, and its interrupt status with where it waits, so that
-//! `interrupt` can wake it from `sleep`, `join` or `wait`. The program's `Thread` object holds the id, so the
+//! alive, the permit of `park`/`unpark`, its interrupt status with where it waits, so that
+//! `interrupt` can wake it from `sleep`, `join` or `wait`, and its `State` for `getState()`. The program's `Thread` object holds the id, so the
 //! translation's `Thread` is an ordinary class of the program and the record needs no type of it.
 //!
 //! The JVM ends when the last thread that is not a daemon ends. So `main` holds a `MainThread`
@@ -17,7 +17,7 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -58,6 +58,52 @@ pub(crate) struct Record {
     bucket: AtomicUsize,
     /// The thread that this one waits for in `join`.
     joining: Mutex<Option<Arc<Record>>>,
+    /// What the thread is doing, as `Thread.getState()` reports it (`State`).
+    state: AtomicU8,
+}
+
+/// The states of a thread that has a record, as `Thread.getState()` numbers them (the ordinals of
+/// `Thread.State`): it runs, waits to enter a monitor that another thread holds, waits with no
+/// time limit (`join`, `wait`, `park`), or with one (`sleep` too); and the main thread once `main`
+/// has returned. A thread that has not started, or has ended, has no record.
+#[derive(Clone, Copy)]
+pub(crate) enum State {
+    Runnable = 1,
+    Blocked = 2,
+    Waiting = 3,
+    TimedWaiting = 4,
+    Terminated = 5,
+}
+
+impl State {
+    /// `Waiting`, or with a time limit `TimedWaiting`.
+    pub(crate) fn waiting(timed: bool) -> State {
+        if timed { State::TimedWaiting } else { State::Waiting }
+    }
+}
+
+/// Runs `f` with the calling thread's state `state`, then gives it back the one it had: an atomic
+/// store before and after, on the thread's record.
+pub(crate) fn in_state<R>(state: State, f: impl FnOnce() -> R) -> R {
+    // A thread whose locals are gone (in a destructor at its end) has no state to show.
+    let Ok(record) = RECORD.try_with(|r| r.borrow_mut().get_or_insert_with(main_record).clone()) else {
+        return f();
+    };
+    let before = record.state.swap(state as u8, Ordering::Relaxed);
+    let result = f();
+    record.state.store(before, Ordering::Relaxed);
+    result
+}
+
+/// `Thread.getState()` of the thread with id `tid`: its `State`, or 0 when it has no record (it
+/// has not started, or has ended, which `Thread` tells apart). The main thread runs until `main`
+/// returns.
+pub fn thread_state(tid: i64) -> i32 {
+    match record(tid) {
+        Some(r) => i32::from(r.state.load(Ordering::Relaxed)),
+        None if tid == MAIN_ID => State::Runnable as i32,
+        None => 0,
+    }
 }
 
 impl Record {
@@ -71,6 +117,7 @@ impl Record {
             interrupted: AtomicBool::new(false),
             bucket: AtomicUsize::new(0),
             joining: Mutex::new(None),
+            state: AtomicU8::new(State::Runnable as u8),
         })
     }
 
@@ -316,6 +363,14 @@ pub fn try_join_thread(tid: i64, millis: i64) -> Result<(), crate::Exception> {
     let me = current_record();
     *lock(&me.joining) = Some(record.clone());
     let deadline = (millis > 0).then(|| Instant::now() + Duration::from_millis(millis as u64));
+    let outcome = in_state(State::waiting(deadline.is_some()), || join_until(&me, &record, deadline));
+    *lock(&me.joining) = None;
+    outcome
+}
+
+/// Waits until the thread of `record` ends, or until `deadline`, or until the calling thread
+/// (`me`) is interrupted.
+fn join_until(me: &Record, record: &Record, deadline: Option<Instant>) -> Result<(), crate::Exception> {
     let mut alive = lock(&record.alive);
     let mut outcome = Ok(());
     while *alive {
@@ -336,7 +391,6 @@ pub fn try_join_thread(tid: i64, millis: i64) -> Result<(), crate::Exception> {
         }
     }
     drop(alive);
-    *lock(&me.joining) = None;
     outcome
 }
 
@@ -371,7 +425,7 @@ pub fn try_sleep_nanos(millis: i64, nanos: i32) -> Result<(), crate::Exception> 
 /// Always on the record, even before the program's first interrupt: one that comes while the
 /// thread sleeps must wake it.
 fn sleep_for(time: Duration) -> Result<(), crate::Exception> {
-    if interruptible_sleep(time) {
+    if in_state(State::TimedWaiting, || interruptible_sleep(time)) {
         return Err(crate::Exception::new(INTERRUPTED, "sleep interrupted"));
     }
     Ok(())
@@ -489,6 +543,10 @@ pub fn current_thread<T: Clone + 'static>() -> T {
 /// `LockSupport.park()`: waits until the calling thread's permit is given, and takes it, or until
 /// the thread is interrupted, which leaves its status set.
 pub fn park(timeout: Option<Duration>) {
+    in_state(State::waiting(timeout.is_some()), || park_until(timeout))
+}
+
+fn park_until(timeout: Option<Duration>) {
     let record = current_record();
     let deadline = timeout.map(|t| Instant::now() + t);
     let mut permit = lock(&record.permit);
@@ -561,6 +619,7 @@ pub fn main_thread() -> MainThread {
 
 impl Drop for MainThread {
     fn drop(&mut self) {
+        main_record().state.store(State::Terminated as u8, Ordering::Relaxed);
         // A panic is a translation bug: the program ends with it.
         if !std::thread::panicking() {
             await_threads();

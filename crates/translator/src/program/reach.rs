@@ -185,10 +185,18 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int"),
     ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.Class<?>,java.lang.String)long"),
     ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.reflect.Field)long"),
+    ("jdk.internal.misc.Unsafe", "staticFieldOffset", "(java.lang.reflect.Field)long"),
+    ("jdk.internal.misc.Unsafe", "staticFieldBase", "(java.lang.reflect.Field)java.lang.Object"),
     ("java.util.HashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
     ("java.util.concurrent.ConcurrentHashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
     // A saved property is a property (`lower/system.rs`).
     ("jdk.internal.misc.VM", "getSavedProperty", "(java.lang.String)java.lang.String"),
+    // Nothing is garbage collected, so a file's descriptor needs no cleaner (`lower/natives.rs`).
+    ("java.io.FileCleanable", "register", "(java.io.FileDescriptor)void"),
+    // No virtual thread blocks a carrier thread (`lower/natives.rs`).
+    ("jdk.internal.misc.Blocker", "begin", "()boolean"),
+    ("jdk.internal.misc.Blocker", "begin", "(boolean)boolean"),
+    ("jdk.internal.misc.Blocker", "end", "(boolean)void"),
 ];
 
 /// A method, by class, name and javac's signature.
@@ -226,12 +234,35 @@ pub fn caller_query(class: &str, name: &str, signature: &str) -> Option<&'static
 /// names it (`lower/handles.rs`).
 pub fn field_offset_named(node: &Value) -> Option<(String, String)> {
     let symbol = &node["symbol"];
-    if text(node, "kind") != "METHOD_INVOCATION"
-        || (text(symbol, "owner"), text(symbol, "name")) != ("jdk.internal.misc.Unsafe", "objectFieldOffset")
-    {
+    if text(node, "kind") != "METHOD_INVOCATION" {
         return None;
     }
     let args = node["arguments"].as_array()?;
+    // The field of a `VarHandle` that `findVarHandle` of a class literal makes.
+    let finds = matches!(
+        (text(symbol, "owner"), text(symbol, "name")),
+        ("java.lang.invoke.MethodHandles.Lookup", "findVarHandle")
+            | ("jdk.internal.invoke.MhUtil", "findVarHandle")
+    );
+    if finds && let [.., class, field, _] = &args[..] {
+        let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
+        return Some((literal_class(class)?, field.to_string()));
+    }
+    // The field that `getDeclaredField` finds, which only a field's handle may use (`handles`):
+    // `ForkJoinPool` finds `poolIds` so through a local of type `Class<ForkJoinPool>`.
+    if (text(symbol, "owner"), text(symbol, "name")) == ("java.lang.Class", "getDeclaredField")
+        && let [field] = &args[..]
+    {
+        let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
+        let class = text(&node["methodSelect"]["expression"], "javaType");
+        let class = class.strip_prefix("java.lang.Class<")?.strip_suffix('>')?;
+        return Some((strip_arguments(class), field.to_string()));
+    }
+    if text(symbol, "owner") != "jdk.internal.misc.Unsafe"
+        || !matches!(text(symbol, "name"), "objectFieldOffset" | "staticFieldOffset")
+    {
+        return None;
+    }
     let (class, field) = match &args[..] {
         [class, field] => (class, field),
         [get]
@@ -313,10 +344,15 @@ pub fn runtime_stream_call(node: &Value) -> bool {
     })
 }
 
-/// Whether the method is one of the `REPLACED_METHODS`, or an access of `Unsafe` through a
-/// field's offset, which the lowering replaces with the field.
+/// Whether the method is one of the `REPLACED_METHODS`, an access of `Unsafe` through a field's
+/// offset, which the lowering replaces with the field, or a method that makes or uses a
+/// `VarHandle`.
 pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
     REPLACED_METHODS.contains(&(class, name, signature))
+        // A method that makes a `VarHandle` makes a constant that lowering keeps as what it
+        // reaches, and the handle's accesses are those of the field or element (`lower/handles.rs`).
+        || signature.ends_with(")java.lang.invoke.VarHandle")
+        || class == "java.lang.invoke.VarHandle"
         || REPLACED_BY_NAME.contains(&(class, name))
         || caller_query(class, name, signature).is_some()
         || (class == "java.lang.Character" && crate::lower::runtime_character_method(name, signature))
@@ -337,6 +373,9 @@ pub enum FieldUpdate {
     /// `compareAndExchange<Kind><Mode>(o, offset, expected, x)`: the old value, the field set to
     /// `x` when it was `expected`.
     CompareAndExchange,
+    /// `getAndBitwiseOr<Kind><Mode>(o, offset, mask)`, and the `And` and `Xor` forms: the old
+    /// value, the field combined with `mask` by the operator (`BitOr`, `BitAnd` or `BitXor`).
+    GetAndBitwise(crate::ast::BinOp),
 }
 
 /// Whether the method is one of `Unsafe`'s atomic updates of an `int`, `long` or reference field
@@ -345,8 +384,12 @@ pub fn unsafe_field_update(class: &str, name: &str, signature: &str) -> Option<F
     if class != "jdk.internal.misc.Unsafe" {
         return None;
     }
-    let forms: [(&str, FieldUpdate, &[&str]); 5] = [
+    use crate::ast::BinOp;
+    let forms: [(&str, FieldUpdate, &[&str]); 8] = [
         ("getAndAdd", FieldUpdate::GetAndAdd, &["", "Acquire", "Release"]),
+        ("getAndBitwiseOr", FieldUpdate::GetAndBitwise(BinOp::BitOr), &["", "Acquire", "Release"]),
+        ("getAndBitwiseAnd", FieldUpdate::GetAndBitwise(BinOp::BitAnd), &["", "Acquire", "Release"]),
+        ("getAndBitwiseXor", FieldUpdate::GetAndBitwise(BinOp::BitXor), &["", "Acquire", "Release"]),
         ("getAndSet", FieldUpdate::GetAndSet, &["", "Acquire", "Release"]),
         ("compareAndSet", FieldUpdate::CompareAndSet, &[""]),
         ("weakCompareAndSet", FieldUpdate::CompareAndSet, &["", "Plain", "Acquire", "Release"]),
@@ -356,12 +399,14 @@ pub fn unsafe_field_update(class: &str, name: &str, signature: &str) -> Option<F
     forms.into_iter().find_map(|(prefix, update, modes)| {
         let rest = name.strip_prefix(prefix)?;
         let (kind, ty) = kinds.into_iter().find(|(k, _)| rest.starts_with(k))?;
-        if !modes.contains(&&rest[kind.len()..]) || (update == FieldUpdate::GetAndAdd && kind == "Reference")
-        {
+        let numeric = matches!(update, FieldUpdate::GetAndAdd | FieldUpdate::GetAndBitwise(_));
+        if !modes.contains(&&rest[kind.len()..]) || (numeric && kind == "Reference") {
             return None;
         }
         let expected = match update {
-            FieldUpdate::GetAndAdd | FieldUpdate::GetAndSet => format!("(java.lang.Object,long,{ty}){ty}"),
+            FieldUpdate::GetAndAdd | FieldUpdate::GetAndSet | FieldUpdate::GetAndBitwise(_) => {
+                format!("(java.lang.Object,long,{ty}){ty}")
+            }
             FieldUpdate::CompareAndSet => format!("(java.lang.Object,long,{ty},{ty})boolean"),
             FieldUpdate::CompareAndExchange => format!("(java.lang.Object,long,{ty},{ty}){ty}"),
         };
@@ -411,8 +456,11 @@ pub fn unsafe_field_access(class: &str, name: &str, signature: &str) -> Option<b
 /// `jdk.internal.event`. The streams' `Tripwire.ENABLED` is `Boolean.getBoolean` of a system
 /// property that only `-D` on the JVM's command line sets, which a translated program has no
 /// equivalent of; it guards warnings through `PlatformLogger` that name a class by reflection.
+/// `ThreadLocal.TRACE_VTHREAD_LOCALS` is the property `jdk.traceVirtualThreadLocals`, which is
+/// unset (`UNSET_PROPERTIES`); it guards a `StackWalker` dump of where a virtual thread sets one.
 pub const FALSE_FLAGS: &[(&str, &str)] = &[
     ("java.io.FileInputStream", "jfrTracing"),
+    ("java.lang.ThreadLocal", "TRACE_VTHREAD_LOCALS"),
     ("java.io.FileOutputStream", "jfrTracing"),
     ("java.io.RandomAccessFile", "jfrTracing"),
     ("java.lang.Throwable", "jfrTracing"),
@@ -457,10 +505,23 @@ fn archived_null_test(condition: &Value, equal: bool) -> bool {
 /// translated program, as in a program run without options (`lower/system.rs`). `Arrays.sort`
 /// reads the first to choose its old merge sort, and `ThreadLocalRandom` the second to seed
 /// itself from `SecureRandom`.
-pub const UNSET_PROPERTIES: &[&str] = &["java.util.Arrays.useLegacyMergeSort", "java.util.secureRandomSeed"];
+pub const UNSET_PROPERTIES: &[&str] = &[
+    "java.util.Arrays.useLegacyMergeSort",
+    "java.util.secureRandomSeed",
+    // The common `ForkJoinPool`'s settings, and whether every thread is tracked for thread dumps.
+    "java.util.concurrent.ForkJoinPool.common.parallelism",
+    "java.util.concurrent.ForkJoinPool.common.threadFactory",
+    "java.util.concurrent.ForkJoinPool.common.exceptionHandler",
+    "java.util.concurrent.ForkJoinPool.common.maximumSpares",
+    "jdk.trackAllThreads",
+    // Whether `ThreadLocal` prints where a virtual thread sets one.
+    "jdk.traceVirtualThreadLocals",
+];
 
 /// The `if` statements among the statements of `block` whose `then` branch never runs: their
-/// condition is `Boolean.parseBoolean(v)` of a local `v` that the block declares earlier with the
+/// condition is `Boolean.parseBoolean(v)` or `v != null` (or `||` of such tests, as the common
+/// `ForkJoinPool` tests its thread factory's and handler's names) of a local `v` that the block
+/// declares earlier with the
 /// value of one of the `UNSET_PROPERTIES` (`System.getProperty` or `VM.getSavedProperty` of it,
 /// which is null) and never assigns, as `ThreadLocalRandom`'s static block tests
 /// `java.util.secureRandomSeed` before it reaches `SecureRandom`.
@@ -503,21 +564,24 @@ pub fn unset_property_ifs(block: &Value) -> Vec<&Value> {
     let mut written = Vec::new();
     assigned(block, &mut written);
     unset.retain(|name| !written.contains(name));
-    statements
-        .iter()
-        .filter(|s| {
-            let condition = &s["condition"];
-            let condition =
-                if text(condition, "kind") == "PARENTHESIZED" { &condition["expression"] } else { condition };
-            let symbol = &condition["symbol"];
-            let arg = &condition["arguments"][0];
-            text(s, "kind") == "IF"
-                && text(condition, "kind") == "METHOD_INVOCATION"
-                && (text(symbol, "owner"), text(symbol, "name")) == ("java.lang.Boolean", "parseBoolean")
-                && text(arg, "kind") == "IDENTIFIER"
-                && unset.contains(&text(arg, "name"))
-        })
-        .collect()
+    let is_unset = |v: &Value| text(v, "kind") == "IDENTIFIER" && unset.contains(&text(v, "name"));
+    // `Boolean.parseBoolean(v)`, `v != null`, or either of two such conditions.
+    fn never<'v>(condition: &'v Value, is_unset: &dyn Fn(&'v Value) -> bool) -> bool {
+        let symbol = &condition["symbol"];
+        let (left, right) = (&condition["leftOperand"], &condition["rightOperand"]);
+        let null = |v: &Value| text(v, "kind") == "NULL_LITERAL";
+        match text(condition, "kind") {
+            "PARENTHESIZED" => never(&condition["expression"], is_unset),
+            "CONDITIONAL_OR" => never(left, is_unset) && never(right, is_unset),
+            "NOT_EQUAL_TO" => (is_unset(left) && null(right)) || (null(left) && is_unset(right)),
+            "METHOD_INVOCATION" => {
+                (text(symbol, "owner"), text(symbol, "name")) == ("java.lang.Boolean", "parseBoolean")
+                    && is_unset(&condition["arguments"][0])
+            }
+            _ => false,
+        }
+    }
+    statements.iter().filter(|s| text(s, "kind") == "IF" && never(&s["condition"], &is_unset)).collect()
 }
 
 /// The only branch of an `if` statement or a `?:` that can run, when its condition is never true
@@ -643,6 +707,20 @@ pub fn writes_string_array(node: &Value) -> bool {
             .and_then(|a| a.first())
             .is_some_and(|a| text(a, "javaType") == "java.lang.String[]")
 }
+
+/// The translator's `System.getProperties()` (`java/overlay/java/lang/TranslatedProperties.java`,
+/// see `lower::system`).
+pub const TRANSLATED_PROPERTIES: JdkMethod =
+    ("java.lang.TranslatedProperties", "all", "()java.util.Properties");
+
+/// The methods of `JavaLangAccess` that are the translator's static methods of the same name and
+/// type in `TRANSLATED_LANG_ACCESS_CLASS` (`java/overlay/jdk/internal/access/`), as
+/// `SharedSecrets.getJavaLangAccess()` is null in a translated program (see `lower.rs`).
+pub const TRANSLATED_LANG_ACCESS: &[&str] =
+    &["countPositives", "countNonZeroAscii", "uncheckedNewStringWithLatin1Bytes", "inflateBytesToChars"];
+
+/// The class of `TRANSLATED_LANG_ACCESS`.
+pub const TRANSLATED_LANG_ACCESS_CLASS: &str = "jdk.internal.access.TranslatedLangAccess";
 
 /// A method of the JDK, by class, name and javac's type of it.
 pub type JdkMethod = (&'static str, &'static str, &'static str);
@@ -1257,6 +1335,12 @@ impl<'t> Walk<'t> {
 
     fn field(&mut self, key: FieldKey) {
         let Some(&node) = self.fields.get(&key) else {
+            // A field of a standard class (the translator's `Thread`) is declared with the class
+            // of its type, though the code may never create one (`ForkJoinWorkerThread` clears
+            // `Thread.inheritableThreadLocals` through `Unsafe`).
+            if let Some(ty) = crate::lower::standard_field_type(&key.0, &key.1) {
+                self.work.push(Item::Class(ty));
+            }
             return self.block(&key.0.clone(), Item::Field(key));
         };
         if !self.reach.fields.insert(key.clone()) {
@@ -1431,6 +1515,19 @@ impl<'t> Walk<'t> {
                 for (class, method, signature) in *methods {
                     self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
                 }
+            }
+            // The translator's properties (see `lower::system`).
+            "METHOD" if owner == "java.lang.System" && name == "getProperties" => {
+                let (class, method, signature) = TRANSLATED_PROPERTIES;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
+            // The translator's code for what `JavaLangAccess` does (see `lower.rs`).
+            "METHOD"
+                if owner == "jdk.internal.access.JavaLangAccess"
+                    && TRANSLATED_LANG_ACCESS.contains(&name.as_str()) =>
+            {
+                let signature = text(symbol, "type").to_string();
+                self.work.push(Item::Method((TRANSLATED_LANG_ACCESS_CLASS.into(), name, signature)));
             }
             // Formatted where it is called, and printed by `PRINT_FORMATTED`.
             "METHOD" if owner == "java.io.PrintStream" && matches!(name.as_str(), "printf" | "format") => {
