@@ -178,15 +178,45 @@ pub const TRANSLATED_ANYWAY: &[&str] =
 /// (`lower/natives.rs`), so that reachability does not enter them, as with the runtime's classes.
 /// They take a `Class`, which the translation has no value for: every call that `Unsafe`'s own
 /// initialization makes of the first two passes a class literal of an array class, and
-/// `objectFieldOffset` of a class literal and a field's name makes a field handle
-/// (`lower/handles.rs`).
+/// `objectFieldOffset` of a class literal and a field's name, or of the field that
+/// `getDeclaredField` finds by its name, makes a field handle (`lower/handles.rs`).
 pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Unsafe", "arrayBaseOffset", "(java.lang.Class<?>)long"),
     ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int"),
     ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.Class<?>,java.lang.String)long"),
+    ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.reflect.Field)long"),
     ("java.util.HashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
     ("java.util.concurrent.ConcurrentHashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
+    // A saved property is a property (`lower/system.rs`).
+    ("jdk.internal.misc.VM", "getSavedProperty", "(java.lang.String)java.lang.String"),
 ];
+
+/// The class and the field that `node` is the offset of, when it is a call of `Unsafe`'s
+/// `objectFieldOffset` of a class literal and the field's name, or of the field that
+/// `getDeclaredField` of a class literal finds by its name: the field is reached, though no code
+/// names it (`lower/handles.rs`).
+pub fn field_offset_named(node: &Value) -> Option<(String, String)> {
+    let symbol = &node["symbol"];
+    if text(node, "kind") != "METHOD_INVOCATION"
+        || (text(symbol, "owner"), text(symbol, "name")) != ("jdk.internal.misc.Unsafe", "objectFieldOffset")
+    {
+        return None;
+    }
+    let args = node["arguments"].as_array()?;
+    let (class, field) = match &args[..] {
+        [class, field] => (class, field),
+        [get]
+            if text(get, "kind") == "METHOD_INVOCATION"
+                && text(&get["symbol"], "owner") == "java.lang.Class"
+                && text(&get["symbol"], "name") == "getDeclaredField" =>
+        {
+            (&get["methodSelect"]["expression"], get["arguments"].get(0)?)
+        }
+        _ => return None,
+    };
+    let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
+    Some((literal_class(class)?, field.to_string()))
+}
 
 /// The methods that lowering replaces whatever their signature, as `REPLACED_METHODS`: the
 /// constants of an enum class, which the JDK reads through `SharedSecrets` and reflection, and
@@ -391,6 +421,73 @@ fn archived_null_test(condition: &Value, equal: bool) -> bool {
     let null = |v: &Value| text(v, "kind") == "NULL_LITERAL";
     let (left, right) = (&condition["leftOperand"], &condition["rightOperand"]);
     text(condition, "kind") == kind && (archived(left) && null(right) || null(left) && archived(right))
+}
+
+/// The system properties that only the command line sets (`-D`), never the JVM: unset in a
+/// translated program, as in a program run without options (`lower/system.rs`). `Arrays.sort`
+/// reads the first to choose its old merge sort, and `ThreadLocalRandom` the second to seed
+/// itself from `SecureRandom`.
+pub const UNSET_PROPERTIES: &[&str] = &["java.util.Arrays.useLegacyMergeSort", "java.util.secureRandomSeed"];
+
+/// The `if` statements among the statements of `block` whose `then` branch never runs: their
+/// condition is `Boolean.parseBoolean(v)` of a local `v` that the block declares earlier with the
+/// value of one of the `UNSET_PROPERTIES` (`System.getProperty` or `VM.getSavedProperty` of it,
+/// which is null) and never assigns, as `ThreadLocalRandom`'s static block tests
+/// `java.util.secureRandomSeed` before it reaches `SecureRandom`.
+pub fn unset_property_ifs(block: &Value) -> Vec<&Value> {
+    let Some(statements) = block["statements"].as_array() else { return Vec::new() };
+    let unset_value = |init: &Value| {
+        let symbol = &init["symbol"];
+        let read = matches!(
+            (text(symbol, "owner"), text(symbol, "name")),
+            ("java.lang.System", "getProperty") | ("jdk.internal.misc.VM", "getSavedProperty")
+        );
+        let key = &init["arguments"][0];
+        text(init, "kind") == "METHOD_INVOCATION"
+            && read
+            && text(symbol, "type") == "(java.lang.String)java.lang.String"
+            && text(key, "kind") == "STRING_LITERAL"
+            && UNSET_PROPERTIES.contains(&text(key, "value"))
+    };
+    let mut unset: Vec<&str> = statements
+        .iter()
+        .filter(|s| text(s, "kind") == "VARIABLE" && unset_value(&s["initializer"]))
+        .map(|s| text(s, "name"))
+        .collect();
+    if unset.is_empty() {
+        return Vec::new();
+    }
+    fn assigned<'v>(v: &'v Value, out: &mut Vec<&'v str>) {
+        match v {
+            Value::Object(map) => {
+                let kind = text(v, "kind");
+                if kind == "ASSIGNMENT" || kind.ends_with("_ASSIGNMENT") {
+                    out.push(text(&v["variable"], "name"));
+                }
+                map.values().for_each(|c| assigned(c, out));
+            }
+            Value::Array(items) => items.iter().for_each(|i| assigned(i, out)),
+            _ => {}
+        }
+    }
+    let mut written = Vec::new();
+    assigned(block, &mut written);
+    unset.retain(|name| !written.contains(name));
+    statements
+        .iter()
+        .filter(|s| {
+            let condition = &s["condition"];
+            let condition =
+                if text(condition, "kind") == "PARENTHESIZED" { &condition["expression"] } else { condition };
+            let symbol = &condition["symbol"];
+            let arg = &condition["arguments"][0];
+            text(s, "kind") == "IF"
+                && text(condition, "kind") == "METHOD_INVOCATION"
+                && (text(symbol, "owner"), text(symbol, "name")) == ("java.lang.Boolean", "parseBoolean")
+                && text(arg, "kind") == "IDENTIFIER"
+                && unset.contains(&text(arg, "name"))
+        })
+        .collect()
 }
 
 /// The only branch of an `if` statement or a `?:` that can run, when its condition is never true
@@ -1176,6 +1273,17 @@ impl<'t> Walk<'t> {
             Value::Object(_)
                 if CLASS_KINDS.contains(&text(value, "kind"))
                     && self.classes.contains_key(&class_name(value)) => {}
+            // An `if` that tests a property that is never set runs only its `else` branch.
+            Value::Object(_) if text(value, "kind") == "BLOCK" && !unset_property_ifs(value).is_empty() => {
+                let dead = unset_property_ifs(value);
+                for s in value["statements"].as_array().into_iter().flatten() {
+                    if dead.iter().any(|d| std::ptr::eq(*d, s)) {
+                        self.scan(&s["elseStatement"]);
+                    } else {
+                        self.scan(s);
+                    }
+                }
+            }
             // The branch that never runs is not reached, and neither is the condition, which the
             // lowering drops: a flag's class need not exist.
             Value::Object(_) if let Some(branch) = live_branch(value, self.sequential) => {
@@ -1239,6 +1347,9 @@ impl<'t> Walk<'t> {
                     self.work.push(if initialize { Item::Init(class) } else { Item::Class(class) });
                 }
                 self.reflective(value);
+                if let Some(field) = field_offset_named(value) {
+                    self.work.push(Item::Field(field));
+                }
                 if text(value, "kind") == "STRING_LITERAL"
                     && let Some(literal) = value["value"].as_str()
                 {

@@ -405,6 +405,29 @@ impl Uses {
                         }
                     }
                     "METHOD_INVOCATION" => {
+                        // A field that the code reaches through its offset (`ThreadLocalRandom`
+                        // reads `Thread`'s seeds so, see `handles`).
+                        if let Some(field) = crate::program::field_offset_named(v)
+                            && is_standard(&field.0)
+                        {
+                            self.fields.insert(field);
+                        }
+                        // `Unsafe.unpark(thread)` passes the thread's id (`natives.rs`).
+                        if (owner.as_str(), text(symbol, "name").as_str())
+                            == ("jdk.internal.misc.Unsafe", "unpark")
+                        {
+                            self.fields.insert(("java.lang.Thread".into(), "tid".into()));
+                        }
+                        // The carrier thread is the current one (`lower.rs`).
+                        if (owner.as_str(), text(symbol, "name").as_str())
+                            == ("jdk.internal.access.JavaLangAccess", "currentCarrierThread")
+                        {
+                            self.members.insert((
+                                "java.lang.Thread".into(),
+                                "currentThread".into(),
+                                "()java.lang.Thread".into(),
+                            ));
+                        }
                         self.operations.insert(kind.clone());
                         self.operations.insert(format!("{owner}#{}", text(symbol, "name")));
                         self.operations.insert(format!("{owner}#"));

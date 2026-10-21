@@ -538,9 +538,17 @@ impl<'t> Lowering<'t> {
 
     fn block(&self, node: Node<'t>) -> Result<Vec<Stmt>, Error> {
         let mut out = Vec::new();
+        // The `if`s that test a property that is never set run only their `else` branch.
+        let unset = crate::program::unset_property_ifs(node.0);
         for stmt in node.list("statements") {
             if is_super_call(stmt) {
                 out.extend(self.super_init(stmt)?);
+                continue;
+            }
+            if unset.iter().any(|s| std::ptr::eq(*s, stmt.0)) {
+                if let Some(otherwise) = stmt.get("elseStatement") {
+                    self.stmt_into(otherwise, &mut out)?;
+                }
                 continue;
             }
             self.stmt_into(stmt, &mut out)?;
@@ -571,6 +579,8 @@ impl<'t> Lowering<'t> {
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
             }
             "EXPRESSION_STATEMENT" if let Some(set_all) = self.set_all(node)? => set_all,
+            // The value of a field handle is no field's (see `handles`).
+            "EXPRESSION_STATEMENT" if self.handle_definition(node) => return Ok(()),
             "EXPRESSION_STATEMENT" => match self.expr(node.child("expression")?)? {
                 // A native that does nothing here, such as `registerNatives()`, leaves no trace.
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
@@ -1006,6 +1016,16 @@ impl<'t> Lowering<'t> {
             // which `StringJoiner` reaches through `SharedSecrets` (`String` is the runtime's).
             ("jdk.internal.access.JavaLangAccess", "join") if args.len() == 5 => {
                 Builtin::String(StringOp::JoinRange)
+            }
+            // There are no virtual threads: a thread's carrier is the thread itself
+            // (`ThreadLocalRandom` keeps its seeds in the carrier).
+            ("jdk.internal.access.JavaLangAccess", "currentCarrierThread") => {
+                let resolved = self.methods.iter().position(|m| {
+                    self.types[m.owner].javac == "java.lang.Thread"
+                        && m.name == "currentThread"
+                        && m.sig == "()java.lang.Thread"
+                });
+                return Ok(ExprKind::Call { name: "currentThread".to_string(), args, resolved });
             }
             (
                 "java.lang.StringBuilder"

@@ -836,6 +836,12 @@ pub enum Builtin {
     /// `[x]`: `HashMap.comparableClassFor(x)` (and `ConcurrentHashMap`'s, the same), the class of `x` if it says `implements
     /// Comparable` itself, else `null`; the JDK's reads the type argument through reflection.
     ComparableClassFor,
+    /// `[expected, a[i] = x]` (the compare forms) or `[a[i] = x]` (`a[i] += delta` for
+    /// get-and-add): an atomic update of an array element through `Unsafe` at an element offset
+    /// (`lower::handles`), made under one borrow of the array. The operands are the store it
+    /// makes, as an assignment, for the analyses to see; its value is the old element, or for
+    /// compare-and-set whether it was `expected`.
+    ElementUpdate(crate::program::FieldUpdate),
 }
 
 /// The methods of `java.lang.Class` that a program can use without reflection.

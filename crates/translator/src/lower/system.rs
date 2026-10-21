@@ -1,5 +1,5 @@
-//! `System.getProperty` and `System.getProperties`. A translated program sees the properties of
-//! a plain `java Main` run:
+//! `System.getProperty`, `VM.getSavedProperty` (the same values, saved as the JVM started) and
+//! `System.getProperties`. A translated program sees the properties of a plain `java Main` run:
 //!
 //! - The keys whose value depends on the machine or the run (`KEYS`: `user.dir`, `user.home`,
 //!   `os.name`, `os.version`, ...) are answered by the runtime when the program runs, as the JVM
@@ -155,7 +155,10 @@ impl<'t> Lowering<'t> {
             }
             return Ok(Some(ExprKind::Call { name: name.to_string(), args: Vec::new(), resolved }));
         }
-        if (symbol.owner, symbol.name) != ("java.lang.System", "getProperty") {
+        if !matches!(
+            (symbol.owner, symbol.name),
+            ("java.lang.System", "getProperty") | ("jdk.internal.misc.VM", "getSavedProperty")
+        ) {
             return Ok(None);
         }
         let key = match args.first().map(|arg| &arg.kind) {

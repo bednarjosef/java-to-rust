@@ -1376,3 +1376,23 @@ Decisions that change during the implementation are recorded here, milestone by 
   The weak forms never fail spuriously, which Java allows. Reachability does not enter
   `Unsafe`'s own updates, whose loops pass the offset on as a value. Atomic fields (2.2) remain
   the refinement for when the lock shows in a profile.
+- **Element offsets and other classes' fields came with `ConcurrentHashMap`**, whose table
+  reads, claims and writes its bins with `Unsafe` at `((long) i << ASHIFT) + ABASE`
+  (`tabAt`, `casTabAt`, `setTabAt`). `lower/handles.rs` proves an offset to be an element's when
+  it is `base + index * scale` or `base + (index << shift)`, in either order, with `base` an
+  `arrayBaseOffset` and `scale` an `arrayIndexScale` of one array class (a `static final`, or a
+  local of the static block), `shift` that scale's `31 - Integer.numberOfLeadingZeros(scale)`,
+  and `index` an `int` widened to `long` or a `long`; any other arithmetic on an offset is
+  rejected with its position. A read or write at an element offset is `a[i]`; an atomic update
+  is a runtime function (`java::compare_and_set_element` and its kin in `array.rs`) that holds
+  the array's borrow, or in a program with threads its lock (`SharedArray`), for the whole read,
+  compare and write, so no other thread's access of the array comes between them. A reference
+  element compares by identity, as `==` does. The offset of a field of another class
+  (`ThreadLocalRandom`'s offsets of `Thread.threadLocalRandomSeed`, `threadLocalRandomProbe`
+  and `threadLocalRandomSecondarySeed`) is a field handle of that class, which the receiver
+  must be of; the translator's `Thread` declares those fields. `objectFieldOffset(Field)` of
+  `C.class.getDeclaredField("f")` and a handle assigned once in a static block (`Random`'s
+  `seedOffset`, inside a `try`) are handles too. `synchronized` on an object whose class has
+  subclasses (a bin's first node) holds the monitor of the object's variant
+  (`corpus/whole-program/ConcurrentCounters.java`). `Unsafe.park` and `unpark` are the runtime's
+  park of the current thread and unpark of a thread by its id.

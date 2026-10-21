@@ -501,6 +501,20 @@ impl<'m> Walk<'m> {
                 Place::Field { object, .. } => self.expr(object),
                 Place::Var(_) | Place::Static { .. } => {}
             },
+            // An atomic update of an element takes the array's handle and borrows it whole, so the
+            // array is shared (see `lower::handles`).
+            ExprKind::Builtin(Builtin::ElementUpdate(_), args) => {
+                for a in args {
+                    match &a.kind {
+                        ExprKind::Assign { target: Place::Index(array, index), value, .. } => {
+                            self.expr(array);
+                            self.expr(index);
+                            self.expr(value);
+                        }
+                        _ => self.expr(a),
+                    }
+                }
+            }
             // `System.arraycopy` reads its source and writes its destination, like indexing.
             ExprKind::Builtin(Builtin::Native(Native::ArrayCopy), args) => {
                 for (i, a) in args.iter().enumerate() {
