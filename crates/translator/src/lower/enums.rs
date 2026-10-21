@@ -206,8 +206,13 @@ impl<'t> Lowering<'t> {
         if let Some(class) = self.enum_index(symbol.owner) {
             if symbol.is_static && symbol.name == "values" {
                 let ty = Type::enum_type(&self.types[class].name);
+                // The constants as `Object`s where the enum's arrays are `Object[]`s (`covariant`).
+                let element = self.covariant_array(Type::array(ty)).element();
                 let values = (0..self.enum_constant_names(class).count())
-                    .map(|ordinal| self.synth(ExprKind::EnumConstant { class, ordinal }, node.pos(), ty))
+                    .map(|ordinal| {
+                        let constant = self.synth(ExprKind::EnumConstant { class, ordinal }, node.pos(), ty);
+                        self.convert(constant, element)
+                    })
                     .collect();
                 return Ok(Some(ExprKind::ArrayLit(values)));
             }

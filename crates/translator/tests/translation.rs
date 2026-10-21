@@ -4240,6 +4240,31 @@ fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at
 }
 
 #[test]
+fn an_enum_array_passed_for_a_type_variables_array_is_an_object_array_of_its_constants() {
+    let rust = translate(
+        "public class Main {
+            enum Day { MON, TUE }
+            static <T> T last(T[] a) { return a[a.length - 1]; }
+            public static void main(String[] args) {
+                Day[] days = Day.values();
+                Day[] some = new Day[2];
+                System.out.println(last(days).ordinal() + \" \" + (some[0] == null) + \" \" + last(new Integer[] {1}));
+            }
+        }",
+    );
+    // `Day[]` meets `Integer[]` at `T[]`: its constants are `Object`s, cast back where read, and
+    // a null test of an element tests the checked cast.
+    assert_contains(
+        &rust,
+        &[
+            "let days: Vec<Option<Object>> = vec![Some(Object::Day(MainDay::Mon)), Some(Object::Day(MainDay::Tue))];",
+            "java::null_enum(last(&days).as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\"))) as i32",
+            "some[0].as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\")).is_none()",
+        ],
+    );
+}
+
+#[test]
 fn main_arguments_that_are_an_object_array_are_strings_as_objects() {
     let rust = translate(
         "public class Main {
