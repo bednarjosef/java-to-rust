@@ -1607,3 +1607,44 @@ Generics are erased in lowering, and nothing after it knows they existed:
   a class), `corpus/programs/ArrayListLike.java`, `corpus/programs/HashMapLike.java`, and
   `corpus/projects/collections` (a generic interface with a default method, two implementations,
   a `Pair<A, B>` with `equals` and `hashCode`, and algorithms bounded by `Comparable`).
+
+### Milestone 6
+
+Stage one of the plan: the generics that need no trait. Text, `equals`, `hashCode`, bounds and
+per-instantiation variants are not done, and a generic that needs them stays erased.
+
+- There is no `Type::Param`. A type variable of a real generic is a synthetic `TypeDecl` of kind
+  `TypeKind::Param`, named after its owner (`Box#T`, `@12#T` for a method), with no members and no
+  implementors: every analysis already treats a value of a class it knows nothing about as an
+  opaque value that is cloned, never borrowed into. `Type::Class` carries its type arguments
+  (`Type::Class("Box", [String])`), and `Type::generic` interns them. The generator writes the
+  synthetic class as its variable (`T`) and a class with arguments as `Box<String>` inside its
+  representation (`Rc<RefCell<Box<String>>>`).
+- Realness is decided in lowering, not by a separate analysis over the erased program, since the
+  erased program has lost what the decision needs. The candidates are classes with type
+  parameters that have no bounds, no supertypes, no subclasses and are not abstract, and methods
+  whose type parameters have no bounds. Lowering translates them as real; afterwards
+  `real_generics::verify` checks the lowered program and fails every candidate whose type
+  variables' values are used for anything but a store, a return, an argument to a parameter of a
+  type variable or a comparison with `null`, whose types meet a cast or an `instanceof`, that is
+  used raw or as an array element (`T[]`, `Box<T>[]`), or (for a method) whose type parameters
+  are not all mentioned by its parameters' types, which Rust infers them from. Lowering then runs
+  again with the failed candidates erased, until nothing fails; a lowering error with candidates
+  left is retried with all of them erased, so a real generic never turns a translated program into
+  a rejected one.
+- The type parameters are bounded by `Clone` only (`impl<T: Clone> Box<T>`, `fn pick<T: Clone>`),
+  and every use of a type variable's value clones it, as for any value of a class whose
+  representation is an `Rc`. A literal passed for a type variable gets its type suffix (`3i32`),
+  which Rust could not infer otherwise.
+- Use sites keep javac's substituted types: `words.pop().length()` is `String`'s and
+  `numbers.pop() + 1` an `Integer`'s, with no cast. A generic class whose constructor builds
+  another instantiation (`Pair<B, A> swap()`) needs nothing of its own.
+- `use_lines` found `Cell<` in the name of a generic struct (`BoxCell<T>`) and imported
+  `std::cell::Cell`; it now matches only the whole name.
+- A field of `this` assigned from a borrow of itself (`head = head.next` with a mutable node) kept
+  the node's `Ref` alive into the write; the right operand is now a block of its own, as it already
+  was for a local (`codegen::objects::reassigns_through_borrow`).
+- Corpus: `corpus/features/GenericsReal.java` (a linked stack, a pair whose swap changes its type
+  arguments, a cell that may hold null, nested instantiations, generic methods) and
+  `corpus/programs/LinkedQueue.java` (a generic queue of generic pairs driving a breadth-first
+  search, and a generic tally). The collections project's `Node<T>` became real.

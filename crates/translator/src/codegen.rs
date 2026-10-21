@@ -375,9 +375,10 @@ impl<'a> Gen<'a> {
         let m = &self.class.methods[index];
         let name = &self.class.types[m.class].name;
         if m.is_ctor && self.builds_plain(name) {
-            format!(" -> {}", self.struct_of(m.class))
+            format!(" -> {}", self.generic_struct(m.class))
         } else if m.is_ctor {
-            format!(" -> {}", self.object_type(name))
+            let args = self.type_params(&self.class.types[m.class].type_params).1;
+            format!(" -> {}", self.object_type_with(name, &args))
         } else if m.ret == Type::Void {
             String::new()
         } else if self.optional_return() {
@@ -433,7 +434,8 @@ impl<'a> Gen<'a> {
         } else {
             let fn_name =
                 if m.name == "<clinit>" { statics::init_name(name) } else { self.fn_names[index].clone() };
-            self.line(&format!("{}fn {fn_name}({}){ret} {{", self.vis(), params.join(", ")));
+            let generics = self.type_params(&m.type_params).0;
+            self.line(&format!("{}fn {fn_name}{generics}({}){ret} {{", self.vis(), params.join(", ")));
         }
         self.indent += 1;
         if m.name == "<clinit>" {

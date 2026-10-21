@@ -12,6 +12,7 @@
 //! the boxes. A class's own `compareTo(C)` implements it through a bridge (see `bridges`).
 
 use super::*;
+use std::collections::HashSet;
 
 /// Where lowering puts `Object`: the index of its type and of its two methods, which follow the
 /// program's types and methods, and `Comparable`'s when the program uses it.
@@ -50,11 +51,15 @@ fn mentions_comparable(v: &Value) -> bool {
 
 /// Whether the declarations mention `java.lang.Object` other than through the constructor that
 /// every class calls: a value, a parameter or a call of one of its methods.
-pub(super) fn uses_object(decls: &[Node]) -> bool {
-    decls.iter().any(|d| mentions_object(d.0))
+pub(super) fn uses_object(decls: &[Node], real: &HashSet<*const Value>) -> bool {
+    decls.iter().any(|d| mentions_object(d.0, real))
 }
 
-fn mentions_object(v: &Value) -> bool {
+fn mentions_object(v: &Value, real: &HashSet<*const Value>) -> bool {
+    if real.contains(&(v as *const Value)) {
+        return false;
+    }
+    let mentions_object = |v| mentions_object(v, real);
     match v {
         // A type variable erases to `Object`.
         Value::Object(fields) if fields.get("kind").and_then(Value::as_str) == Some("TYPE_PARAMETER") => true,
@@ -79,7 +84,7 @@ impl<'t> Lowering<'t> {
     /// and `methods` declared so far.
     pub(super) fn plan_object(&mut self, decls: &[Node<'t>]) {
         let comparable = uses_comparable(decls);
-        if uses_object(decls) || comparable {
+        if uses_object(decls, &self.real_type_parameters()) || comparable {
             let decl = self.types.len();
             let equals = self.methods.len();
             let comparable = comparable.then_some(ComparableIndexes {
@@ -108,6 +113,7 @@ impl<'t> Lowering<'t> {
             pos: Pos::default(),
             is_abstract: true,
             overrides: Vec::new(),
+            type_params: Vec::new(),
         };
         for m in methods.iter_mut().filter(|m| !m.is_static && !m.is_ctor) {
             match (m.name.as_str(), &m.params[..], m.ret) {
@@ -143,6 +149,7 @@ impl<'t> Lowering<'t> {
             fields: Vec::new(),
             statics: Vec::new(),
             enum_constants: None,
+            type_params: Vec::new(),
         };
         // The program's enums are comparable, and so are its classes that implement `Comparable`.
         if let Some(c) = at.comparable {
@@ -269,12 +276,13 @@ impl<'t> Lowering<'t> {
             pos,
             is_abstract: false,
             overrides: vec![index],
+            type_params: Vec::new(),
         }
     }
 
     /// Whether `ty` is `Object`.
     pub(super) fn is_object(ty: Type) -> bool {
-        matches!(ty, Type::Class(name) if name == OBJECT)
+        matches!(ty, Type::Class(name, _) if name == OBJECT)
     }
 
     /// `x.equals(o)` on a string or a box `x` with an argument of `Object`: `Object`'s `equals`
@@ -342,7 +350,7 @@ impl<'t> Lowering<'t> {
             Some(r) => self.expr(r)?,
             None => self.this(node),
         };
-        if !matches!(receiver.ty, Type::Class(_)) {
+        if !matches!(receiver.ty, Type::Class(..)) {
             return unsupported(node, &format!("`{}` of a value of this type", symbol.name));
         }
         let (resolved, args) = match symbol.name {

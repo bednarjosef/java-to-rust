@@ -93,7 +93,7 @@ impl<'a> Gen<'a> {
     /// for an object.
     fn option_source(&self, name: &str, ty: Type) -> String {
         let rust = self.local(name);
-        if matches!(ty, Type::Class(_) | Type::StringBuilder | Type::Enum(_)) {
+        if matches!(ty, Type::Class(..) | Type::StringBuilder | Type::Enum(_)) {
             return format!("{rust}.as_ref()");
         }
         // An `Option<i32>` is `Copy` and matches as it is; a faithful box is `as_deref`'d.
@@ -108,7 +108,7 @@ impl<'a> Gen<'a> {
             _ if e.ty == Type::StringBuilder => self.builder_option(e),
             ExprKind::Null => "None::<&str>".to_string(),
             ExprKind::Var(name) => self.option_source(name, e.ty),
-            ExprKind::Cast(_, inner) if !matches!(inner.ty, Type::Class(_)) => self.option_ref(inner),
+            ExprKind::Cast(_, inner) if !matches!(inner.ty, Type::Class(..)) => self.option_ref(inner),
             // In a format, a field is borrowed until the text is formatted, after every operand,
             // so it is borrowed only when no operand has effects.
             ExprKind::Field { .. } | ExprKind::Index(..) if !self.formatting || self.lazy_text => {
@@ -141,7 +141,7 @@ impl<'a> Gen<'a> {
                     let cell = cell_name(&self.class.types[*class].name, name);
                     format!("{cell}.with_borrow(Option::{test})")
                 }
-                _ if matches!(other.ty, Type::Class(_) | Type::Array(_)) => {
+                _ if matches!(other.ty, Type::Class(..) | Type::Array(_)) => {
                     format!("{}.{test}()", self.expr(other).at(ATOM))
                 }
                 _ => format!("{}.{test}()", self.option_ref(other)),
@@ -227,7 +227,7 @@ impl<'a> Gen<'a> {
                 format!("{text}.to_string()")
             })));
         }
-        if matches!(e.ty, Type::Class(_)) {
+        if matches!(e.ty, Type::Class(..)) {
             // `java::or_null` shows `null`, or the object as it shows when it is not null.
             let option = format!("{}.as_ref()", self.object_place(e));
             let text = self.handle_text("o", e);

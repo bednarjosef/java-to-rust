@@ -10,6 +10,7 @@ mod generics;
 mod hierarchy;
 mod object;
 mod objects;
+mod real_generics;
 mod statics;
 mod strings;
 mod unsigned;
@@ -17,7 +18,7 @@ mod unsigned;
 use crate::ast::*;
 use objects::{MethodInfo, TypeInfo};
 use serde_json::Value;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 mod arrays;
 mod boxing;
@@ -43,19 +44,24 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         .filter(|n| !matches!(n.kind(), "EMPTY_STATEMENT" | "ANNOTATION_TYPE"))
         .collect();
     let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
-    let mut lowering = Lowering::declare(&decls)?;
-    lowering.plan_object(&decls);
-    let mut types: Vec<TypeDecl> =
-        (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
-    let mut methods: Vec<Method> =
-        (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
-    lowering.object_methods(&mut methods)?;
-    lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
-    lowering.object_types(&mut types);
-    let hierarchy = Hierarchy::new(&types, &methods);
-    let class = Class { name: first.str("simpleName").to_string(), types, methods, hierarchy };
-    enums::check_nulls(&class)?;
-    Ok(class)
+    real_generics::retry(|real| {
+        let mut lowering = Lowering::declare(&decls)?;
+        lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
+        lowering.plan_object(&decls);
+        let mut types: Vec<TypeDecl> =
+            (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
+        let mut methods: Vec<Method> =
+            (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
+        lowering.object_methods(&mut methods)?;
+        lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
+        lowering.object_types(&mut types);
+        lowering.param_decls(&mut types);
+        let failed = lowering.verify(&types, &methods);
+        let hierarchy = Hierarchy::new(&types, &methods);
+        let class = Class { name: first.str("simpleName").to_string(), types, methods, hierarchy };
+        enums::check_nulls(&class)?;
+        Ok((class, lowering.real.clone(), failed))
+    })
 }
 
 /// A node of javac's tree.
@@ -168,6 +174,10 @@ struct Lowering<'t> {
     entry: Option<usize>,
     /// Where `Object` goes, in a program that uses it (see `object`).
     object: Option<object::ObjectIndexes>,
+    /// The generic classes and methods that are Rust generics (see `real_generics`).
+    real: real_generics::Real,
+    /// Those of `real` that lowering found cannot be: the program is lowered again without them.
+    failed: RefCell<real_generics::Real>,
 }
 
 impl<'t> Lowering<'t> {
@@ -258,6 +268,7 @@ impl<'t> Lowering<'t> {
             pos: node.pos(),
             is_abstract,
             overrides: self.overrides(node),
+            type_params: self.method_type_params(index),
         })
     }
 
@@ -284,7 +295,13 @@ impl<'t> Lowering<'t> {
             // A type variable hides a class of the same name.
             _ if let Some(erased) = self.type_variable(node, name) => erased,
             _ if self.enum_index(name).is_some() => Ok(Type::enum_type(name)),
-            _ if self.type_index(name).is_some() => Ok(Type::class(name)),
+            _ if let Some(t) = self.type_index(name) => {
+                // A Rust generic used without type arguments.
+                if self.is_real(real_generics::Owner::Class(t)) && !self.class_type_params(t).is_empty() {
+                    self.fail(real_generics::Owner::Class(t));
+                }
+                Ok(Type::class(name))
+            }
             "<nulltype>" => Ok(Type::Null),
             // `this` in the body of an enum constant, which is the constant.
             _ if name.starts_with("<anonymous ") && self.enum_index(&name[11..name.len() - 1]).is_some() => {

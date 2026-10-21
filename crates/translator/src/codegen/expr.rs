@@ -147,7 +147,7 @@ impl<'a> Gen<'a> {
             {
                 return format!("{name} += {}", self.str_ref(value));
             }
-            if matches!(value.ty, Type::Class(_))
+            if matches!(value.ty, Type::Class(..))
                 && self.enum_of(value).is_none()
                 && let Some(index) = self.to_string_index(value)
             {
@@ -197,6 +197,12 @@ impl<'a> Gen<'a> {
 
     /// `e` as a value of type `ty`, applying Java's widening conversions.
     pub(super) fn value(&mut self, e: &'a Expr, ty: Type) -> Code {
+        // A value given to a Rust generic's type variable is of its own type, which a literal
+        // states, since nothing else may.
+        if self.is_type_param(ty) && !self.is_type_param(e.ty) {
+            let code = self.value(e, e.ty);
+            return if code.literal.is_some() { Code::atom(code.typed()) } else { code };
+        }
         if matches!(e.ty, Type::Boxed(_)) || matches!(ty, Type::Boxed(_)) {
             return self.boxing_value(e, ty);
         }
@@ -254,7 +260,7 @@ impl<'a> Gen<'a> {
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
                     // An object narrowed by a null check is a reference to the `Rc`.
-                    Type::Class(_) | Type::StringBuilder if self.borrowed.contains(name) => {
+                    Type::Class(..) | Type::StringBuilder if self.borrowed.contains(name) => {
                         Code::atom(format!("{rust}.clone()"))
                     }
                     ty if self.clones(ty) && !self.facts.moves.contains(&e.id) => {
@@ -302,7 +308,7 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Binary(op, l, r) if is_null_test(*op, l, r) => self.null_test(*op, l, r),
             ExprKind::Binary(BinOp::And, ..) if let Some(code) = self.bound_and(e) => code,
-            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(_)) => {
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(..)) => {
                 self.identity(*op, l, r)
             }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if l.ty == Type::StringBuilder => {
@@ -366,11 +372,11 @@ impl<'a> Gen<'a> {
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
             // An upcast or a downcast between the program's types, or a string, a box or a
             // primitive becoming an `Object`.
-            ExprKind::Cast(to @ Type::Class(_), value) => self.class_cast(*to, value),
+            ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
             // A downcast from an interface to an enum that implements it, or from `Object` to a
             // string or a box.
             ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_)), value)
-                if matches!(value.ty, Type::Class(_)) =>
+                if matches!(value.ty, Type::Class(..)) =>
             {
                 self.class_cast(*to, value)
             }

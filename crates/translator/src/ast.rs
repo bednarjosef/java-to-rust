@@ -35,8 +35,10 @@ pub enum Type {
     Void,
     /// An array type such as `int[]` or `String[][]`.
     Array(&'static Type),
-    /// A class declared in the translated program, by name.
-    Class(&'static str),
+    /// A class declared in the translated program, by name, with the type arguments of a generic
+    /// class that is a Rust generic (see `lower::generics`): `Box<Integer>` is
+    /// `Class("Box", [Integer])`. An erased generic class has none.
+    Class(&'static str, &'static [Type]),
     /// An enum declared in the translated program, by name. Its values are plain Rust enums.
     Enum(&'static str),
     /// The type of `null`.
@@ -76,7 +78,20 @@ impl Type {
     }
 
     pub fn class(name: &str) -> Type {
-        Type::Class(interned_name(name))
+        Type::Class(interned_name(name), &[])
+    }
+
+    /// A generic class with its type arguments: `Box<Integer>`.
+    pub fn generic(name: &str, args: &[Type]) -> Type {
+        Type::Class(interned_name(name), intern_types(args))
+    }
+
+    /// The type arguments of a generic class's type; none for any other type.
+    pub fn args(self) -> &'static [Type] {
+        match self {
+            Type::Class(_, args) => args,
+            _ => &[],
+        }
     }
 
     /// The type of an enum declared in the file.
@@ -117,7 +132,7 @@ impl Type {
             self,
             Type::String
                 | Type::Array(_)
-                | Type::Class(_)
+                | Type::Class(..)
                 | Type::Null
                 | Type::Boxed(_)
                 | Type::StringBuilder
@@ -150,6 +165,22 @@ fn interned_name(name: &str) -> &'static str {
     }
 }
 
+fn intern_types(types: &[Type]) -> &'static [Type] {
+    if types.is_empty() {
+        return &[];
+    }
+    static LISTS: std::sync::Mutex<Vec<&'static [Type]>> = std::sync::Mutex::new(Vec::new());
+    let mut lists = LISTS.lock().unwrap();
+    match lists.iter().find(|l| **l == types) {
+        Some(l) => l,
+        None => {
+            let l: &'static [Type] = Box::leak(types.to_vec().into_boxed_slice());
+            lists.push(l);
+            l
+        }
+    }
+}
+
 fn intern(ty: Type) -> &'static Type {
     static TYPES: std::sync::Mutex<Vec<&'static Type>> = std::sync::Mutex::new(Vec::new());
     let mut types = TYPES.lock().unwrap();
@@ -177,7 +208,11 @@ impl fmt::Display for Type {
             Type::String => f.write_str("String"),
             Type::Void => f.write_str("void"),
             Type::Array(element) => write!(f, "{element}[]"),
-            Type::Class(name) | Type::Enum(name) => f.write_str(name),
+            Type::Class(name, []) | Type::Enum(name) => f.write_str(name),
+            Type::Class(name, args) => {
+                let args: Vec<String> = args.iter().map(Type::to_string).collect();
+                write!(f, "{name}<{}>", args.join(", "))
+            }
             Type::Null => f.write_str("null"),
             Type::StringBuilder => f.write_str("StringBuilder"),
             Type::Charset => f.write_str("Charset"),
@@ -222,6 +257,9 @@ pub enum TypeKind {
     /// A class of the runtime whose values can be `Object`s: `String` and the boxed classes. The
     /// program never declares one: lowering adds them with `Object` (see `OBJECT`).
     Runtime,
+    /// A type variable of a generic class or method that is a Rust generic (see
+    /// `lower::generics`). Its values are of the Rust type parameter, which nothing implements.
+    Param,
 }
 
 /// The name of the type of `java.lang.Object`'s values. Lowering adds it to a program that uses
@@ -278,6 +316,8 @@ pub struct TypeDecl {
     pub statics: Vec<Field>,
     /// The constants of an enum, in declaration order; `None` for a class.
     pub enum_constants: Option<Vec<EnumConstant>>,
+    /// The type parameters of a generic class that is a Rust generic, as types of kind `Param`.
+    pub type_params: Vec<Type>,
 }
 
 /// One constant of an enum: `PLANET(3.0, 4.0)`.
@@ -315,6 +355,8 @@ pub struct Method {
     /// The methods of the program that this one overrides, as javac lists them (indexes into
     /// `Class::methods`).
     pub overrides: Vec<usize>,
+    /// The type parameters of a generic method that is a Rust generic, as types of kind `Param`.
+    pub type_params: Vec<Type>,
 }
 
 pub struct Param {

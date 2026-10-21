@@ -161,7 +161,12 @@ classes that implement it. A method implementing one whose erased signature diff
 next()` for `T next()`, `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a
 method with the erased signature that converts and calls it. An array passed as an array of a type
 variable (`first(String[])` for `<T> T first(T[])`) and intersection bounds (`T extends A & B`) are
-rejected. Other interfaces of the JDK (`Runnable`, `Iterable`) and lambdas are rejected with an
+rejected. A generic class or method that only stores, returns and passes on the values of its
+type variables (a stack, a pair, a node, `<T> T choose(boolean, T, T)`) is a Rust generic instead
+(`struct Stack<T>`, `impl<T: Clone> Stack<T>`, `fn choose<T: Clone>(..)`), and its uses keep the
+substituted types with no casts. One that needs more of them (their text, `equals`, a bound, a
+cast, an array of them), a class with a supertype or a subclass, a raw use, and a method whose type
+parameters its parameters do not all mention stay erased. Other interfaces of the JDK (`Runnable`, `Iterable`) and lambdas are rejected with an
 error that names the construct and its position. So
 are the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and the like),
 `Character.toChars(int, char[], int)`, and the unsigned and parse methods with other argument counts.

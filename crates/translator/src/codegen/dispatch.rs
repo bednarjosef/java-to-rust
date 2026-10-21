@@ -311,7 +311,7 @@ impl<'a> Gen<'a> {
     /// box, that `e` is: the variant it becomes.
     pub(super) fn value_class(&self, e: &Expr) -> usize {
         match e.ty {
-            Type::Class(_) => self.struct_class(e).expect("an object has a class type"),
+            Type::Class(..) => self.struct_class(e).expect("an object has a class type"),
             _ => self.class.type_of(e.ty).expect("a value of a type of the program or of the runtime"),
         }
     }

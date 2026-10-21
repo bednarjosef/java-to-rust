@@ -13,7 +13,11 @@ impl<'a> Gen<'a> {
                 let elem = self.element_ty_name(*elem);
                 format!("{}<{elem}>", self.runtime("Array"))
             }
-            Type::Class(name) => self.object_type(name),
+            Type::Class(name, []) => self.object_type(name),
+            Type::Class(name, args) => {
+                let args: Vec<String> = args.iter().map(|&a| self.ty_name(a)).collect();
+                self.object_type_with(name, &format!("<{}>", args.join(", ")))
+            }
             Type::Enum(name) => struct_name(name),
             Type::Boxed(_) => self.boxed_name(ty),
             Type::StringBuilder => self.runtime("StringBuilder"),
@@ -292,7 +296,7 @@ impl<'a> Gen<'a> {
 pub(super) fn name_part(ty: Type) -> String {
     match ty {
         Type::Array(elem) => format!("{}_array", name_part(*elem)),
-        Type::Class(name) | Type::Enum(name) => struct_name(name).to_lowercase(),
+        Type::Class(name, _) | Type::Enum(name) => struct_name(name).to_lowercase(),
         Type::Boxed(_) => ty.to_string().to_lowercase(),
         _ => rust_type(ty).to_lowercase(),
     }

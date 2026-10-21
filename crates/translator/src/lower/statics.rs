@@ -94,6 +94,7 @@ impl<'t> Lowering<'t> {
             pos: node.pos(),
             is_abstract: false,
             overrides: Vec::new(),
+            type_params: Vec::new(),
         })
     }
 }

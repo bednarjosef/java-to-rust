@@ -61,13 +61,17 @@ impl Slot {
 /// Whether values of this type are owned heap data or shared arrays or objects, which are cloned
 /// when read.
 pub(super) fn needs_clone(ty: Type) -> bool {
-    matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(_))
+    matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(..))
 }
 
 /// The Rust name of a class: its name in its package without the dots (`Outer.Inner` is
 /// `OuterInner`), after the path of its
 /// module when that is not the module being written (see `modules`).
 pub(super) fn struct_name(name: &str) -> String {
+    // A type variable of a Rust generic is the Rust type parameter.
+    if let Some((_, var)) = name.rsplit_once('#') {
+        return var.to_string();
+    }
     let (path, local) = modules::split(name);
     path + &local.replace('.', "")
 }
@@ -89,7 +93,7 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Boolean => "false",
         Type::String => "String::new()",
         Type::StringBuilder => "java::StringBuilder::new()",
-        Type::Boxed(_) | Type::Class(_) => "None",
+        Type::Boxed(_) | Type::Class(..) => "None",
         _ => unreachable!("lowering rejects fields of type {ty}"),
     }
 }
@@ -141,7 +145,7 @@ fn mentioned(class: &Class) -> HashSet<usize> {
         while let Type::Array(element) = ty {
             ty = *element;
         }
-        if let Type::Class(name) = ty
+        if let Type::Class(name, _) = ty
             && let Some(t) = class.type_index(name)
         {
             out.insert(t);
@@ -210,7 +214,7 @@ fn own_exprs(stmt: &Stmt) -> Vec<&Expr> {
 /// Whether an expression turns an object into text, which runs the object's `toString`; the
 /// object, if so.
 fn converted_objects(x: &Expr) -> Vec<&Expr> {
-    let is_object = |a: &&Expr| matches!(a.ty, Type::Class(_));
+    let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..));
     match &x.kind {
         ExprKind::Builtin(Builtin::Print | Builtin::Println, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
@@ -278,7 +282,7 @@ fn reads_static(e: &Expr) -> bool {
 /// tree, or turns one into text.
 fn reads_class(class: &Class, e: &Expr, name: &str) -> bool {
     let root = class.type_index(name).map(|t| class.hierarchy.root(t));
-    let of_class = |x: &Expr| matches!(x.ty, Type::Class(c) if c == name || class.type_index(c).map(|t| class.hierarchy.root(t)) == root);
+    let of_class = |x: &Expr| matches!(x.ty, Type::Class(c, _) if c == name || class.type_index(c).map(|t| class.hierarchy.root(t)) == root);
     let mut found = false;
     visit_expr(e, &mut |x| {
         found |= match &x.kind {
@@ -321,6 +325,38 @@ impl<'a> Gen<'a> {
 
     /// The Rust type of an object of class `name`: a plain value for an owned class.
     pub(super) fn object_type(&self, name: &str) -> String {
+        self.object_type_with(name, "")
+    }
+
+    /// The type parameters of class `t` as a Rust generic: `<T: Clone, U: Clone>` to declare them
+    /// and `<T, U>` to use them; empty for any other class.
+    pub(super) fn type_params(&self, params: &[Type]) -> (String, String) {
+        if params.is_empty() {
+            return (String::new(), String::new());
+        }
+        let names: Vec<String> = params.iter().map(|p| struct_name(&p.to_string())).collect();
+        let bounded: Vec<String> = names.iter().map(|n| format!("{n}: Clone")).collect();
+        (format!("<{}>", bounded.join(", ")), format!("<{}>", names.join(", ")))
+    }
+
+    /// Whether `ty` is a type variable of a Rust generic.
+    pub(super) fn is_type_param(&self, ty: Type) -> bool {
+        self.class.class_index(ty).is_some_and(|t| self.class.types[t].kind == TypeKind::Param)
+    }
+
+    /// The struct of class `t` with its own type parameters, as its `impl` names it.
+    pub(super) fn generic_struct(&self, t: usize) -> String {
+        let decl = &self.class.types[self.rep_class(t)];
+        self.struct_of(t) + &self.type_params(&decl.type_params).1
+    }
+
+    /// `object_type` of a generic class with its type arguments, `<i32>`.
+    pub(super) fn object_type_with(&self, name: &str, args: &str) -> String {
+        if let Some(t) = self.class.type_index(name)
+            && self.class.types[t].kind == TypeKind::Param
+        {
+            return struct_name(name);
+        }
         if let Some(t) = self.class.type_index(name)
             && let hierarchy::Rep::Enum(t) = hierarchy::rep(self.class, self.facts, t)
         {
@@ -331,7 +367,7 @@ impl<'a> Gen<'a> {
         let structure = match self.class.type_index(name) {
             Some(t) => self.struct_of(t),
             None => struct_name(name),
-        };
+        } + args;
         if self.facts.owned.contains(name) {
             structure
         } else if self.facts.immutable.contains(name) {
@@ -353,7 +389,7 @@ impl<'a> Gen<'a> {
         if matches!(e.ty, Type::Enum(_)) {
             return true;
         }
-        matches!(e.ty, Type::Class(name) if {
+        matches!(e.ty, Type::Class(name, _) if {
             let name = self.rep_name(name);
             self.facts.immutable.contains(name) || self.facts.owned.contains(name)
         })
@@ -361,7 +397,7 @@ impl<'a> Gen<'a> {
 
     /// The type of `this` in the method being written: a reference to the object.
     pub(super) fn this_type(&self) -> String {
-        let structure = self.struct_of(self.this_struct);
+        let structure = self.generic_struct(self.this_struct);
         if self.facts.immutable.contains(&self.class.types[self.this_struct].name) {
             format!("&{structure}")
         } else {
@@ -413,7 +449,7 @@ impl<'a> Gen<'a> {
     /// are objects of the same class.
     pub(super) fn peel(&self, e: &'a Expr) -> &'a Expr {
         match &e.kind {
-            ExprKind::Cast(Type::Class(to), inner) if matches!(inner.ty, Type::Class(_)) => {
+            ExprKind::Cast(Type::Class(to, _), inner) if matches!(inner.ty, Type::Class(..)) => {
                 let same = match (self.class.type_index(to), self.class.class_index(inner.ty)) {
                     (Some(a), Some(b)) => self.rep_class(a) == self.rep_class(b),
                     _ => false,
@@ -469,7 +505,7 @@ impl<'a> Gen<'a> {
     pub(super) fn place_nullable(&self, place: &Place) -> bool {
         match place {
             Place::Field { object, name } => {
-                matches!(object.ty, Type::Class(owner) if self.field_nullable(owner, name))
+                matches!(object.ty, Type::Class(owner, _) if self.field_nullable(owner, name))
             }
             Place::Static { class, name } => self.facts.nullable_statics.contains(&(*class, name.clone())),
             Place::Var(_) | Place::Index(..) => false,
@@ -482,7 +518,7 @@ impl<'a> Gen<'a> {
     pub(super) fn object(&mut self, e: &'a Expr) -> String {
         let e = self.peel(e);
         let (text, place) = self.object_parts(e);
-        if !(matches!(e.ty, Type::Class(_)) && self.nullable(e)) {
+        if !(matches!(e.ty, Type::Class(..)) && self.nullable(e)) {
             return text;
         }
         let non_null = self.runtime("non_null");
@@ -547,7 +583,7 @@ impl<'a> Gen<'a> {
             ExprKind::Var(v) => format!("{}.clone()", self.local(v)),
             _ => self.expr(e).text,
         };
-        if matches!(e.ty, Type::Class(_)) && self.nullable(e) {
+        if matches!(e.ty, Type::Class(..)) && self.nullable(e) {
             format!("{}({text})", self.runtime("non_null"))
         } else {
             text
@@ -642,11 +678,11 @@ impl<'a> Gen<'a> {
         match &e.kind {
             ExprKind::This => self.this_name().to_string(),
             // A variable narrowed by a null check is a reference already.
-            ExprKind::Var(name) if matches!(e.ty, Type::Class(_)) && self.borrowed.contains(name) => {
+            ExprKind::Var(name) if matches!(e.ty, Type::Class(..)) && self.borrowed.contains(name) => {
                 self.local(name)
             }
             ExprKind::Var(_) | ExprKind::Field { .. }
-                if matches!(e.ty, Type::Class(_)) && self.nullable(e) =>
+                if matches!(e.ty, Type::Class(..)) && self.nullable(e) =>
             {
                 let (_, place) = self.object_parts(e);
                 let text = self.object(e);
@@ -704,13 +740,29 @@ impl<'a> Gen<'a> {
     /// Whether an assignment to a local reads the local's old object through a `RefCell` borrow,
     /// as `t = t.left` does: the borrow would outlive the assignment that drops the old object.
     pub(super) fn reassigns_through_borrow(&self, e: &Expr) -> bool {
-        let ExprKind::Assign { target: Place::Var(name), value, .. } = &e.kind else {
-            return false;
+        // The place is a local, or a field of `this` (`head = head.next` in a method of a list).
+        let (name, field) = match &e.kind {
+            ExprKind::Assign { target: Place::Var(name), .. } => (name, false),
+            ExprKind::Assign { target: Place::Field { object, name }, .. }
+                if matches!(object.kind, ExprKind::This) =>
+            {
+                (name, true)
+            }
+            _ => return false,
         };
+        let ExprKind::Assign { value, .. } = &e.kind else { unreachable!("matched above") };
         let mut found = false;
         visit_expr(value, &mut |x| {
             if self.holds_borrow(x) {
-                visit_expr(x, &mut |y| found |= matches!(&y.kind, ExprKind::Var(v) if v == name));
+                visit_expr(x, &mut |y| {
+                    found |= match &y.kind {
+                        ExprKind::Var(v) => !field && v == name,
+                        ExprKind::Field { object, name: f } => {
+                            field && f == name && matches!(object.kind, ExprKind::This)
+                        }
+                        _ => false,
+                    }
+                });
             }
         });
         found
@@ -907,7 +959,7 @@ impl<'a> Gen<'a> {
             return Code::atom(format!("{obj}.{path}{}({args})", self.fn_names[index]));
         }
         let borrow = if mutating { ".borrow_mut()" } else { ".borrow()" };
-        let Type::Class(class) = receiver.ty else { unreachable!("a receiver has a class type") };
+        let Type::Class(class, _) = receiver.ty else { unreachable!("a receiver has a class type") };
         // The receiver is borrowed before the arguments run, so arguments that may reach an object
         // of the class run first.
         if args.iter().any(|a| has_effects(a) || reads_class(self.class, a, class)) {
@@ -1053,7 +1105,7 @@ impl<'a> Gen<'a> {
         };
         let place = format!("{obj}{borrow}.{field}");
         let outer = std::mem::replace(&mut self.guarded, true);
-        let Type::Class(class) = object.ty else { unreachable!("a field of an object") };
+        let Type::Class(class, _) = object.ty else { unreachable!("a field of an object") };
         let text = match how {
             Update::Assign(value) => Some(format!("{place} = {}", self.field_value(value, ty, nullable))),
             Update::Compound(op, value) if let Some(symbol) = self.in_place_op(op, ty, value, e.id) => {
@@ -1312,9 +1364,10 @@ impl<'a> Gen<'a> {
     pub(super) fn type_items(&mut self, index: usize) {
         let class = self.class;
         let decl = &class.types[index];
+        let (params, args) = self.type_params(&decl.type_params);
         let name = self.struct_of(index);
         self.gap();
-        self.line(&format!("{}struct {name} {{", self.vis()));
+        self.line(&format!("{}struct {name}{args} {{", self.vis()));
         self.indent += 1;
         if let Some(base) = hierarchy::embedded(self.facts, class, index) {
             self.line(&format!("{}base: {},", self.vis(), self.struct_of(base)));
@@ -1326,7 +1379,7 @@ impl<'a> Gen<'a> {
         self.indent -= 1;
         self.line("}");
         self.gap();
-        self.line(&format!("impl {name} {{"));
+        self.line(&format!("impl{params} {name}{args} {{"));
         self.indent += 1;
         self.this_struct = index;
         self.field_inits(index);
@@ -1349,7 +1402,7 @@ impl<'a> Gen<'a> {
         // `toString` is how the object is displayed.
         if let Some(i) = display {
             self.gap();
-            self.line(&format!("impl fmt::Display for {name} {{"));
+            self.line(&format!("impl{params} fmt::Display for {name}{args} {{"));
             self.indent += 1;
             self.method(i);
             self.indent -= 1;
@@ -1438,11 +1491,11 @@ impl<'a> Gen<'a> {
             | ExprKind::Char(_)
             | ExprKind::Bool(_)
             | ExprKind::Str(_)
-            | ExprKind::Var(_) => !matches!(e.ty, Type::Class(_) | Type::Array(_)),
+            | ExprKind::Var(_) => !matches!(e.ty, Type::Class(..) | Type::Array(_)),
             ExprKind::Field { object, .. } => {
                 matches!(object.kind, ExprKind::This)
                     && match e.ty {
-                        Type::Class(_) => self.quiet_text(e, depth + 1),
+                        Type::Class(..) => self.quiet_text(e, depth + 1),
                         Type::Array(_) => false,
                         _ => true,
                     }
@@ -1450,7 +1503,7 @@ impl<'a> Gen<'a> {
             ExprKind::Binary(op, l, r) => {
                 !matches!(op, BinOp::Div | BinOp::Rem)
                     && [l, r].iter().all(|x| match x.ty {
-                        Type::Class(_) if matches!(x.kind, ExprKind::This) => false,
+                        Type::Class(..) if matches!(x.kind, ExprKind::This) => false,
                         _ => self.quiet(x, depth),
                     })
             }
@@ -1479,9 +1532,9 @@ impl<'a> Gen<'a> {
         if plain {
             self.line("fn field_inits(&mut self) {");
         } else if by_value {
-            self.line(&format!("fn field_inits(this: &mut {}) {{", self.struct_of(index)));
+            self.line(&format!("fn field_inits(this: &mut {}) {{", self.generic_struct(index)));
         } else {
-            self.line(&format!("fn field_inits(this: &Rc<RefCell<{}>>) {{", self.struct_of(index)));
+            self.line(&format!("fn field_inits(this: &Rc<RefCell<{}>>) {{", self.generic_struct(index)));
         }
         self.indent += 1;
         for f in inits {

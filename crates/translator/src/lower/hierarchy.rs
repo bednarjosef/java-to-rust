@@ -50,9 +50,9 @@ impl<'t> Lowering<'t> {
             None => None,
         };
         // `Object` may also hold a string or a box.
-        let target = matches!(ty, Type::Class(_) | Type::Enum(_))
+        let target = matches!(ty, Type::Class(..) | Type::Enum(_))
             || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_)));
-        if !matches!(value.ty, Type::Class(_) | Type::Enum(_)) || !target {
+        if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
             return unsupported(node, "instanceof on these types");
         }
         Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
@@ -115,7 +115,8 @@ impl<'t> Lowering<'t> {
         let types = self.param_types(index)?;
         // Arrays do not convert: a `String[]` is not an `Object[]` in the translation.
         if let Some(arg) = args.iter().zip(&types).find_map(|(a, &ty)| {
-            (matches!(a.ty, Type::Array(_)) && matches!(ty, Type::Array(_)) && a.ty != ty).then_some(a)
+            let mismatch = matches!(a.ty, Type::Array(_)) && matches!(ty, Type::Array(_)) && a.ty != ty;
+            (mismatch && !self.has_param(ty)).then_some(a)
         }) {
             return error(
                 arg.pos,
@@ -134,11 +135,15 @@ impl<'t> Lowering<'t> {
     pub(super) fn convert(&self, e: Expr, to: Type) -> Expr {
         // An enum that implements an interface is converted to it too, and any value but null
         // to `Object`.
+        // A Rust generic's type variable takes any value as it is.
+        if self.param_owner(to).is_some() {
+            return e;
+        }
         let differs = match (e.ty, to) {
-            (_, Type::Class(b)) if b == OBJECT || b == COMPARABLE => {
+            (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE => {
                 !matches!(e.ty, Type::Null | Type::Void) && e.ty != to
             }
-            (Type::Class(a) | Type::Enum(a), Type::Class(b)) => a != b,
+            (Type::Class(a, _) | Type::Enum(a), Type::Class(b, _)) => a != b,
             _ => false,
         };
         if !differs {
@@ -174,7 +179,7 @@ impl<'t> Lowering<'t> {
 
     fn class_of(&self, ty: Type) -> Option<usize> {
         match ty {
-            Type::Class(name) | Type::Enum(name) => self.type_index(name),
+            Type::Class(name, _) | Type::Enum(name) => self.type_index(name),
             _ => None,
         }
     }

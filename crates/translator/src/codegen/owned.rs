@@ -201,7 +201,7 @@ impl<'a> Gen<'a> {
     /// Whether a local needs `mut`: it is reassigned, or it is an owned object that a later statement
     /// changes.
     pub(super) fn local_is_mut(&self, ty: Type, name: &str, rest: &[Stmt]) -> bool {
-        let owned = matches!(ty, Type::Class(c) if self.facts.owned.contains(c));
+        let owned = matches!(ty, Type::Class(c, _) if self.facts.owned.contains(c));
         assigns_any(rest, name)
             || (owned && self.changes_owned(rest, &|e| matches!(&e.kind, ExprKind::Var(v) if v == name)))
     }

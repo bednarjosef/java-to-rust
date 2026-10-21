@@ -3112,5 +3112,108 @@ fn a_type_variable_hides_a_class_of_its_name() {
         class T { int n = 1; }
         class Holder<T> { T held; Holder(T held) { this.held = held; } T get() { return held; } }",
     );
-    assert_contains(&rust, &["struct Holder {\n    held: Object,\n}"]);
+    // The type variable is the Rust type parameter, and `T` the class only outside `Holder`.
+    assert_contains(&rust, &["struct Holder<T> {\n    held: T,\n}", "Holder::new(Rc::new(T::new()))"]);
+}
+
+const REAL_GENERICS: &str = "
+    class Stack<T> {
+        Node<T> head;
+        void push(T value) { head = new Node<>(value, head); }
+        T pop() { T value = head.value; head = head.next; return value; }
+        boolean isEmpty() { return head == null; }
+    }
+    class Node<T> {
+        final T value;
+        final Node<T> next;
+        Node(T value, Node<T> next) { this.value = value; this.next = next; }
+    }
+    class Pair<A, B> {
+        final A first;
+        final B second;
+        Pair(A first, B second) { this.first = first; this.second = second; }
+        Pair<B, A> swap() { return new Pair<>(second, first); }
+    }
+    class M {
+        static <T> T choose(boolean first, T a, T b) { return first ? a : b; }
+        public static void main(String[] args) {
+            Stack<String> words = new Stack<>();
+            words.push(\"a\");
+            System.out.println(words.pop().length());
+            Stack<Integer> numbers = new Stack<>();
+            numbers.push(4);
+            int n = numbers.pop() + 1;
+            Pair<String, Integer> p = new Pair<>(\"one\", 1).swap().swap();
+            System.out.println(n + p.first + choose(false, 1, 2));
+        }
+    }
+";
+
+#[test]
+fn a_simple_container_is_a_rust_generic() {
+    let rust = translate(REAL_GENERICS);
+    // A class whose type variables are only stored, returned and passed on is a Rust generic, and
+    // its use sites keep the substituted types, with no casts.
+    assert_contains(
+        &rust,
+        &[
+            "struct Stack<T> {\n    head: Option<Rc<Node<T>>>,\n}",
+            "impl<T: Clone> Stack<T> {",
+            "fn push(&mut self, value: T) {",
+            "fn pop(&mut self) -> T {",
+            "struct Pair<A, B> {\n    first: A,\n    second: B,\n}",
+            "fn swap(&self) -> Rc<Pair<B, A>> {",
+            "words.push(String::from(\"a\"));",
+        ],
+    );
+    assert!(!rust.contains("enum Object"), "{rust}");
+}
+
+#[test]
+fn a_generic_method_infers_its_type_parameter() {
+    let rust = translate(REAL_GENERICS);
+    // A literal given for a type variable states its type, which Rust would otherwise not know.
+    assert_contains(
+        &rust,
+        &["fn choose<T: Clone>(first: bool, a: T, b: T) -> T {", "choose(false, 1i32, 2i32)"],
+    );
+}
+
+#[test]
+fn a_class_that_reads_its_type_variable_stays_erased() {
+    let rust = translate(
+        "class Box<T> { T v; Box(T v) { this.v = v; } String show() { return \"<\" + v + \">\"; } }
+        class Bag<T> { Object[] items = new Object[2]; T get(int i) { return (T) items[i]; } }
+        class M { public static void main(String[] x) {
+            Bag<String> bag = new Bag<>();
+            bag.items[0] = \"s\";
+            System.out.println(new Box<>(3).show() + bag.get(0)); } }",
+    );
+    // Text of a type variable's value and an unchecked cast need the erased classes.
+    assert_contains(&rust, &["struct Box {\n    v: Object,\n}", "struct Bag {"]);
+    assert!(!rust.contains("struct Box<T>") && !rust.contains("struct Bag<T>"), "{rust}");
+}
+
+#[test]
+fn a_method_whose_type_parameter_is_only_its_result_stays_erased() {
+    let rust = translate(
+        "class M { static <T> T nothing() { return null; }
+            public static void main(String[] x) { String s = nothing(); System.out.println(s == null); } }",
+    );
+    // Rust cannot infer a type parameter that no parameter mentions.
+    assert_contains(&rust, &["fn nothing() -> Option<Object> {"]);
+}
+
+#[test]
+fn a_field_assigned_from_a_borrow_of_itself_ends_the_borrow_first() {
+    let rust = translate(
+        "class Node { int v; Node next; Node(int v) { this.v = v; } }
+        class Chain { Node head;
+            void add(int v) { Node n = new Node(v); n.next = head; head = n; }
+            int pop() { int v = head.v; head = head.next; return v; } }
+        class M { public static void main(String[] x) { Chain c = new Chain(); c.add(1); c.add(2);
+            System.out.println(c.pop() + c.pop()); } }",
+    );
+    // The `Ref` of the old head must end before the field is written.
+    assert_contains(&rust, &["self.head = { java::non_null(self.head.as_ref()).borrow().next.clone() };"]);
 }

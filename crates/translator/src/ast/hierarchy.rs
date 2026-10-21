@@ -228,7 +228,7 @@ impl Class {
     /// beside `Object` (a primitive stands for its box).
     pub fn type_of(&self, ty: Type) -> Option<usize> {
         match ty {
-            Type::Class(name) | Type::Enum(name) => self.type_index(name),
+            Type::Class(name, _) | Type::Enum(name) => self.type_index(name),
             _ => self.type_index(runtime_name(ty)?),
         }
     }
@@ -236,7 +236,7 @@ impl Class {
     /// The type that a class type names.
     pub fn class_index(&self, ty: Type) -> Option<usize> {
         match ty {
-            Type::Class(name) => self.type_index(name),
+            Type::Class(name, _) => self.type_index(name),
             _ => None,
         }
     }

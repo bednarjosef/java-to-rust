@@ -141,7 +141,7 @@ impl Facts {
 
     /// Whether the field `name` of an object of type `ty` can hold null.
     pub fn field_nullable(&self, ty: Type, name: &str) -> bool {
-        let Type::Class(c) = ty else { return false };
+        let Type::Class(c, _) = ty else { return false };
         let owner = self.field_owners.get(&(c.to_string(), name.to_string())).map_or(c, String::as_str);
         self.nullable_fields.contains(&(owner.to_string(), name.to_string()))
     }
@@ -344,7 +344,7 @@ fn borrowed_objects(class: &Class, facts: &Facts) -> HashSet<(usize, usize)> {
     let mut borrowed: HashSet<(usize, usize)> = HashSet::new();
     for (m, method) in class.methods.iter().enumerate() {
         for (i, p) in method.params.iter().enumerate() {
-            if matches!(p.ty, Type::Class(_))
+            if matches!(p.ty, Type::Class(..))
                 && !nullable_var(facts, m, &p.name)
                 && !assigns_any(&method.body, &p.name)
             {
