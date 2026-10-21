@@ -4194,8 +4194,10 @@ fn an_element_that_may_be_null_is_passed_as_the_receiver_that_it_is() {
 }
 
 #[test]
-fn string_chars_needs_the_jdk_sources() {
-    let err = java_to_rust::translate("class A { public static void main(String[] a) { \"abc\".chars(); } }")
-        .expect_err("`String.chars` streams with the JDK's code");
-    assert!(err.to_string().contains("translate the program with the JDK's sources"), "{err}");
+fn string_streams_need_the_jdk_sources() {
+    for method in ["chars", "lines"] {
+        let source = format!("class A {{ public static void main(String[] a) {{ \"abc\".{method}(); }} }}");
+        let err = java_to_rust::translate(&source).expect_err("a string's stream runs the JDK's code");
+        assert!(err.to_string().contains(&format!("`String.{method}` streams with the JDK's code")), "{err}");
+    }
 }

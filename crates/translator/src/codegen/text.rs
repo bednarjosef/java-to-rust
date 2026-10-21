@@ -188,6 +188,22 @@ impl<'a> Gen<'a> {
                     self.runtime("from_vec")
                 ))
             }
+            StringOp::Lines => {
+                let s = self.text_ref(&args[0]);
+                let lines = call(self, "lines", vec![s]).text;
+                let object = self.class.type_index(OBJECT).expect("lowering adds `Object` for `lines`");
+                let string = self.class.type_of(Type::String).expect("a runtime class of `Object`");
+                let variant = self.variant(object, string);
+                let line = if self.nullable_element(Type::class(OBJECT)) {
+                    format!("Some({variant}(line))")
+                } else {
+                    format!("{variant}(line)")
+                };
+                Code::atom(format!(
+                    "{}({lines}.into_iter().map(|line| {line}).collect())",
+                    self.array_maker("from_vec")
+                ))
+            }
             StringOp::FromChars => {
                 let chars = self.slice_of(&args[0]);
                 match args.get(1..) {
@@ -519,9 +535,13 @@ impl<'a> Gen<'a> {
         let bits = if kind == Type::Long { 64 } else { 32 };
         let rust = rust_type(kind);
         if op == BitsOp::ParseRadix {
-            let s = self.text_ref(&args[0]);
+            let s = if self.nullable(&args[0]) {
+                self.option_ref(&args[0])
+            } else {
+                format!("Some({})", self.str_ref(&args[0]))
+            };
             let radix = self.int_arg(&args[1]);
-            return self.may_fail(id, "parse_radix", &format!("::<{rust}>"), &format!("Some({s}), {radix}"));
+            return self.may_fail(id, "parse_radix", &format!("::<{rust}>"), &format!("{s}, {radix}"));
         }
         if op == BitsOp::ParseRange {
             return self.parse_range_builtin(kind, args, id);

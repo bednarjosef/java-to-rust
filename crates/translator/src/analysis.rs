@@ -155,6 +155,9 @@ pub struct Facts {
     /// The methods and constructors that return `Result<_, Throwable>`: some caller observes an
     /// exception that may escape them (see `exceptions`).
     pub throwing: HashSet<usize>,
+    /// The classes whose instance field initializers raise, so that their `field_inits` returns a
+    /// `Result` (see `exceptions::field_inits`).
+    pub init_throwing: HashSet<usize>,
     /// The `try` statements, by address, whose `catch` clauses catch an exception that their body
     /// may throw. The others run their body as a plain block.
     pub live_tries: HashSet<usize>,
@@ -176,6 +179,9 @@ pub struct Facts {
     /// The functional interfaces whose values are closures, `Rc<dyn Fn(A) -> R>` (see
     /// `closures`).
     pub closure_types: HashSet<usize>,
+    /// The locals, by method and name, that hold a closure only to call it: a plain Rust
+    /// closure, `let f = |x| ..;` (see `closures::closure_locals`).
+    pub closure_locals: HashSet<(usize, String)>,
 }
 
 impl Facts {
@@ -201,6 +207,7 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
         closure_types: closures::closure_types(class),
         ..Facts::default()
     };
+    facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
     ranges::analyze(class, &mut facts);
     representation(class, &mut facts);
     validate(class, &facts)?;

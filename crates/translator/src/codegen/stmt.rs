@@ -269,6 +269,10 @@ impl<'a> Gen<'a> {
         }
         let mutable = if mutable { "mut " } else { "" };
         let rust = self.local(name);
+        if let Some(closure) = init.and_then(|init| self.local_closure(name, init)) {
+            self.line(&format!("let {rust} = {closure};"));
+            return;
+        }
         match init {
             None if self.try_assigned.contains(name) => {
                 // Rust cannot tell that a `try` block or its `catch` clauses assign it before it is

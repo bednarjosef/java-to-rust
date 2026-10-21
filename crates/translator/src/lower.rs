@@ -24,6 +24,7 @@ mod real_generics;
 mod statics;
 mod strings;
 mod stubs;
+mod suppress;
 mod unsigned;
 
 use crate::ast::*;
@@ -37,6 +38,7 @@ mod by_name;
 mod captures;
 mod charsets;
 mod classes;
+mod clinit_errors;
 mod constant_bodies;
 mod initializers;
 mod inner;
@@ -53,6 +55,7 @@ mod system;
 mod varargs;
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
+pub(crate) use clinit_errors::rewritten_clinit;
 pub use exceptions::{is_standard, standard_names, standard_subclass};
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
@@ -87,6 +90,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
         let mut methods: Vec<Method> =
             (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
+        lowering.suppress_checks(&mut methods);
         lowering.object_methods(&mut methods)?;
         lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
         lowering.object_types(&mut types);
@@ -250,7 +254,9 @@ impl<'t> Lowering<'t> {
     /// bodies and constants. An error comes with the index of the type it is in.
     fn finish_types(&self, types: &mut [TypeDecl], methods: &mut Vec<Method>) -> Result<(), (usize, Error)> {
         for index in (0..types.len()).filter(|&t| self.has_static_init(t)) {
-            methods.push(self.clinit(index).map_err(|e| (index, e))?);
+            let mut clinit = self.clinit(index).map_err(|e| (index, e))?;
+            self.guard_clinit(index, &mut clinit, &mut types[index], methods.as_slice());
+            methods.push(clinit);
         }
         for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
             let in_type = |e| (index, e);
