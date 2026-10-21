@@ -51,7 +51,7 @@ impl<'a> Gen<'a> {
 
     /// Whether the current method returns an `Option<String>`.
     pub(super) fn optional_return(&self) -> bool {
-        self.ret.is_reference() && self.facts.nullable_returns.contains(&self.method)
+        nullable_type(self.ret) && self.facts.nullable_returns.contains(&self.method)
     }
 
     /// `e` as an `Option<String>`: a possibly-null value as it is, any other string in `Some`.
@@ -116,6 +116,10 @@ impl<'a> Gen<'a> {
             _ if matches!(e.ty, Type::Boxed(_)) => self.expr(e).text,
             // A class is `Copy`, so an `Option` of one is too.
             _ if e.ty == Type::JavaClass => self.expr(e).at(ATOM),
+            // So is an enum, read from a field, an element or a call (see `lower::enum_nulls`).
+            _ if matches!(e.ty, Type::Enum(_)) && !matches!(e.kind, ExprKind::Var(_)) => {
+                self.expr(e).at(ATOM)
+            }
             _ if e.ty == Type::StringBuilder => self.builder_option(e),
             ExprKind::Null => "None::<&str>".to_string(),
             ExprKind::Var(name) => self.option_source(name, e.ty),
@@ -150,7 +154,7 @@ impl<'a> Gen<'a> {
                     format!("{}.{test}()", self.object_place(other))
                 }
                 ExprKind::Static { class, name } if self.init_call(*class).is_none() => {
-                    let cell = cell_name(&self.class.types[*class].name, name);
+                    let cell = cell_name(&self.class.types[*class], name);
                     format!("{cell}.with_borrow(Option::{test})")
                 }
                 _ if matches!(other.ty, Type::Class(..) | Type::Array(_)) => {

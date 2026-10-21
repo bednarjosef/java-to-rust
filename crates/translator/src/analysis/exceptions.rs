@@ -413,9 +413,7 @@ fn method_points(class: &Class, facts: &Facts, m: usize) -> Vec<Point> {
     let mut frames = Vec::new();
     block_points(class, facts, m, &method.body, &mut frames, &[], &mut out);
     // A constructor runs the initializers of its class's fields, unless it starts with `this(..)`.
-    if method.is_ctor
-        && !matches!(method.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })))
-    {
+    if method.is_ctor && !delegates(&method.body) {
         for f in &class.types[method.class].fields {
             if let Some(init) = &f.init {
                 expr_points(class, facts, m, init, &[], &[], &mut out);

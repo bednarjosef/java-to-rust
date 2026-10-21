@@ -1649,6 +1649,36 @@ fn library_roots_are_read_only_where_used() {
 }
 
 #[test]
+fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
+    let library = (
+        "lib/lib/Tags.java",
+        "package lib;\npublic class Tags {\n    public static boolean none(String tag) { return tag == \"\"; }\n    public static boolean differ(String a, String b) { return a != b; }\n}\n",
+    );
+    let main = "package main;\nimport lib.Tags;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Tags.none(\"\") + \" \" + Tags.differ(\"x\", a.length > 0 ? a[0] : \"y\"));\n    }\n}\n";
+    let dir = write_sources("library-string-equality", &[("app/main/Main.java", main), library]);
+    let program = java_to_rust::Program {
+        main: "main.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    // Value equality, `Objects.equals`, of the two strings.
+    assert_contains(&rust, &["tag == \"\"", "!(a == b)"]);
+    // The same comparison in the program's own code compares references, which it cannot.
+    let own = "package main;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(a.length > 0 && a[0] == \"x\");\n    }\n}\n";
+    let dir = write_sources("program-string-equality", &[("app/main/Main.java", own)]);
+    let program = java_to_rust::Program {
+        main: "main.Main".into(),
+        sources: vec![dir.join("app")],
+        ..Default::default()
+    };
+    let err = java_to_rust::translate_program(&program).expect_err("== on the program's strings");
+    assert!(err.to_string().contains("== on strings compares references; not supported yet"), "{err}");
+}
+
+#[test]
 fn program_errors_name_their_file() {
     let dir = write_sources(
         "program-errors",
@@ -1906,6 +1936,35 @@ fn an_enum_field_that_a_constructor_reads_before_setting_it_is_rejected() {
     )
     .expect_err("a field read before it is set is null");
     assert!(error.to_string().contains("null enums not supported yet"), "{error}");
+}
+
+#[test]
+fn an_enum_element_that_may_be_null_is_an_option_and_used_as_a_value_is_rejected() {
+    let rust = translate(
+        "public class A {
+            enum Kind { TOP, DEAD }
+            public static void main(String[] args) {
+                Kind[] kinds = new Kind[2];
+                kinds[1] = Kind.DEAD;
+                System.out.println(kinds[0] + \" \" + (kinds[1] == Kind.DEAD));
+            }
+        }",
+    );
+    assert_contains(&rust, &["vec![None; 2]", "kinds[1] == Some(AKind::Dead)"]);
+    for use_ in ["kinds[0].ordinal()", "switch (kinds[0]) { default -> 0; }", "take(kinds[0])"] {
+        let error = java_to_rust::translate(&format!(
+            "public class A {{
+                enum Kind {{ TOP, DEAD }}
+                static int take(Kind k) {{ return 1; }}
+                public static void main(String[] args) {{
+                    Kind[] kinds = new Kind[2];
+                    System.out.println({use_});
+                }}
+            }}"
+        ))
+        .expect_err("an element that may be null used as an enum value");
+        assert!(error.to_string().contains("null enums not supported yet"), "{use_}: {error}");
+    }
 }
 
 #[test]
@@ -3900,6 +3959,24 @@ fn identity_of_object_values_that_may_be_strings_is_rejected() {
 }
 
 #[test]
+fn identity_of_object_values_follows_what_flows_into_them() {
+    // Only program objects reach `same`'s parameters, so `==` is plain identity; once a box may
+    // reach both sides, it is rejected again.
+    let program = |arg: &str| {
+        format!(
+            "class M {{ static boolean same(Object a, Object b) {{ return a == b; }}
+                public static void main(String[] x) {{ Object m = {arg}; System.out.println(same(m, {arg})); }} }}"
+        )
+    };
+    java_to_rust::translate(&program("new M()")).unwrap();
+    let err = java_to_rust::translate(&program("1")).unwrap_err();
+    assert!(
+        err.to_string().contains("`==` on `Object` values that may be strings or boxes not supported yet"),
+        "{err}"
+    );
+}
+
+#[test]
 fn an_array_as_an_object_prints_as_its_jvm_name_and_hash() {
     let rust = translate(
         "class M { public static void main(String[] x) { Object a = new int[2]; System.out.println(a); } }",
@@ -4047,6 +4124,92 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
 }
 
 #[test]
+fn a_type_variables_array_passed_for_an_erased_array_erases_only_its_generic() {
+    let rust = translate(
+        "public class Main {
+            static class Fixed<E> {
+                final E[] items;
+                Fixed(E[] items) { this.items = items; }
+            }
+            @SafeVarargs
+            static <T> Fixed<T> fixed(T... a) { return new Fixed<>(a); }
+            static <T> T either(boolean first, T a, T b) { return first ? a : b; }
+            public static void main(String[] args) {
+                System.out.println(fixed(1, 2).items.length + either(true, \"x\", \"y\"));
+            }
+        }",
+    );
+    // `fixed`'s `T[]` is `Fixed`'s erased `Object[]`, so `fixed` is erased; `either` stays generic.
+    assert_contains(
+        &rust,
+        &[
+            "fn fixed(a: java::Array<Object>) -> Rc<MainFixed> {",
+            "fn either<T: Clone>(first: bool, a: T, b: T) -> T {",
+        ],
+    );
+}
+
+#[test]
+fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at_builtins() {
+    let rust = translate(
+        "public class Main {
+            static <T> T first(T[] a) { return a[0]; }
+            public static void main(String[] args) {
+                String[] words = \"b a\".split(\" \");
+                Integer[] numbers = {1, 2};
+                System.out.println(first(words) + first(numbers) + String.join(\",\", words));
+            }
+        }",
+    );
+    // `String[]` meets `Integer[]` at `T[]`, so it is an `Object[]` of strings; the runtime's
+    // string builtins take and give copies as `String[]`.
+    assert_contains(
+        &rust,
+        &[
+            "String(String),",
+            "fn first(a: &[Object]) -> Object {",
+            "let words: java::Array<Object> = java::from_vec((&java::from_vec(java::split(\"b a\", \" \", 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>());",
+            "java::join(\",\", &java::from_vec((&words.borrow()).iter().map(|s| java::cast(s.as_string(), \"java.lang.String\")).collect::<Vec<_>>()).borrow())",
+        ],
+    );
+}
+
+#[test]
+fn main_arguments_that_are_an_object_array_are_strings_as_objects() {
+    let rust = translate(
+        "public class Main {
+            static <T> int count(T[] a) { return a.length; }
+            public static void main(String[] args) {
+                System.out.println(count(args) + count(new Integer[] {1}));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["String(String),", "main_args().into_iter().map(|s| Object::String(s)).collect::<Vec<_>>()"],
+    );
+}
+
+#[test]
+fn sorting_a_string_array_that_is_an_object_array_in_place_is_rejected() {
+    let err = java_to_rust::translate(
+        "public class Main {
+            static <T> T first(T[] a) { return a[0]; }
+            public static void main(String[] args) {
+                String[] words = {\"b\", \"a\"};
+                java.util.Arrays.sort(words);
+                System.out.println(first(words) + first(new Integer[] {1}));
+            }
+        }",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("a change in place of a `String[]` that is also an `Object[]`"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_string_builder_as_an_object_is_a_shared_variant_compared_by_identity() {
     let rust = translate(
         "public class Main {
@@ -4148,15 +4311,19 @@ fn wildcards_and_raw_types_erase() {
 }
 
 #[test]
-fn an_array_passed_as_an_array_of_a_type_variable_is_rejected() {
-    let err = java_to_rust::translate(
+fn a_string_array_passed_as_an_array_of_a_type_variable_is_an_object_array() {
+    let rust = translate(
         "class M { static <T> T first(T[] xs) { return xs[0]; }
             public static void main(String[] x) { String[] s = {\"a\"}; System.out.println(first(s)); } }",
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("an array passed as an array of a type variable not supported yet"),
-        "{err}"
+    );
+    // The erased `T[]` is an `Object[]`, which the `String[]` meets, so it is one too.
+    assert_contains(
+        &rust,
+        &[
+            "fn first(xs: &[Object]) -> Object {",
+            "let s: Vec<Object> = vec![Object::String(String::from(\"a\"))];",
+            "java::cast(first(&s).as_string(), \"java.lang.String\")",
+        ],
     );
 }
 

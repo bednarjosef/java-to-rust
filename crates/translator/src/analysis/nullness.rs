@@ -52,13 +52,19 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 // arrays.
                 ExprKind::NewArray(sizes) => {
                     let elem = x.ty.element_at(sizes.len());
-                    if elem.is_reference() {
+                    if nullable_type(elem) {
                         elements.push(elem);
                     }
                 }
                 // `Arrays.copyOf` and `copyOfRange` pad a longer copy with null.
                 ExprKind::Builtin(Builtin::ArraysCopyOf | Builtin::Arrays(ArraysOp::CopyOfRange), _)
                     if x.ty.element().is_reference() =>
+                {
+                    elements.push(x.ty.element());
+                }
+                // A copy of an array between `String[]` and `Object[]` has the same nulls.
+                ExprKind::Builtin(Builtin::StringArrayOf | Builtin::ObjectArrayOf, args)
+                    if facts.nullable_elements.contains(&args[0].ty.element()) =>
                 {
                     elements.push(x.ty.element());
                 }
@@ -179,9 +185,7 @@ fn set_by_construction(class: &Class, facts: &Facts, t: usize, name: &str) -> bo
         return init.is_some_and(|e| !maybe_null(facts, usize::MAX, e));
     }
     class.methods.iter().enumerate().filter(|(_, m)| m.is_ctor && m.class == t).all(|(index, m)| {
-        let delegates =
-            matches!(m.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })));
-        if delegates {
+        if delegates(&m.body) {
             return true;
         }
         let leading = leading_assignments(class, m, facts);

@@ -186,7 +186,7 @@ impl<'a> Gen<'a> {
             ExprKind::Char(c) => c.to_string(),
             ExprKind::Str(s) => rust_string(s),
             ExprKind::EnumConstant { class, ordinal } => self.constant_path(*class, *ordinal),
-            ExprKind::Static { class, name } => cell_name(&self.class.types[*class].name, name),
+            ExprKind::Static { class, name } => cell_name(&self.class.types[*class], name),
             _ => unreachable!("lowering keeps only constant case labels"),
         }
     }

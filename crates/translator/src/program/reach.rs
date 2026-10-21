@@ -93,6 +93,8 @@ pub(super) const OBJECT_METHODS: &[(&str, &str)] =
 /// reaches deep into the JVM.
 pub const RUNTIME_CLASSES: &[&str] = &[
     "java.io.PrintStream",
+    // The builders' base class, whose methods are the builders' (see `lower::strings`).
+    "java.lang.AbstractStringBuilder",
     "java.lang.Boolean",
     "java.lang.Byte",
     "java.lang.Character",
@@ -373,6 +375,10 @@ pub fn runtime_arrays_call(node: &Value) -> bool {
 /// A method of the JDK, by class, name and javac's type of it.
 pub type JdkMethod = (&'static str, &'static str, &'static str);
 
+/// `Locale.getLanguage()`, which `String.toUpperCase(locale)` and `toLowerCase(locale)` call to
+/// tell the languages with their own case mapping (see `lower::strings`).
+pub const LOCALE_LANGUAGE: JdkMethod = ("java.util.Locale", "getLanguage", "()java.lang.String");
+
 /// The methods of `String` that stream with the JDK's methods (see `lower::strings`), and those
 /// methods, each called on what the one before returns. `chars()` streams the string's UTF-16 code
 /// units as an `int[]`. `lines()` streams its lines, an `Object[]` of strings, through an iterator,
@@ -408,6 +414,10 @@ pub const ITERATION: &[(&str, &str, &str)] = &[
     ("java.util.Iterator", "hasNext", "()boolean"),
     ("java.util.Iterator", "next", "()E"),
 ];
+
+/// The method that a try-with-resources calls on each resource, which javac's tree does not show:
+/// reaching it reaches the `close()` of every live class of a resource.
+pub const CLOSE: (&str, &str, &str) = ("java.lang.AutoCloseable", "close", "()void");
 
 /// The node kinds of class declarations, and the symbol kinds of classes.
 pub const CLASS_KINDS: &[&str] = &["CLASS", "INTERFACE", "ENUM", "RECORD", "ANNOTATION_TYPE"];
@@ -997,6 +1007,16 @@ impl<'t> Walk<'t> {
                         )));
                     }
                 }
+                if text(value, "kind") == "TRY"
+                    && value["resources"].as_array().is_some_and(|r| !r.is_empty())
+                {
+                    let (class, name, signature) = CLOSE;
+                    self.work.push(Item::Method((
+                        class.to_string(),
+                        name.to_string(),
+                        signature.to_string(),
+                    )));
+                }
                 if text(value, "kind") == "VARIABLE" {
                     self.stub_type(text(&value["symbol"], "type"));
                 }
@@ -1042,6 +1062,14 @@ impl<'t> Walk<'t> {
     fn symbol(&mut self, symbol: &Value) {
         let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
         match text(symbol, "kind") {
+            "METHOD"
+                if owner == "java.lang.String"
+                    && matches!(name.as_str(), "toUpperCase" | "toLowerCase")
+                    && text(symbol, "type") == "(java.util.Locale)java.lang.String" =>
+            {
+                let (class, method, signature) = LOCALE_LANGUAGE;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
             "METHOD"
                 if owner == "java.lang.String"
                     && let Some((_, methods)) = STRING_STREAMS.iter().find(|(m, _)| *m == name) =>

@@ -206,6 +206,18 @@ pub fn flows(
                 edges.insert((s, t));
             }
         }
+        // A `String[]` that is an `Object[]` (`lower::covariant`), and `main`'s arguments as one:
+        // its strings are `Object`s.
+        ExprKind::Builtin(Builtin::StringArrayOf | Builtin::ObjectArrayOf, args) => {
+            if let (Some(s), Some(t)) = (index(args[0].ty.element()), index(e.ty.element())) {
+                edges.insert((s, t));
+            }
+        }
+        ExprKind::Builtin(Builtin::MainArgs, _) => {
+            if let (Some(s), Some(t)) = (index(Type::String), index(e.ty.element())) {
+                edges.insert((s, t));
+            }
+        }
         // `super.m()`: `this` as a value of the superclass.
         ExprKind::This => {
             if let Some(t) = index(e.ty)

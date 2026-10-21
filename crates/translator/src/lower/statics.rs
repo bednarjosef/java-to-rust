@@ -43,7 +43,8 @@ impl<'t> Lowering<'t> {
     /// block, or a static field with an initializer that is not a constant.
     pub(super) fn has_static_init(&self, index: usize) -> bool {
         self.types[index].node.list("members").any(|m| match m.kind() {
-            "BLOCK" => Self::is_static_block(m),
+            // A static block is kept when the class is initialized (`program::Reach::member`).
+            "BLOCK" => Self::is_static_block(m) && self.keeps(m, &self.types[index].javac),
             "VARIABLE" => {
                 m.has_flag("STATIC")
                     && m.get("initializer").is_some()
@@ -71,7 +72,9 @@ impl<'t> Lowering<'t> {
                 continue;
             }
             match member.kind() {
-                "BLOCK" => body.push(Stmt::Block(self.block(member)?)),
+                "BLOCK" if self.keeps(member, &self.types[index].javac) => {
+                    body.push(Stmt::Block(self.block(member)?))
+                }
                 // A field that nothing reads, whose initializer does nothing else, is not kept.
                 "VARIABLE"
                     if !Self::is_constant(member)

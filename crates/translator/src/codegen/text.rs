@@ -96,6 +96,12 @@ impl<'a> Gen<'a> {
                 let offset = self.int_arg(&args[2]);
                 call(self, "starts_with_at", vec![s, prefix, offset])
             }
+            StringOp::ToUpperCase | StringOp::ToLowerCase if args.len() == 2 => {
+                let f = if op == StringOp::ToUpperCase { "uppercase_in" } else { "lowercase_in" };
+                let s = self.text_ref(&args[0]);
+                let language = self.text_ref(&args[1]);
+                call(self, f, vec![s, language])
+            }
             StringOp::IsBlank
             | StringOp::Trim
             | StringOp::Strip

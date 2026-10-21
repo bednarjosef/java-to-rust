@@ -8,6 +8,10 @@ use super::*;
 
 /// The Rust variant for an enum constant: `RED` is `Red`, and `VERY_BIG` is `VeryBig`.
 pub(super) fn variant_name(constant: &str) -> String {
+    // `SELF` would be `Self`, Rust's keyword.
+    if constant == "SELF" {
+        return "Self_".to_string();
+    }
     constant
         .split('_')
         .map(|word| {
@@ -265,9 +269,10 @@ impl<'a> Gen<'a> {
         let ordinal = |g: &mut Self, e: &'a Expr| {
             let obj = g.object(e);
             let mut arms: Vec<String> =
-                enums.iter().map(|&c| format!("{}(e) => e as i32", g.variant(t, c))).collect();
+                enums.iter().map(|&c| format!("{}(e) => *e as i32", g.variant(t, c))).collect();
             arms.push(format!("_ => {}(\"java.lang.Enum\")", g.runtime("cast_failed")));
-            format!("(match {obj} {{ {} }})", arms.join(", "))
+            // Borrowed, the constant is a reference however the `Enum` is held.
+            format!("(match &({obj}) {{ {} }})", arms.join(", "))
         };
         match builtin {
             Builtin::EnumOrdinal => Code::atom(ordinal(self, &args[0])),
