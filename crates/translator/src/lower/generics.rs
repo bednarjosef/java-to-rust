@@ -206,8 +206,10 @@ impl<'t> Lowering<'t> {
                 let Some(ret) = info.node.get("returnType") else { return Ok(None) };
                 Some(self.declared_type(ret, ret.java_type(), info.owner, Some(*index))?)
             }
+            // (A call that reads a field, as one through a field offset does, has the field's type
+            // already.)
             ExprKind::Field { .. } => {
-                let Some(symbol) = node.symbol() else { return Ok(None) };
+                let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD") else { return Ok(None) };
                 let Some(class) = self.type_index(symbol.owner) else { return Ok(None) };
                 Some(self.declared_type(node, symbol.ty, class, None)?)
             }

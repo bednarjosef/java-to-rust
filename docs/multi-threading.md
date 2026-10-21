@@ -1230,3 +1230,16 @@ Decisions that change during the implementation are recorded here, milestone by 
 - **A `volatile` static is an ordinary `java::Atomic`** (acquire and release) until the volatile
   milestone gives it `SeqCst`; a `volatile` field of a shared object is read and written under
   the object's lock.
+
+### Volatile fields and the atomic natives
+
+- **Field handles came first**, ahead of monitors: `Charset.defaultCharset()` keeps its charset
+  in a `LazyConstant`, whose `get` reads its field with `Unsafe.getReferenceAcquire` at an
+  `objectFieldOffset`, so every reader, writer and `getBytes()` without a charset needs them.
+  `lower/handles.rs` makes a `static final` whose initializer is `objectFieldOffset(C.class, "f")`
+  a handle with no field of its own, as 5.3 says, and lowers `get<Kind><Mode>` and
+  `put<Kind><Mode>` through it to a plain read or write of `o.f`; reachability enters neither
+  `objectFieldOffset` nor the accessors. The field is not made atomic yet: in a program without
+  threads a plain access is exact, and in one with threads the access is under the object's lock,
+  which orders it at least as acquire, release and volatile ask. The compare-and-set and
+  get-and-add forms, `VarHandle`s and array handles come with `java.util.concurrent`.

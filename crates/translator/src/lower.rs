@@ -11,6 +11,7 @@ mod foreach;
 mod functional;
 mod generic_args;
 mod generics;
+mod handles;
 mod hierarchy;
 mod lambdas;
 mod object;
@@ -674,6 +675,9 @@ impl<'t> Lowering<'t> {
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
+        if let Some(kind) = self.handle_access(node, &symbol)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);
         }
