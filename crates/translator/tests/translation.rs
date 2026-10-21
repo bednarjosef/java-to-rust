@@ -3899,6 +3899,22 @@ fn equals_takes_the_object_enum() {
 }
 
 #[test]
+fn a_class_extending_number_implements_it_and_byte_value_narrows_int_value() {
+    let class = |extra: &str| {
+        format!(
+            "class M {{ static class Cell extends Number {{ int v = 300;
+                public int intValue() {{ return v; }} public long longValue() {{ return v; }}
+                public float floatValue() {{ return v; }} public double doubleValue() {{ return v; }} {extra} }}
+                public static void main(String[] x) {{ Number n = new Cell(); System.out.println(n.byteValue() + n.intValue()); }} }}"
+        )
+    };
+    let rust = translate(&class(""));
+    assert_contains(&rust, &["(n.int_value() as i8 as i32)"]);
+    let err = java_to_rust::translate(&class("public byte byteValue() { return 1; }")).unwrap_err();
+    assert!(err.to_string().contains("overriding `Number.byteValue` not supported yet"), "{err}");
+}
+
+#[test]
 fn identity_of_object_values_that_may_be_strings_is_rejected() {
     let err = java_to_rust::translate(
         "class M { public static void main(String[] x) { Object a = \"s\"; Object b = \"s\"; System.out.println(a == b); } }",
