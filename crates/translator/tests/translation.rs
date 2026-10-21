@@ -3258,6 +3258,38 @@ fn a_runtime_failure_that_a_catch_sees_is_a_checked_call_that_throws() {
 }
 
 #[test]
+fn a_null_dereference_that_a_catch_sees_is_a_checked_non_null() {
+    let rust = translate(
+        "class A {
+            int v;
+            A next;
+            int get() { return v; }
+            static int second(A a) {
+                try {
+                    return a.next.get() + a.next.v;
+                } catch (NullPointerException e) {
+                    return -1;
+                }
+            }
+            public static void main(String[] args) {
+                A a = new A();
+                System.out.println(second(a));
+                System.out.println(a.get());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::or_break!(java::try_non_null(a.next.as_ref()), 'attempt).get()",
+            "\"java.lang.NullPointerException\" => ",
+        ],
+    );
+    // A dereference that no handler sees keeps the plain check.
+    assert_lacks(&rust, &["try_non_null(a.as_ref())"]);
+}
+
+#[test]
 fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
     let err = reject(

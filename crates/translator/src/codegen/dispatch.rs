@@ -929,6 +929,7 @@ impl<'a> Gen<'a> {
 
     /// The address of the object of class `c` that `receiver` is (see `address`).
     pub(super) fn receiver_address(&mut self, receiver: &'a Expr, c: usize) -> String {
+        let id = receiver.id;
         let receiver = self.peel(receiver);
         match receiver.kind {
             ExprKind::This if self.this_form == ThisForm::Local => "std::ptr::from_ref(&this)".to_string(),
@@ -936,8 +937,8 @@ impl<'a> Gen<'a> {
                 format!("std::ptr::from_ref({})", self.this_name())
             }
             _ if self.nullable(receiver) => {
-                let handle =
-                    format!("{}({}.as_ref())", self.runtime("non_null"), self.object_place(receiver));
+                let option = format!("{}.as_ref()", self.object_place(receiver));
+                let handle = self.dereference(&[id, receiver.id], &option);
                 self.address(c, &handle)
             }
             _ => {

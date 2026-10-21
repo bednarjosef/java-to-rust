@@ -521,13 +521,38 @@ impl<'a> Gen<'a> {
     /// expression. Dereferencing a reference that may be null throws `NullPointerException`; the
     /// result is then a `&Rc<..>` when the reference is a place, else the `Rc` itself.
     pub(super) fn object(&mut self, e: &'a Expr) -> String {
+        let id = e.id;
         let e = self.peel(e);
         let (text, place) = self.object_parts(e);
         if !(matches!(e.ty, Type::Class(..)) && self.nullable(e)) {
             return text;
         }
-        let non_null = self.runtime("non_null");
-        if place { format!("{non_null}({text}.as_ref())") } else { format!("{non_null}({text})") }
+        let option = if place { format!("{text}.as_ref()") } else { text };
+        self.dereference(&[id, e.id], &option)
+    }
+
+    /// `java::non_null(option)`, for the object (expression `ids`, before and after `peel`) that a
+    /// call or a field access dereferences; where a `catch` or a `finally` may see its
+    /// `NullPointerException` (`Facts::null_checked`), the checked form, whose failure goes on
+    /// from here as a thrown exception does.
+    pub(super) fn dereference(&mut self, ids: &[ExprId], option: &str) -> String {
+        let Some(&id) = ids.iter().find(|id| self.facts.null_checked.contains_key(id)) else {
+            return format!("{}({option})", self.runtime("non_null"));
+        };
+        self.dereferenced.insert(id);
+        let call = format!("{}({option})", self.runtime("try_non_null"));
+        self.passed_on(Code::atom(call))
+    }
+
+    /// Rejects the program when an object of `Facts::null_checked` is dereferenced by code that
+    /// does not write the checked form, where its `NullPointerException` would end the program
+    /// instead of reaching the `catch` or the `finally`.
+    pub(super) fn check_dereferences(&mut self) {
+        let missed = self.facts.null_checked.iter().filter(|(id, _)| !self.dereferenced.contains(id));
+        if let Some(pos) = missed.map(|(_, &pos)| pos).min_by_key(|p| (p.line, p.column)) {
+            let message = "catching the `NullPointerException` of this dereference not supported yet";
+            self.rejected.get_or_insert(Error { pos, message: message.to_string() });
+        }
     }
 
     /// The text of a reference as it is stored, without a clone: `this`, a variable, a field, or
@@ -582,6 +607,7 @@ impl<'a> Gen<'a> {
     /// A non-null object as an `Rc` of its own, which holds no borrow: null throws
     /// `NullPointerException`.
     pub(super) fn object_handle(&mut self, e: &'a Expr) -> String {
+        let id = e.id;
         let e = self.peel(e);
         let text = match &e.kind {
             ExprKind::This => format!("{}.clone()", self.this_name()),
@@ -589,7 +615,7 @@ impl<'a> Gen<'a> {
             _ => self.expr(e).text,
         };
         if matches!(e.ty, Type::Class(..)) && self.nullable(e) {
-            format!("{}({text})", self.runtime("non_null"))
+            self.dereference(&[id, e.id], &text)
         } else {
             text
         }
