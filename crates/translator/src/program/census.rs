@@ -4,15 +4,20 @@
 //!
 //! Lowering records an error in a method, a constructor or a lambda and lowers a stub in its place,
 //! with its signature and a body that never runs; an error in a field initializer or an
-//! initializer block leaves that initializer out (`lower::census_lower_program`). An error of an
+//! initializer block leaves that initializer out (`lower::census_lower_program`). An error in a
+//! class's declaration (extending or implementing a class that is not translated, or code of a
+//! nested class that the planning of its captured variables rejects) rejects the class: it
+//! extends and implements none of those, and each of its methods, constructors, field
+//! initializers and initializer blocks is rejected with that error and stubbed. An error of an
 //! analysis or of the generator, which only has a line and column, stubs the methods whose code
 //! is at that position, in any file (or drops the field initializer there), and the analyses and
 //! the generator run again. The generator and the analysis of exceptions report every error they
 //! find, which are stubbed together; the other analyses report their first. A panic while the
 //! generator writes a method stubs the method. So every error recorded is one that a translation
 //! of the program would report once the code before it translated. An error that no
-//! stub can take away (a class's declaration, say) ends the census there: the pieces it did not
-//! get to are counted as they stand.
+//! stub can take away ends the census there, with its place: the pieces it did not get to are
+//! counted as they stand. An error that lowering met outside any unit's code is placed in the
+//! unit that alone has code at its line and column.
 //!
 //! The pieces of code are those of the survey (`survey::scan`): the reachable methods,
 //! constructors, field initializers and initializer blocks of the program's and its libraries'
@@ -74,11 +79,12 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
         .into_iter()
         .map(|r| Rejection { unit: r.unit, anchor: r.anchor, error: r.error })
         .collect();
-    let fatal = match lowered.class {
+    let mut fatal = match lowered.class {
         Err((unit, error)) => Some(Rejection { unit, anchor: None, error }),
         Ok(mut class) => phase("analyze", || analyse(&mut class, &lowered.units, &mut rejections)),
     };
     std::panic::set_hook(hook);
+    locate(&trees, rejections.iter_mut().filter(|r| r.anchor.is_none()).chain(&mut fatal));
     let scan = survey::scan(&units, &reach, program, &files);
     let tally = Tally::new(&scan.pieces, &survey::unit_files(&units, program, &files), rejections, fatal);
     Ok(Census { report: tally.report(&scan, &program.main), json: tally.json(&scan, &program.main) })
@@ -258,6 +264,52 @@ fn unresolved_calls(class: &mut Class) -> Result<(), Vec<Error>> {
         decl.fields.iter().chain(&decl.statics).filter_map(|f| f.init.as_ref()).for_each(&mut see);
     }
     if errors.is_empty() { Ok(()) } else { Err(errors) }
+}
+
+/// Gives the rejections that have a position but no unit (an error that lowering met outside the
+/// code of a class, or one that no stub took away) the unit with code at that position, when one
+/// unit alone has code there.
+fn locate<'a>(trees: &[&Value], rejections: impl Iterator<Item = &'a mut Rejection>) {
+    let mut rejections: Vec<&mut Rejection> =
+        rejections.filter(|r| r.unit.is_none() && r.error.pos != Pos::default()).collect();
+    if rejections.is_empty() {
+        return;
+    }
+    let wanted: HashSet<(usize, usize)> =
+        rejections.iter().map(|r| (r.error.pos.line, r.error.pos.column)).collect();
+    let mut found: BTreeMap<(usize, usize), BTreeSet<usize>> = BTreeMap::new();
+    fn visit(
+        node: &Value,
+        unit: usize,
+        wanted: &HashSet<(usize, usize)>,
+        found: &mut BTreeMap<(usize, usize), BTreeSet<usize>>,
+    ) {
+        match node {
+            Value::Object(fields) => {
+                if let (Some(line), Some(column)) =
+                    (fields.get("line").and_then(Value::as_u64), fields.get("column").and_then(Value::as_u64))
+                {
+                    let pos = (line as usize, column as usize);
+                    if wanted.contains(&pos) {
+                        found.entry(pos).or_default().insert(unit);
+                    }
+                }
+                fields.values().for_each(|v| visit(v, unit, wanted, found));
+            }
+            Value::Array(items) => items.iter().for_each(|v| visit(v, unit, wanted, found)),
+            _ => {}
+        }
+    }
+    for (unit, tree) in trees.iter().enumerate() {
+        visit(tree, unit, &wanted, &mut found);
+    }
+    for rejection in &mut rejections {
+        if let Some(units) = found.get(&(rejection.error.pos.line, rejection.error.pos.column))
+            && units.len() == 1
+        {
+            rejection.unit = units.first().copied();
+        }
+    }
 }
 
 /// The largest id of an expression of the program.

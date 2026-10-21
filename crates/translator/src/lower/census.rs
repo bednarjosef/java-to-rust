@@ -2,7 +2,8 @@
 //! of code is recorded with the type it is in, and lowering goes on past it. A rejected method,
 //! constructor or lambda becomes a stub, with its signature and a body that never runs, so the
 //! code around it is still lowered and analysed; a rejected field initializer or initializer
-//! block is left out.
+//! block is left out. A class whose declaration is rejected has all of its code rejected with it
+//! (`reject_class`).
 
 use super::*;
 
@@ -24,10 +25,50 @@ impl<'t> Lowering<'t> {
         }
     }
 
+    /// Records, in a census, that the declaration of class `t` is rejected for `error` (the
+    /// first error of its declaration, when it has several), which the class's code is rejected
+    /// for too (`method_or_stub`, `type_decl_or_stub`); passes the error on otherwise.
+    pub(super) fn reject_class(&self, t: usize, error: Result<(), Error>) -> Result<(), Error> {
+        let Err(error) = error else { return Ok(()) };
+        if self.census.is_none() {
+            return Err(error);
+        }
+        self.rejected_classes.borrow_mut().entry(t).or_insert(error);
+        Ok(())
+    }
+
+    /// The error that the declaration of class `t` was rejected for in a census, if it was.
+    fn class_rejection(&self, t: usize) -> Option<Error> {
+        let rejected = self.rejected_classes.borrow();
+        rejected.get(&t).map(|e| Error { pos: e.pos, message: e.message.clone() })
+    }
+
+    /// Checks the declarations of the classes in a census, before anything else asks for their
+    /// superclasses and interfaces: those that are rejected are known before their code is
+    /// lowered.
+    pub(super) fn check_class_headers(&self) {
+        if self.census.is_some() {
+            for t in 0..self.types.len() {
+                let _ = self.superclass(t);
+                let _ = self.interfaces(t);
+            }
+        }
+    }
+
     /// Method `index`, or in a census, when lowering rejects it, its stub.
     pub(super) fn method_or_stub(&self, index: usize) -> Result<Method, Error> {
         if self.census.is_none() {
             return self.method(index);
+        }
+        // The code of a class whose declaration is rejected is rejected with it.
+        let owner = self.methods[index].owner;
+        if let Some(error) = self.class_rejection(owner) {
+            self.reject_at(owner, Some(self.methods[index].node.pos()), error)?;
+            self.stubbed.borrow_mut().insert(index);
+            self.stubbing.set(true);
+            let stub = self.method(index);
+            self.stubbing.set(false);
+            return stub;
         }
         // A panic of lowering is a rejection of the method like any other.
         let ctx = (self.method_ctx.get(), self.aliases.borrow().len());
@@ -55,6 +96,24 @@ impl<'t> Lowering<'t> {
     /// its fields and captured locals of a type that is not supported as `int`s: the code that
     /// uses them lowers the same types, and is rejected too.
     pub(super) fn type_decl_or_stub(&self, t: usize) -> Result<TypeDecl, Error> {
+        // The field initializers and initializer blocks of a class whose declaration is rejected
+        // are rejected with it, and left out (`type_decl`).
+        if let Some(error) = self.class_rejection(t) {
+            let javac = &self.types[t].javac;
+            let node = self.types[t].node;
+            let initializers = node.list("members").filter(|m| match m.kind() {
+                "VARIABLE" => m.get("initializer").is_some() && !enums::is_enum_constant(*m),
+                kind => kind == "BLOCK",
+            });
+            for member in initializers.filter(|m| self.keeps(*m, javac)) {
+                let error = Error { pos: error.pos, message: error.message.clone() };
+                self.reject_at(t, Some(member.pos()), error)?;
+            }
+            self.stubbing.set(true);
+            let stub = self.type_decl(t);
+            self.stubbing.set(false);
+            return stub;
+        }
         match self.type_decl(t) {
             Err(error) if self.census.is_some() => {
                 self.reject_at(t, Some(self.types[t].node.pos()), error)?;

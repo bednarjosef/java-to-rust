@@ -71,6 +71,7 @@ impl<'t> Lowering<'t> {
             stubbing: Cell::new(false),
             stubbed: Default::default(),
             annotation_types: Default::default(),
+            rejected_classes: Default::default(),
         }
     }
 
@@ -171,6 +172,8 @@ impl<'t> Lowering<'t> {
         let (mut fields, mut statics) = (self.synthetic_fields(index)?, Vec::new());
         let name = &self.types[index].name;
         let moved = self.moves_initializers(index);
+        // A census's rejected class keeps its fields, without their initializers.
+        let rejected = self.rejected_classes.borrow().contains_key(&index);
         let javac = &self.types[index].javac;
         for member in node
             .list("members")
@@ -178,7 +181,7 @@ impl<'t> Lowering<'t> {
             .filter(|m| self.handle_declaration(*m).is_none())
         {
             // Moved initializers run in the constructors (see `inner`).
-            let field = self.field(member, !(moved && !member.has_flag("STATIC")))?;
+            let field = self.field(member, !rejected && !(moved && !member.has_flag("STATIC")))?;
             // A subclass's struct holds its superclass's fields as `base`.
             if !member.has_flag("STATIC")
                 && field.name.eq_ignore_ascii_case("base")

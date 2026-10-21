@@ -687,12 +687,15 @@ prints what it rejects: lowering, the analyses and the generator run as for a tr
 each method, constructor or lambda that one of them rejects is recorded and replaced by a stub
 with its signature and a body that never runs (a rejected field initializer or initializer block
 is left out), so every rejection after it is one the translation would meet once the code before
-it translates. Its report gives, for the program's own code and for its library code separately,
+it translates. A class whose declaration is rejected (it extends or implements a class that is
+not translated) is recorded as a rejection of each of its pieces of code, which are stubbed, and
+the census goes on with the class extending and implementing none of those. Its report gives, for the program's own code and for its library code separately,
 the pieces of code (methods, constructors, field initializers, initializer blocks) that translate
 and the rejections, grouped by message (the names in backquotes left out), with the number of
 pieces each blocks and example places (`file:line:column`, relative to the source or library
 root), and the native methods reached, each with whether the runtime has it
-(`program/census.rs`). It ends early only at a rejection that no stub takes away, which it says.
+(`program/census.rs`). It ends early only at a rejection that no stub takes away, which it says,
+with the error's file, line and column (the file, when one file alone has code there).
 `--census-json <file>` writes it as JSON for scripts; `scripts/jdk-coverage.py` runs it over the
 target programs and writes `docs/jdk-coverage.md`, how much of the JDK code they reach translates.
 

@@ -3026,6 +3026,46 @@ fn the_census_reports_every_rejection_not_only_the_first() {
 }
 
 #[test]
+fn the_census_rejects_a_class_whose_declaration_is_rejected_with_its_code_and_goes_on() {
+    let dir = write_sources(
+        "census_class",
+        &[
+            (
+                "p/Main.java",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(new Loader().n() + Other.fine());\n        Number x = Integer.valueOf(5);\n        System.out.println(x.intValue());\n    }\n}\n",
+            ),
+            (
+                "p/Loader.java",
+                "package p;\nclass Loader extends java.security.SecureClassLoader {\n    int count = 3;\n    { count++; }\n    int n() { return count; }\n}\n",
+            ),
+            ("p/Other.java", "package p;\nclass Other {\n    static int fine() { return 4; }\n}\n"),
+        ],
+    );
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    let error = java_to_rust::translate_program(&program).expect_err("SecureClassLoader is not translated");
+    assert!(
+        error
+            .to_string()
+            .ends_with("p/Loader.java:2:22: extending `java.security.SecureClassLoader` not supported yet"),
+        "{error}"
+    );
+    // The class's constructor, field initializer, initializer block and method are rejected with
+    // it, and `main`, which uses the class, and `fine` translate. (With `Number` in the program,
+    // lowering asks for the superclass of every class with a method without parameters, which
+    // once ended the census at this error.)
+    let census = census(&program);
+    assert_lacks(&census.report, &["Incomplete"]);
+    assert_contains(
+        &census.report,
+        &[
+            "  Program: 6 pieces; 2 (33.3%) translate, 4 rejected.",
+            "       4  extending `…` not supported yet\n          at p/Loader.java:2:22\n",
+        ],
+    );
+    assert_eq!(census.json["complete"], true);
+}
+
+#[test]
 fn census_json_writes_the_census_to_the_file_given() {
     let dir = census_sources("census_cli");
     let json = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("census_cli.json");

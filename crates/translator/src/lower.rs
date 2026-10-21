@@ -309,6 +309,10 @@ struct Lowering<'t> {
     census: Option<RefCell<Vec<CensusError>>>,
     /// Whether the method being lowered is a census's stub of one that lowering rejected.
     stubbing: Cell<bool>,
+    /// In a census, the classes whose declaration lowering rejected (one that extends or
+    /// implements a class that is not translated), with the error: such a class extends and
+    /// implements none of those, and all of its code is rejected with it (see `census`).
+    rejected_classes: RefCell<std::collections::BTreeMap<usize, Error>>,
     /// The methods that are a census's stubs.
     stubbed: RefCell<std::collections::BTreeSet<usize>>,
     /// The annotation types (`@interface`) that were left out, by javac's name: an annotation

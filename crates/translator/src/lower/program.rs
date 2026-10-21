@@ -168,6 +168,7 @@ fn lower_into<'t>(
     lowering.declare_plain_object(reachable.iter().copied()).map_err(|e| (None, e))?;
     unit_of.resize(lowering.types.len(), usize::MAX);
     lowering.name_nested();
+    lowering.check_class_headers();
     lowering.plan_captures().map_err(|(t, e)| ((unit_of[t] != usize::MAX).then_some(unit_of[t]), e))?;
     packages.resize(lowering.types.len(), String::new());
     lowering.entry = lowering.type_index(main);
