@@ -480,7 +480,8 @@ reaches those on paths that only its data rules out, as `HashMap` reaches reflec
 `comparableClassFor` and parallel streams reach threads, so the boundary is needed. A program that
 puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints the count).
 Annotations reach nothing, and neither does the code that Java Flight Recorder's flags guard
-(`jfrTracing` in `Throwable` and the file streams, which only JFR sets, by reflection): it is not
+(`jfrTracing` in `Throwable` and the file streams, which only JFR sets, by reflection), or the
+streams' `Tripwire.ENABLED` (a system property that only the JVM's `-D` option sets): it is not
 translated. Nor is what `AbstractPipeline.isParallel()` guards, when a check over the code reached
 shows that no stream can become parallel (`program/reach/sequential.rs`); otherwise reachability
 runs again without that assumption.

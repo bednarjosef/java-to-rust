@@ -140,21 +140,26 @@ pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
     REPLACED_METHODS.contains(&(class, name, signature))
 }
 
-/// Static fields that only Java Flight Recorder sets, through reflection when it starts
-/// (`jdk.internal.event.JFRTracing`): no code sets them otherwise, so in a translated program they
-/// stay `false` and the code they guard, which records events through `jdk.internal.event`, never
-/// runs.
+/// Static fields that are `false` in every translated program, so the code they guard never runs.
+/// The `jfrTracing` flags are set only by Java Flight Recorder, through reflection when it starts
+/// (`jdk.internal.event.JFRTracing`), and guard code that records events through
+/// `jdk.internal.event`. The streams' `Tripwire.ENABLED` is `Boolean.getBoolean` of a system
+/// property that only `-D` on the JVM's command line sets, which a translated program has no
+/// equivalent of; it guards warnings through `PlatformLogger` that name a class by reflection.
 pub const FALSE_FLAGS: &[(&str, &str)] = &[
     ("java.io.FileInputStream", "jfrTracing"),
     ("java.io.FileOutputStream", "jfrTracing"),
     ("java.io.RandomAccessFile", "jfrTracing"),
     ("java.lang.Throwable", "jfrTracing"),
+    ("java.util.Tripwire", "ENABLED"),
+    ("java.util.stream.Tripwire", "ENABLED"),
     ("sun.nio.ch.FileChannelImpl", "jfrTracing"),
 ];
 
 /// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
 /// branch can run: it reads one of the `FALSE_FLAGS`, or, when the program's streams are all
-/// `sequential` (see `sequential.rs`), it is a pipeline's `isParallel()`; alone, or as the first
+/// `sequential` (see `sequential.rs`), it is a pipeline's `isParallel()` or a test whether one
+/// of its nodes has children (`getChildCount() > 0`); alone, or as the first
 /// operand of `&&`, or as the second after one that only computes a value (the lowering drops the
 /// whole condition).
 pub fn never_true(condition: &Value, sequential: bool) -> bool {
@@ -170,6 +175,7 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
                 && FALSE_FLAGS.contains(&(text(symbol, "owner"), text(symbol, "name")))
         }
         "METHOD_INVOCATION" => sequential && sequential::is_parallel_test(condition),
+        "GREATER_THAN" => sequential && sequential::has_children_test(condition),
         _ => false,
     }
 }
@@ -463,19 +469,25 @@ impl<'t> Walk<'t> {
         self.scan(node);
     }
 
-    /// Makes every declaration that a node of this subtree refers to reachable. Local and
-    /// anonymous classes inside are scanned whole, which over-approximates. Annotations are
-    /// skipped: without reflection they do nothing at run time. So is the branch of an `if` or a
-    /// `?:` whose condition is never true (`never_true`).
+    /// Makes every declaration that a node of this subtree refers to reachable. The local and
+    /// anonymous classes declared inside are not scanned with it: their members are reached as
+    /// those of any other class, a constructor by its `new` and an instance method by a call or
+    /// by dispatch once the class is instantiated. (The body of an enum constant is not such a
+    /// class, see `local_classes`, and is scanned with its constant.) Annotations are skipped:
+    /// without reflection they do nothing at run time. So is the branch of an `if` or a `?:`
+    /// whose condition is never true (`never_true`).
     fn scan(&mut self, value: &'t Value) {
         match value {
             Value::Object(_) if matches!(text(value, "kind"), "ANNOTATION" | "TYPE_ANNOTATION") => {}
-            // The branch that a condition that is never true guards is not reached.
+            Value::Object(_)
+                if CLASS_KINDS.contains(&text(value, "kind"))
+                    && self.classes.contains_key(&class_name(value)) => {}
+            // The branch that a condition that is never true guards is not reached, and neither
+            // is the condition, which the lowering drops: a flag's class need not exist.
             Value::Object(_)
                 if matches!(text(value, "kind"), "IF" | "CONDITIONAL_EXPRESSION")
                     && never_true(&value["condition"], self.sequential) =>
             {
-                self.scan(&value["condition"]);
                 self.scan(else_branch(value));
             }
             Value::Object(fields) => {
@@ -710,6 +722,46 @@ mod tests {
         assert!(reach.methods.contains(&method("Other")), "{reach:?}");
     }
 
+    #[test]
+    fn an_anonymous_class_is_reached_by_dispatch_not_with_the_code_that_creates_it() {
+        let method = |name: &str, statements: Vec<Value>, overrides: Option<&str>| {
+            json!({"kind": "METHOD", "name": name, "symbol": {"type": "()void", "static": false,
+                       "overrides": overrides.map(|o| vec![json!({"owner": o, "type": "()void"})])},
+                   "body": {"kind": "BLOCK", "statements": statements}})
+        };
+        // `new Base() { void used() { Used.run(); } void unused() { Unused.run(); } }.used()`
+        let anonymous = json!({"kind": "CLASS", "symbol": {"type": "Main$1"},
+        "extendsClause": {"kind": "IDENTIFIER", "symbol": {"type": "Base"}},
+        "members": [
+            method("<init>", vec![], None),
+            method("used", vec![call("Used", "run")], Some("Base")),
+            method("unused", vec![call("Unused", "run")], Some("Base")),
+        ]});
+        let created = json!({"kind": "NEW_CLASS", "classBody": anonymous,
+            "symbol": {"kind": "CONSTRUCTOR", "owner": "Main$1", "name": "<init>", "type": "()void"}});
+        let used = json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "METHOD_INVOCATION",
+            "methodSelect": {"kind": "MEMBER_SELECT", "expression": created},
+            "symbol": {"kind": "METHOD", "owner": "Base", "name": "used", "type": "()void", "static": false}}});
+        let base = json!({"kind": "CLASS", "symbol": {"type": "Base"}, "members": [
+            method("<init>", vec![], None),
+            method("used", vec![], None),
+            method("unused", vec![], None),
+        ]});
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![used])]),
+            base,
+            class("Used", &[("run", vec![])]),
+            class("Unused", &[("run", vec![])]),
+        ]});
+        let reach = reach(&[&unit], "Main").unwrap();
+        let key = |class: &str, name: &str| (class.to_string(), name.to_string(), "()void".to_string());
+        assert!(reach.instantiated.contains("Main$1"), "{reach:?}");
+        assert!(reach.methods.contains(&key("Main$1", "used")), "{reach:?}");
+        assert!(reach.methods.contains(&key("Used", "run")), "{reach:?}");
+        assert!(!reach.methods.contains(&key("Main$1", "unused")), "{reach:?}");
+        assert!(!reach.classes.contains("Unused"), "{reach:?}");
+    }
+
     /// A pipeline in the shape of `java.util.stream.AbstractPipeline`: a `parallel` field that its
     /// constructor sets from its argument and `parallel()` sets to true, `isParallel()`, and an
     /// `evaluate()` that runs `Par.run()` when the pipeline is parallel and `Seq.run()` when not.
@@ -775,5 +827,46 @@ mod tests {
             assert!(parallel.methods.contains(&method("Par")), "{parallel:?}");
             assert!(parallel.methods.contains(&method("Seq")), "{parallel:?}");
         }
+    }
+
+    #[test]
+    fn a_sequential_program_has_no_nodes_with_children() {
+        let node = "java.util.stream.Node";
+        let instance = |name: &str, ty: &str, overrides: Option<&str>| {
+            json!({"kind": "METHOD", "name": name, "symbol": {"type": ty, "static": false,
+                       "overrides": overrides.map(|o| vec![json!({"owner": o, "type": ty})])},
+                   "body": {"kind": "BLOCK", "statements": []}})
+        };
+        // `Nodes.flatten`: `if (node.getChildCount() > 0) Par.run(); else Seq.run();`
+        let has_children = json!({"kind": "GREATER_THAN",
+            "leftOperand": {"kind": "METHOD_INVOCATION",
+                "symbol": {"kind": "METHOD", "owner": node, "name": "getChildCount", "type": "()int"}},
+            "rightOperand": {"kind": "INT_LITERAL", "value": "0"}});
+        let flatten = json!({"kind": "IF", "condition": has_children,
+            "thenStatement": call("Par", "run"), "elseStatement": call("Seq", "run")});
+        // A class whose nodes have children, as `Nodes.ConcNode`.
+        let conc = json!({"kind": "CLASS", "symbol": {"type": "Conc"},
+            "implementsClause": [{"kind": "IDENTIFIER", "symbol": {"type": node}}],
+            "members": [instance("<init>", "()void", None), instance("getChildCount", "()int", Some(node))]});
+        let new_conc = json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "NEW_CLASS",
+            "symbol": {"kind": "CONSTRUCTOR", "owner": "Conc", "name": "<init>", "type": "()void"}}});
+        let reach_with = |statements: Vec<Value>| {
+            let unit = json!({"typeDecls": [
+                class("Main", &[("main", statements)]),
+                {"kind": "INTERFACE", "symbol": {"type": node}, "members": [instance("getChildCount", "()int", None)]},
+                conc.clone(),
+                class("Par", &[("run", vec![])]),
+                class("Seq", &[("run", vec![])]),
+            ]});
+            reach(&[&unit], "Main").unwrap()
+        };
+        let method = |class: &str| (class.to_string(), "run".to_string(), "()void".to_string());
+        let sequential = reach_with(vec![flatten.clone()]);
+        assert!(sequential.sequential);
+        assert!(sequential.methods.contains(&method("Seq")), "{sequential:?}");
+        assert!(!sequential.methods.contains(&method("Par")), "{sequential:?}");
+        let concatenated = reach_with(vec![new_conc, flatten]);
+        assert!(!concatenated.sequential);
+        assert!(concatenated.methods.contains(&method("Par")), "{concatenated:?}");
     }
 }

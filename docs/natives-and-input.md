@@ -611,6 +611,7 @@ Recommended, in order of payoff:
    `Buffer` reaches every method of `JavaNioAccess`: mapped memory, `writeback`, continuations.
    This needs javac's trees to name anonymous classes (their qualified name is empty today, so
    their methods' keys collide), after which their methods are overriders like any other.
+   **Made** (4.5).
 4. **Sequential streams do not reach the parallel paths.** `AbstractPipeline.evaluate` and the
    `opEvaluateParallel*` methods run only when `isParallel()` is true, which needs a reachable
    call of `BaseStream.parallel()`, `Collection.parallelStream()` or a parallel
@@ -715,6 +716,24 @@ for when a program needs time zones.
   `ReduceOps.makeRefCounting`, whose `opEvaluateParallel` and `evaluateParallel` overrides are
   scanned with the method that creates them. The 23 natives come off once anonymous classes are
   reached by dispatch (4.2, 3).
+- **Local and anonymous classes reached by dispatch** (4.2, 3): javac's trees name them by their
+  binary names (`DistinctOps$1`), reachability declares them, and `Walk::scan` no longer scans
+  them with the code that creates them: a constructor is reached by its `new`, an instance
+  method by a call or by dispatch once its class is instantiated. The check of the sequential
+  assumption indexes them the same way.
+- **Nodes without children** (with 3): one more path reached `ForkJoinPool` from sequential
+  code, `Nodes.flatten`, which copies a tree of nodes into an array with a `ForkJoinTask` when
+  `node.getChildCount() > 0`. Only parallel evaluation concatenates nodes (`Nodes.conc`), so the
+  sequential assumption covers that test too, checked by no class that overrides
+  `Node.getChildCount()` having objects.
+- **Flags of the streams' `Tripwire`** (`java.util.Tripwire`, `java.util.stream.Tripwire`): its
+  `ENABLED` is `Boolean.getBoolean` of a property that only `-D` sets, so it joins the JFR flags in
+  `FALSE_FLAGS`, and the condition of a skipped branch is no longer scanned (the lowering drops
+  it), so the class is not reached for its flag.
+
+With these, `StreamPipeline` reaches 264 classes (176 instantiated), 1,144 methods and 4 natives,
+all in the runtime (the `CDS` ones and `Unsafe.registerNatives`), against the 372 classes and 28
+natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` atomics are gone.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

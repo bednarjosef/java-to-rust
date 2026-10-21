@@ -1123,7 +1123,10 @@ Decisions that change during the implementation are recorded here, milestone by 
   implementer owns the file and is told.
 - **Reachability declares local and anonymous classes** (with the class whose member declares
   them as their outer class), so that their members are in `Reach::methods` and are lowered in
-  whole-program mode; their code is still scanned whole with the code that declares them.
+  whole-program mode. Their code is not scanned with the code that declares them: a constructor
+  is reached by its `new`, an instance method by a call or by dispatch once the class is
+  instantiated, as for any other class (the streams work; a stream operation's anonymous `Sink`
+  and `StatefulOp` no longer reach their parallel overrides).
 - **Still rejected:** local interfaces, enums and records (the records work); member classes of
   local and anonymous classes; a nested class extending one nested in another class (the two
   `outer` fields would differ); a field named `outer` in a nested class with an enclosing
