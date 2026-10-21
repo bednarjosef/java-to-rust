@@ -410,6 +410,9 @@ default). `crates/translator/tests/translation.rs` pins down what the output loo
   streams as Rust iterators, after the object model, lambdas and for-each over `Iterable` land.
 - [docs/thorough-mode.md](docs/thorough-mode.md): a slower whole-program mode with points-to
   analysis, ownership checked by rustc, enums for class trees, and typed errors.
+- [docs/closures-and-nested-classes.md](docs/closures-and-nested-classes.md): captures, inner,
+  local and anonymous classes, lambdas, method references and for-each over `Iterable`, after
+  the object model.
 - [docs/multi-threading.md](docs/multi-threading.md): real threads, shared objects as `Arc` and
   `java::Locked`, monitors, and parallel execution, after the object model and exceptions.
 - [docs/performance.md](docs/performance.md): the benchmark table from one run, and the causes of
