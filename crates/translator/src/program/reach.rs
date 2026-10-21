@@ -367,7 +367,8 @@ impl<'t> Walk<'t> {
     }
 
     /// The initializers that run for the class's static initialization (`statics`) or for every
-    /// object it creates.
+    /// object it creates. A class's `serialPersistentFields` is kept only if code reads it
+    /// (`for_serialization`).
     fn initializers(&mut self, decl: &'t Value, class: &str, statics: bool) {
         for member in members(decl) {
             let is_static = match text(member, "kind") {
@@ -380,7 +381,7 @@ impl<'t> Walk<'t> {
             }
             if text(member, "kind") == "BLOCK" {
                 self.scan(member);
-            } else if has_effects(&member["initializer"]) {
+            } else if has_effects(&member["initializer"]) && !for_serialization(member) {
                 self.work.push(Item::Field((class.to_string(), text(member, "name").to_string())));
             }
         }
@@ -649,6 +650,24 @@ pub(super) fn has_flag(node: &Value, flag: &str) -> bool {
     node["modifiers"]["flags"].as_array().is_some_and(|f| f.iter().any(|x| x == flag))
 }
 
+/// Whether a field is the `serialPersistentFields` of a serializable class: serialization reads it
+/// by reflection, which a translation has not, and its initializer only creates the
+/// `ObjectStreamField`s that describe the fields, from arguments without effects. Some thirty
+/// classes of java.base have one (`String`, `Random`, `ConcurrentHashMap`, ...), whose
+/// `Long.TYPE` and `String.class` arguments are `Class` values.
+fn for_serialization(field: &Value) -> bool {
+    let describes = |element: &Value| {
+        text(element, "kind") == "NEW_CLASS"
+            && text(&element["symbol"], "owner") == "java.io.ObjectStreamField"
+            && !has_effects(&element["arguments"])
+    };
+    let init = &field["initializer"];
+    text(field, "name") == "serialPersistentFields"
+        && has_flag(field, "STATIC")
+        && text(init, "kind") == "NEW_ARRAY"
+        && init["initializers"].as_array().is_some_and(|elements| elements.iter().all(describes))
+}
+
 /// Whether evaluating an initializer may do more than compute a value: call a method, create an
 /// object, assign, or throw on a division.
 fn has_effects(value: &Value) -> bool {
@@ -720,6 +739,38 @@ mod tests {
         assert!(reach.methods.contains(&method("Other", "run")), "{reach:?}");
         assert!(!reach.methods.contains(&method("Tracer", "trace")), "{reach:?}");
         assert!(!reach.classes.contains("Tracer"), "{reach:?}");
+    }
+
+    #[test]
+    fn serial_persistent_fields_are_not_initialized_unless_read() {
+        let describe = json!({"kind": "NEW_CLASS",
+            "symbol": {"kind": "CONSTRUCTOR", "owner": "java.io.ObjectStreamField", "name": "<init>",
+                       "type": "(java.lang.String,java.lang.Class)void"},
+            "arguments": [{"kind": "STRING_LITERAL", "value": "seed"}]});
+        let field = |name: &str, init: Value| {
+            json!({"kind": "VARIABLE", "name": name, "symbol": {"type": "java.io.ObjectStreamField[]", "static": true},
+                   "initializer": {"kind": "NEW_ARRAY", "initializers": [init]}})
+        };
+        let holder = |fields: Value| {
+            let mut holder = class("Holder", &[("run", vec![])]);
+            holder["members"].as_array_mut().unwrap().push(fields);
+            let unit = json!({"typeDecls": [
+                class("Main", &[("main", vec![call("Holder", "run")])]),
+                holder,
+                class("java.io.ObjectStreamField", &[]),
+                class("Describe", &[("run", vec![])]),
+            ]});
+            reach(&[&unit], "Main").unwrap()
+        };
+        let key = ("Holder".to_string(), "serialPersistentFields".to_string());
+        let reach = holder(field("serialPersistentFields", describe.clone()));
+        assert!(!reach.fields.contains(&key), "{reach:?}");
+        // Another name, or an element that does something, is initialized with its class.
+        let reach = holder(field("persistent", describe));
+        assert!(reach.fields.contains(&("Holder".to_string(), "persistent".to_string())), "{reach:?}");
+        let reach = holder(field("serialPersistentFields", call("Describe", "run")["expression"].clone()));
+        assert!(reach.fields.contains(&key), "{reach:?}");
+        assert!(reach.methods.contains(&("Describe".into(), "run".into(), "()void".into())), "{reach:?}");
     }
 
     #[test]
