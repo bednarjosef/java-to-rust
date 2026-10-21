@@ -787,6 +787,61 @@ variants are the union over its concretes as for any type; `to_<super interface>
 conversions are generated on demand. A class implementing two interfaces appears in both
 enums. Interface methods are always object-level (interfaces have no instance fields).
 
+### 1.13 Dropping long chains
+
+Objects are freed by reference counting, and Rust frees an object's fields when it frees the
+object. Left alone, freeing the head of a linked list of a million nodes would free its `next`,
+which frees its `next`, a million frames deep, and the program would abort with a stack
+overflow on the 8 MB main stack. Java's collector has no such limit, so the translation must
+not either. The rule (`codegen/chains.rs`, runtime `chains.rs`):
+
+- **Which classes.** The *held classes* of a field type are the concrete classes whose objects
+  a value of it holds directly: the class an object type stands for, the variants of the enum
+  of a class type (program classes only, not strings, boxes or Java enums), and for an array
+  the held classes of its element type. A type variable of a real Rust generic holds none
+  (its instantiations are not followed). Concrete class `c` has an edge to each held class of
+  each of its fields, its own and those of the fields structs it embeds. A field of a struct
+  is a *link* when, for some concrete class whose objects have the field, one of its held
+  classes is that class or can reach it by edges: the field can lead back to an object of the
+  same class, directly (`Node next`) or through a cycle of classes (`Outer.inner` and
+  `Inner.outer`), and so a chain of such objects can be as long as the program makes it.
+- **What they get.** A struct with links gets `impl java::Unlink<'a>`, whose `unlink` calls
+  `java::Link::unlink_in(&mut self.f, chain)` for each link (and `unlink` of its embedded
+  `base` when that struct has links), and `impl Drop` calling `java::drop_links(self)`. A
+  struct without links of its own whose embedded fields struct has them gets only the
+  `Unlink`, which unlinks `base`; the fields struct's own `Drop` runs when the struct's
+  fields are dropped. The enum of a class type that is the type (or the array element type) of
+  a link gets `impl java::Link<'a>`, which matches the variants whose structs unlink and does
+  nothing for the others.
+- **How it frees.** `drop_links` moves the links out of the dying object onto a
+  `java::Chain`, a stack of `Rc<dyn Unlink>` on the heap, and frees the objects on it one at a
+  time, unlinking each before it is freed, so each object dies with its links already gone and
+  the drop depth stays constant. `Link` is implemented in the runtime for every form a link
+  has: `Option` (taken out), `Rc` of an object (pushed onto the chain), `Vec` and so
+  `java::Array` (the elements are drained onto the chain) and the generated enums. An object
+  goes on the chain only while the chain holds its last reference; any other reference keeps
+  it alive, and dropping the chain's only decrements the count, so a list that is still
+  reachable from somewhere else is not touched. A link that cannot be null (a plain `Rc`
+  field) cannot be taken out; when nothing else holds its object, the object is unlinked in
+  place. A cycle of non-null links cannot end, so such an object is on a reference cycle and
+  never freed, and the in-place unlinking goes at most one class cycle deep.
+- **Shallow structures stay recursive.** Rust's own recursive drop is the fastest way to free
+  a structure, and most structures are shallow (a balanced tree of a million nodes is 20
+  deep). A thread-local holds the highest stack address any `drop_links` on the thread has run
+  at. A `drop_links` that runs less than 128 KB of stack below it does nothing, and Rust drops
+  the fields recursively as it would without the `Drop`; one deeper than that moves the links
+  onto a chain, which frees the rest of the structure iteratively at that depth. So the drops
+  of a structure use at most 128 KB of stack below the shallowest drop of the thread, plus
+  constant space.
+- **What it costs.** Only the classes on cycles of field types change. Each object of such a
+  class that dies runs its `Drop`: near the top, one thread-local read and a compare; deeper,
+  the takes of its links and a heap stack that is allocated only when a link held the last
+  reference to its object. The binary trees benchmark, which frees millions of small trees, is the worst case;
+  its numbers are in docs/performance.md.
+- **Not covered.** A chain through a field whose type is a type variable of a real Rust
+  generic (`Box<T>` holding `Box<Box<...>>`), or through objects captured by a lambda. Reference
+  cycles are still never freed, as before.
+
 ## 2. Interaction with the existing analyses
 
 Where a change is "every site that matches `resolved: Some(callee)`", the sites are:

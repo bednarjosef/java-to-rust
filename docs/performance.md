@@ -44,7 +44,8 @@ medians, load average 72 at start). Times in milliseconds.
 | Statics        |    1800 |    1763 |      0.98 |           - |           - |            - |
 | StringBuild    |      33 |       2 |      0.05 |           - |           - |            - |
 
-NodeList does not compile. See below.
+NodeList did not compile on that branch; it compiles now and runs since the drop of long chains
+was made iterative. See below.
 
 The four programs that use arrays most, before (main at `18ab2fb`) and after the array
 ownership work, run back to back in the same minutes:
@@ -109,21 +110,45 @@ Read from the generated Rust under `target/benchmarks/<Name>/crate/src/main.rs`.
 Mandelbrot (0.33x, kernel 0.99x), Collatz (0.38x) and NBody (1.02x) are at or faster than Java
 and need no change.
 
-## NodeList: does not compile (translator bug)
+## NodeList: stack overflow when the list is freed (fixed on `iterative-drop`)
 
-`benchmarks/NodeList.java` walks a linked list with `current = current.next` inside a loop. The
-translator emits
+`benchmarks/NodeList.java` builds a linked list of about 667,000 nodes. It compiled once the
+assignment from a field read was fixed on main, but the binary aborted with SIGABRT: when the
+list went out of scope, Rust's drop of `next` recursed once per node and overflowed the 8 MB
+main stack. With `ulimit -s unlimited` it printed Java's checksum.
 
-    current = java::non_null(current.as_ref()).borrow().next.clone();
+A class whose fields can lead back to objects of the same class now gets a `Drop` that frees
+deep chains iteratively (docs/object-model.md, "1.13 Dropping long chains"). Near the top of the
+stack the `Drop` only compares the stack address with a thread-local and leaves the fields to
+Rust's recursive drop; 128 KB of stack deeper it moves the links onto a heap stack. Only
+classes on a cycle of field types change: both benchmarks here have one.
 
-The `Ref` temporary from `borrow()` lives until the end of the statement, so the assignment to
-`current` happens while `current` is still borrowed. rustc rejects it with E0506 ("cannot assign
-to `current` because it is borrowed"). The same shape appears in the loop of `sum`. The fix
-belongs in the codegen that emits assignments from a field read through a `RefCell`: bind the
-`clone` to a local before the assignment. Nothing in `crates/` was changed for this benchmark.
+`python3 scripts/benchmark.py BinaryTrees NodeList`, five runs per side, medians in ms:
 
-Because it does not compile, the script reports NodeList as "does not compile" and exits with
-status 1.
+| run                                   | load | BinaryTrees Java | BinaryTrees Rust | NodeList Java | NodeList Rust |
+|---------------------------------------|-----:|-----------------:|-----------------:|--------------:|--------------:|
+| main at `45ad1c1`                     |   46 |             1873 |            11428 |             - | aborts (exit -6) |
+| heap stack for every drop             |   19 |             1337 |             9610 |           230 |           481 |
+| recursion counter, heap stack below 200 levels | 12 |       763 |             6977 |           234 |           466 |
+
+The machine's load moved the Java and Rust times by up to a factor of two between these runs, so
+the cost of the `Drop` was measured separately: the generated crate of each benchmark built
+twice, once as generated and once with the `Unlink` and `Drop` impls removed (NodeList then run
+with an unlimited stack), the two binaries run alternately, median of the runs in ms:
+
+| version of the runtime                           | runs | BinaryTrees with / without | ratio | NodeList with / without | ratio |
+|--------------------------------------------------|-----:|---------------------------:|------:|------------------------:|------:|
+| heap stack for every drop                        |    7 |                6769 / 5739 |  1.18 |               471 / 480 |  0.98 |
+| recursion counter, heap stack below 200 levels   |    9 |                6413 / 6059 |  1.06 |               470 / 500 |  0.94 |
+| stack address test, heap stack below 128 KB      |   10 |                6745 / 6255 |  1.08 |               471 / 474 |  0.99 |
+
+BinaryTrees frees about 300 million nodes, so it is the worst case: every node runs the `Drop`.
+In the last version that is eight instructions and one call more than Rust's own drop of a
+node (a thread-local load, a compare, and a call into the node's drop glue that is no longer
+inlined into `Rc::drop_slow`), about 1.5 ns per node, 6 to 8 percent of its run time across
+three runs at loads 5 to 15. NodeList is unchanged within the noise: its chain is freed on the
+heap stack, which costs no more than recursion. Programs without a cycle of field types are
+not touched.
 
 ## Deviations from the plan
 
