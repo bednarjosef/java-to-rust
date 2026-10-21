@@ -1,7 +1,9 @@
 //! Distinct names for a method's locals of different types. Java lets two locals whose scopes do
 //! not overlap share a name (`for (Box s : boxes)` and later `for (String s : names)`), but the
 //! analyses record what they find about a local by its method and name (`Facts::nullable_vars`),
-//! so a later local of another type is renamed, with every use of it: `s2`.
+//! so a later local of another reference type (whose nullness may differ) is renamed, with every
+//! use of it: `s2`. Locals of primitive types, and catch parameters, which are never null, keep
+//! their names.
 //!
 //! Java forbids a local to shadow another one in scope, so a use refers to the declaration of its
 //! name that comes last before it in the order of the source, which is the order of this walk.
@@ -39,7 +41,7 @@ pub(super) fn distinct_locals(method: &mut Method) {
                     declarations.borrow_mut().push((name.clone(), *ty))
                 }
                 Stmt::Try { catches, .. } => {
-                    declarations.borrow_mut().extend(catches.iter().map(|c| (c.name.clone(), c.ty)));
+                    declarations.borrow_mut().extend(catches.iter().map(|c| (c.name.clone(), CAUGHT)));
                 }
                 _ => {}
             },
@@ -54,11 +56,12 @@ pub(super) fn distinct_locals(method: &mut Method) {
     for (name, types) in &found {
         let mut distinct: Vec<Type> = Vec::new();
         for &ty in types {
-            if !distinct.contains(&ty) {
+            // Only a string, an array, an object or an enum can be null.
+            if crate::analysis::nullable_type(ty) && !distinct.contains(&ty) {
                 distinct.push(ty);
             }
         }
-        for &ty in &distinct[1..] {
+        for &ty in distinct.iter().skip(1) {
             let fresh =
                 (2..).map(|k| format!("{name}{k}")).find(|n| !names.contains(n)).expect("a free name");
             names.insert(fresh.clone());
@@ -107,6 +110,10 @@ fn stmt_declarations(s: &Stmt) -> Vec<&str> {
         _ => Vec::new(),
     }
 }
+
+/// The type that stands for every catch parameter's: one is never null, so catch parameters of
+/// different classes need no names of their own.
+const CAUGHT: Type = Type::Class("java.lang.Throwable", &[]);
 
 struct Walk {
     /// The new name of each name declared with each type.
@@ -207,7 +214,7 @@ impl Walk {
             Stmt::Try { body, catches, finally } => {
                 body.iter_mut().for_each(|s| self.stmt(s));
                 for c in catches {
-                    if let Some(fresh) = self.declare(&c.name, c.ty) {
+                    if let Some(fresh) = self.declare(&c.name, CAUGHT) {
                         c.name = fresh;
                     }
                     c.body.iter_mut().for_each(|s| self.stmt(s));
