@@ -98,7 +98,9 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.Character",
     "java.lang.Class",
     "java.lang.ClassLoader",
-    // `Comparable` is the object model's (see `lower::object`), which strings and boxes are.
+    // `CharSequence` and `Comparable` are the object model's (see `lower::object`), which strings
+    // (and builders, and boxes) are.
+    "java.lang.CharSequence",
     "java.lang.Comparable",
     "java.lang.Double",
     "java.lang.Enum",
