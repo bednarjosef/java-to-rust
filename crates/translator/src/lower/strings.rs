@@ -263,8 +263,13 @@ impl<'t> Lowering<'t> {
         if args[0].ty != Type::String {
             return unsupported(node, "`String.format` with a locale");
         }
-        // An array passed for the varargs is the arguments themselves (`Object[]`), or a single
-        // array argument; neither is supported.
+        // An array of objects passed for the varargs is the arguments themselves (`Object[]`, as
+        // `LocaleResources.trace` passes its own); any other array is a single array argument,
+        // which is not supported.
+        let objects = |ty: Type| matches!(ty, Type::Array(element) if element.is_reference());
+        if args.len() == 2 && objects(args[1].ty) {
+            return Ok(ExprKind::Builtin(Builtin::Format, args));
+        }
         if let Some(array) = args[1..].iter().find(|a| !textual(a.ty)) {
             return error(array.pos, "an array as an argument of `String.format` not supported yet");
         }

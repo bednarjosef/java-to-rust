@@ -68,7 +68,7 @@ pub use exception::*;
 pub use fd::*;
 pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
-pub use format::{Arg, format};
+pub use format::{Arg, format, format_objects};
 pub use initializer::*;
 pub use integer::*;
 pub use integer_parse::{parse_radix, parse_small_radix, try_parse_radix, try_parse_small_radix};

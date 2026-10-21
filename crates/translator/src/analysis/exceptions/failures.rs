@@ -203,10 +203,12 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         Builtin::ObjectText => None,
         Builtin::ArraysCopyOf => Some("java.lang.NegativeArraySizeException"),
         Builtin::Native(Native::ArrayCopy) => Some("java.lang.ArrayIndexOutOfBoundsException"),
-        // A literal format that fits its arguments' types never throws.
+        // A literal format that fits its arguments' types never throws; the arguments in an
+        // `Object[]` are as many as the array has.
         Builtin::Format => match &args[0].kind {
             ExprKind::Str(format)
-                if java_runtime::format::never_fails(format, &format_samples(&args[1..])) =>
+                if !args[1..].iter().any(|a| matches!(a.ty, Type::Array(_)))
+                    && java_runtime::format::never_fails(format, &format_samples(&args[1..])) =>
             {
                 None
             }
