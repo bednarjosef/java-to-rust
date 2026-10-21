@@ -377,7 +377,10 @@ impl<'a> Gen<'a> {
                     Code::new(format!("{{ let {old} = {name}; {text}; {old} }}"), LOWEST)
                 }
             }
-            ExprKind::Switch { selector, cases } => self.switch_expr(e.ty, selector, cases),
+            ExprKind::Switch { selector, cases } => {
+                let optional = self.nullable(e);
+                self.switch_expr(e.ty, optional, selector, cases)
+            }
             ExprKind::Cast(ty, value) if ty.is_small() => self.small_cast(*ty, value, e.id),
             ExprKind::Assign { op: None, target: Place::Index(array, index), value } => {
                 Code::atom(self.index_set(e.id, array, index, arrays::element(array.ty), value, true))

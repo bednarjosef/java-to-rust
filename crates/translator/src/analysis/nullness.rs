@@ -227,6 +227,16 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
         // A cast to an enum gives an enum value (see `java::null_enum`).
         ExprKind::Cast(Type::Enum(_), _) => false,
         ExprKind::Cast(_, value) => maybe_null(facts, m, value),
+        // A switch expression is null when a value it yields may be.
+        ExprKind::Switch { cases, .. } => {
+            let mut null = false;
+            for s in cases.iter().flat_map(|c| &c.body) {
+                visit_stmt_outside_switches(s, &mut |s| {
+                    null |= matches!(s, Stmt::Yield(v) if maybe_null(facts, m, v));
+                });
+            }
+            null
+        }
         ExprKind::Builtin(Builtin::ClassMethod(op), _) => op.nullable(),
         ExprKind::Builtin(Builtin::ComparableClassFor, _) => true,
         // A boxed field is always an `Option`: its default is `null`, and so is an assignment of
