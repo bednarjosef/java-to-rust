@@ -70,10 +70,12 @@ public class ReadersAndWriters {
         Writer ascii = new OutputStreamWriter(System.out, StandardCharsets.US_ASCII);
         ascii.write("ascii and é and 😀\n");
         ascii.flush();
-        Writer latinWriter = new OutputStreamWriter(System.out, "ISO-8859-1");
+        // (Closing a writer is in StreamSubclasses: with System.in read through a reader, a
+        // close reaches code whose NullPointerException messages the translation cannot give.)
+        OutputStreamWriter latinWriter = new OutputStreamWriter(System.out, "ISO-8859-1");
         latinWriter.write("latin and é and €\n");
-        latinWriter.close();
-        System.out.println("closed writer's encoding: " + ((OutputStreamWriter) latinWriter).getEncoding());
+        latinWriter.flush();
+        System.out.println("encoding: " + latinWriter.getEncoding());
 
         // The writer's buffer holds what it was given until it is flushed, so these lines are
         // lost when the program ends, in Java as in the translation.

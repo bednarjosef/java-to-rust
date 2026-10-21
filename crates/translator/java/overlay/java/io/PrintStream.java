@@ -92,20 +92,24 @@ public class PrintStream extends FilterOutputStream implements Appendable, Close
         return Charset.forName(name);
     }
 
-    /** The stream underneath, or an {@code IOException} once this one is closed. */
-    private OutputStream open() throws IOException {
-        OutputStream stream = out;
-        if (stream == null) {
-            throw new IOException("Stream closed");
-        }
-        return stream;
+    /**
+     * The {@code IOException} of a stream that is closed: the stream underneath is null. Each
+     * method reads {@code out} into a local and tests it, so that the translation knows the
+     * stream it writes to is not null.
+     */
+    private static IOException closed() {
+        return new IOException("Stream closed");
     }
 
     @Override
     public void flush() {
         synchronized (this) {
             try {
-                open().flush();
+                OutputStream stream = out;
+                if (stream == null) {
+                    throw closed();
+                }
+                stream.flush();
             } catch (IOException e) {
                 trouble = true;
             }
@@ -120,7 +124,10 @@ public class PrintStream extends FilterOutputStream implements Appendable, Close
             }
             closing = true;
             try {
-                out.close();
+                OutputStream stream = out;
+                if (stream != null) {
+                    stream.close();
+                }
             } catch (IOException e) {
                 trouble = true;
             }
@@ -150,7 +157,10 @@ public class PrintStream extends FilterOutputStream implements Appendable, Close
     public void write(int b) {
         synchronized (this) {
             try {
-                OutputStream stream = open();
+                OutputStream stream = out;
+                if (stream == null) {
+                    throw closed();
+                }
                 stream.write(b);
                 if (b == '\n' && autoFlush) {
                     stream.flush();
@@ -165,7 +175,10 @@ public class PrintStream extends FilterOutputStream implements Appendable, Close
     public void write(byte[] buf, int off, int len) {
         synchronized (this) {
             try {
-                OutputStream stream = open();
+                OutputStream stream = out;
+                if (stream == null) {
+                    throw closed();
+                }
                 stream.write(buf, off, len);
                 if (autoFlush) {
                     stream.flush();
@@ -193,14 +206,20 @@ public class PrintStream extends FilterOutputStream implements Appendable, Close
     private void text(String text, boolean newline) {
         synchronized (this) {
             try {
-                open();
+                if (out == null) {
+                    throw closed();
+                }
                 String whole = newline ? text + System.lineSeparator() : text;
                 byte[] bytes = whole.getBytes(charset);
                 if (bytes.length > 0) {
                     write(bytes, 0, bytes.length);
                 }
                 if (autoFlush && (newline || whole.indexOf('\n') >= 0)) {
-                    open().flush();
+                    OutputStream stream = out;
+                    if (stream == null) {
+                        throw closed();
+                    }
+                    stream.flush();
                 }
             } catch (IOException e) {
                 trouble = true;

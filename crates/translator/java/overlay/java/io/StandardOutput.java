@@ -30,12 +30,21 @@ final class StandardOutput extends OutputStream {
 
     @Override
     public void write(byte[] b, int off, int len) {
+        if (b == null) {
+            // The JVM's buffer copies with `System.arraycopy` and its file writes natively: the
+            // exception has no message.
+            throw new NullPointerException();
+        }
         if (off < 0 || len < 0 || off > b.length - len) {
             // What the JVM's stream throws for a range outside the array: the buffer of 128 bytes
-            // copies a shorter range with `System.arraycopy`, and a longer one goes to the file
-            // after the buffer is written out, whose native throws without a message.
+            // copies a shorter range with `System.arraycopy`, whose messages these are (the
+            // buffer always has room), and a longer one goes to the file after the buffer is
+            // written out, whose native throws without a message.
             if (len < BUFFER) {
-                System.arraycopy(b, off, new byte[BUFFER], 0, len);
+                String where = " out of bounds for byte[" + b.length + "]";
+                throw new ArrayIndexOutOfBoundsException(off < 0 ? "arraycopy: source index " + off + where
+                        : len < 0 ? "arraycopy: length " + len + " is negative"
+                        : "arraycopy: last source index " + (off + len) + where);
             }
             flush0(fd);
             throw new IndexOutOfBoundsException();

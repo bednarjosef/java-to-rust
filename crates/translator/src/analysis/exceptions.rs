@@ -700,9 +700,8 @@ fn stmt_points(
                 catches: catches.iter().flat_map(|c| c.types.iter().copied()).collect(),
                 finally: finally.is_some(),
             });
-            for b in body {
-                stmt_points(class, facts, m, b, frames, safe, out);
-            }
+            // Each block narrows as it goes, as any block does (`block_points`).
+            block_points(class, facts, m, body, frames, safe, out);
             frames.pop();
             // What a `catch` clause throws leaves the `try`, through its `finally`.
             frames.push(Frame {
@@ -711,13 +710,11 @@ fn stmt_points(
                 finally: finally.is_some(),
             });
             for catch in catches {
-                for b in &catch.body {
-                    stmt_points(class, facts, m, b, frames, safe, out);
-                }
+                block_points(class, facts, m, &catch.body, frames, safe, out);
             }
             frames.pop();
-            for b in finally.iter().flatten() {
-                stmt_points(class, facts, m, b, frames, safe, out);
+            if let Some(finally) = finally {
+                block_points(class, facts, m, finally, frames, safe, out);
             }
         }
         Stmt::Block(stmts) => block_points(class, facts, m, stmts, frames, safe, out),
