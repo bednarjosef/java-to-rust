@@ -26,6 +26,7 @@ mod indexing;
 mod monitors;
 mod moves;
 mod nullness;
+mod object_values;
 mod objects;
 mod owned;
 mod patterns;

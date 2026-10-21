@@ -3911,6 +3911,24 @@ fn identity_of_object_values_that_may_be_strings_is_rejected() {
 }
 
 #[test]
+fn identity_of_object_values_follows_what_flows_into_them() {
+    // Only program objects reach `same`'s parameters, so `==` is plain identity; once a box may
+    // reach both sides, it is rejected again.
+    let program = |arg: &str| {
+        format!(
+            "class M {{ static boolean same(Object a, Object b) {{ return a == b; }}
+                public static void main(String[] x) {{ Object m = {arg}; System.out.println(same(m, {arg})); }} }}"
+        )
+    };
+    java_to_rust::translate(&program("new M()")).unwrap();
+    let err = java_to_rust::translate(&program("1")).unwrap_err();
+    assert!(
+        err.to_string().contains("`==` on `Object` values that may be strings or boxes not supported yet"),
+        "{err}"
+    );
+}
+
+#[test]
 fn an_array_as_an_object_prints_as_its_jvm_name_and_hash() {
     let rust = translate(
         "class M { public static void main(String[] x) { Object a = new int[2]; System.out.println(a); } }",
