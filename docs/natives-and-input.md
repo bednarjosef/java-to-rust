@@ -609,8 +609,8 @@ Recommended, in order of payoff:
    that creates it is. 27 files of java.base register a `SharedSecrets` accessor as an anonymous
    class in a static initializer (`Buffer`, `FileDescriptor`, `System`, ...), so initializing
    `Buffer` reaches every method of `JavaNioAccess`: mapped memory, `writeback`, continuations.
-   **Made** (4.5): javac's trees now name anonymous classes, and their methods are overriders
-   like any other.
+   **Made** (4.5): javac's trees name anonymous classes by their binary names, and their
+   methods are overriders like any other.
 4. **Sequential streams do not reach the parallel paths.** `AbstractPipeline.evaluate` and the
    `opEvaluateParallel*` methods run only when `isParallel()` is true, which needs a reachable
    call of `BaseStream.parallel()`, `Collection.parallelStream()` or a parallel
@@ -715,25 +715,24 @@ for when a program needs time zones.
   `ReduceOps.makeRefCounting`, whose `opEvaluateParallel` and `evaluateParallel` overrides are
   scanned with the method that creates them. The 23 natives come off once anonymous classes are
   reached by dispatch (4.2, 3).
-- **Anonymous and local classes reached by dispatch** (4.2, 3): the scan of a method or
-  initializer no longer goes into the classes declared in it. The `new` of an anonymous class
-  makes it instantiated (its instance initializers and `Object` methods reached, as for any
-  constructor), and its other methods are reached as overriders of the methods called; a local
-  class is reached through its constructors like a member class. Test: the project
-  `corpus/projects/anonymous` and `anonymous_classes_are_reached_through_their_creation_and_calls`
-  in `tests/translation.rs`. Survey numbers before and after (classes, natives, those in the
-  runtime): `ReaderLines` (`BufferedReader` over `System.in`) 382 to 263 classes and 37 to 24
-  natives (9 to 6), having lost `Buffer`'s and `FileDescriptor`'s accessors with mapped memory,
-  continuations and `FileCleanable`; `ScannerGrades` 1,258 to 1,129 classes and 73 to 64 natives
-  (22 to 21); `StreamPipeline` 372 to 343 classes and 28 to 27 natives; `ComparatorSorting` 90 to
-  81 classes, `ListOperations` 87 to 80, `GenericContainers` 40 to 11, all with the same natives.
-  The parallel paths of streams were not the 23 natives after all: what `StreamPipeline` keeps
-  are `Unsafe`'s atomics and `park`/`unpark`, reached through `ConcurrentHashMap` and the
-  `java.util.concurrent` classes that the sequential code uses itself. Of `ReaderLines`' 18
-  natives the runtime lacks, all are `Unsafe`: the field offsets, atomics, volatile accesses and
-  `park`/`unpark` of `ConcurrentHashMap` (which `Properties` and `CoderResult`'s cache are) and
-  `ThreadLocalRandom`, and the plain gets and puts of `ArraysSupport.vectorizedMismatch` and
-  `ThreadLocalRandom`'s probe.
+- **Local and anonymous classes reached by dispatch** (4.2, 3): javac's trees name them by their
+  binary names (`DistinctOps$1`), reachability declares them, and `Walk::scan` no longer scans
+  them with the code that creates them: a constructor is reached by its `new`, an instance
+  method by a call or by dispatch once its class is instantiated. The check of the sequential
+  assumption indexes them the same way.
+- **Nodes without children** (with 3): one more path reached `ForkJoinPool` from sequential
+  code, `Nodes.flatten`, which copies a tree of nodes into an array with a `ForkJoinTask` when
+  `node.getChildCount() > 0`. Only parallel evaluation concatenates nodes (`Nodes.conc`), so the
+  sequential assumption covers that test too, checked by no class that overrides
+  `Node.getChildCount()` having objects.
+- **Flags of the streams' `Tripwire`** (`java.util.Tripwire`, `java.util.stream.Tripwire`): its
+  `ENABLED` is `Boolean.getBoolean` of a property that only `-D` sets, so it joins the JFR flags in
+  `FALSE_FLAGS`, and the condition of a skipped branch is no longer scanned (the lowering drops
+  it), so the class is not reached for its flag.
+
+With these, `StreamPipeline` reaches 264 classes (176 instantiated), 1,144 methods and 4 natives,
+all in the runtime (the `CDS` ones and `Unsafe.registerNatives`), against the 372 classes and 28
+natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` atomics are gone.
 - **`serialPersistentFields` not initialized**: serialization reads it by reflection, and its
   initializer only creates `ObjectStreamField`s; some thirty classes of java.base have one
   (`String`, `Random`, `ThreadLocalRandom`, `ConcurrentHashMap`), with `Long.TYPE` and

@@ -36,6 +36,7 @@ mod initializers;
 mod inner;
 mod java_arrays;
 mod java_objects;
+mod local_types;
 mod natives;
 mod patterns;
 mod primitives;
@@ -225,6 +226,9 @@ struct Lowering<'t> {
     /// The `new` expressions, by address, with the captures of the created class that are
     /// captures of the creating class there (see `captures`).
     capture_sites: std::collections::HashSet<(*const Value, String)>,
+    /// The member classes of local and anonymous classes, each with its outer class, by index:
+    /// they are named after that class (see `inner::name_nested`).
+    member_outers: Vec<(usize, usize)>,
 }
 
 impl<'t> Lowering<'t> {
@@ -239,7 +243,10 @@ impl<'t> Lowering<'t> {
             let in_type = |e| (index, e);
             self.constant_bodies(index, methods).map_err(in_type)?;
             self.check_enum(index, methods).map_err(in_type)?;
-            let constants = self.enum_constants(index, &types[index].fields, methods).map_err(in_type)?;
+            let bodies = self.constant_body_fields(index).map_err(in_type)?;
+            self.add_body_fields(&bodies, &mut types[index].fields).map_err(in_type)?;
+            let constants =
+                self.enum_constants(index, &types[index].fields, methods, &bodies).map_err(in_type)?;
             types[index].enum_constants = Some(constants);
         }
         Ok(())
@@ -354,7 +361,8 @@ impl<'t> Lowering<'t> {
             "float" => Ok(Type::Float),
             // A type variable hides a class of the same name.
             _ if let Some(erased) = self.type_variable(node, name) => erased,
-            _ if self.enum_index(name).is_some() => Ok(Type::enum_type(name)),
+            // The declared name, which can differ from javac's (a hoisted enum, see `local_types`).
+            _ if let Some(e) = self.enum_index(name) => Ok(Type::enum_type(&self.types[e].name)),
             _ if let Some(t) = self.type_index(name) => {
                 // A Rust generic used without type arguments.
                 if self.is_real(real_generics::Owner::Class(t)) && !self.class_type_params(t).is_empty() {
@@ -822,10 +830,7 @@ impl<'t> Lowering<'t> {
                             && self.types[self.current.get()].node.kind() != "INTERFACE"
                 });
                 let receiver = match receiver {
-                    Some(r) if is_super => {
-                        let ty = self.ty(r, r.java_type())?;
-                        self.synth(ExprKind::This, r.pos(), ty)
-                    }
+                    Some(r) if is_super => self.super_receiver(r)?,
                     Some(r) => self.receiver(r, symbol.owner)?,
                     None => self.this(node),
                 };
@@ -838,11 +843,15 @@ impl<'t> Lowering<'t> {
     }
 }
 
-/// `super(...)`, which javac writes into every constructor that does not call another one.
+/// `super(...)` or `outer.super(...)`, which javac writes into every constructor that does not
+/// call another one, or a constructor that calls its superclass's with an enclosing instance.
 fn is_super_call(stmt: Node) -> bool {
     stmt.get("expression").is_some_and(|call| {
         call.kind() == "METHOD_INVOCATION"
-            && call.get("methodSelect").is_some_and(|s| s.kind() == "IDENTIFIER" && s.str("name") == "super")
+            && call.get("methodSelect").is_some_and(|s| {
+                s.kind() == "IDENTIFIER" && s.str("name") == "super"
+                    || s.kind() == "MEMBER_SELECT" && s.str("identifier") == "super"
+            })
     })
 }
 
