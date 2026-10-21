@@ -54,6 +54,7 @@ mod patterns;
 mod primitives;
 mod program;
 mod prologues;
+mod recreate;
 mod switch;
 mod sync;
 mod system;
@@ -841,7 +842,7 @@ impl<'t> Lowering<'t> {
                     } else {
                         (left, right)
                     };
-                    ExprKind::Binary(op, Box::new(left), Box::new(right))
+                    self.binary_before_assignment(node, op, left, right)
                 }
             }
         };
@@ -859,6 +860,32 @@ impl<'t> Lowering<'t> {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
         Ok(Expr { kind, pos: node.pos(), ty, id })
+    }
+
+    /// `left op right`, where `right` may assign the variable that `left` reads, as in
+    /// `a == (a = next(a))`: Java reads `left` first, so its value is kept in a local before
+    /// `right` runs.
+    fn binary_before_assignment(&self, node: Node<'t>, op: BinOp, left: Expr, right: Expr) -> ExprKind {
+        let read = match &left.kind {
+            ExprKind::Cast(_, inner) => inner,
+            _ => &left,
+        };
+        let ExprKind::Var(name) = &read.kind else {
+            return ExprKind::Binary(op, Box::new(left), Box::new(right));
+        };
+        if !assigns(&right, name) {
+            return ExprKind::Binary(op, Box::new(left), Box::new(right));
+        }
+        let (pos, ty) = (node.pos(), left.ty);
+        let copy = self.fresh_name("left");
+        let var = self.synth(ExprKind::Var(copy.clone()), pos, ty);
+        let binary = ExprKind::Binary(op, Box::new(var), Box::new(right));
+        let result = self.synth(binary, pos, self.ty(node, node.java_type()).unwrap_or(Type::Boolean));
+        let block = vec![Stmt::Local { ty, name: copy, init: Some(left), pos }, Stmt::Yield(result)];
+        ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        }
     }
 
     fn number<T: std::str::FromStr>(&self, node: Node) -> Result<T, Error> {
@@ -1068,6 +1095,7 @@ impl<'t> Lowering<'t> {
                 if resolved.is_none() {
                     return unsupported(node, &format!("`JavaLangAccess.{name}` outside a whole program"));
                 }
+                let args = self.convert_args(resolved, args)?;
                 return Ok(ExprKind::Call { name: name.to_string(), args, resolved });
             }
             // There are no virtual threads: a thread's carrier is the thread itself

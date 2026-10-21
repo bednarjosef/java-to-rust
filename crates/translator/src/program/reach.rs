@@ -254,9 +254,7 @@ pub fn field_offset_named(node: &Value) -> Option<(String, String)> {
         && let [field] = &args[..]
     {
         let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
-        let class = text(&node["methodSelect"]["expression"], "javaType");
-        let class = class.strip_prefix("java.lang.Class<")?.strip_suffix('>')?;
-        return Some((strip_arguments(class), field.to_string()));
+        return Some((class_named(&node["methodSelect"]["expression"])?, field.to_string()));
     }
     if text(symbol, "owner") != "jdk.internal.misc.Unsafe"
         || !matches!(text(symbol, "name"), "objectFieldOffset" | "staticFieldOffset")
@@ -275,7 +273,16 @@ pub fn field_offset_named(node: &Value) -> Option<(String, String)> {
         _ => return None,
     };
     let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
-    Some((literal_class(class)?, field.to_string()))
+    Some((class_named(class)?, field.to_string()))
+}
+
+/// The class that the expression `node` of type `Class<C>` is: a class literal, or a value of
+/// that exact type, as `ForkJoinPool`'s local `Class<ForkJoinPool> klass` that finds its fields.
+fn class_named(node: &Value) -> Option<String> {
+    literal_class(node).or_else(|| {
+        let class = text(node, "javaType").strip_prefix("java.lang.Class<")?.strip_suffix('>')?;
+        (!class.starts_with('?')).then(|| strip_arguments(class))
+    })
 }
 
 /// The methods that lowering replaces whatever their signature, as `REPLACED_METHODS`: the
@@ -584,6 +591,41 @@ pub fn unset_property_ifs(block: &Value) -> Vec<&Value> {
     statements.iter().filter(|s| text(s, "kind") == "IF" && never(&s["condition"], &is_unset)).collect()
 }
 
+/// The variable whose exception the `try` statement `node` replaces with a new one of the same
+/// class, as `ForkJoinTask.getException` does by reflection for an exception that another thread
+/// threw: it finds the public constructors of `ex.getClass()` (two `Constructor` locals, a loop
+/// over `getConstructors()`, then an `if` that calls the one of a `Throwable`, else the one
+/// without parameters and `initCause`). `lower::recreate` writes it without reflection.
+pub fn recreated_exception(node: &Value) -> Option<&str> {
+    if text(node, "kind") != "TRY"
+        || node["resources"].as_array().is_some_and(|r| !r.is_empty())
+        || !node["finallyBlock"].is_null()
+    {
+        return None;
+    }
+    let statements = node["block"]["statements"].as_array()?;
+    let kinds: Vec<&str> = statements.iter().map(|s| text(s, "kind")).collect();
+    if kinds != ["VARIABLE", "VARIABLE", "ENHANCED_FOR_LOOP", "IF"]
+        || !statements[..2]
+            .iter()
+            .all(|v| text(&v["symbol"], "type").starts_with("java.lang.reflect.Constructor"))
+    {
+        return None;
+    }
+    let all = &statements[2]["expression"];
+    let get_class = &all["methodSelect"]["expression"];
+    let exception = &get_class["methodSelect"]["expression"];
+    let called = |call: &Value, owner: &str, name: &str| {
+        text(call, "kind") == "METHOD_INVOCATION"
+            && (text(&call["symbol"], "owner"), text(&call["symbol"], "name")) == (owner, name)
+    };
+    (called(all, "java.lang.Class", "getConstructors")
+        && called(get_class, "java.lang.Object", "getClass")
+        && text(exception, "kind") == "IDENTIFIER"
+        && text(exception, "javaType") == "java.lang.Throwable")
+        .then(|| text(exception, "name"))
+}
+
 /// The only branch of an `if` statement or a `?:` that can run, when its condition is never true
 /// (`never_true`: the `else` branch, `Null` for an `if` without one) or always true (a test that
 /// one of the `ARCHIVED_FIELDS` is null: the `then` branch).
@@ -716,8 +758,13 @@ pub const TRANSLATED_PROPERTIES: JdkMethod =
 /// The methods of `JavaLangAccess` that are the translator's static methods of the same name and
 /// type in `TRANSLATED_LANG_ACCESS_CLASS` (`java/overlay/jdk/internal/access/`), as
 /// `SharedSecrets.getJavaLangAccess()` is null in a translated program (see `lower.rs`).
-pub const TRANSLATED_LANG_ACCESS: &[&str] =
-    &["countPositives", "countNonZeroAscii", "uncheckedNewStringWithLatin1Bytes", "inflateBytesToChars"];
+pub const TRANSLATED_LANG_ACCESS: &[&str] = &[
+    "countPositives",
+    "countNonZeroAscii",
+    "uncheckedNewStringWithLatin1Bytes",
+    "inflateBytesToChars",
+    "start",
+];
 
 /// The class of `TRANSLATED_LANG_ACCESS`.
 pub const TRANSLATED_LANG_ACCESS_CLASS: &str = "jdk.internal.access.TranslatedLangAccess";
@@ -968,6 +1015,10 @@ struct Walk<'t> {
     /// Whether reachable code finds a class by a name it computes, `Class.forName(name)`, which
     /// initializes every class that it can find (`by_name.rs`).
     finds_named: bool,
+    /// Whether reachable code makes a new exception of an exception's class
+    /// (`recreated_exception`): each exception class whose objects are created has the
+    /// constructor that does it.
+    recreates: bool,
     /// The parameters, by method and position, that a method gives `ensureInitialized`, and the
     /// class literals that reachable code passes to each parameter (`initialize.rs`).
     initializing: HashSet<(MethodKey, usize)>,
@@ -1289,12 +1340,51 @@ impl<'t> Walk<'t> {
         if !self.reach.instantiated.insert(class.clone()) {
             return;
         }
+        if self.recreates {
+            self.recreatable(&class);
+        }
         self.live(class.clone());
         let decl = self.classes[&class].0;
         self.initializers(decl, &class, false);
         // Library code calls these on any object, as string conversion calls `toString`.
         for (name, signature) in OBJECT_METHODS {
             self.work.push(Item::Method((class.clone(), name.to_string(), signature.to_string())));
+        }
+    }
+
+    /// Reachable code makes a new exception of an exception's class (`recreated_exception`).
+    fn recreates_exceptions(&mut self) {
+        if std::mem::replace(&mut self.recreates, true) {
+            return;
+        }
+        let classes: Vec<String> = self.reach.instantiated.iter().cloned().collect();
+        for class in classes {
+            self.recreatable(&class);
+        }
+    }
+
+    /// The constructor that makes a new exception of class `class` from another
+    /// (`recreated_exception`): its public one of a `Throwable`, else its public one without
+    /// parameters (and `initCause`, a standard method).
+    fn recreatable(&mut self, class: &str) {
+        let mut work = vec![class.to_string()];
+        let mut throwable = false;
+        while let Some(c) = work.pop() {
+            if c == "java.lang.Throwable" || crate::lower::standard_subclass(&c, "java.lang.Throwable") {
+                throwable = true;
+                break;
+            }
+            work.extend(self.supertypes.get(&c).cloned().unwrap_or_default());
+        }
+        if !throwable {
+            return;
+        }
+        for signature in ["(java.lang.Throwable)void", "()void"] {
+            let key = (class.to_string(), "<init>".to_string(), signature.to_string());
+            if self.methods.get(&key).is_some_and(|m| has_flag(m, "PUBLIC")) {
+                self.work.push(Item::Method(key));
+                return;
+            }
         }
     }
 
@@ -1456,6 +1546,9 @@ impl<'t> Walk<'t> {
                     self.work.push(if initialize { Item::Init(class) } else { Item::Class(class) });
                 }
                 self.reflective(value);
+                if recreated_exception(value).is_some() {
+                    self.recreates_exceptions();
+                }
                 if let Some(field) = field_offset_named(value) {
                     self.work.push(Item::Field(field));
                 }

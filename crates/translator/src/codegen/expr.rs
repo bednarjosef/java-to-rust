@@ -407,7 +407,10 @@ impl<'a> Gen<'a> {
                     None => Update::Assign(value),
                     Some(op) => Update::Compound(*op, value),
                 };
-                self.update(target, e.ty, how, e.id, false)
+                // The write of `Unsafe.putReference` and its kind is a void call (`lower::handles`):
+                // its value has the field's type.
+                let ty = if e.ty == Type::Void { value.ty } else { e.ty };
+                self.update(target, ty, how, e.id, false)
             }
             ExprKind::IncDec {
                 target: target @ (Place::Field { .. } | Place::Static { .. }),

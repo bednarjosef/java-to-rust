@@ -758,11 +758,10 @@ fn stmt_points(
                 ExprKind::Cast(_, inner) => inner,
                 _ => e,
             };
-            // A value that may be null throws a `NullPointerException` instead, by `throw` itself,
-            // unless an enclosing condition tested it.
-            if matches!(thrown.kind, ExprKind::Null)
-                || (maybe_null(facts, m, thrown) && !is_tested(thrown, safe))
-            {
+            // A value that may be null throws a `NullPointerException` instead when it is null, by
+            // `throw` itself, unless an enclosing condition tested it; `null` itself, only that.
+            let null = matches!(thrown.kind, ExprKind::Null);
+            if null || (maybe_null(facts, m, thrown) && !is_tested(thrown, safe)) {
                 let raise =
                     Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: thrown.id };
                 out.push(Point {
@@ -772,7 +771,8 @@ fn stmt_points(
                     frames: frames.clone(),
                     known: Vec::new(),
                 });
-            } else if let Some(t) = class.class_index(thrown.ty) {
+            }
+            if !null && let Some(t) = class.class_index(thrown.ty) {
                 out.push(Point {
                     raise: Raise::Throw(t),
                     pos: e.pos,

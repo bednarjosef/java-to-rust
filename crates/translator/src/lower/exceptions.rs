@@ -417,6 +417,24 @@ fn linkage_classes(uses: &mut Uses) {
     }
 }
 
+/// The signature of the constructor of the standard exception class `class` that makes a new one
+/// of it from another, as `ForkJoinTask.getException` chooses it (`program::recreated_exception`):
+/// the public one of a `Throwable`, else the public one without parameters.
+pub(super) fn recreating_constructor(class: &str) -> Option<&'static str> {
+    if !standard_subclass(class, "java.lang.Throwable") {
+        return None;
+    }
+    let decl = template_type(class)?;
+    let constructors: Vec<&str> = decl["members"]
+        .as_array()?
+        .iter()
+        .filter(|m| m["kind"] == "METHOD" && m["name"] == "<init>")
+        .filter(|m| m["modifiers"]["flags"].as_array().is_some_and(|f| f.iter().any(|f| f == "PUBLIC")))
+        .filter_map(|m| m["symbol"]["type"].as_str())
+        .collect();
+    ["(java.lang.Throwable)void", "()void"].into_iter().find(|s| constructors.contains(s))
+}
+
 /// The uses of the standard classes found in a tree.
 #[derive(Default)]
 struct Uses {
@@ -429,6 +447,9 @@ struct Uses {
     finally: bool,
     /// The operations that may fail, as `RAISED` names them.
     operations: HashSet<String>,
+    /// Whether the code makes a new exception of an exception's class
+    /// (`program::recreated_exception`).
+    recreates: bool,
 }
 
 impl Uses {
@@ -447,6 +468,7 @@ impl Uses {
                 let kind = text(v, "kind");
                 match kind.as_str() {
                     "TRY" => {
+                        self.recreates |= crate::program::recreated_exception(v).is_some();
                         self.finally |= !v["finallyBlock"].is_null();
                         // A try-with-resources catches a `Throwable` to add a failing `close`
                         // to the body's exception as suppressed (see `with_resource`).
@@ -600,6 +622,16 @@ impl Standard {
                         uses.classes.insert(class.into());
                         uses.members.insert((class.into(), "<init>".into(), "(java.lang.String)void".into()));
                         uses.instantiated.insert(class.into());
+                    }
+                }
+            }
+            // Each standard exception class whose objects are created has the constructor that
+            // makes a new one of it from another (see `recreate`).
+            if uses.recreates {
+                uses.members.insert(init_cause_member());
+                for class in uses.instantiated.clone() {
+                    if let Some(signature) = recreating_constructor(&class) {
+                        uses.members.insert((class, "<init>".into(), signature.into()));
                     }
                 }
             }
@@ -814,7 +846,10 @@ impl<'t> Lowering<'t> {
 
     /// `try { .. } catch (..) { .. } finally { .. }`, and try-with-resources (`resources`).
     pub(super) fn try_stmt(&self, node: Node<'t>) -> Result<Stmt, Error> {
-        let mut body = self.block(node.child("block")?)?;
+        let mut body = match self.recreation(node)? {
+            Some(body) => body,
+            None => self.block(node.child("block")?)?,
+        };
         let resources: Vec<Node<'t>> = node.list("resources").collect();
         for &resource in resources.iter().rev() {
             body = self.with_resource(resource, body)?;

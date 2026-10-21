@@ -45,4 +45,13 @@ final class TranslatedLangAccess {
             dst[dstOff + i] = (char) (src[srcOff + i] & 0xff);
         }
     }
+
+    /**
+     * Starts {@code thread} in {@code container}, as {@code ForkJoinPool}'s threads are started.
+     * Containers only list their threads for monitoring tools, and track only virtual threads,
+     * which a translated program does not have: the thread is started on its own.
+     */
+    static void start(Thread thread, jdk.internal.vm.ThreadContainer container) {
+        thread.start();
+    }
 }

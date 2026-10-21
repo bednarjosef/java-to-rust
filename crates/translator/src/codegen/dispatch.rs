@@ -1192,6 +1192,8 @@ impl<'a> Gen<'a> {
         let place = if self.facts.borrowed_objects.contains(&(r, 0)) { other } else { format!("&{other}") };
         let same = match self.runtime_of(c).map(Type::unboxed) {
             Some(Type::Double | Type::Float) => "o.to_bits() == b.to_bits()",
+            // Arrays are `Arc`s in a program with threads, as `array_identity` compares them.
+            Some(Type::Array(_)) if self.facts.threaded => "Arc::ptr_eq(o, b)",
             Some(Type::Array(_)) => "Rc::ptr_eq(o, b)",
             Some(Type::StringBuilder) => "o.same(b)",
             // A box whose identity is kept (`java::Boxed`) compares the values it holds.

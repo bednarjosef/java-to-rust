@@ -434,7 +434,10 @@ pub(super) fn runtime_failures(
                 | BoxedOp::Logical(_),
                 _,
             ) => {}
-            Builtin::MonitorEnter => out.push((NPE, "this synchronized", true, args[0].id)),
+            // Only a lock that may be null throws, as a dereference does: the code generator
+            // checks no other (`codegen::sync`).
+            Builtin::MonitorEnter if null(&args[0]) => out.push((NPE, "this synchronized", true, args[0].id)),
+            Builtin::MonitorEnter => {}
             // A class that is not the object's; a `catch` sees it through `java::catching`.
             Builtin::ClassCheck => out.push(("java.lang.ClassCastException", "this cast", false, x.id)),
             // An object of a class that is not `Cloneable` refuses to be copied.
