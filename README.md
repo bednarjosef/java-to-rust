@@ -87,8 +87,7 @@ The test programs come from:
   or `Function.andThen`, translated whole with the sources of `java.base` by a test of their own
   (`tests/whole_program.rs`). The JDK's sources cannot be in the repository, so the test runs
   only when `JAVA_BASE_SOURCES` names their root (`JAVA_BASE_SOURCES=… cargo test --test
-  whole_program`) and otherwise says it skipped; at about a minute per program, it runs at merges
-  rather than in every check;
+  whole_program`) and otherwise says it skipped; it runs at merges rather than in every check;
 - `tools/fuzz`: random programs generated from a seed (`fuzz.py`, with `fuzz_strings.py` for
   strings and builders under `--strings`, `fuzz_arrays.py` for arrays of up to three dimensions,
   their aliases, rows, loops and helper methods under `--arrays`, and `fuzz_objects.py` for
@@ -560,7 +559,9 @@ them in one run, with the source roots as its source path, and a reachability pa
 (`program/reach.rs`) starts at `main` and follows every resolved call, `new`, field access and
 type, so only the classes, methods, constructors and fields that `main` can reach are lowered and
 translated. Library roots (`--library`, meant for the JDK's own sources) are only on the source
-path: javac reads a file from them when the program uses one of its classes. Packages become
+path: javac attributes a file from them only when reachability asks for one of its classes, a
+few dozen of the JDK's units where javac by itself would attribute thousands (see "Translating
+whole programs" in docs/performance.md). Packages become
 nested modules in one output file (`com.example.util` is `mod com { pub(crate) mod example
 { pub(crate) mod util { .. } } }`); a class of another package is named by its path from the crate
 root, such as `crate::com::example::util::Counter::new(..)`, and items in packages are

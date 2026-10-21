@@ -8,8 +8,9 @@
 # reading JDK classes from that source root. Names pick programs (all of them without names).
 # Scratch output goes to target/targets/; each program's line is also appended to
 # target/targets/results.txt as it finishes, so a run that is cut short leaves its record.
-# A whole-program translation takes about a minute and 2 GB of memory, so a full run takes half
-# an hour or more: start it in the background rather than under a short command timeout.
+# A whole-program translation takes a few seconds and about 1 GB of memory (javac's), and a
+# translated crate takes longer to build: start a full run in the background rather than under a
+# short command timeout.
 # Limits in seconds: TRANSLATE_TIMEOUT (600), BUILD_TIMEOUT (900), RUN_TIMEOUT (20).
 set -u
 

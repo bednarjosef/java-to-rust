@@ -8,6 +8,9 @@
 
 use std::process::Command;
 
+/// javac's implementation, whose `analyze` of chosen classes `JavaTree` calls (see `javac.rs`).
+const JAVAC_API: &str = "jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED";
+
 fn main() {
     println!("cargo:rerun-if-changed=java/JavaTree.java");
     println!("cargo:rerun-if-changed=java/Standard.java");
@@ -15,7 +18,7 @@ fn main() {
     println!("cargo:rerun-if-changed=java/Threads.java");
     let out = std::env::var("OUT_DIR").expect("cargo sets OUT_DIR");
     let status = Command::new("javac")
-        .args(["-d", &out, "-Xlint:none", "java/JavaTree.java"])
+        .args(["-d", &out, "-Xlint:none", "--add-exports", JAVAC_API, "java/JavaTree.java"])
         .status()
         .expect("building the translator needs javac (a JDK, version 21 or newer) on PATH");
     assert!(status.success(), "javac failed to compile java/JavaTree.java");
@@ -25,7 +28,7 @@ fn main() {
         ("java/Threads.java", "threads.json"),
     ] {
         let tree = Command::new("java")
-            .args(["-cp", &out, "JavaTree", "--program", source])
+            .args(["--add-exports", JAVAC_API, "-cp", &out, "JavaTree", "--program", source])
             .output()
             .expect("building the translator needs java (a JDK) on PATH");
         assert!(
