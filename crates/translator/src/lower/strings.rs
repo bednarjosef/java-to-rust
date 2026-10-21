@@ -37,40 +37,73 @@ impl<'t> Lowering<'t> {
         self.synth(ExprKind::Binary(BinOp::Add, Box::new(empty), Box::new(x)), pos, Type::String)
     }
 
-    /// `s.chars()` and `s.lines()`: the JDK's `Arrays.stream` over an array the runtime makes, of
-    /// the string's UTF-16 code units or of its lines, which streams the same values with the same
-    /// characteristics as the JDK's own spliterators.
+    /// `s.chars()` and `s.lines()`: the JDK's methods over an array the runtime makes, of the
+    /// string's UTF-16 code units or of its lines, which stream the same values with the same
+    /// characteristics as the JDK's own spliterators. `chars()` is `Arrays.stream(units)`, which is
+    /// `SIZED` as the JDK's is; `lines()` is not, so it is
+    ///
+    /// ```text
+    /// StreamSupport.stream(Spliterators.spliteratorUnknownSize(
+    ///     Spliterators.iterator(Spliterators.spliterator(lines, 0)), ORDERED | IMMUTABLE | NONNULL), false)
+    /// ```
     fn string_stream(
         &self,
         node: Node<'t>,
         method: &str,
         receiver: Option<Node<'t>>,
     ) -> Result<ExprKind, Error> {
-        let (_, (owner, name, sig)) = *crate::program::STRING_STREAMS
+        let (_, calls) = crate::program::STRING_STREAMS
             .iter()
             .find(|(m, _)| *m == method)
             .expect("a method of `String` that streams");
-        let Some(stream) = self
-            .methods
-            .iter()
-            .position(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == sig)
-        else {
-            return error(
-                node.pos(),
-                format!(
-                    "`String.{method}` streams with the JDK's code: translate the program with the JDK's \
-                     sources (`--main` and `--library`) for it"
-                ),
-            );
-        };
+        let mut resolved = Vec::new();
+        for &(owner, name, sig) in calls.iter() {
+            let Some(m) = self
+                .methods
+                .iter()
+                .position(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == sig)
+            else {
+                return error(
+                    node.pos(),
+                    format!(
+                        "`String.{method}` streams with the JDK's code: translate the program with the \
+                         JDK's sources (`--main` and `--library`) for it"
+                    ),
+                );
+            };
+            resolved.push(m);
+        }
         let receiver = self.expr(receiver.expect("an instance method has a receiver"))?;
         let pos = receiver.pos;
         let (op, ty) = match method {
             "chars" => (StringOp::CharCodes, Type::array(Type::Int)),
             _ => (StringOp::Lines, Type::array(Type::class(OBJECT))),
         };
-        let array = self.synth(ExprKind::Builtin(Builtin::String(op), vec![receiver]), pos, ty);
-        Ok(ExprKind::Call { name: name.to_string(), args: vec![array], resolved: Some(stream) })
+        let mut value = self.synth(ExprKind::Builtin(Builtin::String(op), vec![receiver]), pos, ty);
+        // Spliterator.ORDERED | Spliterator.IMMUTABLE | Spliterator.NONNULL, as the JDK's lines.
+        let extra = |name: &str| match name {
+            "spliterator" => Some(ExprKind::Int(0)),
+            "spliteratorUnknownSize" => Some(ExprKind::Int(0x0000_0010 | 0x0000_0400 | 0x0000_0100)),
+            "stream" if method == "lines" => Some(ExprKind::Bool(false)),
+            _ => None,
+        };
+        let last = resolved.len() - 1;
+        for (i, m) in resolved.into_iter().enumerate() {
+            let info = &self.methods[m];
+            let mut args = vec![value];
+            if let Some(kind) = extra(info.name) {
+                let ty = if matches!(kind, ExprKind::Bool(_)) { Type::Boolean } else { Type::Int };
+                args.push(self.synth(kind, pos, ty));
+            }
+            let kind = ExprKind::Call { name: info.name.to_string(), args, resolved: Some(m) };
+            if i == last {
+                return Ok(kind);
+            }
+            let ret = info.node.child("returnType")?;
+            let ty = self.declared_type(ret, ret.java_type(), info.owner, Some(m))?;
+            value = self.synth(kind, pos, ty);
+        }
+        unreachable!("a stream of a string has a last call")
     }
 
     /// A call of a method of `String`. `args` are the lowered arguments, without the receiver.

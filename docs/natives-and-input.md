@@ -743,12 +743,13 @@ for when a program needs time zones.
   `StringLatin1.CharsSpliterator` and `LinesSpliterator`, are not translated. `chars()` is the
   JDK's `Arrays.stream(int[])` over the string's UTF-16 code units instead, which streams the
   same values with the same spliterator characteristics (`ORDERED`, `SIZED`, `SUBSIZED`,
-  `IMMUTABLE`). `lines()` is `Arrays.stream(T[])` over an `Object[]` of the lines that the
-  runtime splits (`java::lines`: ended by `\n`, `\r` or `\r\n`, without an empty last line). Its
-  spliterator is `SIZED` where the JDK's is not, so a `count()` straight after `lines()`, `map` or
-  `peek` computes the size without running the pipeline's lambdas, which the JDK runs.
-  Reachability reaches `Arrays.stream` for every such call; without the JDK's sources the call is
-  rejected.
+  `IMMUTABLE`). `lines()` streams an `Object[]` of the lines that the runtime splits
+  (`java::lines`: ended by `\n`, `\r` or `\r\n`, without an empty last line) through an iterator,
+  `StreamSupport.stream(Spliterators.spliteratorUnknownSize(Spliterators.iterator(
+  Spliterators.spliterator(lines, 0)), ORDERED | IMMUTABLE | NONNULL), false)`: the JDK's
+  `LinesSpliterator` has those characteristics and no size, so a `count()` runs the pipeline's
+  `peek` and `map` lambdas, as Java does, where a sized stream would skip them. Reachability
+  reaches those methods for every such call; without the JDK's sources the call is rejected.
 
 With these, `StreamPipeline` reaches 264 classes (176 instantiated), 1,144 methods and 4 natives,
 all in the runtime (the `CDS` ones and `Unsafe.registerNatives`), against the 372 classes and 28

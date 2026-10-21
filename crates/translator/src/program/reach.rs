@@ -329,12 +329,36 @@ pub fn runtime_arrays_call(node: &Value) -> bool {
     }
 }
 
-/// The methods of `String` that stream with a JDK method (see `lower::strings`), and that method:
-/// `chars()` streams the string's UTF-16 code units as an `int[]`, `lines()` its lines as an
-/// `Object[]` of strings.
-pub const STRING_STREAMS: [(&str, (&str, &str, &str)); 2] = [
-    ("chars", ("java.util.Arrays", "stream", "(int[])java.util.stream.IntStream")),
-    ("lines", ("java.util.Arrays", "stream", "<T>(T[])java.util.stream.Stream<T>")),
+/// A method of the JDK, by class, name and javac's type of it.
+pub type JdkMethod = (&'static str, &'static str, &'static str);
+
+/// The methods of `String` that stream with the JDK's methods (see `lower::strings`), and those
+/// methods, each called on what the one before returns. `chars()` streams the string's UTF-16 code
+/// units as an `int[]`. `lines()` streams its lines, an `Object[]` of strings, through an iterator,
+/// so that the stream's size is unknown, as with the JDK's own spliterator.
+pub const STRING_STREAMS: [(&str, &[JdkMethod]); 2] = [
+    ("chars", &[("java.util.Arrays", "stream", "(int[])java.util.stream.IntStream")]),
+    (
+        "lines",
+        &[
+            ("java.util.Spliterators", "spliterator", "<T>(java.lang.Object[],int)java.util.Spliterator<T>"),
+            (
+                "java.util.Spliterators",
+                "iterator",
+                "<T>(java.util.Spliterator<? extends T>)java.util.Iterator<T>",
+            ),
+            (
+                "java.util.Spliterators",
+                "spliteratorUnknownSize",
+                "<T>(java.util.Iterator<? extends T>,int)java.util.Spliterator<T>",
+            ),
+            (
+                "java.util.stream.StreamSupport",
+                "stream",
+                "<T>(java.util.Spliterator<T>,boolean)java.util.stream.Stream<T>",
+            ),
+        ],
+    ),
 ];
 
 /// The methods that a for-each over an `Iterable` calls.
@@ -731,10 +755,11 @@ impl<'t> Walk<'t> {
         match text(symbol, "kind") {
             "METHOD"
                 if owner == "java.lang.String"
-                    && let Some((_, (class, method, signature))) =
-                        STRING_STREAMS.iter().find(|(m, _)| *m == name) =>
+                    && let Some((_, methods)) = STRING_STREAMS.iter().find(|(m, _)| *m == name) =>
             {
-                self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
+                for (class, method, signature) in *methods {
+                    self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
+                }
             }
             "METHOD" | "CONSTRUCTOR" => {
                 self.work.push(Item::Method((owner, name, text(symbol, "type").to_string())));
