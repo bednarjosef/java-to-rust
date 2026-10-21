@@ -19,6 +19,18 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ArrayLit(items));
         }
         let sizes = node.list("dimensions").map(|d| self.expr(d)).collect::<Result<Vec<_>, _>>()?;
+        // An array of arrays that is an `Object[]` (see `covariant`), `new int[n][m]` where
+        // `int[][]` is: the rows are made as `int[]`s and become `Object`s.
+        let java = node.java_type();
+        if sizes.len() > 1
+            && let Some(row) = java.strip_suffix("[]")
+            && let exact = Type::array(self.ty(node, row)?)
+            && exact != self.ty(node, java)?
+        {
+            self.note_object_array(exact.element());
+            let rows = self.synth(ExprKind::NewArray(sizes), node.pos(), exact);
+            return Ok(ExprKind::Cast(self.ty(node, java)?, Box::new(rows)));
+        }
         Ok(ExprKind::NewArray(sizes))
     }
 

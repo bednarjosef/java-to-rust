@@ -148,8 +148,26 @@ impl Walk<'_> {
         if self.by_name.is_empty() {
             return;
         }
-        for literal in std::mem::take(&mut self.literals) {
+        for literal in self.literals.clone() {
             self.missing(&literal);
+        }
+    }
+
+    /// After a round's units were declared (`Walk::add`): the literals that name a class they
+    /// declare name it now, and every creation by name looks at the classes named again, as the
+    /// supertypes that make one a candidate may be among the new units.
+    pub(super) fn add_named(&mut self) {
+        let declared: Vec<String> =
+            self.literals.iter().filter(|literal| self.classes.contains_key(*literal)).cloned().collect();
+        for literal in declared {
+            self.literals.remove(&literal);
+            self.named(&literal);
+        }
+        let named: Vec<String> = self.named.iter().cloned().collect();
+        for target in self.by_name.clone() {
+            for name in &named {
+                self.create_by_name(&target, name);
+            }
         }
     }
 

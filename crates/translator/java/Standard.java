@@ -202,24 +202,6 @@ class CloneNotSupportedException extends Exception {
     }
 }
 
-class ReflectiveOperationException extends Exception {
-    public ReflectiveOperationException() {
-    }
-
-    public ReflectiveOperationException(String s) {
-        super(s);
-    }
-}
-
-class ClassNotFoundException extends ReflectiveOperationException {
-    public ClassNotFoundException() {
-    }
-
-    public ClassNotFoundException(String s) {
-        super(s);
-    }
-}
-
 class ArithmeticException extends RuntimeException {
     public ArithmeticException() {
     }
@@ -457,5 +439,164 @@ class FileNotFoundException extends IOException {
 
     public FileNotFoundException(String s) {
         super(s);
+    }
+}
+
+class EOFException extends IOException {
+    public EOFException() {
+    }
+
+    public EOFException(String s) {
+        super(s);
+    }
+}
+
+class UnsupportedEncodingException extends IOException {
+    public UnsupportedEncodingException() {
+    }
+
+    public UnsupportedEncodingException(String s) {
+        super(s);
+    }
+}
+
+class UncheckedIOException extends RuntimeException {
+    public UncheckedIOException(String message, IOException cause) {
+        super(message, nonNull(cause));
+    }
+
+    // Java's `Objects.requireNonNull(cause)` of the constructor below: the dereference throws the
+    // NullPointerException, and the message is `cause.toString()`, as `Throwable(Throwable)` sets it.
+    public UncheckedIOException(IOException cause) {
+        super(cause.toString(), cause);
+    }
+
+    public IOException getCause() {
+        return (IOException) super.getCause();
+    }
+
+    private static IOException nonNull(IOException cause) {
+        cause.toString();
+        return cause;
+    }
+}
+
+class SecurityException extends RuntimeException {
+    public SecurityException() {
+    }
+
+    public SecurityException(String s) {
+        super(s);
+    }
+
+    public SecurityException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public SecurityException(Throwable cause) {
+        super(cause);
+    }
+}
+
+class ReflectiveOperationException extends Exception {
+    public ReflectiveOperationException() {
+    }
+
+    public ReflectiveOperationException(String message) {
+        super(message);
+    }
+
+    public ReflectiveOperationException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public ReflectiveOperationException(Throwable cause) {
+        super(cause);
+    }
+}
+
+class ClassNotFoundException extends ReflectiveOperationException {
+    public ClassNotFoundException() {
+    }
+
+    public ClassNotFoundException(String s) {
+        super(s, null);
+    }
+
+    public ClassNotFoundException(String s, Throwable ex) {
+        super(s, ex);
+    }
+
+    public Throwable getException() {
+        return super.getCause();
+    }
+}
+
+class NoSuchMethodException extends ReflectiveOperationException {
+    public NoSuchMethodException() {
+    }
+
+    public NoSuchMethodException(String s) {
+        super(s);
+    }
+}
+
+class NoSuchFieldException extends ReflectiveOperationException {
+    public NoSuchFieldException() {
+    }
+
+    public NoSuchFieldException(String s) {
+        super(s);
+    }
+}
+
+class IllegalAccessException extends ReflectiveOperationException {
+    public IllegalAccessException() {
+    }
+
+    public IllegalAccessException(String s) {
+        super(s);
+    }
+}
+
+class InstantiationException extends ReflectiveOperationException {
+    public InstantiationException() {
+    }
+
+    public InstantiationException(String s) {
+        super(s);
+    }
+}
+
+class InputMismatchException extends NoSuchElementException {
+    public InputMismatchException() {
+    }
+
+    public InputMismatchException(String s) {
+        super(s);
+    }
+}
+
+class EmptyStackException extends RuntimeException {
+    public EmptyStackException() {
+    }
+}
+
+class MissingResourceException extends RuntimeException {
+    private String className;
+    private String key;
+
+    public MissingResourceException(String s, String className, String key) {
+        super(s);
+        this.className = className;
+        this.key = key;
+    }
+
+    public String getClassName() {
+        return className;
+    }
+
+    public String getKey() {
+        return key;
     }
 }

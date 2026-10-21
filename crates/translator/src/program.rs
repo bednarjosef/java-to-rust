@@ -83,38 +83,123 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
 /// few dozen where javac, left to itself, attributes thousands (see `javac::Session`). The
 /// program's files come first, in the order given, and then the library's in the order they
 /// were asked for, so that the first unsupported construct reported is near the program's code.
+///
+/// Each round walks only what its units add (`reach::Rounds`), over the units with their records
+/// complete (`javac::Records`). Which members a record gets depends on every unit, so when a new
+/// unit changes those of a unit walked before, the round walks all of them again.
 fn load(program: &Program) -> Result<(Vec<Value>, Reach), ProgramError> {
     let files = source_files(program)?;
     let javac_error = |(file, error)| ProgramError { file, error };
     let (mut javac, mut reaching) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     let start = std::time::Instant::now();
-    let mut session = javac::Session::start(&files, &sourcepath(program)).map_err(javac_error)?;
+    let (mut session, mut new) = javac::Session::start(&files, &sourcepath(program)).map_err(javac_error)?;
     javac += start.elapsed();
-    for round in 1.. {
+    // The units as javac gave them, and the copies of those whose records were completed.
+    let (given, completed) = (Store::default(), Store::default());
+    let mut records = javac::Records::default();
+    // The tree that the rounds walk of each unit, and the units that completing their records
+    // changes, by index, with their records as completed.
+    let mut trees: Vec<&Value> = Vec::new();
+    let mut changing: Vec<(usize, &Value, Vec<Value>)> = Vec::new();
+    let mut rounds = reach::Rounds::new(&program.main);
+    let (mut round, mut walks) = (0, 0);
+    loop {
+        round += 1;
         let start = std::time::Instant::now();
-        let reach = {
-            let units = session.units();
-            let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
-            reach::reach(&trees, &program.main).map_err(fail)?
+        let units = given.push(std::mem::take(&mut new));
+        let changes = records.add(units);
+        let complete = |unit: &Value| {
+            let mut copy = unit.clone();
+            records.complete(&mut copy);
+            copy
         };
+        let mut changed: Vec<(usize, Value)> = Vec::new();
+        for (index, unit, completed) in &mut changing {
+            let now = records.completed_records(unit);
+            if now != *completed {
+                changed.push((*index, complete(unit)));
+                *completed = now;
+            }
+        }
+        let restart = !changed.is_empty();
+        let old = trees.len();
+        for (unit, &changes) in units.iter().zip(&changes) {
+            if changes {
+                changed.push((trees.len(), complete(unit)));
+                changing.push((trees.len(), unit, records.completed_records(unit)));
+            }
+            trees.push(&unit["tree"]);
+        }
+        let (indices, copies): (Vec<usize>, Vec<Value>) = changed.into_iter().unzip();
+        for (index, copy) in indices.into_iter().zip(completed.push(copies)) {
+            trees[index] = &copy["tree"];
+        }
+        if restart {
+            walks += 1 + rounds.restarts();
+            rounds = reach::Rounds::new(&program.main);
+            rounds.add(&trees).map_err(fail)?;
+        } else {
+            rounds.add(&trees[old..]).map_err(fail)?;
+        }
         reaching += start.elapsed();
         let start = std::time::Instant::now();
-        let loaded = session.load(&reach.missing.iter().cloned().collect::<Vec<_>>()).map_err(javac_error)?;
+        new = session.load(&rounds.missing()).map_err(javac_error)?;
         javac += start.elapsed();
-        if loaded == 0 {
-            let units = session.finish();
-            if crate::timings::enabled() {
-                let (javac, reaching) = (javac.as_secs_f64(), reaching.as_secs_f64());
-                let (classes, methods) = (reach.classes.len(), reach.methods.len());
-                eprintln!("timing: javac: {javac:.3} s, {} units", units.len());
-                eprintln!(
-                    "timing: reach: {reaching:.3} s, {round} rounds, {classes} classes and {methods} methods"
-                );
-            }
-            return Ok((units, reach));
+        if new.is_empty() {
+            break;
         }
     }
-    unreachable!("the rounds end when javac has no more units to give")
+    walks += rounds.restarts();
+    let reach = rounds.finish();
+    let changing: Vec<usize> = changing.iter().map(|&(index, _, _)| index).collect();
+    let mut units = given.into_values();
+    for index in changing {
+        records.complete(&mut units[index]);
+    }
+    if crate::timings::enabled() {
+        let (javac, reaching) = (javac.as_secs_f64(), reaching.as_secs_f64());
+        let (classes, methods) = (reach.classes.len(), reach.methods.len());
+        eprintln!("timing: javac: {javac:.3} s, {} units", units.len());
+        eprintln!(
+            "timing: reach: {reaching:.3} s, {round} rounds ({walks} walks from the start again), {classes} classes and {methods} methods"
+        );
+    }
+    Ok((units, reach))
+}
+
+/// Values that stay where they are while more are added, so that the rounds of `load` can keep
+/// references to the units of earlier rounds: a list of batches, each added behind the last.
+#[derive(Default)]
+struct Store {
+    first: std::cell::OnceCell<Box<Batch>>,
+}
+
+struct Batch {
+    values: Vec<Value>,
+    next: std::cell::OnceCell<Box<Batch>>,
+}
+
+impl Store {
+    /// Adds a batch of values, and returns them where they now stay.
+    fn push(&self, values: Vec<Value>) -> &[Value] {
+        let mut last = &self.first;
+        while let Some(batch) = last.get() {
+            last = &batch.next;
+        }
+        &last.get_or_init(|| Box::new(Batch { values, next: std::cell::OnceCell::new() })).values
+    }
+
+    /// Every value, in the order added.
+    fn into_values(self) -> Vec<Value> {
+        let mut values = Vec::new();
+        let mut next = self.first.into_inner();
+        while let Some(batch) = next {
+            let Batch { values: batch, next: rest } = *batch;
+            values.extend(batch);
+            next = rest.into_inner();
+        }
+        values
+    }
 }
 
 /// The file of the code at `pos` that an analysis or the generator rejected, which the error

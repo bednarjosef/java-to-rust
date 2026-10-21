@@ -770,7 +770,18 @@ impl<'a> Gen<'a> {
             }
             return format!("{obj}.to_string()");
         }
-        self.handle_call(handle, e, index)
+        let call = self.handle_call(handle, e, index);
+        self.null_text(index, call)
+    }
+
+    /// The text that `call`, a call of `toString` method `index`, gives: `"null"` where it
+    /// returns null, as `String.valueOf` shows it.
+    fn null_text(&self, index: usize, call: String) -> String {
+        if self.facts.nullable_returns.contains(&index) {
+            format!("{call}.unwrap_or_else(|| String::from(\"null\"))")
+        } else {
+            call
+        }
     }
 
     /// The object of `e`'s class reached through `handle`, borrowed for method `index` to be
@@ -1224,7 +1235,8 @@ impl<'a> Gen<'a> {
             return Code::atom(self.default_text(c, hash));
         };
         if !self.displays(index) {
-            return self.text_call(e, index);
+            let call = self.text_call(e, index);
+            return Code::atom(self.null_text(index, call.text));
         }
         if !self.lazy_text || (self.printing && !self.quiet_text(e, 0)) {
             return self.method_call(e, index, &[]);

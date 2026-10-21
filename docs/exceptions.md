@@ -43,7 +43,17 @@ signature. Everything else is decided here.
    each method may let escape, and of what the callers of each method observe. A method returns
    `Result` exactly when some caller observes an exception that may escape it: a call inside a
    `try` whose `catch` matches it or whose `finally` observes it, or a call in a method whose own
-   callers observe it. The methods of an override group agree.
+   callers observe it. The methods of an override group agree. The `toString` that making an
+   object's text runs (`"" + o`, `println(o)`, `append(o)`, `String.valueOf(o)`) is not such a
+   call: the text is `Display`, which cannot return an exception, so what that `toString` throws
+   ends the program there. Where a `toString` that the program wrote may run and may throw what a
+   `catch` around the text, or around a call on the way to it, would catch, the program is
+   rejected. The JDK's own `toString`s are not looked at: they throw only for bugs, such as a
+   collection changed while it is shown (`ConcurrentModificationException`), which then end the
+   program even where a `catch` would see them. (Before, the JDK's collections' `toString`s were
+   all taken as observed: `AbstractList.Itr.next` catches the `IndexOutOfBoundsException` of
+   `get`, whose message formats a `List` with `%s`.) An explicit `o.toString()` is an ordinary
+   call.
 6. **Failures of the runtime become values only where they are observed.** Division by zero,
    array indexes and sizes, null dereferences, parsing and the string indexes raise exceptions in
    the runtime today by printing them and exiting (`java::throw`). That stays the translation
@@ -75,8 +85,9 @@ signature. Everything else is decided here.
     `getMessage()` in a `catch` that such an exception reaches is rejected, while the message of
     one that code creates, as `Objects.requireNonNull(x, "msg")` does, is its own),
     catching `StackOverflowError`, `OutOfMemoryError` or `VirtualMachineError` (the translation
-    cannot raise them), a `toString` that throws an exception someone observes (it is
-    `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace` and `initCause`.
+    cannot raise them), a `toString` that throws an exception that a call of it observes, or a
+    `toString` of the program that throws what a `catch` around an object's text, or around a
+    call on the way to it, would catch (it is `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace` and `initCause`.
 
 ## 1. The representation
 
@@ -182,7 +193,9 @@ the program as Java's uncaught exception would. Without the `finally`, the handl
 superclass, which of the four `Throwable` constructor shapes they have (`()`, `(String)`,
 `(String, Throwable)`, `(Throwable)`) and any other constructor (`(int)` of the index
 exceptions, and the `AssertionError` constructors with a detail of any type: `(Object)`, which
-takes a `Throwable` as the cause, and the primitive ones):
+takes a `Throwable` as the cause, and the primitive ones; `MissingResourceException` has
+`(String, String, String)` and `UncheckedIOException` has `(String, IOException)` and
+`(IOException)`, and `ClassNotFoundException` has `getException`):
 
 ```
 java.lang.Throwable
@@ -194,9 +207,16 @@ java.lang.Throwable
       java.lang.IndexOutOfBoundsException (java.lang.ArrayIndexOutOfBoundsException,
         java.lang.StringIndexOutOfBoundsException), java.lang.NegativeArraySizeException,
       java.lang.NullPointerException, java.lang.UnsupportedOperationException,
-      java.util.NoSuchElementException, java.util.ConcurrentModificationException
+      java.lang.SecurityException, java.util.NoSuchElementException
+        (java.util.InputMismatchException), java.util.ConcurrentModificationException,
+      java.util.EmptyStackException, java.util.MissingResourceException,
+      java.io.UncheckedIOException
     java.lang.InterruptedException, java.lang.CloneNotSupportedException,
-    java.lang.ReflectiveOperationException (java.lang.ClassNotFoundException)
+    java.lang.ReflectiveOperationException (java.lang.ClassNotFoundException,
+      java.lang.NoSuchMethodException, java.lang.NoSuchFieldException,
+      java.lang.IllegalAccessException, java.lang.InstantiationException),
+    java.io.IOException (java.io.FileNotFoundException, java.io.EOFException,
+      java.io.UnsupportedEncodingException)
   java.lang.Error
     java.lang.AssertionError, java.lang.LinkageError
       java.lang.ExceptionInInitializerError, java.lang.NoClassDefFoundError

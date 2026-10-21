@@ -31,7 +31,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// `x` as `"" + x`, which shows it as `String.valueOf` does.
-    fn as_text(&self, x: Expr) -> Expr {
+    pub(super) fn as_text(&self, x: Expr) -> Expr {
         let empty = self.synth(ExprKind::Str(String::new()), x.pos, Type::String);
         let pos = x.pos;
         self.synth(ExprKind::Binary(BinOp::Add, Box::new(empty), Box::new(x)), pos, Type::String)

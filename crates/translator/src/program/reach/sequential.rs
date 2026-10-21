@@ -24,9 +24,12 @@
 //! nodes into an array with a `ForkJoinTask`, is never true either. That holds when no class
 //! that overrides `Node.getChildCount()`, whose default is 0, has objects.
 
-use super::{CLASS_KINDS, MethodKey, Walk, class_name, has_flag, members, never_true, text};
+use super::{CLASS_KINDS, FieldKey, MethodKey, Walk, class_name, has_flag, members, never_true, text};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+
+/// The classes of a walk, with their declarations and outer classes.
+type Classes<'t> = HashMap<String, (&'t Value, Option<String>)>;
 
 /// The field that makes a pipeline parallel, and the method that reads it.
 const PARALLEL_FIELD: (&str, &str) = ("java.util.stream.AbstractPipeline", "parallel");
@@ -66,82 +69,92 @@ pub(super) fn is_parallel_test(condition: &Value) -> bool {
         && text(symbol, "name") == "isParallel"
 }
 
-/// Whether, in the code that a walk which assumed sequential streams reached, the assumption
-/// holds.
-pub(super) fn streams_stay_sequential(walk: &Walk) -> bool {
-    // No node can have children: no class that overrides `getChildCount()` has objects.
-    let child_count = (NODE.to_string(), "getChildCount".to_string(), "()int".to_string());
-    let overriders = walk.overriders.get(&child_count).map(Vec::as_slice).unwrap_or_default();
-    if overriders.iter().any(|(class, _, _)| walk.reach.live.contains(class)) {
-        return false;
-    }
-    let mut index = Index {
-        classes: &walk.classes,
-        calls: HashMap::new(),
-        referenced: HashSet::new(),
-        assigned: HashSet::new(),
-        writes: Vec::new(),
-    };
-    for key in &walk.reach.methods {
-        if let Some(node) = walk.methods.get(key) {
-            index.scan(node, Some(key));
+impl<'t> Index<'t> {
+    /// Whether, in the code that a walk which assumed sequential streams reached, the assumption
+    /// holds. The index keeps the code it indexed, so that a walk that went on since (`Rounds`)
+    /// has only what it reached since indexed.
+    pub(super) fn streams_stay_sequential(&mut self, walk: &Walk<'t>) -> bool {
+        // No node can have children: no class that overrides `getChildCount()` has objects.
+        let child_count = (NODE.to_string(), "getChildCount".to_string(), "()int".to_string());
+        let overriders = walk.overriders.get(&child_count).map(Vec::as_slice).unwrap_or_default();
+        if overriders.iter().any(|(class, _, _)| walk.reach.live.contains(class)) {
+            return false;
         }
-    }
-    for key in &walk.reach.fields {
-        if let Some(node) = walk.fields.get(key) {
-            index.scan(&node["initializer"], None);
-        }
-    }
-    for (class, (decl, _)) in &walk.classes {
-        for member in members(decl).filter(|m| text(m, "kind") == "BLOCK") {
-            let is_static = member["static"].as_bool() == Some(true);
-            let runs = if is_static { &walk.reach.initialized } else { &walk.reach.instantiated };
-            if runs.contains(class) {
-                index.scan(member, None);
+        for key in &walk.reach.methods {
+            if let Some(node) = walk.methods.get(key)
+                && self.methods.insert(key.clone())
+            {
+                self.scan(&walk.classes, node, Some(key));
             }
         }
+        for key in &walk.reach.fields {
+            if let Some(node) = walk.fields.get(key)
+                && self.fields.insert(key.clone())
+            {
+                self.scan(&walk.classes, &node["initializer"], None);
+            }
+        }
+        for (class, (decl, _)) in &walk.classes {
+            for is_static in [true, false] {
+                let runs = if is_static { &walk.reach.initialized } else { &walk.reach.instantiated };
+                if !runs.contains(class) || !self.blocks.insert((class.clone(), is_static)) {
+                    continue;
+                }
+                for member in members(decl).filter(|m| text(m, "kind") == "BLOCK") {
+                    if (member["static"].as_bool() == Some(true)) == is_static {
+                        self.scan(&walk.classes, member, None);
+                    }
+                }
+            }
+        }
+        // A call of `isParallel()` through a stream interface runs a reachable implementation, and
+        // every one with a body must be the pipeline's.
+        let only_pipelines = walk.reach.methods.iter().all(|key| {
+            key.1 != "isParallel"
+                || key.0 == PIPELINE
+                || walk.methods.get(key).is_none_or(|m| m["body"].is_null())
+        });
+        let mut check = Check { index: self, only_pipelines, never_true: HashSet::new() };
+        check.solve(walk);
+        self.writes.iter().all(|(context, value)| value.is_some_and(|v| check.value(v, context.as_ref())))
     }
-    // A call of `isParallel()` through a stream interface runs a reachable implementation, and
-    // every one with a body must be the pipeline's.
-    let only_pipelines = walk.reach.methods.iter().all(|key| {
-        key.1 != "isParallel"
-            || key.0 == PIPELINE
-            || walk.methods.get(key).is_none_or(|m| m["body"].is_null())
-    });
-    let mut check = Check { index: &index, only_pipelines, never_true: HashSet::new() };
-    check.solve(walk);
-    index.writes.iter().all(|(context, value)| value.is_some_and(|v| check.value(v, context.as_ref())))
 }
 
 /// What the check needs from the reached code: the calls of each method with their arguments,
 /// the methods that a method reference names, the parameters that are assigned, and every write
-/// of the field with the value written (`None` for a compound assignment).
-struct Index<'w, 't> {
-    /// The classes of the program: a local or anonymous class among them is indexed with its own
-    /// reached members, not with the code that declares it, as reachability does.
-    classes: &'w HashMap<String, (&'t Value, Option<String>)>,
+/// of the field with the value written (`None` for a compound assignment); and what of the code
+/// it has indexed: the methods, the fields' initializers, and the initializer blocks of classes,
+/// static (`true`) or not.
+#[derive(Default)]
+pub(super) struct Index<'t> {
     calls: HashMap<MethodKey, Vec<(Option<MethodKey>, &'t Value)>>,
     referenced: HashSet<MethodKey>,
     assigned: HashSet<(MethodKey, String)>,
     writes: Vec<(Option<MethodKey>, Option<&'t Value>)>,
+    methods: HashSet<MethodKey>,
+    fields: HashSet<FieldKey>,
+    blocks: HashSet<(String, bool)>,
 }
 
-impl<'t> Index<'_, 't> {
+impl<'t> Index<'t> {
     /// Indexes a piece of code. `context` is the method whose parameters its names refer to;
     /// inside a lambda or a local or anonymous class it is unknown, which only makes the check
     /// fail more often. What the assumption skips is skipped, as reachability does.
-    fn scan(&mut self, node: &'t Value, context: Option<&MethodKey>) {
+    /// A local or anonymous class among the program's `classes` is indexed with its own reached
+    /// members, not with the code that declares it, as reachability does.
+    fn scan(&mut self, classes: &Classes<'t>, node: &'t Value, context: Option<&MethodKey>) {
         match node {
             Value::Object(fields) => {
                 let kind = text(node, "kind");
                 if kind == "ANNOTATION" || kind == "TYPE_ANNOTATION" {
                     return;
                 }
-                if CLASS_KINDS.contains(&kind) && self.classes.contains_key(&class_name(node)) {
+                if CLASS_KINDS.contains(&kind) && classes.contains_key(&class_name(node)) {
                     return;
                 }
                 if matches!(kind, "IF" | "CONDITIONAL_EXPRESSION") && never_true(&node["condition"], true) {
-                    self.scan(&node[if kind == "IF" { "elseStatement" } else { "falseExpression" }], context);
+                    let branch = &node[if kind == "IF" { "elseStatement" } else { "falseExpression" }];
+                    self.scan(classes, branch, context);
                     return;
                 }
                 let context =
@@ -149,11 +162,11 @@ impl<'t> Index<'_, 't> {
                 self.node(node, kind, context);
                 for (field, child) in fields {
                     if field != "symbol" {
-                        self.scan(child, context);
+                        self.scan(classes, child, context);
                     }
                 }
             }
-            Value::Array(items) => items.iter().for_each(|item| self.scan(item, context)),
+            Value::Array(items) => items.iter().for_each(|item| self.scan(classes, item, context)),
             _ => {}
         }
     }
@@ -199,15 +212,15 @@ fn key(symbol: &Value) -> MethodKey {
 /// A parameter: its method and its name.
 type Parameter = (MethodKey, String);
 
-struct Check<'i, 'w, 't> {
-    index: &'i Index<'w, 't>,
+struct Check<'i, 't> {
+    index: &'i Index<'t>,
     /// Whether `isParallel()` through a stream interface can only be the pipeline's.
     only_pipelines: bool,
     /// The `boolean` parameters that cannot be true.
     never_true: HashSet<Parameter>,
 }
 
-impl Check<'_, '_, '_> {
+impl Check<'_, '_> {
     /// The greatest set of `boolean` parameters that cannot be true: start from every one whose
     /// method can only be called directly and that is never assigned, and drop those that a call
     /// passes a value that may be true, until none is dropped.

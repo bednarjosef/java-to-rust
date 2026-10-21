@@ -6,7 +6,6 @@ mod records;
 
 use crate::ast::{Error, Pos};
 use serde_json::Value;
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -120,25 +119,24 @@ fn compile_error(stderr: &[u8]) -> (Option<String>, Error) {
 /// A javac run over a program that attributes the units of the source path only as they are
 /// asked for (`JavaTree --program --serve`), where `program_tree` has javac attribute every unit
 /// it loads: for a program that uses the JDK's collections, those are thousands of units, of
-/// which the code reachable from `main` uses a few dozen.
+/// which the code reachable from `main` uses a few dozen. The units come as javac printed them,
+/// `{"file": ..., "tree": ...}`, without the members that `Records` writes into records.
 pub struct Session {
     child: Child,
     input: Option<ChildStdin>,
     output: BufReader<ChildStdout>,
     errors: Option<JoinHandle<Vec<u8>>>,
-    /// The units so far as javac printed them, `{"file": ..., "tree": ...}`: the program's files
-    /// in the order given, then the others in the order they came.
-    units: Vec<Value>,
-    /// Whether completing the records changes each of `units` (`records::changes`).
-    changes: Vec<bool>,
     /// The classes asked for so far.
     asked: HashSet<String>,
 }
 
 impl Session {
-    /// Starts javac on the program's files, with `sourcepath` as its source path, and reads their
-    /// units. A compile error is returned with the file it is in.
-    pub fn start(files: &[PathBuf], sourcepath: &[PathBuf]) -> Result<Session, (Option<String>, Error)> {
+    /// Starts javac on the program's files, with `sourcepath` as its source path, and returns
+    /// their units, in the order given. A compile error is returned with the file it is in.
+    pub fn start(
+        files: &[PathBuf],
+        sourcepath: &[PathBuf],
+    ) -> Result<(Session, Vec<Value>), (Option<String>, Error)> {
         let mut child = program_command(files, sourcepath)?
             .arg("--serve")
             .stdin(Stdio::piped())
@@ -154,68 +152,24 @@ impl Session {
             let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
             bytes
         });
-        let mut session = Session {
-            child,
-            input,
-            output,
-            errors: Some(errors),
-            units: Vec::new(),
-            changes: Vec::new(),
-            asked: HashSet::new(),
-        };
+        let mut session = Session { child, input, output, errors: Some(errors), asked: HashSet::new() };
         let units = session.read()?;
-        session.add(units);
-        Ok(session)
+        Ok((session, units))
     }
 
     /// Asks for the units that declare these classes, those not asked for before, and returns
-    /// how many new units javac gave.
-    pub fn load(&mut self, classes: &[String]) -> Result<usize, (Option<String>, Error)> {
+    /// those of them that javac had not given yet.
+    pub fn load(&mut self, classes: &[String]) -> Result<Vec<Value>, (Option<String>, Error)> {
         let names: Vec<&str> =
             classes.iter().filter(|c| self.asked.insert(c.to_string())).map(String::as_str).collect();
         if names.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         let input = self.input.as_mut().expect("the input is open while the session lives");
         if writeln!(input, "{}", names.join(",")).and_then(|()| input.flush()).is_err() {
             return Err(self.failure());
         }
-        let units = self.read()?;
-        let count = units.len();
-        self.add(units);
-        Ok(count)
-    }
-
-    /// The units so far, with the members that javac adds to records written (see `records`):
-    /// those that the units' code may use. Only the units that this changes are copies.
-    pub fn units(&self) -> Vec<Cow<'_, Value>> {
-        let survey = records::survey(&self.units.iter().map(|u| &u["tree"]).collect::<Vec<_>>());
-        let complete = |unit: &Value| {
-            let mut unit = unit.clone();
-            records::complete_unit(&mut unit["tree"], &survey);
-            unit
-        };
-        let changes = self.units.iter().zip(&self.changes);
-        changes
-            .map(|(u, &changes)| if changes { Cow::Owned(complete(u)) } else { Cow::Borrowed(u) })
-            .collect()
-    }
-
-    /// The units, as `units` gives them, when no more are to come.
-    pub fn finish(mut self) -> Vec<Value> {
-        let mut units = std::mem::take(&mut self.units);
-        let survey = records::survey(&units.iter().map(|u| &u["tree"]).collect::<Vec<_>>());
-        for (unit, &changes) in units.iter_mut().zip(&self.changes) {
-            if changes {
-                records::complete_unit(&mut unit["tree"], &survey);
-            }
-        }
-        units
-    }
-
-    fn add(&mut self, units: Vec<Value>) {
-        self.changes.extend(units.iter().map(|u| records::changes(&u["tree"])));
-        self.units.extend(units);
+        self.read()
     }
 
     /// The units of one line of `JavaTree`'s output.
@@ -238,6 +192,33 @@ impl Session {
         let _ = self.child.wait();
         let stderr = self.errors.take().and_then(|e| e.join().ok()).unwrap_or_default();
         compile_error(&stderr)
+    }
+}
+
+/// The members that javac adds to records written (see `records`), into units that come in
+/// rounds (`Session`): which members a record gets depends on every unit so far.
+#[derive(Default)]
+pub struct Records {
+    survey: records::Survey,
+}
+
+impl Records {
+    /// Adds units to those that decide the members, and returns, for each, whether `complete`
+    /// changes it: those with a record or without a package.
+    pub fn add(&mut self, units: &[Value]) -> Vec<bool> {
+        self.survey.add(&units.iter().map(|u| &u["tree"]).collect::<Vec<_>>());
+        units.iter().map(|u| records::changes(&u["tree"])).collect()
+    }
+
+    /// Writes the members into the records of a unit, as the units so far decide them.
+    pub fn complete(&self, unit: &mut Value) {
+        records::complete_unit(&mut unit["tree"], &self.survey);
+    }
+
+    /// The records of a unit, as `complete` writes them: when these are the same as before a
+    /// round's units were added, so is what `complete` makes of the unit.
+    pub fn completed_records(&self, unit: &Value) -> Vec<Value> {
+        records::completed_records(&unit["tree"], &self.survey)
     }
 }
 
