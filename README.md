@@ -364,9 +364,12 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   or by range with Java's range checks, `fill` by range, `copyOfRange` on primitives,
   `binarySearch` in both forms (`-(insertion point) - 1` when absent), and `deepToString` on
   arrays of primitive or `String` rows. `a.clone()` is a shallow copy; rows of a 2-D array are
-  shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`. Not
-  yet: `copyOf` and `copyOfRange` on `String` arrays (the padding would need nulls that the
-  nullness analysis does not see), `equals(null, b)`, `asList` and `stream`.
+  shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`.
+  `copyOf` works on any array, and `copyOf(a, n, type)` is the same copy (its class is dropped).
+  Translated with the JDK's sources, every other call of `Arrays` (a sort with a `Comparator`, a
+  sort of objects, `asList`) is a call of the translated `java/util/Arrays.java`, and
+  reachability follows only those (`lower::runtime_arrays_call`). Not yet without the JDK:
+  `copyOfRange` on `String` arrays, `equals(null, b)`, `asList` and `stream`.
 - Objects (`analysis/objects.rs`, `analysis/owned.rs`, `analysis/borrowing.rs`). The faithful form
   of an object is `Rc<RefCell<C>>`, because Java references are shared and mutable. A class whose
   objects never change after construction is shared as `Rc<C>`: its fields are written only by its

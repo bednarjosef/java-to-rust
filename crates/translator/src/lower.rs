@@ -43,6 +43,7 @@ mod switch;
 mod sync;
 mod system;
 mod varargs;
+pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use exceptions::{is_standard, standard_names, standard_subclass};
 pub use functional::is_functional;
@@ -412,8 +413,8 @@ impl<'t> Lowering<'t> {
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
                 e => Stmt::Expr(e),
             },
-            // Reachability skipped the branch that the condition guards (`program::never_true`).
-            "IF" if self.never_true(node) => match node.get("elseStatement") {
+            // Reachability skipped the other branch (`program::live_branch`).
+            "IF" if let Some(branch) = self.live_branch(node) => match branch {
                 Some(n) => self.single_stmt(n)?,
                 None => Stmt::Block(Vec::new()),
             },
@@ -551,9 +552,9 @@ impl<'t> Lowering<'t> {
                 }
             }
             // As with `if`, reachability skipped the branch that the condition guards.
-            "CONDITIONAL_EXPRESSION" if self.never_true(node) => {
+            "CONDITIONAL_EXPRESSION" if let Some(Some(branch)) = self.live_branch(node) => {
                 let ty = self.ty(node, node.java_type())?;
-                let value = self.convert(self.expr(node.child("falseExpression")?)?, ty);
+                let value = self.convert(self.expr(branch)?, ty);
                 // The branch converts to the type of the whole, as `cond ? 1 : 2L` is a `long`.
                 if value.ty == ty {
                     return Ok(value);
@@ -680,6 +681,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.class_call(node, &symbol, select)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.copy_of_with_class(node, &symbol)? {
+            return Ok(kind);
+        }
         let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
@@ -736,7 +740,16 @@ impl<'t> Lowering<'t> {
             ("java.lang.Math", "min") => Builtin::MathMin,
             ("java.lang.Math", "sqrt") => Builtin::MathSqrt,
             ("java.lang.Math", "pow") => Builtin::MathPow,
-            ("java.util.Arrays", name) => return self.arrays_call(node, name, args),
+            // Where the JDK's `Arrays` is translated, a call that the runtime does not do is one of
+            // it, such as a sort with a `Comparator`.
+            ("java.util.Arrays", name)
+                if self.type_index(symbol.owner).is_none() || {
+                    let types: Vec<&str> = node.list("arguments").map(|a| a.java_type()).collect();
+                    arrays::runtime_arrays_call(name, &types)
+                } =>
+            {
+                return self.arrays_call(node, name, args);
+            }
             ("java.lang.String", "length" | "equals")
                 if symbol.name == "length" || matches!(args[0].ty, Type::String | Type::Null) =>
             {

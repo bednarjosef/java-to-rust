@@ -18,8 +18,8 @@
 
 use super::Program;
 use super::reach::{
-    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, else_branch, has_flag, members, never_true,
-    outside, provided, replaced, symbol_type, text, untranslated,
+    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, has_flag, live_branch, members, outside,
+    provided, replaced, runtime_arrays_call, symbol_type, text, untranslated,
 };
 use crate::ast::runtime_native;
 use serde_json::{Value, json};
@@ -277,12 +277,9 @@ impl Census {
     fn body(&self, node: &Value, scan: &mut Scan<'_>) {
         match node {
             // Reachability skips the branch, and so does the translation.
-            Value::Object(_)
-                if matches!(text(node, "kind"), "IF" | "CONDITIONAL_EXPRESSION")
-                    && never_true(&node["condition"], scan.sequential) =>
-            {
+            Value::Object(_) if let Some(branch) = live_branch(node, scan.sequential) => {
                 self.body(&node["condition"], scan);
-                self.body(else_branch(node), scan);
+                self.body(branch, scan);
             }
             Value::Object(fields) => {
                 let kind = text(node, "kind");
@@ -359,7 +356,10 @@ impl Census {
                     } else if let Some(feature) = untranslated(owner) {
                         scan.feature(feature, node);
                         scan.calls.insert(format!("({feature}) {owner}.{name}"));
-                    } else if provided(owner) || replaced(owner, name, text(symbol, "type")) {
+                    } else if provided(owner)
+                        || replaced(owner, name, text(symbol, "type"))
+                        || runtime_arrays_call(node)
+                    {
                         let simple = owner.rsplit('.').next().unwrap_or(owner);
                         scan.calls.insert(format!("{simple}.{name}"));
                     } else if !owner.is_empty() && !self.declared.contains(owner) {
