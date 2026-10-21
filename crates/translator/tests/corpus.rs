@@ -50,9 +50,14 @@ fn run(output: Output) -> Run {
     Run { stdout: String::from_utf8_lossy(&output.stdout).into_owned(), code: output.status.code() }
 }
 
-/// Calls `f` on each index below `n` on one thread per CPU, and returns the results in order.
+/// Calls `f` on each index below `n` on one thread per CPU (or `CORPUS_THREADS` threads, to keep
+/// memory down when several test runs share a machine), and returns the results in order.
 fn parallel<R: Send>(n: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let threads = std::env::var("CORPUS_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n: &usize| n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
     let next = AtomicUsize::new(0);
     let results: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
     std::thread::scope(|s| {

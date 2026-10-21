@@ -18,6 +18,7 @@
 mod arrays;
 mod borrowing;
 mod boxing;
+mod constants;
 mod indexing;
 mod moves;
 mod nullness;

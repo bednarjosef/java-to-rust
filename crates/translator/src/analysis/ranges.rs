@@ -15,6 +15,7 @@
 //! that stays within them on every path cannot overflow.
 
 use super::Facts;
+use super::constants::static_value;
 use crate::ast::*;
 use crate::types::binary_type;
 use std::collections::{HashMap, HashSet};
@@ -966,7 +967,11 @@ impl<'a> Analysis<'a> {
                 }
                 other
             }
-            ExprKind::This | ExprKind::Static { .. } => other,
+            ExprKind::Static { class, name } => match static_value(self.class, *class, name) {
+                Some(v) => Interval::point(v),
+                None => other,
+            },
+            ExprKind::This => other,
             ExprKind::Field { object, .. } => {
                 self.expr(object, env);
                 other
