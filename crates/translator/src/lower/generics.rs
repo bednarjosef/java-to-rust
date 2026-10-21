@@ -243,6 +243,11 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if matches!(declared, Type::Array(_)) {
+            // The array of a type variable is an `Object[]`, and so is its argument's, which
+            // covariant arrays are once lowered again.
+            if self.meets_object_array(ty, declared) {
+                return Ok(kind);
+            }
             return unsupported(node, "an array of a type variable used as an array of its argument");
         }
         // An array held as an `Object` (`Deque<int[]>`) is cast back to its type.

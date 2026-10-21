@@ -39,17 +39,20 @@ pub fn lower_program<'t>(
     reach: &'t Reach,
     main: &str,
 ) -> Result<Class, (Option<usize>, Error)> {
-    super::real_generics::retry(|real| lower_with(units, reach, main, real))
+    super::real_generics::retry(|real, covariant| lower_with(units, reach, main, real, covariant))
 }
 
-/// `lower_program` with the Rust generics `real`, or with the candidates when it is `None`.
+/// `lower_program` with the Rust generics `real`, or with the candidates when it is `None`, and
+/// the arrays `covariant`.
 fn lower_with<'t>(
     units: &[&'t Value],
     reach: &'t Reach,
     main: &str,
     real: Option<&super::real_generics::Real>,
+    covariant: &super::covariant::Covariant,
 ) -> Result<(Class, super::real_generics::Real, super::real_generics::Real), (Option<usize>, Error)> {
     let mut lowering = Lowering::empty();
+    lowering.covariant = covariant.clone();
     lowering.reach = Some(reach);
     // The unit and the package of each class, in `Class::types` order.
     let mut unit_of = Vec::new();
