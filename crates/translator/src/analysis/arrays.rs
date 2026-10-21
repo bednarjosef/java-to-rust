@@ -1,26 +1,63 @@
-//! Arrays that no other name can see. Such an array is a plain `Vec`, not a shared `java::Array`.
-//! A local or a parameter qualifies when it is a one-dimensional array declared once in its
-//! method, never assigned again, and used only through its own elements and length: `a[i]`,
-//! `a[i] = v`, `a.length` and for-each. A local must also be initialised with a fresh array (from
-//! `new` or an initializer). Returning it, copying it to another variable or giving it to
-//! `java.util.Arrays` makes it shared.
+//! Arrays that no other name can see. Such an array is a plain `Vec` (a `Vec` of `Vec`s for an
+//! array of arrays), not a shared `java::Array`, and a method that makes an array and hands it
+//! back returns the `Vec`.
+//!
+//! A local qualifies when it is declared once in its method, everything it ever holds is an
+//! array nobody else holds (a new array, a literal, the result of a method that returns its own
+//! arrays, or another plain local moved into it), and it is used only through its elements and
+//! lengths (`a[i]`, `m[i][j] = v`, `a.length`, for-each over a one-dimensional array, or over
+//! the rows of an array of arrays whose body leaves the array alone): see `scan`. A local is moved when it is not read again before it is assigned (`a = b; b = c;`,
+//! see `liveness`); a moved local may also go to a parameter or variable that is shared, which
+//! then takes the `Vec` over (`java::share`). Copying an array to a second name that is used
+//! later, comparing it, storing it in a field or giving it to `java.util.Arrays` makes it shared.
+//! An array of arrays stays plain while its rows are only read through it: a row kept in a
+//! variable is a second name for it. Arrays of arrays need elements that are primitives or
+//! strings and rows that are never null.
 //!
 //! A parameter is borrowed, as `&[T]` or `&mut [T]` when its elements are written, when its
 //! method uses it only through its elements and every call can lend it an array: a plain array
-//! (`&v`), or a shared one (`&a.borrow()`) when nothing else can reach that array while the call
-//! runs. Passing a plain array to a borrowed parameter keeps it plain; passing it to any other
-//! parameter makes it shared.
+//! or one of its rows (`&v`, `&m[i]`), a new array, or a shared one-dimensional array
+//! (`&a.borrow()`) when nothing else can reach that array while the call runs. Passing a plain
+//! array to a borrowed parameter keeps it plain; passing it to any other parameter shares it,
+//! unless it is moved there.
 //!
-//! A counting loop `for (int i = 0; i < a.length; i++)` over a plain array, whose body neither
-//! assigns `i` nor `a`, keeps `i` in bounds, so `a[i]` in its body needs no check. When the body
-//! reads `a[i]` and uses `i` and `a` nowhere else, the loop can be `for x in a.iter()`.
+//! A method returns a `Vec` when every array it returns is one nobody else holds.
+//!
+//! The indexes that are always in bounds are found by `bounds`, and the innermost counting loops
+//! whose accesses can be checked once before the loop by `slices`. A counting loop
+//! `for (int i = 0; i < a.length; i++)` over a plain array whose body reads `a[i]` and uses `i`
+//! and `a` nowhere else can be `for x in a.iter()`.
+
+mod bounds;
+mod liveness;
+mod scan;
+mod slices;
+
+pub use slices::{RowIndex, Slice, SlicedLoop};
 
 use super::Facts;
 use crate::ast::*;
+use scan::{Call, Owned, Scan};
 use std::collections::{HashMap, HashSet};
 
 pub(super) fn analyze(class: &Class, facts: &mut Facts) {
-    let mut scans: Vec<Scan> = class.methods.iter().map(scan).collect();
+    let mut scans: Vec<Scan> = class
+        .methods
+        .iter()
+        .enumerate()
+        .map(|(m, method)| {
+            let arrays: HashSet<String> = declarations(method)
+                .into_iter()
+                .filter(|d| matches!(d.ty, Type::Array(_)))
+                .map(|d| d.name.to_string())
+                .chain(
+                    method.params.iter().filter(|p| matches!(p.ty, Type::Array(_))).map(|p| p.name.clone()),
+                )
+                .collect();
+            let live_after = liveness::live_after(method, &arrays);
+            scan::scan(m, method, facts, &live_after)
+        })
+        .collect();
     // A call may run any method of its override group, which all take their arrays alike.
     for s in &mut scans {
         let calls = std::mem::take(&mut s.calls);
@@ -37,27 +74,34 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
         .iter()
         .flat_map(|t| t.fields.iter().chain(&t.statics))
         .all(|f| !matches!(f.ty, Type::Array(_)));
-    let (plain, borrowed) = solve(class, &scans, lend_shared);
-    let written = written_names(class, &scans, &borrowed);
+    let solution = solve(class, &scans, lend_shared, facts);
+    let written = written_names(class, &scans, &solution.borrowed);
     for (m, method) in class.methods.iter().enumerate() {
         let names: HashMap<String, bool> =
-            plain[m].iter().map(|name| (name.clone(), written[m].contains(name))).collect();
+            solution.plain[m].iter().map(|name| (name.clone(), written[m].contains(name))).collect();
         for stmt in &method.body {
             visit_stmt(stmt, &mut |_| {}, &mut |s| {
-                if let Some(counting) = counting_over(s, &names) {
-                    in_bounds(counting.array, counting.index, counting.body, facts);
-                    if let Some(reads) = element_reads(&counting) {
-                        facts.element_loops.insert(counting.cond.id, reads);
-                    }
+                if let Some(counting) = counting_over(s, &names)
+                    && let Some(reads) = element_reads(&counting)
+                {
+                    facts.element_loops.insert(counting.cond.id, reads);
                 }
             });
         }
-        constant_indexes(method, &plain[m], facts);
+        let proven = bounds::in_bounds(method, &solution.plain[m], &scans[m].reshaped, facts);
+        facts.in_bounds.extend(proven);
+        facts.sliced_loops.extend(slices::sliced_loops(method, &solution.plain[m], facts));
+        facts.moves.extend(scans[m].moves.iter().copied());
         for (name, written) in names {
             facts.plain_arrays.insert((m, name), written);
         }
+        for (array, row) in &scans[m].row_loops {
+            if solution.plain[m].contains(array) {
+                facts.row_loops.insert((m, row.clone()));
+            }
+        }
         for (i, p) in method.params.iter().enumerate() {
-            if borrowed.contains(&(m, i)) {
+            if solution.borrowed.contains(&(m, i)) {
                 let group = class.hierarchy.group(m);
                 let any_written = written[m].contains(&p.name)
                     || group.iter().any(|&g| written[g].contains(&class.methods[g].params[i].name));
@@ -65,197 +109,148 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
             }
         }
     }
+    facts.owned_returns = solution.owned_returns;
 }
 
-/// What one method does with its arrays, before the analysis decides which are plain.
-#[derive(Default)]
-struct Scan {
-    /// Array locals and parameters that qualify unless a use makes them shared.
-    candidates: HashSet<String>,
-    /// Array parameters, as (index, name).
-    params: Vec<(usize, String)>,
-    /// Every array local and parameter, plain or not.
-    arrays: HashSet<String>,
-    /// Arrays with an element assigned in this method.
-    written: HashSet<String>,
-    /// The calls made in this method.
-    calls: Vec<Call>,
+/// A local of a method.
+pub(super) struct Declaration<'m> {
+    pub name: &'m str,
+    pub ty: Type,
+    pub init: Option<&'m Expr>,
+    /// Whether it is the variable of a for-each loop.
+    pub loop_var: bool,
 }
 
-/// A call and what each argument is.
-#[derive(Clone)]
-struct Call {
-    callee: usize,
-    args: Vec<Arg>,
-}
-
-#[derive(Clone)]
-struct Arg {
-    /// The variable the argument is, if it is one.
-    name: Option<String>,
-    /// Whether the argument is a new array literal, such as the packed trailing arguments of a
-    /// varargs call: nobody else holds it, so any parameter may borrow it.
-    fresh: bool,
-    array: bool,
-    /// The variables the argument mentions.
-    mentions: HashSet<String>,
-    /// Whether evaluating the argument may run code that reaches an array: a call, an assignment
-    /// or a `java.util.Arrays` method.
-    effects: bool,
-}
-
-impl Arg {
-    fn of(e: &Expr) -> Arg {
-        let mut mentions = HashSet::new();
-        let mut effects = false;
-        visit_expr(e, &mut |x| match &x.kind {
-            ExprKind::Var(v) => {
-                mentions.insert(v.clone());
-            }
-            ExprKind::Call { .. }
-            | ExprKind::MethodCall { .. }
-            | ExprKind::New { .. }
-            | ExprKind::ThisCall { .. }
-            | ExprKind::SuperInit { .. }
-            | ExprKind::Assign { .. }
-            | ExprKind::IncDec { .. }
-            | ExprKind::Builtin(Builtin::ArraysFill | Builtin::ArraysSort | Builtin::Arrays(_), _) => {
-                effects = true
-            }
-            _ => {}
-        });
-        let name = match &e.kind {
-            ExprKind::Var(v) => Some(v.clone()),
-            _ => None,
-        };
-        let fresh = matches!(e.kind, ExprKind::ArrayLit(_));
-        Arg { name, fresh, array: matches!(e.ty, Type::Array(_)), mentions, effects }
-    }
-}
-
-fn scan(method: &Method) -> Scan {
-    let mut uses = Uses::default();
-    for stmt in &method.body {
-        visit_stmt(stmt, &mut |e| visit_expr(e, &mut |x| uses.record(x)), &mut |_| {});
-    }
-    let mut declared: HashMap<String, usize> = HashMap::new();
-    for p in &method.params {
-        *declared.entry(p.name.clone()).or_default() += 1;
-    }
-    let mut arrays = HashSet::new();
-    for stmt in &method.body {
-        visit_stmt(stmt, &mut |_| {}, &mut |s| match s {
+/// Every local declared in `method`, including the variables of for-each loops and the locals
+/// of the cases of switch expressions.
+pub(super) fn declarations(method: &Method) -> Vec<Declaration<'_>> {
+    fn stmt<'m>(s: &'m Stmt, out: &mut Vec<Declaration<'m>>) {
+        match s {
             Stmt::Local { ty, name, init, .. } => {
-                *declared.entry(name.clone()).or_default() += 1;
-                let Type::Array(elem) = ty else { return };
-                if matches!(**elem, Type::Array(_)) || init.as_ref().is_none_or(|e| !is_fresh(e)) {
-                    uses.escaped.insert(name.clone());
+                out.push(Declaration { name, ty: *ty, init: init.as_ref(), loop_var: false });
+                if let Some(e) = init {
+                    expr(e, out);
                 }
-                arrays.insert(name.clone());
             }
-            Stmt::ForEach { name, array, .. } => {
-                *declared.entry(name.clone()).or_default() += 1;
-                uses.good.insert(array.id);
+            Stmt::ForEach { ty, name, array, body } => {
+                out.push(Declaration { name, ty: *ty, init: None, loop_var: true });
+                expr(array, out);
+                stmt(body, out);
             }
-            _ => {}
-        });
-    }
-    let mut params = Vec::new();
-    for (i, p) in method.params.iter().enumerate() {
-        if let Type::Array(elem) = &p.ty
-            && !matches!(**elem, Type::Array(_))
-        {
-            params.push((i, p.name.clone()));
-            arrays.insert(p.name.clone());
+            Stmt::Expr(e) | Stmt::Return(Some(e), _) | Stmt::Yield(e) => expr(e, out),
+            Stmt::If { cond, then, otherwise } => {
+                expr(cond, out);
+                stmt(then, out);
+                if let Some(o) = otherwise {
+                    stmt(o, out);
+                }
+            }
+            Stmt::While { cond, body } | Stmt::DoWhile { body, cond } => {
+                expr(cond, out);
+                stmt(body, out);
+            }
+            Stmt::For { init, cond, update, body } => {
+                init.iter().for_each(|s| stmt(s, out));
+                if let Some(c) = cond {
+                    expr(c, out);
+                }
+                update.iter().for_each(|u| expr(u, out));
+                stmt(body, out);
+            }
+            Stmt::Switch { selector, cases } => {
+                expr(selector, out);
+                cases.iter().flat_map(|c| &c.body).for_each(|s| stmt(s, out));
+            }
+            Stmt::Labeled { body, .. } => stmt(body, out),
+            Stmt::Block(stmts) => stmts.iter().for_each(|s| stmt(s, out)),
+            Stmt::Return(None, _)
+            | Stmt::Break
+            | Stmt::Continue
+            | Stmt::BreakLabel(_)
+            | Stmt::ContinueLabel(_) => {}
         }
     }
-    let bad: HashSet<String> = uses
-        .vars
-        .iter()
-        .filter(|(id, _)| !uses.good.contains(id))
-        .map(|(_, name)| name.clone())
-        .chain(uses.escaped.iter().cloned())
-        .collect();
-    let candidates = arrays
-        .iter()
-        .filter(|name| declared.get(*name) == Some(&1) && !bad.contains(*name))
-        .cloned()
-        .collect();
-    Scan { candidates, params, arrays, written: uses.written, calls: uses.calls }
-}
-
-/// What the uses of variables in one method are, collected before any of them is judged.
-#[derive(Default)]
-struct Uses {
-    /// Every mention of a variable, to be judged once all the good uses are known.
-    vars: Vec<(ExprId, String)>,
-    /// Expressions that are good uses of a variable: the array of an index, length, element
-    /// assignment or for-each, and a variable passed as an argument (judged at the call).
-    good: HashSet<ExprId>,
-    /// Variables whose array is replaced by another, so that they cannot be plain.
-    escaped: HashSet<String>,
-    written: HashSet<String>,
-    calls: Vec<Call>,
-}
-
-impl Uses {
-    fn record(&mut self, x: &Expr) {
-        match &x.kind {
-            ExprKind::Var(name) => self.vars.push((x.id, name.clone())),
-            ExprKind::Index(array, _) | ExprKind::Length(array) => {
-                self.good.insert(array.id);
-            }
-            ExprKind::Assign { target, .. } => match target {
-                Place::Index(array, _) => self.element_write(array),
-                Place::Var(name) => {
-                    self.escaped.insert(name.clone());
-                }
-                Place::Field { .. } | Place::Static { .. } => {}
-            },
-            ExprKind::IncDec { target: Place::Index(array, _), .. } => self.element_write(array),
-            // `System.arraycopy` reads its source and writes its destination, like indexing.
-            ExprKind::Builtin(Builtin::Native(Native::ArrayCopy), args) => {
-                self.good.insert(args[0].id);
-                self.element_write(&args[2]);
-            }
-            ExprKind::Call { args, resolved: Some(callee), .. }
-            | ExprKind::MethodCall { args, resolved: Some(callee), .. }
-            | ExprKind::New { args, ctor: Some(callee), .. }
-            | ExprKind::ThisCall { args, resolved: Some(callee) }
-            | ExprKind::SuperInit { args, resolved: Some(callee) } => {
-                for a in args.iter().filter(|a| matches!(a.kind, ExprKind::Var(_))) {
-                    self.good.insert(a.id);
-                }
-                self.calls.push(Call { callee: *callee, args: args.iter().map(Arg::of).collect() });
-            }
-            _ => {}
+    fn expr<'m>(e: &'m Expr, out: &mut Vec<Declaration<'m>>) {
+        let mut switches = Vec::new();
+        collect_switches(e, &mut switches);
+        for cases in switches {
+            cases.iter().flat_map(|c| &c.body).for_each(|s| stmt(s, out));
         }
     }
+    let mut out = Vec::new();
+    method.body.iter().for_each(|s| stmt(s, &mut out));
+    out
+}
 
-    /// An assignment to an element of `array`: a good use that also writes the array.
-    fn element_write(&mut self, array: &Expr) {
-        self.good.insert(array.id);
-        if let ExprKind::Var(name) = &array.kind {
-            self.written.insert(name.clone());
+/// The cases of the switch expressions in `e` that are not inside another switch expression.
+fn collect_switches<'e>(e: &'e Expr, out: &mut Vec<&'e [Case]>) {
+    match &e.kind {
+        ExprKind::Switch { selector, cases } => {
+            collect_switches(selector, out);
+            out.push(cases);
         }
+        ExprKind::Unary(_, x)
+        | ExprKind::Cast(_, x)
+        | ExprKind::Length(x)
+        | ExprKind::Field { object: x, .. } => collect_switches(x, out),
+        ExprKind::Assign { target, value, .. } => {
+            visit_place_switches(target, out);
+            collect_switches(value, out);
+        }
+        ExprKind::IncDec { target, .. } => visit_place_switches(target, out),
+        ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) => {
+            collect_switches(l, out);
+            collect_switches(r, out);
+        }
+        ExprKind::Conditional(c, a, b) => {
+            collect_switches(c, out);
+            collect_switches(a, out);
+            collect_switches(b, out);
+        }
+        ExprKind::MethodCall { receiver, args, .. } => {
+            collect_switches(receiver, out);
+            args.iter().for_each(|a| collect_switches(a, out));
+        }
+        ExprKind::Call { args, .. }
+        | ExprKind::Builtin(_, args)
+        | ExprKind::New { args, .. }
+        | ExprKind::ThisCall { args, .. }
+        | ExprKind::SuperInit { args, .. }
+        | ExprKind::NewArray(args)
+        | ExprKind::ArrayLit(args) => args.iter().for_each(|a| collect_switches(a, out)),
+        _ => {}
     }
 }
 
-/// Whether `e` makes a new array, which no other name can hold yet.
-fn is_fresh(e: &Expr) -> bool {
-    matches!(e.kind, ExprKind::NewArray(_) | ExprKind::ArrayLit(_))
+fn visit_place_switches<'e>(place: &'e Place, out: &mut Vec<&'e [Case]>) {
+    match place {
+        Place::Index(array, index) => {
+            collect_switches(array, out);
+            collect_switches(index, out);
+        }
+        Place::Field { object, .. } => collect_switches(object, out),
+        Place::Var(_) | Place::Static { .. } => {}
+    }
 }
 
-/// Decides which arrays are plain and which parameters are borrowed. Both only shrink: a plain
-/// array passed to a parameter that is not borrowed escapes, and a parameter is borrowed only
-/// while it is plain in its method and every call of the method can lend it an array (see
-/// `lends`). A parameter that is not borrowed is shared. Returns the plain names of each method
-/// and the borrowed (method, parameter) pairs.
-fn solve(
-    class: &Class,
-    scans: &[Scan],
-    lend_shared: bool,
-) -> (Vec<HashSet<String>>, HashSet<(usize, usize)>) {
+/// What the solver decides.
+struct Solution {
+    /// The plain array variables of each method.
+    plain: Vec<HashSet<String>>,
+    /// The borrowed (method, parameter) pairs.
+    borrowed: HashSet<(usize, usize)>,
+    /// The methods that return arrays they own, as `Vec`s.
+    owned_returns: HashSet<usize>,
+}
+
+/// Decides which arrays are plain, which parameters are borrowed and which methods return their
+/// own arrays. All three only shrink, from everything that the scans allow, until every
+/// condition holds: a local is plain only while all its values are owned; a plain array passed to
+/// a parameter that is not borrowed stays plain only if it is moved there; a parameter is
+/// borrowed only while it is plain in its method and every call of the method can lend it an
+/// array (see `lends`), and a parameter that is not borrowed is shared; a method returns its own
+/// arrays only while every value it returns is owned.
+fn solve(class: &Class, scans: &[Scan], lend_shared: bool, facts: &Facts) -> Solution {
     let mut plain: Vec<HashSet<String>> = scans.iter().map(|s| s.candidates.clone()).collect();
     let called: HashSet<usize> = scans.iter().flat_map(|s| s.calls.iter().map(|c| c.callee)).collect();
     let mut borrowed: HashSet<(usize, usize)> = scans
@@ -264,12 +259,43 @@ fn solve(
         .filter(|(m, _)| called.contains(m))
         .flat_map(|(m, s)| s.params.iter().map(move |(i, _)| (m, *i)))
         .collect();
+    // A call in a field initializer has no plain arrays to lend.
+    for init in
+        class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics)).filter_map(|f| f.init.as_ref())
+    {
+        visit_expr(init, &mut |x| match &x.kind {
+            ExprKind::Call { args, resolved: Some(callee), .. }
+            | ExprKind::MethodCall { args, resolved: Some(callee), .. }
+            | ExprKind::New { args, ctor: Some(callee), .. } => {
+                for i in 0..args.len() {
+                    borrowed.remove(&(*callee, i));
+                }
+            }
+            _ => {}
+        });
+    }
+    let mut owned_returns: HashSet<usize> = class
+        .methods
+        .iter()
+        .enumerate()
+        .filter(|(m, method)| {
+            !method.is_ctor && scan::shareable(method.ret, facts) && !facts.nullable_returns.contains(m)
+        })
+        .map(|(m, _)| m)
+        .collect();
     loop {
         let mut changed = false;
         for (m, scan) in scans.iter().enumerate() {
             for call in &scan.calls {
                 for i in 0..call.args.len() {
-                    let lent = Lending { class, scans, plain: &plain, borrowed: &borrowed, lend_shared };
+                    let lent = Lending {
+                        class,
+                        scans,
+                        plain: &plain,
+                        borrowed: &borrowed,
+                        owned_returns: &owned_returns,
+                        lend_shared,
+                    };
                     if borrowed.contains(&(call.callee, i)) && !lent.lends(m, call, i) {
                         borrowed.remove(&(call.callee, i));
                         changed = true;
@@ -282,6 +308,7 @@ fn solve(
                 for (i, arg) in call.args.iter().enumerate() {
                     if let Some(name) = &arg.name
                         && !borrowed.contains(&(call.callee, i))
+                        && (arg.row || !arg.moved)
                         && plain[m].remove(name)
                     {
                         changed = true;
@@ -308,10 +335,46 @@ fn solve(
                     changed = true;
                 }
             }
+            let unowned: Vec<String> = scan
+                .assigned
+                .iter()
+                .chain(&scan.rows)
+                .filter(|(name, value)| plain[m].contains(name) && !owned(value, &plain[m], &owned_returns))
+                .map(|(name, _)| name.clone())
+                .collect();
+            for name in unowned {
+                changed |= plain[m].remove(&name);
+            }
+            // The variable of a for-each over the rows of a plain array borrows them, so both are
+            // plain or neither is.
+            for (array, row) in &scan.row_loops {
+                if plain[m].contains(array) != plain[m].contains(row) {
+                    plain[m].remove(array);
+                    plain[m].remove(row);
+                    changed = true;
+                }
+            }
+            if owned_returns.contains(&m) && !scan.returns.iter().all(|r| owned(r, &plain[m], &owned_returns))
+            {
+                owned_returns.remove(&m);
+                changed = true;
+            }
         }
         if !changed {
-            return (plain, borrowed);
+            return Solution { plain, borrowed, owned_returns };
         }
+    }
+}
+
+/// Whether a value is an array that nobody else holds, given the plain locals of its method and
+/// the methods that return their own arrays.
+fn owned(value: &Owned, plain: &HashSet<String>, owned_returns: &HashSet<usize>) -> bool {
+    match value {
+        Owned::Never => false,
+        Owned::Fresh => true,
+        Owned::Returned(callee) => owned_returns.contains(callee),
+        Owned::Moved(name) => plain.contains(name),
+        Owned::Rows(rows) => rows.iter().all(|r| owned(r, plain, owned_returns)),
     }
 }
 
@@ -321,20 +384,24 @@ struct Lending<'s> {
     scans: &'s [Scan],
     plain: &'s [HashSet<String>],
     borrowed: &'s HashSet<(usize, usize)>,
+    owned_returns: &'s HashSet<usize>,
     lend_shared: bool,
 }
 
 impl Lending<'_> {
     /// Whether argument `i` of `call`, made in method `m`, can be lent to its borrowed parameter.
     /// No other argument may see the array while it is lent mutably; while it is lent to be read,
-    /// other arguments may read it, or lend it again to be read. A shared array is lent by borrowing its cell, which
-    /// panics if anything else borrows that cell mutably meanwhile: then no other argument may run
-    /// code that could, and if the parameter is written, no other argument may be a shared array.
+    /// other arguments may read it, or lend it again to be read. A shared array is lent by
+    /// borrowing its cell, which panics if anything else borrows that cell mutably meanwhile:
+    /// then no other argument may run code that could, and if the parameter is written, no other
+    /// argument may be a shared array. Only a one-dimensional shared array can be lent, as the
+    /// rows of a shared array of arrays are shared arrays too.
     fn lends(&self, m: usize, call: &Call, i: usize) -> bool {
-        if call.args[i].fresh {
+        let arg = &call.args[i];
+        if owned(&arg.fresh, &self.plain[m], self.owned_returns) {
             return true;
         }
-        let Some(name) = &call.args[i].name else { return false };
+        let Some(name) = &arg.name else { return false };
         let writes = self.writes(call.callee, i);
         let others = || call.args.iter().enumerate().filter(move |(j, _)| *j != i);
         for (j, other) in others() {
@@ -347,7 +414,8 @@ impl Lending<'_> {
         if self.plain[m].contains(name) {
             return true;
         }
-        if !self.lend_shared || !self.scans[m].arrays.contains(name) {
+        let param = &self.class.methods[call.callee].params[i];
+        if arg.row || scan::depth(param.ty) > 1 || !self.lend_shared || !self.scans[m].arrays.contains(name) {
             return false;
         }
         others().all(|(j, other)| {
@@ -368,8 +436,9 @@ impl Lending<'_> {
     }
 }
 
-/// The arrays whose elements are written: the ones written in their method, and any argument
-/// passed to a borrowed parameter that is written, which must then be borrowed mutably.
+/// The arrays whose elements are written: the ones written in their method, any argument (or
+/// array whose row is the argument) passed to a borrowed parameter that is written, which must
+/// then be borrowed mutably, and any array whose rows a written for-each variable borrows.
 fn written_names(class: &Class, scans: &[Scan], borrowed: &HashSet<(usize, usize)>) -> Vec<HashSet<String>> {
     let mut written: Vec<HashSet<String>> = scans.iter().map(|s| s.written.clone()).collect();
     loop {
@@ -385,6 +454,11 @@ fn written_names(class: &Class, scans: &[Scan], borrowed: &HashSet<(usize, usize
                     }
                 }
             }
+            for (array, row) in &scan.row_loops {
+                if written[m].contains(row) {
+                    changed |= written[m].insert(array.clone());
+                }
+            }
         }
         if !changed {
             return written;
@@ -392,9 +466,9 @@ fn written_names(class: &Class, scans: &[Scan], borrowed: &HashSet<(usize, usize
     }
 }
 
-/// A counting loop `for (int i = 0; i < a.length; i++)` over a plain array `a`, which does not
-/// assign `i` or `a` in its body.
-struct Counting<'s> {
+/// A counting loop `for (int i = 0; i < a.length; i++)` over a plain array `a` (see
+/// `ast::counting`), which does not assign `a` in its body.
+struct OverArray<'s> {
     cond: &'s Expr,
     array: &'s str,
     index: &'s str,
@@ -402,99 +476,20 @@ struct Counting<'s> {
 }
 
 /// The counting loop `s`, if `s` is one over an array in `plain`.
-fn counting_over<'s>(s: &'s Stmt, plain: &HashMap<String, bool>) -> Option<Counting<'s>> {
+fn counting_over<'s>(s: &'s Stmt, plain: &HashMap<String, bool>) -> Option<OverArray<'s>> {
     let Stmt::For { init, cond: Some(cond), update, body } = s else { return None };
-    let [Stmt::Local { name: index, init: Some(start), .. }] = init.as_slice() else { return None };
-    let ExprKind::Binary(BinOp::Lt, var, end) = &cond.kind else { return None };
-    let ExprKind::Length(array) = &end.kind else { return None };
+    let (index, from, to) = counting_loop(init, Some(cond), update, body)?;
+    let ExprKind::Length(array) = &to.kind else { return None };
     let ExprKind::Var(array) = &array.kind else { return None };
-    let counts_up = matches!(update.as_slice(), [Expr { kind: ExprKind::IncDec { target: Place::Var(t), increment: true, .. }, .. }] if t == index);
-    let starts_at_zero = matches!(start.kind, ExprKind::Int(0));
-    let index_is_var = matches!(&var.kind, ExprKind::Var(v) if v == index);
-    if !(counts_up && starts_at_zero && index_is_var && plain.contains_key(array)) {
+    if !matches!(from.kind, ExprKind::Int(0)) || !plain.contains_key(array) || assigns_stmt(body, array) {
         return None;
     }
-    if assigns_stmt(body, index) || assigns_stmt(body, array) {
-        return None;
-    }
-    Some(Counting { cond, array, index, body })
-}
-
-/// Marks every `a[i]` in `body` as in bounds, where `a` is the array and `i` the loop index: a read
-/// or a plain element assignment.
-fn in_bounds(array: &str, index: &str, body: &Stmt, facts: &mut Facts) {
-    visit_stmt(
-        body,
-        &mut |e| {
-            visit_expr(e, &mut |x| {
-                let is = |e: &Expr, name: &str| matches!(&e.kind, ExprKind::Var(v) if v == name);
-                match &x.kind {
-                    ExprKind::Index(a, i) | ExprKind::Assign { op: None, target: Place::Index(a, i), .. }
-                        if is(a, array) && is(i, index) =>
-                    {
-                        facts.in_bounds.insert(x.id);
-                    }
-                    _ => {}
-                }
-            })
-        },
-        &mut |_| {},
-    );
-}
-
-/// Marks the indexings of plain arrays of a known length whose index the range analysis keeps in
-/// bounds, such as `a[0]` of `int[] a = {1, 2}` or `a[i]` after `if (i < 3)` on `new int[3]`.
-fn constant_indexes(method: &Method, plain: &HashSet<String>, facts: &mut Facts) {
-    let mut lengths: HashMap<String, i64> = HashMap::new();
-    for stmt in &method.body {
-        visit_stmt(stmt, &mut |_| {}, &mut |s| {
-            if let Stmt::Local { name, init: Some(init), .. } = s
-                && plain.contains(name)
-            {
-                let length = match &init.kind {
-                    ExprKind::NewArray(sizes) => match sizes.as_slice() {
-                        [Expr { kind: ExprKind::Int(n), .. }] => Some(*n as i64),
-                        _ => None,
-                    },
-                    ExprKind::ArrayLit(items) => Some(items.len() as i64),
-                    _ => None,
-                };
-                if let Some(length) = length {
-                    lengths.insert(name.clone(), length);
-                }
-            }
-        });
-    }
-    let mut proven = Vec::new();
-    for stmt in &method.body {
-        visit_stmt(
-            stmt,
-            &mut |e| {
-                visit_expr(e, &mut |x| {
-                    let array = match &x.kind {
-                        ExprKind::Index(array, _)
-                        | ExprKind::Assign { target: Place::Index(array, _), .. }
-                        | ExprKind::IncDec { target: Place::Index(array, _), .. } => array,
-                        _ => return,
-                    };
-                    let ExprKind::Var(name) = &array.kind else { return };
-                    if let (Some(&length), Some(&(lo, hi))) =
-                        (lengths.get(name), facts.index_ranges.get(&x.id))
-                        && (lo > hi || (lo >= 0 && hi < length))
-                    {
-                        proven.push(x.id);
-                    }
-                })
-            },
-            &mut |_| {},
-        );
-    }
-    facts.in_bounds.extend(proven);
+    Some(OverArray { cond, array, index, body })
 }
 
 /// The reads `a[i]` in the body of a counting loop, when the body uses `a` only to read its
 /// elements and `i` only as their index, so that `for x in a.iter()` gives the same values.
-fn element_reads(c: &Counting) -> Option<Vec<ExprId>> {
+fn element_reads(c: &OverArray) -> Option<Vec<ExprId>> {
     let is = |e: &Expr, name: &str| matches!(&e.kind, ExprKind::Var(v) if v == name);
     let (mut array_mentions, mut array_uses, mut index_mentions) = (0, 0, 0);
     let mut reads = Vec::new();

@@ -15,6 +15,7 @@
 //! that stays within them on every path cannot overflow.
 
 use super::Facts;
+use super::constants::static_value;
 use crate::ast::*;
 use crate::types::binary_type;
 use std::collections::{HashMap, HashSet};
@@ -878,7 +879,15 @@ impl<'a> Analysis<'a> {
                 env.insert(target.clone(), Var { ty: var.ty, range });
                 if *prefix { range } else { current }
             }
-            ExprKind::NewArray(items) | ExprKind::ArrayLit(items) => {
+            ExprKind::NewArray(sizes) => {
+                // A size's values are kept like an index's: one that is never negative needs no check.
+                for size in sizes {
+                    let range = self.expr(size, env);
+                    self.indexed(size.id, range);
+                }
+                other
+            }
+            ExprKind::ArrayLit(items) => {
                 for item in items {
                     self.expr(item, env);
                 }
@@ -976,7 +985,11 @@ impl<'a> Analysis<'a> {
                 }
                 other
             }
-            ExprKind::This | ExprKind::Static { .. } => other,
+            ExprKind::Static { class, name } => match static_value(self.class, *class, name) {
+                Some(v) => Interval::point(v),
+                None => other,
+            },
+            ExprKind::This => other,
             ExprKind::Field { object, .. } => {
                 self.expr(object, env);
                 other

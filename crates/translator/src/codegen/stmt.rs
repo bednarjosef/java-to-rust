@@ -127,6 +127,9 @@ impl<'a> Gen<'a> {
         if self.optional_return() {
             return self.optional_to(value, self.ret);
         }
+        if self.facts.owned_returns.contains(&self.method) {
+            return Code::atom(self.owned(value));
+        }
         if let ExprKind::Var(name) = &value.kind
             && value.ty == Type::String
             && !self.borrowed.contains(name)
@@ -179,31 +182,12 @@ impl<'a> Gen<'a> {
             return;
         }
         if let Some(counted) = counting(init, cond, update, body) {
-            let ty = counted.ty;
-            let start = self.value(counted.from, ty);
-            let end = self.value(counted.to, ty);
-            let mut used = false;
-            visit_stmt(body, &mut |e| used |= mentions(e, counted.var), &mut |_| {});
-            let var = if used { self.local(counted.var) } else { "_".to_string() };
-            let start_text = if used && start.untyped && end.untyped {
-                let suffix = self.annotation(ty, rust_type(ty).to_string());
-                if suffix == rust_type(ty) { start.typed() } else { format!("{}{suffix}", start.text) }
-            } else {
-                start.at(ADD + 1)
-            };
-            let range =
-                format!("{start_text}{}{}", if counted.inclusive { "..=" } else { ".." }, end.at(ADD + 1));
-            let range = if counted.descending {
-                format!("({range}).rev()")
-            } else if counted.step > 1 {
-                format!("({range}).step_by({})", counted.step)
-            } else {
-                range
-            };
-            self.line(&format!("for {var} in {range} {{"));
-            self.loop_body(Loop::Plain, body, &[]);
-            self.line("}");
-            return;
+            if let Some(cond) = cond
+                && self.sliced_loop(cond, &counted, body)
+            {
+                return;
+            }
+            return self.range_loop(&counted, body);
         }
         // The loop variables stay in scope after the loop, which is harmless: Java forbids
         // using them there, and a later declaration of the same name shadows them.
@@ -232,12 +216,40 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
+    /// A counting loop as `for i in a..b`, `(a..b).rev()` or `(a..b).step_by(k)`.
+    pub(super) fn range_loop(&mut self, counted: &Counting<'a>, body: &'a Stmt) {
+        let ty = counted.ty;
+        let start = self.value(counted.from, ty);
+        let end = self.value(counted.to, ty);
+        let mut used = false;
+        visit_stmt(body, &mut |e| used |= mentions(e, counted.var), &mut |_| {});
+        let var = if used { self.local(counted.var) } else { "_".to_string() };
+        let start_text = if used && start.untyped && end.untyped {
+            let suffix = self.annotation(ty, rust_type(ty).to_string());
+            if suffix == rust_type(ty) { start.typed() } else { format!("{}{suffix}", start.text) }
+        } else {
+            start.at(ADD + 1)
+        };
+        let range =
+            format!("{start_text}{}{}", if counted.inclusive { "..=" } else { ".." }, end.at(ADD + 1));
+        let range = if counted.descending {
+            format!("({range}).rev()")
+        } else if counted.step > 1 {
+            format!("({range}).step_by({})", counted.step)
+        } else {
+            range
+        };
+        self.line(&format!("for {var} in {range} {{"));
+        self.loop_body(Loop::Plain, body, &[]);
+        self.line("}");
+    }
+
     pub(super) fn local_decl(&mut self, ty: Type, name: &str, init: Option<&'a Expr>, mutable: bool) {
         if self.optional_var(self.method, ty, name) {
             return self.optional_local(name, ty, init, mutable);
         }
         if let Some(written) = self.plain(name) {
-            self.plain_local(ty, name, init, written);
+            self.plain_local(ty, name, init, written || mutable);
             return;
         }
         let mutable = if mutable { "mut " } else { "" };
@@ -306,6 +318,13 @@ impl<'a> Gen<'a> {
     /// An expression evaluated for its effect, as a statement.
     pub(super) fn effect(&mut self, e: &'a Expr) {
         match &e.kind {
+            // A plain array takes over the array it is given.
+            ExprKind::Assign { op: None, target: Place::Var(target), value }
+                if self.plain(target).is_some() =>
+            {
+                let value = self.owned(value);
+                self.line(&format!("{} = {value};", self.local(target)));
+            }
             ExprKind::Assign { op, target: Place::Var(target), value } => {
                 let text = self.assignment(*op, target, e.ty, value, e.id);
                 self.line(&format!("{text};"));
