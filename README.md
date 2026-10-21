@@ -235,12 +235,12 @@ A small subset, end to end:
   `finally` replaces how the `try` ended. A failure of the runtime that a `catch` or a `finally`
   sees (a division by zero, an array index out of bounds, `charAt` or `substring` out of range, a
   malformed or `null` number string) is the standard exception Java throws, with Java's message;
-  elsewhere it ends the program as before. try-with-resources closes the program's own resources (a new object of
-  the program's class, or an existing variable of it, `try (r)`; a null one is not closed) in the
-  reverse order, before its `catch` clauses and `finally`; a `close`
-  that throws after the body threw is added to that exception as suppressed, and `getSuppressed`
-  returns it; `addSuppressed` of the exception itself or of `null` throws Java's
-  `IllegalArgumentException` or `NullPointerException`. A `throw` of a value that may be null throws
+  elsewhere it ends the program as before. try-with-resources closes the program's own resources
+  (a new object of the program's class, or an existing variable of it, `try (r)`; a null one is not
+  closed) in the reverse order, before its `catch` clauses and `finally`; a `close` that throws
+  after the body threw is added to that exception as suppressed, and `getSuppressed` returns it;
+  `addSuppressed` of the exception itself or of `null` throws Java's `IllegalArgumentException` or
+  `NullPointerException`. A `throw` of a value that may be null throws
   `NullPointerException`, and a `yield` or a constructor's `return` through a `finally` runs the
   `finally` first. A static initializer or a static field initializer that throws ends an uncaught
   program with `ExceptionInInitializerError`; where a `catch` of it, of `Error` or of `Throwable`
@@ -249,9 +249,9 @@ A small subset, end to end:
   Rejected for now, by name: try-with-resources over a library type (an `AutoCloseable` variable or
   lambda), catching or letting a `finally` see a null dereference, a negative array size, a failed
   cast or a failure of the library other than these, a `toString`, a constructor of an exception or
-  an enum that throws something a caller catches, a `finally` that sees a static initializer's
-  failure in a program that catches none of those classes, and `new AssertionError(message)`. The
-  design is in [docs/exceptions.md](docs/exceptions.md).
+  an enum that throws something a caller catches, and a `finally` that sees a static initializer's
+  failure in a program that catches none of those classes. The design is in
+  [docs/exceptions.md](docs/exceptions.md).
 - **Threads** are the platform's: a class that extends `Thread` and overrides `run`, or a
   `Thread` given a `Runnable` (a class or a lambda), with `start`, `join` (with and without a
   timeout), `isAlive`, `currentThread`, `getName`/`setName`, `setDaemon`/`isDaemon`, `getId`,

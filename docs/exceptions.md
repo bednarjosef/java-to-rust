@@ -685,5 +685,3 @@ Decisions that changed during the implementation, step by step.
   - The analysis takes the `Error` clause of a rewritten `<clinit>` to rethrow any `Error`, so a
     method may return a `Result` where it need not. An uncaught static initializer that is not
     rewritten also gets an entry point, which may do the same for its callers.
-  - `new AssertionError(message)` is rejected: `Standard.java` declares no `(String)`
-    constructor for it yet.
