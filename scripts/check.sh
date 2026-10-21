@@ -2,8 +2,13 @@
 # Everything CI checks, in its order: formatting, clippy with warnings as errors, all tests.
 # Prints only what fails. On success with a clean working tree, records the commit in
 # target/check-passed (the worker Stop hook reads it).
+# Results that cannot change until their inputs do (Java's output of each test program, javac's
+# trees, the runs of unchanged translations) are kept in CHECK_CACHE, by default
+# ~/.cache/java-to-rust-checks, shared by every worktree; CHECK_FRESH=1 does all the work again
+# and stores the results anew (see "Testing" in README.md).
 set -uo pipefail
 cd "$(dirname "$0")/.."
+export CHECK_CACHE=${CHECK_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/java-to-rust-checks}
 
 fail() { echo "check failed: $1"; exit 1; }
 
