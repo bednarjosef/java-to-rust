@@ -45,7 +45,9 @@ impl<'t> Lowering<'t> {
         ) {
             return Ok(Some(self.enum_universe(node)?));
         }
-        if (symbol.owner, symbol.name) == ("java.util.HashMap", "comparableClassFor") {
+        if matches!(symbol.owner, "java.util.HashMap" | "java.util.concurrent.ConcurrentHashMap")
+            && symbol.name == "comparableClassFor"
+        {
             let x = self.expr(node.list("arguments").next().expect("comparableClassFor has an argument"))?;
             return Ok(Some(ExprKind::Builtin(Builtin::ComparableClassFor, vec![x])));
         }

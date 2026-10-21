@@ -185,6 +185,7 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int"),
     ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.Class<?>,java.lang.String)long"),
     ("java.util.HashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
+    ("java.util.concurrent.ConcurrentHashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
 ];
 
 /// The methods that lowering replaces whatever their signature, as `REPLACED_METHODS`: the

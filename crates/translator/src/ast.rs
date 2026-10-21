@@ -833,7 +833,7 @@ pub enum Builtin {
     /// cast A to B`) unless `x` is null or `class.isInstance(x)`. `lower::classes` writes the cast
     /// that gives the value after it.
     ClassCheck,
-    /// `[x]`: `HashMap.comparableClassFor(x)`, the class of `x` if it says `implements
+    /// `[x]`: `HashMap.comparableClassFor(x)` (and `ConcurrentHashMap`'s, the same), the class of `x` if it says `implements
     /// Comparable` itself, else `null`; the JDK's reads the type argument through reflection.
     ComparableClassFor,
 }
