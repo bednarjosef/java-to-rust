@@ -314,8 +314,14 @@ impl<'m> Walk<'m> {
             Stmt::ForEach { name, array, body, .. } => {
                 // A for-each over a one-dimensional array reads its elements; one over an array
                 // of arrays borrows each row in turn, while the body leaves the array alone.
+                // A body that assigns the array itself leaves the loop holding the old one, a
+                // second name for it.
                 match &array.kind {
-                    ExprKind::Var(v) if self.types.get(v).is_some_and(|&ty| depth(ty) == 1) => {}
+                    ExprKind::Var(v) if self.types.get(v).is_some_and(|&ty| depth(ty) == 1) => {
+                        if assigns_any(std::slice::from_ref(&**body), v) {
+                            self.bad.insert(v.clone());
+                        }
+                    }
                     ExprKind::Var(v) if self.is_array(v) && !stmt_mentions(body, v) => {
                         self.scan.row_loops.push((v.clone(), name.clone()));
                     }
