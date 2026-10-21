@@ -83,6 +83,8 @@ struct Symbol<'t> {
     is_static: bool,
     /// Whether a method or constructor takes a variable number of arguments.
     varargs: bool,
+    /// Whether a method is `native`: the JVM implements it (see `natives.rs`).
+    native: bool,
     /// The declared type, such as `int` or, for a method, `(int,long)double`.
     ty: &'t str,
     /// The value of a compile-time constant variable, as text (`Character`s as their code unit).
@@ -131,6 +133,7 @@ impl<'t> Node<'t> {
             owner: s.str("owner"),
             is_static: s.0["static"].as_bool().unwrap_or(false),
             varargs: s.0["varargs"].as_bool().unwrap_or(false),
+            native: s.0["native"].as_bool().unwrap_or(false),
             ty: s.str("type"),
             constant: s.0.get("constant").and_then(Value::as_str),
         })
@@ -364,9 +367,13 @@ impl<'t> Lowering<'t> {
                 };
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
             }
-            "EXPRESSION_STATEMENT" => Stmt::Expr(self.expr(node.child("expression")?)?),
+            "EXPRESSION_STATEMENT" => match self.expr(node.child("expression")?)? {
+                // A native that does nothing here, such as `registerNatives()`, leaves no trace.
+                Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
+                e => Stmt::Expr(e),
+            },
             // Reachability skipped the branch that the condition guards (`program::never_true`).
-            "IF" if crate::program::never_true(&node.0["condition"]) => match node.get("elseStatement") {
+            "IF" if self.never_true(node) => match node.get("elseStatement") {
                 Some(n) => self.single_stmt(n)?,
                 None => Stmt::Block(Vec::new()),
             },
@@ -499,6 +506,16 @@ impl<'t> Lowering<'t> {
                     ExprKind::Cast(ty, Box::new(value))
                 }
             }
+            // As with `if`, reachability skipped the branch that the condition guards.
+            "CONDITIONAL_EXPRESSION" if self.never_true(node) => {
+                let ty = self.ty(node, node.java_type())?;
+                let value = self.convert(self.expr(node.child("falseExpression")?)?, ty);
+                // The branch converts to the type of the whole, as `cond ? 1 : 2L` is a `long`.
+                if value.ty == ty {
+                    return Ok(value);
+                }
+                ExprKind::Cast(ty, Box::new(value))
+            }
             "CONDITIONAL_EXPRESSION" => {
                 let ty = self.ty(node, node.java_type())?;
                 ExprKind::Conditional(
@@ -605,6 +622,9 @@ impl<'t> Lowering<'t> {
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
+        if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
+            return Ok(kind);
+        }
         let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {

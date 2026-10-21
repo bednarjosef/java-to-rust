@@ -213,6 +213,47 @@ impl FdTable {
             *slot = None;
         }
     }
+
+    /// `FileDescriptor.getAppend(fd)`: whether the descriptor writes at the end of its file
+    /// (`O_APPEND`), as the JVM's `fcntl(fd, F_GETFL)` tells. Standard output appends when the
+    /// shell opened it with `>>`. For a descriptor that is not open `fcntl` fails with -1, whose
+    /// bits include `O_APPEND`, so Java answers `true` there, and so does this. Where the flags
+    /// cannot be read (no `/proc`, as outside Linux) the answer is `false`.
+    pub fn append(&self, fd: i32) -> bool {
+        let entry = if fd < 0 { None } else { self.entries.get(fd as usize).and_then(Option::as_ref) };
+        match entry {
+            Some(entry) => os_descriptor(entry).and_then(open_flags).is_some_and(|f| f & O_APPEND != 0),
+            None => true,
+        }
+    }
+}
+
+/// Linux's `O_APPEND`.
+const O_APPEND: u32 = 0o2000;
+
+/// The operating system's descriptor behind an entry.
+#[cfg(unix)]
+fn os_descriptor(entry: &Entry) -> Option<i32> {
+    use std::os::unix::io::AsRawFd;
+    Some(match entry {
+        Entry::Stdin => 0,
+        Entry::Stdout => 1,
+        Entry::Stderr => 2,
+        Entry::Read(file) | Entry::Write(file) => file.as_raw_fd(),
+    })
+}
+
+#[cfg(not(unix))]
+fn os_descriptor(_: &Entry) -> Option<i32> {
+    None
+}
+
+/// The flags an open descriptor of this process was opened with (`F_GETFL`), from Linux's
+/// `/proc/self/fdinfo`, where they are written in octal.
+fn open_flags(fd: i32) -> Option<u32> {
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).ok()?;
+    let flags = info.lines().find_map(|line| line.strip_prefix("flags:"))?;
+    u32::from_str_radix(flags.trim(), 8).ok()
 }
 
 fn with<T>(f: impl FnOnce(&mut FdTable) -> T) -> T {
@@ -256,6 +297,17 @@ pub fn fd_write_bytes(fd: i32, buf: &[i8], off: i32, len: i32) -> Result<(), Fai
 
 pub fn fd_close(fd: i32) {
     with(|t| t.close(fd))
+}
+
+/// `FileDescriptor.getAppend(fd)`, see `FdTable::append`.
+pub fn fd_append(fd: i32) -> bool {
+    with(|t| t.append(fd))
+}
+
+/// `FileDescriptor.getHandle(fd)`: the Windows handle of a descriptor, which on every other
+/// system is -1.
+pub fn fd_handle(_fd: i32) -> i64 {
+    -1
 }
 
 #[cfg(test)]
@@ -357,6 +409,26 @@ mod tests {
         t.close(r);
         assert_eq!(t.read(r), Err(closed()));
         assert_eq!(t.read(42), Err(closed()));
+    }
+
+    #[test]
+    fn append_is_the_mode_the_descriptor_was_opened_in() {
+        let name = temp_file("append_mode", "mode.txt");
+        let mut t = table(b"");
+        let plain = t.open_write(&name, false).unwrap();
+        let appending = t.open_write(&name, true).unwrap();
+        let reading = t.open_read(&name).unwrap();
+        if std::path::Path::new("/proc/self/fdinfo").is_dir() {
+            assert!(t.append(appending));
+        }
+        assert!(!t.append(plain));
+        assert!(!t.append(reading));
+        t.close(appending);
+        // `fcntl` fails on a descriptor that is not open, and Java reads that as `true`.
+        assert!(t.append(appending));
+        assert!(t.append(42));
+        assert!(t.append(-1));
+        assert_eq!(fd_handle(STDOUT_FD), -1);
     }
 
     #[test]
