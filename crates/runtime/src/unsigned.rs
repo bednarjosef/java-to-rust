@@ -4,7 +4,7 @@
 
 use crate::character_classes::digit;
 use crate::integer_parse::{check_radix, for_input};
-use crate::throw;
+use crate::{Exception, throw, uncaught};
 
 /// Java's `Integer.divideUnsigned` and `Long.divideUnsigned`.
 pub fn divide_unsigned(a: u64, b: u64) -> u64 {
@@ -46,8 +46,13 @@ pub fn to_unsigned_string(value: u64, radix: i32) -> String {
 /// Java's `parseUnsignedInt(s, radix)` (`bits` 32) and `parseUnsignedLong(s, radix)` (`bits` 64),
 /// which throw `NumberFormatException` for what Java rejects. `None` is a null string.
 pub fn parse_unsigned(s: Option<&str>, radix: i32, bits: u32) -> u64 {
-    let Some(s) = s else { throw("java.lang.NumberFormatException", "Cannot parse null string") };
-    read(s, radix, bits).unwrap_or_else(|message| throw("java.lang.NumberFormatException", &message))
+    try_parse_unsigned(s, radix, bits).unwrap_or_else(uncaught)
+}
+
+/// The checked form of `parse_unsigned`.
+pub fn try_parse_unsigned(s: Option<&str>, radix: i32, bits: u32) -> Result<u64, Exception> {
+    let Some(s) = s else { return Err(Exception::new("java.lang.NumberFormatException", "Cannot parse null string")) };
+    read(s, radix, bits).map_err(|message| Exception::new("java.lang.NumberFormatException", message))
 }
 
 /// The value of an unsigned string: a leading `+` is allowed, a leading `-` is not, and each digit

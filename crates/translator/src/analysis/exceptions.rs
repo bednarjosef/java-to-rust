@@ -743,7 +743,10 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             ArraysOp::Equals | ArraysOp::HashCode | ArraysOp::SortAll | ArraysOp::BinarySearch,
         ) => None,
         Builtin::Arrays(ArraysOp::DeepToString | ArraysOp::Clone) => None,
-        Builtin::Bits(BitsOp::ParseRadix, _) => Some("java.lang.NumberFormatException"),
+        Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _) => Some("java.lang.NumberFormatException"),
+        Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _) => {
+            Some("java.lang.NumberFormatException")
+        }
         Builtin::EnumValueOf => Some("java.lang.IllegalArgumentException"),
         Builtin::Bits(..) => None,
         Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => None,
@@ -924,6 +927,10 @@ fn runtime_failures(
                 if matches!(builtin, Builtin::CodePoint(CodePointOp::ToCharsInto)) {
                     out.push(("java.lang.ArrayIndexOutOfBoundsException", "this call of the library", true, x.id));
                 }
+                // A begin or end outside the string throws, as `parseInt(s, begin, end, radix)` does.
+                if matches!(builtin, Builtin::Bits(BitsOp::ParseRange, _) | Builtin::Unsigned(UnsignedOp::ParseRange, _)) {
+                    out.push(("java.lang.IndexOutOfBoundsException", "this call of the library", true, x.id));
+                }
                 // A null argument throws, except where the method takes null (an `equals`, the
                 // elements of `join`, the text of `Arrays.toString`).
                 let takes_null = matches!(
@@ -947,7 +954,8 @@ fn runtime_failures(
                     let checked = matches!(
                         builtin,
                         Builtin::String(StringOp::Substring | StringOp::FromChars)
-                            | Builtin::Bits(BitsOp::ParseRadix, _)
+                            | Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _)
+                            | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
                             | Builtin::CodePoint(CodePointOp::ToCharsInto)
                             | Builtin::EnumValueOf
                     );

@@ -29,6 +29,7 @@ mod float_parse;
 pub mod format;
 mod integer;
 mod integer_parse;
+mod parse_range;
 mod java_arrays;
 mod math;
 mod natives;
@@ -56,7 +57,10 @@ pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
 pub use format::{Arg, format};
 pub use integer::*;
-pub use integer_parse::{parse_radix, try_parse_radix};
+pub use integer_parse::{parse_radix, parse_small_radix, try_parse_radix, try_parse_small_radix};
+pub use parse_range::{
+    parse_range, parse_unsigned_range, try_parse_range, try_parse_unsigned_range,
+};
 pub use java_arrays::*;
 pub use math::*;
 pub use natives::*;
@@ -67,6 +71,7 @@ pub use string::*;
 pub use system::*;
 pub use unsigned::{
     compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,
+    try_parse_unsigned,
 };
 pub use vm::*;
 

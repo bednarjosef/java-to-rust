@@ -596,7 +596,7 @@ impl<'a> Gen<'a> {
                 self.enum_builtin(builtin, args, ty, id)
             }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
-            Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty),
+            Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty, id),
             Builtin::CodePoint(op) => self.code_point_builtin(op, args, id),
             Builtin::Charset(op) => self.charset_builtin(op, args),
             Builtin::CharNumericValue => self.char_numeric_value(args),

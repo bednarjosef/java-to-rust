@@ -513,6 +513,9 @@ impl<'a> Gen<'a> {
             let radix = self.int_arg(&args[1]);
             return self.may_fail(id, "parse_radix", &format!("::<{rust}>"), &format!("Some({s}), {radix}"));
         }
+        if op == BitsOp::ParseRange {
+            return self.parse_range_builtin(kind, args, id);
+        }
         let v = self.value(&args[0], kind);
         let recv = self.recv(&v, kind);
         let format = |spec: &str| {
@@ -558,7 +561,7 @@ impl<'a> Gen<'a> {
                 let f = self.runtime("to_string_radix");
                 Code::atom(format!("{f}({wide}, {radix})"))
             }
-            BitsOp::ParseRadix => unreachable!("handled above"),
+            BitsOp::ParseRadix | BitsOp::ParseRange => unreachable!("handled above"),
         }
     }
 }

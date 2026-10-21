@@ -26,6 +26,7 @@ mod math;
 mod names;
 mod null;
 mod object_clone;
+mod parse_range;
 mod primitives;
 mod statics;
 mod stmt;
