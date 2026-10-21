@@ -86,7 +86,7 @@ impl Budget {
             return false;
         }
         let more = (kept - self.granted.get()).div_ceil(GRANT) * GRANT;
-        let taken = GRANTED.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |granted| {
+        let taken = GRANTED.try_update(Ordering::Relaxed, Ordering::Relaxed, |granted| {
             (granted + more <= PROCESS_BYTES).then_some(granted + more)
         });
         if taken.is_err() {
