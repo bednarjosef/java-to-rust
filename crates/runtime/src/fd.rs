@@ -286,8 +286,14 @@ impl FdTable {
     /// the runtime's buffered `out`.
     pub fn write(&mut self, fd: i32, bytes: &[u8]) -> Result<(), Failure> {
         match self.entries.get_mut(fd as usize).and_then(Option::as_mut) {
-            Some(Entry::Stdout) => Ok(out::raw_write(STDOUT_FD, bytes)),
-            Some(Entry::Stderr) => Ok(out::raw_write(STDERR_FD, bytes)),
+            Some(Entry::Stdout) => {
+                out::raw_write(STDOUT_FD, bytes);
+                Ok(())
+            }
+            Some(Entry::Stderr) => {
+                out::raw_write(STDERR_FD, bytes);
+                Ok(())
+            }
             Some(Entry::Write(file)) => file.write_all(bytes).map_err(io_failure),
             Some(_) => Err(bad_descriptor()),
             None => Err(closed()),
