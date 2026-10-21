@@ -22,6 +22,7 @@ mod objects;
 mod real_generics;
 mod statics;
 mod strings;
+mod stubs;
 mod unsigned;
 
 use crate::ast::*;

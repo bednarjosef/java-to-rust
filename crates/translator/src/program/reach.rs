@@ -7,10 +7,11 @@
 //! declaration reachable in turn: a worklist that runs until nothing new is found.
 
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod by_name;
 mod sequential;
+mod stubs;
 
 pub use by_name::created_by_name;
 
@@ -52,6 +53,10 @@ pub struct Reach {
     /// where reachability stops (`outside`): those that the sources do not have, and those whose
     /// units javac has not given yet when it gives them as they are asked for (`javac::Session`).
     pub missing: BTreeSet<String>,
+    /// Classes that are not translated but that reachable code uses as the types of variables,
+    /// which are only ever null, with the instance methods that it calls on them, by name and
+    /// signature (`stubs.rs`).
+    pub stubs: BTreeMap<String, BTreeSet<(String, String)>>,
 }
 
 impl Reach {
@@ -695,6 +700,9 @@ impl<'t> Walk<'t> {
                         )));
                     }
                 }
+                if text(value, "kind") == "VARIABLE" {
+                    self.stub_type(text(&value["symbol"], "type"));
+                }
                 if text(value, "kind") == "STRING_LITERAL"
                     && let Some(literal) = value["value"].as_str()
                 {
@@ -733,6 +741,7 @@ impl<'t> Walk<'t> {
         let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
         match text(symbol, "kind") {
             "METHOD" | "CONSTRUCTOR" => {
+                self.stub_method(symbol);
                 self.work.push(Item::Method((owner, name, text(symbol, "type").to_string())));
             }
             "FIELD" | "ENUM_CONSTANT" => self.work.push(Item::Field((owner, name))),
