@@ -101,7 +101,7 @@ fn programs(root: &Path) -> Vec<Program> {
     let mut out = Vec::new();
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(root).unwrap().map(|e| e.unwrap().path()).collect();
     dirs.sort();
-    for dir in dirs.into_iter().filter(|d| d.is_dir()) {
+    for dir in dirs.into_iter().filter(|d| d.is_dir() && !d.ends_with("whole-program")) {
         let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().path())
