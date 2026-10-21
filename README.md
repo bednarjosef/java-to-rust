@@ -831,6 +831,10 @@ as its command-line arguments, on `java` and as the translated binary alike.
   translator's scale, output in several crates, reading build tools, dependencies' sources,
   generated sources, resources and tests, the library coverage they lean on, and working
   through their blockers.
+- [docs/reflection-and-plugins.md](docs/reflection-and-plugins.md): why the translation stays
+  closed-world, and how code reached by name still runs: a reflection table built from constant
+  names, `ServiceLoader` lists and a recording run on the JVM; plugins translated with the
+  program; open doors for native plugins loaded at run time; an embedded JVM as the last resort.
 - [docs/closures-and-nested-classes.md](docs/closures-and-nested-classes.md): captures, inner,
   local and anonymous classes, lambdas, method references and for-each over `Iterable`, after
   the object model.
