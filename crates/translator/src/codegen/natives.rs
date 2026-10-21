@@ -145,6 +145,18 @@ impl<'a> Gen<'a> {
                 call(self, "is_interrupted", vec![tid])
             }
             Native::ThreadClearInterrupt => call(self, "thread_interrupted", vec![]),
+            Native::InstallUncaught => self.install_uncaught(args),
+            Native::UncaughtException => {
+                let ty = self.ty_name(ty);
+                call(self, &format!("pending_uncaught::<{ty}>"), vec![])
+            }
+            Native::PrintUncaught => {
+                let name = self.thread_name(&args[0]);
+                let e = self.value(&args[1], args[1].ty).text;
+                let e =
+                    if self.nullable(&args[1]) { format!("{}({e})", self.runtime("non_null")) } else { e };
+                call(self, "print_uncaught", vec![format!("&{name}"), format!("&{e}")])
+            }
             Native::ThreadRename => {
                 let tid = self.value(&args[0], Type::Long).text;
                 let name = format!("&{}", self.thread_name(&args[1]));
@@ -211,6 +223,46 @@ impl<'a> Gen<'a> {
         Code::atom(format!(
             "{start}({tid}, {name}, {daemon}, {{ let {local} = {handle}; move || {{ let {local} = &{local}; \
              {set}({local}.clone()); {body}; }} }})"
+        ))
+    }
+
+    /// `Thread.installUncaught0()` with the call `Thread.dispatchUncaught()` that lowering added:
+    /// the runtime gets two functions. The first makes the exception that ends a thread (a value
+    /// of `Throwable`, or a failure of the runtime of a class the program has objects of) the
+    /// pending one that `uncaught0()` returns, and runs the call, on that thread; the second names
+    /// the class of an exception that the handler itself lets escape.
+    fn install_uncaught(&mut self, args: &'a [Expr]) -> Code {
+        let throwable = self.throwable_type();
+        let attempts = std::mem::take(&mut self.attempts);
+        let throwing = std::mem::replace(&mut self.throwing, false);
+        let body = self.expr(&args[0]).text;
+        self.attempts = attempts;
+        self.throwing = throwing;
+        let raised: Vec<String> =
+            self.facts.raised_classes.iter().map(|&c| rust_string(&self.class.types[c].name)).collect();
+        let runtime = if raised.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " else if let Some(e) = e.downcast_ref::<{}>().filter(|e| matches!(e.class, {})) \
+                 {{ {throwable}::from(e.clone()) }}",
+                self.runtime("Exception"),
+                raised.join(" | ")
+            )
+        };
+        let t = self.class.type_index("java.lang.Throwable").expect("the program has `Throwable`");
+        let arms: Vec<String> = self
+            .enum_variants(t)
+            .into_iter()
+            .map(|c| format!("{}(_) => {}", self.variant(t, c), rust_string(&self.java_class_name(c, false))))
+            .collect();
+        let (set, pending) = (self.runtime("set_uncaught_hook"), self.runtime("set_pending_uncaught"));
+        Code::atom(format!(
+            "{set}(|e: &dyn std::any::Any| {{ let uncaught: {throwable} = if let Some(e) = \
+             e.downcast_ref::<{throwable}>() {{ e.clone() }}{runtime} else {{ return false; }}; \
+             {pending}(uncaught); {body}; true }}, |e: &dyn std::any::Any| \
+             e.downcast_ref::<{throwable}>().map(|e| String::from(match e {{ {} }})))",
+            arms.join(", ")
         ))
     }
 

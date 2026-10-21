@@ -61,7 +61,7 @@ use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
 pub use census::panic_message;
 pub(crate) use clinit_errors::rewritten_clinit;
-pub use exceptions::{is_standard, standard_names, standard_subclass};
+pub use exceptions::{is_standard, standard_local_name, standard_names, standard_subclass};
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;

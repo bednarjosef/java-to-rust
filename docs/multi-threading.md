@@ -1245,8 +1245,9 @@ Decisions that change during the implementation are recorded here, milestone by 
 
 ### Threads by subclassing `Thread`
 
-- **`Thread` is smaller than 5.1**: no `ThreadGroup`, interrupts, state, handlers,
-  `ThreadLocal` or `Duration` sleep yet; each lands with the milestone that needs it. `join` is
+- **`Thread` is smaller than 5.1**: no state, `ThreadLocal` or `Duration` sleep yet, and
+  `ThreadGroup` only as far as handlers need it (interrupts and handlers have their own sections
+  below); each lands with the milestone that needs it. `join` is
   the native `join0` on the runtime's record (a condvar on its alive flag), not `while
   (isAlive()) wait()`, because monitors come later. `start` passes the new thread the `Thread`
   object itself: `start0` gets a fifth argument, the call `t.run()`, which codegen puts in the
@@ -1318,6 +1319,36 @@ Decisions that change during the implementation are recorded here, milestone by 
 - **Found on the way**: the `Link` of an enum whose variants are thread-shared pushed `Arc`s with
   the `Rc` form; it now uses `Chain::push_shared` for them (a lambda run by a thread that
   captures a `Thread`).
+
+### Uncaught-exception handlers
+
+- **The runtime calls the translation back.** `setUncaughtExceptionHandler` and
+  `setDefaultUncaughtExceptionHandler` call the native `installUncaught0`, which hands the runtime
+  a function (`java::set_uncaught_hook`) that turns what ends a thread into a `Throwable`, keeps it
+  for `uncaught0()` and runs `Thread.dispatchUncaught()`, which is
+  `currentThread().dispatchUncaughtException(uncaught0())` in `Threads.java`: the thread's handler,
+  else its group, whose `uncaughtException` goes to the parent, else the default handler, else
+  `printUncaught0`, the message the runtime printed before. Until a program installs a handler,
+  `java::die` prints as before, and a program that never sets one has no hook at all.
+- **What a handler sees**: an exception that the program throws, and a failure of the runtime
+  (an index, a division, a cast) whose class lowering declares; in a program that installs a
+  handler, every class of `RAISED` whose operation the program uses is declared, as if a `catch`
+  could see it. A failure of the runtime without a declared class skips the handlers and ends
+  the thread with the message.
+- **A handler that throws** ends the thread with the JVM's `Exception: <class> thrown from the
+  UncaughtExceptionHandler in thread "<name>"` (`DISPATCHING` marks the thread while its handler
+  runs). `main`'s uncaught exception goes through the same chain and the program then exits
+  with 1, as Java's does.
+- **Thread groups only as far as handlers observe them**: a group has a name, a parent and
+  `maxpri` 10, prints as `java.lang.ThreadGroup[name=main,maxpri=10]`, and a thread joins the
+  group of the thread that creates it (`main`, whose parent is `system`); a thread that has
+  ended has no group and no handler. `Thread.group` is null for the main group, so a program
+  that never creates a group only gains a field that stays null.
+- **Nested classes in the templates**: `Thread.UncaughtExceptionHandler` made the selection of
+  template members declare nested types with their outer class, keep the interfaces a used
+  class implements, the abstract methods of an interface the program uses, and the methods of
+  a class whose constructor is used that implement a used interface method
+  (`ThreadGroup.uncaughtException`).
 
 ### Volatile fields and the atomic natives
 
