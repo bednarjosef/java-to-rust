@@ -29,6 +29,7 @@ mod initializers;
 mod java_arrays;
 mod java_objects;
 mod natives;
+mod patterns;
 mod primitives;
 mod program;
 mod switch;
@@ -190,6 +191,8 @@ struct Lowering<'t> {
     real: real_generics::Real,
     /// Those of `real` that lowering found cannot be: the program is lowered again without them.
     failed: RefCell<real_generics::Real>,
+    /// The pattern variables in scope that name a value without testing it (see `patterns`).
+    aliases: RefCell<Vec<patterns::Alias>>,
 }
 
 impl<'t> Lowering<'t> {
@@ -437,7 +440,10 @@ impl<'t> Lowering<'t> {
             "CHAR_LITERAL" => self.char_literal(node)?,
             "FLOAT_LITERAL" => self.float_literal(node)?,
             "NULL_LITERAL" => ExprKind::Null,
-            "IDENTIFIER" => self.name(node)?,
+            "IDENTIFIER" => match self.alias(node) {
+                Some(value) => value,
+                None => self.name(node)?,
+            },
             // javac folds the minus sign into integer literals only; fold it into doubles too.
             "UNARY_MINUS" if node.child("expression")?.kind() == "DOUBLE_LITERAL" => {
                 ExprKind::Double(-self.number::<f64>(node.child("expression")?)?)

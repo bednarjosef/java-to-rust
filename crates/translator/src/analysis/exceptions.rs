@@ -781,7 +781,11 @@ fn runtime_failures(
                 | BoxedOp::Logical(_),
                 _,
             ) => {}
-            Builtin::NullCheck => out.push((NPE, "this synchronized", false)),
+            Builtin::NullCheck | Builtin::NullChecked | Builtin::Unmatched => {
+                if null(&args[0]) {
+                    out.push((NPE, "this null check", false));
+                }
+            }
             _ => {
                 // A null argument throws, except where the method takes null (an `equals`, the
                 // elements of `join`, the text of `Arrays.toString`).

@@ -390,12 +390,13 @@ impl<'a> Gen<'a> {
                 let outer = std::mem::replace(&mut self.guarded, false);
                 let cond = self.condition(cond);
                 self.guarded = outer;
-                let (a, b) = if self.nullable(e) {
-                    (self.optional(a), self.optional(b))
-                } else {
-                    (self.value(a, e.ty), self.value(b, e.ty))
-                };
-                let text = |a: String, b: String| format!("if {cond} {{ {a} }} else {{ {b} }}");
+                let chain = std::mem::replace(&mut self.chain, false);
+                let a = if self.nullable(e) { self.optional(a) } else { self.value(a, e.ty) };
+                self.chain = matches!(b.kind, ExprKind::Conditional(..));
+                let lines = chain || self.chain;
+                let b = if self.nullable(e) { self.optional(b) } else { self.value(b, e.ty) };
+                self.chain = chain;
+                let text = |a: String, b: String| self.if_else(&cond, &a, &b, lines);
                 if a.untyped && b.untyped {
                     // As for literals, inference gives the branches `i32` or `f64` unless the
                     // type is written.
@@ -532,6 +533,29 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// `if head { a } else { b }`; with `lines`, a link of a chain `if .. else if .. else ..`, on
+    /// lines of their own.
+    pub(super) fn if_else(&self, head: &str, a: &str, b: &str, lines: bool) -> String {
+        if !lines {
+            return format!("if {head} {{ {a} }} else {{ {b} }}");
+        }
+        let pad = "    ".repeat(self.indent);
+        let otherwise = if b.starts_with("if ") {
+            format!("else {b}")
+        } else {
+            format!(
+                "else {{
+{pad}    {b}
+{pad}}}"
+            )
+        };
+        format!(
+            "if {head} {{
+{pad}    {a}
+{pad}}} {otherwise}"
+        )
+    }
+
     pub(super) fn builtin(&mut self, builtin: Builtin, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
         match builtin {
             Builtin::ArraysToString | Builtin::ArraysFill | Builtin::ArraysSort | Builtin::ArraysCopyOf => {
@@ -629,6 +653,8 @@ impl<'a> Gen<'a> {
             Builtin::Builder(op) => self.builder_call(op, args),
             Builtin::Format => self.format_builtin(args),
             Builtin::ObjectsEquals => self.objects_equals(args),
+            Builtin::NullChecked => self.null_checked(args),
+            Builtin::Unmatched => self.unmatched(args),
             Builtin::ObjectsHashCode => self.objects_hash_code(args),
             Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args, id),
         }

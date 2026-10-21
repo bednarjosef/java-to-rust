@@ -140,7 +140,12 @@ impl<'a> Gen<'a> {
                 };
                 let parts = args
                     .iter()
-                    .map(|a| if a.ty == Type::Int { self.int_arg(a) } else { self.text_ref(a) })
+                    .map(|a| match a.ty {
+                        Type::Int => self.int_arg(a),
+                        // An `Integer` count is unboxed.
+                        Type::Boxed(Type::Int) => self.value(a, Type::Int).text,
+                        _ => self.text_ref(a),
+                    })
                     .collect();
                 call(self, f, parts)
             }

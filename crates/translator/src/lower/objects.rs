@@ -49,6 +49,7 @@ impl<'t> Lowering<'t> {
             object: None,
             real: Default::default(),
             failed: Default::default(),
+            aliases: Default::default(),
         }
     }
 

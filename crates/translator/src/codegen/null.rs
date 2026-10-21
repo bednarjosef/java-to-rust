@@ -462,10 +462,14 @@ impl<'a> Gen<'a> {
                 (head, a, b, narrowed)
             }
         };
+        let chain = std::mem::replace(&mut self.chain, false);
         let non_null = arm(self, non_null);
         self.unnarrow(narrowed);
+        self.chain = matches!(other.kind, ExprKind::Conditional(..));
+        let lines = chain || self.chain;
         let other = arm(self, other);
-        let text = format!("if {head} {{ {} }} else {{ {} }}", non_null.text, other.text);
+        self.chain = chain;
+        let text = self.if_else(&head, &non_null.text, &other.text, lines);
         let mut code = Code::new(text, LOWEST);
         code.untyped = non_null.untyped && other.untyped;
         Some(code)

@@ -16,8 +16,9 @@
 //!
 //! A member the record declares itself is kept. An accessor is written only when something calls
 //! it or an interface of the record declares it, `hashCode` only when it is called (directly or
-//! through a record holding this one) or the program uses `Object`, and `equals` only when the
-//! program uses `Object`, which every call of it does: whatever else would be dead code. Written
+//! through a record holding this one) or `Object`'s may run, and `equals` only when `Object`'s
+//! may run (every call of it is one): whatever else would be dead code. `Object`'s methods may
+//! run when the program uses `Object` and calls a method of the name, or `java.util`. Written
 //! members carry `"synthetic": true`, and the calls of `java.util.Objects` they make
 //! `"implicit": true` (they do not make the program use `Object`).
 
@@ -103,13 +104,22 @@ impl Survey {
         }
     }
 
-    /// The records whose `hashCode` runs: those it is called on, every record when `Object` is
-    /// used, and the records held by those.
+    /// Whether `Object`'s method `name` may run on a record: the program uses `Object`, and calls a
+    /// method of that name or the library of `java.util`, which calls it on the objects it holds.
+    fn runs(&self, name: &str) -> bool {
+        self.uses_object
+            && self.called.iter().any(|(owner, called)| called == name || owner.starts_with("java.util."))
+    }
+
+    /// The records whose `hashCode` runs: those it is called on, every record when `Object`'s may
+    /// run, and the records held by those.
     fn hashed_closure(&mut self) {
         let mut work: Vec<String> = self
             .records
             .keys()
-            .filter(|r| self.uses_object || self.called.contains(&((*r).clone(), "hashCode".to_string())))
+            .filter(|r| {
+                self.runs("hashCode") || self.called.contains(&((*r).clone(), "hashCode".to_string()))
+            })
             .cloned()
             .collect();
         while let Some(record) = work.pop() {
@@ -309,7 +319,7 @@ fn complete_record(record: &mut Value, survey: &Survey) {
             && text(m, "name") == "equals"
             && matches!(params(m), [p] if text(&p["symbol"], "type") == "java.lang.Object")
     });
-    if !declares_equals && survey.uses_object {
+    if !declares_equals && survey.runs("equals") {
         let owner = "equals(java.lang.Object)";
         let param = json!({
             "kind": "VARIABLE", "line": at.line, "column": at.column, "name": "other",
