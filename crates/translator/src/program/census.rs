@@ -4,7 +4,9 @@
 //!
 //! Lowering records an error in a method, a constructor or a lambda and lowers a stub in its place,
 //! with its signature and a body that never runs; an error in a field initializer or an
-//! initializer block leaves that initializer out (`lower::census_lower_program`). An error of an
+//! initializer block leaves that initializer out (`lower::census_lower_program`). As in a
+//! translation, only what can run counts: the methods that cannot run (`analysis::live_methods`)
+//! get a body that never runs, and what lowering rejected in them is left out. An error of an
 //! analysis or of the generator, which only has a line and column, stubs the methods whose code
 //! is at that position, in any file (or drops the field initializer there), and the analyses and
 //! the generator run again. The generator and the analysis of exceptions report every error they
@@ -69,14 +71,20 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
             units: Vec::new(),
         }
     });
-    let mut rejections: Vec<Rejection> = lowered
-        .rejected
-        .into_iter()
-        .map(|r| Rejection { unit: r.unit, anchor: r.anchor, error: r.error })
-        .collect();
+    let rejection = |r: lower::Rejected| Rejection { unit: r.unit, anchor: r.anchor, error: r.error };
+    let mut rejections = Vec::new();
     let fatal = match lowered.class {
-        Err((unit, error)) => Some(Rejection { unit, anchor: None, error }),
-        Ok(mut class) => phase("analyze", || analyse(&mut class, &lowered.units, &mut rejections)),
+        Err((unit, error)) => {
+            rejections.extend(lowered.rejected.into_iter().map(rejection));
+            Some(Rejection { unit, anchor: None, error })
+        }
+        // As a translation does, only what can run counts (the unresolved calls are found again
+        // below, where they are stubbed).
+        Ok(mut class) => {
+            let (running, _) = phase("live methods", || super::narrow(&mut class, lowered.rejected));
+            rejections.extend(running.into_iter().map(rejection));
+            phase("analyze", || analyse(&mut class, &lowered.units, &mut rejections))
+        }
     };
     std::panic::set_hook(hook);
     let scan = survey::scan(&units, &reach, program, &files);

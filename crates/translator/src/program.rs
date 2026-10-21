@@ -103,45 +103,55 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Str
 }
 
 /// Keeps the methods of `class` that can run (`analysis::live_methods`) and gives the others a
-/// body that never runs; the first piece of code that lowering rejected and that can run, if
-/// there is one. When the methods that can run are not known, every rejection can run.
+/// body that never runs; the first piece of code that lowering rejected and that can run, or
+/// else the first call that lowering left unresolved and that can run, if there is one.
 fn keep_live(class: &mut crate::ast::Class, rejected: Vec<lower::Rejected>) -> Result<(), lower::Rejected> {
+    let (running, unresolved) = narrow(class, rejected);
+    let unresolved = unresolved.into_iter().map(|error| lower::Rejected {
+        unit: None,
+        anchor: None,
+        error,
+        ty: 0,
+        method: None,
+    });
+    running.into_iter().chain(unresolved).next().map_or(Ok(()), Err)
+}
+
+/// The pieces of code that lowering rejected (`rejected`, stubs in `class`) that can run, and
+/// the calls that lowering left unresolved that can run; the methods that cannot run get a body
+/// that never runs (`analysis::live_methods::prune`). When the methods that can run are not
+/// known, every rejection can run and nothing changes (and the unresolved calls are not looked
+/// for).
+fn narrow(
+    class: &mut crate::ast::Class,
+    rejected: Vec<lower::Rejected>,
+) -> (Vec<lower::Rejected>, Vec<Error>) {
     let live = match analysis::live_methods::live_methods(class) {
         Ok(live) => live,
         Err(unknown) => {
             if crate::timings::enabled() {
                 eprintln!("timing: live methods: not known for {unknown}, {} rejections", rejected.len());
             }
-            return rejected.into_iter().next().map_or(Ok(()), Err);
+            return (rejected, Vec::new());
         }
     };
     let distinct = |rejected: &[lower::Rejected]| {
         rejected.iter().map(|r| r.error.message.as_str()).collect::<std::collections::HashSet<_>>().len()
     };
     let (total, distinct_total) = (rejected.len(), distinct(&rejected));
-    let mut running: Vec<lower::Rejected> =
-        rejected.into_iter().filter(|r| live.runs(r.ty, r.method)).collect();
-    // A call that lowering left unresolved is rejected where it can run.
-    running.extend(live.unresolved.iter().map(|error| lower::Rejected {
-        unit: None,
-        anchor: None,
-        error: Error { pos: error.pos, message: error.message.clone() },
-        ty: 0,
-        method: None,
-    }));
+    let running: Vec<lower::Rejected> = rejected.into_iter().filter(|r| live.runs(r.ty, r.method)).collect();
     if crate::timings::enabled() {
-        let (live, methods) = (live.methods.len(), class.methods.len());
         let (count, kinds) = (running.len(), distinct(&running));
         eprintln!(
-            "timing: live methods: {live} of {methods}; {total} rejections ({distinct_total} distinct), \
-             {count} of them can run ({kinds} distinct)"
+            "timing: live methods: {} of {}; {total} rejections ({distinct_total} distinct), {count} of them \
+             can run ({kinds} distinct), and {} unresolved calls",
+            live.methods.len(),
+            class.methods.len(),
+            live.unresolved.len()
         );
     }
-    if let Some(first) = running.into_iter().next() {
-        return Err(first);
-    }
     analysis::live_methods::prune(class, &live);
-    Ok(())
+    (running, live.unresolved)
 }
 
 /// The units of the program and of the library classes that its reachable code uses, with what
