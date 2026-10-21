@@ -336,8 +336,10 @@ impl Census {
                     _ => {}
                 }
                 // The program's generic types are erased; one from elsewhere is not translated.
-                // javac names an anonymous class `<anonymous Sink>`: that is not a generic type.
-                if ty.contains('<') && !ty.starts_with('<') && !self.erases(ty) {
+                // javac names an anonymous class `<anonymous Sink>`: that is not a generic type,
+                // and nor is the method type of a method's name (`(java.lang.Class<?>)int`, or
+                // `<T>(T)T` for a generic method), whose call has a type of its own.
+                if ty.contains('<') && !ty.starts_with(['<', '(']) && !self.erases(ty) {
                     scan.feature("generic types", node);
                 }
                 refer(&node["symbol"], scan);
@@ -393,12 +395,13 @@ impl Census {
             || value == "java.lang.Object" && held
     }
 
-    /// Whether a parameterized type translates: one of the program's generic types, erased, or
-    /// `Comparable`.
+    /// Whether a parameterized type translates as far as its type arguments go: one of the
+    /// program's generic types, erased, `Comparable`, or a class of the runtime, whose type
+    /// arguments are erased too (`Class<?>` translates as far as `Class` does).
     fn erases(&self, ty: &str) -> bool {
         let raw = raw(ty);
         let raw = raw.trim_end_matches("[]");
-        self.declared.contains(raw) || raw == "java.lang.Comparable"
+        self.declared.contains(raw) || raw == "java.lang.Comparable" || provided(raw)
     }
 
     /// The node of the call graph that a reachable member's code belongs to, with the edges that

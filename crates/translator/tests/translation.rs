@@ -2384,6 +2384,36 @@ fn the_survey_counts_only_a_for_each_over_a_type_outside_the_sources() {
 }
 
 #[test]
+fn the_survey_counts_only_values_of_generic_types_outside_the_sources() {
+    let dir = write_sources(
+        "survey_generic_types",
+        &[(
+            "Main.java",
+            "public class Main {
+                static <T> Box<T> box(T t) { return new Box<>(t); }
+                static int size(Box<?> b) { return 1; }
+                static Class<?> kind() { return null; }
+                static int a() { return size(box(\"a\")); }
+                static Object b() { return kind(); }
+                static void c(java.util.List<String> l) { System.out.println(l); }
+                public static void main(String[] args) { a(); b(); c(null); }
+            }
+            class Box<T> { T v; Box(T v) { this.v = v; } }",
+        )],
+    );
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let report = survey(&program).report;
+    let table = feature_table(&report, "Program code: features");
+    // The names of `size` and `box` have method types (`(Box<?>)int`, `<T>(T)Box<T>`), which are
+    // not values; a `Class<?>` is the runtime's class; only the `List<String>` is outside.
+    let row = feature_row(table, "generic types");
+    assert!(
+        row.contains("Main.java:7") && !row.contains("Main.java:5") && !row.contains("Main.java:6"),
+        "{table}"
+    );
+}
+
+#[test]
 fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
     let dir = write_sources(
         "survey_split",
