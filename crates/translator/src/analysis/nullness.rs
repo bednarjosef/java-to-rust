@@ -253,7 +253,11 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
         }
         ExprKind::Field { object, name } => facts.field_nullable(object.ty, name),
         ExprKind::Static { class, name } => facts.nullable_statics.contains(&(*class, name.clone())),
-        ExprKind::Index(array, _) => facts.nullable_elements.contains(&array.ty.element()),
+        // An array type; a lowering that indexes a value of another type gives what may be null.
+        ExprKind::Index(array, _) => match array.ty {
+            Type::Array(element) => facts.nullable_elements.contains(element),
+            _ => true,
+        },
         ExprKind::Assign {
             op: None,
             target: Place::Field { .. } | Place::Static { .. } | Place::Index(..),
