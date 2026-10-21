@@ -157,8 +157,16 @@ fastest runs were 1.42 s before, 0.90 s after and 0.21 s for Java. With the mach
   up to 136 bytes per size and per thread, and the next allocation of that size on that thread
   takes one back. Every block is still a block of the system allocator, of the size of the glibc
   chunk the request would get anyway, so a block freed on another thread is correct and no memory
-  is wasted. A thread keeps at most 64 MB per size; a thread started by `Thread.start` gives its
-  blocks back when it ends.
+  is wasted. A thread keeps at most 64 MB in all sizes together, and all threads together at
+  most 256 MB, counting the arrays that list the blocks; past either budget a freed block goes
+  back to glibc. A thread takes its share of the process's budget in grants of 1 MB, so keeping a
+  block rarely touches the shared count. A thread started by `Thread.start` gives its blocks and
+  its grants back when it ends.
+  - The first version allowed 64 MB per size and per thread, with no limit across threads: in
+    the worst case about 585 MB per live thread (eight sizes, and the arrays). The budgets cost
+    little: binarytrees-2 went from 0.93 to 0.99 s (fastest of nine interleaved runs), -3 from
+    0.96 to 1.00 s, -6 from 0.91 to 0.96 s, and NodeList's twelve rounds from 0.42 to 0.43 s
+    (glibc 0.54 s), at load 12 to 21.
   - The first version kept the blocks on a list threaded through them, last freed first taken.
     It made `NodeList` ten times slower (540 ms to 5.8 s): the list's nodes, freed in list order
     and taken back in reverse, were spread more widely over memory every round, and walking the

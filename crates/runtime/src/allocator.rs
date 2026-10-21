@@ -7,10 +7,12 @@
 //! Every block is a block of the system allocator, of the largest size that fits the same glibc
 //! chunk as the request (24, 40, 56, ... bytes: a chunk is a multiple of 16 bytes and 8 of them
 //! are its header), so a block takes no more memory than `malloc` would give, and any thread may
-//! free or keep any block. A thread keeps at most `CACHED_BYTES` per size. The main thread's
-//! cache lasts as long as the process; a thread started by `Thread.start` gives its cache back
-//! when its body ends (`release_thread_cache`). Other threads, which the runtime does not start,
-//! keep what they cached until the process ends.
+//! free or keep any block. A thread keeps at most `THREAD_BYTES` in all sizes together, and all
+//! threads together at most `PROCESS_BYTES`, counting the arrays that list the blocks; past
+//! either budget a freed block goes back to the system allocator. The main thread's cache lasts
+//! as long as the process; a thread started by `Thread.start` gives its cache, and its share of
+//! the process's budget, back when its body ends (`release_thread_cache`). Other threads, which
+//! the runtime does not start, keep what they cached until the process ends.
 //!
 //! The freed blocks of a size are kept in an array, not in a list threaded through the blocks,
 //! so that keeping or taking one does not touch its memory. When the thread goes from freeing
@@ -22,14 +24,25 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::ptr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The sizes that are cached: `SMALLEST`, `SMALLEST + STEP`, ..., 136 bytes.
 const CLASSES: usize = 8;
 const STEP: usize = 16;
 const SMALLEST: usize = 24;
 
-/// How many bytes of freed blocks of one size a thread keeps; more are given to the system.
-const CACHED_BYTES: usize = 64 << 20;
+/// How many bytes one thread keeps, in freed blocks of all sizes and the arrays that list them.
+const THREAD_BYTES: usize = 64 << 20;
+
+/// How many bytes all threads together keep.
+const PROCESS_BYTES: usize = 256 << 20;
+
+/// A thread takes its share of `PROCESS_BYTES` in grants of this size, so that keeping a block
+/// rarely touches the shared count.
+const GRANT: usize = 1 << 20;
+
+/// The bytes of `PROCESS_BYTES` that threads hold as grants.
+static GRANTED: AtomicUsize = AtomicUsize::new(0);
 
 /// The fewest blocks freed since the last sort that make the next allocation sort the array:
 /// a few megabytes, more than a processor's second-level cache, below which the order of the
@@ -45,9 +58,68 @@ struct Stack {
     unsorted: Cell<usize>,
 }
 
+/// The bytes a thread keeps, against its budget and its grants from the process's.
+struct Budget {
+    /// The bytes of the kept blocks and of the arrays' capacity.
+    kept: Cell<usize>,
+    /// The bytes of `PROCESS_BYTES` this thread holds; `kept` stays at most this.
+    granted: Cell<usize>,
+}
+
+impl Budget {
+    /// Counts `n` more bytes kept; false, counting nothing, when a budget does not allow them.
+    #[inline]
+    fn charge(&self, n: usize) -> bool {
+        let kept = self.kept.get() + n;
+        if kept > self.granted.get() && !self.grant(kept) {
+            return false;
+        }
+        self.kept.set(kept);
+        true
+    }
+
+    /// Takes grants from the process's budget until they cover `kept` bytes, if the budgets allow.
+    #[cold]
+    #[inline(never)]
+    fn grant(&self, kept: usize) -> bool {
+        if kept > THREAD_BYTES {
+            return false;
+        }
+        let more = (kept - self.granted.get()).div_ceil(GRANT) * GRANT;
+        let taken = GRANTED.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |granted| {
+            (granted + more <= PROCESS_BYTES).then_some(granted + more)
+        });
+        if taken.is_err() {
+            return false;
+        }
+        self.granted.set(self.granted.get() + more);
+        true
+    }
+
+    /// Counts `n` bytes no longer kept, and gives back grants the thread no longer needs.
+    #[inline]
+    fn uncharge(&self, n: usize) {
+        let kept = self.kept.get() - n;
+        self.kept.set(kept);
+        if self.granted.get() - kept >= 2 * GRANT {
+            self.give_back_grants(GRANT);
+        }
+    }
+
+    /// Gives back the grants that exceed the kept bytes by more than `spare`.
+    #[cold]
+    #[inline(never)]
+    fn give_back_grants(&self, spare: usize) {
+        let unused = (self.granted.get() - self.kept.get()).saturating_sub(spare) / GRANT * GRANT;
+        GRANTED.fetch_sub(unused, Ordering::Relaxed);
+        self.granted.set(self.granted.get() - unused);
+    }
+}
+
 /// A thread's freed blocks, one array per size.
 struct Cache {
     stacks: [Stack; CLASSES],
+    budget: Budget,
     /// False once the thread has given its cache back for good.
     open: Cell<bool>,
 }
@@ -63,6 +135,7 @@ thread_local! {
                     unsorted: Cell::new(0),
                 }
             }; CLASSES],
+            budget: Budget { kept: Cell::new(0), granted: Cell::new(0) },
             open: Cell::new(true),
         }
     };
@@ -125,11 +198,11 @@ impl Stack {
         blocks.sort_unstable_by(|a, b| b.cmp(a));
     }
 
-    /// Keeps a freed block of class `c`; false when the array is full.
+    /// Keeps a freed block of class `c`, already charged; false when the array is full.
     #[inline]
-    fn keep(&self, c: usize, block: *mut u8) -> bool {
+    fn keep(&self, c: usize, block: *mut u8, budget: &Budget) -> bool {
         let len = self.len.get();
-        if len == self.capacity.get() && !self.grow(c) {
+        if len == self.capacity.get() && !self.grow(c, budget) {
             return false;
         }
         // SAFETY: `len` is below the capacity.
@@ -139,16 +212,21 @@ impl Stack {
         true
     }
 
-    /// Doubles the array, up to `CACHED_BYTES` of blocks; false when it cannot grow.
+    /// Doubles the array, up to `THREAD_BYTES` of blocks, charging its growth to the budget;
+    /// false when it cannot grow.
     #[cold]
     #[inline(never)]
-    fn grow(&self, c: usize) -> bool {
-        let most = CACHED_BYTES / block(c).size();
+    fn grow(&self, c: usize, budget: &Budget) -> bool {
+        let most = THREAD_BYTES / block(c).size();
         let capacity = self.capacity.get();
         if capacity >= most {
             return false;
         }
         let wanted = (capacity * 2).clamp(1024, most);
+        let growth = array(wanted).size() - array(capacity).size();
+        if !budget.charge(growth) {
+            return false;
+        }
         let old = self.blocks.get();
         // SAFETY: the array, if any, came from `System` with the layout `array(capacity)`.
         let new = unsafe {
@@ -159,6 +237,7 @@ impl Stack {
             }
         };
         if new.is_null() {
+            budget.uncharge(growth);
             return false;
         }
         self.blocks.set(new as *mut *mut u8);
@@ -187,20 +266,35 @@ impl Stack {
 impl Cache {
     #[inline]
     fn take(&self, c: usize) -> *mut u8 {
-        self.stacks[c].take()
+        let block = self.stacks[c].take();
+        if !block.is_null() {
+            self.budget.uncharge(self::block(c).size());
+        }
+        block
     }
 
     #[inline]
     fn keep(&self, c: usize, block: *mut u8) -> bool {
-        self.open.get() && self.stacks[c].keep(c, block)
+        let size = self::block(c).size();
+        if !self.open.get() || !self.budget.charge(size) {
+            return false;
+        }
+        if self.stacks[c].keep(c, block, &self.budget) {
+            return true;
+        }
+        self.budget.uncharge(size);
+        false
     }
 
-    /// Gives every cached block back to the system, and caches nothing more.
+    /// Gives every cached block, and the thread's share of the process's budget, back, and
+    /// caches nothing more.
     fn close(&self) {
         self.open.set(false);
         for (c, stack) in self.stacks.iter().enumerate() {
             stack.give_back(c);
         }
+        self.budget.kept.set(0);
+        self.budget.give_back_grants(0);
     }
 }
 
@@ -282,6 +376,32 @@ mod tests {
             let zeroed = a.alloc_zeroed(layout);
             assert!((0..24).all(|i| *zeroed.add(i) == 0));
             a.dealloc(zeroed, layout);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn a_thread_keeps_no_more_than_its_budget_and_gives_its_grants_back() {
+        let a = Allocator;
+        let layout = Layout::from_size_align(136, 8).unwrap();
+        std::thread::spawn(move || unsafe {
+            let blocks: Vec<*mut u8> = (0..THREAD_BYTES / 136 + 50_000).map(|_| a.alloc(layout)).collect();
+            for &b in &blocks {
+                a.dealloc(b, layout);
+            }
+            CACHE.with(|cache| {
+                let budget = &cache.budget;
+                assert!(budget.kept.get() <= budget.granted.get());
+                assert!(budget.granted.get() <= THREAD_BYTES);
+                assert!(cache.stacks[class_of(&layout).unwrap()].len.get() < blocks.len());
+            });
+            let again: Vec<*mut u8> = blocks.iter().map(|_| a.alloc(layout)).collect();
+            for b in again {
+                a.dealloc(b, layout);
+            }
+            release_thread_cache();
+            CACHE.with(|cache| assert_eq!((cache.budget.kept.get(), cache.budget.granted.get()), (0, 0)));
         })
         .join()
         .unwrap();
