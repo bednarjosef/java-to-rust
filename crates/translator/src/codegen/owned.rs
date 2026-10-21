@@ -41,7 +41,8 @@ impl<'a> Gen<'a> {
         let mutable = initialize || self.changes_owned(rest, &|e| matches!(e.kind, ExprKind::This));
         self.line(&format!("let {}this = {start};", if mutable { "mut " } else { "" }));
         if initialize {
-            self.line("this.field_inits();");
+            let call = self.run_inits(m.class, "this.field_inits()".to_string());
+            self.line(&call);
         }
         self.ctor_result = Some("this");
         self.stmts(rest, false);

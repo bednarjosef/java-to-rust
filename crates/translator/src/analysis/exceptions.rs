@@ -20,6 +20,8 @@
 //! yet (a null dereference, an array creation, a cast, ...) is rejected where its failure would
 //! be seen.
 
+mod field_inits;
+
 use super::Facts;
 use super::hierarchy;
 use super::nullness::{maybe_null, non_null_names};
@@ -282,8 +284,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             return error(method.pos, "a static initializer that throws inside a `try` not supported yet");
         }
     }
-    // The initializers of instance fields and of enum constants run outside any `try` of the
-    // program: Java would wrap what they throw in `ExceptionInInitializerError`.
+    // The initializers of instance fields run in each constructor, outside its `try`s: what they
+    // raise escapes the constructor (see `field_inits`).
+    let init_throwing = field_inits::throwing(class, facts, &raised, &escapes);
+    // The initializers of enum constants run in the static initializer, so what they raise would
+    // be `ExceptionInInitializerError`: not translated yet.
     let escapes_ref = &escapes;
     let initializer_raises = |e: &Expr, m: usize| {
         let mut out = Vec::new();
@@ -293,11 +298,6 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             .then_some(e.pos)
     };
     for decl in &class.types {
-        for f in &decl.fields {
-            if let Some(pos) = f.init.as_ref().and_then(|e| initializer_raises(e, usize::MAX)) {
-                return error(pos, "a field initializer that throws not supported yet");
-            }
-        }
         for constant in decl.enum_constants.iter().flatten() {
             if let Some(pos) = constant.values.iter().find_map(|e| initializer_raises(e, usize::MAX)) {
                 return error(pos, "an enum constant whose arguments throw not supported yet");
@@ -306,6 +306,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     }
 
     facts.throwing = throwing;
+    facts.init_throwing = init_throwing;
     facts.live_tries = live_tries;
     facts.raising_tries = raising_tries;
     facts.raising = raising;

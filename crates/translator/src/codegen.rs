@@ -20,6 +20,7 @@ mod dispatch;
 mod enums;
 mod exceptions;
 mod expr;
+mod field_inits;
 mod files;
 mod idiomatic;
 mod math;
