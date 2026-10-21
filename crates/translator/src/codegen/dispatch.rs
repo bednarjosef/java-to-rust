@@ -938,7 +938,11 @@ impl<'a> Gen<'a> {
                 let (text, uses) = g.arm_call(t, c, i, &args);
                 (g.covariant_ret(i, r, text), uses)
             }
-            None => (g.builtin_arm(r, c), true),
+            // A builtin never throws, but the method may (another class's `equals` does).
+            None => {
+                let text = g.builtin_arm(r, c);
+                (if g.facts.throwing.contains(&r) { format!("Ok({text})") } else { text }, true)
+            }
         });
         self.indent -= 1;
         self.line("}");
