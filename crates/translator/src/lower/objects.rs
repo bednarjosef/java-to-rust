@@ -47,6 +47,8 @@ impl<'t> Lowering<'t> {
             standard: exceptions::Standard::default(),
             closes: Default::default(),
             object: None,
+            real: Default::default(),
+            failed: Default::default(),
         }
     }
 
@@ -133,6 +135,7 @@ impl<'t> Lowering<'t> {
             fields,
             statics,
             enum_constants: None,
+            type_params: self.class_type_params(index),
         })
     }
 
@@ -226,8 +229,7 @@ impl<'t> Lowering<'t> {
 
     /// `this` of the class whose members are being lowered.
     pub(super) fn this(&self, node: Node<'t>) -> Expr {
-        let name = &self.types[self.current.get()].name;
-        let ty = if self.enum_index(name).is_some() { Type::enum_type(name) } else { Type::class(name) };
+        let ty = self.self_type(self.current.get());
         self.synth(ExprKind::This, node.pos(), ty)
     }
 

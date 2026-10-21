@@ -6,25 +6,79 @@
 //! conversion javac inserts there. Arguments are converted to the erased parameter types by the
 //! conversions every call makes (`convert_args`).
 
+use super::real_generics::Owner;
 use super::*;
+
+/// The type arguments in javac's `java.lang.Integer,Box<T>`, split at the commas outside `<>`.
+fn split_args(args: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0, 0);
+    for (i, c) in args.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(args[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(args[start..].trim());
+    out
+}
 
 impl<'t> Lowering<'t> {
     /// The declaration of the type variable `name` in scope: the method's being lowered (or the
     /// one `scope` names), then its class's and those of the classes it is nested in.
-    fn type_var(&self, name: &str) -> Option<Node<'t>> {
+    fn type_var(&self, name: &str) -> Option<(Node<'t>, Owner)> {
         let (class, method) = self.scope.get().unwrap_or((self.current.get(), self.method_ctx.get()));
         let declares = |node: Node<'t>| node.list("typeParameters").find(|p| p.str("name") == name);
-        if let Some(found) = method.and_then(|m| declares(self.methods[m].node)) {
-            return Some(found);
+        if let Some(m) = method
+            && let Some(found) = declares(self.methods[m].node)
+        {
+            return Some((found, Owner::Method(m)));
         }
         let mut outer = Some(self.types[class].name.as_str());
         while let Some(name) = outer {
-            if let Some(found) = self.type_index(name).and_then(|t| declares(self.types[t].node)) {
-                return Some(found);
+            if let Some(t) = self.type_index(name)
+                && let Some(found) = declares(self.types[t].node)
+            {
+                return Some((found, Owner::Class(t)));
             }
             outer = name.rsplit_once('.').map(|(outer, _)| outer);
         }
         None
+    }
+
+    /// The type of a type variable: its own type in a Rust generic, else its erasure.
+    fn var_type(&self, node: Node, (param, owner): (Node<'t>, Owner)) -> Result<Type, Error> {
+        if self.is_real(owner) {
+            return Ok(self.param_type(owner, param.str("name")));
+        }
+        self.var_erasure(node, param)
+    }
+
+    /// A generic class with the type arguments javac wrote, `args` (`java.lang.Integer,T`), when it
+    /// is a Rust generic.
+    fn real_class(&self, node: Node, raw: &str, args: &str) -> Option<Result<Type, Error>> {
+        let t = self.type_index(raw)?;
+        if !self.is_real(Owner::Class(t)) {
+            return None;
+        }
+        let mut types = Vec::new();
+        for arg in split_args(args) {
+            // A wildcard or a primitive (which javac never writes) has no Rust type argument.
+            if arg.starts_with('?') || arg.starts_with("capture#") {
+                self.fail(Owner::Class(t));
+                return Some(Ok(Type::class(raw)));
+            }
+            match self.ty(node, arg) {
+                Ok(ty) => types.push(ty),
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        Some(Ok(Type::generic(raw, &types)))
     }
 
     /// The erasure of a type variable: that of its first bound, or `Object`.
@@ -66,11 +120,17 @@ impl<'t> Lowering<'t> {
             && !name.starts_with('<')
         {
             let close = name.rfind('>').unwrap_or(name.len() - 1);
-            let raw = format!("{}{}", &name[..open], &name[close + 1..]);
+            let suffix = &name[close + 1..];
+            if suffix.is_empty()
+                && let Some(real) = self.real_class(node, &name[..open], &name[open + 1..close])
+            {
+                return Some(real);
+            }
+            let raw = format!("{}{}", &name[..open], suffix);
             return Some(self.ty(node, &raw));
         }
-        let param = self.type_var(name)?;
-        Some(self.var_erasure(node, param))
+        let var = self.type_var(name)?;
+        Some(self.var_type(node, var))
     }
 
     /// The erasure of the type variable `name`, if one is in scope.
@@ -78,8 +138,8 @@ impl<'t> Lowering<'t> {
         if name.contains(['.', '<', '[', ' ', '?']) {
             return None;
         }
-        let param = self.type_var(name)?;
-        Some(self.var_erasure(node, param))
+        let var = self.type_var(name)?;
+        Some(self.var_type(node, var))
     }
 
     /// The erasure of a wildcard: its upper bound, or `Object`.
@@ -143,7 +203,8 @@ impl<'t> Lowering<'t> {
     /// erasure needs (see the module's comment).
     pub(super) fn erased_use(&self, node: Node<'t>, kind: ExprKind, ty: Type) -> Result<ExprKind, Error> {
         let Some(declared) = self.declared_use_type(node, &kind)? else { return Ok(kind) };
-        if declared == ty || ty == Type::Void {
+        // Rust substitutes a Rust generic's type variables itself.
+        if declared == ty || ty == Type::Void || self.has_param(declared) {
             return Ok(kind);
         }
         if matches!(declared, Type::Array(_)) || matches!(ty, Type::Array(_)) {

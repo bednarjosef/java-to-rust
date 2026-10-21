@@ -108,7 +108,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             for f in decl.statics.iter().filter(|f| may_be_unset(f.ty)) {
                 // An eagerly initialized static starts at a placeholder, which an object has not.
                 let set = f.init.as_ref().is_some_and(|e| !maybe_null(facts, usize::MAX, e))
-                    && (!facts.eager_init.contains(&t) || !matches!(f.ty, Type::Class(_)));
+                    && (!facts.eager_init.contains(&t) || !matches!(f.ty, Type::Class(..)));
                 if !set {
                     statics.push((t, f.name.clone()));
                 }
@@ -146,7 +146,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
 /// The fields whose nullness is analyzed: strings, arrays and objects. A boxed field is always an
 /// `Option`.
 fn may_be_unset(ty: Type) -> bool {
-    matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(_))
+    matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(..))
 }
 
 /// Whether every constructor of class `t` sets the field `name` to a value that is not null

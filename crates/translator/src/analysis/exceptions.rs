@@ -563,7 +563,7 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
 
 /// The objects whose text an expression makes, which runs their `toString`.
 fn text_objects(x: &Expr) -> Vec<&Expr> {
-    let is_object = |a: &&Expr| matches!(a.ty, Type::Class(_));
+    let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..));
     match &x.kind {
         ExprKind::Builtin(Builtin::ClassName { .. }, _) => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),

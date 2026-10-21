@@ -59,7 +59,7 @@ pub(super) fn check_enum_casts(class: &Class, facts: &super::Facts) -> Result<()
                 &mut |e| {
                     visit_expr(e, &mut |x| {
                         if let ExprKind::Cast(Type::Enum(_), value) = &x.kind
-                            && matches!(value.ty, Type::Class(_))
+                            && matches!(value.ty, Type::Class(..))
                             && super::maybe_null(facts, m, value)
                         {
                             found.get_or_insert(x.pos);
@@ -92,10 +92,10 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
         .any(|c| class.types[c].kind == TypeKind::Runtime);
     let may_be_value = |e: &Expr| match &e.kind {
         ExprKind::Null => false,
-        ExprKind::Cast(Type::Class(name), inner) if *name == OBJECT => {
-            !matches!(inner.ty, Type::Class(_) | Type::Enum(_))
+        ExprKind::Cast(Type::Class(name, _), inner) if *name == OBJECT => {
+            !matches!(inner.ty, Type::Class(..) | Type::Enum(_))
         }
-        _ => matches!(e.ty, Type::Class(name) if name == OBJECT),
+        _ => matches!(e.ty, Type::Class(name, _) if name == OBJECT),
     };
     let mut shortcuts = HashSet::new();
     for method in &class.methods {
@@ -110,7 +110,7 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                 s,
                 &mut |e| {
                     visit_expr(e, &mut |x| match &x.kind {
-                        ExprKind::Cast(Type::Class(name), inner)
+                        ExprKind::Cast(Type::Class(name, _), inner)
                             if *name == OBJECT && matches!(inner.ty, Type::Array(_)) =>
                         {
                             found.get_or_insert((x.pos, "an array as an `Object` value"));
@@ -162,7 +162,7 @@ fn shortcut(e: &Expr) -> Option<ExprId> {
 /// `e` without the conversions to `Object` that lowering adds.
 fn peel(e: &Expr) -> &Expr {
     match &e.kind {
-        ExprKind::Cast(Type::Class(name), inner) if *name == OBJECT => peel(inner),
+        ExprKind::Cast(Type::Class(name, _), inner) if *name == OBJECT => peel(inner),
         _ => e,
     }
 }

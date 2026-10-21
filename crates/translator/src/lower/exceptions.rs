@@ -403,7 +403,7 @@ impl<'t> Lowering<'t> {
         };
         let (ty, name, pos) = (*ty, name.clone(), *pos);
         let class = match ty {
-            Type::Class(class) => self.type_index(class),
+            Type::Class(class, _) => self.type_index(class),
             _ => None,
         };
         let Some(close) = class.and_then(|t| self.close_method(t)) else {
@@ -479,7 +479,7 @@ impl<'t> Lowering<'t> {
             Some(o) => self.expr(o)?,
             None => self.this(get_class),
         };
-        if !matches!(object.ty, Type::Class(_)) {
+        if !matches!(object.ty, Type::Class(..)) {
             return unsupported(get_class, "getClass() of this type");
         }
         Ok(Some(ExprKind::Builtin(Builtin::ClassName { simple }, vec![object])))

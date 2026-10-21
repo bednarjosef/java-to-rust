@@ -62,7 +62,8 @@ public class GenericFailures {
         Box<String> box = new Box<>("hello");
         System.out.println(box.get().length());
         try {
-            Box<String> empty = new Box<>(null);
+            String nothing = args.length > 5 ? "x" : null;
+            Box<String> empty = new Box<>(nothing);
             System.out.println(empty.get());
         } catch (IllegalArgumentException e) {
             System.out.println("caught " + e.getMessage());

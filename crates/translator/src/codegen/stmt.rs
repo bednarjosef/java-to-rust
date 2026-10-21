@@ -310,7 +310,7 @@ impl<'a> Gen<'a> {
                 if op.is_comparison()
                     && !l.ty.is_floating()
                     && !r.ty.is_floating()
-                    && !matches!(l.ty, Type::Class(_))
+                    && !matches!(l.ty, Type::Class(..))
                     && !is_null_test(*op, l, r) =>
             {
                 let flipped = match op {

@@ -103,7 +103,11 @@ fn module_name(segment: &str) -> String {
 /// The `use` lines that code of one module needs, found in its text.
 pub(super) fn use_lines(code: &str) -> Vec<String> {
     let mut std = String::new();
-    if code.match_indices("Cell<").any(|(i, _)| !code[..i].ends_with("Ref")) {
+    // `RefCell<` and a generic struct such as `BoxCell<` are not `Cell<`.
+    if code
+        .match_indices("Cell<")
+        .any(|(i, _)| !code[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_'))
+    {
         std.push_str("use std::cell::Cell;\n");
     }
     if code.contains("Ref<'_") {

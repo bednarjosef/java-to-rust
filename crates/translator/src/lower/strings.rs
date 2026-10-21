@@ -227,7 +227,7 @@ impl<'t> Lowering<'t> {
                 return unsupported(node, "appending an array that is not a `char[]`");
             }
             // An object shows its `toString`, which runs before the builder is changed.
-            if matches!(ty, Type::Class(_)) {
+            if matches!(ty, Type::Class(..)) {
                 let x = args.remove(i);
                 args.insert(i, self.as_text(x));
             }

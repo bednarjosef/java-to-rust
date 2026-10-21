@@ -102,7 +102,7 @@ fn runs_inherited_object_code(class: &Class, t: usize, field_level: &HashSet<usi
 }
 
 fn is_class(ty: Type, name: &str) -> bool {
-    matches!(ty, Type::Class(c) if c == name)
+    matches!(ty, Type::Class(c, _) if c == name)
 }
 
 fn has_this_call(body: &[Stmt]) -> bool {
