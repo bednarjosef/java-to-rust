@@ -31,7 +31,8 @@ impl<'t> Lowering<'t> {
             ("fill", 4) if printable && int(1) && int(2) && assignable(args[3].ty, elem) => {
                 ArraysOp::FillRange
             }
-            ("copyOfRange", 3) if primitive && int(1) && int(2) => ArraysOp::CopyOfRange,
+            // Of references too, as `copyOf`.
+            ("copyOfRange", 3) if int(1) && int(2) => ArraysOp::CopyOfRange,
             ("binarySearch", 2) if printable && key_ok(&args[1], elem) => ArraysOp::BinarySearch,
             ("binarySearch", 4) if printable && int(1) && int(2) && key_ok(&args[3], elem) => {
                 ArraysOp::BinarySearchRange

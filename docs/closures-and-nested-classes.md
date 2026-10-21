@@ -1299,14 +1299,18 @@ Decisions that change during the implementation are recorded here, milestone by 
 ### Closure forms
 
 - **The first closure types are a subset of 4.2**: an interface is one when it has one abstract
-  method (besides `Object`'s, which `Comparator` declares again), no interface above or below it, every class
-  below it is a lambda's that implements it alone, every `new` of such a class is converted to
-  the interface right away, and no value of it is converted to another type (`Object`,
-  printing, a collection), compared with `==`, tested with `instanceof`, passed to a builtin or
-  called with anything but its method and its default methods; and each lambda's method uses
-  `this` only to read its capture fields. Interfaces that extend another (`UnaryOperator<T> extends Function<T, T>`, condition 4 of 4.2, which makes both
-  enums) and interfaces seen as objects (condition 3 of 4.2 as written, and identity) stay enums
-  for now.
+  method (besides `Object`'s, which `Comparator` declares again), or extends exactly one
+  interface and declares none, every class below it is a lambda's that implements one
+  interface, every interface above and below it is a closure type too, every `new` of such a
+  class is converted to the interface right away, and no value of it is converted to another
+  type than an interface above it (`Object`, printing, a collection), compared with `==`,
+  tested with `instanceof`, passed to a builtin or called with anything but its method and its
+  default methods; and each lambda's method uses `this` only to read its capture fields.
+  Whatever rules out one interface rules out those above and below it. Interfaces seen as
+  objects (condition 3 of 4.2 as written, and identity) stay enums for now.
+- **An interface that extends another names its closures**: `type UnaryOperator = Function;`, so
+  a `UnaryOperator` is passed where a `Function` is taken as it is, and calls the default
+  methods of `FunctionMethods`.
 - **A generic interface's closure is erased, per interface, not per instantiation** (4.4 asks
   for the substituted types at each declaration site): `Function<Integer, Integer>` is the
   alias `type Function = Rc<dyn Fn(Object) -> Object>;`, and a call boxes the arguments and
@@ -1334,7 +1338,10 @@ Decisions that change during the implementation are recorded here, milestone by 
   local passed as it is moves in under its own name; the closure owns what the class's
   constructor would have borrowed. A closure with no captures has no `move`, and a one-line
   body stays on the closure's line. The value is `Rc::new(closure) as Op`, so that every place
-  gets the alias's type without an annotation.
+  gets the alias's type without an annotation; the captures are bound in a block around it,
+  `{ let outer = self.clone(); Rc::new(move |x| ..) as Op }`, except where the closure is a
+  function's final value: there they are statements of the function, and the result type
+  converts `Rc::new(move |x| ..)` without `as`.
 - **Default methods are an extension trait** (4.6): `trait PredicateMethods { fn negate(&self)
   -> Predicate; .. }` beside the alias and `impl PredicateMethods for Predicate`, with only the
   default methods the program calls. `self` is `&Rc<dyn Fn ..>`: `test(x)` is `self(x)`, and a
@@ -1344,15 +1351,24 @@ Decisions that change during the implementation are recorded here, milestone by 
   Two closure types with the same Rust type and a default method of the same name would make
   such a call ambiguous; no two of `java.util.function` do, and no corpus program has such a
   pair.
+- **A closure type that threads may share** (`Facts::thread_shared` holds it or an interface
+  above or below it, which share its closures) is `Arc<dyn Fn(..) -> R + Send + Sync>` and its
+  closures `Arc::new(..)`, the handle chosen in one place (`closure_handle`); its captures are of
+  shared types by the same walk. Others keep `Rc`, also in a threaded program
+  (`docs/multi-threading.md`). Corpus: `threads/ClosuresAcrossThreads.java`,
+  `threads/ClosureMethodsAcrossThreads.java` (default methods on shared closures),
+  `threads/OperatorsAcrossThreads.java` (a `UnaryOperator` that a thread runs makes `Function`
+  an `Arc` too).
 - **A call clones a closure out of a `RefCell`** before running it,
   `({ let f = a.borrow().op.clone(); f })(3)`, since the closure may reach the object again; a
   local, a capture or a field of a plain object is called in place (`op(x)`, `(self.op)(x)`).
 - **Corpus**: `features/ClosureDefaultMethods.java` (default methods that create lambdas over
   `this`, call each other and call the closure, and a static method);
   `whole-program/FunctionChains.java` (`Predicate`, `IntPredicate` and `BiFunction` from the
-  JDK's sources with their default methods); `features/GenericClosures.java` (the generic interfaces of `java.util.function`
-  and the program's own: an early return, a lambda that throws behind a bridge, a single
-  lambda of an interface passed as an argument, a generic method calling its closure, and
-  `UnaryOperator` keeping `Function` an enum); `features/ClosureForms.java` (captures, `this` through `outer`, a field and a
-  final field of closures, an array of them, a closure returned from a method, a constructor
+  JDK's sources with their default methods, `Function` with `UnaryOperator`);
+  `features/GenericClosures.java` (the generic interfaces of `java.util.function` and the
+  program's own: an early return, a lambda that throws behind a bridge, a single lambda of an
+  interface passed as an argument, a generic method calling its closure, a `UnaryOperator`
+  passed as a `Function`); `features/ClosureForms.java` (captures, `this` through `outer`, a
+  field and a final field of closures, an array of them, a closure returned from a method, a constructor
   reference, a closure that throws a checked exception, a closure in a closure).

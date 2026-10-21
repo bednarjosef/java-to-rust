@@ -7,9 +7,12 @@
 //! declaration reachable in turn: a worklist that runs until nothing new is found.
 
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
+mod by_name;
 mod sequential;
+
+pub use by_name::created_by_name;
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
 /// constructor) and javac's signature, such as `(int)void`.
@@ -45,6 +48,10 @@ pub struct Reach {
     /// Whether no stream of the program can be parallel, so that what a pipeline's
     /// `isParallel()` guards is not reached (`sequential.rs`).
     pub sequential: bool,
+    /// Classes that reachable code names, or makes live, that no unit declares, other than those
+    /// where reachability stops (`outside`): those that the sources do not have, and those whose
+    /// units javac has not given yet when it gives them as they are asked for (`javac::Session`).
+    pub missing: BTreeSet<String>,
 }
 
 impl Reach {
@@ -325,6 +332,11 @@ pub fn runtime_arrays_call(node: &Value) -> bool {
     }
 }
 
+/// The JDK method that `String.chars()` runs (see `lower::strings`): it streams the string's
+/// UTF-16 code units, as an `int[]`.
+pub const STRING_CHARS: (&str, &str, &str) =
+    ("java.util.Arrays", "stream", "(int[])java.util.stream.IntStream");
+
 /// The methods that a for-each over an `Iterable` calls.
 pub const ITERATION: &[(&str, &str, &str)] = &[
     ("java.lang.Iterable", "iterator", "()java.util.Iterator<T>"),
@@ -356,6 +368,7 @@ pub fn reach(units: &[&Value], main: &str) -> Result<Reach, String> {
         walk.work.push(Item::Init(main.to_string()));
         walk.work.push(Item::Method(entry));
         walk.run();
+        walk.note_named();
         walk.reach.sequential = sequential;
         Ok(walk)
     };
@@ -363,7 +376,9 @@ pub fn reach(units: &[&Value], main: &str) -> Result<Reach, String> {
     if sequential::streams_stay_sequential(&sequential) {
         return Ok(sequential.reach);
     }
-    Ok(walk(false)?.reach)
+    let mut parallel = walk(false)?.reach;
+    parallel.missing.extend(sequential.reach.missing);
+    Ok(parallel)
 }
 
 /// A declaration that has become reachable and is still to be visited.
@@ -392,6 +407,13 @@ struct Walk<'t> {
     reach: Reach,
     /// Whether streams are assumed to stay sequential (`Reach::sequential`).
     sequential: bool,
+    /// The classes that reachable code creates objects of by class name (`by_name`).
+    by_name: HashSet<String>,
+    /// The string literals of reachable code that are names of classes.
+    named: HashSet<String>,
+    /// The string literals of reachable code that could be names of classes that no unit
+    /// declares (`by_name`).
+    literals: HashSet<String>,
 }
 
 impl<'t> Walk<'t> {
@@ -431,6 +453,18 @@ impl<'t> Walk<'t> {
                 _ => self.declare(member, Some(&class)),
             }
         }
+        // A method inherited from a superclass that implements a method of this class's interfaces.
+        for inherited in decl["symbol"]["inherits"].as_array().into_iter().flatten() {
+            let name = text(inherited, "name").to_string();
+            let implemented = &inherited["implements"];
+            let overridden =
+                (text(implemented, "owner").to_string(), name.clone(), text(implemented, "type").to_string());
+            let key = (text(inherited, "owner").to_string(), name, text(inherited, "type").to_string());
+            let overriders = self.overriders.entry(overridden).or_default();
+            if !overriders.contains(&key) {
+                overriders.push(key);
+            }
+        }
         let mut supertypes: Vec<String> = ["extendsClause", "implementsClause"]
             .iter()
             .flat_map(|header| match &decl[header] {
@@ -466,7 +500,9 @@ impl<'t> Walk<'t> {
     /// A class named by reachable code: it exists as a type, with its outer class and the types in
     /// its header.
     fn class(&mut self, class: String) {
-        let Some((decl, outer)) = self.classes.get(&class).map(|(d, o)| (*d, o.clone())) else { return };
+        let Some((decl, outer)) = self.classes.get(&class).map(|(d, o)| (*d, o.clone())) else {
+            return self.missing(&class);
+        };
         if !self.reach.classes.insert(class) {
             return;
         }
@@ -482,7 +518,7 @@ impl<'t> Walk<'t> {
     /// fields with initializers that may do something besides computing a value are kept even if
     /// nothing reads them. (When classes can extend others, the superclass is initialized first.)
     fn init(&mut self, class: String) {
-        let Some(&(decl, _)) = self.classes.get(&class) else { return };
+        let Some(&(decl, _)) = self.classes.get(&class) else { return self.missing(&class) };
         if !self.reach.initialized.insert(class.clone()) {
             return;
         }
@@ -514,6 +550,7 @@ impl<'t> Walk<'t> {
     fn method(&mut self, key: MethodKey) {
         let node = self.methods.get(&key).filter(|_| !replaced(&key.0, &key.1, &key.2));
         let Some(&node) = node else {
+            self.missing(&key.0);
             // What overrides a method of the runtime, such as `Object.toString`, can still run.
             if self.reach.external.insert(key.clone()) {
                 for overrider in self.overriders(&key) {
@@ -606,6 +643,7 @@ impl<'t> Walk<'t> {
             if !self.reach.live.insert(class.clone()) {
                 continue;
             }
+            self.missing(&class);
             for overrider in self.waiting.remove(&class).unwrap_or_default() {
                 self.work.push(Item::Method(overrider));
             }
@@ -614,7 +652,7 @@ impl<'t> Walk<'t> {
     }
 
     fn field(&mut self, key: FieldKey) {
-        let Some(&node) = self.fields.get(&key) else { return };
+        let Some(&node) = self.fields.get(&key) else { return self.missing(&key.0) };
         if !self.reach.fields.insert(key.clone()) {
             return;
         }
@@ -623,6 +661,13 @@ impl<'t> Walk<'t> {
             self.work.push(Item::Init(key.0));
         }
         self.scan(node);
+    }
+
+    /// Notes a class that reachable code needs, if no unit declares it (`Reach::missing`).
+    fn missing(&mut self, class: &str) {
+        if !self.classes.contains_key(class) && !outside(class) && !self.reach.missing.contains(class) {
+            self.reach.missing.insert(class.to_string());
+        }
     }
 
     /// Makes every declaration that a node of this subtree refers to reachable. The local and
@@ -646,6 +691,13 @@ impl<'t> Walk<'t> {
             // A call of `java.util.Arrays` that the runtime does (`lower::runtime_arrays_call`)
             // reaches only what its arguments do.
             Value::Object(_) if runtime_arrays_call(value) => self.scan(&value["arguments"]),
+            // An object created from a class name (`by_name`) reaches the constructors of the
+            // classes that the name can be, not reflection.
+            Value::Object(_) if let Some(name) = created_by_name(value) => {
+                self.created_by_name(value);
+                self.scan(&value["type"]);
+                self.scan(name);
+            }
             Value::Object(fields) => {
                 // A for-each over an `Iterable` calls its iterator's methods, which javac's tree
                 // does not show.
@@ -659,6 +711,11 @@ impl<'t> Walk<'t> {
                             signature.to_string(),
                         )));
                     }
+                }
+                if text(value, "kind") == "STRING_LITERAL"
+                    && let Some(literal) = value["value"].as_str()
+                {
+                    self.named(literal);
                 }
                 // A lambda creates an object of a class that implements its interface with the
                 // interface's abstract method.
@@ -692,6 +749,10 @@ impl<'t> Walk<'t> {
     fn symbol(&mut self, symbol: &Value) {
         let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
         match text(symbol, "kind") {
+            "METHOD" if owner == "java.lang.String" && name == "chars" => {
+                let (class, method, signature) = STRING_CHARS;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
             "METHOD" | "CONSTRUCTOR" => {
                 self.work.push(Item::Method((owner, name, text(symbol, "type").to_string())));
             }

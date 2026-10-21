@@ -189,8 +189,8 @@ fn a_lambda_reaches_the_enclosing_object_through_outer() {
     assert_contains(
         &rust,
         &[
-            "{ let outer = this.clone(); Rc::new(move |a: i32| -> i32 { a.wrapping_add(outer.borrow().base) }) as AOp }",
-            "{ let outer = this.clone(); Rc::new(move |a: i32| -> i32 { outer.borrow().scaled(a) }) as AOp }",
+            "fn adder(this: &Rc<RefCell<A>>) -> AOp {\n        let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { a.wrapping_add(outer.borrow().base) })\n    }",
+            "let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { outer.borrow().scaled(a) })\n",
             "A::adder(&o)(1)",
         ],
     );
@@ -329,10 +329,30 @@ fn the_default_methods_of_a_closure_type_are_its_extension_trait() {
             "type ACheck = Rc<dyn Fn(i32) -> bool>;",
             "trait ACheckMethods {\n    fn negate(&self) -> ACheck;\n    fn describe(&self, x: i32) -> String;\n}",
             "impl ACheckMethods for ACheck {\n    fn negate(&self) -> ACheck {",
-            "{ let outer = self.clone(); Rc::new(move |x: i32| -> bool { !outer(x) }) as ACheck }",
+            "let outer = self.clone();\n        Rc::new(move |x: i32| -> bool { !outer(x) })\n",
             "if self(x) {",
             "even.negate()(3)",
             "even.describe(2)",
         ],
     );
+}
+
+#[test]
+fn an_interface_that_extends_a_closure_type_names_its_closures() {
+    let rust = translate(
+        "import java.util.function.Function;
+        import java.util.function.UnaryOperator;
+        class A {
+            static String run(Function<String, String> f) { return f.apply(\"x\"); }
+            public static void main(String[] args) {
+                UnaryOperator<String> twice = s -> s + s;
+                System.out.println(run(twice) + run(s -> s));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["type Function = Rc<dyn Fn(Object) -> Object>;", "type UnaryOperator = Function;", "run(&twice)"],
+    );
+    assert_lacks(&rust, &["enum Function", "struct UnaryOperatorLambdaInMain"]);
 }

@@ -166,3 +166,32 @@ fn a_string_builder_that_threads_share_is_rejected() {
     .to_string();
     assert!(error.ends_with("a `StringBuilder` that threads may share not supported yet"), "{error}");
 }
+
+#[test]
+fn a_closure_that_threads_share_is_an_arc_that_any_thread_may_call() {
+    // `Step` reaches the thread through the lambda's capture; `Local` stays on the main thread.
+    let rust = translate(
+        "class A {
+            interface Step { int apply(int x); }
+            interface Local { int apply(int x); }
+            public static void main(String[] args) throws InterruptedException {
+                int k = 3;
+                Step s = x -> x + k;
+                int[] out = new int[1];
+                Thread t = new Thread(() -> out[0] = s.apply(4));
+                t.start();
+                t.join();
+                Local l = x -> x * 2;
+                System.out.println(l.apply(out[0]));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "type AStep = Arc<dyn Fn(i32) -> i32 + Send + Sync>;",
+            "let s = Arc::new(move |x: i32| -> i32 { x.wrapping_add(k) }) as AStep;",
+            "type ALocal = Rc<dyn Fn(i32) -> i32>;",
+        ],
+    );
+}

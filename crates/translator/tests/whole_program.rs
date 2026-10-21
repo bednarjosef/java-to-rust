@@ -5,7 +5,7 @@
 //! `java.base` that `JAVA_BASE_SOURCES` names; those cannot be in the repository, so without the
 //! variable the test says it skipped and passes. A program is one `.java` file, or a directory
 //! with a source root `src/` and a file `main` that names the main class, as in
-//! `corpus/projects/`. Translating with the JDK takes about a minute per program, so the programs
+//! `corpus/projects/`. Translating with the JDK takes a few seconds per program, and the programs
 //! run one at a time; `CORPUS_FILTER=text` runs only those whose name contains `text`.
 
 use std::path::{Path, PathBuf};
@@ -141,4 +141,59 @@ fn whole_programs_match_java() {
         println!("{:<24} {verdict}", p.name);
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A program that uses the JDK's collections, boxing and a lambda, as
+/// `targets/IntegerKeyedGroups.java` does. Its translation is rejected or not depending on what
+/// the translator supports; this test is about what javac does for it.
+const COLLECTIONS: &str = "import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        Map<Integer, List<String>> groups = new HashMap<>();
+        groups.computeIfAbsent(3, k -> new ArrayList<>()).add(\"ann\");
+        Set<Integer> primes = new HashSet<>(List.of(2, 3, 5, 7));
+        primes.retainAll(Set.of(1, 3, 5));
+        System.out.println(groups + \" \" + primes.size());
+    }
+}
+";
+
+/// javac attributes only the units of the classes that the program's reachable code uses, as
+/// reachability asks for them: a few dozen of the JDK's. Left to itself, javac attributes every
+/// unit that the code of the units it attributes names, some 2500 for programs like this one,
+/// which took half a minute and 7 GB, and ten minutes on a machine short of memory.
+#[test]
+fn a_program_using_collections_has_only_reachable_units_attributed() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-units");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), COLLECTIONS).unwrap();
+    let start = std::time::Instant::now();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--timings", "--main", "Main", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    let elapsed = start.elapsed();
+    let stderr = String::from_utf8_lossy(&translated.stderr);
+    // `timing: javac: 1.234 s, 36 units`
+    let units: usize = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("timing: javac: "))
+        .and_then(|l| l.split(", ").nth(1))
+        .and_then(|u| u.strip_suffix(" units"))
+        .and_then(|u| u.parse().ok())
+        .unwrap_or_else(|| panic!("no unit count among the timings:\n{stderr}"));
+    assert!(units < 200, "javac attributed {units} units:\n{stderr}");
+    assert!(elapsed.as_secs() < 120, "the translation took {elapsed:?}:\n{stderr}");
 }

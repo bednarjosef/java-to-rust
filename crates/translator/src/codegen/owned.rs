@@ -84,7 +84,9 @@ impl<'a> Gen<'a> {
                 })
             })
             .collect();
-        let sequential = read.iter().any(|&r| r);
+        // A leading assignment that reads a field an earlier one set computes them all into locals.
+        let reads_leading = crate::analysis::reads_leading_fields(decl, &leading);
+        let sequential = read.iter().any(|&r| r) || reads_leading;
         // `super(...)` runs first: before any value that is computed into a local first.
         let base_part = base.map(|b| {
             let values = inits.iter().flatten().copied().chain(leading.iter().map(|&(_, v)| v));
@@ -132,10 +134,29 @@ impl<'a> Gen<'a> {
                 }
             }
         }
-        // The fields whose values have effects, in the order Java runs them.
-        let mut effects: Vec<usize> =
-            (0..fields.len()).filter(|&i| bound[i].is_none() && values[i].is_some_and(has_effects)).collect();
-        for &(i, value) in &leading {
+        if reads_leading {
+            // The initializers with effects run before the body, then the leading assignments
+            // in order, each a local that the later ones read.
+            for i in 0..fields.len() {
+                if bound[i].is_none()
+                    && let Some(init) = inits[i].filter(|e| has_effects(e) || reads_static(e))
+                {
+                    bound[i] = Some(bind(self, i, init, &mut taken));
+                }
+            }
+            for &(i, value) in &leading {
+                let local = bind(self, i, value, &mut taken);
+                self.field_locals.insert(fields[i].name.clone(), local.clone());
+                values[i] = Some(value);
+                bound[i] = Some(local);
+            }
+        }
+        // The fields whose values have effects, in the order Java runs them. An initializer that
+        // reads a static runs before the body, which may change it.
+        let mut effects: Vec<usize> = (0..fields.len())
+            .filter(|&i| bound[i].is_none() && values[i].is_some_and(|e| has_effects(e) || reads_static(e)))
+            .collect();
+        for &(i, value) in leading.iter().filter(|_| !reads_leading) {
             values[i] = Some(value);
             bound[i] = None;
             if has_effects(value) {

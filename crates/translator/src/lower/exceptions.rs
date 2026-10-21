@@ -467,9 +467,10 @@ impl<'t> Lowering<'t> {
         for &resource in resources.iter().rev() {
             body = self.with_resource(resource, body)?;
         }
-        let catches: Vec<Catch> = node.list("catches").map(|c| self.catch(c)).collect::<Result<_, _>>()?;
+        let catches: Vec<Catch> =
+            node.list("catches").filter_map(|c| self.catch(c).transpose()).collect::<Result<_, _>>()?;
         let finally = node.get("finallyBlock").map(|block| self.block(block)).transpose()?;
-        if !resources.is_empty() && catches.is_empty() && finally.is_none() {
+        if catches.is_empty() && finally.is_none() {
             return Ok(Stmt::Block(body));
         }
         Ok(Stmt::Try { body, catches, finally })
@@ -494,16 +495,28 @@ impl<'t> Lowering<'t> {
     /// }
     /// ```
     ///
-    /// The resource is a new object, so it is not null, as Java requires for `close` to run.
+    /// The resource is a new object, so it is not null, as Java requires for `close` to run. An
+    /// existing variable (`try (r)`, `try (this.r)`) is `final var r$resource = r`, and a null
+    /// value is not closed, as Java skips it: the `close` calls then test `r$resource`.
     fn with_resource(&self, resource: Node<'t>, body: Vec<Stmt>) -> Result<Vec<Stmt>, Error> {
-        let Some(init) = resource.get("initializer").filter(|_| resource.kind() == "VARIABLE") else {
-            return unsupported(resource, "try-with-resources over an existing variable");
-        };
-        if init.kind() != "NEW_CLASS" {
-            return unsupported(init, "a resource that is not a new object");
-        }
+        let existing = resource.kind() != "VARIABLE";
         let mut declared = Vec::new();
-        self.stmt_into(resource, &mut declared)?;
+        if existing {
+            let name = resource.symbol().map_or("resource", |s| s.name);
+            let value = self.expr(resource)?;
+            let ty = self.ty(resource, resource.java_type())?;
+            let value = self.convert(value, ty);
+            let name = format!("{name}$resource");
+            declared.push(Stmt::Local { ty, name, init: Some(value), pos: resource.pos() });
+        } else {
+            let Some(init) = resource.get("initializer") else {
+                return unsupported(resource, "this resource");
+            };
+            if init.kind() != "NEW_CLASS" {
+                return unsupported(init, "a resource that is not a new object");
+            }
+            self.stmt_into(resource, &mut declared)?;
+        }
         let [Stmt::Local { ty, name, pos, .. }] = &declared[..] else {
             return unsupported(resource, "this resource");
         };
@@ -548,7 +561,7 @@ impl<'t> Lowering<'t> {
         let on_throw = vec![
             Stmt::Expr(self.synth(set_failed, pos, Type::Void)),
             Stmt::Try {
-                body: vec![self.close_stmt(&name, ty, pos, close)],
+                body: vec![self.close_stmt(&name, ty, pos, close, existing)],
                 catches: vec![suppress],
                 finally: None,
             },
@@ -571,7 +584,7 @@ impl<'t> Lowering<'t> {
         );
         let close_unless_failed = Stmt::If {
             cond: self.synth(not_failed, pos, Type::Boolean),
-            then: Box::new(Stmt::Block(vec![self.close_stmt(&name, ty, pos, close)])),
+            then: Box::new(Stmt::Block(vec![self.close_stmt(&name, ty, pos, close, existing)])),
             otherwise: None,
         };
         declared.push(Stmt::Local {
@@ -588,8 +601,9 @@ impl<'t> Lowering<'t> {
         Ok(declared)
     }
 
-    /// `name.close();` for the program's `close` method `close` of the resource's type `ty`.
-    fn close_stmt(&self, name: &str, ty: Type, pos: Pos, close: usize) -> Stmt {
+    /// `name.close();` for the program's `close` method `close` of the resource's type `ty`; with
+    /// `guard`, `if (name != null) name.close();`, for a resource that may be null.
+    fn close_stmt(&self, name: &str, ty: Type, pos: Pos, close: usize, guard: bool) -> Stmt {
         let receiver = Box::new(self.synth(ExprKind::Var(name.to_string()), pos, ty));
         let call = ExprKind::MethodCall {
             receiver,
@@ -598,7 +612,18 @@ impl<'t> Lowering<'t> {
             resolved: Some(close),
             is_super: false,
         };
-        Stmt::Expr(self.synth(call, pos, Type::Void))
+        let close = Stmt::Expr(self.synth(call, pos, Type::Void));
+        if !guard {
+            return close;
+        }
+        let value = Box::new(self.synth(ExprKind::Var(name.to_string()), pos, ty));
+        let null = Box::new(self.synth(ExprKind::Null, pos, Type::Null));
+        let not_null = ExprKind::Binary(BinOp::Ne, value, null);
+        Stmt::If {
+            cond: self.synth(not_null, pos, Type::Boolean),
+            then: Box::new(Stmt::Block(vec![close])),
+            otherwise: None,
+        }
     }
 
     /// The program's `close()` of type `t`, declared there or inherited from a superclass.
@@ -615,14 +640,24 @@ impl<'t> Lowering<'t> {
         None
     }
 
-    fn catch(&self, node: Node<'t>) -> Result<Catch, Error> {
+    /// A `catch` clause, or `None` when every class it catches is one that a whole program does
+    /// not translate (`program::untranslated`), such as reflection's
+    /// `InvocationTargetException`: no translated code can throw one, so such an alternative is
+    /// left out.
+    fn catch(&self, node: Node<'t>) -> Result<Option<Catch>, Error> {
         let param = node.child("parameter")?;
         let ty_node = param.child("type")?;
-        let names: Vec<&str> = if ty_node.kind() == "UNION_TYPE" {
+        let mut names: Vec<&str> = if ty_node.kind() == "UNION_TYPE" {
             ty_node.list("typeAlternatives").map(|a| a.java_type()).collect()
         } else {
             vec![ty_node.java_type()]
         };
+        if self.reach.is_some() {
+            names.retain(|name| crate::program::untranslated(name).is_none());
+            if names.is_empty() {
+                return Ok(None);
+            }
+        }
         let mut types = Vec::new();
         for name in names {
             match self.type_index(name) {
@@ -632,7 +667,7 @@ impl<'t> Lowering<'t> {
         }
         let ty = self.ty(param, param.symbol().map_or("", |s| s.ty))?;
         let body = self.block(node.child("block")?)?;
-        Ok(Catch { types, name: param.str("name").to_string(), ty, body, pos: node.pos() })
+        Ok(Some(Catch { types, name: param.str("name").to_string(), ty, body, pos: node.pos() }))
     }
 
     /// `o.getClass().getName()` or `o.getClass().getSimpleName()`, as `Builtin::ClassName` of

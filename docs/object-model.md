@@ -451,6 +451,12 @@ fn new(r: f64) -> Circle {
   rule (`analysis::leading_assignments`) skips the `super(...)` statement, which lowering
   represents as `ExprKind::SuperInit { args, resolved }` as the first statement (like
   `ThisCall`).
+- A leading assignment may read fields that earlier leading assignments set, as `EnumMap`'s
+  constructor does (`keyUniverse = getKeyUniverse(keyType); vals = new
+  Object[keyUniverse.length]`): the literal then computes the initializers with effects or that
+  read a static first, as Java runs them before the body, and then each leading value into a
+  local that the later ones read in place of the field. Every field is set before anything can
+  read it, so the nullness analysis sees those fields as never null.
 - The superclass's constructor builds a plain value (`plain_constructors`) wherever it can: it
   uses `this` only for the struct being built, calls on `this` only methods that borrow that
   struct, and so do its class's field initializers. A constructor of a class with subclasses
@@ -835,6 +841,14 @@ variant holding the Copy value: `Shape::Color(Color)`, and its arm calls the enu
 variants are the union over its concretes as for any type; `to_<super interface>()`
 conversions are generated on demand. A class implementing two interfaces appears in both
 enums. Interface methods are always object-level (interfaces have no instance fields).
+
+A class may implement an interface's method with a method it inherits from a superclass that
+does not implement the interface (`Spliterators.EmptySpliterator.OfInt`): javac's `overrides`
+of the superclass's method cannot list it, so `JavaTree` gives the class's symbol an `inherits`
+list of such pairs, and reachability and lowering add the interface's method to the overrides of
+the inherited one (with a bridge when erasure changes its signature). An interface that declares
+`Object`'s `equals` or `hashCode` again (`Comparator`) dispatches a class or enum without its
+own to `Object`'s.
 
 ### 1.13 Dropping long chains
 
@@ -1697,10 +1711,28 @@ Generics are erased in lowering, and nothing after it knows they existed:
   method declares it, not at the call; an array of references passed for it is passed on, as
   javac infers `T` from it (and is then rejected below unless it is an `Object[]`).
 - Arrays do not convert: `String[]` is `java::Array<String>` and `Object[]` is
-  `java::Array<Option<Object>>`, so an array passed as an array of a type variable
-  (`<T> T first(T[] xs)` called with a `String[]`) is rejected ("an array passed as an array of a
-  type variable"), and so is an array of a type variable read as an array of its argument. A
-  generic array built as `(T[]) new Object[n]` is an `Object[]` and translates.
+  `java::Array<Option<Object>>`. A generic array built as `(T[]) new Object[n]` is an `Object[]`
+  and translates. Java's arrays of references are covariant, though (a `Version[]` is an
+  `Object[]`), and erasure makes the array of a type variable an `Object[]`, so
+  `list.toArray(new Version[0])` passes a `Version[]` where `T[]` is an `Object[]`, and
+  `toArray(a)` with an array big enough fills `a` and returns it. Copying at the boundary would
+  lose that identity. Instead, two different array types of references that meet (an argument,
+  an assignment, a return or a cast between the two, a use where javac substituted one for the
+  array of a type variable, which is an array of its bound, or an array passed for `Object...`)
+  are each an `Object[]` everywhere in the program: lowering notes each such type, and
+  `real_generics::retry` lowers the program again with it as `Object[]` (`lower::covariant`). So
+  `Integer[]` passed to `<T extends Comparable<T>> int countGreater(T[] array, T pivot)` makes
+  both `Integer[]` and `Comparable[]` `Object[]`s. Element reads get the checked cast back that
+  erasure writes, a for-each over such an array casts each element to the variable's type, and a
+  store converts to `Object`. A Rust generic that would take such an `Object[]` for an array of
+  its type variable is erased. Every other array keeps its exact type. Keeping the element class
+  in a tag beside the elements would need an array type of its own through all of the array code,
+  so it is not done, with two deviations: storing an object of another class in such an array
+  does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s
+  (`[Ljava.lang.Object;`). Arrays of strings are left out: the runtime's string methods make and
+  take `java::Array<String>` (`split`, `String.join`, `main`'s arguments), so a `String[]` passed
+  for an array of a type variable is still rejected ("an array passed as an array of a type
+  variable").
 - An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the
   plan's `Variant::Array`, done as a runtime class beside the strings and the boxes rather than a
   variant kind of its own: each array type that is converted to `Object` or cast back from it gets
