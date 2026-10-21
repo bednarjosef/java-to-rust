@@ -409,7 +409,7 @@ Each step is mergeable on its own, with tests green and the corpus extended.
 4. **`finally`** with the rules for `return`, `break`, `continue` and exceptions in `try`,
    `catch` and `finally`. Corpus: `features/Finally.java`, `features/FinallyOverrides.java`.
 5. **Failures of the runtime as values**. Corpus: `features/RuntimeExceptionsCaught.java`,
-   `programs/RpnCalculatorErrors.java`.
+   `features/ArrayFailuresCaught.java`, `programs/RpnCalculatorErrors.java`.
 6. **Causes, `getCause`, `printStackTrace`, constructors that throw**. Corpus:
    `features/ExceptionCauses.java`, `features/ThrowingConstructors.java`.
 7. **try-with-resources**, once interfaces translate.
@@ -526,5 +526,14 @@ Decisions that changed during the implementation, step by step.
   (`NullPointerException`, whose checked form would wrap every `non_null`), an array creation
   with a negative size, a `ClassCastException` of a downcast, the library calls that may fail
   in more than one way (a `StringBuilder` index, a pattern that is not a literal, `repeat`), and
-  a checked operation inside a closure of the translation (an update of a shared array element
-  whose value divides, `counts[i] += 10 / d`), where the `?` would not leave the method.
+  any checked operation that would land inside a closure of the translation
+  (`check_closures`), where the `?` would not leave the method.
+- **Plain arrays** (main's `Vec`s and `Vec`s of `Vec`s) have checked forms of their helpers too
+  (`java::try_at`, `try_put`, `try_modify`, `try_row`, `try_row_mut`, `try_position_of`,
+  `try_assign`). An element update whose value may fail (`counts[i] += 10 / d`,
+  `row[j] += grid[r][j]`) is a read, the value and a write one after the other, in Java's
+  order, instead of a closure. A sliced loop inside a `try` keeps its fast copy: the check
+  before it proves its accesses, and the other copy fails where Java does.
+- **The array analyses and `try`**: the liveness analysis does not look into a `try` (every
+  array it mentions is live throughout it, as for a `switch`), so no array is moved inside one,
+  where a failure may lead to a `catch` or a `finally` that reads it.
