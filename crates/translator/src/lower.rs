@@ -604,6 +604,7 @@ impl<'t> Lowering<'t> {
             "TYPE_CAST" if let Some(name) = crate::program::created_by_name(node.0) => {
                 self.created_by_name(node, Node(name))?
             }
+            "TYPE_CAST" if arrays::casts_component_array(node) => self.component_array(node)?,
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
                 let value = self.expr(node.child("expression")?)?;

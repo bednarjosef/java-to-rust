@@ -181,7 +181,8 @@ the program as Java's uncaught exception would. Without the `finally`, the handl
 `lower/exceptions.rs` holds a table of the standard classes: their qualified name, their
 superclass, which of the four `Throwable` constructor shapes they have (`()`, `(String)`,
 `(String, Throwable)`, `(Throwable)`) and any other constructor (`(int)` of the index
-exceptions, `(Object)` of `AssertionError`, taken with a `String` argument only):
+exceptions, and the `AssertionError` constructors with a detail of any type: `(Object)`, which
+takes a `Throwable` as the cause, and the primitive ones):
 
 ```
 java.lang.Throwable
