@@ -741,14 +741,23 @@ fn super_calls_are_non_virtual() {
 }
 
 #[test]
-fn a_superclass_constructor_that_leaks_this_is_rejected() {
-    let err = java_to_rust::translate(
+fn a_superclass_constructor_that_calls_an_override_runs_on_the_whole_object() {
+    let rust = translate(
         "abstract class Base { int x; Base() { x = size(); } abstract int size(); }
         class Impl extends Base { @Override int size() { return 3; } }
         class A { public static void main(String[] a) { System.out.println(new Impl().x); } }",
-    )
-    .expect_err("a superclass constructor that calls an overridable method must be rejected");
-    assert!(err.to_string().contains("call overridable methods not supported yet"), "{err}");
+    );
+    // The object is built with every field zero, then the superclass's constructor body runs on
+    // it as a method, where `size()` is the subclass's.
+    assert_contains(
+        &rust,
+        &[
+            "let mut this = Impl { base: BaseFields::new() };",
+            "this.construct_base();",
+            "fn construct_base(&mut self) {",
+            "self.base.x = self.size();",
+        ],
+    );
 }
 
 #[test]
