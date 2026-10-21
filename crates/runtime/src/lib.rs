@@ -10,6 +10,7 @@ pub use slice::*;
 
 use std::fmt;
 
+mod allocator;
 mod arguments;
 mod boxed;
 mod builder;
@@ -49,6 +50,7 @@ mod system;
 mod thread;
 mod unsigned;
 mod vm;
+pub use allocator::{Allocator, release_thread_cache};
 pub use arguments::main_args;
 pub use boxed::*;
 pub use builder::{StringBuilder, same_builder};

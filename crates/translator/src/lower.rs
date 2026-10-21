@@ -5,6 +5,7 @@
 
 mod code_point;
 mod covariant;
+mod element_reads;
 mod enum_nulls;
 mod enum_tables;
 mod enums;
@@ -291,6 +292,7 @@ impl<'t> Lowering<'t> {
         self.method_ctx.set(outer);
         let mut method = method?;
         local_names::distinct_locals(&mut method);
+        self.share_element_reads(&mut method);
         Ok(method)
     }
 

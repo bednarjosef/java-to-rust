@@ -184,8 +184,12 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
     if !uses.is_empty() {
         header.push_str(&(uses.join("\n") + "\n"));
     }
-    (header + &g.out, g.needs.take(), g.rejected)
+    (header + &g.out + "\n" + ALLOCATOR, g.needs.take(), g.rejected)
 }
+
+/// The crate root's allocator: the runtime's, which caches small blocks (runtime `allocator.rs`),
+/// as Java programs make and drop many small objects.
+const ALLOCATOR: &str = "#[global_allocator]\nstatic JAVA_RUNTIME_ALLOCATOR: java_runtime::Allocator = java_runtime::Allocator;\n";
 
 /// How `this` is written in the code being generated.
 #[derive(Clone, Copy, PartialEq)]

@@ -185,7 +185,10 @@ impl<'a> Gen<'a> {
             }
         }
         let body = self.module("", live, &packages);
-        format!("// Translated from the Java program `{}` by java-to-rust.\n\n{body}", class.name)
+        format!(
+            "// Translated from the Java program `{}` by java-to-rust.\n\n{body}\n{ALLOCATOR}",
+            class.name
+        )
     }
 
     /// The items of a package's module, then its nested modules, after the `use` lines they need.

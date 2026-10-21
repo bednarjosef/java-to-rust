@@ -239,4 +239,34 @@ impl<'a> Gen<'a> {
         assigns_any(rest, name)
             || (owned && self.changes_owned(rest, &|e| matches!(&e.kind, ExprKind::Var(v) if v == name)))
     }
+
+    /// `local_is_mut` of a local declared without a value: one that a statement of its own block
+    /// assigns once, and nothing else assigns, is first given its value there, as Rust's
+    /// `let x;` allows without `mut`.
+    pub(super) fn declared_local_is_mut(&self, ty: Type, name: &str, rest: &[Stmt]) -> bool {
+        let count = |e: &Expr| {
+            let mut n = 0;
+            visit_expr(e, &mut |x| match &x.kind {
+                ExprKind::Assign { target: Place::Var(v), .. }
+                | ExprKind::IncDec { target: Place::Var(v), .. }
+                    if v == name =>
+                {
+                    n += 1
+                }
+                // A switch expression's cases may loop.
+                ExprKind::Switch { .. } => n += 2,
+                _ => {}
+            });
+            n
+        };
+        let once = rest.iter().any(|s| match s {
+            Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) => count(e) == 1,
+            _ => false,
+        }) && rest.iter().filter(|s| assigns_stmt(s, name)).count() == 1;
+        if !once {
+            return self.local_is_mut(ty, name, rest);
+        }
+        let owned = matches!(ty, Type::Class(c, _) if self.facts.owned.contains(c));
+        owned && self.changes_owned(rest, &|e| matches!(&e.kind, ExprKind::Var(v) if v == name))
+    }
 }

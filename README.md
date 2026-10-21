@@ -105,15 +105,20 @@ null checks, dynamic calls, `unsafe` code, and memory.
 
 ## Performance
 
-`benchmarks/` holds 11 programs: sieve, Collatz, n-body, Mandelbrot, matrix multiply, sorting a
-million ints, binary trees, a linked list (`NodeList`), string building, statics and a bytecode
-interpreter. `python3 scripts/benchmark.py [--runs N]` checks that each translation prints what
+`benchmarks/` holds 13 programs: sieve, Collatz, n-body, Mandelbrot, matrix multiply, sorting a
+million ints, binary trees, a linked list (`NodeList`), string building, statics, a bytecode
+interpreter, a character scanner over a string field (`TokenScanner`) and particles read through
+an array (`ParticleArray`). `python3 scripts/benchmark.py [--runs N]` checks that each translation prints what
 Java prints, then times both sides as the median of N wall-clock runs (default 5, JVM start-up
 included). A program that warms up also reports the time of its timed kernel. Memory is not
 measured.
 
-`docs/performance.md` has the table from one run on the `array-ownership` branch, and the causes
-of the slow cases. Freeing a long chain of objects, such as `NodeList`'s list, does not
+`docs/performance.md` has the benchmark tables, the causes of the slow cases, and what was
+measured on whole third-party programs (Are We Fast Yet, binary trees, n-body). A translated
+program uses the runtime's memory allocator, which keeps freed blocks of up to 136 bytes per
+thread for the next allocation of that size: a thread holds on to at most 64 MB of them per size,
+a thread started by `Thread.start` gives them back when it ends, and other threads keep them until
+the process exits. Freeing a long chain of objects, such as `NodeList`'s list, does not
 overflow the stack: classes on a cycle of field types get an iterative `Drop`
 (docs/object-model.md, "1.13 Dropping long chains").
 

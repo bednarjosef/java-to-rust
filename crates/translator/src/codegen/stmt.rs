@@ -80,6 +80,9 @@ impl<'a> Gen<'a> {
 
     pub(super) fn statement(&mut self, stmt: &'a Stmt, rest: &'a [Stmt]) {
         match stmt {
+            Stmt::Local { ty, name, init: None, .. } => {
+                self.local_decl(*ty, name, None, self.declared_local_is_mut(*ty, name, rest));
+            }
             Stmt::Local { ty, name, init, .. } => {
                 self.local_decl(*ty, name, init.as_ref(), self.local_is_mut(*ty, name, rest));
             }
