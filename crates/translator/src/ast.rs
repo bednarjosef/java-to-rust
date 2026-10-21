@@ -954,56 +954,72 @@ pub fn mentions(e: &Expr, name: &str) -> bool {
     found
 }
 
-/// Calls `on_expr` on every top-level expression and `on_stmt` on every statement in `stmt`.
+/// Calls `on_expr` on every top-level expression and `on_stmt` on every statement in `stmt`, and on
+/// the statements inside the switch expressions of those expressions, at any depth.
 pub fn visit_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn FnMut(&Stmt)) {
+    walk_stmt(stmt, on_expr, on_stmt, true);
+}
+
+/// Calls `on_stmt` on every statement in `stmt` except those inside its switch expressions. For
+/// callers that count what belongs to one switch expression or loop: a `yield` or `continue` in a
+/// nested switch expression belongs to that expression, and Java does not let one leave it.
+pub fn visit_stmt_outside_switches(stmt: &Stmt, on_stmt: &mut dyn FnMut(&Stmt)) {
+    walk_stmt(stmt, &mut |_| {}, on_stmt, false);
+}
+
+/// `visit_stmt`, where `switches` says whether the statements of switch expressions are reported.
+/// `visit_expr` walks those itself, so its own walk turns this off to report each one once.
+fn walk_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn FnMut(&Stmt), switches: bool) {
     on_stmt(stmt);
     match stmt {
-        Stmt::Local { init: Some(e), .. } => on_expr(e),
+        Stmt::Local { init: Some(e), .. } => top_expr(e, on_expr, on_stmt, switches),
         Stmt::Local { init: None, .. } => {}
-        Stmt::Expr(e) | Stmt::Return(Some(e), _) => on_expr(e),
+        Stmt::Expr(e) | Stmt::Return(Some(e), _) => top_expr(e, on_expr, on_stmt, switches),
         Stmt::If { cond, then, otherwise } => {
-            on_expr(cond);
-            visit_stmt(then, on_expr, on_stmt);
+            top_expr(cond, on_expr, on_stmt, switches);
+            walk_stmt(then, on_expr, on_stmt, switches);
             if let Some(o) = otherwise {
-                visit_stmt(o, on_expr, on_stmt);
+                walk_stmt(o, on_expr, on_stmt, switches);
             }
         }
         Stmt::While { cond, body } | Stmt::DoWhile { body, cond } => {
-            on_expr(cond);
-            visit_stmt(body, on_expr, on_stmt);
+            top_expr(cond, on_expr, on_stmt, switches);
+            walk_stmt(body, on_expr, on_stmt, switches);
         }
         Stmt::For { init, cond, update, body } => {
-            init.iter().for_each(|s| visit_stmt(s, on_expr, on_stmt));
+            init.iter().for_each(|s| walk_stmt(s, on_expr, on_stmt, switches));
             if let Some(cond) = cond {
-                on_expr(cond);
+                top_expr(cond, on_expr, on_stmt, switches);
             }
-            update.iter().for_each(&mut *on_expr);
-            visit_stmt(body, on_expr, on_stmt);
+            for e in update {
+                top_expr(e, on_expr, on_stmt, switches);
+            }
+            walk_stmt(body, on_expr, on_stmt, switches);
         }
         Stmt::ForEach { array, body, .. } => {
-            on_expr(array);
-            visit_stmt(body, on_expr, on_stmt);
+            top_expr(array, on_expr, on_stmt, switches);
+            walk_stmt(body, on_expr, on_stmt, switches);
         }
-        Stmt::Block(stmts) => stmts.iter().for_each(|s| visit_stmt(s, on_expr, on_stmt)),
+        Stmt::Block(stmts) => stmts.iter().for_each(|s| walk_stmt(s, on_expr, on_stmt, switches)),
         Stmt::Switch { selector, cases } => {
-            on_expr(selector);
+            top_expr(selector, on_expr, on_stmt, switches);
             for case in cases {
                 for label in &case.labels {
                     if let CaseLabel::Value(e) = label {
-                        on_expr(e);
+                        top_expr(e, on_expr, on_stmt, switches);
                     }
                 }
-                case.body.iter().for_each(|s| visit_stmt(s, on_expr, on_stmt));
+                case.body.iter().for_each(|s| walk_stmt(s, on_expr, on_stmt, switches));
             }
         }
-        Stmt::Labeled { body, .. } => visit_stmt(body, on_expr, on_stmt),
-        Stmt::Yield(e) | Stmt::Throw(e) => on_expr(e),
+        Stmt::Labeled { body, .. } => walk_stmt(body, on_expr, on_stmt, switches),
+        Stmt::Yield(e) | Stmt::Throw(e) => top_expr(e, on_expr, on_stmt, switches),
         Stmt::Try { body, catches, finally } => {
-            body.iter().for_each(|s| visit_stmt(s, on_expr, on_stmt));
+            body.iter().for_each(|s| walk_stmt(s, on_expr, on_stmt, switches));
             for catch in catches {
-                catch.body.iter().for_each(|s| visit_stmt(s, on_expr, on_stmt));
+                catch.body.iter().for_each(|s| walk_stmt(s, on_expr, on_stmt, switches));
             }
-            finally.iter().flatten().for_each(|s| visit_stmt(s, on_expr, on_stmt));
+            finally.iter().flatten().for_each(|s| walk_stmt(s, on_expr, on_stmt, switches));
         }
         Stmt::Return(None, _)
         | Stmt::Break
@@ -1011,6 +1027,30 @@ pub fn visit_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn
         | Stmt::BreakLabel(_)
         | Stmt::ContinueLabel(_) => {}
     }
+}
+
+/// Calls `on_expr` on a top-level expression of a statement, then `on_stmt` on the statements of
+/// the switch expressions inside it (see `switch_stmts`) when `switches` is set.
+fn top_expr(e: &Expr, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn FnMut(&Stmt), switches: bool) {
+    on_expr(e);
+    if switches {
+        switch_stmts(e, on_stmt);
+    }
+}
+
+/// Calls `on_stmt` on the statements of every switch expression in `e`, at any depth. Each case
+/// body is walked once, by the switch expression that owns it; `walk_stmt` does not descend into
+/// the expressions of those statements, which `visit_expr` already reaches.
+fn switch_stmts(e: &Expr, on_stmt: &mut dyn FnMut(&Stmt)) {
+    visit_expr(e, &mut |x| {
+        if let ExprKind::Switch { cases, .. } = &x.kind {
+            for case in cases {
+                for stmt in &case.body {
+                    walk_stmt(stmt, &mut |_| {}, on_stmt, false);
+                }
+            }
+        }
+    });
 }
 
 /// Calls `f` on `e` and every expression inside it.
@@ -1055,7 +1095,7 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
                     }
                 }
                 for stmt in &case.body {
-                    visit_stmt(stmt, &mut |e| visit_expr(e, f), &mut |_| {});
+                    walk_stmt(stmt, &mut |e| visit_expr(e, f), &mut |_| {}, false);
                 }
             }
         }

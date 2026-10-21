@@ -40,7 +40,8 @@ pub(super) fn check(class: &Class) -> Result<(), Error> {
                     if found.is_ok() {
                         found = expression(e, &m.body, &declared, &negated);
                     }
-                    // The statements of a switch expression, which `visit_stmt` does not reach.
+                    // The expressions of the statements of a switch expression: `visit_stmt` reports
+                    // those statements to `on_stmt`, not their expressions to `on_expr`.
                     switch_bodies(e, &mut |body| {
                         for inner in body {
                             visit_stmt(
