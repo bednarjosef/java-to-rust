@@ -44,10 +44,12 @@ use switch::{Frame, Kind};
 mod array_writes;
 mod arrays;
 mod java_arrays;
+mod java_objects;
 mod modules;
 mod natives;
 mod objects;
 mod owned;
+mod patterns;
 mod plain_arrays;
 mod sliced_loops;
 mod sync;
@@ -102,6 +104,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         formatting: false,
         chars: false,
         exhaustive: false,
+        chain: false,
         field_locals: HashMap::new(),
         ctor_result: None,
         printing: false,
@@ -230,6 +233,9 @@ struct Gen<'a> {
     chars: bool,
     /// Whether the cases of the switch being written cover every value of its enum selector.
     exhaustive: bool,
+    /// Whether the `?:` being written is the else branch of another, so that the chain is written
+    /// as `if .. else if ..` on lines of its own.
+    chain: bool,
     /// The locals that hold the fields that a constructor's initializers computed first, by
     /// Java field name: the later initializers read them there.
     field_locals: HashMap<String, String>,

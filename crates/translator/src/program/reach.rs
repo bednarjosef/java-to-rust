@@ -80,6 +80,7 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.Long",
     "java.lang.Math",
     "java.lang.Number",
+    "java.lang.Record",
     "java.lang.Object",
     "java.lang.Runtime",
     "java.lang.Short",
@@ -197,6 +198,13 @@ pub fn outside(class: &str) -> bool {
 pub fn provided(class: &str) -> bool {
     RUNTIME_CLASSES.contains(&class) || crate::lower::is_standard(class)
 }
+
+/// The methods that a for-each over an `Iterable` calls.
+pub const ITERATION: &[(&str, &str, &str)] = &[
+    ("java.lang.Iterable", "iterator", "()java.util.Iterator<T>"),
+    ("java.util.Iterator", "hasNext", "()boolean"),
+    ("java.util.Iterator", "next", "()E"),
+];
 
 /// The node kinds of class declarations, and the symbol kinds of classes.
 pub const CLASS_KINDS: &[&str] = &["CLASS", "INTERFACE", "ENUM", "RECORD", "ANNOTATION_TYPE"];
@@ -471,6 +479,19 @@ impl<'t> Walk<'t> {
                 self.scan(else_branch(value));
             }
             Value::Object(fields) => {
+                // A for-each over an `Iterable` calls its iterator's methods, which javac's tree
+                // does not show.
+                if text(value, "kind") == "ENHANCED_FOR_LOOP"
+                    && !text(&value["expression"], "javaType").ends_with(']')
+                {
+                    for (class, name, signature) in ITERATION {
+                        self.work.push(Item::Method((
+                            class.to_string(),
+                            name.to_string(),
+                            signature.to_string(),
+                        )));
+                    }
+                }
                 // A lambda creates an object of a class that implements its interface with the
                 // interface's abstract method.
                 let descriptor = &value["descriptor"];

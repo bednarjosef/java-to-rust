@@ -58,6 +58,7 @@ impl<'t> Lowering<'t> {
             plain_object: None,
             real: Default::default(),
             failed: Default::default(),
+            aliases: Default::default(),
             functional: Default::default(),
             lambdas: Vec::new(),
             capture_refs: Default::default(),
@@ -67,7 +68,7 @@ impl<'t> Lowering<'t> {
 
     /// Declares a class, named `outer.Name` inside `outer` (a class or a package).
     pub(super) fn declare_type(&mut self, node: Node<'t>, outer: Option<&str>) -> Result<(), Error> {
-        if !matches!(node.kind(), "CLASS" | "ENUM" | "INTERFACE") {
+        if !matches!(node.kind(), "CLASS" | "ENUM" | "INTERFACE" | "RECORD") {
             return unsupported(node, &kind_words(node.kind()));
         }
         let simple = node.str("simpleName");
@@ -75,8 +76,12 @@ impl<'t> Lowering<'t> {
             Some(outer) => format!("{outer}.{simple}"),
             None => simple.to_string(),
         };
+        // A local record, enum or interface moved to the top level (see `javac::records`) keeps
+        // the binary name that javac's symbols give it.
+        let binary = crate::program::class_name(node.0);
+        let javac = if binary.contains('$') { binary } else { name.clone() };
         let index = self.types.len();
-        self.types.push(TypeInfo { name: name.clone(), javac: name, node, nested: None });
+        self.types.push(TypeInfo { name, javac, node, nested: None });
         self.declare_members(index)
     }
 
@@ -108,7 +113,7 @@ impl<'t> Lowering<'t> {
                 "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
                     return unsupported(member, "member classes of local and anonymous classes");
                 }
-                "ENUM" | "INTERFACE" => self.declare_type(member, Some(&name))?,
+                "ENUM" | "INTERFACE" | "RECORD" => self.declare_type(member, Some(&name))?,
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
                 "CLASS" => self.declare_inner(index, member)?,
                 "BLOCK" => {
@@ -219,7 +224,7 @@ impl<'t> Lowering<'t> {
             // Java evaluates an object in front of a static field and ignores it, even null;
             // one without effects is simply dropped.
             if let Some(r) = receiver
-                && r.symbol().is_none_or(|s| !matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM"))
+                && r.symbol().is_none_or(|s| !matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD"))
                 && has_effects(&self.expr(r)?)
             {
                 return unsupported(node, "static fields through an expression with effects");

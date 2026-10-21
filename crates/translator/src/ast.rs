@@ -721,6 +721,18 @@ pub enum Builtin {
     Unsigned(UnsignedOp, Type),
     /// A code point method of `Character` (`toChars`, `charCount` and the like), see `CodePointOp`.
     CodePoint(CodePointOp),
+    /// `Objects.equals(a, b)` on two strings, boxes of one kind, or objects; for objects a third
+    /// argument is the call `a.equals(b)` that runs when `a` is not null.
+    ObjectsEquals,
+    /// `Objects.hashCode(o)` on a string, a box, an enum or an object; for an object a second
+    /// argument is the call `o.hashCode()` that runs when `o` is not null.
+    ObjectsHashCode,
+    /// `[selector, value]`: `value`, once a pattern switch has checked its selector (a variable)
+    /// for null (see `lower::patterns`); `[selector]`: the check alone.
+    NullChecked,
+    /// `[selector]`: the end of an exhaustive pattern switch that no case matched, which only a
+    /// null selector reaches: it throws `NullPointerException`.
+    Unmatched,
     /// `o.getClass().getName()`: Java's binary name of the class of the object `o`, such as
     /// `java.lang.IllegalStateException` or `Bank$Overdrawn`; with `simple`,
     /// `o.getClass().getSimpleName()`, its name in its source: `IllegalStateException`, `Overdrawn`.

@@ -1,7 +1,7 @@
 //! The shape of the generated Rust for inner, local and anonymous classes: each is a struct
 //! whose synthetic fields hold its enclosing instance (`outer`) and the locals it captures, set
-//! by its constructors from parameters that each `new` passes. (Whether the output matches Java
-//! is checked by the corpus test.)
+//! by its constructors from parameters that each `new` passes; and for-each over an `Iterable`,
+//! which calls their iterators. (Whether the output matches Java is checked by the corpus test.)
 
 fn translate(java: &str) -> String {
     java_to_rust::translate(java).unwrap_or_else(|e| panic!("translation failed: {e}"))
@@ -236,5 +236,64 @@ fn an_anonymous_subclass_passes_constructor_arguments_to_super() {
             "ReportInMain { base: AReportFields::new(title), sep: sep.to_string() }",
             "ReportInMain::new(\"squares\", &sep)",
         ],
+    );
+}
+
+#[test]
+fn for_each_over_an_iterable_is_the_iterator_loop() {
+    let rust = translate(
+        "import java.util.Iterator;
+        class A implements Iterable<String> {
+            String[] items = { \"x\", \"yy\" };
+            public Iterator<String> iterator() {
+                return new Iterator<String>() {
+                    int at;
+                    public boolean hasNext() { return at < items.length; }
+                    public String next() { return items[at++]; }
+                };
+            }
+            public static void main(String[] args) {
+                A a = new A();
+                int n = 0;
+                outer:
+                for (String s : a) {
+                    for (String t : a) {
+                        if (t.length() == 2) continue outer;
+                        n += s.length();
+                    }
+                }
+                System.out.println(n);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "let it = A::iterator(&a);",
+            "'outer: while it.borrow().has_next() {",
+            "let s = java::cast(({ let value = it.borrow_mut().next(); value }).as_string(), \"java.lang.String\");",
+            "continue 'outer;",
+        ],
+    );
+}
+
+#[test]
+fn a_default_method_of_a_provided_interface_is_rejected() {
+    let error = java_to_rust::translate(
+        "import java.util.Iterator;
+        class A {
+            public static void main(String[] args) {
+                Iterator<String> it = new Iterator<String>() {
+                    public boolean hasNext() { return false; }
+                    public String next() { return null; }
+                };
+                it.remove();
+            }
+        }",
+    )
+    .expect_err("Iterator.remove is a default method of the JDK's");
+    assert!(
+        error.to_string().contains("the default method java.util.Iterator.remove not supported yet"),
+        "{error}"
     );
 }

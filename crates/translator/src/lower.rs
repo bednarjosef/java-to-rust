@@ -7,6 +7,7 @@ mod code_point;
 mod enum_nulls;
 mod enums;
 mod exceptions;
+mod foreach;
 mod functional;
 mod generic_args;
 mod generics;
@@ -32,7 +33,9 @@ mod constant_bodies;
 mod initializers;
 mod inner;
 mod java_arrays;
+mod java_objects;
 mod natives;
+mod patterns;
 mod primitives;
 mod program;
 mod switch;
@@ -208,6 +211,8 @@ struct Lowering<'t> {
     real: real_generics::Real,
     /// Those of `real` that lowering found cannot be: the program is lowered again without them.
     failed: RefCell<real_generics::Real>,
+    /// The pattern variables in scope that name a value without testing it (see `patterns`).
+    aliases: RefCell<Vec<patterns::Alias>>,
     /// The JDK's functional interfaces that the program uses and lowering provides (see `functional`).
     functional: functional::Functional,
     /// The lambdas and method references of the code being lowered (see `lambdas`).
@@ -451,7 +456,7 @@ impl<'t> Lowering<'t> {
             },
             "BREAK" | "CONTINUE" => switch::jump(node),
             "YIELD" => Stmt::Yield(self.expr(node.child("value")?)?),
-            "ENHANCED_FOR_LOOP" => self.for_each(node)?,
+            "ENHANCED_FOR_LOOP" => self.for_each(node, None)?,
             "SWITCH" => self.switch_stmt(node)?,
             "TRY" => self.try_stmt(node)?,
             "THROW" => self.throw(node)?,
@@ -478,7 +483,10 @@ impl<'t> Lowering<'t> {
             "CHAR_LITERAL" => self.char_literal(node)?,
             "FLOAT_LITERAL" => self.float_literal(node)?,
             "NULL_LITERAL" => ExprKind::Null,
-            "IDENTIFIER" => self.name(node)?,
+            "IDENTIFIER" => match self.alias(node) {
+                Some(value) => value,
+                None => self.name(node)?,
+            },
             // javac folds the minus sign into integer literals only; fold it into doubles too.
             "UNARY_MINUS" if node.child("expression")?.kind() == "DOUBLE_LITERAL" => {
                 ExprKind::Double(-self.number::<f64>(node.child("expression")?)?)
@@ -587,6 +595,13 @@ impl<'t> Lowering<'t> {
                 if left.ty == Type::String && right.ty == Type::String && matches!(op, BinOp::Eq | BinOp::Ne)
                 {
                     return error(node.pos(), "== on strings compares references; not supported yet");
+                }
+                // An array's text is its type and identity hash, such as `[I@1b6d3586`.
+                if op == BinOp::Add
+                    && (left.ty == Type::String || right.ty == Type::String)
+                    && (matches!(left.ty, Type::Array(_)) || matches!(right.ty, Type::Array(_)))
+                {
+                    return unsupported(node, "the text of an array");
                 }
                 let (left, right) = if matches!(op, BinOp::Eq | BinOp::Ne) {
                     self.convert_operands(left, right)
@@ -757,9 +772,15 @@ impl<'t> Lowering<'t> {
                 let char_arg = args.first().is_some_and(|a| a.ty == Type::Char);
                 self.character_method(node, name, symbol.ty, char_arg)?
             }
+            ("java.util.Objects", name) => return self.objects_call(node, name, args),
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);
+                // A default method of a JDK interface that lowering provides is not declared.
+                if resolved.is_none() && self.functional.has(symbol.owner) {
+                    let what = format!("the default method {}.{}", symbol.owner, symbol.name);
+                    return unsupported(node, &what);
+                }
                 let args = self.convert_generic_args(node, resolved, args)?;
                 if symbol.is_static {
                     return Ok(ExprKind::Call { name, args, resolved });
