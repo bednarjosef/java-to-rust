@@ -319,7 +319,9 @@ translated: reflection, method handles, serialization and security (`UNTRANSLATE
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
 `comparableClassFor` and parallel streams reach threads, so the boundary is needed. A program that
 puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints the count).
-Annotations reach nothing.
+Annotations reach nothing, and neither does the code that Java Flight Recorder's flags guard
+(`jfrTracing` in `Throwable` and the file streams, which only JFR sets, by reflection): it is not
+translated.
 
 `--survey` prints what the code reachable from `main` uses that is not supported yet instead of
 translating it: for the program's own code and for its library code, separately, per feature
@@ -327,10 +329,13 @@ translating it: for the program's own code and for its library code, separately,
 (methods, field initializers, initializer blocks) that use it, those it alone blocks, and up to
 three example places (`file:line`, relative to the source or library root). It also prints the
 order of features that frees the most code at each step, the methods of the runtime's classes
-that are called, and the native methods reached (`program/survey.rs`). `--survey-json <file>`
+and of the untranslated ones that are called, and the native methods reached, each with the
+shortest chain of calls from `main` that reaches it (`program/survey.rs`). `--survey-json <file>`
 writes the same census as JSON for scripts: the pieces with their class, kind, name, location and
-features, the runtime calls and the natives. It is a syntactic census, so it misses the narrower
-rejections of the lowering.
+features, the runtime calls, the natives, the methods outside the sources that are called and the
+classes whose objects are created, with their chains. It is a syntactic census, so it misses the narrower rejections of the lowering.
+`docs/natives-and-input.md` is the census of the natives that the target programs reach and of
+what reading standard input pulls in.
 
 ### Native layer and runtime
 
