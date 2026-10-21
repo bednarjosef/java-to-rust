@@ -605,6 +605,7 @@ impl<'a> Gen<'a> {
                 let code = self.value(&args[0], Type::Int);
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
+            Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
             Builtin::NullCheck => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),

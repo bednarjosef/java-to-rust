@@ -618,9 +618,8 @@ Recommended, in order of payoff:
    that creates it is. 27 files of java.base register a `SharedSecrets` accessor as an anonymous
    class in a static initializer (`Buffer`, `FileDescriptor`, `System`, ...), so initializing
    `Buffer` reaches every method of `JavaNioAccess`: mapped memory, `writeback`, continuations.
-   This needs javac's trees to name anonymous classes (their qualified name is empty today, so
-   their methods' keys collide), after which their methods are overriders like any other.
-   **Made** (4.5).
+   **Made** (4.5): javac's trees name anonymous classes by their binary names, and their
+   methods are overriders like any other.
 4. **Sequential streams do not reach the parallel paths.** `AbstractPipeline.evaluate` and the
    `opEvaluateParallel*` methods run only when `isParallel()` is true, which needs a reachable
    call of `BaseStream.parallel()`, `Collection.parallelStream()` or a parallel
@@ -743,6 +742,33 @@ for when a program needs time zones.
 With these, `StreamPipeline` reaches 264 classes (176 instantiated), 1,144 methods and 4 natives,
 all in the runtime (the `CDS` ones and `Unsafe.registerNatives`), against the 372 classes and 28
 natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` atomics are gone.
+- **`serialPersistentFields` not initialized**: serialization reads it by reflection, and its
+  initializer only creates `ObjectStreamField`s; some thirty classes of java.base have one
+  (`String`, `Random`, `ThreadLocalRandom`, `ConcurrentHashMap`), with `Long.TYPE` and
+  `String.class` arguments that are `Class` values. Reading standard input stopped at `Random`'s.
+  Test: `serial_persistent_fields_are_not_initialized_unless_read` in `reach.rs` and the project
+  `corpus/projects/serialization`.
+- **The instance methods of classes without objects are dormant** (`Reach::dormant`): a call of
+  an instance method of a class that no reachable constructor creates objects of, nor of a
+  subclass, can only throw `NullPointerException` on its null receiver, so the method is declared
+  with its signature and a body that never runs (`Builtin::NoObject`, `unreachable!()` as the
+  codegen writes for classes without objects), and what its body uses is not reached. It wakes up
+  when its class becomes live. Interfaces are left out: the runtime's strings and boxes are
+  `CharSequence`s and `Comparable`s that no constructor shows. `ByteBuffer.equals` reached
+  `MemorySessionImpl.checkValidStateRaw` through `ScopedMemoryAccess`, and with it the
+  `VarHandle` of `MemorySessionImpl`'s initializer, though only foreign memory creates sessions.
+  Test: the project `corpus/projects/uncreated`. It takes 9 classes off `ReaderLines` and 94
+  classes and 4 natives off `ScannerGrades`. With it, the anonymous classes and the
+  `serialPersistentFields` above, `ReaderLines` (`BufferedReader` over `System.in`) reaches 254
+  classes and 24 natives (6 in the runtime) instead of 382 and 37, `ScannerGrades` 1,027 classes
+  and 60 natives (20) instead of 1,258 and 73, and `StreamPipeline` 263 classes and 4 natives.
+  The 18 natives of `ReaderLines` that the runtime lacks are all `Unsafe`: the field offsets,
+  atomics, volatile accesses and `park`/`unpark` of `ConcurrentHashMap` (which `Properties` and
+  `CoderResult`'s cache are) and `ThreadLocalRandom`, and the plain gets and puts of
+  `ArraysSupport.vectorizedMismatch`. `ReaderLines` then stops at `LazyConstantImpl`, the
+  `LazyConstant` in which
+  `Charset` keeps its default: `Unsafe.objectFieldOffset` and the acquire and release accesses of
+  its `constant` field, which wait for the threads design's symbolic field offsets.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

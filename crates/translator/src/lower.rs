@@ -84,9 +84,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let failed = lowering.verify(&types, &methods);
         let hierarchy = Hierarchy::new(&types, &methods);
         let raised = lowering.raised_objects(&types, &methods);
-        let closes = lowering.closes.take();
         let name = first.str("simpleName").to_string();
-        let class = Class { name, types, methods, hierarchy, raised, closes };
+        let class = Class { name, types, methods, hierarchy, raised };
         enums::check_nulls(&class)?;
         Ok((class, lowering.real.clone(), failed))
     })
@@ -205,8 +204,6 @@ struct Lowering<'t> {
     entry: Option<usize>,
     /// The standard exception classes that the program uses (see `exceptions`).
     standard: exceptions::Standard,
-    /// The `close` methods that try-with-resources statements call (see `exceptions`).
-    closes: std::cell::RefCell<Vec<(usize, Pos)>>,
     /// The array types whose arrays become `Object`s or are cast back from them: each is a
     /// runtime class beside `Object` (see `object::object_types`).
     object_arrays: std::cell::RefCell<Vec<Type>>,
@@ -306,7 +303,12 @@ impl<'t> Lowering<'t> {
         let is_abstract = node.get("body").is_none()
             && (node.has_flag("ABSTRACT") || in_interface && !is_static)
             && !abstract_in_enum;
+        let dormant = self.reach.is_some_and(|r| r.dormant(&self.types[info.owner].javac, node.0));
         let mut body = match node.get("body") {
+            Some(_) if dormant => {
+                let never = ExprKind::Builtin(Builtin::NoObject { class: info.owner }, Vec::new());
+                vec![Stmt::Expr(self.synth(never, node.pos(), Type::Void))]
+            }
             Some(body) => self.block(body)?,
             None if abstract_in_enum || is_abstract => Vec::new(),
             None => return unsupported(node, "methods without a body"),

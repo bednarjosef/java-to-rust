@@ -230,7 +230,7 @@ impl Census {
                             runtime_native(&class, &key.1, &key.2),
                         ));
                     }
-                    reach.methods.contains(&key)
+                    reach.methods.contains(&key) && !reach.dormant.contains(&key)
                 }
                 "VARIABLE" => {
                     !member["initializer"].is_null()

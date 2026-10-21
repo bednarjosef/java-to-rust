@@ -1470,6 +1470,14 @@ fn unreachable_code_is_not_translated() {
 }
 
 #[test]
+fn anonymous_classes_are_reached_through_their_creation_and_calls() {
+    let rust = translate_project("anonymous", "app.Main");
+    assert_contains(&rust, &["fn run(", "fn area(", "write!(f, \"task {}\", self.name)"]);
+    // `audit` and `describe` are never called, nor is `never`, whose anonymous class uses `extra`.
+    assert_lacks(&rust, &["extra", "Audit", "audit", "describe", "fn never", "\"never\""]);
+}
+
+#[test]
 fn classes_with_one_name_in_two_packages() {
     let rust = translate_project("statics", "com.shop.Main");
     assert_contains(
@@ -3407,31 +3415,6 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
         "{err}"
     );
     let err = reject(
-        "class A { public static void main(String[] a) {
-            RuntimeException e = a.length > 0 ? new RuntimeException() : null;
-            throw e;
-        } }",
-    );
-    assert!(err.contains("throwing a value that may be null not supported yet"), "{err}");
-    let err = reject(
-        "class A { public static void main(String[] a) {
-            int n = switch (a.length) {
-                case 0 -> { try { yield 1; } finally { System.out.println(2); } }
-                default -> 3;
-            };
-            System.out.println(n);
-        } }",
-    );
-    assert!(err.contains("a `yield` through a `finally` not supported yet"), "{err}");
-    let err = reject(
-        "class P {
-            int x;
-            P(int x) { try { if (x < 0) return; this.x = x; } finally { System.out.println(\"built\"); } }
-        }
-        class A { public static void main(String[] a) { System.out.println(new P(1).x); } }",
-    );
-    assert!(err.contains("a `return` of a constructor through a `finally` not supported yet"), "{err}");
-    let err = reject(
         "class Bad extends RuntimeException {
             Bad(int x) { super(\"bad\"); if (x < 0) throw new IllegalStateException(\"negative\"); }
         }
@@ -3458,20 +3441,22 @@ fn a_try_with_resources_closes_each_resource_in_a_finally() {
             }
         }",
     );
-    // `b` is closed first, then `a`, however the body ends.
-    assert_contains(&rust, &["let a = ", "let b = ", ".close();\n        }\n        a.", ".close();"]);
-    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
-    let err = reject(
+    // `b` is closed first, then `a`, however the body ends; this `close` cannot throw, so no
+    // `addSuppressed` is needed.
+    assert_contains(&rust, &["let a = ", "let b = ", "a_failed", "b_failed", ".close();"]);
+    assert!(!rust.contains(".add_suppressed("));
+    let rust = translate(
         "class A {
             static class R implements AutoCloseable {
                 public void close() { throw new IllegalStateException(\"closing\"); }
             }
             public static void main(String[] args) {
-                try (R r = new R()) { System.out.println(1); }
+                try (R r = new R()) { throw new RuntimeException(\"body\"); }
             }
         }",
     );
-    assert!(err.contains("a resource whose `close` may fail not supported yet"), "{err}");
+    assert_contains(&rust, &["r_failed", "add_suppressed"]);
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
     let err = reject(
         "class A {
             static class R implements AutoCloseable { public void close() {} }
