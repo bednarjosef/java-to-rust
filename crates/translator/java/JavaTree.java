@@ -195,7 +195,10 @@ public class JavaTree {
             TypeMirror type = trees.getTypeMirror(path);
             if (type != null) {
                 out.append(",\"javaType\":");
-                string(typeText(type), out);
+                string(typeName(type), out);
+            }
+            if (type != null && (tree instanceof LambdaExpressionTree || tree instanceof MemberReferenceTree)) {
+                descriptor(type, tree, path, out);
             }
         }
         if (tree instanceof IdentifierTree || tree instanceof MemberSelectTree || tree instanceof MethodInvocationTree
@@ -290,6 +293,123 @@ public class JavaTree {
             string(c instanceof Character ch ? Integer.toString(ch) : c.toString(), out);
         }
         out.append('}');
+    }
+
+    /** Interfaces that declare no methods, which an intersection type adds nothing with. */
+    private static final Set<String> MARKERS = Set.of("java.io.Serializable", "java.lang.Cloneable", "java.util.RandomAccess");
+
+    /**
+     * A type as {@link #typeText} prints it, except that an intersection type ({@code (Comparator<T> &
+     * Serializable)}) loses {@code Object} and the marker interfaces, and is the one type left
+     * when only one is.
+     */
+    private static String typeName(TypeMirror type) {
+        if (type instanceof IntersectionType intersection) {
+            List<String> kept = new ArrayList<>();
+            for (TypeMirror bound : intersection.getBounds()) {
+                String name = typeText(bound);
+                String raw = name.contains("<") ? name.substring(0, name.indexOf('<')) : name;
+                if (!raw.equals("java.lang.Object") && !MARKERS.contains(raw)) {
+                    kept.add(name);
+                }
+            }
+            if (kept.size() == 1) {
+                return kept.get(0);
+            }
+        }
+        return typeText(type);
+    }
+
+    /**
+     * The method that a lambda or method reference implements: the one abstract method of its
+     * functional interface that is not one of {@code Object}'s, with the interface that declares
+     * it ({@code owner}), the interface the lambda converts to ({@code target}), its declared
+     * type ({@code type}, as in the method's symbol), its erasure, and its type as a member of the
+     * lambda's type ({@code substituted}, with the type arguments javac inferred). A method
+     * reference also gets {@code referent}, the referenced method's type as a member of its
+     * qualifier's type, with its own type variables replaced by the descriptor's types.
+     */
+    private void descriptor(TypeMirror type, Tree tree, TreePath path, StringBuilder out) {
+        if (type instanceof IntersectionType intersection) {
+            for (TypeMirror bound : intersection.getBounds()) {
+                String name = bound.toString();
+                String raw = name.contains("<") ? name.substring(0, name.indexOf('<')) : name;
+                if (!raw.equals("java.lang.Object") && !MARKERS.contains(raw)) {
+                    type = bound;
+                }
+            }
+        }
+        if (!(type instanceof DeclaredType target) || !(target.asElement() instanceof TypeElement iface)) {
+            return;
+        }
+        ExecutableElement method = null;
+        for (Element member : elements.getAllMembers(iface)) {
+            if (member instanceof ExecutableElement m && m.getKind() == ElementKind.METHOD
+                    && m.getModifiers().contains(Modifier.ABSTRACT) && !objectMethod(m)) {
+                method = m;
+            }
+        }
+        if (method == null) {
+            return;
+        }
+        ExecutableType substituted = (ExecutableType) types.asMemberOf(target, method);
+        out.append(",\"descriptor\":{\"owner\":");
+        string(className((TypeElement) method.getEnclosingElement()), out);
+        out.append(",\"target\":");
+        string(className(iface), out);
+        out.append(",\"name\":");
+        string(method.getSimpleName().toString(), out);
+        out.append(",\"type\":");
+        string(typeText(method.asType()), out);
+        out.append(",\"erased\":");
+        string(typeText(types.erasure(method.asType())), out);
+        out.append(",\"substituted\":");
+        string(typeText(substituted), out);
+        if (tree instanceof MemberReferenceTree reference
+                && trees.getElement(path) instanceof ExecutableElement referent) {
+            out.append(",\"referent\":");
+            string(referent(reference, referent, substituted, path), out);
+        }
+        out.append('}');
+    }
+
+    /**
+     * The type of the method a reference names as a member of its qualifier's type
+     * ({@code List<String>::get} is {@code (int)java.lang.String}); when the method has type
+     * variables of its own, which javac's public API does not instantiate, its return type is the
+     * descriptor's (or its erasure, for a descriptor that returns nothing).
+     */
+    private String referent(MemberReferenceTree reference, ExecutableElement referent, ExecutableType descriptor, TreePath path) {
+        TypeMirror qualifier = trees.getTypeMirror(new TreePath(path, reference.getQualifierExpression()));
+        TypeMirror member = referent.asType();
+        if (qualifier instanceof DeclaredType declared && !referent.getModifiers().contains(Modifier.STATIC)) {
+            try {
+                member = types.asMemberOf(declared, referent);
+            } catch (IllegalArgumentException e) {
+                // A raw or unrelated qualifier: the declared type stands.
+            }
+        }
+        if (referent.getTypeParameters().isEmpty() || !(member instanceof ExecutableType executable)) {
+            return typeText(member);
+        }
+        TypeMirror ret = descriptor.getReturnType().getKind() == javax.lang.model.type.TypeKind.VOID
+                ? types.erasure(executable.getReturnType()) : descriptor.getReturnType();
+        StringBuilder text = new StringBuilder("(");
+        for (int i = 0; i < executable.getParameterTypes().size(); i++) {
+            text.append(i == 0 ? "" : ",").append(typeText(types.erasure(executable.getParameterTypes().get(i))));
+        }
+        return text.append(')').append(typeText(ret)).toString();
+    }
+
+    /** Whether an abstract method of an interface is one of {@code Object}'s public methods. */
+    private static boolean objectMethod(ExecutableElement m) {
+        String name = m.getSimpleName().toString();
+        List<? extends VariableElement> params = m.getParameters();
+        return switch (name) {
+            case "equals" -> params.size() == 1 && types.erasure(params.get(0).asType()).toString().equals("java.lang.Object");
+            case "hashCode", "toString" -> params.isEmpty();
+            default -> false;
+        };
     }
 
     /** The methods of the supertypes of {@code owner} that {@code m} overrides. */

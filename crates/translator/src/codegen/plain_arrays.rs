@@ -258,11 +258,15 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Var(name) => self.local(name),
             ExprKind::Call { args, resolved: Some(index), .. } => self.owned_call(*index, args),
-            ExprKind::MethodCall { receiver, args, resolved: Some(index), .. } => {
+            ExprKind::MethodCall { receiver, args, resolved: Some(index), is_super, .. } => {
                 if self.class.methods[*index].is_static {
                     self.owned_call(*index, args)
+                } else if !*is_super && let Some(t) = self.enum_of(receiver) {
+                    self.enum_call(t, receiver, *index, args).text
                 } else {
-                    self.method_call(receiver, *index, args).text
+                    // The method of the receiver's class, which an interface's method is not.
+                    let target = self.dispatch(receiver, *index, *is_super);
+                    self.method_call(receiver, target, args).text
                 }
             }
             _ => unreachable!("the analysis makes plain arrays only of owned values"),

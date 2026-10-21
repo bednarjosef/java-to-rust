@@ -57,6 +57,8 @@ impl<'t> Lowering<'t> {
             object: None,
             real: Default::default(),
             failed: Default::default(),
+            functional: Default::default(),
+            lambdas: Vec::new(),
             capture_refs: Default::default(),
             capture_sites: Default::default(),
         }
@@ -94,9 +96,13 @@ impl<'t> Lowering<'t> {
                     });
                     let method = self.methods.len() - 1;
                     self.declare_local_classes(index, member, Some(method))?;
+                    self.declare_lambdas(member, index, Some(method))?;
                 }
-                "VARIABLE" if enums::is_enum_constant(member) => {}
-                "VARIABLE" => self.declare_local_classes(index, member, None)?,
+                "VARIABLE" if enums::is_enum_constant(member) => self.declare_lambdas(member, index, None)?,
+                "VARIABLE" => {
+                    self.declare_local_classes(index, member, None)?;
+                    self.declare_lambdas(member, index, None)?;
+                }
                 "EMPTY_STATEMENT" => {}
                 "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
                     return unsupported(member, "member classes of local and anonymous classes");
@@ -109,6 +115,7 @@ impl<'t> Lowering<'t> {
                         self.check_initializer_block(node, member)?;
                     }
                     self.declare_local_classes(index, member, None)?;
+                    self.declare_lambdas(member, index, None)?;
                 }
                 kind => return unsupported(member, &kind_words(kind)),
             }
@@ -131,6 +138,9 @@ impl<'t> Lowering<'t> {
 
     /// The declaration of a class: its instance fields and static fields, in source order.
     pub(super) fn type_decl(&self, index: usize) -> Result<TypeDecl, Error> {
+        if let Some(decl) = self.lambda_decl(index) {
+            return decl;
+        }
         self.current.set(index);
         let node = self.types[index].node;
         // The enclosing instance and the captured locals come first, set before anything runs.
@@ -225,6 +235,10 @@ impl<'t> Lowering<'t> {
     /// An identifier: a field, `this`, or a local variable or parameter.
     pub(super) fn name(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         if node.str("name") == "this" {
+            // In a lambda, the object of the code that holds it.
+            if let Some(holder) = self.lambda_this(node) {
+                return Ok(holder?.kind);
+            }
             return Ok(ExprKind::This);
         }
         if let Some(constant) = node.symbol().and_then(|s| self.enum_constant(&s)) {
