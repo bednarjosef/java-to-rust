@@ -5,3 +5,8 @@ members = ["crates/translator", "crates/runtime"]
 [workspace.package]
 edition = "2024"
 license = "GPL-3.0-or-later"
+
+# Dependencies (serde_json and the rest) are compiled once, so optimizing them costs a clean
+# build some seconds and an incremental build of the translator nothing.
+[profile.dev.package."*"]
+opt-level = 3

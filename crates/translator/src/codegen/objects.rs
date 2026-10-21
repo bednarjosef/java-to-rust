@@ -94,6 +94,9 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::String => "String::new()",
         Type::StringBuilder => "java::StringBuilder::new()",
         Type::Boxed(_) | Type::Class(..) => "None",
+        // A charset is never null, so its field starts as a placeholder; lowering rejects a
+        // `Charset` field without an initializer, which assigns the field before it is read.
+        Type::Charset => "java::Charset::Utf8",
         _ => unreachable!("lowering rejects fields of type {ty}"),
     }
 }
@@ -110,6 +113,12 @@ pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
     // A class that only ever types a null reference still needs its struct for the type.
     for t in mentioned(class) {
         live[t] |= class.hierarchy.is_concrete(t) && !class.hierarchy.has_subtypes(t);
+    }
+    // The lambdas of closure types are closures, not objects.
+    for &t in &facts.closure_types {
+        for c in class.hierarchy.concretes(t) {
+            live[c] = false;
+        }
     }
     for t in 0..live.len() {
         if live[t] {
@@ -357,6 +366,26 @@ impl<'a> Gen<'a> {
         if self.facts.fields_structs.contains(&t) { name + "Fields" } else { name }
     }
 
+    /// The pointer of an object of class `t`: an `Rc`, or an `Arc` for a class whose objects
+    /// threads share (see `analysis::threads`).
+    pub(super) fn pointer(&self, t: usize) -> &'static str {
+        if self.facts.thread_shared.contains(&t) { "Arc" } else { "Rc" }
+    }
+
+    /// The cell of a mutable object of class `t`: a `RefCell`, or for a class whose objects
+    /// threads share a `java::Locked`, which is a `RefCell` that one thread at a time may borrow.
+    pub(super) fn cell(&self, t: usize) -> &'static str {
+        if self.facts.thread_shared.contains(&t) { "java::Locked" } else { "RefCell" }
+    }
+
+    /// `pointer` and `cell` of the class named `name`.
+    fn handle_parts(&self, name: &str) -> (&'static str, &'static str) {
+        match self.class.type_index(name) {
+            Some(t) => (self.pointer(t), self.cell(t)),
+            None => ("Rc", "RefCell"),
+        }
+    }
+
     /// The Rust type of an object of class `name`: a plain value for an owned class.
     pub(super) fn object_type(&self, name: &str) -> String {
         self.object_type_with(name, "")
@@ -391,6 +420,13 @@ impl<'a> Gen<'a> {
         {
             return struct_name(name);
         }
+        // A closure type is its alias, written where its enum would be (see `closures`).
+        if let Some(t) = self.class.type_index(name)
+            && self.facts.closure_types.contains(&t)
+        {
+            self.need(Need::Enum(t));
+            return struct_name(&self.class.types[t].name);
+        }
         if let Some(t) = self.class.type_index(name)
             && let hierarchy::Rep::Enum(t) = hierarchy::rep(self.class, self.facts, t)
         {
@@ -402,12 +438,13 @@ impl<'a> Gen<'a> {
             Some(t) => self.struct_of(t),
             None => struct_name(name),
         } + args;
+        let (pointer, cell) = self.handle_parts(name);
         if self.facts.owned.contains(name) {
             structure
         } else if self.facts.immutable.contains(name) {
-            format!("Rc<{structure}>")
+            format!("{pointer}<{structure}>")
         } else {
-            format!("Rc<RefCell<{structure}>>")
+            format!("{pointer}<{cell}<{structure}>>")
         }
     }
 
@@ -435,7 +472,8 @@ impl<'a> Gen<'a> {
         if self.facts.immutable.contains(&self.class.types[self.this_struct].name) {
             format!("&{structure}")
         } else {
-            format!("&Rc<RefCell<{structure}>>")
+            let (pointer, cell) = (self.pointer(self.this_struct), self.cell(self.this_struct));
+            format!("&{pointer}<{cell}<{structure}>>")
         }
     }
 
@@ -485,6 +523,8 @@ impl<'a> Gen<'a> {
         match &e.kind {
             ExprKind::Cast(Type::Class(to, _), inner) if matches!(inner.ty, Type::Class(..)) => {
                 let same = match (self.class.type_index(to), self.class.class_index(inner.ty)) {
+                    // A lambda converted to a closure type becomes the closure there.
+                    (Some(a), _) if self.facts.closure_types.contains(&a) => false,
                     (Some(a), Some(b)) => self.rep_class(a) == self.rep_class(b),
                     _ => false,
                 };
@@ -576,7 +616,25 @@ impl<'a> Gen<'a> {
     /// does not write the checked form, where its `NullPointerException` would end the program
     /// instead of reaching the `catch` or the `finally`.
     pub(super) fn check_dereferences(&mut self) {
-        let missed = self.facts.null_checked.iter().filter(|(id, _)| !self.dereferenced.contains(id));
+        // The objects in the bodies that were not written, which nothing calls or which never run.
+        let mut unwritten = HashSet::new();
+        let methods = self.class.methods.iter().enumerate().filter(|(i, _)| !self.written.contains(i));
+        for stmt in methods.flat_map(|(_, m)| &m.body) {
+            visit_stmt(
+                stmt,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        unwritten.insert(x.id);
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+        let missed = self
+            .facts
+            .null_checked
+            .iter()
+            .filter(|(id, _)| !self.dereferenced.contains(id) && !unwritten.contains(id));
         if let Some(pos) = missed.map(|(_, &pos)| pos).min_by_key(|p| (p.line, p.column)) {
             let message = "catching the `NullPointerException` of this dereference not supported yet";
             self.rejected.get_or_insert(Error { pos, message: message.to_string() });
@@ -680,8 +738,9 @@ impl<'a> Gen<'a> {
             let (a, b) = (self.object_option(l), self.object_option(r));
             format!("{}({a}, {b})", self.runtime("same"))
         } else {
+            let pointer = self.struct_class(l).map_or("Rc", |c| self.pointer(c));
             let (a, b) = (self.object_ref(l), self.object_ref(r));
-            format!("Rc::ptr_eq({a}, {b})")
+            format!("{pointer}::ptr_eq({a}, {b})")
         };
         if op == BinOp::Ne { Code::new(format!("!{same}"), UNARY) } else { Code::atom(same) }
     }
@@ -740,7 +799,8 @@ impl<'a> Gen<'a> {
             ExprKind::Var(name) if matches!(e.ty, Type::Class(..)) && self.borrowed.contains(name) => {
                 self.local(name)
             }
-            ExprKind::Var(_) | ExprKind::Field { .. }
+            // So is a place that may be null, once checked: a variable, a field or an element.
+            ExprKind::Var(_) | ExprKind::Field { .. } | ExprKind::Index(..)
                 if matches!(e.ty, Type::Class(..)) && self.nullable(e) =>
             {
                 let (_, place) = self.object_parts(e);
@@ -829,6 +889,8 @@ impl<'a> Gen<'a> {
 
     /// Whether the borrows that evaluating the expressions makes may conflict: a `RefCell` borrow
     /// lives to the end of the statement, so two borrows conflict when one of them is mutable.
+    /// With threads, a borrow is a lock, which must not be held while the statement takes another
+    /// or waits (see `analysis::threads`), so any two conflict.
     pub(super) fn conflicts(&self, exprs: &[&Expr]) -> bool {
         let (mut borrows, mut mutable) = (0, 0);
         for e in exprs {
@@ -838,7 +900,7 @@ impl<'a> Gen<'a> {
                 mutable += m;
             });
         }
-        mutable > 0 && borrows > 1
+        (mutable > 0 || self.facts.threaded) && borrows > 1
     }
 
     /// The borrows of a shared object that one expression node makes (not counting its operands),
@@ -873,6 +935,11 @@ impl<'a> Gen<'a> {
             | ExprKind::New { ctor: Some(index), .. }
             | ExprKind::ThisCall { resolved: Some(index), .. }
             | ExprKind::SuperInit { resolved: Some(index), .. } => call(*index, None),
+            // A native that waits counts as a borrow: no lock may be held across it.
+            ExprKind::Builtin(
+                Builtin::Native(Native::Sleep { .. } | Native::ThreadJoin | Native::ThreadStart),
+                _,
+            ) => (1, 0),
             _ => (0, 0),
         };
         for object in converted_objects(x) {
@@ -1033,12 +1100,13 @@ impl<'a> Gen<'a> {
         };
         let c = self.class.methods[ctor].class;
         let name = &self.class.types[c].name;
+        let (pointer, cell) = (self.pointer(c), self.cell(c));
         let object = if self.facts.owned.contains(name) || !self.builds_plain(name) {
             call
         } else if self.facts.immutable.contains(name) {
-            format!("Rc::new({call})")
+            format!("{pointer}::new({call})")
         } else {
-            format!("Rc::new(RefCell::new({call}))")
+            format!("{pointer}::new({cell}::new({call}))")
         };
         Code::atom(match rep {
             Some(t) => format!("{}({object})", self.variant(t, c)),
@@ -1562,6 +1630,7 @@ impl<'a> Gen<'a> {
             self.indent -= 1;
             self.line("}");
         }
+        self.chain_items(index);
     }
 
     /// Whether method `i` is emitted in the `impl` of the struct of class `t`: it lives there, and
@@ -1670,7 +1739,11 @@ impl<'a> Gen<'a> {
         } else if by_value {
             self.line(&format!("fn field_inits(this: &mut {}) {{", self.generic_struct(index)));
         } else {
-            self.line(&format!("fn field_inits(this: &Rc<RefCell<{}>>) {{", self.generic_struct(index)));
+            let (pointer, cell) = (self.pointer(index), self.cell(index));
+            self.line(&format!(
+                "fn field_inits(this: &{pointer}<{cell}<{}>>) {{",
+                self.generic_struct(index)
+            ));
         }
         self.indent += 1;
         for f in inits {
@@ -1732,7 +1805,8 @@ impl<'a> Gen<'a> {
                     let mut_kw = if mutable { "mut " } else { "" };
                     self.line(&format!("let {mut_kw}obj = {name} {{ {fields} }};"));
                 } else {
-                    self.line(&format!("let obj = Rc::new(RefCell::new({name} {{ {fields} }}));"));
+                    let (pointer, cell) = (self.pointer(m.class), self.cell(m.class));
+                    self.line(&format!("let obj = {pointer}::new({cell}::new({name} {{ {fields} }}));"));
                 }
             }
         }
@@ -1744,7 +1818,11 @@ impl<'a> Gen<'a> {
         if initialize {
             self.line(&format!("{}::field_inits(this);", self.struct_of(m.class)));
         }
-        let result = if immutable { "Rc::new(obj)" } else { "obj" };
+        let result = match () {
+            _ if !immutable => "obj",
+            _ if self.facts.thread_shared.contains(&m.class) => "Arc::new(obj)",
+            _ => "Rc::new(obj)",
+        };
         self.ctor_result = Some(result);
         self.stmts(without_final_return(rest), false);
         self.ctor_result = None;

@@ -45,6 +45,7 @@ impl<'a> Gen<'a> {
             }
             _ => vec![self.value(&args[0], Type::Int).text],
         };
-        Code::atom(format!("{}({})", self.runtime(function), operands.join(", ")))
+        let call = format!("{}({})", self.runtime(function), operands.join(", "));
+        Code::atom(if op == CodePointOp::ToChars { self.made_array(call) } else { call })
     }
 }
