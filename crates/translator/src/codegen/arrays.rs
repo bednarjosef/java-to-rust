@@ -3,6 +3,7 @@
 //! allocates anything, as Java does. An array that no other name can see is a plain `Vec`,
 //! written by `plain_arrays`.
 
+use super::array_writes::lends_array;
 use super::*;
 
 impl<'a> Gen<'a> {
@@ -145,14 +146,18 @@ impl<'a> Gen<'a> {
         if let Some(path) = self.plain_path(array) {
             return self.plain_set(path, id, index, ty, rhs, used);
         }
-        let (binding, handle) = self.write_handle(array, has_effects(index) || has_effects(rhs));
-        let i = self.value(index, Type::Int).text;
+        let (mut binding, handle) = self.write_handle(array, has_effects(index) || has_effects(rhs));
+        let mut i = self.value(index, Type::Int).text;
         // The value of the assignment is an `Option` only where the stored value may be null.
-        let (helper, v) = if used && self.stores_some(rhs, ty) {
+        let (helper, mut v) = if used && self.stores_some(rhs, ty) {
             ("store_some", self.value(rhs, ty).text)
         } else {
             (if used { "store" } else { "set" }, self.element_value(rhs, ty))
         };
+        if lends_array(index) || lends_array(rhs) {
+            i = self.bind_first(&mut binding, i, &["index", "slot", "at"]);
+            v = self.bind_first(&mut binding, v, &["value", "item", "new"]);
+        }
         Self::bound_write(binding, format!("{}({handle}, {i}, {v})", self.runtime(helper)))
     }
 
@@ -171,8 +176,11 @@ impl<'a> Gen<'a> {
         if let Some(path) = self.plain_path(array) {
             return self.plain_update(path, op, index, ty, rhs, id, used);
         }
-        let (binding, handle) = self.write_handle(array, has_effects(index) || has_effects(rhs));
-        let i = self.value(index, Type::Int).text;
+        let (mut binding, handle) = self.write_handle(array, has_effects(index) || has_effects(rhs));
+        let mut i = self.value(index, Type::Int).text;
+        if lends_array(index) {
+            i = self.bind_first(&mut binding, i, &["index", "slot", "at"]);
+        }
         let old = self.fresh_name(&["old", "previous", "before"]);
         let new = self.element_update(op, ty, rhs, id, old);
         Self::bound_write(binding, format!("{}({handle}, {i}, |{old}| {new})", self.runtime("update")))
@@ -193,8 +201,11 @@ impl<'a> Gen<'a> {
         if let Some(path) = self.plain_path(array) {
             return self.plain_step(path, index, ty, increment, prefix, id, used);
         }
-        let (binding, handle) = self.write_handle(array, has_effects(index));
-        let i = self.value(index, Type::Int).text;
+        let (mut binding, handle) = self.write_handle(array, has_effects(index));
+        let mut i = self.value(index, Type::Int).text;
+        if lends_array(index) {
+            i = self.bind_first(&mut binding, i, &["index", "slot", "at"]);
+        }
         let old = self.fresh_name(&["old", "previous", "before"]);
         let new = self.step_value(ty, increment, id, old);
         let helper = if prefix { "update" } else { "post_update" };
