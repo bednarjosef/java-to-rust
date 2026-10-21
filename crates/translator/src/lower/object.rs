@@ -795,22 +795,26 @@ impl<'t> Lowering<'t> {
     /// Integer.toHexString(hashCode())`.
     fn object_super_call(&self, node: Node<'t>, symbol: &Symbol, args: Vec<Expr>) -> Result<ExprKind, Error> {
         let at = self.object.expect("`object_call` checked `Object`");
-        let this = self.this(node);
+        // In a lambda, `super` is the object of the class whose code holds it.
+        let this = || match self.lambda_this(node) {
+            Some(holder) => holder,
+            None => Ok(self.this(node)),
+        };
         let pos = node.pos();
         match symbol.name {
-            "hashCode" => Ok(ExprKind::Builtin(Builtin::Native(Native::IdentityHash), vec![this])),
+            "hashCode" => Ok(ExprKind::Builtin(Builtin::Native(Native::IdentityHash), vec![this()?])),
             "equals" => {
-                let this = self.convert(this, Type::class(OBJECT));
+                let this = self.convert(this()?, Type::class(OBJECT));
                 let other = args.into_iter().next().expect("`equals` has an argument");
                 let other = self.convert(other, Type::class(OBJECT));
                 Ok(ExprKind::Binary(BinOp::Eq, Box::new(this), Box::new(other)))
             }
             "toString" => {
-                let name = ExprKind::Builtin(Builtin::ClassName { simple: false }, vec![self.this(node)]);
+                let name = ExprKind::Builtin(Builtin::ClassName { simple: false }, vec![this()?]);
                 let name = self.synth(name, pos, Type::String);
                 let at_sign = self.synth(ExprKind::Str("@".to_string()), pos, Type::String);
                 let hash = ExprKind::MethodCall {
-                    receiver: Box::new(this),
+                    receiver: Box::new(this()?),
                     name: "hashCode".to_string(),
                     args: Vec::new(),
                     resolved: Some(at.hash_code),

@@ -269,7 +269,12 @@ impl<'a> Gen<'a> {
         }
         if let Some(value) = value {
             text.push(' ');
-            text.push_str(&value);
+            // `break 'label { .. } as T` reads as a block after the label: Rust wants it wrapped.
+            if value.starts_with('{') && text.contains('\'') {
+                text.push_str(&format!("({value})"));
+            } else {
+                text.push_str(&value);
+            }
         }
         text.push(';');
         self.line(&text);

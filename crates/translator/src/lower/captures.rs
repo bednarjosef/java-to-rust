@@ -54,6 +54,7 @@ impl<'t> Lowering<'t> {
     /// enclosing instance (see the module's comment). An error comes with the index of the class
     /// it is in.
     pub(super) fn plan_captures(&mut self) -> Result<(), (usize, Error)> {
+        self.plan_receivers()?;
         let nested: Vec<usize> = (0..self.types.len()).filter(|&t| self.types[t].nested.is_some()).collect();
         loop {
             let mut found = Vec::new();
@@ -526,8 +527,17 @@ impl<'t> Walk<'_, 't> {
         match node.kind() {
             // A lambda is an object of its class, created here.
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" if l.lambda_class(node).is_some() => {
+                // A computed receiver is evaluated here, into a local that the class captures.
+                let receiver = l.lambda_receiver(node);
+                if let Some((name, qualifier)) = receiver {
+                    self.walk(qualifier)?;
+                    self.scopes.push(vec![name]);
+                }
                 if let Some(class) = l.lambda_class(node) {
                     self.uses_class(class, Some(node), true)?;
+                }
+                if receiver.is_some() {
+                    self.scopes.pop();
                 }
             }
             "BLOCK" | "FOR_LOOP" | "SWITCH" | "SWITCH_EXPRESSION" | "CATCH" | "TRY" | "LAMBDA_EXPRESSION" => {
@@ -597,8 +607,8 @@ impl<'t> Walk<'_, 't> {
             }
             "IDENTIFIER" => {
                 let name = node.str("name");
-                // `this` in a lambda is the object of the class whose code holds it.
-                if name == "this" && l.nesting(self.class).is_some_and(|n| n.kind == inner::NestKind::Lambda)
+                // `this` (and `super`) in a lambda is the object of the class whose code holds it.
+                if matches!(name, "this" | "super") && l.nesting(self.class).is_some_and(|n| n.kind == inner::NestKind::Lambda)
                 {
                     self.need(l.lambda_holder(self.class));
                 }

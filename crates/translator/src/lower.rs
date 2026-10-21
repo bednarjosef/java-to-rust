@@ -1057,7 +1057,7 @@ impl<'t> Lowering<'t> {
                     r.kind() == "IDENTIFIER" && r.str("name") == "super"
                         || r.kind() == "MEMBER_SELECT"
                             && r.str("identifier") == "super"
-                            && self.types[self.current.get()].node.kind() != "INTERFACE"
+                            && self.types[self.lambda_holder(self.current.get())].node.kind() != "INTERFACE"
                 });
                 let receiver = match receiver {
                     Some(r) if is_super => self.super_receiver(r)?,

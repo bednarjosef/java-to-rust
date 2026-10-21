@@ -613,8 +613,11 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   class: the locals it captures are fields set from its constructor
   (`OpLambdaInMain::new(k, &name)`), and `this` and the enclosing class's members are read
   through `outer` (`self.outer.borrow().base`), also from a lambda in a lambda or in a local or
-  anonymous class. A bound method reference takes a local, `this` or a final field as its
-  receiver. In single-file mode the JDK's functional interfaces come from
+  anonymous class. A bound method reference captures its receiver: a local, `this` or a final
+  field as it is, and any other receiver (`make()::run`, a field that is not final) evaluated once
+  where the reference is created, into a local that is checked for null there, as Java does.
+  `super.m()` and `super::m` in a lambda call the superclass's method on the object of the class
+  whose code holds the lambda, as javac's synthetic method does. In single-file mode the JDK's functional interfaces come from
   `crates/translator/java/Functional.java` (abstract methods only), and a call of one of their
   default or static methods is rejected with a pointer to whole-program mode. Translated whole
   with the JDK's sources, those methods are the JDK's own code, lambdas in interface methods
@@ -634,7 +637,7 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   a call is a call of the closure (`op(acc, x)`). A local that only calls its lambda is the
   closure itself, borrowing what it captures (`let scale = |x: i32| -> i32 {
   x.wrapping_mul(this.borrow().factor) };`). Every other functional interface keeps the class
-  per lambda. Not yet: other receivers, `super` in a lambda, typed closures for a generic
+  per lambda. Not yet: typed closures for a generic
   interface's instantiations, and the parameter form (`impl FnMut`).
 
 ### Whole programs
@@ -758,8 +761,8 @@ Each construct below is rejected at translation with an error that names it:
 - the exceptions and try-with-resources listed under "Exceptions" above;
 - record patterns in `instanceof` (those in `switch` translate), and blocks, member classes,
   static fields and non-constant initializers in an enum constant's body;
-- method references on a receiver other than a local, `this` or a final field, `super` in a
-  lambda, and without the JDK's sources the default and static methods of its functional
+- `super` in a lambda other than as the receiver of a method call (`super.x`, `super.clone()`),
+  and without the JDK's sources the default and static methods of the JDK's functional
   interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
