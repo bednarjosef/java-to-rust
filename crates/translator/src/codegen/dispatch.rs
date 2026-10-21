@@ -217,6 +217,10 @@ impl<'a> Gen<'a> {
     /// a `catch` or a `finally` sees its failure (see `checked_class_cast`).
     fn downcast(&mut self, s: usize, to: Type, value: &'a Expr, checked: Option<ExprId>) -> Code {
         let t = self.type_of(to).expect("a cast to a type of the program");
+        // No class of the enum is a `T` (no object of one is created): only null passes.
+        if self.passing(s, t).is_empty() {
+            return self.failing_cast(to, value, checked);
+        }
         self.need(Need::Narrow(s, t));
         let name = self.as_name(t);
         let cast = self.runtime(if checked.is_some() { "try_cast" } else { "cast" });
@@ -307,6 +311,9 @@ impl<'a> Gen<'a> {
             Narrowing::Known(false) => format!("None::<{}>", self.ty_name(to)),
             Narrowing::Down(s) => {
                 let t = self.type_of(to).expect("a test of a type of the program");
+                if self.passing(s, t).is_empty() {
+                    return format!("None::<{}>", self.ty_name(to));
+                }
                 self.need(Need::Narrow(s, t));
                 let name = self.as_name(t);
                 let text = if nullable {
