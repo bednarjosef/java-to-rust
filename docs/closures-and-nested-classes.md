@@ -1129,3 +1129,30 @@ Decisions that change during the implementation are recorded here, milestone by 
   `outer` fields would differ); a field named `outer` in a nested class with an enclosing
   instance; `Outer.super.m()`; a qualified `super(..)` (`outer.super()`); an enclosing
   instance needed in static code (which javac rejects as well).
+
+### Inner classes
+
+- **Inner classes come with the captures commit**, as the same desugaring covers them; this
+  milestone adds their corpus, shape tests and survey rows. An inner class extending a static
+  nested class keeps `outer` after `base`; inner subclasses of an inner class share the
+  superclass's `outer`.
+- **`is_inner` is renamed `has_subclasses`**, not `has_fields_struct`: it holds for every class
+  with subclasses, and `fields_structs` picks those of them that get a fields struct.
+- **An inner object kept in a field of its outer object is a reference cycle** (the outer
+  object holds the inner one, which holds `outer`), which `Rc` never frees where Java's
+  collector would; a `HashMap` that caches its `keySet()` leaks with its view. Programs print
+  the same; memory is the cost, as with any other cycle of objects in the translation.
+
+### Anonymous classes
+
+- **Anonymous classes come with the captures commit too**; this milestone adds their corpus,
+  shape tests and survey row, and fixes found on the way: a static field of an interface type
+  had its initializer unconverted (no variant), a method of an immutable class took `&mut self`
+  when another method of its override group changes its object, and an anonymous subclass of a
+  local class was named after the local class's binary name (`1CounterInChained`).
+- **The name of an anonymous class has no enclosing class**: `<package><Supertype>In<Place>`
+  (`OrderInMain`, `TaskInInit`) as 2.5 says, numbered from 2 on a clash.
+- **An anonymous class extending a class or implementing an interface of the JDK** (`new
+  Runnable() { .. }`, `new Comparator<..>() { .. }`) needs those types as program types: the
+  lambdas work's runtime interfaces in single-file mode, the JDK's sources in whole-program
+  mode. Without them it is rejected as "implementing `java.lang.Runnable`".

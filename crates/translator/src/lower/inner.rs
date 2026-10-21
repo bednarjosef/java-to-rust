@@ -140,7 +140,9 @@ impl<'t> Lowering<'t> {
                     let new = nested.new.expect("an anonymous class has its `new`");
                     let supertype = new.get("identifier").map_or("", |i| i.java_type());
                     let supertype = supertype.split('<').next().unwrap_or_default();
+                    // A local class's binary name has its number before its simple name.
                     let simple = supertype.rsplit(['.', '$']).next().unwrap_or_default();
+                    let simple = simple.trim_start_matches(|c: char| c.is_ascii_digit());
                     let package = self.package_of(t);
                     format!("{package}{simple}In{place}")
                 }
