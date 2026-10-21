@@ -60,8 +60,10 @@ impl<'t> Lowering<'t> {
             let mut found = Vec::new();
             for &t in &nested {
                 let mut walk = Walk { lowering: self, class: t, scopes: Vec::new(), found: Found::default() };
-                walk.class_code().map_err(|e| (t, e))?;
+                // In a census, a class whose code cannot be walked is rejected with its code.
+                let walked = walk.class_code();
                 found.push(walk.found);
+                self.reject_class(t, walked).map_err(|e| (t, e))?;
             }
             let mut changed = false;
             let mut refs = HashSet::new();
@@ -69,8 +71,9 @@ impl<'t> Lowering<'t> {
             for (&t, found) in nested.iter().zip(found) {
                 let instance = self.types[t].nested.as_ref().is_some_and(|n| n.instance);
                 if !found.needs.is_empty() && !instance {
-                    return unsupported(self.types[t].node, "an enclosing instance in static code")
-                        .map_err(|e| (t, e));
+                    let error = unsupported(self.types[t].node, "an enclosing instance in static code");
+                    self.reject_class(t, error).map_err(|e| (t, e))?;
+                    continue;
                 }
                 let outer = !found.needs.is_empty();
                 let nested = self.types[t].nested.as_mut().expect("a nested class");
