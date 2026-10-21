@@ -31,6 +31,7 @@
 mod entry;
 mod failures;
 mod field_inits;
+mod guards;
 
 use super::Facts;
 use super::hierarchy;
@@ -82,6 +83,8 @@ struct Point {
     /// What the point raises, in words, for an error message.
     what: &'static str,
     frames: Vec<Frame>,
+    /// For a call, the values of its arguments when some are known (see `guards`).
+    known: Vec<Vec<Option<guards::Value>>>,
 }
 
 /// What the callers of a method observe: the exceptions under these types, or all of them.
@@ -91,12 +94,16 @@ struct Seen {
     all: bool,
 }
 
-pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
+/// Every error found, in the order of the code; the first is the one a translation reports.
+pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>> {
     if class.type_index("java.lang.Throwable").is_none() {
         return Ok(());
     }
+    let mut errors = Vec::new();
+    let mut reject = |pos: Pos, message: &str| errors.push(Error { pos, message: message.to_string() });
     let h = &class.hierarchy;
-    let points: Vec<Vec<Point>> = (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
+    let mut points: Vec<Vec<Point>> =
+        (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
     let matches = |k: &Kind, t: usize| match k {
         Kind::Class(c) => h.is_subtype(*c, t),
         Kind::Runtime(name) => {
@@ -123,25 +130,61 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     };
 
     // What escapes each method.
-    let mut escapes: Vec<BTreeSet<Kind>> = vec![BTreeSet::new(); class.methods.len()];
-    loop {
-        let mut changed = false;
-        for m in 0..class.methods.len() {
-            let mut out = BTreeSet::new();
-            for p in &points[m] {
-                out.extend(raised(p, &escapes).into_iter().filter(|k| !caught(k, &p.frames)));
+    let escapes_of = |points: &[Vec<Point>]| {
+        let mut escapes: Vec<BTreeSet<Kind>> = vec![BTreeSet::new(); class.methods.len()];
+        loop {
+            let mut changed = false;
+            for m in 0..class.methods.len() {
+                let mut out = BTreeSet::new();
+                for p in &points[m] {
+                    out.extend(raised(p, &escapes).into_iter().filter(|k| !caught(k, &p.frames)));
+                }
+                if initializer[m] && !guarded[m] && !out.is_empty() {
+                    out = BTreeSet::from([Kind::Runtime(INITIALIZER_ERROR)]);
+                }
+                if out != escapes[m] {
+                    escapes[m] = out;
+                    changed = true;
+                }
             }
-            if initializer[m] && !guarded[m] && !out.is_empty() {
-                out = BTreeSet::from([Kind::Runtime(INITIALIZER_ERROR)]);
-            }
-            if out != escapes[m] {
-                escapes[m] = out;
-                changed = true;
+            if !changed {
+                return escapes;
             }
         }
-        if !changed {
+    };
+    let mut escapes = escapes_of(&points);
+    // A call that raises nothing for the arguments it passes is no point (see `guards`). Leaving
+    // one out only shrinks what escapes, so the calls are looked at again until none is left.
+    loop {
+        let mut dropped = Vec::new();
+        for (m, ps) in points.iter().enumerate() {
+            for (i, p) in ps.iter().enumerate() {
+                let Raise::Call(callees) = &p.raise else { continue };
+                if p.known.is_empty() || raised(p, &escapes).is_empty() {
+                    continue;
+                }
+                let callee = callees[0];
+                let quiet = p.known.iter().all(|args| {
+                    let run = guards::run(class, callee, args);
+                    points[callee].iter().all(|q| {
+                        // The start of a method that initializes the caller's own class, which is
+                        // initialized or being initialized, does nothing.
+                        let own = matches!(&q.raise, Raise::Call(cs) if q.what == entry::START && cs.iter().all(|&c| class.methods[c].class == class.methods[m].class));
+                        own || run.skips(q.pos, &q.raise) || raised(q, &escapes).iter().all(|k| caught(k, &q.frames))
+                    })
+                });
+                if quiet {
+                    dropped.push((m, i));
+                }
+            }
+        }
+        if dropped.is_empty() {
             break;
         }
+        for &(m, i) in dropped.iter().rev() {
+            points[m].remove(i);
+        }
+        escapes = escapes_of(&points);
     }
 
     // What the callers of each method observe.
@@ -186,10 +229,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         let Raise::Text(shown) = &p.raise else { continue };
         let program = shown.iter().filter(|&&c| !from_jdk(&class.types[class.methods[c].class]));
         if program.flat_map(|&c| &escapes[c]).any(|k| caught(k, &p.frames) || observed(k, &seen[m])) {
-            return error(
-                p.pos,
-                "catching an exception that this toString may throw not supported yet".to_string(),
-            );
+            reject(p.pos, "catching an exception that this toString may throw not supported yet");
         }
     }
 
@@ -197,6 +237,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     let mut throwing: HashSet<usize> = (0..class.methods.len())
         .filter(|&m| guarded[m] || (!initializer[m] && escapes[m].iter().any(|k| observed(k, &seen[m]))))
         .collect();
+    // The methods that throw themselves, not only through an override.
+    let own = throwing.clone();
     let groups: Vec<usize> = throwing.iter().flat_map(|&m| h.group(m)).collect();
     throwing.extend(groups);
 
@@ -207,8 +249,13 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     let mut raising = HashSet::new();
     let mut null_checked = std::collections::HashMap::new();
     let mut catching = std::collections::HashMap::new();
-    // The `try`s whose `catch` gets a `NullPointerException` that the runtime raises.
+    // The `try`s whose `catch` gets a `NullPointerException` that the runtime raises, those of
+    // them that get one without the checked form (whose message is the runtime's), and the
+    // objects of `null_checked` with the `try` that catches their exception in their method, and
+    // their method.
     let mut runtime_npe_tries = HashSet::new();
+    let mut unchecked_npe_tries = HashSet::new();
+    let mut npe_catchers: Vec<(ExprId, Option<usize>, usize)> = Vec::new();
     let mut raised_classes = BTreeSet::new();
     for (m, method) in class.methods.iter().enumerate() {
         for p in &points[m] {
@@ -235,6 +282,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
                 {
                     if name == "java.lang.NullPointerException" {
                         null_checked.insert(id, p.pos);
+                        npe_catchers.push((id, catcher.map(|f| f.id), m));
                         if let Some(f) = catcher {
                             runtime_npe_tries.insert(f.id);
                         }
@@ -249,15 +297,16 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
                         && name == "java.lang.NullPointerException"
                     {
                         runtime_npe_tries.insert(f.id);
+                        unchecked_npe_tries.insert(f.id);
                     }
                     raised_classes.insert(c);
                 } else if seen_here {
                     let simple = name.rsplit('.').next().unwrap_or_default();
                     let exception =
                         if name == "?" { "an exception".to_string() } else { format!("the `{simple}`") };
-                    return error(
+                    reject(
                         p.pos,
-                        format!("catching {exception} that {} may throw not supported yet", p.what),
+                        &format!("catching {exception} that {} may throw not supported yet", p.what),
                     );
                 }
             }
@@ -266,72 +315,119 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             continue;
         }
         if method.is_main {
-            return error(method.pos, "a call of `main` that is caught not supported yet");
+            reject(method.pos, "a call of `main` that is caught not supported yet");
+            continue;
         }
         // An exception object is built where it is thrown, and an enum constant where the enum
         // is initialized, outside any `try` of the program.
         let throwable = class.type_index("java.lang.Throwable");
         let decl = &class.types[method.class];
         if method.is_ctor && throwable.is_some_and(|t| class.hierarchy.is_subtype(method.class, t)) {
-            return error(method.pos, "a constructor of an exception that throws not supported yet");
-        }
-        if method.is_ctor && decl.enum_constants.is_some() {
-            return error(method.pos, "a constructor of an enum that throws not supported yet");
+            reject(method.pos, "a constructor of an exception that throws not supported yet");
+        } else if method.is_ctor && decl.enum_constants.is_some() {
+            reject(method.pos, "a constructor of an enum that throws not supported yet");
         }
         if method.name == "toString" && method.params.is_empty() {
-            return error(method.pos, "a toString that throws an exception that is caught not supported yet");
+            // At the override that throws, which may not be the first of its group.
+            let thrower = h.group(m).into_iter().find(|g| own.contains(g)).unwrap_or(m);
+            let pos = class.methods[thrower].pos;
+            reject(pos, "a toString that throws an exception that is caught not supported yet");
         }
     }
 
     // Java's message of a `NullPointerException` that the runtime raises describes the
-    // dereference ("Cannot invoke ..."); the message of one that code creates is its own.
+    // dereference ("Cannot invoke ..."); the message of one that code creates is its own. Where
+    // a `catch` reads it, the translation writes Java's message (`npe_messages`), for the checked
+    // form only.
     let npe = Kind::Runtime("java.lang.NullPointerException");
+    let mut reading_tries = HashSet::new();
     for method in &class.methods {
         let mut found = None;
         for s in &method.body {
             visit_stmt(s, &mut |_| {}, &mut |s| {
                 let Stmt::Try { catches, .. } = s else { return };
-                if !runtime_npe_tries.contains(&(s as *const Stmt as usize)) {
+                let id = s as *const Stmt as usize;
+                // A `try` that a dereference of its own reaches, or any where one leaves its
+                // method, which a call in the `try` may reach.
+                if !runtime_npe_tries.contains(&id)
+                    && npe_catchers.iter().all(|(_, catcher, _)| catcher.is_some())
+                {
                     return;
                 }
-                let Some(catch) = catches.iter().find(|c| c.types.iter().any(|&t| matches(&npe, t))) else {
-                    return;
-                };
-                for b in &catch.body {
-                    visit_stmt(
-                        b,
-                        &mut |e| {
-                            visit_expr(e, &mut |x| {
-                                if let ExprKind::MethodCall { receiver, name, .. } = &x.kind
-                                    && matches!(name.as_str(), "getMessage" | "getLocalizedMessage")
-                                    && matches!(&receiver.kind, ExprKind::Var(v) if *v == catch.name)
-                                {
-                                    found.get_or_insert(x.pos);
-                                }
-                            })
-                        },
-                        &mut |_| {},
-                    );
+                for catch in catches.iter().filter(|c| c.types.iter().any(|&t| matches(&npe, t))) {
+                    // Any use of the exception may read its message (`getMessage`, its text, a
+                    // method it is passed to), except throwing it on.
+                    let mut rethrown = HashSet::new();
+                    for b in &catch.body {
+                        visit_stmt(b, &mut |_| {}, &mut |s| {
+                            if let Stmt::Throw(e) = s {
+                                let thrown = if let ExprKind::Cast(_, inner) = &e.kind { inner } else { e };
+                                rethrown.insert(thrown.id);
+                            }
+                        });
+                    }
+                    for b in &catch.body {
+                        visit_stmt(
+                            b,
+                            &mut |e| {
+                                visit_expr(e, &mut |x| {
+                                    if matches!(&x.kind, ExprKind::Var(v) if *v == catch.name)
+                                        && !rethrown.contains(&x.id)
+                                    {
+                                        reading_tries.insert(id);
+                                        facts.npe_message_read.get_or_insert(x.pos);
+                                        if unchecked_npe_tries.contains(&id) {
+                                            found.get_or_insert(x.pos);
+                                        }
+                                    }
+                                })
+                            },
+                            &mut |_| {},
+                        );
+                    }
                 }
             });
         }
         if let Some(pos) = found {
-            return error(
-                pos,
-                "the message of a `NullPointerException` that the runtime raises not supported yet",
-            );
+            reject(pos, "the message of a `NullPointerException` that the runtime raises not supported yet");
         }
     }
+    // A `catch` may read the message of a dereference that its `try` catches, or of one whose
+    // exception leaves its method, in a method that a call in the `try` may run.
+    let mut reached = HashSet::new();
+    let mut calls: Vec<usize> = points
+        .iter()
+        .flatten()
+        .filter(|p| p.frames.iter().any(|f| reading_tries.contains(&f.id) && !f.catches.is_empty()))
+        .flat_map(|p| match &p.raise {
+            Raise::Call(callees) => callees.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
+    while let Some(m) = calls.pop() {
+        if reached.insert(m) {
+            calls.extend(points[m].iter().flat_map(|p| match &p.raise {
+                Raise::Call(callees) => callees.clone(),
+                _ => Vec::new(),
+            }));
+        }
+    }
+    facts.npe_message_needed = npe_catchers
+        .iter()
+        .filter(|(_, catcher, m)| match catcher {
+            Some(t) => reading_tries.contains(t),
+            None => reached.contains(m),
+        })
+        .map(|&(id, ..)| id)
+        .collect();
 
-    // A static initializer's exception reaches the program as `ExceptionInInitializerError`, an
-    // `Error` that a `try` here is not known to match, so one that observes it is not translated.
+    // A static initializer's exception reaches the program as `ExceptionInInitializerError`,
+    // which ends it here: one that a `catch` (of `Error`, `LinkageError`, `Throwable`) or a
+    // `finally` around a use of the class would see is not translated.
+    let initializer_error = Kind::Runtime(INITIALIZER_ERROR);
     for (m, method) in class.methods.iter().enumerate() {
-        if initializer[m]
-            && !guarded[m]
-            && !escapes[m].is_empty()
-            && (seen[m].all || !seen[m].types.is_empty())
-        {
-            return error(method.pos, "a static initializer that throws inside a `try` not supported yet");
+        if initializer[m] && !guarded[m] && !escapes[m].is_empty() && observed(&initializer_error, &seen[m]) {
+            reject(method.pos, "a static initializer that throws inside a `try` not supported yet");
         }
     }
     // The initializers of instance fields run in each constructor, outside its `try`s: what they
@@ -350,11 +446,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     for decl in &class.types {
         for constant in decl.enum_constants.iter().flatten() {
             if let Some(pos) = constant.values.iter().find_map(|e| initializer_raises(e, usize::MAX)) {
-                return error(pos, "an enum constant whose arguments throw not supported yet");
+                reject(pos, "an enum constant whose arguments throw not supported yet");
             }
         }
     }
 
+    if !errors.is_empty() {
+        return Err(errors);
+    }
     facts.throwing = throwing;
     facts.init_throwing = init_throwing;
     facts.live_tries = live_tries;
@@ -375,9 +474,7 @@ fn method_points(class: &Class, facts: &Facts, m: usize) -> Vec<Point> {
     let mut frames = Vec::new();
     block_points(class, facts, m, &method.body, &mut frames, &[], &mut out);
     // A constructor runs the initializers of its class's fields, unless it starts with `this(..)`.
-    if method.is_ctor
-        && !matches!(method.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })))
-    {
+    if method.is_ctor && !delegates(&method.body) {
         for f in &class.types[method.class].fields {
             if let Some(init) = &f.init {
                 expr_points(class, facts, m, init, &[], &[], &mut out);
@@ -516,14 +613,26 @@ fn stmt_points(
     {
         let raise =
             Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: selector.id };
-        out.push(Point { raise, pos: selector.pos, what: "this switch", frames: frames.clone() });
+        out.push(Point {
+            raise,
+            pos: selector.pos,
+            what: "this switch",
+            frames: frames.clone(),
+            known: Vec::new(),
+        });
     }
     match s {
         Stmt::If { cond, then, otherwise } => {
             expr_points(class, facts, m, cond, frames, safe, out);
+            // A branch that a known condition never takes raises nothing (see `guards`).
+            let known = guards::known_condition(class, cond);
             let then_safe = narrowed(safe, cond, true, |v| assigns_stmt(then, v));
-            stmt_points(class, facts, m, then, frames, &then_safe, out);
-            if let Some(o) = otherwise {
+            if known != Some(false) {
+                stmt_points(class, facts, m, then, frames, &then_safe, out);
+            }
+            if let Some(o) = otherwise
+                && known != Some(true)
+            {
                 let else_safe = narrowed(safe, cond, false, |v| assigns_stmt(o, v));
                 stmt_points(class, facts, m, o, frames, &else_safe, out);
             }
@@ -560,13 +669,20 @@ fn stmt_points(
             if matches!(thrown.kind, ExprKind::Null) || maybe_null(facts, m, thrown) {
                 let raise =
                     Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: thrown.id };
-                out.push(Point { raise, pos: e.pos, what: "this throw", frames: frames.clone() });
+                out.push(Point {
+                    raise,
+                    pos: e.pos,
+                    what: "this throw",
+                    frames: frames.clone(),
+                    known: Vec::new(),
+                });
             } else if let Some(t) = class.class_index(thrown.ty) {
                 out.push(Point {
                     raise: Raise::Throw(t),
                     pos: e.pos,
                     what: "this throw",
                     frames: frames.clone(),
+                    known: Vec::new(),
                 });
             }
         }
@@ -706,13 +822,20 @@ fn expr_points(
     safe: &[String],
     out: &mut Vec<Point>,
 ) {
-    let mut push = |raise: Raise, pos: Pos, what: &'static str| {
-        out.push(Point { raise, pos, what, frames: frames.to_vec() });
-    };
     let callees = class.callees(x);
     if !callees.is_empty() {
-        push(Raise::Call(callees), x.pos, "this call");
+        let known = match callees[..] {
+            [only] => Some(guards::known_args(class, x))
+                .filter(|k| k.first().is_some_and(|args| class.methods[only].params.len() == args.len()))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let raise = Raise::Call(callees);
+        out.push(Point { raise, pos: x.pos, what: "this call", frames: frames.to_vec(), known });
     }
+    let mut push = |raise: Raise, pos: Pos, what: &'static str| {
+        out.push(Point { raise, pos, what, frames: frames.to_vec(), known: Vec::new() });
+    };
     for init in static_inits(class, facts, m, x) {
         push(Raise::Call(vec![init]), x.pos, "this static use");
     }
@@ -775,6 +898,8 @@ fn expr_points(
         // What a started thread runs raises nothing where the thread is started: an exception
         // that escapes it ends that thread (the runtime prints it), whatever catches the start.
         ExprKind::Builtin(Builtin::Native(Native::ThreadStart), args) => children.extend(&args[..4]),
+        // The runtime runs the dispatch of an uncaught exception later, on the thread it ends.
+        ExprKind::Builtin(Builtin::Native(Native::InstallUncaught), _) => {}
         ExprKind::Call { args, .. }
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }
@@ -796,7 +921,7 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
 }
 
 /// Whether `decl` is a class of the JDK, which no program may declare.
-fn from_jdk(decl: &TypeDecl) -> bool {
+pub(super) fn from_jdk(decl: &TypeDecl) -> bool {
     ["java", "javax", "jdk", "sun"]
         .iter()
         .any(|root| decl.package == *root || decl.package.starts_with(&format!("{root}.")))
@@ -816,7 +941,7 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
             | Builtin::EnumOrdinal
             | Builtin::EnumName
             | Builtin::EnumCompareTo
-            | Builtin::Native(Native::IdentityHash),
+            | Builtin::Native(Native::IdentityHash | Native::SystemIdentityHash),
             _,
         ) => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
@@ -830,12 +955,13 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
     }
 }
 
-/// The `toString` methods that showing a value of type `ty` may run.
+/// The `toString` methods that showing a value of type `ty` may run, and the `hashCode`s that
+/// `Object`'s `toString` shows.
 fn to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
     let Some(t) = class.class_index(ty) else { return Vec::new() };
     let mut out = Vec::new();
     for c in class.hierarchy.concretes(t) {
-        if let Some(i) = hierarchy::to_string_impl(class, c)
+        if let Some(i) = hierarchy::text_impl(class, c)
             && !out.contains(&i)
         {
             out.push(i);

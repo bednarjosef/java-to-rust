@@ -38,6 +38,7 @@ mod arrays;
 mod boxing;
 mod by_name;
 mod captures;
+mod census;
 mod charsets;
 mod classes;
 mod clinit_errors;
@@ -51,17 +52,26 @@ mod natives;
 mod patterns;
 mod primitives;
 mod program;
+mod prologues;
 mod switch;
 mod sync;
 mod system;
 mod varargs;
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
+pub use captures::raw as raw_type;
+pub use census::panic_message;
 pub(crate) use clinit_errors::rewritten_clinit;
-pub use exceptions::{is_standard, standard_names, standard_subclass};
+pub use exceptions::{is_standard, standard_local_name, standard_names, standard_subclass};
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
-pub use program::lower_program;
+pub use primitives::runtime_character_method;
+pub use program::{Lowered, census_lower_program, lower_program};
+
+/// Checks that no enum of the program can be null: the translation has no null enums.
+pub fn check_enum_nulls(class: &Class) -> Result<(), Error> {
+    enums::check_nulls(class)
+}
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
@@ -188,11 +198,47 @@ impl<'t> Node<'t> {
     }
 }
 
+/// What the rejection of an `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]`
+/// says, where the runtime would do it (see `Reach::string_array_writes`).
+pub const STRING_ARRAY_WRITE: &str = "a change in place of a `String[]` that is also an `Object[]`";
+
+impl<'t> Lowering<'t> {
+    /// `a == b` or `a != b` of two strings, which compares references. A translated string is a
+    /// value without an identity, so the program's own code is rejected. The JDK compares by
+    /// reference only strings it interned (the parts of a `Locale`, `Charset`'s canonical names)
+    /// or as a shortcut before comparing the characters (`LocaleUtils.caseIgnoreMatch`), and no
+    /// code of it that the targets reach makes a string with an identity of its own to tell it
+    /// apart (a `new String` kept as a marker): there, the reference comparison gives what value
+    /// equality does, which is how the library's code is lowered (`Objects.equals`).
+    fn library_string_comparison(
+        &self,
+        node: Node<'t>,
+        op: BinOp,
+        left: Expr,
+        right: Expr,
+    ) -> Result<ExprKind, Error> {
+        if !self.library.get(self.current.get()).copied().unwrap_or(false) {
+            return error(node.pos(), "== on strings compares references; not supported yet");
+        }
+        let equal = ExprKind::Builtin(Builtin::ObjectsEquals, vec![left, right]);
+        Ok(match op {
+            BinOp::Eq => equal,
+            _ => ExprKind::Unary(UnOp::Not, Box::new(self.synth(equal, node.pos(), Type::Boolean))),
+        })
+    }
+}
+
 fn unsupported<T>(node: Node, what: &str) -> Result<T, Error> {
     error(node.pos(), format!("{what} not supported yet"))
 }
 
 /// `ENHANCED_FOR_LOOP` as `enhanced for loop`.
+/// Whether javac's type `name` is an instantiation of the generic class `class`, such as
+/// `java.lang.Enum<?>` (and not an array of one, `java.lang.Enum<?>[]`).
+fn generic_of(name: &str, class: &str) -> bool {
+    name.strip_prefix(class).is_some_and(|rest| rest.starts_with('<') && rest.ends_with('>'))
+}
+
 fn kind_words(kind: &str) -> String {
     kind.to_lowercase().replace('_', " ")
 }
@@ -223,6 +269,9 @@ struct Lowering<'t> {
     /// The array types whose arrays become `Object`s or are cast back from them: each is a
     /// runtime class beside `Object` (see `object::object_types`).
     object_arrays: std::cell::RefCell<Vec<Type>>,
+    /// The atomic updates of fields through `Unsafe` that the code makes, each a method that
+    /// lowering adds to the field's class (see `handles`).
+    field_updates: RefCell<Vec<handles::FieldUpdateMethod>>,
     /// The arrays of references that are `Object[]`s (see `covariant`).
     covariant: covariant::Covariant,
     /// Where `Object` goes, in a program that uses it (see `object`).
@@ -248,7 +297,22 @@ struct Lowering<'t> {
     /// The member classes of local and anonymous classes, each with its outer class, by index:
     /// they are named after that class (see `inner::name_nested`).
     member_outers: Vec<(usize, usize)>,
+    /// In a whole program, whether each class, by index, is the library's (the JDK's) rather than
+    /// the program's own; a class without an entry is the program's.
+    library: Vec<bool>,
+    /// In a census (see `census`), the code that lowering rejected, each error with the index of
+    /// the type whose code it is in and the position of the method being lowered, and lowering
+    /// goes on past it; `None` otherwise, when the first error ends lowering.
+    census: Option<RefCell<Vec<CensusError>>>,
+    /// Whether the method being lowered is a census's stub of one that lowering rejected.
+    stubbing: Cell<bool>,
+    /// The methods that are a census's stubs.
+    stubbed: RefCell<std::collections::BTreeSet<usize>>,
 }
+
+/// An error that lowering for a census records: the index of the type whose code it is in, the
+/// position of the method being lowered, and the error.
+type CensusError = (usize, Option<Pos>, Error);
 
 impl<'t> Lowering<'t> {
     /// What lowering adds once every declared method is lowered, for a file and a whole program
@@ -261,28 +325,45 @@ impl<'t> Lowering<'t> {
             methods.push(clinit);
         }
         for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
-            let in_type = |e| (index, e);
-            self.constant_bodies(index, methods).map_err(in_type)?;
-            let bodies = self.constant_body_fields(index).map_err(in_type)?;
-            let own_fields = types[index].fields.len();
-            let pure = self.check_enum(index, methods).and_then(|()| {
-                self.add_body_fields(&bodies, &mut types[index].fields)?;
-                self.enum_constants(index, &types[index].fields, methods, &bodies)
-            });
-            // An enum whose constructors do more than the pure form allows has tables instead,
-            // when its constants' bodies declare no fields.
-            let constants = match pure {
-                Ok(constants) => constants,
-                Err(e) if bodies.iter().any(|b| !b.is_empty()) => return Err(in_type(e)),
-                Err(_) => {
-                    types[index].fields.truncate(own_fields);
-                    self.enum_tables(index, types, methods).map_err(in_type)?;
-                    let names = self.enum_constant_names(index);
-                    names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() }).collect()
-                }
-            };
-            types[index].enum_constants = Some(constants);
+            if let Err(e) = self.finish_enum(index, types, methods) {
+                // In a census, an enum that lowering rejects keeps its constants without values.
+                self.reject_at(index, Some(self.types[index].node.pos()), e).map_err(|e| (index, e))?;
+                let names = self.enum_constant_names(index);
+                let constants = names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() });
+                types[index].enum_constants = Some(constants.collect());
+            }
         }
+        self.field_update_methods(methods);
+        Ok(())
+    }
+
+    /// The constant bodies and the constants of enum `index`.
+    fn finish_enum(
+        &self,
+        index: usize,
+        types: &mut [TypeDecl],
+        methods: &mut Vec<Method>,
+    ) -> Result<(), Error> {
+        self.constant_bodies(index, methods)?;
+        let bodies = self.constant_body_fields(index)?;
+        let own_fields = types[index].fields.len();
+        let pure = self.check_enum(index, methods).and_then(|()| {
+            self.add_body_fields(&bodies, &mut types[index].fields)?;
+            self.enum_constants(index, &types[index].fields, methods, &bodies)
+        });
+        // An enum whose constructors do more than the pure form allows has tables instead,
+        // when its constants' bodies declare no fields.
+        let constants = match pure {
+            Ok(constants) => constants,
+            Err(e) if bodies.iter().any(|b| !b.is_empty()) => return Err(e),
+            Err(_) => {
+                types[index].fields.truncate(own_fields);
+                self.enum_tables(index, types, methods)?;
+                let names = self.enum_constant_names(index);
+                names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() }).collect()
+            }
+        };
+        types[index].enum_constants = Some(constants);
         Ok(())
     }
 
@@ -311,7 +392,7 @@ impl<'t> Lowering<'t> {
             Type::Void
         } else {
             let ret_node = node.child("returnType")?;
-            self.ty(ret_node, ret_node.java_type())?
+            self.signature_type(ret_node, ret_node.java_type())?
         };
         self.ret.set(ret);
         let params: Vec<Node> = node.list("parameters").collect();
@@ -328,7 +409,9 @@ impl<'t> Lowering<'t> {
         } else {
             params
                 .into_iter()
-                .map(|p| Ok(Param { name: p.str("name").to_string(), ty: self.ty(p, param_type(p))? }))
+                .map(|p| {
+                    Ok(Param { name: p.str("name").to_string(), ty: self.signature_type(p, param_type(p))? })
+                })
                 .collect::<Result<_, Error>>()?
         };
         // An abstract method of an enum is implemented by the constants' bodies, which
@@ -341,15 +424,16 @@ impl<'t> Lowering<'t> {
             && !abstract_in_enum;
         let dormant = self.reach.is_some_and(|r| r.dormant(&self.types[info.owner].javac, node.0));
         let mut body = match node.get("body") {
-            Some(_) if dormant => {
-                let never = ExprKind::Builtin(Builtin::NoObject { class: info.owner }, Vec::new());
-                vec![Stmt::Expr(self.synth(never, node.pos(), Type::Void))]
-            }
+            Some(_) if dormant || self.stubbing.get() => self.never(info.owner, node.pos()),
             Some(body) => self.block(body)?,
             None if abstract_in_enum || is_abstract => Vec::new(),
             None => return unsupported(node, "methods without a body"),
         };
-        let params = if is_ctor {
+        let params = if is_ctor && self.stubbing.get() {
+            let (first, last) = self.synthetic_params(info.owner)?;
+            first.into_iter().chain(params).chain(last).collect()
+        } else if is_ctor {
+            self.constructor_prologue(node, info.owner, &mut body)?;
             self.run_initializer_blocks(info.owner, &mut body)?;
             self.start_constructor(info.owner, &mut body)?;
             let (first, last) = self.synthetic_params(info.owner)?;
@@ -390,9 +474,10 @@ impl<'t> Lowering<'t> {
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
-            _ if name == "java.lang.Class" || name.starts_with("java.lang.Class<") => Ok(Type::JavaClass),
+            // An array of these (`Class<?>[]`, `Enum<?>[]`) is an array type, below.
+            _ if name == "java.lang.Class" || generic_of(name, "java.lang.Class") => Ok(Type::JavaClass),
             // A value of one of the program's enums (see `enums::enum_call`).
-            _ if (name == "java.lang.Enum" || name.starts_with("java.lang.Enum<"))
+            _ if (name == "java.lang.Enum" || generic_of(name, "java.lang.Enum"))
                 && self.object.is_some_and(|at| at.enumeration.is_some()) =>
             {
                 Ok(Type::class(ENUM))
@@ -472,6 +557,7 @@ impl<'t> Lowering<'t> {
                 };
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
             }
+            "EXPRESSION_STATEMENT" if let Some(set_all) = self.set_all(node)? => set_all,
             "EXPRESSION_STATEMENT" => match self.expr(node.child("expression")?)? {
                 // A native that does nothing here, such as `registerNatives()`, leaves no trace.
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
@@ -692,21 +778,22 @@ impl<'t> Lowering<'t> {
                 let (left, right) = (self.expr(left)?, self.expr(node.child("rightOperand")?)?);
                 if left.ty == Type::String && right.ty == Type::String && matches!(op, BinOp::Eq | BinOp::Ne)
                 {
-                    return error(node.pos(), "== on strings compares references; not supported yet");
-                }
-                // An array's text is its type and identity hash, such as `[I@1b6d3586`.
-                if op == BinOp::Add
-                    && (left.ty == Type::String || right.ty == Type::String)
-                    && (matches!(left.ty, Type::Array(_)) || matches!(right.ty, Type::Array(_)))
-                {
-                    return unsupported(node, "the text of an array");
-                }
-                let (left, right) = if matches!(op, BinOp::Eq | BinOp::Ne) {
-                    self.convert_operands(left, right)
+                    self.library_string_comparison(node, op, left, right)?
                 } else {
-                    (left, right)
-                };
-                ExprKind::Binary(op, Box::new(left), Box::new(right))
+                    // An array's text is its type and identity hash, such as `[I@1b6d3586`.
+                    if op == BinOp::Add
+                        && (left.ty == Type::String || right.ty == Type::String)
+                        && (matches!(left.ty, Type::Array(_)) || matches!(right.ty, Type::Array(_)))
+                    {
+                        return unsupported(node, "the text of an array");
+                    }
+                    let (left, right) = if matches!(op, BinOp::Eq | BinOp::Ne) {
+                        self.convert_operands(left, right)
+                    } else {
+                        (left, right)
+                    };
+                    ExprKind::Binary(op, Box::new(left), Box::new(right))
+                }
             }
         };
         // `printf` returns its stream, which the translation has no type for; it is a statement.
@@ -858,13 +945,17 @@ impl<'t> Lowering<'t> {
             ("java.lang.Math", "sqrt") => Builtin::MathSqrt,
             ("java.lang.Math", "pow") => Builtin::MathPow,
             // Where the JDK's `Arrays` is translated, a call that the runtime does not do is one of
-            // it, such as a sort with a `Comparator`.
+            // it, such as a sort with a `Comparator`, and so is a sort or a fill of a `String[]`
+            // that is an `Object[]` where reachability kept the JDK's for it.
             ("java.util.Arrays", name)
                 if self.type_index(symbol.owner).is_none() || {
                     let types: Vec<&str> = node.list("arguments").map(|a| a.java_type()).collect();
-                    arrays::runtime_arrays_call(name, &types)
+                    arrays::runtime_arrays_call(name, &types) && !self.jdk_string_array_write(node)
                 } =>
             {
+                let (writes, copies) =
+                    (matches!(name, "sort" | "fill"), matches!(name, "copyOf" | "copyOfRange"));
+                let args = self.string_array_args(node, args, writes, copies)?;
                 return self.arrays_call(node, name, args);
             }
             ("java.lang.String", "length" | "equals")
@@ -884,7 +975,11 @@ impl<'t> Lowering<'t> {
                 args.insert(0, self.expr(receiver)?);
                 Builtin::String(StringOp::GetBytes)
             }
-            ("java.lang.String", _) => return self.string_call(node, &symbol, receiver, args),
+            ("java.lang.String", _) => {
+                let args = self.string_array_args(node, args, false, false)?;
+                let kind = self.string_call(node, &symbol, receiver, args)?;
+                return Ok(self.object_array_result(node, kind));
+            }
             // `String`'s own `join` of the first `size` elements between a prefix and a suffix,
             // which `StringJoiner` reaches through `SharedSecrets` (`String` is the runtime's).
             ("jdk.internal.access.JavaLangAccess", "join") if args.len() == 5 => {
@@ -908,7 +1003,10 @@ impl<'t> Lowering<'t> {
             (owner, name) if boxing::boxed_type(owner).is_some() && boxing::is_boxed_method(name) => {
                 self.boxed_call(node, &symbol, &mut args, receiver)?
             }
-            ("java.lang.Character", name) => {
+            // The rest of `Character` is the JDK's, where a whole program has it.
+            ("java.lang.Character", name)
+                if runtime_character_method(name, symbol.ty) || self.type_index(symbol.owner).is_none() =>
+            {
                 let char_arg = args.first().is_some_and(|a| a.ty == Type::Char);
                 self.character_method(node, name, symbol.ty, char_arg)?
             }

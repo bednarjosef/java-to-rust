@@ -12,13 +12,17 @@ pub mod timings;
 pub mod types;
 
 pub use ast::Error;
-pub use program::{Program, ProgramError, survey_program, translate_program};
+pub use program::{Program, ProgramError, census_program, survey_program, translate_program};
 
 /// Translates one Java source file into the source of a Rust program that uses the
 /// `java-runtime` crate.
 pub fn translate(java: &str) -> Result<String, Error> {
     let mut class = lower::lower(&javac::tree(java)?)?;
     analysis::whole_objects(&mut class)?;
-    let facts = analysis::analyze(&class)?;
+    let mut facts = analysis::analyze(&class)?;
+    // A `catch` reads the message of a `NullPointerException`: it names the class file's code.
+    if facts.npe_message_read.is_some() {
+        analysis::npe_messages(&class, &mut facts, &javac::source_names(java)?)?;
+    }
     codegen::generate(&class, &facts)
 }

@@ -42,7 +42,14 @@ pub(super) fn enter(class: &Class) -> Option<Scope> {
     if class.types.iter().all(|t| t.package.is_empty()) {
         return None;
     }
-    let packages = class.types.iter().map(|t| (t.name.clone(), t.package.clone())).collect();
+    // A runtime value's class is the runtime's, whatever its name: the JDK's `Character`, which
+    // is translated for its static members, is the box's class too.
+    let packages = class
+        .types
+        .iter()
+        .filter(|t| t.kind != TypeKind::Runtime)
+        .map(|t| (t.name.clone(), t.package.clone()))
+        .collect();
     CONTEXT.with_borrow_mut(|c| *c = Some(Context { packages, current: None }));
     Some(Scope)
 }
@@ -65,7 +72,7 @@ pub(super) fn split(name: &str) -> (String, &str) {
         && CONTEXT
             .with_borrow(|c| c.as_ref().is_none_or(|c| c.packages.get(name).is_some_and(String::is_empty)));
     if crate::lower::is_standard(name) || provided {
-        let simple = name.rsplit('.').next().unwrap_or(name);
+        let simple = crate::lower::standard_local_name(name);
         let root = CONTEXT.with_borrow(|c| {
             c.as_ref().and_then(|c| c.current.as_deref()).is_some_and(|current| !current.is_empty())
         });

@@ -17,11 +17,16 @@ pub fn null_enum<T>(value: Option<T>) -> T {
     }
 }
 
-/// `non_null` where the program observes the `NullPointerException`. Java's message names what
-/// was null in terms of the bytecode, which a translation cannot reproduce; the translator
-/// rejects programs that read it.
+/// `non_null` where the program observes the `NullPointerException`, without a message: where
+/// nothing reads it, or where Java's has none (as `Objects.requireNonNull`'s).
 pub fn try_non_null<T>(value: Option<T>) -> Result<T, crate::Exception> {
     value.ok_or_else(|| crate::Exception::bare("java.lang.NullPointerException"))
+}
+
+/// `try_non_null` with Java's message, which names what was null in terms of the class file:
+/// `Cannot invoke "Main$Box.size()" because "<local2>" is null`.
+pub fn try_non_null_message<T>(value: Option<T>, message: &'static str) -> Result<T, crate::Exception> {
+    value.ok_or_else(|| crate::Exception::new("java.lang.NullPointerException", message))
 }
 
 /// Java's string form of a reference that may be null: `null`, or the value's own.

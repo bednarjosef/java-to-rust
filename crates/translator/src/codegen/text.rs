@@ -231,6 +231,12 @@ impl<'a> Gen<'a> {
                     _ => call(self, "from_units", vec![chars]),
                 }
             }
+            StringOp::FromCodePoints | StringOp::FromHighByte => {
+                let mut values = vec![self.slice_of(&args[0])];
+                values.extend(args[1..].iter().map(|x| self.int_arg(x)));
+                let name = if op == StringOp::FromCodePoints { "from_code_points" } else { "from_high_byte" };
+                call(self, name, values)
+            }
             StringOp::GetBytes => {
                 let s = self.text_ref(&args[0]);
                 let charset = match args.get(1) {

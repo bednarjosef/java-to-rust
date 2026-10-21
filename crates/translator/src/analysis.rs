@@ -25,6 +25,7 @@ pub mod hierarchy;
 mod indexing;
 mod monitors;
 mod moves;
+mod npe_messages;
 mod nullness;
 mod object_values;
 mod objects;
@@ -38,6 +39,8 @@ mod whole_objects;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
+pub use npe_messages::npe_messages;
+
 pub use arrays::{RowIndex, Slice, SlicedLoop};
 pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
 pub use whole_objects::whole_objects;
@@ -46,6 +49,9 @@ pub use whole_objects::whole_objects;
 pub struct Facts {
     /// Whether the program starts a thread (see `threads`).
     pub threaded: bool,
+    /// Whether the program interrupts a thread, so that `sleep`, `join` and `wait` may throw
+    /// `InterruptedException` (see `threads`).
+    pub interrupts: bool,
     /// The classes, by type index, whose objects two threads may reach: `Arc`s, with a
     /// `java::Locked` unless immutable.
     pub thread_shared: HashSet<usize>,
@@ -173,6 +179,17 @@ pub struct Facts {
     /// `NullPointerException` that a `catch` or a `finally` may see: they are written with the
     /// runtime's checked `non_null`. With the position of the call or the field access.
     pub null_checked: HashMap<ExprId, Pos>,
+    /// Where a `catch` first reads the message of a `NullPointerException` that the runtime
+    /// raises (`getMessage`), which the translation then writes as Java's (see `npe_messages`).
+    pub npe_message_read: Option<Pos>,
+    /// The objects of `null_checked` whose message such a `catch` may read: those that its `try`
+    /// catches itself, and those whose exception leaves their method. Each must have Java's
+    /// message in `npe_messages`, or the program is not translated.
+    pub npe_message_needed: HashSet<ExprId>,
+    /// The message of the `NullPointerException` of the dereference of each object of
+    /// `null_checked` whose message is known: Java's text, or `None` for an exception without
+    /// one (such as `Objects.requireNonNull`'s). Filled in only when `npe_message_read` is set.
+    pub npe_messages: HashMap<ExprId, Option<String>>,
     /// The operations whose failure, which has no checked form of its own, a `catch` or a
     /// `finally` may see: they run inside `java::catching`. With their positions.
     pub catching: HashMap<ExprId, Pos>,
@@ -203,6 +220,13 @@ impl Facts {
 }
 
 pub fn analyze(class: &Class) -> Result<Facts, Error> {
+    analyze_all(class).map_err(|mut errors| errors.remove(0))
+}
+
+/// The facts, or the errors of the first analysis that rejects the program: all of them, where
+/// that analysis finds more than one (a census stubs them together, `program/census.rs`).
+pub fn analyze_all(class: &Class) -> Result<Facts, Vec<Error>> {
+    let one = |e: Error| vec![e];
     let mut facts = Facts {
         fields_structs: hierarchy::fields_structs(class),
         field_owners: hierarchy::field_owners(class),
@@ -212,17 +236,17 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
     ranges::analyze(class, &mut facts);
     representation(class, &mut facts);
-    validate(class, &facts)?;
-    patterns::check(class)?;
+    validate(class, &facts).map_err(one)?;
+    patterns::check(class).map_err(one)?;
     facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
     nullness::analyze(class, &mut facts);
-    patterns::check_object_values(class, &facts)?;
+    patterns::check_object_values(class, &facts).map_err(one)?;
     boxing::analyze(class, &mut facts);
     if facts.threaded {
-        threads::check(class, &facts)?;
+        threads::check(class, &facts).map_err(one)?;
     }
-    monitors::check(class, &facts)?;
+    monitors::check(class, &facts).map_err(one)?;
     facts.class_monitors = monitors::class_monitors(class, &facts);
     borrowed_params(class, &mut facts);
     facts.borrowed_objects = borrowed_objects(class, &facts);
@@ -231,6 +255,14 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     indexing::analyze(class, &mut facts);
     moves::analyze(class, &mut facts);
     exceptions::analyze(class, &mut facts)?;
+    // An uncaught-exception handler gets the failures of the runtime as objects of their classes.
+    if threads::handles_uncaught(class) {
+        for new in &class.raised {
+            if let ExprKind::New { class: c, .. } = new.kind {
+                facts.raised_classes.insert(c);
+            }
+        }
+    }
     // The exceptions that the runtime raises are values of `Throwable` too.
     if !facts.raised_classes.is_empty() {
         facts.flows = hierarchy::flows(class, &facts.field_level, &facts.raised_classes);
@@ -242,6 +274,7 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
 /// `immutable` to `writers`, given `fields_structs`.
 fn representation(class: &Class, facts: &mut Facts) {
     facts.threaded = threads::threaded(class);
+    facts.interrupts = threads::interrupts(class);
     if facts.threaded {
         facts.thread_shared = threads::thread_shared(class);
         facts.long_methods = threads::long_methods(class, &facts.thread_shared);
@@ -386,17 +419,13 @@ pub fn reads_earlier_fields(decl: &TypeDecl, i: usize, e: &Expr) -> bool {
 /// the initializer must run.
 pub fn leading_assignments<'c>(class: &Class, ctor: &'c Method, facts: &Facts) -> Vec<(usize, &'c Expr)> {
     let decl = &class.types[ctor.class];
-    let delegates =
-        matches!(ctor.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })));
-    if delegates || !inline_initializers(class, ctor.class, facts) {
+    if delegates(&ctor.body) || !inline_initializers(class, ctor.class, facts) {
         return Vec::new();
     }
     let mut out: Vec<(usize, &Expr)> = Vec::new();
-    // `super(...)` runs first, before the initializers: the struct literal's `base`.
-    let body = match ctor.body.first() {
-        Some(Stmt::Expr(Expr { kind: ExprKind::SuperInit { .. }, .. })) => &ctor.body[1..],
-        _ => &ctor.body[..],
-    };
+    // `super(...)` runs first, before the initializers: the struct literal's `base`. The
+    // statements before it run before the literal is built.
+    let (_, _, body) = split_explicit_call(&ctor.body);
     for stmt in body {
         let Stmt::Expr(Expr {
             kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, value },

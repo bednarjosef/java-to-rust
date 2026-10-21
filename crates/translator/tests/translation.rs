@@ -1051,11 +1051,11 @@ fn constructors_keep_java_order_in_their_struct_literal() {
             public static void main(String[] a) { P p = new P(5); System.out.println(p.a + p.b + p.c); }
         }",
     );
-    // All three are taken into the literal; `a` is assigned by a call after `c`'s, but its field
-    // comes first in the literal, so the calls run first, in Java's order.
+    // All three are taken into the literal, whose values are in the order of the assignments;
+    // `a` is assigned by a call after `c`'s, and the calls run first, in Java's order.
     assert_contains(
         &rust,
-        &["let c = next();\n        let a = next();\n        let this = P { a, b: x, c };", "        this\n"],
+        &["let c = next();\n        let a = next();\n        let this = P { b: x, c, a };", "        this\n"],
     );
 }
 
@@ -1649,6 +1649,36 @@ fn library_roots_are_read_only_where_used() {
 }
 
 #[test]
+fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
+    let library = (
+        "lib/lib/Tags.java",
+        "package lib;\npublic class Tags {\n    public static boolean none(String tag) { return tag == \"\"; }\n    public static boolean differ(String a, String b) { return a != b; }\n}\n",
+    );
+    let main = "package main;\nimport lib.Tags;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Tags.none(\"\") + \" \" + Tags.differ(\"x\", a.length > 0 ? a[0] : \"y\"));\n    }\n}\n";
+    let dir = write_sources("library-string-equality", &[("app/main/Main.java", main), library]);
+    let program = java_to_rust::Program {
+        main: "main.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    // Value equality, `Objects.equals`, of the two strings.
+    assert_contains(&rust, &["tag == \"\"", "!(a == b)"]);
+    // The same comparison in the program's own code compares references, which it cannot.
+    let own = "package main;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(a.length > 0 && a[0] == \"x\");\n    }\n}\n";
+    let dir = write_sources("program-string-equality", &[("app/main/Main.java", own)]);
+    let program = java_to_rust::Program {
+        main: "main.Main".into(),
+        sources: vec![dir.join("app")],
+        ..Default::default()
+    };
+    let err = java_to_rust::translate_program(&program).expect_err("== on the program's strings");
+    assert!(err.to_string().contains("== on strings compares references; not supported yet"), "{err}");
+}
+
+#[test]
 fn program_errors_name_their_file() {
     let dir = write_sources(
         "program-errors",
@@ -1958,6 +1988,55 @@ fn a_catch_right_around_the_text_of_an_object_whose_to_string_throws_is_rejected
     assert!(
         error.to_string().ends_with("catching an exception that this toString may throw not supported yet"),
         "{error}"
+    );
+}
+
+#[test]
+fn a_catch_around_the_default_text_of_an_object_whose_hash_code_throws_is_rejected() {
+    // `Object`'s `toString` shows the `hashCode`, which may throw what the `catch` catches.
+    let error = java_to_rust::translate(
+        "public class A {
+            static class Item {
+                public int hashCode() { throw new IllegalStateException(\"no hash\"); }
+            }
+            public static void main(String[] args) {
+                try {
+                    System.out.println(\"item \" + new Item());
+                } catch (IllegalStateException e) {
+                    System.out.println(\"caught\");
+                }
+            }
+        }",
+    )
+    .expect_err("a hashCode whose exception a catch around the text sees");
+    assert!(
+        error.to_string().ends_with("catching an exception that this toString may throw not supported yet"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_default_text_of_an_object_whose_hash_code_may_throw_ends_the_program_on_it() {
+    let rust = translate(
+        "public class A {
+            static class Key {
+                final int n;
+                Key(int n) { this.n = n; }
+                public int hashCode() { if (n < 0) throw new IllegalStateException(\"negative\"); return n; }
+            }
+            public static void main(String[] args) {
+                try { new Key(-1).hashCode(); } catch (IllegalStateException e) { System.out.println(\"caught\"); }
+                System.out.println(new Key(3));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn hash_code(&self) -> Result<i32, Throwable> {",
+            "java::default_text(\"A$Key\", ",
+            ".hash_code().unwrap_or_else(java::uncaught))",
+        ],
     );
 }
 
@@ -2749,6 +2828,87 @@ fn survey_json_writes_the_census_to_the_file_given() {
     assert!(written["pieces"].as_array().is_some_and(|p| !p.is_empty()), "{written}");
 }
 
+/// A program in package `p` whose `main` reaches three methods that the translator rejects, each
+/// for its own reason, and one that it translates.
+fn census_sources(dir: &str) -> std::path::PathBuf {
+    write_sources(
+        dir,
+        &[
+            (
+                "p/Main.java",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        Other.process();\n        Other.split(a);\n        Other.same();\n        Other.fine();\n    }\n}\n",
+            ),
+            (
+                "p/Other.java",
+                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void same() {\n        String s = \"x\";\n        System.out.println(s.intern() == \"x\");\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\n",
+            ),
+        ],
+    )
+}
+
+/// The census of a program, which must not fail.
+fn census(program: &java_to_rust::Program) -> java_to_rust::program::Census {
+    java_to_rust::census_program(program).unwrap_or_else(|e| panic!("census failed: {e}"))
+}
+
+#[test]
+fn the_census_reports_every_rejection_not_only_the_first() {
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![census_sources("census")],
+        ..Default::default()
+    };
+    // The translation stops at the first rejection.
+    let error = java_to_rust::translate_program(&program).expect_err("ProcessBuilder is not supported");
+    assert!(error.to_string().ends_with("type `java.lang.ProcessBuilder` not supported yet"), "{error}");
+    let census = census(&program);
+    let report = &census.report;
+    // Lowering, an analysis and the generator each reject one method; `main` and `fine` translate.
+    assert_lacks(report, &["Incomplete"]);
+    assert_contains(
+        report,
+        &[
+            "  Program: 5 pieces; 2 (40.0%) translate, 3 rejected.",
+            "type `…` not supported yet\n          at p/Other.java:4:9",
+            "catching an exception that this call of the library may throw not supported yet\n          at p/Other.java:7",
+            "== on strings compares references; not supported yet\n          at p/Other.java:12",
+        ],
+    );
+    let pieces = census.json["pieces"].as_array().expect("pieces");
+    let errors = |name: &str| {
+        let piece =
+            pieces.iter().find(|p| p["name"] == name).unwrap_or_else(|| panic!("no {name} in {pieces:?}"));
+        piece["errors"].as_array().expect("errors").len()
+    };
+    assert_eq!(
+        (errors("process"), errors("split"), errors("same"), errors("fine"), errors("main")),
+        (1, 1, 1, 0, 0)
+    );
+    assert_eq!(census.json["complete"], true);
+    assert_eq!(census.json["totals"]["program"]["rejected"], 3);
+}
+
+#[test]
+fn census_json_writes_the_census_to_the_file_given() {
+    let dir = census_sources("census_cli");
+    let json = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("census_cli.json");
+    let _ = std::fs::remove_file(&json);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "p.Main", "--source"])
+        .arg(&dir)
+        .arg("--census-json")
+        .arg(&json)
+        .output()
+        .expect("runs the translator");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Census of the code reachable from p.Main"), "{stdout}");
+    let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    assert_eq!(written["main"], "p.Main");
+    let rejections = written["rejections"].as_array().expect("rejections");
+    assert_eq!(rejections.len(), 3, "{written}");
+}
+
 #[test]
 fn an_enum_field_assigned_outside_its_constructor_is_a_table() {
     let rust = java_to_rust::translate(
@@ -3122,6 +3282,24 @@ fn natives_of_jdk_classes_become_runtime_calls() {
         &rust,
         &["register_natives", "initialize", "from_archive", "fn array_base_offset", "fn array_index_scale"],
     );
+}
+
+#[test]
+fn natives_that_only_answer_a_value_cannot_fail_in_a_try() {
+    // A `catch` around them sees nothing they raise, as in `ImmutableCollections`'s static
+    // initializer, which reads the seed of CDS.
+    let rust = translate_with_natives(
+        "jdk-natives-caught",
+        "try {
+            System.out.println(CDS.getRandomSeedForDumping() + VM.getNanoTimeAdjustment(0));
+            System.out.println(System.nanoTime() > 0);
+        } catch (Throwable t) {
+            System.out.println(\"caught\");
+        }",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["java::cds_random_seed_for_dumping()"]);
+    assert_lacks(&rust, &["java::catching("]);
 }
 
 #[test]
@@ -3542,8 +3720,8 @@ fn a_null_dereference_that_a_catch_sees_is_a_checked_non_null() {
 }
 
 #[test]
-fn the_message_of_a_null_dereference_is_rejected_and_a_created_ones_is_not() {
-    let program = |message: &str| {
+fn the_message_of_a_null_dereference_is_javas_or_rejected_and_a_created_ones_is_its_own() {
+    let program = |second: &str, message: &str| {
         format!(
             "class A {{
                 A next;
@@ -3551,7 +3729,7 @@ fn the_message_of_a_null_dereference_is_rejected_and_a_created_ones_is_not() {
                 static int second(A a) {{
                     try {{
                         if (a.v > 0) {{ throw new NullPointerException(\"given\"); }}
-                        return a.next.v;
+                        {second}
                     }} catch (NullPointerException e) {{
                         System.out.println({message});
                         return -1;
@@ -3563,12 +3741,19 @@ fn the_message_of_a_null_dereference_is_rejected_and_a_created_ones_is_not() {
             }}"
         )
     };
-    let err = java_to_rust::translate(&program("e.getMessage()")).unwrap_err().to_string();
+    let rust = java_to_rust::translate(&program("return a.next.v;", "e.getMessage()")).unwrap();
+    assert!(rust.contains(r#"Cannot read field \"v\" because \"<parameter1>.next\" is null"#), "{rust}");
+    // A parameter that its method assigns is `<localN>` or `<parameterN>` by the path that ran.
+    let err = java_to_rust::translate(&program("a = a.next; return a.v;", "e.getMessage()"))
+        .unwrap_err()
+        .to_string();
     assert!(
-        err.contains("the message of a `NullPointerException` that the runtime raises not supported yet"),
+        err.contains("the message of the `NullPointerException` of this dereference not supported yet"),
         "{err}"
     );
-    java_to_rust::translate(&program("\"caught\"")).expect("a catch that does not read the message");
+    let rust = java_to_rust::translate(&program("a = a.next; return a.v;", "\"caught\""))
+        .expect("a catch that does not read the message");
+    assert!(!rust.contains("try_non_null_message"), "{rust}");
 }
 
 #[test]
@@ -3899,6 +4084,22 @@ fn equals_takes_the_object_enum() {
 }
 
 #[test]
+fn a_class_extending_number_implements_it_and_byte_value_narrows_int_value() {
+    let class = |extra: &str| {
+        format!(
+            "class M {{ static class Cell extends Number {{ int v = 300;
+                public int intValue() {{ return v; }} public long longValue() {{ return v; }}
+                public float floatValue() {{ return v; }} public double doubleValue() {{ return v; }} {extra} }}
+                public static void main(String[] x) {{ Number n = new Cell(); System.out.println(n.byteValue() + n.intValue()); }} }}"
+        )
+    };
+    let rust = translate(&class(""));
+    assert_contains(&rust, &["(n.int_value() as i8 as i32)"]);
+    let err = java_to_rust::translate(&class("public byte byteValue() { return 1; }")).unwrap_err();
+    assert!(err.to_string().contains("overriding `Number.byteValue` not supported yet"), "{err}");
+}
+
+#[test]
 fn identity_of_object_values_that_may_be_strings_is_rejected() {
     let err = java_to_rust::translate(
         "class M { public static void main(String[] x) { Object a = \"s\"; Object b = \"s\"; System.out.println(a == b); } }",
@@ -4102,6 +4303,91 @@ fn a_type_variables_array_passed_for_an_erased_array_erases_only_its_generic() {
 }
 
 #[test]
+fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at_builtins() {
+    let rust = translate(
+        "public class Main {
+            static <T> T first(T[] a) { return a[0]; }
+            public static void main(String[] args) {
+                String[] words = \"b a\".split(\" \");
+                Integer[] numbers = {1, 2};
+                System.out.println(first(words) + first(numbers) + String.join(\",\", words));
+            }
+        }",
+    );
+    // `String[]` meets `Integer[]` at `T[]`, so it is an `Object[]` of strings; the runtime's
+    // string builtins take and give copies as `String[]`.
+    assert_contains(
+        &rust,
+        &[
+            "String(String),",
+            "fn first(a: &[Object]) -> Object {",
+            "let words: java::Array<Object> = java::from_vec((&java::from_vec(java::split(\"b a\", \" \", 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>());",
+            "java::join(\",\", &java::from_vec((&words.borrow()).iter().map(|s| java::cast(s.as_string(), \"java.lang.String\")).collect::<Vec<_>>()).borrow())",
+        ],
+    );
+}
+
+#[test]
+fn an_enum_array_passed_for_a_type_variables_array_is_an_object_array_of_its_constants() {
+    let rust = translate(
+        "public class Main {
+            enum Day { MON, TUE }
+            static <T> T last(T[] a) { return a[a.length - 1]; }
+            public static void main(String[] args) {
+                Day[] days = Day.values();
+                Day[] some = new Day[2];
+                System.out.println(last(days).ordinal() + \" \" + (some[0] == null) + \" \" + last(new Integer[] {1}));
+            }
+        }",
+    );
+    // `Day[]` meets `Integer[]` at `T[]`: its constants are `Object`s, cast back where read, and
+    // a null test of an element tests the checked cast.
+    assert_contains(
+        &rust,
+        &[
+            "let days: Vec<Option<Object>> = vec![Some(Object::Day(MainDay::Mon)), Some(Object::Day(MainDay::Tue))];",
+            "java::null_enum(last(&days).as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\"))) as i32",
+            "some[0].as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\")).is_none()",
+        ],
+    );
+}
+
+#[test]
+fn main_arguments_that_are_an_object_array_are_strings_as_objects() {
+    let rust = translate(
+        "public class Main {
+            static <T> int count(T[] a) { return a.length; }
+            public static void main(String[] args) {
+                System.out.println(count(args) + count(new Integer[] {1}));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["String(String),", "main_args().into_iter().map(|s| Object::String(s)).collect::<Vec<_>>()"],
+    );
+}
+
+#[test]
+fn sorting_a_string_array_that_is_an_object_array_in_place_is_rejected() {
+    let err = java_to_rust::translate(
+        "public class Main {
+            static <T> T first(T[] a) { return a[0]; }
+            public static void main(String[] args) {
+                String[] words = {\"b\", \"a\"};
+                java.util.Arrays.sort(words);
+                System.out.println(first(words) + first(new Integer[] {1}));
+            }
+        }",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("a change in place of a `String[]` that is also an `Object[]`"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_string_builder_as_an_object_is_a_shared_variant_compared_by_identity() {
     let rust = translate(
         "public class Main {
@@ -4203,15 +4489,19 @@ fn wildcards_and_raw_types_erase() {
 }
 
 #[test]
-fn an_array_passed_as_an_array_of_a_type_variable_is_rejected() {
-    let err = java_to_rust::translate(
+fn a_string_array_passed_as_an_array_of_a_type_variable_is_an_object_array() {
+    let rust = translate(
         "class M { static <T> T first(T[] xs) { return xs[0]; }
             public static void main(String[] x) { String[] s = {\"a\"}; System.out.println(first(s)); } }",
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("an array passed as an array of a type variable not supported yet"),
-        "{err}"
+    );
+    // The erased `T[]` is an `Object[]`, which the `String[]` meets, so it is one too.
+    assert_contains(
+        &rust,
+        &[
+            "fn first(xs: &[Object]) -> Object {",
+            "let s: Vec<Object> = vec![Object::String(String::from(\"a\"))];",
+            "java::cast(first(&s).as_string(), \"java.lang.String\")",
+        ],
     );
 }
 

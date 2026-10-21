@@ -68,25 +68,48 @@ use boxing::boxed_locals;
 use objects::*;
 
 pub fn generate(class: &Class, facts: &Facts) -> Result<String, Error> {
+    generate_all(class, facts).map_err(|mut errors| errors.remove(0))
+}
+
+/// The program, or what in it cannot be translated: every construct found, in the order the
+/// program is written, or else every method with a call that throws inside a closure. A census
+/// (`program/census.rs`) stubs them all at once.
+pub fn generate_all(class: &Class, facts: &Facts) -> Result<String, Vec<Error>> {
     // The enums of class types get the items that the code uses, which writing the code finds:
     // the program is written again until it asks for no item that was not written.
     let mut wanted = Needs::new();
     loop {
-        let (text, needs, rejected) = generate_with(class, facts, &wanted);
-        if let Some(e) = rejected {
-            return Err(e);
+        let (text, needs, rejected, closures) = generate_with(class, facts, &wanted);
+        if !rejected.is_empty() {
+            return Err(rejected);
         }
         if needs.is_subset(&wanted) {
-            exceptions::check_closures(&text)?;
+            // The methods with a call that throws inside a closure, and then any other code.
+            if !closures.is_empty() {
+                return Err(closures);
+            }
+            exceptions::check_closures(&text).map_err(|e| vec![e])?;
             return Ok(text);
         }
         wanted.extend(needs);
     }
 }
 
+thread_local! {
+    /// The position of the method being written, which a census stubs when the generator panics.
+    static WRITING: std::cell::Cell<Option<Pos>> = const { std::cell::Cell::new(None) };
+}
+
+/// The position of the method that the generator was writing when it panicked, if it was writing
+/// one; it is forgotten.
+pub fn panicked_in() -> Option<Pos> {
+    WRITING.with(|w| w.take())
+}
+
 /// The program, with the enum items `wanted`, and the enum items that it uses; and what in it
-/// cannot be translated, if anything.
-fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs, Option<Error>) {
+/// cannot be translated, and the methods with a call that throws inside a closure (see
+/// `exceptions::check_closures`).
+fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs, Vec<Error>, Vec<Error>) {
     let live = live_types(class, facts);
     let modules = modules::enter(class);
     let homes: Vec<Home> = (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect();
@@ -139,13 +162,15 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         attempts: Vec::new(),
         finallies: Vec::new(),
         yield_slots: Vec::new(),
+        optional_yield: false,
         attempt_count: 0,
         try_assigned: HashSet::new(),
         dereferenced: HashSet::new(),
         checked_cast: None,
         catching_now: HashSet::new(),
         written: HashSet::new(),
-        rejected: None,
+        rejected: Vec::new(),
+        closures: Vec::new(),
         chains: chains::Chains::default(),
     };
     g.chains = g.find_chains();
@@ -154,7 +179,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         g.check_dereferences();
         g.check_casts();
         g.check_catching();
-        return (text, g.needs.take(), g.rejected);
+        return (text, g.needs.take(), g.rejected, g.closures);
     }
     for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
         g.type_items(index);
@@ -184,7 +209,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
     if !uses.is_empty() {
         header.push_str(&(uses.join("\n") + "\n"));
     }
-    (header + &g.out + "\n" + ALLOCATOR, g.needs.take(), g.rejected)
+    (header + &g.out + "\n" + ALLOCATOR, g.needs.take(), g.rejected, g.closures)
 }
 
 /// The crate root's allocator: the runtime's, which caches small blocks (runtime `allocator.rs`),
@@ -325,6 +350,9 @@ struct Gen<'a> {
     /// The switch expressions (by frame index) that a `yield` leaves through a `finally`: their
     /// value waits in a `yielded{index}` local (see `switch.rs`).
     yield_slots: Vec<usize>,
+    /// Whether the innermost switch expression may be null, so that each value it yields is an
+    /// `Option`.
+    optional_yield: bool,
     /// How many `try` blocks of the current method have a label.
     attempt_count: usize,
     /// The current method's locals declared without a value that a `try` block assigns (see
@@ -340,8 +368,10 @@ struct Gen<'a> {
     /// The methods whose bodies have been written. A body that is not, as no call needs it or
     /// it never runs, dereferences nothing.
     written: HashSet<usize>,
-    /// The first construct found that cannot be translated, which `generate` reports.
-    rejected: Option<Error>,
+    /// The constructs found that cannot be translated, of which `generate` reports the first.
+    rejected: Vec<Error>,
+    /// The methods written with a call that throws inside a closure, at their positions.
+    closures: Vec<Error>,
 }
 
 impl<'a> Gen<'a> {
@@ -414,7 +444,7 @@ impl<'a> Gen<'a> {
         self.attempt_count = 0;
         self.try_assigned = exceptions::try_assigned(self.facts, &m.body);
         if let Some(e) = exceptions::check_try_assigned(&m.body, &self.try_assigned) {
-            self.rejected.get_or_insert(e);
+            self.rejected.push(e);
         }
         self.name_locals(m);
         self.int_receiver = false;
@@ -506,6 +536,7 @@ impl<'a> Gen<'a> {
 
     fn method(&mut self, index: usize) {
         let m = &self.class.methods[index];
+        let outer = WRITING.with(|w| w.replace(Some(m.pos)));
         self.enter_method(index);
         let start = self.out.len();
         let name = &self.class.types[m.class].name;
@@ -601,6 +632,10 @@ impl<'a> Gen<'a> {
         self.line("}");
         self.display = false;
         self.resolve_annotations(start);
+        if let Err(e) = exceptions::check_closures(&self.out[start..]) {
+            self.closures.push(Error { pos: m.pos, ..e });
+        }
+        WRITING.with(|w| w.set(outer));
     }
 
     /// Picks Rust names for the method's parameters and locals: snake case, distinct from each

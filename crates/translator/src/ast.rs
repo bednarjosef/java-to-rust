@@ -235,7 +235,7 @@ impl fmt::Display for Type {
 }
 
 /// A position in the Java source, 1-based, for error messages.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Pos {
     pub line: usize,
     pub column: usize,
@@ -686,6 +686,12 @@ pub enum Builtin {
     /// The `String[]` that `main` gets as `args`: the command-line arguments, each a new string.
     /// Built fresh where it is read (`lower::arrays::args_decl`), so it is an owned array.
     MainArgs,
+    /// A `String[]` that is an `Object[]` (see `lower::covariant`) as the `String[]` that a
+    /// builtin of strings reads (`String.join`, `Arrays.toString`): a copy, each element cast back.
+    StringArrayOf,
+    /// The new `String[]` that a builtin makes (`split`) as the `Object[]` that a `String[]` is
+    /// where it is covariant: a copy, which no other name sees.
+    ObjectArrayOf,
     /// The body of an instance method of a class that has no objects (`Reach::dormant`): it never
     /// runs.
     NoObject {
@@ -695,6 +701,10 @@ pub enum Builtin {
     /// is of no class of the translated program, and the program ends with a
     /// `ClassNotFoundException` that nothing catches.
     UnknownClass,
+    /// `[class, name]`: `Class.getResourceAsStream(name)`. A translated program has no resources
+    /// (the JDK's data files are not in its source), so the program ends with an `InternalError`
+    /// that nothing catches. `class` is the name of the class, a string literal.
+    MissingResource,
     /// `[]`: runs the static initialization of the class, as its first use would, for
     /// `Class.forName` with a name that the code spells out (`lower::by_name`).
     InitializeClass {
@@ -1023,6 +1033,7 @@ pub fn has_effects(e: &Expr) -> bool {
                         | Builtin::Exit
                         | Builtin::NoObject { .. }
                         | Builtin::UnknownClass
+                        | Builtin::MissingResource
                         | Builtin::InitializeClass { .. }
                         | Builtin::Native(_),
                     _
@@ -1053,6 +1064,49 @@ pub fn mentions_this(e: &Expr) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::This));
     found
+}
+
+/// The index in a constructor's `body` of its `this(..)` or `super(..)`. Java 25 lets statements
+/// that do not use `this` come before it (see `lower::prologues`); in most constructors it is
+/// first.
+pub fn explicit_call(body: &[Stmt]) -> Option<usize> {
+    body.iter().position(|s| {
+        matches!(s, Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. } | ExprKind::SuperInit { .. }, .. }))
+    })
+}
+
+/// Whether a constructor's `body` calls another constructor of its class with `this(..)`.
+pub fn delegates(body: &[Stmt]) -> bool {
+    explicit_call(body)
+        .is_some_and(|i| matches!(&body[i], Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })))
+}
+
+/// A constructor's `body` split at its `this(..)` or `super(..)`: the statements before it, the
+/// call, and the statements after it.
+pub fn split_explicit_call(body: &[Stmt]) -> (&[Stmt], Option<&Expr>, &[Stmt]) {
+    match explicit_call(body) {
+        Some(i) => match &body[i] {
+            Stmt::Expr(call) => (&body[..i], Some(call), &body[i + 1..]),
+            _ => unreachable!("an explicit constructor call is an expression statement"),
+        },
+        None => (&[], None, body),
+    }
+}
+
+/// The local that holds the value a constructor's statements before `super(..)` assign to field
+/// `field`, until the object exists (see `lower::prologues`).
+pub fn early_field_local(field: &str) -> String {
+    format!("early${field}")
+}
+
+/// Whether `stmt` is `this.f = early$f`, the assignment that sets a field assigned before
+/// `super(..)` once the object exists.
+pub fn is_early_field_assignment(stmt: &Stmt) -> bool {
+    matches!(stmt, Stmt::Expr(Expr {
+        kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, value },
+        ..
+    }) if matches!(object.kind, ExprKind::This)
+        && matches!(&value.kind, ExprKind::Var(v) if *v == early_field_local(name)))
 }
 
 pub fn mentions(e: &Expr, name: &str) -> bool {

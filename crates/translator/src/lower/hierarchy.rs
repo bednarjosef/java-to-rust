@@ -5,8 +5,9 @@
 use super::*;
 
 impl<'t> Lowering<'t> {
-    /// The superclass of class `t` when the program declares it; `None` for `Object`. A class
-    /// that extends a class of the runtime is rejected.
+    /// The superclass of class `t` when the program declares it; `None` for `Object`, and for
+    /// `Number`, which is the object model's (see `lower::object`). A class that extends another
+    /// class of the runtime is rejected.
     pub(super) fn superclass(&self, t: usize) -> Result<Option<usize>, Error> {
         let node = self.types[t].node;
         let Some(clause) = node.get("extendsClause") else { return Ok(None) };
@@ -15,9 +16,10 @@ impl<'t> Lowering<'t> {
         let name = name.as_str();
         match self.type_index(name) {
             Some(s) if self.types[s].node.kind() == "CLASS" => Ok(Some(s)),
-            Some(_) => unsupported(clause, &format!("extending `{name}`")),
-            None if name == "java.lang.Object" => Ok(None),
-            None => unsupported(clause, &format!("extending `{name}`")),
+            None if name == "java.lang.Object" || name == "java.lang.Number" => Ok(None),
+            // A census's stub of the class extends nothing.
+            _ if self.stubbing.get() => Ok(None),
+            _ => unsupported(clause, &format!("extending `{name}`")),
         }
     }
 
@@ -31,8 +33,7 @@ impl<'t> Lowering<'t> {
         // javac lists the interfaces that an interface extends as its `implementsClause` too.
         let mut out = Vec::new();
         for clause in node.list("implementsClause") {
-            let name = clause.java_type();
-            let raw = name.split('<').next().unwrap_or(name);
+            let raw = &super::captures::raw(clause.java_type());
             if functional::is_marker(raw) {
                 continue;
             }
@@ -40,12 +41,13 @@ impl<'t> Lowering<'t> {
                 Some(i) if self.types[i].node.kind() == "INTERFACE" => out.push(i),
                 // `CharSequence` is the object model's (see `object_types`).
                 None if matches!(
-                    raw,
+                    raw.as_str(),
                     "java.lang.Comparable"
                         | "java.lang.AutoCloseable"
                         | "java.io.Closeable"
                         | "java.lang.CharSequence"
                 ) => {}
+                _ if self.stubbing.get() => {}
                 _ => return unsupported(clause, &format!("implementing `{raw}`")),
             }
         }
@@ -260,6 +262,16 @@ impl<'t> Lowering<'t> {
         }
         if right.ty == sequence && left.ty == Type::StringBuilder {
             return (self.convert(left, sequence), right);
+        }
+        // An object of a class that extends `Number` compared with a `Number` is one.
+        let number = Type::class(NUMBER);
+        let extends_number =
+            |e: &Expr| self.class_of(e.ty).is_some_and(|c| self.extends_number(c).unwrap_or(false));
+        if left.ty == number && extends_number(&right) {
+            return (left, self.convert(right, number));
+        }
+        if right.ty == number && extends_number(&left) {
+            return (self.convert(left, number), right);
         }
         let (Some(a), Some(b)) = (self.class_of(left.ty), self.class_of(right.ty)) else {
             return (left, right);

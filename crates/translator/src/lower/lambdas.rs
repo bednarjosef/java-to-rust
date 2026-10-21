@@ -175,7 +175,11 @@ impl<'t> Lowering<'t> {
                 kind: TypeKind::Class,
                 is_abstract: false,
                 extends: None,
-                implements: vec![self.lambda_interface(l)?],
+                // A census's stub of the class implements nothing.
+                implements: match self.lambda_interface(l) {
+                    Err(_) if self.stubbing.get() => Vec::new(),
+                    interface => vec![interface?],
+                },
                 fields: self.synthetic_fields(t)?,
                 statics: Vec::new(),
                 enum_constants: None,
@@ -254,25 +258,28 @@ impl<'t> Lowering<'t> {
         l: &LambdaInfo<'t>,
     ) -> Result<(&'t str, Vec<Param>, Type, Vec<Stmt>, Option<usize>), Error> {
         let node = l.node;
-        if let Some(qualifier) = computed_receiver(node.0, &|owner, name| self.is_final_field(owner, name)) {
+        let stub = self.stubbing.get();
+        if let Some(qualifier) =
+            computed_receiver(node.0, &|owner, name| self.is_final_field(owner, name)).filter(|_| !stub)
+        {
             return unsupported(
                 Node(qualifier),
                 "a method reference on a receiver that is not a local, `this` or a final field",
             );
         }
-        if let Some(sup) = uses_super(l.code.0) {
+        if let Some(sup) = uses_super(l.code.0).filter(|_| !stub) {
             return unsupported(Node(sup), "`super` in a lambda");
         }
         let descriptor = node.child("descriptor")?;
         let (param_types, ret) = signature(descriptor.str("substituted"));
-        let ret = self.ty(node, ret)?;
+        let ret = self.signature_type(node, ret)?;
         self.ret.set(ret);
         let params: Vec<Param> = if node.kind() == "LAMBDA_EXPRESSION" {
             node.list("parameters")
                 .map(|p| {
                     Ok(Param {
                         name: p.str("name").to_string(),
-                        ty: self.ty(p, p.symbol().map_or("", |s| s.ty))?,
+                        ty: self.signature_type(p, p.symbol().map_or("", |s| s.ty))?,
                     })
                 })
                 .collect::<Result<_, Error>>()?
@@ -280,10 +287,11 @@ impl<'t> Lowering<'t> {
             param_types
                 .iter()
                 .zip(&l.params)
-                .map(|(ty, name)| Ok(Param { name: name.to_string(), ty: self.ty(node, ty)? }))
+                .map(|(ty, name)| Ok(Param { name: name.to_string(), ty: self.signature_type(node, ty)? }))
                 .collect::<Result<_, Error>>()?
         };
         let body = match (node.kind(), node.str("bodyKind")) {
+            _ if stub => self.never(l.class, node.pos()),
             ("LAMBDA_EXPRESSION", "STATEMENT") => self.block(l.code)?,
             _ => self.tail(self.expr(l.code)?, ret),
         };

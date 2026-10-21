@@ -12,7 +12,7 @@
 //! that the thread has entered, so that `wait`, `notify` and `holdsLock` answer as Java's do.
 
 use crate::Locked;
-use crate::locked::RawLock;
+use crate::locked::{RawLock, Waited};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -129,15 +129,20 @@ pub fn try_monitor_wait(held: &impl HasMonitor, millis: i64) -> Result<(), crate
     }
     let timeout = (millis > 0).then(|| Duration::from_millis(millis as u64));
     let waited = match held.monitor() {
-        MonitorOf::Shared(lock) => lock.wait_notified(timeout),
+        MonitorOf::Shared(lock) => match lock.wait_notified(timeout) {
+            Waited::Done => true,
+            Waited::NotOwner => false,
+            Waited::Interrupted => return Err(crate::Exception::bare("java.lang.InterruptedException")),
+        },
         // No other thread can reach the object to notify it, so the wait lasts its timeout, or
         // for ever, as Java's does.
         MonitorOf::Local(address) if holds_local(address) => {
-            match timeout {
-                Some(t) => std::thread::sleep(t),
-                None => loop {
-                    std::thread::park();
-                },
+            // Only an interrupt, from another thread or from before the wait, ends a wait
+            // without a timeout.
+            if crate::thread::take_interrupt()
+                || crate::thread::interruptible_sleep(timeout.unwrap_or(Duration::MAX))
+            {
+                return Err(crate::Exception::bare("java.lang.InterruptedException"));
             }
             true
         }

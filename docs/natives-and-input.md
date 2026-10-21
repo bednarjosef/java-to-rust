@@ -859,8 +859,10 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   nothing when the class has nothing to run) if the call initializes. Reachability reaches the
   class as initialized, and the next round loads its unit if no unit declares it yet. The loader
   is evaluated for its effects only: a JVM's bootstrap loader (`null`) finds only the JDK's
-  classes, where the translation finds the program's too. A name of no class of the program is
-  rejected, and so are a computed name and a computed `initialize`. The `ClassNotFoundException`
+  classes, where the translation finds the program's too. A name of no class of the program, such as
+  `java.lang.invoke.MethodHandleImpl` in `SharedSecrets.getJavaLangInvokeAccess`, ends the
+  program when the call runs (`Builtin::UnknownClass`), as an unknown name does for a creation; a
+  computed name and a computed `initialize` are rejected. The `ClassNotFoundException`
   that the caller catches is then never thrown; for a single file, `Standard.java` has it and
   `ReflectiveOperationException`. Test: `corpus/features/ClassForName.java` and
   `class_for_name_of_a_spelled_out_name_initializes_that_class`.
@@ -880,6 +882,57 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   `corpus/whole-program/CaseInLocale.java` (null locales: `Locale.ROOT` itself initializes
   `Locale`, whose `ConcurrentHashMap` reaches `AtomicInteger`, a class that extends `Number`, which
   the object model does not take yet) and the runtime's unit test of the mapping.
+- **`==` on strings in the JDK's code is value equality** (`Lowering::library_string_comparison`):
+  a deviation from Java, where it compares references. A translated string is a value with no
+  identity, so the program's own `a == b` on two strings stays rejected. The JDK compares by
+  reference only strings it interned, the parts of a `Locale` (`ResourceBundle.Control.toBundleName`:
+  `language == ""`, `Calendar`'s `getLanguage() == "th"`, `StringLatin1`'s `lang == "tr"`) and
+  `Charset`'s canonical names, or as a shortcut before comparing the characters
+  (`LocaleUtils.caseIgnoreMatch`), where value equality gives the JVM's answer; so in a unit from
+  `--library` it is `Objects.equals` of the two, null included. It would be wrong where the
+  library makes a string with an identity of its own to tell apart, a `new String(..)` kept as a
+  marker: of the 456 files that `LocaleNumbers` and `ScannerGrades` reach, the 14 `new String(..)`
+  are text read or built (`Reader.lines`, `DataInputStream.readUTF`, `Pattern`'s group names,
+  `ZoneInfoFile`'s ids, `LocaleResources`' patterns), none kept to be compared by reference. Test:
+  `library_code_compares_strings_by_value_and_the_programs_own_code_cannot`.
+- **`MethodHandles.lookup().ensureInitialized(c)`** (`program/reach/initialize.rs`,
+  `lower/by_name.rs`): `SharedSecrets.ensureClassInitialized` has `Buffer`, `FileDescriptor` and
+  `ResourceBundle` (among others) register their access objects by running their static
+  initializers through it, so every program that reads a file or a buffer reached a
+  `java.lang.invoke` call. It initializes the class of the `Class` value and gives the value back.
+  The JDK passes the class literal to a helper that passes its parameter on, so reachability
+  takes as initialized the classes whose literals reachable code gives `ensureInitialized`
+  directly or through the parameter of a method that gives it that parameter, one call deep
+  (`Reach::ensured`). The lowering initializes a literal's class directly, and any other value's
+  by comparing it with each of those classes (`c.equals(X.class)`), as the class's first use
+  would (`Builtin::InitializeClass`); the receiver must be `MethodHandles.lookup()`, which has
+  access to every class of the closed program. Test: `corpus/whole-program/EnsureInitialized.java`.
+- **`Character` is translated from the JDK, except for what the runtime does**
+  (`lower::runtime_character_method`, `program::reach::replaced`): it was one of the
+  `RUNTIME_CLASSES`, so `Pattern`'s `CharPredicates` (reached by `Scanner`) stopped at
+  `Character.UnicodeScript`, and `Character.getType`, `isTitleCase`, `isIdeographic`, the
+  identifier tests, `isMirrored`, `isDefined`, `isEmoji` and `reverseBytes` were rejected. A
+  whole program now has the JDK's `Character` with its nested classes (`UnicodeScript`,
+  `UnicodeBlock`, `Subset`) and the `CharacterData` classes whose tables they read; the box
+  itself, its instance methods and the `char` and code point methods that the runtime's tables
+  answer stay the runtime's, and reachability does not enter them. What it took:
+  `Class.getPrimitiveClass("char")`, the native behind `Character.TYPE`, is `char.class`; the
+  translated `Character` does not count as a `Comparable` class of the program (its objects are
+  the runtime's boxes), and the runtime box's class does not take its module path; a module with
+  more than 100 statics (`UnicodeBlock` has some 340) is written as several `thread_local!`
+  blocks, as one expands a static per recursion level and Rust stops at 128; a `toString` that may
+  return null shows `null` in `Display`; and an expression statement that is a cast (erasure's,
+  of `aliases.put("ADLM", ADLAM)` on a `Map<String, UnicodeScript>`) evaluates the call only,
+  as javac does, instead of rejecting the null previous value as a null enum. `new
+  String(codePoints, offset, count)` (`Pattern`'s character names and families) and the
+  deprecated `new String(ascii, hibyte, offset, count)` (`CharacterName`) are the runtime's,
+  as `String` is. `Character.getName` and `codePointOf` read `uniName.dat`, a data file that is
+  generated when the JDK is built and is not in its sources; a translated program has no
+  resources, so `Class.getResourceAsStream` ends the program with an `InternalError` naming the
+  resource (`Builtin::MissingResource`), which also covers `Currency`'s `currency.data` and the
+  ICU normalizer data of `ICUBinary`. `ScannerGrades` now stops first at `BigDecimal` extending
+  `Number`. Tests: `corpus/whole-program/CharacterFromJdk.java` and
+  `reading_a_resource_ends_the_program`.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

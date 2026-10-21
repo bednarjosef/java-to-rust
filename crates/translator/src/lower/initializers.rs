@@ -23,7 +23,7 @@ impl<'t> Lowering<'t> {
     /// Puts the instance initializer blocks of class `owner` at the start of a constructor's
     /// `body` (after its `super(...)`), unless the constructor first calls another one, which runs them.
     pub(super) fn run_initializer_blocks(&self, owner: usize, body: &mut Vec<Stmt>) -> Result<(), Error> {
-        if matches!(body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. }))) {
+        if delegates(body) {
             return Ok(());
         }
         let class = &self.types[owner];
@@ -34,7 +34,14 @@ impl<'t> Lowering<'t> {
             .collect();
         let mut lowered = Vec::new();
         for block in blocks {
-            let stmts = self.block(block)?;
+            // In a census, a rejected block is left out of the constructor.
+            let stmts = match self.block(block) {
+                Ok(stmts) => stmts,
+                Err(e) => {
+                    self.reject(owner, e)?;
+                    continue;
+                }
+            };
             // A block that declares no locals needs no scope of its own.
             if stmts.iter().any(|s| matches!(s, Stmt::Local { .. })) {
                 lowered.push(Stmt::Block(stmts));
@@ -43,10 +50,7 @@ impl<'t> Lowering<'t> {
             }
         }
         // They run after the superclass's constructor.
-        let at = usize::from(matches!(
-            body.first(),
-            Some(Stmt::Expr(Expr { kind: ExprKind::SuperInit { .. }, .. }))
-        ));
+        let at = explicit_call(body).map_or(0, |i| i + 1);
         body.splice(at..at, lowered);
         Ok(())
     }
