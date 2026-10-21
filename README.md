@@ -398,9 +398,9 @@ collection) is the same handle in `Object`'s `StringBuilder` variant: `==`, `equ
 `hashCode` are its identity's, and it prints as its text.
 
 `split`, `replaceAll`, `replaceFirst` and `matches` run a small backtracking regular expression
-engine with a literal fast path: literals and escapes, `.`, `\d \s \w` and their negations, sets
-and ranges, groups, alternation, `^ $` and greedy and lazy quantifiers. What it lacks (lookaround,
-flags, backreferences, `\b`, `\p{..}`, possessive quantifiers, set intersections) is rejected when
+engine with a literal fast path: literals and escapes, `.`, `\d \s \w` and their negations, the
+line break `\R`, sets and ranges, groups, back references (`\1`, read as Java reads `\11`),
+alternation, `^ $` and greedy and lazy quantifiers. What it lacks (lookaround, flags, `\b`, `\p{..}`, possessive quantifiers, set intersections) is rejected when
 the pattern is a constant and throws `UnsupportedOperationException` when it is not; a malformed
 pattern throws `PatternSyntaxException` as in Java.
 
