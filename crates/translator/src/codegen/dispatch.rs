@@ -934,6 +934,12 @@ impl<'a> Gen<'a> {
         let temp = self.temp("address");
         let same = format!("std::ptr::addr_eq({temp}, {})", self.address(c, "b"));
         let test = self.equals_test(c, &place, optional, &same);
+        // An argument that cannot be the object is still evaluated.
+        let test = if test == "false" && has_effects(&args[0]) {
+            format!("{{ let _ = {place}; false }}")
+        } else {
+            test
+        };
         Code::atom(format!("{{ let {temp} = {address}; {test} }}"))
     }
 
