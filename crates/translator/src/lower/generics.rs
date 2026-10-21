@@ -101,12 +101,9 @@ impl<'t> Lowering<'t> {
         Some(Ok(Type::generic(raw, &types)))
     }
 
-    /// The erasure of a type variable: that of its first bound, or `Object`.
+    /// The erasure of a type variable: that of its first bound, or `Object`. A value of it is
+    /// cast to a later bound where it is used as one (`receiver`).
     fn var_erasure(&self, node: Node, param: Node<'t>) -> Result<Type, Error> {
-        // A call of a later bound's method would need a cast to it, which javac does not write.
-        if param.list("bounds").nth(1).is_some() {
-            return unsupported(param, "intersection types");
-        }
         match param.list("bounds").next() {
             Some(bound) => self.ty(bound, bound.java_type()),
             None => self.object_type(node),
@@ -151,6 +148,24 @@ impl<'t> Lowering<'t> {
         }
         let var = self.type_var(name)?;
         Some(self.var_type(node, var))
+    }
+
+    /// The receiver of a call of a method that class `owner` declares. A type variable with
+    /// several bounds (`T extends Object & Comparable<? super T>`) erases to its first, so a value
+    /// of it calling a method of a later one is cast to that bound, as javac casts it.
+    pub(super) fn receiver(&self, receiver: Node<'t>, owner: &str) -> Result<Expr, Error> {
+        let value = self.expr(receiver)?;
+        let ty = receiver.java_type();
+        let var = ty
+            .strip_prefix("capture#")
+            .map_or(ty, |rest| rest.split_once(" of ? extends ").map_or("", |(_, bound)| bound));
+        let several = !var.contains(['.', '<', '[', ' ', '?'])
+            && self.type_var(var).is_some_and(|(param, _)| param.list("bounds").nth(1).is_some());
+        if !several {
+            return Ok(value);
+        }
+        let bound = self.ty(receiver, owner)?;
+        Ok(self.convert(value, bound))
     }
 
     /// The erasure of the type variable `name`, if one is in scope.

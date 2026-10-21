@@ -253,9 +253,6 @@ impl Census {
                 refs: BTreeSet::new(),
                 sequential: reach.sequential,
             };
-            if kind == "METHOD" && intersects(member) {
-                scan.feature("intersection types", member);
-            }
             if kind == "BLOCK" && member["static"].as_bool() != Some(true) {
                 scan.feature("initializer blocks", member);
             }
@@ -766,9 +763,6 @@ fn class_features(decl: &Value, declared: &HashSet<String>) -> BTreeSet<&'static
             features.insert("extending classes outside the sources");
         }
     }
-    if intersects(decl) {
-        features.insert("intersection types");
-    }
     if kind == "ENUM" && members(decl).any(|m| !m["initializer"]["classBody"].is_null()) {
         features.insert("enum constants with bodies");
     }
@@ -780,15 +774,6 @@ fn class_features(decl: &Value, declared: &HashSet<String>) -> BTreeSet<&'static
 fn is_anonymous(name: &str) -> bool {
     name.starts_with('<')
         || name.rsplit_once('$').is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// Whether a declaration has a type variable with more than one bound (`T extends A & B`).
-fn intersects(decl: &Value) -> bool {
-    decl["typeParameters"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|p| p["bounds"].as_array().is_some_and(|b| b.len() > 1))
 }
 
 /// A type without its type arguments: `Box<java.lang.Integer>[]` is `Box[]`.

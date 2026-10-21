@@ -803,7 +803,7 @@ impl<'t> Lowering<'t> {
                         let ty = self.ty(r, r.java_type())?;
                         self.synth(ExprKind::This, r.pos(), ty)
                     }
-                    Some(r) => self.expr(r)?,
+                    Some(r) => self.receiver(r, symbol.owner)?,
                     None => self.this(node),
                 };
                 let receiver = Box::new(receiver);

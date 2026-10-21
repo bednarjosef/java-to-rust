@@ -162,9 +162,10 @@ A small subset, end to end:
   `Object`, over strings, boxes, the program's enums and its classes that implement it. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
-  signature that converts and calls it. An array passed as an array of a type variable
-  (`first(String[])` for `<T> T first(T[])`) and intersection bounds (`T extends A & B`) are
-  rejected. A generic class or method that only stores, returns and passes on the values of its type
+  signature that converts and calls it. A type variable with several bounds (`T extends Object &
+  Comparable<? super T>`) erases to the first, and a call of a later bound's method casts to that
+  bound first, as javac's erased code does. An array passed as an array of a type variable
+  (`first(String[])` for `<T> T first(T[])`) is rejected. A generic class or method that only stores, returns and passes on the values of its type
   variables (a stack, a pair, a node, `<T> T choose(boolean, T, T)`) is a Rust generic instead
   (`struct Stack<T>`, `impl<T: Clone> Stack<T>`, `fn choose<T: Clone>(..)`), and its uses keep the
   substituted types with no casts. One that needs more of them (their text, `equals`, a bound, a
@@ -524,8 +525,7 @@ for references) and are answered at the call, so their `Class`-taking natives ar
 
 Each construct below is rejected at translation with an error that names it:
 
-- the exceptions and try-with-resources listed under "Exceptions" above, and intersection bounds
-  (`T extends A & B`);
+- the exceptions and try-with-resources listed under "Exceptions" above;
 - records, local interfaces, enums and records, and record patterns;
 - method references on a receiver other than a local, `this` or a final field, `super` in a
   lambda, the default and static methods of the JDK's functional interfaces;

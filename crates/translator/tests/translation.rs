@@ -3693,6 +3693,36 @@ fn bounded_type_variables_erase_to_the_bound() {
 }
 
 #[test]
+fn a_type_variable_with_several_bounds_is_cast_to_the_later_bound_it_calls() {
+    let rust = translate(
+        "interface Named { String name(); }
+        interface Sized { int size(); }
+        class Parcel implements Named, Sized {
+            public String name() { return \"box\"; }
+            public int size() { return 2; }
+        }
+        public class Main {
+            static <T extends Object & Comparable<? super T>> T max(T a, T b) { return a.compareTo(b) >= 0 ? a : b; }
+            static <T extends Named & Sized> String show(T t) { return t.name() + t.size(); }
+            public static void main(String[] args) {
+                System.out.println(max(\"a\", \"b\"));
+                System.out.println(show(new Parcel()));
+            }
+        }",
+    );
+    // `T` erases to its first bound; a call of a later bound's method casts to it first, as
+    // javac's erased code does.
+    assert_contains(
+        &rust,
+        &[
+            "fn max(a: Object, b: Object) -> Object {",
+            "java::cast(a.as_comparable(), \"Comparable\").compare_to(",
+            "t.name()",
+        ],
+    );
+}
+
+#[test]
 fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
     let rust = translate(GENERICS);
     // The method with the substituted types keeps its own signature; a bridge with the erased
