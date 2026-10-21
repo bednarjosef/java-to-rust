@@ -43,7 +43,14 @@ signature. Everything else is decided here.
    each method may let escape, and of what the callers of each method observe. A method returns
    `Result` exactly when some caller observes an exception that may escape it: a call inside a
    `try` whose `catch` matches it or whose `finally` observes it, or a call in a method whose own
-   callers observe it. The methods of an override group agree.
+   callers observe it. The methods of an override group agree. The `toString` that making an
+   object's text runs (`"" + o`, `println(o)`, `append(o)`, `String.valueOf(o)`) is not such a
+   call: the text is `Display`, which cannot return an exception, so what that `toString` throws
+   ends the program there. A `catch` right around the text that would catch it is rejected; one
+   further up the calls is not looked at, a deviation that matters only when a `toString` really
+   throws and a caller catches it. (Before, the JDK's collections' `toString`s were all taken as
+   observed: `AbstractList.Itr.next` catches the `IndexOutOfBoundsException` of `get`, whose
+   message formats a `List` with `%s`.) An explicit `o.toString()` is an ordinary call.
 6. **Failures of the runtime become values only where they are observed.** Division by zero,
    array indexes and sizes, null dereferences, parsing and the string indexes raise exceptions in
    the runtime today by printing them and exiting (`java::throw`). That stays the translation
@@ -73,8 +80,8 @@ signature. Everything else is decided here.
     `getMessage()` in a `catch` that such an exception reaches is rejected, while the message of
     one that code creates, as `Objects.requireNonNull(x, "msg")` does, is its own),
     catching `StackOverflowError`, `OutOfMemoryError` or `VirtualMachineError` (the translation
-    cannot raise them), a `toString` that throws an exception someone observes (it is
-    `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace` and `initCause`.
+    cannot raise them), a `toString` that throws an exception that a call of it observes, or
+    that a `catch` right around an object's text would catch (it is `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace` and `initCause`.
 
 ## 1. The representation
 

@@ -246,7 +246,9 @@ A small subset, end to end:
   (an `AutoCloseable` variable or lambda), catching or
   letting a `finally` see a null dereference, a negative array size, a failed cast or a failure of
   the library other than these, a `toString`, an instance field initializer or a constructor of an
-  exception or an enum that throws something a caller catches, and a `try` or `catch` that observes
+  exception or an enum that throws something a caller catches (for the `toString` that making an
+  object's text runs, only a `catch` right around the text counts: one further up does not see
+  its exception, which ends the program), and a `try` or `catch` that observes
   an `ExceptionInInitializerError`. A constructor that throws returns a `Result`, as a method does. The design is in
   [docs/exceptions.md](docs/exceptions.md).
 - **Threads** are the platform's: a class that extends `Thread` and overrides `run`, or a

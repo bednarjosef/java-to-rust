@@ -5,7 +5,7 @@
 //! observes keep their plain signatures.
 //!
 //! Two fixpoints over the calls (every implementation a virtual call may run, constructors,
-//! `this(...)`, `super(...)`, and the `toString` that printing an object runs):
+//! `this(...)` and `super(...)`):
 //!
 //! - what may *escape* each method: the classes that its `throw`s throw and that its calls let
 //!   escape, minus what an enclosing `catch` of the method catches;
@@ -19,6 +19,13 @@
 //! standard class gets objects (`Facts::raised_classes`). An operation that has no checked form
 //! yet (a null dereference, an array creation, a cast, ...) is rejected where its failure would
 //! be seen.
+//!
+//! The `toString` that making an object's text runs (`"" + o`, `println(o)`, `append(o)`,
+//! `String.valueOf(o)`) is not such a call: the generator writes it with `Display`, which has no
+//! way to return an exception, so what it throws ends the program there, as an exception that
+//! nothing catches does. Where a `catch` directly around the text would catch it, the program is
+//! rejected; a `catch` further up the calls is not looked at (a deviation where a `toString`
+//! throws and a caller catches it). An explicit `o.toString()` is an ordinary call.
 
 use super::Facts;
 use super::hierarchy;
@@ -45,6 +52,9 @@ enum Raise {
     Throw(usize),
     /// A call of one of these methods.
     Call(Vec<usize>),
+    /// The text of an object, which runs one of these `toString` methods; what they throw ends the
+    /// program here.
+    Text(Vec<usize>),
     /// A failure of the runtime, of the standard class `class`, by the expression `id`;
     /// `checked`: the generator has the runtime's checked form of the operation.
     Runtime { class: &'static str, checked: bool, id: ExprId },
@@ -95,6 +105,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             Raise::Throw(t) => h.concretes(*t).into_iter().map(Kind::Class).collect(),
             Raise::Call(callees) => callees.iter().flat_map(|&c| escapes[c].iter().cloned()).collect(),
             Raise::Runtime { class, .. } => BTreeSet::from([Kind::Runtime(class)]),
+            Raise::Text(_) => BTreeSet::new(),
         }
     };
 
@@ -154,6 +165,17 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         seen = next;
     }
     let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|&t| matches(k, t));
+
+    // A `catch` right around an object's text that would catch what its `toString` throws.
+    for p in points.iter().flatten() {
+        let Raise::Text(shown) = &p.raise else { continue };
+        if shown.iter().flat_map(|&c| &escapes[c]).any(|k| caught(k, &p.frames)) {
+            return error(
+                p.pos,
+                "catching an exception that this toString may throw not supported yet".to_string(),
+            );
+        }
+    }
 
     // A static initializer never returns a `Result`: what it raises ends the program (see `seen`).
     let mut throwing: HashSet<usize> = (0..class.methods.len())
@@ -645,7 +667,7 @@ fn expr_points(
     for object in text_objects(x) {
         let shown = to_string_impls(class, object.ty);
         if !shown.is_empty() {
-            push(Raise::Call(shown), object.pos, "this toString");
+            push(Raise::Text(shown), object.pos, "this toString");
         }
     }
     for (name, what, checked, id) in runtime_failures(class, facts, m, x, safe) {
