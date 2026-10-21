@@ -609,6 +609,15 @@ fn static_inits(class: &Class, facts: &Facts, m: usize, x: &Expr) -> Vec<usize> 
             }
         }
         ExprKind::Assign { target: Place::Static { class: t, .. }, .. } => classes.push(*t),
+        // The first use of an enum's constant initializes the enum.
+        ExprKind::EnumConstant { class: t, .. } => classes.push(*t),
+        ExprKind::Builtin(Builtin::EnumValueOf, _) => {
+            if let Type::Enum(name) = x.ty
+                && let Some(t) = class.type_index(name)
+            {
+                classes.push(t);
+            }
+        }
         _ => {}
     }
     for c in class.callees(x) {
@@ -923,6 +932,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         // or, for null, `IllegalArgumentException`. Not checked, so a catch of it is rejected.
         Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported) => Some("?"),
         Builtin::Charset(_) => None,
+        // What an object's `toString` throws is a point of its own (`text_objects`).
+        Builtin::ObjectText => None,
         Builtin::ArraysCopyOf => Some("java.lang.NegativeArraySizeException"),
         Builtin::Native(Native::ArrayCopy) => Some("java.lang.ArrayIndexOutOfBoundsException"),
         // A literal format that fits its arguments' types never throws.

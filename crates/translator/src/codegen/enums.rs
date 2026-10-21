@@ -238,11 +238,17 @@ impl<'a> Gen<'a> {
             Builtin::EnumValueOf => {
                 let Type::Enum(name) = ty else { unreachable!("valueOf returns an enum") };
                 let text = self.str_ref(&args[0]);
-                if self.facts.raising.contains(&id) {
+                let value = if self.facts.raising.contains(&id) {
                     let call = Code::atom(format!("{}::try_enum_value_of({text})", struct_name(name)));
-                    return Code::atom(self.passed_on(call));
+                    self.passed_on(call)
+                } else {
+                    format!("{}::enum_value_of({text})", struct_name(name))
+                };
+                // Java initializes the enum first.
+                match self.class.type_index(name).and_then(|t| self.init_call(t)) {
+                    Some(init) => Code::atom(format!("{{ {init} {value} }}")),
+                    None => Code::atom(value),
                 }
-                Code::atom(format!("{}::enum_value_of({text})", struct_name(name)))
             }
             _ => unreachable!("not an enum builtin: {builtin:?}"),
         }
