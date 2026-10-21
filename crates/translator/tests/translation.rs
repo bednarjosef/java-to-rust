@@ -2854,6 +2854,8 @@ fn natives_of_jdk_classes_become_runtime_calls() {
             "UNSAFE_ARRAY_OBJECT_INDEX_SCALE.set(java::array_index_scale(\"java.lang.Object\"));",
             "java::nano_time_adjustment(0)",
             "CONTINUATIONSUPPORT_SUPPORTED.set(java::continuations_supported());",
+            // `main` initializes `Unsafe` in its package before reading its statics.
+            "{ crate::jdk::internal::misc::init_unsafe_(); crate::jdk::internal::misc::UNSAFE_ARRAY_INT_BASE_OFFSET.get() }",
         ],
     );
     // Registering natives, `VM.initialize` and restoring from an archive do nothing, and neither
