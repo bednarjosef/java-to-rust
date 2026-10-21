@@ -78,6 +78,10 @@ impl<'a> Gen<'a> {
                 let chars = self.slice_of(&args[0]);
                 call(self, if newline { "println_chars" } else { "print_chars" }, vec![chars])
             }
+            Native::ErrPrintChars { newline } => {
+                let chars = self.slice_of(&args[0]);
+                call(self, if newline { "eprintln_chars" } else { "eprint_chars" }, vec![chars])
+            }
             Native::SystemProperty(key) => call(self, "system_property", vec![rust_string(key)]),
             Native::TotalMemory => call(self, "total_memory", vec![]),
             Native::FreeMemory => call(self, "free_memory", vec![]),

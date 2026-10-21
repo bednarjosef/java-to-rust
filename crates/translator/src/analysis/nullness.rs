@@ -31,6 +31,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
         let mut returns = Vec::new();
         let mut fields = Vec::new();
         let mut statics = Vec::new();
+        let mut placeholders = Vec::new();
         let mut on_expr = |m: usize, e: &Expr| {
             visit_expr(e, &mut |x| match &x.kind {
                 ExprKind::Assign { op: None, target, value }
@@ -54,6 +55,10 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                     if elem.is_reference() {
                         elements.push(elem);
                     }
+                }
+                // `Arrays.copyOf` pads a longer copy with null.
+                ExprKind::Builtin(Builtin::ArraysCopyOf, _) if x.ty.element().is_reference() => {
+                    elements.push(x.ty.element());
                 }
                 ExprKind::ArrayLit(items) if items.iter().any(|item| maybe_null(facts, m, item)) => {
                     elements.push(x.ty.element());
@@ -106,11 +111,12 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 }
             }
             for f in decl.statics.iter().filter(|f| may_be_unset(f.ty)) {
-                // An eagerly initialized static starts at a placeholder, which an object has not.
-                let set = f.init.as_ref().is_some_and(|e| !maybe_null(facts, usize::MAX, e))
-                    && (!facts.eager_init.contains(&t) || !matches!(f.ty, Type::Class(..)));
-                if !set {
+                // An eagerly initialized static starts at a placeholder, which an object has not,
+                // so its cell starts empty; once the class is initialized, it holds the value.
+                if !f.init.as_ref().is_some_and(|e| !maybe_null(facts, usize::MAX, e)) {
                     statics.push((t, f.name.clone()));
+                } else if facts.eager_init.contains(&t) && matches!(f.ty, Type::Class(..)) {
+                    placeholders.push((t, f.name.clone()));
                 }
             }
         }
@@ -129,6 +135,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
         facts.nullable_returns.extend(returns);
         facts.nullable_fields.extend(fields);
         facts.nullable_statics.extend(statics);
+        facts.placeholder_statics.extend(placeholders);
         facts.nullable_elements.extend(elements);
         let after = (
             facts.nullable_vars.len(),

@@ -1235,8 +1235,35 @@ Decisions that change during the implementation are recorded here, milestone by 
   (`crates/translator/java/Functional.java`, compiled by `build.rs` like `Standard.java`): the
   abstract methods of `Runnable`, `Callable`, `Comparator`, `Iterable`, `Iterator` and the
   `java.util.function` interfaces, declared for the program when it mentions them. Their default
-  and static methods are not in it (the JDK functional interfaces milestone takes them from the
-  JDK's sources).
+  and static methods are not in it: written by hand they would be a second copy of the JDK's
+  code, so a call of one in single-file mode is rejected with a message that points to
+  whole-program mode (`--main` and `--library`).
+- **The JDK functional interfaces milestone is whole-program only**, and came before the closure
+  forms. With the JDK's sources the interfaces are the JDK's, and their default and static
+  methods, with the lambdas in them that capture `this` or parameters
+  (`ComparatorLambdaInThenComparing { outer, other }`), are translated like the program's.
+  What it took was outside the lambda code:
+  - `new Object()` as an object of a class of its own (`PlainObject`, its own commit);
+  - the methods of `java.util.Objects` other than the hand-written `equals`, `hashCode`, `hash`,
+    `isNull` and `nonNull` go to the translated `Objects.java` (`requireNonNull`,
+    `requireNonNullElseGet`, ...);
+  - `java.lang.Comparable` is one of the runtime's classes in whole-program mode. Its source made
+    a second `Comparable` enum that strings and boxes were not in, so `Comparator.comparing` on a
+    string key failed its cast;
+  - an enum may implement an interface's own `equals` or `hashCode` (`Comparator.equals`) with
+    the one every enum has;
+  - the analysis of failures that a `catch` sees (`analysis/exceptions.rs`) knows more values not
+    null: an `instanceof` test proves its variable not null and its cast safe, `!` is followed,
+    `if (c) return;` (or `throw`, `break`, `continue`) narrows the statements after it, and a
+    local initialized from such a value is not null (`corpus/features/GuardedCasts.java`). The
+    `catch (ClassCastException | NullPointerException unused)` of `AbstractMap.equals` sees every
+    `equals` that a map's values may run.
+
+  The programs are in `corpus/whole-program/`, run by `tests/whole_program.rs` when
+  `JAVA_BASE_SOURCES` names the JDK's sources. Still blocked: `Comparator.reversed()` and
+  `reverseOrder()` reach `java.util.Collections`, whose empty collections' iterators are eagerly
+  initialized statics that the nullness analysis takes as possibly null, so `AbstractList.equals`
+  may fail where `AbstractMap.equals` catches it; `NullPointerException.getMessage()`.
 - **Marker interfaces are dropped** where they are named as supertypes and from intersection
   casts (`(Op & Serializable) a -> ..`), in `JavaTree` (`javaType` of the cast) and in
   `hierarchy::interfaces`.

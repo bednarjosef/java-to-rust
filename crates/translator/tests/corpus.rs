@@ -5,14 +5,26 @@
 //! Translation, the Java runs, the Cargo build and the Rust runs each use one thread per CPU.
 //! The Rust programs are one Cargo project with a binary per program, kept in `target/tmp`
 //! between runs: a source is rewritten only when its translation changes, so cargo rebuilds
-//! just the programs whose translation changed. `CORPUS_FILTER=text` runs only the programs
+//! just the programs whose translation changed. Java's results are kept the same way, in
+//! `java_cache`, so a program runs on Java again only when its sources or the Java version change.
+//! `CORPUS_JAVA_FRESH=1` runs every program on Java. `CORPUS_FILTER=text` runs only the programs
 //! whose name contains `text`.
+
+#[path = "corpus/java_cache.rs"]
+mod java_cache;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use java_cache::JavaCache;
+
+/// The JVM arguments of every Java run: short-lived JVMs skip the optimizing compiler, the parallel
+/// collector and perf data (whose lock-file warnings go to stdout when many JVMs run at once).
+/// The output does not change.
+const JVM_ARGS: [&str; 3] = ["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData"];
 
 struct Program {
     /// The binary name, such as `features-hello`.
@@ -89,7 +101,7 @@ fn programs(root: &Path) -> Vec<Program> {
     let mut out = Vec::new();
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(root).unwrap().map(|e| e.unwrap().path()).collect();
     dirs.sort();
-    for dir in dirs.into_iter().filter(|d| d.is_dir()) {
+    for dir in dirs.into_iter().filter(|d| d.is_dir() && !d.ends_with("whole-program")) {
         let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -123,11 +135,9 @@ fn projects(root: &Path) -> Vec<Program> {
 /// Runs a program on Java: a single file with the source launcher, a project compiled with javac
 /// into `classes/<name>` first.
 fn run_java(p: &Program, classes: &Path) -> Output {
-    // Short-lived JVMs: skip the optimizing compiler, the parallel collector and perf data (whose
-    // lock-file warnings go to stdout when many JVMs run at once). The output does not change.
     let java = || {
         let mut java = Command::new("java");
-        java.args(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData"]);
+        java.args(JVM_ARGS);
         java
     };
     let Some(main) = &p.main else {
@@ -324,6 +334,7 @@ fn corpus_matches_java() {
             std::fs::remove_file(path).unwrap();
         }
     }
+    let java_cache = JavaCache::open(&work.join("java-cache"), &programs);
     if let Ok(filter) = std::env::var("CORPUS_FILTER") {
         programs.retain(|p| p.name.contains(&filter));
         assert!(!programs.is_empty(), "no program name contains CORPUS_FILTER={filter}");
@@ -349,7 +360,7 @@ fn corpus_matches_java() {
             let build = build_binaries(&work, &built);
             (translations, build)
         });
-        let expected = parallel(programs.len(), |i| run(run_java(&programs[i], &classes)));
+        let expected = parallel(programs.len(), |i| java_cache.run(&programs[i], &classes));
         let (translations, build) = translate.join().unwrap();
         (translations, build, expected)
     });

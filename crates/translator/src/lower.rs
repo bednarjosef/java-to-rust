@@ -14,6 +14,7 @@ mod generics;
 mod hierarchy;
 mod lambdas;
 mod object;
+mod object_clone;
 mod objects;
 mod real_generics;
 mod statics;
@@ -29,6 +30,7 @@ mod arrays;
 mod boxing;
 mod captures;
 mod charsets;
+mod classes;
 mod constant_bodies;
 mod initializers;
 mod inner;
@@ -537,8 +539,11 @@ impl<'t> Lowering<'t> {
                 let value = self.expr(node.child("expression")?)?;
                 // A cast between the program's types, up, down or across: `Cast` converts as the
                 // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
-                // `Integer` and unboxes.
-                if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
+                // `Integer` and unboxes. `(C) super.clone()` is already a `C`: the copy has the
+                // node's type, so the cast is the copy itself.
+                if matches!(value.kind, ExprKind::Builtin(Builtin::ObjectClone, _)) {
+                    value.kind
+                } else if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
                     let boxed = self.synth(
                         ExprKind::Cast(Type::boxed(ty), Box::new(value)),
                         node.pos(),
@@ -587,6 +592,7 @@ impl<'t> Lowering<'t> {
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => self.lambda(node)?,
             "INSTANCE_OF" => self.instance_of(node)?,
             "SWITCH_EXPRESSION" => self.switch_expr(node)?,
+            "EQUAL_TO" | "NOT_EQUAL_TO" if classes::compares_classes(node) => self.class_comparison(node)?,
             kind => {
                 let left = node.child("leftOperand");
                 let op = binary_op(node, kind);
@@ -675,6 +681,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.class_call(node, &symbol, select)? {
+            return Ok(kind);
+        }
         let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
@@ -684,6 +693,9 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ThisCall { args, resolved });
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        if symbol.owner == "java.lang.Object" && symbol.name == "clone" {
+            return self.object_clone(node, receiver);
+        }
         if symbol.owner == "java.lang.Object" && self.object.is_some() {
             return self.object_call(node, &symbol, receiver, args);
         }
@@ -772,14 +784,26 @@ impl<'t> Lowering<'t> {
                 let char_arg = args.first().is_some_and(|a| a.ty == Type::Char);
                 self.character_method(node, name, symbol.ty, char_arg)?
             }
-            ("java.util.Objects", name) => return self.objects_call(node, name, args),
+            // Where the JDK's `Objects` is translated, its calls are calls of it, but for the calls
+            // that the members written for records make on values that are not `Object`s.
+            ("java.util.Objects", name)
+                if self.type_index(symbol.owner).is_none() || node.0["implicit"] == Value::Bool(true) =>
+            {
+                return self.objects_call(node, name, args);
+            }
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);
-                // A default method of a JDK interface that lowering provides is not declared.
+                // The default and static methods of a JDK interface that lowering declares (see
+                // `functional`) are the JDK's code, which only a translation with its sources has.
                 if resolved.is_none() && self.functional.has(symbol.owner) {
-                    let what = format!("the default method {}.{}", symbol.owner, symbol.name);
-                    return unsupported(node, &what);
+                    let kind = if symbol.is_static { "static" } else { "default" };
+                    let message = format!(
+                        "the {kind} method `{}.{}` is the JDK's code: translate the program with the \
+                         JDK's sources (`--main` and `--library`) for it",
+                        symbol.owner, symbol.name
+                    );
+                    return error(node.pos(), message);
                 }
                 let args = self.convert_generic_args(node, resolved, args)?;
                 if symbol.is_static {
@@ -797,7 +821,7 @@ impl<'t> Lowering<'t> {
                         let ty = self.ty(r, r.java_type())?;
                         self.synth(ExprKind::This, r.pos(), ty)
                     }
-                    Some(r) => self.expr(r)?,
+                    Some(r) => self.receiver(r, symbol.owner)?,
                     None => self.this(node),
                 };
                 let receiver = Box::new(receiver);

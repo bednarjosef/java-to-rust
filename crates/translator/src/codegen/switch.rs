@@ -152,7 +152,7 @@ fn yield_count(cases: &[Case]) -> usize {
     let mut n = 0;
     for case in cases {
         for stmt in &case.body {
-            visit_stmt(stmt, &mut |_| {}, &mut |s| n += usize::from(matches!(s, Stmt::Yield(_))));
+            visit_stmt_outside_switches(stmt, &mut |s| n += usize::from(matches!(s, Stmt::Yield(_))));
         }
     }
     n

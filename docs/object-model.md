@@ -1592,7 +1592,12 @@ Generics are erased in lowering, and nothing after it knows they existed:
   classes read back fine. The enum-field check was too strict for the classes that hold enums: an
   enum field without an initializer may now be set by any of the leading field assignments of
   every constructor, not only the first statement (`lower::enums::set_before_use`).
-- Intersection bounds (`T extends A & B`) are rejected ("intersection types"). Generic
+- Intersection bounds (`T extends A & B`) were first rejected ("intersection types"). A type
+  variable with several bounds now erases to its first bound, and the receiver of a call of a
+  method that a later bound declares is cast to that bound (`lower::generics::receiver`), which is
+  the checkcast javac's erasure writes there; an argument or a store converts to a later bound by
+  the conversions every use already makes. `Collections.max` and `min`
+  (`T extends Object & Comparable<? super T>`) translate this way. Generic
   constructors, explicit type arguments (`G.<Long>boxed(5L)`), raw types and diamonds need nothing
   of their own.
 - Survey: "generic classes" and "generic methods" are no longer features, "generic types" counts
