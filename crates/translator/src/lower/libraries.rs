@@ -12,7 +12,7 @@ impl<'t> Lowering<'t> {
         &self,
         node: Node<'t>,
         symbol: &Symbol<'t>,
-        args: &mut Vec<Expr>,
+        args: &[Expr],
     ) -> Result<Option<ExprKind>, Error> {
         if (symbol.owner, symbol.name) != ("jdk.internal.loader.BootLoader", "loadLibrary") {
             return Ok(None);
