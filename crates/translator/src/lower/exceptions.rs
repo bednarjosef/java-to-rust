@@ -463,9 +463,10 @@ impl<'t> Lowering<'t> {
         for &resource in resources.iter().rev() {
             body = self.with_resource(resource, body)?;
         }
-        let catches: Vec<Catch> = node.list("catches").map(|c| self.catch(c)).collect::<Result<_, _>>()?;
+        let catches: Vec<Catch> =
+            node.list("catches").filter_map(|c| self.catch(c).transpose()).collect::<Result<_, _>>()?;
         let finally = node.get("finallyBlock").map(|block| self.block(block)).transpose()?;
-        if !resources.is_empty() && catches.is_empty() && finally.is_none() {
+        if catches.is_empty() && finally.is_none() {
             return Ok(Stmt::Block(body));
         }
         Ok(Stmt::Try { body, catches, finally })
@@ -635,14 +636,24 @@ impl<'t> Lowering<'t> {
         None
     }
 
-    fn catch(&self, node: Node<'t>) -> Result<Catch, Error> {
+    /// A `catch` clause, or `None` when every class it catches is one that a whole program does
+    /// not translate (`program::untranslated`), such as reflection's
+    /// `InvocationTargetException`: no translated code can throw one, so such an alternative is
+    /// left out.
+    fn catch(&self, node: Node<'t>) -> Result<Option<Catch>, Error> {
         let param = node.child("parameter")?;
         let ty_node = param.child("type")?;
-        let names: Vec<&str> = if ty_node.kind() == "UNION_TYPE" {
+        let mut names: Vec<&str> = if ty_node.kind() == "UNION_TYPE" {
             ty_node.list("typeAlternatives").map(|a| a.java_type()).collect()
         } else {
             vec![ty_node.java_type()]
         };
+        if self.reach.is_some() {
+            names.retain(|name| crate::program::untranslated(name).is_none());
+            if names.is_empty() {
+                return Ok(None);
+            }
+        }
         let mut types = Vec::new();
         for name in names {
             match self.type_index(name) {
@@ -652,7 +663,7 @@ impl<'t> Lowering<'t> {
         }
         let ty = self.ty(param, param.symbol().map_or("", |s| s.ty))?;
         let body = self.block(node.child("block")?)?;
-        Ok(Catch { types, name: param.str("name").to_string(), ty, body, pos: node.pos() })
+        Ok(Some(Catch { types, name: param.str("name").to_string(), ty, body, pos: node.pos() }))
     }
 
     /// `o.getClass().getName()` or `o.getClass().getSimpleName()`, as `Builtin::ClassName` of

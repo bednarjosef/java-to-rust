@@ -6,7 +6,9 @@
 mod reach;
 mod survey;
 
-pub use reach::{CLASS_KINDS, Reach, STRING_CHARS, class_name, live_branch, unsafe_field_access};
+pub use reach::{
+    CLASS_KINDS, Reach, STRING_CHARS, class_name, created_by_name, live_branch, unsafe_field_access, untranslated,
+};
 pub use survey::Survey;
 
 use crate::ast::{Error, Pos};

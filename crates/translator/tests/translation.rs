@@ -1501,6 +1501,36 @@ fn classes_with_one_name_in_two_packages() {
     );
 }
 
+#[test]
+fn objects_created_from_a_class_name_are_of_the_classes_that_code_names() {
+    let java = "package app;\n\
+        abstract class Shape { abstract String name(); }\n\
+        class Circle extends Shape { String name() { return \"circle\"; } }\n\
+        class Square extends Shape { String name() { return \"square\"; } }\n\
+        public class Main {\n\
+            static Shape make(String n) throws Exception {\n\
+                return (Shape) Class.forName(n).getDeclaredConstructor().newInstance();\n\
+            }\n\
+            public static void main(String[] a) throws Exception {\n\
+                System.out.println(make(a.length > 0 ? a[0] : \"app.Circle\").name());\n\
+            }\n\
+        }\n";
+    let dir = write_sources("by-name", &[("app/Main.java", java)]);
+    let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &[
+            "\"app.Circle\" => {",
+            "Rc::new(Circle::new());",
+            "java::throw_uncaught(format!(\"java.lang.ClassNotFoundException: {} is not a class of the translated program\"",
+        ],
+    );
+    // No code names `Square`, so no name can create one.
+    assert_lacks(&rust, &["Square", "square"]);
+}
+
 /// Writes Java files into a fresh directory under the test's temporary directory.
 fn write_sources(dir: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(dir);

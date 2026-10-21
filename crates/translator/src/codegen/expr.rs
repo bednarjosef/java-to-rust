@@ -634,6 +634,11 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
             Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
+            Builtin::UnknownClass => {
+                let name = self.value(&args[0], Type::String);
+                let message = "java.lang.ClassNotFoundException: {} is not a class of the translated program";
+                Code::atom(format!("{}(format!({message:?}, {}))", self.runtime("throw_uncaught"), name.text))
+            }
             Builtin::NullCheck => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),
