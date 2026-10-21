@@ -580,10 +580,14 @@ overflow checks on (so a wrong "cannot overflow" fact panics), and compares stan
 exit code. Java's runs, translation and the Cargo build run in parallel, one thread per CPU. All
 the Rust programs are one Cargo project under `target/tmp/corpus`, kept between runs, so a program
 is rebuilt only when its translation changes: a warm run takes about as long as translating the
-corpus. The report prints a table with one row per program and lists each failing program with the
-first differing lines of output. `CORPUS_FILTER=text cargo test --test corpus` runs only the
-programs whose name contains `text`, and `CORPUS_THREADS=n` limits it to n threads (one per CPU by
-default). `crates/translator/tests/translation.rs` pins down what the output looks like.
+corpus. Java's results are cached the same way, in `target/tmp/corpus/java-cache`, one file per
+program: a program runs on `java` again only when its Java sources (for a project, all its files
+and their paths), its main class, the JVM arguments or the `java -version` output change, so a
+warm run starts no JVM. `CORPUS_JAVA_FRESH=1` runs every program on Java and stores the results
+anew, for when the cache is doubted. Only a run that Java finished is stored. The report prints a
+table with one row per program and lists each failing program with the first differing lines of
+output. `CORPUS_FILTER=text cargo test --test corpus` runs only the programs whose name contains
+`text`, and `CORPUS_THREADS=n` limits it to n threads (one per CPU by default). `crates/translator/tests/translation.rs` pins down what the output looks like.
 
 ## Plans
 
