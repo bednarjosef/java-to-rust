@@ -303,6 +303,14 @@ impl Standard {
             // The operations of the standard members scanned so far may raise (`addSuppressed`
             // indexes an array), so the classes they raise are decided again on every round.
             raise_classes(&mut uses, &mut raised);
+            // The checks of `addSuppressed` throw these (see `lower/suppress.rs`).
+            if uses.members.contains(&suppress_member()) {
+                for class in super::suppress::CLASSES {
+                    uses.classes.insert(class.into());
+                    uses.members.insert((class.into(), "<init>".into(), "(java.lang.String)void".into()));
+                    uses.instantiated.insert(class.into());
+                }
+            }
             let before = (uses.classes.len(), uses.members.len(), uses.fields.len(), uses.operations.len());
             let owners: Vec<String> = uses
                 .members

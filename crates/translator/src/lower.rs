@@ -19,6 +19,7 @@ mod objects;
 mod real_generics;
 mod statics;
 mod strings;
+mod suppress;
 mod unsigned;
 
 use crate::ast::*;
@@ -76,6 +77,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
         let mut methods: Vec<Method> =
             (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
+        lowering.suppress_checks(&mut methods);
         lowering.object_methods(&mut methods)?;
         lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
         lowering.object_types(&mut types);
