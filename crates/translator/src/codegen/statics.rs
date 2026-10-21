@@ -61,7 +61,7 @@ impl<'a> Gen<'a> {
                 (_, Some(init)) => (self.ty_name(f.ty), self.value(init, f.ty).text),
                 (_, None) => unreachable!("a constant has a value"),
             };
-            let cell = cell_name(&decl.name, &f.name);
+            let cell = cell_name(decl, &f.name);
             self.line(&format!("{}const {cell}: {ty} = {value};", self.vis()));
         }
         let here: Vec<usize> = (0..class.types.len())
@@ -112,7 +112,7 @@ impl<'a> Gen<'a> {
             Some(e) if !self.facts.eager_init.contains(&t) => self.field_value(e, f.ty, stored),
             _ => self.placeholder(f.ty, stored),
         };
-        let cell = cell_name(&self.class.types[t].name, &f.name);
+        let cell = cell_name(&self.class.types[t], &f.name);
         let ty = self.field_ty_name(f.ty, stored);
         let constant = init == "None"
             || init == "String::new()"
@@ -203,7 +203,7 @@ impl<'a> Gen<'a> {
         if !field.constant {
             return None;
         }
-        let cell = cell_name(&self.class.types[class].name, name);
+        let cell = cell_name(&self.class.types[class], name);
         Some(Code::atom(if ty == Type::String { format!("String::from({cell})") } else { cell }))
     }
 }

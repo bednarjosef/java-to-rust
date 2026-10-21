@@ -76,10 +76,29 @@ pub(super) fn struct_name(name: &str) -> String {
     path + &local.replace('.', "")
 }
 
-/// The thread-local cell that holds a static field.
-pub(super) fn cell_name(class: &str, field: &str) -> String {
-    let (path, local) = modules::split(class);
-    path + &format!("{}_{}", local.replace('.', "_"), snake_case(field)).to_uppercase()
+/// The thread-local cell, or the `const`, that holds static field `field` of class `decl`. Two
+/// statics whose names differ only in case (`SEED` and `seed`) would get the same name: the later
+/// of them in the class gets the first number after it that no other static's name has (`SEED_3`
+/// when a field `seed_2` is `SEED_2`).
+pub(super) fn cell_name(decl: &TypeDecl, field: &str) -> String {
+    let (path, local) = modules::split(&decl.name);
+    let upper = |f: &str| format!("{}_{}", local.replace('.', "_"), snake_case(f)).to_uppercase();
+    let bases: Vec<String> = decl.statics.iter().map(|f| upper(&f.name)).collect();
+    let mut used: HashSet<String> = bases.iter().cloned().collect();
+    for (i, f) in decl.statics.iter().enumerate() {
+        let name = if bases[..i].contains(&bases[i]) {
+            let free = (2..).map(|n| format!("{}_{n}", bases[i])).find(|n| !used.contains(n));
+            let name = free.expect("a free name");
+            used.insert(name.clone());
+            name
+        } else {
+            bases[i].clone()
+        };
+        if f.name == field {
+            return path + &name;
+        }
+    }
+    path + &upper(field)
 }
 
 /// The value a field has before its constructor runs: Java's default, or a placeholder that the
@@ -770,7 +789,18 @@ impl<'a> Gen<'a> {
             }
             return format!("{obj}.to_string()");
         }
-        self.handle_call(handle, e, index)
+        let call = self.handle_call(handle, e, index);
+        self.null_text(index, call)
+    }
+
+    /// The text that `call`, a call of `toString` method `index`, gives: `"null"` where it
+    /// returns null, as `String.valueOf` shows it.
+    fn null_text(&self, index: usize, call: String) -> String {
+        if self.facts.nullable_returns.contains(&index) {
+            format!("{call}.unwrap_or_else(|| String::from(\"null\"))")
+        } else {
+            call
+        }
     }
 
     /// The object of `e`'s class reached through `handle`, borrowed for method `index` to be
@@ -1046,7 +1076,7 @@ impl<'a> Gen<'a> {
         if let Some(constant) = self.constant_read(class, name, ty) {
             return constant;
         }
-        let cell = cell_name(&self.class.types[class].name, name);
+        let cell = cell_name(&self.class.types[class], name);
         let read = Slot::Static { cell, plain: is_cell(ty) }.read(self.clones(ty));
         // A static that starts empty holds its value once its class is initialized.
         let read = if self.facts.placeholder_statics.contains(&(class, name.to_string())) {
@@ -1224,7 +1254,8 @@ impl<'a> Gen<'a> {
             return Code::atom(self.default_text(c, hash));
         };
         if !self.displays(index) {
-            return self.text_call(e, index);
+            let call = self.text_call(e, index);
+            return Code::atom(self.null_text(index, call.text));
         }
         if !self.lazy_text || (self.printing && !self.quiet_text(e, 0)) {
             return self.method_call(e, index, &[]);
@@ -1373,7 +1404,7 @@ impl<'a> Gen<'a> {
         {
             return None;
         }
-        let cell = cell_name(&self.class.types[*class].name, name);
+        let cell = cell_name(&self.class.types[*class], name);
         let init = self.init_call(*class);
         let mut lines = Vec::new();
         match how {
@@ -1482,7 +1513,7 @@ impl<'a> Gen<'a> {
                 Slot::Field { obj, field: self.field_path(object, name), plain: false, on_enum }
             }
             Place::Static { class, name } => {
-                Slot::Static { cell: cell_name(&self.class.types[*class].name, name), plain: is_cell(ty) }
+                Slot::Static { cell: cell_name(&self.class.types[*class], name), plain: is_cell(ty) }
             }
             Place::Var(_) => unreachable!("variables are assigned by `assignment`"),
             Place::Index(..) => unreachable!("array elements are assigned by `index_set`"),

@@ -346,6 +346,16 @@ impl<'a> Gen<'a> {
             {
                 self.boxed_identity(*op, l, r)
             }
+            // Enums of which one may be null (see `lower::enum_nulls`): `Option`s, equal when both
+            // are null or both are the same constant.
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
+                if matches!((l.ty, r.ty), (Type::Enum(_), Type::Enum(_)))
+                    && (self.nullable(l) || self.nullable(r)) =>
+            {
+                let (a, b) = (self.optional_to(l, l.ty), self.optional_to(r, r.ty));
+                let symbol = if *op == BinOp::Eq { "==" } else { "!=" };
+                Code::new(format!("{} {symbol} {}", a.at(CMP + 1), b.at(CMP + 1)), CMP)
+            }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if bool_test(l, r).is_some() => {
                 self.bool_comparison(*op, l, r)
             }
@@ -403,6 +413,13 @@ impl<'a> Gen<'a> {
             ExprKind::Index(array, index) => self.index(e.id, array, index),
             ExprKind::Length(array) => self.length(array),
             ExprKind::NewArray(sizes) => self.new_array(e.ty, sizes),
+            // `new int[n][m]` where `int[][]` is an `Object[]` (see `lower::arrays::new_array`).
+            ExprKind::Cast(to @ Type::Array(_), value)
+                if let ExprKind::NewArray(sizes) = &value.kind
+                    && value.ty != *to =>
+            {
+                self.new_object_rows(*to, value.ty, sizes)
+            }
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
             // An upcast or a downcast between the program's types, or a string, a box or a
             // primitive becoming an `Object`.
@@ -645,7 +662,12 @@ impl<'a> Gen<'a> {
                 let code = self.value(&args[0], Type::Int);
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
+            Builtin::MainArgs => self.main_args(ty),
             Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
+            Builtin::InitializeClass { class } => match self.init_call(class) {
+                Some(init) => Code::atom(format!("{{ {init} }}")),
+                None => Code::atom("()".to_string()),
+            },
             Builtin::UnknownClass => {
                 let name = self.value(&args[0], Type::String);
                 let message = "java.lang.ClassNotFoundException: {} is not a class of the translated program";

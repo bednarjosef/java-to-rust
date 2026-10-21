@@ -26,8 +26,14 @@ use std::sync::OnceLock;
 const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("NoSuchElementException", "java.util"),
     ("ConcurrentModificationException", "java.util"),
+    ("InputMismatchException", "java.util"),
+    ("EmptyStackException", "java.util"),
+    ("MissingResourceException", "java.util"),
     ("IOException", "java.io"),
     ("FileNotFoundException", "java.io"),
+    ("EOFException", "java.io"),
+    ("UnsupportedEncodingException", "java.io"),
+    ("UncheckedIOException", "java.io"),
 ];
 
 /// The standard classes that the runtime raises and a translation can catch, each with the
@@ -544,11 +550,13 @@ impl<'t> Lowering<'t> {
     /// }
     /// ```
     ///
-    /// The resource is a new object, so it is not null, as Java requires for `close` to run. An
-    /// existing variable (`try (r)`, `try (this.r)`) is `final var r$resource = r`, and a null
-    /// value is not closed, as Java skips it: the `close` calls then test `r$resource`.
+    /// A resource that is a new object is not null, as Java requires for `close` to run. An
+    /// existing variable (`try (r)`, `try (this.r)`) is `final var r$resource = r`; it, and a
+    /// resource that any other expression gives (`try (Stream<R> s = mapper.apply(e))`), may be
+    /// null, which is not closed, as Java skips it: the `close` calls then test the resource.
     fn with_resource(&self, resource: Node<'t>, body: Vec<Stmt>) -> Result<Vec<Stmt>, Error> {
         let existing = resource.kind() != "VARIABLE";
+        let mut guard = existing;
         let mut declared = Vec::new();
         if existing {
             let name = resource.symbol().map_or("resource", |s| s.name);
@@ -561,9 +569,7 @@ impl<'t> Lowering<'t> {
             let Some(init) = resource.get("initializer") else {
                 return unsupported(resource, "this resource");
             };
-            if init.kind() != "NEW_CLASS" {
-                return unsupported(init, "a resource that is not a new object");
-            }
+            guard = init.kind() != "NEW_CLASS";
             self.stmt_into(resource, &mut declared)?;
         }
         let [Stmt::Local { ty, name, pos, .. }] = &declared[..] else {
@@ -610,7 +616,7 @@ impl<'t> Lowering<'t> {
         let on_throw = vec![
             Stmt::Expr(self.synth(set_failed, pos, Type::Void)),
             Stmt::Try {
-                body: vec![self.close_stmt(&name, ty, pos, close, existing)],
+                body: vec![self.close_stmt(&name, ty, pos, close, guard)],
                 catches: vec![suppress],
                 finally: None,
             },
@@ -633,7 +639,7 @@ impl<'t> Lowering<'t> {
         );
         let close_unless_failed = Stmt::If {
             cond: self.synth(not_failed, pos, Type::Boolean),
-            then: Box::new(Stmt::Block(vec![self.close_stmt(&name, ty, pos, close, existing)])),
+            then: Box::new(Stmt::Block(vec![self.close_stmt(&name, ty, pos, close, guard)])),
             otherwise: None,
         };
         declared.push(Stmt::Local {
@@ -675,16 +681,34 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// The program's `close()` of type `t`, declared there or inherited from a superclass.
+    /// The program's `close()` of type `t`, declared there or inherited from a superclass, or
+    /// declared by an interface that it implements or extends (`AutoCloseable`'s, which a call
+    /// dispatches to the implementation).
     fn close_method(&self, t: usize) -> Option<usize> {
+        let declared = |c: usize| {
+            self.methods.iter().position(|m| m.owner == c && m.name == "close" && m.sig == "()void")
+        };
+        let mut chain = Vec::new();
         let mut at = Some(t);
         while let Some(c) = at {
-            let found =
-                self.methods.iter().position(|m| m.owner == c && m.name == "close" && m.sig == "()void");
-            if found.is_some() {
-                return found;
+            if let Some(found) = declared(c) {
+                return Some(found);
             }
+            chain.push(c);
             at = self.superclass(c).ok().flatten();
+        }
+        let mut work: Vec<usize> =
+            chain.iter().flat_map(|&c| self.interfaces(c).unwrap_or_default()).collect();
+        let mut seen = Vec::new();
+        while let Some(i) = work.pop() {
+            if seen.contains(&i) {
+                continue;
+            }
+            seen.push(i);
+            if let Some(found) = declared(i) {
+                return Some(found);
+            }
+            work.extend(self.interfaces(i).unwrap_or_default());
         }
         None
     }

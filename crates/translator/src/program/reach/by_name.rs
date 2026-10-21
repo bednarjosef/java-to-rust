@@ -45,6 +45,34 @@ pub fn created_by_name(node: &Value) -> Option<&Value> {
     (is_for_name && matches!(arguments.len(), 1 | 3)).then(|| &arguments[0])
 }
 
+/// The class that the call `node`, `Class.forName(name)` or `Class.forName(name, initialize,
+/// loader)`, finds when it spells the name out as a string literal, and whether the call
+/// initializes it: the class's name as the program's classes have it (the binary name `a.B$C`
+/// of a member class is `a.B.C`). `SharedSecrets` runs a class's static initializer this way,
+/// `Class.forName("java.util.ImmutableCollections$Access", true, null)`, and in a closed program
+/// such a name is a class of the program, or of none. `None` for a computed name, a computed
+/// `initialize`, or the name of a local or anonymous class.
+pub fn class_for_name(node: &Value) -> Option<(String, bool)> {
+    let symbol = &node["symbol"];
+    let is_for_name = text(node, "kind") == "METHOD_INVOCATION"
+        && text(symbol, "owner") == "java.lang.Class"
+        && text(symbol, "name") == "forName"
+        && text(symbol, "type").starts_with("(java.lang.String");
+    let arguments = node["arguments"].as_array()?;
+    if !is_for_name || !matches!(arguments.len(), 1 | 3) {
+        return None;
+    }
+    let name = unparenthesized(&arguments[0]);
+    let name = (text(name, "kind") == "STRING_LITERAL").then(|| name["value"].as_str())??;
+    let initialize = match arguments.get(1).map(unparenthesized) {
+        None => true,
+        Some(flag) if text(flag, "kind") == "BOOLEAN_LITERAL" => flag["value"].as_bool()?,
+        Some(_) => return None,
+    };
+    let named = name.split(['.', '$']).all(|part| is_identifier(part) && !part.contains('$'));
+    named.then(|| (name.replace('$', "."), initialize))
+}
+
 /// The class that declares the method of a call `node` named `name` without arguments, and the
 /// receiver it is called on.
 fn call<'v>(node: &'v Value, name: &str) -> Option<(&'v str, &'v Value)> {
@@ -120,8 +148,26 @@ impl Walk<'_> {
         if self.by_name.is_empty() {
             return;
         }
-        for literal in std::mem::take(&mut self.literals) {
+        for literal in self.literals.clone() {
             self.missing(&literal);
+        }
+    }
+
+    /// After a round's units were declared (`Walk::add`): the literals that name a class they
+    /// declare name it now, and every creation by name looks at the classes named again, as the
+    /// supertypes that make one a candidate may be among the new units.
+    pub(super) fn add_named(&mut self) {
+        let declared: Vec<String> =
+            self.literals.iter().filter(|literal| self.classes.contains_key(*literal)).cloned().collect();
+        for literal in declared {
+            self.literals.remove(&literal);
+            self.named(&literal);
+        }
+        let named: Vec<String> = self.named.iter().cloned().collect();
+        for target in self.by_name.clone() {
+            for name in &named {
+                self.create_by_name(&target, name);
+            }
         }
     }
 
@@ -144,9 +190,11 @@ impl Walk<'_> {
 /// Whether a string could be the binary name of a top-level class in a package: identifiers
 /// joined by dots, at least two (`sun.util.cldr.CLDRLocaleProviderAdapter`).
 fn could_name_class(text: &str) -> bool {
-    let is_identifier = |part: &str| {
-        part.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
-            && part.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-    };
     text.contains('.') && text.split('.').all(is_identifier)
+}
+
+/// Whether a string is a Java identifier, as far as names of classes need.
+fn is_identifier(part: &str) -> bool {
+    part.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+        && part.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
 }

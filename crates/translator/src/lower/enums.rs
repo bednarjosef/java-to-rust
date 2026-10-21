@@ -329,7 +329,7 @@ fn set_before_use(class: &Class, index: usize, name: &str) -> bool {
 /// Rejects `null` where an enum value is expected, except in a nullable enum local (see
 /// `enum_nulls`). Java gives an enum-typed field `null` until it is set, so an instance field
 /// without an initializer is allowed only when every constructor sets it first (see
-/// `set_before_use`), and a static field must have an initializer.
+/// `set_before_use`) or it holds a captured local, and a static field must have an initializer.
 pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
     let found: Cell<Option<Pos>> = Cell::new(None);
     let record = |pos: Pos| {
@@ -337,6 +337,7 @@ pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
             found.set(Some(pos));
         }
     };
+    let places = enum_nulls::places(class);
     for (t, decl) in class.types.iter().enumerate() {
         for f in decl.fields.iter().chain(&decl.statics) {
             if let Some(init) = &f.init
@@ -346,8 +347,14 @@ pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
                 record(init.pos);
             }
         }
+        // A captured local's field is set from the constructor's parameter before anything runs.
+        let captured = |name: &str| decl.captures.iter().any(|c| c.field == name);
         for f in decl.fields.iter().filter(|f| f.init.is_none() && matches!(f.ty, Type::Enum(_))) {
-            if !set_before_use(class, t, &f.name) {
+            // A field that the program sets to null is an `Option`, which starts as Java's null.
+            if !captured(&f.name)
+                && !set_before_use(class, t, &f.name)
+                && !places.holds_null(&decl.name, &f.name)
+            {
                 record(f.pos);
             }
         }
@@ -356,7 +363,7 @@ pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
         }
     }
     for m in 0..class.methods.len() {
-        if let Some(pos) = enum_nulls::escape(class, m) {
+        if let Some(pos) = enum_nulls::escape(class, m, &places) {
             record(pos);
         }
     }

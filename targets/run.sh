@@ -40,7 +40,7 @@ mkdir -p "$work"
 cargo build -q -p java-to-rust || exit 1
 # A copy, so that rebuilding the translator during a run does not change the programs after it.
 translator="$work/java-to-rust"
-cp "$root/target/debug/java-to-rust" "$translator" || exit 1
+cp "${CARGO_TARGET_DIR:-$root/target}/debug/java-to-rust" "$translator" || exit 1
 results="$work/results.txt"
 : > "$results"
 
@@ -102,10 +102,13 @@ for java in "${programs[@]}"; do
 
   input=/dev/null
   [ -f "$targets/$name.input" ] && input="$targets/$name.input"
+  # The command-line arguments, one per line of Name.args, as the program's own main gets them.
+  args=()
+  [ -f "$targets/$name.args" ] && mapfile -t args < "$targets/$name.args"
   expected_code=0
   [ -f "$targets/$name.exitcode" ] && expected_code=$(tr -d '\n' < "$targets/$name.exitcode")
   actual="$dir/actual.out"
-  timeout "$run_timeout" "$bin" < "$input" > "$actual" 2> "$dir/stderr.txt"
+  timeout "$run_timeout" "$bin" "${args[@]}" < "$input" > "$actual" 2> "$dir/stderr.txt"
   code=$?
 
   if [ "$code" = "$expected_code" ] && cmp -s "$actual" "$targets/$name.expected"; then

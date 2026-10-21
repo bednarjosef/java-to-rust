@@ -5,7 +5,7 @@
 //! observes keep their plain signatures.
 //!
 //! Two fixpoints over the calls (every implementation a virtual call may run, constructors,
-//! `this(...)`, `super(...)`, and the `toString` that printing an object runs):
+//! `this(...)` and `super(...)`):
 //!
 //! - what may *escape* each method: the classes that its `throw`s throw and that its calls let
 //!   escape, minus what an enclosing `catch` of the method catches;
@@ -19,6 +19,14 @@
 //! standard class gets objects (`Facts::raised_classes`). An operation that has no checked form
 //! yet (a null dereference, an array creation, a cast, ...) is rejected where its failure would
 //! be seen.
+//!
+//! The `toString` that making an object's text runs (`"" + o`, `println(o)`, `append(o)`,
+//! `String.valueOf(o)`) is not such a call: the generator writes it with `Display`, which has no
+//! way to return an exception, so what it throws ends the program there, as an exception that
+//! nothing catches does. Where a `toString` that the program wrote may throw what a `catch`
+//! around the text, or around a call on the way to it, would catch, the program is rejected. The
+//! JDK's own `toString`s throw only for bugs (a collection changed while it is shown) and are not
+//! looked at. An explicit `o.toString()` is an ordinary call.
 
 mod entry;
 mod failures;
@@ -50,6 +58,9 @@ enum Raise {
     Throw(usize),
     /// A call of one of these methods.
     Call(Vec<usize>),
+    /// The text of an object, which runs one of these `toString` methods; what they throw ends the
+    /// program here.
+    Text(Vec<usize>),
     /// A failure of the runtime, of the standard class `class`, by the expression `id`;
     /// `checked`: the generator has the runtime's checked form of the operation.
     Runtime { class: &'static str, checked: bool, id: ExprId },
@@ -107,6 +118,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             Raise::Throw(t) => h.concretes(*t).into_iter().map(Kind::Class).collect(),
             Raise::Call(callees) => callees.iter().flat_map(|&c| escapes[c].iter().cloned()).collect(),
             Raise::Runtime { class, .. } => BTreeSet::from([Kind::Runtime(class)]),
+            Raise::Text(_) => BTreeSet::new(),
         }
     };
 
@@ -166,6 +178,20 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         seen = next;
     }
     let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|&t| matches(k, t));
+
+    // An object's text whose `toString`, one the program wrote, may throw what a `catch` around
+    // the text, or around a call on the way to it, would catch. The JDK's own `toString`s throw
+    // only for bugs (a collection changed while it is shown) and are not looked at.
+    for (m, p) in points.iter().enumerate().flat_map(|(m, ps)| ps.iter().map(move |p| (m, p))) {
+        let Raise::Text(shown) = &p.raise else { continue };
+        let program = shown.iter().filter(|&&c| !from_jdk(&class.types[class.methods[c].class]));
+        if program.flat_map(|&c| &escapes[c]).any(|k| caught(k, &p.frames) || observed(k, &seen[m])) {
+            return error(
+                p.pos,
+                "catching an exception that this toString may throw not supported yet".to_string(),
+            );
+        }
+    }
 
     // A static initializer never returns a `Result`: what it raises ends the program (see `seen`).
     let mut throwing: HashSet<usize> = (0..class.methods.len())
@@ -637,6 +663,7 @@ fn static_inits(class: &Class, facts: &Facts, m: usize, x: &Expr) -> Vec<usize> 
         ExprKind::Assign { target: Place::Static { class: t, .. }, .. } => classes.push(*t),
         // The first use of an enum's constant initializes the enum.
         ExprKind::EnumConstant { class: t, .. } => classes.push(*t),
+        ExprKind::Builtin(Builtin::InitializeClass { class: t }, _) => classes.push(*t),
         ExprKind::Builtin(Builtin::EnumValueOf, _) => {
             if let Type::Enum(name) = x.ty
                 && let Some(t) = class.type_index(name)
@@ -697,7 +724,7 @@ fn expr_points(
     for object in text_objects(x) {
         let shown = to_string_impls(class, object.ty);
         if !shown.is_empty() {
-            push(Raise::Call(shown), object.pos, "this toString");
+            push(Raise::Text(shown), object.pos, "this toString");
         }
     }
     for (name, what, checked, id) in runtime_failures(class, facts, m, x, safe) {
@@ -771,6 +798,13 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
         Place::Field { object, .. } => out.push(object),
         Place::Var(_) | Place::Static { .. } => {}
     }
+}
+
+/// Whether `decl` is a class of the JDK, which no program may declare.
+fn from_jdk(decl: &TypeDecl) -> bool {
+    ["java", "javax", "jdk", "sun"]
+        .iter()
+        .any(|root| decl.package == *root || decl.package.starts_with(&format!("{root}.")))
 }
 
 /// The objects whose text an expression makes, which runs their `toString`.

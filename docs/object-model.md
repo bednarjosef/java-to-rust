@@ -1656,6 +1656,14 @@ Decisions that changed during the implementation, milestone by milestone.
   Later, an operand may also assign its variable on the way, as `HashMap.getNode` writes
   `(k = first.key) == key || (key != null && key.equals(k))`; the assignment's value is then a
   clone of the variable's handle, which the `equals` reads again.
+- `TreeMap`'s sub-map iterators stop at the end of the view with `next.key != fenceKey`, where
+  `fenceKey` is `fence == null ? UNBOUNDED : fence.key`. In `TreeMap`'s own code, a comparison of
+  two keys of its entries (or of a field that only ever holds one, `null` or a sentinel) is
+  accepted and compares by value. That gives Java's result: the keys of a sorted map are distinct
+  under its comparator, and in the translation a comparator sees strings and boxes only by
+  value, so two keys that are equal values compare as 0 and cannot both be in the map. The rule
+  is that narrow because the argument rests on that invariant: in general, two equal strings
+  held by different nodes are different objects in Java.
 - Two analyses had to learn about the new sources of values: a string bound by a pattern
   (`o instanceof String s`) is not known to be ASCII, and the generator's nullness of a cast
   follows its operand, which a null check may have narrowed.
@@ -1701,6 +1709,15 @@ Generics are erased in lowering, and nothing after it knows they existed:
   value converted with `as`, which converts as Java's primitive conversions do (a floating-point
   value becomes a `byte` or a `short` through an `int`). A program class that extends `Number` is
   still rejected, as is any extension of a runtime class.
+- `java.lang.CharSequence` is a fourth, `CHAR_SEQUENCE`, planned when the program uses it as the
+  type of a value (the JDK's `StringJoiner` and `Collectors.joining` take `CharSequence`s). The
+  JDK's interface is not translated (it is among `RUNTIME_CLASSES`). Strings implement it, and so
+  do builders, through the runtime class that holds a `StringBuilder` as an `Object`, which keeps
+  the builder's identity: what is appended later shows through the `CharSequence`. Its abstract
+  `length()` and `charAt(int)` have an arm per runtime class in
+  `codegen::dispatch::char_sequence_arm`; `toString()` is the value's text and `isEmpty()` a zero
+  `length()`. Its other methods (`chars()`, `subSequence`, `compare`) and a program class that
+  implements it are rejected.
 - Bridges are methods, not conversions in dispatcher arms: when a method overrides one whose erased
   parameter or return types differ (`Integer next()` implementing `T next()` of `Source<Integer>`,
   `compareTo(Point)` implementing `Comparable`'s), lowering adds a method to its class with the
@@ -1812,7 +1829,9 @@ per-instantiation variants are not done, and a generic that needs them stays era
   are not all mentioned by its parameters' types, which Rust infers them from. Lowering then runs
   again with the failed candidates erased, until nothing fails; a lowering error with candidates
   left is retried with all of them erased, so a real generic never turns a translated program into
-  a rejected one.
+  a rejected one. Later, the array of a type variable passed for an erased array (`Arrays.asList`'s
+  `T[]` to its list's `E[]`, an `Object[]`) fails only the generics it mentions instead of being
+  such an error, so the program's other real generics stay real.
 - The type parameters are bounded by `Clone` only (`impl<T: Clone> Box<T>`, `fn pick<T: Clone>`),
   and every use of a type variable's value clones it, as for any value of a class whose
   representation is an `Rc`. A literal passed for a type variable gets its type suffix (`3i32`),

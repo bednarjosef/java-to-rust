@@ -176,7 +176,8 @@ A small subset, end to end:
   array on both sides, but without its element class: storing an object of another class in it
   does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s. Arrays of strings
   are not converted this way yet. `==` between two `Object`s that may both be strings or boxes (whose identity the
-  translation does not keep, except in the shortcut `a == b || a.equals(b)`) is rejected. The
+  translation does not keep, except in the shortcut `a == b || a.equals(b)` and in `TreeMap`'s own
+  comparisons of the keys of its entries, which are distinct values) is rejected. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
   and a use where javac substituted a type argument gets the checked cast back
@@ -253,7 +254,9 @@ A small subset, end to end:
   Rejected for now, by name: try-with-resources over a library type (an `AutoCloseable` variable or
   lambda), catching or letting a `finally` see a null dereference, a negative array size, a failed
   cast or a failure of the library other than these, a `toString`, a constructor of an exception or
-  an enum that throws something a caller catches, and a `finally` that sees a static initializer's
+  an enum that throws something a caller catches (the JDK's own `toString`s throw only for bugs,
+  such as a collection changed while it is shown, and those end the program even where a caller
+  would catch them), and a `finally` that sees a static initializer's
   failure in a program that catches none of those classes. The design is in
   [docs/exceptions.md](docs/exceptions.md).
 - **Threads** are the platform's: a class that extends `Thread` and overrides `run`, or a
@@ -401,7 +404,7 @@ over the program's enums, like `Object`; `ordinal()`, `name()`, `compareTo` and
 `getDeclaringClass()` on it match on the enums it can be, and the constants of an enum's class,
 which the JDK reads through `SharedSecrets`, are those of the program's enum whose class it is. A
 cast to an enum of a value that may be null (a key from a generic collection) ends the program
-if the value is null, as the translation has no null enums.
+if the value is null, as an enum that comes out of an `Object` is never an `Option`.
 
 ### Analyses
 
@@ -430,6 +433,11 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   Dereferencing null throws `NullPointerException` through `java::non_null`, and printing or
   concatenating it gives `null` (`java::or_null`). `==` on objects compares identity:
   `Rc::ptr_eq(&a, &b)`, or `java::same(a.as_ref(), b.as_ref())` where either may be null.
+  An enum local, field, array element or return value that the program sets to null (or the
+  elements of `new E[n]`, which start null) is an `Option` of the enum, compared with
+  `kinds[i] == Some(Kind::Dead)`; such a value may only be stored, returned, tested against
+  null, compared, printed or dropped, and any other use of it is rejected
+  (`lower/enum_nulls.rs`).
 - Arrays (`int[]`, `long[]`, `double[]`, `boolean[]`, `String[]`, and arrays of arrays) are shared
   references in the faithful form, `java::Array<T>`: a shared cell whose clones see each other's
   writes. The aliasing analysis (`analysis/arrays.rs`) finds local arrays that no other name can
@@ -738,11 +746,14 @@ the Rust programs are one Cargo project under `target/tmp/corpus`, kept between 
 is rebuilt only when its translation changes: a warm run takes about as long as translating the
 corpus. Java's results are cached the same way, in `target/tmp/corpus/java-cache`, one file per
 program: a program runs on `java` again only when its Java sources (for a project, all its files
-and their paths), its main class, the JVM arguments or the `java -version` output change, so a
+and their paths), its main class, its command-line arguments, the JVM arguments or the
+`java -version` output change, so a
 warm run starts no JVM. `CORPUS_JAVA_FRESH=1` runs every program on Java and stores the results
 anew, for when the cache is doubted. Only a run that Java finished is stored. The report prints a
 table with one row per program and lists each failing program with the first differing lines of
-output. `CORPUS_FILTER=text cargo test --test corpus` runs only the programs whose name contains
+output. A single-file program with a `Name.args` file next to it runs with the lines of that file
+as its command-line arguments, on `java` and as the translated binary alike.
+`CORPUS_FILTER=text cargo test --test corpus` runs only the programs whose name contains
 `text`, and `CORPUS_THREADS=n` limits it to n threads (one per CPU by default). `crates/translator/tests/translation.rs` pins down what the output looks like.
 
 ## Plans

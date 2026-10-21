@@ -471,6 +471,9 @@ impl<'t> Lowering<'t> {
             "java.lang.Number" if self.object.is_some_and(|at| at.number.is_some()) => {
                 Ok(Type::class(NUMBER))
             }
+            "java.lang.CharSequence" if self.object.is_some_and(|at| at.char_sequence.is_some()) => {
+                Ok(Type::class(CHAR_SEQUENCE))
+            }
             _ if let Some(erased) = self.erased(node, name) => erased,
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
             "java.lang.Object" => unsupported(node, "Object"),
@@ -846,6 +849,16 @@ impl<'t> Lowering<'t> {
         if symbol.owner == "java.lang.Number" {
             return self.number_call(node, &symbol, receiver);
         }
+        if symbol.owner == "java.lang.CharSequence"
+            && receiver.is_none_or(|r| {
+                !matches!(
+                    r.java_type(),
+                    "java.lang.String" | "java.lang.StringBuilder" | "java.lang.StringBuffer"
+                )
+            })
+        {
+            return self.char_sequence_call(node, &symbol, receiver);
+        }
         if symbol.name == "equals"
             && !symbol.is_static
             && matches!(&args[..], [arg] if Self::is_object(arg.ty))
@@ -915,6 +928,11 @@ impl<'t> Lowering<'t> {
                 Builtin::String(StringOp::GetBytes)
             }
             ("java.lang.String", _) => return self.string_call(node, &symbol, receiver, args),
+            // `String`'s own `join` of the first `size` elements between a prefix and a suffix,
+            // which `StringJoiner` reaches through `SharedSecrets` (`String` is the runtime's).
+            ("jdk.internal.access.JavaLangAccess", "join") if args.len() == 5 => {
+                Builtin::String(StringOp::JoinRange)
+            }
             (
                 "java.lang.StringBuilder"
                 | "java.lang.StringBuffer"

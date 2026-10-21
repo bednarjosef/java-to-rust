@@ -38,9 +38,13 @@ impl<'t> Lowering<'t> {
             }
             match self.type_index(raw) {
                 Some(i) if self.types[i].node.kind() == "INTERFACE" => out.push(i),
+                // `CharSequence` is the object model's (see `object_types`).
                 None if matches!(
                     raw.as_str(),
-                    "java.lang.Comparable" | "java.lang.AutoCloseable" | "java.io.Closeable"
+                    "java.lang.Comparable"
+                        | "java.lang.AutoCloseable"
+                        | "java.io.Closeable"
+                        | "java.lang.CharSequence"
                 ) => {}
                 _ if self.stubbing.get() => {}
                 _ => return unsupported(clause, &format!("implementing `{raw}`")),
@@ -180,6 +184,19 @@ impl<'t> Lowering<'t> {
         for (a, &ty) in args.iter().zip(&types) {
             self.fail_on_covariant(a.ty, ty);
         }
+        // The array of a Rust generic's type variable passed for an erased array (`asList`'s `T[]`
+        // to `Arrays.ArrayList`'s `E[]`, an `Object[]`) erases the generic: it is lowered again.
+        for (a, &ty) in args.iter().zip(&types) {
+            if matches!((a.ty, ty), (Type::Array(_), Type::Array(_)))
+                && self.has_param(a.ty)
+                && !self.has_param(ty)
+            {
+                let mut owners = Vec::new();
+                self.owners_in(a.ty, &mut owners);
+                owners.into_iter().for_each(|o| self.fail(o));
+                return Ok(args);
+            }
+        }
         // Arrays do not convert: a `Version[]` is an `Object[]` in the translation only when it is
         // covariant (see `covariant`).
         if let Some(arg) = args.iter().zip(&types).find_map(|(a, &ty)| {
@@ -211,7 +228,7 @@ impl<'t> Lowering<'t> {
             self.meets_object_array(e.ty, to);
         }
         let differs = match (e.ty, to) {
-            (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE || b == NUMBER => {
+            (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE || b == NUMBER || b == CHAR_SEQUENCE => {
                 !matches!(e.ty, Type::Null | Type::Void) && e.ty != to
             }
             (Type::Class(a, _) | Type::Enum(a), Type::Class(b, _)) => a != b,
@@ -220,7 +237,8 @@ impl<'t> Lowering<'t> {
         if !differs {
             return e;
         }
-        if Self::is_object(to) {
+        // A builder that becomes an `Object` or a `CharSequence` is a value of its runtime class.
+        if Self::is_object(to) || to == Type::class(CHAR_SEQUENCE) && e.ty == Type::StringBuilder {
             self.note_object_array(e.ty);
         }
         let pos = e.pos;
@@ -235,6 +253,14 @@ impl<'t> Lowering<'t> {
         }
         if Self::is_object(right.ty) && left.ty != Type::Null {
             return (self.convert(left, Type::class(OBJECT)), right);
+        }
+        // A builder compared with a `CharSequence` is one, as it is to an `Object`.
+        let sequence = Type::class(CHAR_SEQUENCE);
+        if left.ty == sequence && right.ty == Type::StringBuilder {
+            return (left, self.convert(right, sequence));
+        }
+        if right.ty == sequence && left.ty == Type::StringBuilder {
+            return (self.convert(left, sequence), right);
         }
         let (Some(a), Some(b)) = (self.class_of(left.ty), self.class_of(right.ty)) else {
             return (left, right);
