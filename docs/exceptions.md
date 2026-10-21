@@ -182,7 +182,9 @@ the program as Java's uncaught exception would. Without the `finally`, the handl
 superclass, which of the four `Throwable` constructor shapes they have (`()`, `(String)`,
 `(String, Throwable)`, `(Throwable)`) and any other constructor (`(int)` of the index
 exceptions, and the `AssertionError` constructors with a detail of any type: `(Object)`, which
-takes a `Throwable` as the cause, and the primitive ones):
+takes a `Throwable` as the cause, and the primitive ones; `MissingResourceException` has
+`(String, String, String)` and `UncheckedIOException` has `(String, IOException)` and
+`(IOException)`, and `ClassNotFoundException` has `getException`):
 
 ```
 java.lang.Throwable
@@ -194,8 +196,16 @@ java.lang.Throwable
       java.lang.IndexOutOfBoundsException (java.lang.ArrayIndexOutOfBoundsException,
         java.lang.StringIndexOutOfBoundsException), java.lang.NegativeArraySizeException,
       java.lang.NullPointerException, java.lang.UnsupportedOperationException,
-      java.util.NoSuchElementException, java.util.ConcurrentModificationException
-    java.lang.InterruptedException, java.lang.CloneNotSupportedException
+      java.lang.SecurityException, java.util.NoSuchElementException
+        (java.util.InputMismatchException), java.util.ConcurrentModificationException,
+      java.util.EmptyStackException, java.util.MissingResourceException,
+      java.io.UncheckedIOException
+    java.lang.InterruptedException, java.lang.CloneNotSupportedException,
+    java.lang.ReflectiveOperationException (java.lang.ClassNotFoundException,
+      java.lang.NoSuchMethodException, java.lang.NoSuchFieldException,
+      java.lang.IllegalAccessException, java.lang.InstantiationException),
+    java.io.IOException (java.io.FileNotFoundException, java.io.EOFException,
+      java.io.UnsupportedEncodingException)
   java.lang.Error
     java.lang.AssertionError, java.lang.LinkageError
       java.lang.ExceptionInInitializerError, java.lang.NoClassDefFoundError
