@@ -490,6 +490,27 @@ pub fn park(timeout: Option<Duration>) {
     *permit = false;
 }
 
+/// `Unsafe.park(absolute, time)`, which `LockSupport` calls: `park` until the deadline `time`, in
+/// milliseconds since the epoch, when `absolute`, else for `time` nanoseconds, with no limit for a
+/// relative 0. A deadline already past, or a negative time, returns at once, as HotSpot's does.
+pub fn unsafe_park(absolute: bool, time: i64) {
+    if time < 0 || (absolute && time == 0) {
+        return;
+    }
+    let timeout = if absolute {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        match u64::try_from(time).ok().map(Duration::from_millis).and_then(|t| t.checked_sub(now)) {
+            Some(left) if !left.is_zero() => Some(left),
+            _ => return,
+        }
+    } else if time == 0 {
+        None
+    } else {
+        Some(Duration::from_nanos(time as u64))
+    };
+    park(timeout)
+}
+
 /// `LockSupport.unpark(thread)`: gives the thread with id `tid` its permit.
 pub fn unpark(tid: i64) {
     let record = if tid == MAIN_ID { Some(main_record()) } else { record(tid) };

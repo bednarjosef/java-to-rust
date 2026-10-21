@@ -149,6 +149,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::ThreadInterrupt
             | Native::ThreadIsInterrupted
             | Native::ThreadClearInterrupt
+            | Native::Park
+            | Native::Unpark
             | Native::InstallUncaught
             | Native::UncaughtException
             | Native::PrintUncaught,

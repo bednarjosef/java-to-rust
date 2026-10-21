@@ -271,8 +271,8 @@ fn shortcut(e: &Expr) -> Vec<ExprId> {
             visit_expr(r, &mut |x| {
                 if let ExprKind::MethodCall { receiver, name, args, .. } = &x.kind
                     && name == "equals"
-                    && let (ExprKind::Var(x), [arg]) = (&receiver.kind, &args[..])
-                    && let ExprKind::Var(y) = &peel(arg).kind
+                    && let (Some(x), [arg]) = (compared(receiver), &args[..])
+                    && let Some(y) = compared(arg)
                 {
                     equals |= (x == a && y == b) || (x == b && y == a);
                 }
@@ -296,10 +296,16 @@ fn chain<'e>(e: &'e Expr, op: BinOp, operands: &mut Vec<&'e Expr>) {
     }
 }
 
-/// The variable that an operand of the shortcut's `==` is: a variable, or an assignment to one.
-fn compared(e: &Expr) -> Option<&String> {
+/// What an operand of the shortcut's `==` reads: a variable (or an assignment to one), or a field
+/// of `this` (`this.name`), as `ConcurrentHashMap`'s entries compare `k == key || k.equals(key)`.
+fn compared(e: &Expr) -> Option<String> {
     match &peel(e).kind {
-        ExprKind::Var(name) | ExprKind::Assign { op: None, target: Place::Var(name), .. } => Some(name),
+        ExprKind::Var(name) | ExprKind::Assign { op: None, target: Place::Var(name), .. } => {
+            Some(name.clone())
+        }
+        ExprKind::Field { object, name } if matches!(object.kind, ExprKind::This) => {
+            Some(format!("this.{name}"))
+        }
         _ => None,
     }
 }

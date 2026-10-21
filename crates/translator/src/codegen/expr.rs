@@ -641,6 +641,7 @@ impl<'a> Gen<'a> {
                 self.arrays_builtin(builtin, args, id)
             }
             Builtin::Arrays(op) => self.arrays_op(op, args),
+            Builtin::ElementUpdate(update) => self.element_update_call(update, args),
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
                 let outer = std::mem::replace(&mut self.printing, true);

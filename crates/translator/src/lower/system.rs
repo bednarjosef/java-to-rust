@@ -1,9 +1,13 @@
-//! `System.getProperty`. A key whose value does not depend on the JVM is answered by the runtime
-//! at run time, as Java does. The JVM's own keys are rejected, since a translated program would
-//! see different values from Java's. Any other key is unknown: null, or the default.
+//! `System.getProperty`, and `VM.getSavedProperty`, which gives the same values. A key whose
+//! value does not depend on the JVM is answered by the runtime at run time, as Java does. The
+//! JVM's own keys are rejected, since a translated program would see different values from
+//! Java's. Any other key is unknown: null, or the default.
 
 use super::{Lowering, Node, Symbol, unsupported};
 use crate::ast::*;
+// Keys under `JVM_KEYS` that only the command line sets, never the JVM itself: unknown keys, as
+// for a program run without them.
+use crate::program::UNSET_PROPERTIES as UNSET_KEYS;
 
 /// The keys the runtime answers (`java_runtime::system_property`).
 const KEYS: &[&str] = &[
@@ -17,10 +21,6 @@ const KEYS: &[&str] = &[
     "os.name",
     "os.arch",
 ];
-
-/// Keys under `JVM_KEYS` that only the command line sets, never the JVM itself: unknown keys, as
-/// for a program run without them. `Arrays.sort` reads the first to choose its old merge sort.
-const UNSET_KEYS: &[&str] = &["java.util.Arrays.useLegacyMergeSort"];
 
 /// Prefixes of keys that the JVM sets. A program reading one would see the JVM's value, which the
 /// translation cannot give, so these are rejected rather than taken for unknown keys.
@@ -69,7 +69,11 @@ impl<'t> Lowering<'t> {
                 cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
             }));
         }
-        if (symbol.owner, symbol.name) != ("java.lang.System", "getProperty") {
+        // The properties that the JVM saved as it started are the same (`VM.getSavedProperty`).
+        if !matches!(
+            (symbol.owner, symbol.name),
+            ("java.lang.System", "getProperty") | ("jdk.internal.misc.VM", "getSavedProperty")
+        ) {
             return Ok(None);
         }
         let Some(ExprKind::Str(key)) = args.first().map(|arg| &arg.kind) else {

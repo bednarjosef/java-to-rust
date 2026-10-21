@@ -68,6 +68,12 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 {
                     elements.push(x.ty.element());
                 }
+                // An atomic update of an element compares the element with its expected value.
+                ExprKind::Builtin(Builtin::ElementUpdate(_), args)
+                    if args.len() == 2 && maybe_null(facts, m, &args[0]) =>
+                {
+                    elements.push(updated_element(x));
+                }
                 ExprKind::ArrayLit(items) if items.iter().any(|item| maybe_null(facts, m, item)) => {
                     elements.push(x.ty.element());
                 }
@@ -243,6 +249,10 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
         }
         ExprKind::Builtin(Builtin::ClassMethod(op), _) => op.nullable(),
         ExprKind::Builtin(Builtin::ComparableClassFor, _) => true,
+        // The old element, of an atomic update of an element.
+        ExprKind::Builtin(Builtin::ElementUpdate(_), _) => {
+            facts.nullable_elements.contains(&updated_element(e))
+        }
         // A boxed field is always an `Option`: its default is `null`, and so is an assignment of
         // `null` to it.
         _ if matches!(e.ty, Type::Boxed(_))
@@ -268,6 +278,17 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
             value,
         } => maybe_null(facts, m, value),
         _ => false,
+    }
+}
+
+/// The type of the element that `e`, a `Builtin::ElementUpdate`, updates.
+fn updated_element(e: &Expr) -> Type {
+    match &e.kind {
+        ExprKind::Builtin(_, args) => match args.last().map(|a| &a.kind) {
+            Some(ExprKind::Assign { target: Place::Index(array, _), .. }) => array.ty.element(),
+            _ => unreachable!("an element update makes a store to an element"),
+        },
+        _ => unreachable!("an element update"),
     }
 }
 

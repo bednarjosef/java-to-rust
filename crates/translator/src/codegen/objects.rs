@@ -994,7 +994,11 @@ impl<'a> Gen<'a> {
             // A native that waits counts as a borrow: no lock may be held across it.
             ExprKind::Builtin(
                 Builtin::Native(
-                    Native::Sleep { .. } | Native::ThreadJoin | Native::ThreadStart | Native::MonitorWait,
+                    Native::Sleep { .. }
+                    | Native::Park
+                    | Native::ThreadJoin
+                    | Native::ThreadStart
+                    | Native::MonitorWait,
                 ),
                 _,
             ) => (1, 0),
