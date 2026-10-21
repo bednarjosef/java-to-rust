@@ -21,9 +21,10 @@ use super::*;
 impl<'a> Gen<'a> {
     /// Evaluates a lock and drops it, throwing if it is null.
     pub(super) fn null_check(&mut self, lock: &'a Expr) -> Code {
-        // An object, which may be the plain `Object` of the program rather than a handle, is
-        // checked as a monitor's handle is.
-        if self.nullable(lock) && matches!(lock.ty, Type::Class(..)) {
+        // An object read from a field or a call, which may be the plain `Object` of the program
+        // rather than a handle, is checked as a monitor's handle is.
+        if self.nullable(lock) && matches!(lock.ty, Type::Class(..)) && !matches!(lock.kind, ExprKind::Var(_))
+        {
             let handle = self.monitor_handle(lock);
             return Code::atom(format!("{{ let _ = {handle}; }}"));
         }
