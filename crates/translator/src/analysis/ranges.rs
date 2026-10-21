@@ -935,7 +935,9 @@ impl<'a> Analysis<'a> {
             }
             ExprKind::Length(array) => {
                 self.expr(array, env);
-                Interval::new(0, i32::MAX as i128)
+                // HotSpot refuses arrays of `i32::MAX - 1` elements or more (the header takes
+                // words), so `length + 1` cannot overflow.
+                Interval::new(0, i32::MAX as i128 - 2)
             }
             ExprKind::Assign { target: Place::Index(array, index), value, .. } => {
                 self.expr(array, env);

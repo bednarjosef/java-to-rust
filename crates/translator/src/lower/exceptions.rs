@@ -168,6 +168,11 @@ pub(super) struct Standard {
     raised: HashSet<String>,
 }
 
+/// `Throwable.addSuppressed`, which each try-with-resources calls (see `with_resource`).
+fn suppress_member() -> (String, String, String) {
+    ("java.lang.Throwable".into(), "addSuppressed".into(), "(java.lang.Throwable)void".into())
+}
+
 /// The uses of the standard classes found in a tree.
 #[derive(Default)]
 struct Uses {
@@ -199,6 +204,12 @@ impl Uses {
                 match kind.as_str() {
                     "TRY" => {
                         self.finally |= !v["finallyBlock"].is_null();
+                        // A try-with-resources catches a `Throwable` to add a failing `close`
+                        // to the body's exception as suppressed (see `with_resource`).
+                        if v["resources"].as_array().is_some_and(|r| !r.is_empty()) {
+                            self.finally = true;
+                            self.members.insert(suppress_member());
+                        }
                         for catch in v["catches"].as_array().into_iter().flatten() {
                             let ty = &catch["parameter"]["type"];
                             for t in
@@ -254,6 +265,21 @@ impl Uses {
     }
 }
 
+/// Declares the classes of `RAISED` that the runtime may raise where a `catch` or a `finally`
+/// might see them, and records them in `raised`.
+fn raise_classes(uses: &mut Uses, raised: &mut HashSet<String>) {
+    for (class, operations) in RAISED {
+        let caught =
+            uses.finally || uses.catches.iter().any(|c| is_standard(c) && standard_subclass(class, c));
+        if caught && operations.iter().any(|o| uses.operations.contains(*o)) {
+            uses.classes.insert(class.to_string());
+            uses.members.insert((class.to_string(), "<init>".into(), "(java.lang.String)void".into()));
+            uses.instantiated.insert(class.to_string());
+            raised.insert(class.to_string());
+        }
+    }
+}
+
 impl Standard {
     /// What the code in these trees uses of the standard classes, with what that uses in turn.
     pub fn select<'v>(trees: impl IntoIterator<Item = &'v Value>) -> Standard {
@@ -261,18 +287,8 @@ impl Standard {
         for tree in trees {
             uses.scan(tree);
         }
-        // The classes the runtime raises where a `catch` or a `finally` might see them.
         let mut raised = HashSet::new();
-        for (class, operations) in RAISED {
-            let caught =
-                uses.finally || uses.catches.iter().any(|c| is_standard(c) && standard_subclass(class, c));
-            if caught && operations.iter().any(|o| uses.operations.contains(*o)) {
-                uses.classes.insert(class.to_string());
-                uses.members.insert((class.to_string(), "<init>".into(), "(java.lang.String)void".into()));
-                uses.instantiated.insert(class.to_string());
-                raised.insert(class.to_string());
-            }
-        }
+        raise_classes(&mut uses, &mut raised);
         if uses.classes.is_empty() && uses.members.is_empty() {
             return Standard::default();
         }
@@ -282,7 +298,10 @@ impl Standard {
         let decl = |name: &str| decls.iter().find(|(n, _)| n == name).map(|(_, d)| *d);
         let mut scanned: HashSet<(String, String, String)> = HashSet::new();
         loop {
-            let before = (uses.classes.len(), uses.members.len(), uses.fields.len());
+            // The operations of the standard members scanned so far may raise (`addSuppressed`
+            // indexes an array), so the classes they raise are decided again on every round.
+            raise_classes(&mut uses, &mut raised);
+            let before = (uses.classes.len(), uses.members.len(), uses.fields.len(), uses.operations.len());
             let owners: Vec<String> = uses
                 .members
                 .iter()
@@ -310,7 +329,7 @@ impl Standard {
                     uses.scan(node);
                 }
             }
-            if before == (uses.classes.len(), uses.members.len(), uses.fields.len()) {
+            if before == (uses.classes.len(), uses.members.len(), uses.fields.len(), uses.operations.len()) {
                 break;
             }
         }
@@ -417,10 +436,25 @@ impl<'t> Lowering<'t> {
     }
 
     /// The statements `body` inside the resource `resource` of a try-with-resources: the
-    /// resource's declaration, then `try { body } finally { r.close(); }`. That is what Java does
-    /// when `r` is not null and its `close` cannot fail, which the resource being a new object
-    /// and the analysis's check of `Class::closes` make sure of: otherwise Java would skip the
-    /// `close` of a null and add the exception of a `close` to the body's as suppressed.
+    /// resource's declaration, then the closing that Java does. The body's completion closes the
+    /// resource, and a `close` that throws replaces it, unless the body threw: then the `close`'s
+    /// exception is added to the body's as suppressed and the body's is thrown.
+    ///
+    /// ```text
+    /// R r = new R(..);
+    /// boolean r$failed = false;
+    /// try {
+    ///     try { body } catch (Throwable r$thrown) {
+    ///         r$failed = true;
+    ///         try { r.close(); } catch (Throwable r$suppressed) { r$thrown.addSuppressed(r$suppressed); }
+    ///         throw r$thrown;
+    ///     }
+    /// } finally {
+    ///     if (!r$failed) { r.close(); }
+    /// }
+    /// ```
+    ///
+    /// The resource is a new object, so it is not null, as Java requires for `close` to run.
     fn with_resource(&self, resource: Node<'t>, body: Vec<Stmt>) -> Result<Vec<Stmt>, Error> {
         let Some(init) = resource.get("initializer").filter(|_| resource.kind() == "VARIABLE") else {
             return unsupported(resource, "try-with-resources over an existing variable");
@@ -441,8 +475,82 @@ impl<'t> Lowering<'t> {
         let Some(close) = class.and_then(|t| self.close_method(t)) else {
             return unsupported(resource, "a resource without a `close()` of the program");
         };
-        self.closes.borrow_mut().push((close, pos));
-        let receiver = Box::new(self.synth(ExprKind::Var(name), pos, ty));
+        let Some(throwable) = self.type_index("java.lang.Throwable") else {
+            return unsupported(resource, "a try-with-resources without `Throwable`");
+        };
+        let Some(add) = self.methods.iter().position(|m| m.owner == throwable && m.name == "addSuppressed")
+        else {
+            return unsupported(resource, "a try-with-resources without `addSuppressed`");
+        };
+        let throwable_ty = Type::class("java.lang.Throwable");
+        let failed = format!("{name}$failed");
+        let thrown = format!("{name}$thrown");
+        let suppressed = format!("{name}$suppressed");
+        let add_call = ExprKind::MethodCall {
+            receiver: Box::new(self.synth(ExprKind::Var(thrown.clone()), pos, throwable_ty)),
+            name: "addSuppressed".to_string(),
+            args: vec![self.synth(ExprKind::Var(suppressed.clone()), pos, throwable_ty)],
+            resolved: Some(add),
+            is_super: false,
+        };
+        let set_failed = ExprKind::Assign {
+            op: None,
+            target: Place::Var(failed.clone()),
+            value: Box::new(self.synth(ExprKind::Bool(true), pos, Type::Boolean)),
+        };
+        let suppress = Catch {
+            types: vec![throwable],
+            name: suppressed,
+            ty: throwable_ty,
+            body: vec![Stmt::Expr(self.synth(add_call, pos, Type::Void))],
+            pos,
+        };
+        let on_throw = vec![
+            Stmt::Expr(self.synth(set_failed, pos, Type::Void)),
+            Stmt::Try {
+                body: vec![self.close_stmt(&name, ty, pos, close)],
+                catches: vec![suppress],
+                finally: None,
+            },
+            Stmt::Throw(self.synth(ExprKind::Var(thrown.clone()), pos, throwable_ty)),
+        ];
+        let inner = Stmt::Try {
+            body,
+            catches: vec![Catch {
+                types: vec![throwable],
+                name: thrown,
+                ty: throwable_ty,
+                body: on_throw,
+                pos,
+            }],
+            finally: None,
+        };
+        let not_failed = ExprKind::Unary(
+            UnOp::Not,
+            Box::new(self.synth(ExprKind::Var(failed.clone()), pos, Type::Boolean)),
+        );
+        let close_unless_failed = Stmt::If {
+            cond: self.synth(not_failed, pos, Type::Boolean),
+            then: Box::new(Stmt::Block(vec![self.close_stmt(&name, ty, pos, close)])),
+            otherwise: None,
+        };
+        declared.push(Stmt::Local {
+            ty: Type::Boolean,
+            name: failed,
+            init: Some(self.synth(ExprKind::Bool(false), pos, Type::Boolean)),
+            pos,
+        });
+        declared.push(Stmt::Try {
+            body: vec![inner],
+            catches: Vec::new(),
+            finally: Some(vec![close_unless_failed]),
+        });
+        Ok(declared)
+    }
+
+    /// `name.close();` for the program's `close` method `close` of the resource's type `ty`.
+    fn close_stmt(&self, name: &str, ty: Type, pos: Pos, close: usize) -> Stmt {
+        let receiver = Box::new(self.synth(ExprKind::Var(name.to_string()), pos, ty));
         let call = ExprKind::MethodCall {
             receiver,
             name: "close".to_string(),
@@ -450,9 +558,7 @@ impl<'t> Lowering<'t> {
             resolved: Some(close),
             is_super: false,
         };
-        let close = Stmt::Expr(self.synth(call, pos, Type::Void));
-        declared.push(Stmt::Try { body, catches: Vec::new(), finally: Some(vec![close]) });
-        Ok(declared)
+        Stmt::Expr(self.synth(call, pos, Type::Void))
     }
 
     /// The program's `close()` of type `t`, declared there or inherited from a superclass.

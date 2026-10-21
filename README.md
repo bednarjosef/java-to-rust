@@ -222,13 +222,17 @@ A small subset, end to end:
   `finally` replaces how the `try` ended. A failure of the runtime that a `catch` or a `finally`
   sees (a division by zero, an array index out of bounds, `charAt` or `substring` out of range, a
   malformed number) is the standard exception Java throws, with Java's message; elsewhere it ends
-  the program as before. try-with-resources closes the program's own resources (a new object whose
-  `close` cannot fail) in the reverse order, before its `catch` clauses and `finally`. Rejected for
-  now, by name: other try-with-resources, catching or letting a `finally` see a null dereference, a
-  negative array size, a failed cast or a failure of the library other than these, a `toString`, a
-  field initializer or a constructor of an exception or an enum that throws something a caller
-  catches, throwing a value that may be null, and a `yield` or a constructor's `return` through a
-  `finally`. A constructor that throws returns a `Result`, as a method does. The design is in
+  the program as before. try-with-resources closes the program's own resources (a new object of
+  the program's class) in the reverse order, before its `catch` clauses and `finally`; a `close`
+  that throws after the body threw is added to that exception as suppressed, and `getSuppressed`
+  returns it. A `throw` of a value that may be null throws `NullPointerException`, and a `yield` or
+  a constructor's `return` through a `finally` runs the `finally` first. A static initializer or a
+  static field initializer that throws ends an uncaught program with
+  `ExceptionInInitializerError`. Rejected for now, by name: other try-with-resources, catching or
+  letting a `finally` see a null dereference, a negative array size, a failed cast or a failure of
+  the library other than these, a `toString`, an instance field initializer or a constructor of an
+  exception or an enum that throws something a caller catches, and a `try` or `catch` that observes
+  an `ExceptionInInitializerError`. A constructor that throws returns a `Result`, as a method does. The design is in
   [docs/exceptions.md](docs/exceptions.md).
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`), and so are
   `System.out.println(char[])` and `System.err.print`/`println`, which also print a `char[]`.
