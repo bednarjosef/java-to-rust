@@ -10,6 +10,20 @@ fn object_checked(object: &Expr) -> bool {
     matches!(object.ty, Type::Class(..))
 }
 
+/// Whether every object that a value of type `s` may be (`Facts::flows`, which decides the
+/// variants of its enum) is of a class under `t`, so that a cast of it to `t` cannot fail: the
+/// JDK's `((TreeMap<E,?>) m).keyIterator()` in `TreeMap.KeySet`, whose `m` is only ever a `TreeMap`
+/// where nothing makes a submap.
+fn only_under(class: &Class, facts: &Facts, s: usize, t: usize) -> bool {
+    facts.flows.get(s).is_some_and(|objects| {
+        class
+            .hierarchy
+            .concretes(s)
+            .into_iter()
+            .all(|c| !objects.contains(&c) || class.hierarchy.is_subtype(c, t))
+    })
+}
+
 /// Whether `builtin` is a regular expression call whose pattern (and replacement) are literals
 /// that compile, so that it never throws.
 fn constant_pattern(builtin: &Builtin, args: &[Expr]) -> bool {
@@ -456,6 +470,7 @@ pub(super) fn runtime_failures(
         && let (Some(t), Some(s)) = (class.class_index(*to), class.class_index(value.ty))
         && !class.hierarchy.is_subtype(s, t)
         && !instance(t, value)
+        && !only_under(class, facts, s, t)
     {
         out.push(("java.lang.ClassCastException", "this cast", true, x.id));
     }
