@@ -3155,6 +3155,24 @@ fn natives_of_jdk_classes_become_runtime_calls() {
 }
 
 #[test]
+fn natives_that_only_answer_a_value_cannot_fail_in_a_try() {
+    // A `catch` around them sees nothing they raise, as in `ImmutableCollections`'s static
+    // initializer, which reads the seed of CDS.
+    let rust = translate_with_natives(
+        "jdk-natives-caught",
+        "try {
+            System.out.println(CDS.getRandomSeedForDumping() + VM.getNanoTimeAdjustment(0));
+            System.out.println(System.nanoTime() > 0);
+        } catch (Throwable t) {
+            System.out.println(\"caught\");
+        }",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["java::cds_random_seed_for_dumping()"]);
+    assert_lacks(&rust, &["java::catching("]);
+}
+
+#[test]
 fn an_access_through_a_field_offset_is_the_field() {
     let rust = translate_with_natives(
         "jdk-field-handles",
