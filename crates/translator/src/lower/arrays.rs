@@ -148,13 +148,13 @@ impl<'t> Lowering<'t> {
         Ok(ExprKind::NewArray(vec![self.expr(length)?]))
     }
 
-    /// `String[] args` of `main`, which the program never gets from the command line: an empty
-    /// array, declared in the body in place of the parameter.
+    /// `String[] args` of `main`: the program's command-line arguments, declared in the body in
+    /// place of the parameter.
     pub(super) fn args_decl(&self, param: Node<'t>) -> Stmt {
         let ty = Type::array(Type::String);
         let id = self.next_id.get();
         self.next_id.set(id + 1);
-        let init = Expr { kind: ExprKind::ArrayLit(Vec::new()), pos: param.pos(), ty, id };
+        let init = Expr { kind: ExprKind::Builtin(Builtin::MainArgs, Vec::new()), pos: param.pos(), ty, id };
         Stmt::Local { ty, name: param.str("name").to_string(), init: Some(init), pos: param.pos() }
     }
 }

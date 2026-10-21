@@ -680,6 +680,9 @@ pub enum Builtin {
     Println,
     Print,
     Exit,
+    /// The `String[]` that `main` gets as `args`: the command-line arguments, each a new string.
+    /// Built fresh where it is read (`lower::arrays::args_decl`), so it is an owned array.
+    MainArgs,
     /// The body of an instance method of a class that has no objects (`Reach::dormant`): it never
     /// runs.
     NoObject {

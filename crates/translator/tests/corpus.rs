@@ -33,6 +33,8 @@ struct Program {
     java: PathBuf,
     /// For a project, the qualified name of its main class.
     main: Option<String>,
+    /// The command-line arguments both runs get: the lines of `Name.args` next to a single file.
+    args: Vec<String>,
 }
 
 #[derive(PartialEq)]
@@ -111,10 +113,18 @@ fn programs(root: &Path) -> Vec<Program> {
         for java in files {
             let stem = java.file_stem().unwrap().to_string_lossy().to_lowercase();
             let group = dir.file_name().unwrap().to_string_lossy().to_string();
-            out.push(Program { name: format!("{group}-{stem}"), java, main: None });
+            let args = read_args(&java);
+            out.push(Program { name: format!("{group}-{stem}"), java, main: None, args });
         }
     }
     out
+}
+
+/// The command-line arguments of a single file: one per line of the `.args` file next to it, if
+/// there is one.
+fn read_args(java: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(java.with_extension("args")) else { return Vec::new() };
+    text.lines().map(str::to_string).collect()
 }
 
 /// The multi-file programs: every directory of `projects/` with a source root `src/` laid out by
@@ -127,7 +137,7 @@ fn projects(root: &Path) -> Vec<Program> {
         .map(|dir| {
             let main = std::fs::read_to_string(dir.join("main")).unwrap().trim().to_string();
             let name = format!("projects-{}", dir.file_name().unwrap().to_string_lossy());
-            Program { name, java: dir.join("src"), main: Some(main) }
+            Program { name, java: dir.join("src"), main: Some(main), args: Vec::new() }
         })
         .collect()
 }
@@ -143,6 +153,7 @@ fn run_java(p: &Program, classes: &Path) -> Output {
     let Some(main) = &p.main else {
         return java()
             .arg(&p.java)
+            .args(&p.args)
             .output()
             .expect("running `java` failed; the corpus test needs a JDK on PATH");
     };
@@ -283,7 +294,7 @@ fn check(
         };
         return Err(Failure { summary: "does not compile".to_string(), details });
     };
-    let actual = run(Command::new(binary).output().unwrap());
+    let actual = run(Command::new(binary).args(&p.args).output().unwrap());
     if actual == *expected {
         return Ok(());
     }
