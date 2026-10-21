@@ -1036,6 +1036,63 @@ exceptions in threads printed through the `ThreadGroup` chain, `System.exit` fro
 0), `UncaughtInMainWithWorkers.java` (main throws while a worker still prints; exit 1 after the
 worker ends), `ExitFromWorker.java` (`System.exit(3)` from a thread), `InterruptedSleep.java`.
 
+### Monitors
+
+- **Always the fused form, on a reentrant lock.** The data lock of `java::Locked` is reentrant
+  (`RawLock`), so the reason for the separate form of 3.2 (a plain `Mutex` would deadlock on
+  reentry) is gone, and there is one form: an object's monitor is its data lock. No
+  `java::Monitor<C>`, `java::Monitored<C>` or `java::ReentrantMonitor`, and no family-wide
+  choice. `synchronized (x) { .. }` is `{ let _monitor = java::enter(&x); { .. } }`, a
+  synchronized method's body starts with `let _monitor = java::enter(this);`, and the field
+  borrows inside take the lock once more. The call site does not lock (`c.lock().increment()` of
+  3.2): a method that uses its object's monitor takes the handle (it joins `long_methods`), so a
+  synchronized method calling another, or `wait` inside one, holds no `Ref` across the call.
+  `wait` asserts that the thread holds no borrow of the object, which would let another thread
+  in while it lasts. A thread waiting for a lock held as a monitor is not watched by the
+  watchdog, since Java may hold a monitor across anything.
+- **Which monitors are kept** (`analysis/monitors.rs`) is decided per program, not per class as
+  in 3.1: in a program that waits, notifies or asks `holdsLock`, every monitor; otherwise those
+  of objects whose class threads may share (the type-based walk), and the class monitors in a
+  program with threads. The classes whose values may be a kept lock (through the flows computed
+  without the fields-struct methods, a superset) are neither immutable nor owned, so
+  `new Object()` as a lock is `Arc<java::Locked<PlainObject>>`, not the bare monitor of 2.6.
+  Elsewhere `synchronized` stays the null check, so a program without threads or `wait` is
+  byte-identical to before.
+- **A monitor of one thread's object** (an `Rc`, in a program that observes monitors) is a
+  thread-local list of the addresses the thread has entered: `holdsLock` and the
+  `IllegalMonitorStateException` of `wait` and `notify` answer from it, `notify` wakes nobody,
+  and `wait` lasts its timeout, or for ever without one, as in Java where no other thread can
+  reach the object. No `java::check_owner` was needed: the runtime checks ownership in every
+  `wait` and `notify`.
+- **The wait set** is one entry per waiting thread in the lock's parking bucket: `notify` marks
+  the one that has waited longest (HotSpot's order), `notifyAll` all of them, and a timed-out
+  waiter removes its own entry, so a later waiter cannot take a notification meant for an
+  earlier one. No spurious wakeups are produced. Nothing interrupts a thread yet, so `wait`
+  never throws `InterruptedException`; `InterruptWait.java` waits for the interrupt step, and
+  `wait(millis, nanos)` is rejected.
+- **Class monitors** are statics of the translation, `static C__MONITOR: java::Locked<()>`,
+  entered with `java::enter_class(&C__MONITOR)` by static synchronized methods and
+  `synchronized (C.class)`. `synchronized (o.getClass())` is rejected where it would be kept.
+- **Rejected where the monitor would be kept**: `synchronized` on a string, a box, an array, a
+  `StringBuilder` or a Java enum's constant (values, or `Rc`s without a lock), and `wait`,
+  `notify` or `holdsLock` on them anywhere. `synchronized (this)` in a constructor keeps no
+  monitor: no other thread has the object yet.
+- **A lock read through another object** is taken out of it before the thread waits for its
+  monitor (`java::enter(&{ this.borrow().lock.clone() })`), so that the thread does not hold the
+  first object's data lock while it waits; the same holds for `wait` and `notify`.
+- **Found on the way**: a conditional expression's condition with two shared objects
+  (`a.number < b.number ? a : b`) held both data locks at once, and two threads could wait for
+  each other there; in a threaded program such a condition is now guarded like a statement. A
+  static field of reference type initialized eagerly in a threaded program is stored with
+  `java::Locked::set`, which the runtime lacked.
+- **Corpus**: `corpus/threads/` holds `SynchronizedCounter`, `ProducerConsumer`,
+  `ReentrantSynchronized`, `StaticSynchronized`, `WaitTimeout`, `LockObject`, and, instead of
+  `programs/BankTransfersThreaded.java` and `programs/DiningPhilosophers.java`, `BankTransfers`
+  and `DiningPhilosophers` there with the other thread programs; plus `SynchronizedSubclasses`
+  (inherited synchronized methods through a variable of the base type), `ExceptionInSynchronized`
+  (an exception leaving a region exits the monitor) and `MonitorsOneThread` (the monitors of one
+  thread).
+
 ### Volatile fields and the atomic natives
 
 Needs the object model's erased generics (its fifth milestone, for `AtomicReference<V>` and the collections)
@@ -1189,7 +1246,7 @@ Decisions that change during the implementation are recorded here, milestone by 
 
 ### Threads by subclassing `Thread`
 
-- **`Thread` is smaller than 5.1**: no `ThreadGroup`, interrupts, state, handlers, `holdsLock`,
+- **`Thread` is smaller than 5.1**: no `ThreadGroup`, interrupts, state, handlers,
   `ThreadLocal` or `Duration` sleep yet; each lands with the milestone that needs it. `join` is
   the native `join0` on the runtime's record (a condvar on its alive flag), not `while
   (isAlive()) wait()`, because monitors come later. `start` passes the new thread the `Thread`
@@ -1220,13 +1277,16 @@ Decisions that change during the implementation are recorded here, milestone by 
   mutable (`codegen/objects.rs`, `conflicts`), with a blocking native counting as one, so
   `java::join_thread(self.base().tid, 0)` reads the id in its own block first: the lock is never
   held while the thread waits for another.
-- **`synchronized` is still the null check** until monitors land, as the milestone says: correct
-  for programs whose shared state one thread writes and another reads after `join`.
 - **Not yet shared**: a `StringBuilder` or a box compared by identity (both `Rc`s) in a static or
   in a field of a shared class is rejected (`analysis/threads.rs`, `check`) until the escape
   milestone gives them shared forms. The closure does not follow the type arguments of a generic
   class yet; a program that needs it fails in rustc with `Rc<..> cannot be sent between threads
   safely` (4.4).
+- **A closure type that threads may share** (a functional interface whose values are only
+  lambdas, `docs/closures-and-nested-classes.md` 4.2, reached through a capture, a field or a
+  static) is `Arc<dyn Fn(..) -> R + Send + Sync>` and its lambdas `Arc::new(move |..| ..)`; the
+  closure's captures are of shared types by the same type-based walk, so the closure is `Send`
+  and `Sync`. A closure type no thread reaches keeps its `Rc<dyn Fn>`, also in a threaded program.
 - **A `volatile` static is an ordinary `java::Atomic`** (acquire and release) until the volatile
   milestone gives it `SeqCst`; a `volatile` field of a shared object is read and written under
   the object's lock.

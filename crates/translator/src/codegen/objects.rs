@@ -316,7 +316,7 @@ fn changes_object(e: &Expr, object: &Expr, mutating: &HashSet<usize>) -> bool {
 }
 
 /// Whether an expression reads a static field.
-fn reads_static(e: &Expr) -> bool {
+pub(super) fn reads_static(e: &Expr) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::Static { .. }));
     found
@@ -525,7 +525,10 @@ impl<'a> Gen<'a> {
             ExprKind::Cast(Type::Class(to, _), inner) if matches!(inner.ty, Type::Class(..)) => {
                 let same = match (self.class.type_index(to), self.class.class_index(inner.ty)) {
                     // A lambda converted to a closure type becomes the closure there.
-                    (Some(a), _) if self.facts.closure_types.contains(&a) => false,
+                    // A closure is one of the closure type its interface extends too.
+                    (Some(a), b) if self.facts.closure_types.contains(&a) => {
+                        b.is_some_and(|b| self.facts.closure_types.contains(&b))
+                    }
                     (Some(a), Some(b)) => self.rep_class(a) == self.rep_class(b),
                     _ => false,
                 };
@@ -938,7 +941,9 @@ impl<'a> Gen<'a> {
             | ExprKind::SuperInit { resolved: Some(index), .. } => call(*index, None),
             // A native that waits counts as a borrow: no lock may be held across it.
             ExprKind::Builtin(
-                Builtin::Native(Native::Sleep { .. } | Native::ThreadJoin | Native::ThreadStart),
+                Builtin::Native(
+                    Native::Sleep { .. } | Native::ThreadJoin | Native::ThreadStart | Native::MonitorWait,
+                ),
                 _,
             ) => (1, 0),
             _ => (0, 0),
@@ -1734,15 +1739,19 @@ impl<'a> Gen<'a> {
         let plain = self.builds_plain(name);
         let by_value = plain || self.facts.immutable.contains(name);
         self.this_form = if plain { ThisForm::SelfRef } else { ThisForm::Shared };
+        // An initializer that raises makes the function return a `Result`, as a method does.
+        let throws = self.inits_throw(index);
+        let outer_throwing = std::mem::replace(&mut self.throwing, throws);
+        let ret = if throws { format!(" -> Result<(), {}>", self.throwable_type()) } else { String::new() };
         self.gap();
         if plain {
-            self.line("fn field_inits(&mut self) {");
+            self.line(&format!("fn field_inits(&mut self){ret} {{"));
         } else if by_value {
-            self.line(&format!("fn field_inits(this: &mut {}) {{", self.generic_struct(index)));
+            self.line(&format!("fn field_inits(this: &mut {}){ret} {{", self.generic_struct(index)));
         } else {
             let (pointer, cell) = (self.pointer(index), self.cell(index));
             self.line(&format!(
-                "fn field_inits(this: &{pointer}<{cell}<{}>>) {{",
+                "fn field_inits(this: &{pointer}<{cell}<{}>>){ret} {{",
                 self.generic_struct(index)
             ));
         }
@@ -1760,6 +1769,11 @@ impl<'a> Gen<'a> {
                 self.line(&format!("this.borrow_mut().{field} = {value};"));
             }
         }
+        if throws {
+            let ok = self.ok("()".to_string());
+            self.line(&ok);
+        }
+        self.throwing = outer_throwing;
         self.indent -= 1;
         self.line("}");
     }
@@ -1817,7 +1831,9 @@ impl<'a> Gen<'a> {
             self.line(&format!("let this = {this};"));
         }
         if initialize {
-            self.line(&format!("{}::field_inits(this);", self.struct_of(m.class)));
+            let name = self.struct_of(m.class);
+            let call = self.run_inits(m.class, format!("{name}::field_inits(this)"));
+            self.line(&call);
         }
         let result = match () {
             _ if !immutable => "obj",

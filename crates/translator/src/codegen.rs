@@ -23,6 +23,7 @@ mod dispatch;
 mod enums;
 mod exceptions;
 mod expr;
+mod field_inits;
 mod files;
 mod idiomatic;
 mod math;
@@ -139,6 +140,8 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         attempt_count: 0,
         try_assigned: HashSet::new(),
         dereferenced: HashSet::new(),
+        checked_cast: None,
+        catching_now: HashSet::new(),
         written: HashSet::new(),
         rejected: None,
         chains: chains::Chains::default(),
@@ -147,6 +150,8 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
     if modules.is_some() {
         let text = g.program(&live);
         g.check_dereferences();
+        g.check_casts();
+        g.check_catching();
         return (text, g.needs.take(), g.rejected);
     }
     for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
@@ -162,6 +167,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         g.enum_items(index);
     }
     g.statics();
+    g.class_monitors();
     for i in 0..class.methods.len() {
         if g.emitted_free(i) {
             g.gap();
@@ -169,6 +175,8 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         }
     }
     g.check_dereferences();
+    g.check_casts();
+    g.check_catching();
     let mut header = format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name);
     let uses = modules::use_lines(&g.out);
     if !uses.is_empty() {
@@ -313,8 +321,13 @@ struct Gen<'a> {
     /// The current method's locals declared without a value that a `try` block assigns (see
     /// `exceptions::try_assigned`).
     try_assigned: HashSet<String>,
-    /// The objects of `Facts::null_checked` whose checked dereference has been written.
+    /// The objects of `Facts::null_checked` whose checked dereference has been written, and the
+    /// casts of `Facts::raising` whose checked form has.
     dereferenced: HashSet<ExprId>,
+    /// The cast of `Facts::raising` that `class_cast` is writing, in the checked form.
+    checked_cast: Option<ExprId>,
+    /// The operations of `Facts::catching` being written inside `java::catching`.
+    catching_now: HashSet<ExprId>,
     /// The methods whose bodies have been written. A body that is not, as no call needs it or
     /// it never runs, dereferences nothing.
     written: HashSet<usize>,
@@ -536,22 +549,28 @@ impl<'a> Gen<'a> {
         }
         self.indent += 1;
         if m.name == "<clinit>" {
-            self.init_guard(name);
+            // A rewritten `<clinit>` keeps its own state, which is its guard (`lower/clinit_errors.rs`).
+            if !crate::lower::rewritten_clinit(&self.class.types[m.class]) {
+                self.init_guard(name);
+            }
             // Java initializes the superclass first.
             let superclass = self.class.hierarchy.superclass(m.class);
             if let Some(s) = superclass.and_then(|s| self.facts.init_class(self.class, s)) {
-                self.line(&format!("{}();", statics::init_name(&self.class.types[s].name)));
+                let call = self.init_run(s);
+                self.line(&format!("{call};"));
             }
         } else if self.facts.entry_init.contains(&index)
             && let Some(t) = self.facts.init_class(self.class, m.class)
         {
-            self.line(&format!("{}();", statics::init_name(&self.class.types[t].name)));
+            let call = self.init_run(t);
+            self.line(&format!("{call};"));
         }
         // The program ends when its last thread does, not when `main` returns.
         if m.is_main && self.facts.threaded {
             let guard = self.runtime("main_thread");
             self.line(&format!("let _main = {guard}();"));
         }
+        self.method_monitor(index);
         let initializes = m.name == "<clinit>" && self.facts.threaded;
         if !never_runs {
             self.written.insert(index);

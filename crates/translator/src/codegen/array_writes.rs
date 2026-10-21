@@ -21,7 +21,7 @@ impl<'a> Gen<'a> {
         let place = self.object_place(array);
         let binding = format!("let {name} = {place}.clone();");
         let handle = if self.nullable(array) {
-            format!("{}({name}.as_ref())", self.runtime("non_null"))
+            self.dereference(&[array.id], &format!("{name}.as_ref()"))
         } else {
             format!("&{name}")
         };

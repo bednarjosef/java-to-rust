@@ -16,12 +16,15 @@ mod generics;
 mod handles;
 mod hierarchy;
 mod lambdas;
+mod local_names;
 mod object;
 mod object_clone;
 mod objects;
 mod real_generics;
 mod statics;
 mod strings;
+mod stubs;
+mod suppress;
 mod unsigned;
 
 use crate::ast::*;
@@ -31,9 +34,11 @@ use std::cell::{Cell, RefCell};
 
 mod arrays;
 mod boxing;
+mod by_name;
 mod captures;
 mod charsets;
 mod classes;
+mod clinit_errors;
 mod constant_bodies;
 mod initializers;
 mod inner;
@@ -50,6 +55,7 @@ mod system;
 mod varargs;
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
+pub(crate) use clinit_errors::rewritten_clinit;
 pub use exceptions::{is_standard, standard_names, standard_subclass};
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
@@ -84,6 +90,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
         let mut methods: Vec<Method> =
             (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
+        lowering.suppress_checks(&mut methods);
         lowering.object_methods(&mut methods)?;
         lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
         lowering.object_types(&mut types);
@@ -247,7 +254,9 @@ impl<'t> Lowering<'t> {
     /// bodies and constants. An error comes with the index of the type it is in.
     fn finish_types(&self, types: &mut [TypeDecl], methods: &mut Vec<Method>) -> Result<(), (usize, Error)> {
         for index in (0..types.len()).filter(|&t| self.has_static_init(t)) {
-            methods.push(self.clinit(index).map_err(|e| (index, e))?);
+            let mut clinit = self.clinit(index).map_err(|e| (index, e))?;
+            self.guard_clinit(index, &mut clinit, &mut types[index], methods.as_slice());
+            methods.push(clinit);
         }
         for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
             let in_type = |e| (index, e);
@@ -279,7 +288,9 @@ impl<'t> Lowering<'t> {
         let outer = self.method_ctx.replace(Some(index));
         let method = self.method_in_scope(index);
         self.method_ctx.set(outer);
-        method
+        let mut method = method?;
+        local_names::distinct_locals(&mut method);
+        Ok(method)
     }
 
     fn method_in_scope(&self, index: usize) -> Result<Method, Error> {
@@ -357,6 +368,7 @@ impl<'t> Lowering<'t> {
             class: info.owner,
             pos: node.pos(),
             is_abstract,
+            is_synchronized: node.has_flag("SYNCHRONIZED"),
             overrides: self.overrides(node),
             type_params: self.method_type_params(index),
         })
@@ -590,6 +602,10 @@ impl<'t> Lowering<'t> {
                     value: Box::new(value),
                 }
             }
+            "TYPE_CAST" if let Some(name) = crate::program::created_by_name(node.0) => {
+                self.created_by_name(node, Node(name))?
+            }
+            "TYPE_CAST" if arrays::casts_component_array(node) => self.component_array(node)?,
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
                 let value = self.expr(node.child("expression")?)?;
@@ -602,10 +618,10 @@ impl<'t> Lowering<'t> {
                 }
                 // A cast between the program's types, up, down or across: `Cast` converts as the
                 // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
-                // `Integer` and unboxes. `(C) super.clone()` is already a `C`: the copy has the
-                // node's type, so the cast is the copy itself.
-                if matches!(value.kind, ExprKind::Builtin(Builtin::ObjectClone, _)) {
-                    value.kind
+                // `Integer` and unboxes. `(C) super.clone()` in `C` is the copy itself, which has
+                // `C`'s type: it is not converted to `Object` and back.
+                if Self::is_clone(&value) {
+                    self.cast_clone(value, ty)
                 } else if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
                     let boxed = self.synth(
                         ExprKind::Cast(Type::boxed(ty), Box::new(value)),
@@ -766,6 +782,9 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ThisCall { args, resolved });
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        if let Some(kind) = self.monitor_call(node, &symbol, receiver, &mut args)? {
+            return Ok(kind);
+        }
         if symbol.owner == "java.lang.Object" && symbol.name == "clone" {
             return self.object_clone(node, receiver);
         }

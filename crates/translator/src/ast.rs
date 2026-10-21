@@ -317,6 +317,9 @@ pub fn runtime_values() -> [(&'static str, Type); 9] {
     ]
 }
 
+/// The runtime class of the `StringBuilder`s that become `Object`s.
+pub const STRING_BUILDER: &str = "java.lang.StringBuilder";
+
 /// The runtime class whose values are of type `ty`, a primitive standing for its box.
 pub fn runtime_name(ty: Type) -> Option<&'static str> {
     let ty = if ty.is_numeric() || ty == Type::Boolean { Type::boxed(ty) } else { ty };
@@ -358,6 +361,9 @@ pub struct TypeDecl {
     /// class.
     pub captures: Vec<Capture>,
     pub origin: Origin,
+    /// The class or a superclass implements `Cloneable`, directly or through an interface, so
+    /// that `Object`'s `clone` copies its objects rather than throwing.
+    pub cloneable: bool,
 }
 
 /// A local variable that a local or anonymous class captures.
@@ -437,6 +443,9 @@ pub struct Method {
     pub pos: Pos,
     /// A method without a body: abstract, or an interface method that is not a default method.
     pub is_abstract: bool,
+    /// A `synchronized` method, which holds the monitor of its object, or of its class when
+    /// static, for the call.
+    pub is_synchronized: bool,
     /// The methods of the program that this one overrides, as javac lists them (indexes into
     /// `Class::methods`).
     pub overrides: Vec<usize>,
@@ -676,8 +685,14 @@ pub enum Builtin {
     NoObject {
         class: usize,
     },
-    /// Evaluates the lock of a `synchronized` block and throws if it is null; the value is dropped.
-    NullCheck,
+    /// The default of a creation from a class name (`lower::by_name`): the name, its argument,
+    /// is of no class of the translated program, and the program ends with a
+    /// `ClassNotFoundException` that nothing catches.
+    UnknownClass,
+    /// The lock of a `synchronized` block, the statement before the block: evaluated, and a
+    /// `NullPointerException` when it is null. Where the program can tell (`codegen::sync`), the
+    /// block holds the lock's monitor.
+    MonitorEnter,
     MathAbs,
     MathMax,
     MathMin,
@@ -996,6 +1011,7 @@ pub fn has_effects(e: &Expr) -> bool {
                         | Builtin::Println
                         | Builtin::Exit
                         | Builtin::NoObject { .. }
+                        | Builtin::UnknownClass
                         | Builtin::Native(_),
                     _
                 )

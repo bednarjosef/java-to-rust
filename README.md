@@ -139,14 +139,18 @@ A small subset, end to end:
 - **Classes**: static and instance methods, overloading, varargs, fields with initializers,
   instance initializer blocks, static fields, constructors (including `this(...)`), `new`,
   object-typed fields and `null` objects, and a user `toString` in `println` and concatenation.
-  `synchronized (x)` checks `x` for null and runs the block; it does not lock yet (see "Threads").
+  `synchronized (x)` checks `x` for null and runs the block, holding `x`'s monitor where the
+  program can tell (see "Threads").
   An override may return a subtype of the overridden method's return type (a
   covariant return): the override's value is converted to the overridden method's representation,
-  so a caller that goes through the supertype sees the same value as Java's. In a class that
-  implements `Cloneable` with no superclass and no subclasses, `super.clone()` (or `clone()` with no
-  receiver) is a shallow copy of the fields: primitives and strings by value, arrays and object
-  references shared, as Java shares them. `clone` of another object, or in a class with a superclass
-  or a subclass, is rejected.
+  so a caller that goes through the supertype sees the same value as Java's. `super.clone()` (or
+  `clone()` with no receiver) of `Object` is a shallow copy of the object's runtime class: its
+  fields and its superclasses' (the `base` structs), primitives and strings by value, arrays and
+  object references shared, as Java shares them. In a class with subclasses it is a `match` on the
+  object's variant, so the copy of a subclass's object is one of the subclass, as `EnumSet.clone`
+  copies a `RegularEnumSet`. A class that is not `Cloneable` (itself, a superclass or an interface)
+  throws `CloneNotSupportedException` with its binary name, which the program can catch. `clone`
+  of another object than `this` is rejected.
 - **Class trees, interfaces and generics**: class trees of the program's own classes translate,
   abstract or not and of any depth: `extends`, abstract methods, overriding and virtual calls,
   `super(...)` and `super.m(...)`, upcasts, `==` on objects of a class tree, and printing through
@@ -234,20 +238,23 @@ A small subset, end to end:
   `break` or `continue` out of the `try`, through nested `try`s; a `return` or an exception in the
   `finally` replaces how the `try` ended. A failure of the runtime that a `catch` or a `finally`
   sees (a division by zero, an array index out of bounds, `charAt` or `substring` out of range, a
-  malformed number) is the standard exception Java throws, with Java's message; elsewhere it ends
-  the program as before. try-with-resources closes the program's own resources (a new object of
-  the program's class, or an existing variable of it, `try (r)`; a null one is not closed) in the
-  reverse order, before its `catch` clauses and `finally`; a `close`
-  that throws after the body threw is added to that exception as suppressed, and `getSuppressed`
-  returns it. A `throw` of a value that may be null throws `NullPointerException`, and a `yield` or
-  a constructor's `return` through a `finally` runs the `finally` first. A static initializer or a
-  static field initializer that throws ends an uncaught program with
-  `ExceptionInInitializerError`. Rejected for now, by name: try-with-resources over a library type
-  (an `AutoCloseable` variable or lambda), catching or
-  letting a `finally` see a null dereference, a negative array size, a failed cast or a failure of
-  the library other than these, a `toString`, an instance field initializer or a constructor of an
-  exception or an enum that throws something a caller catches, and a `try` or `catch` that observes
-  an `ExceptionInInitializerError`. A constructor that throws returns a `Result`, as a method does. The design is in
+  malformed or `null` number string) is the standard exception Java throws, with Java's message;
+  elsewhere it ends the program as before. try-with-resources closes the program's own resources
+  (a new object of the program's class, or an existing variable of it, `try (r)`; a null one is not
+  closed) in the reverse order, before its `catch` clauses and `finally`; a `close` that throws
+  after the body threw is added to that exception as suppressed, and `getSuppressed` returns it;
+  `addSuppressed` of the exception itself or of `null` throws Java's `IllegalArgumentException` or
+  `NullPointerException`. A `throw` of a value that may be null throws
+  `NullPointerException`, and a `yield` or a constructor's `return` through a `finally` runs the
+  `finally` first. A static initializer or a static field initializer that throws ends an uncaught
+  program with `ExceptionInInitializerError`; where a `catch` of it, of `Error` or of `Throwable`
+  observes it, the first use throws it and every later use throws `NoClassDefFoundError`. A
+  constructor or an instance field initializer that throws returns a `Result`, as a method does.
+  Rejected for now, by name: try-with-resources over a library type (an `AutoCloseable` variable or
+  lambda), catching or letting a `finally` see a null dereference, a negative array size, a failed
+  cast or a failure of the library other than these, a `toString`, a constructor of an exception or
+  an enum that throws something a caller catches, and a `finally` that sees a static initializer's
+  failure in a program that catches none of those classes. The design is in
   [docs/exceptions.md](docs/exceptions.md).
 - **Threads** are the platform's: a class that extends `Thread` and overrides `run`, or a
   `Thread` given a `Runnable` (a class or a lambda), with `start`, `join` (with and without a
@@ -262,10 +269,16 @@ A small subset, end to end:
   immutable, and every other class keeps `Rc<RefCell<C>>`; arrays are `java::SharedArray<T>`; and
   statics are process-wide (`java::Atomic<T>` for primitives, `java::Locked<T>` otherwise, and a
   `java::ClassInit` that runs a class's initializer once). A program without threads translates
-  exactly as before. `synchronized` does not lock yet, and a `volatile` static is read with
-  acquire and written with release, as every static is. Monitors, interrupts, sequentially
-  consistent `volatile`, the atomics and `java.util.concurrent` are next; the design is in
-  [docs/multi-threading.md](docs/multi-threading.md).
+  exactly as before. Monitors are Java's: synchronized methods (static ones on the class's
+  monitor), `synchronized` blocks (on objects and on class literals), `wait` with and without a
+  timeout, `notify`, `notifyAll` and `Thread.holdsLock`, with `IllegalMonitorStateException`. The
+  monitor of a shared object is the reentrant lock of its `java::Locked`
+  (`let _monitor = java::enter(this);`), held for the region and released however it ends; in a
+  program that waits, notifies or asks `holdsLock`, the monitor of an object of one thread is a
+  record of the objects the thread holds; elsewhere `synchronized` is the null check it was. A
+  `volatile` static is read with acquire and written with release, as every static is.
+  Interrupts, sequentially consistent `volatile`, the atomics and `java.util.concurrent` are
+  next; the design is in [docs/multi-threading.md](docs/multi-threading.md).
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`), and so are
   `System.out.println(char[])` and `System.err.print`/`println`, which also print a `char[]`.
   `System.err` is written as it is, after `System.out` is flushed, so the two stay in order.
@@ -329,7 +342,9 @@ The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`,
 `java::StringBuilder`, a shared handle to UTF-16 units like an array: every variable, field and
 parameter that holds the builder sees it change, `reverse` keeps surrogate pairs in order, and a
 chain is Rust's chain (`sb.append_str("a").append(1)`), the handle cloned only where the builder
-is used as a value.
+is used as a value. A builder held as an `Object` (from a `Supplier<StringBuilder>`, in a
+collection) is the same handle in `Object`'s `StringBuilder` variant: `==`, `equals` and
+`hashCode` are its identity's, and it prints as its text.
 
 `split`, `replaceAll`, `replaceFirst` and `matches` run a small backtracking regular expression
 engine with a literal fast path: literals and escapes, `.`, `\d \s \w` and their negations, sets
@@ -447,7 +462,9 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   arrays of primitive or `String` rows. `a.clone()` is a shallow copy; rows of a 2-D array are
   shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`.
   `copyOf` works on any array, and `copyOf(a, n, type)` and `copyOfRange(a, from, to, type)` are
-  the same copies as without the class, which is dropped.
+  the same copies as without the class, which is dropped (a class literal, a `getClass()` or a
+  variable holding a class). `(T[]) Array.newInstance(a.getClass().getComponentType(), n)`, as
+  the JDK's `toArray(T[])` and sorts write it, is a new array of `n` nulls of `a`'s type.
   Translated with the JDK's sources, every other call of `Arrays` (a sort with a `Comparator`, a
   sort of objects, `asList`) is a call of the translated `java/util/Arrays.java`, and
   reachability follows only those (`lower::runtime_arrays_call`). Not yet without the JDK:
@@ -520,8 +537,13 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   of its interface's enum, or a subclass whose constructor passes the arguments of its `new` to
   the superclass's and its captures after them (`ReportInMain::new("squares", &sep)`); its
   `getName` is javac's (`Main$1`) and its `getSimpleName` empty. Local interfaces, enums and
-  records and member classes of local and anonymous classes translate, as do `Outer.super.m()`
-  and `outer.super()`. Not yet: an inner class extending one nested in another class.
+  records and member classes of local and anonymous classes translate, as do `Outer.super.m()`,
+  `outer.super()` and `o.new Inner() { .. }`. A class extending an inner class nested in
+  another class (an inner class of an inner class, of a subclass of the outer class or of an
+  unrelated class, a local or anonymous class in an inner class's method) holds its own
+  enclosing instance as `outer_` next to the superclass's `outer` in `base`; the JDK's
+  `AbstractList.ListItr extends Itr` translates. Not yet: an inner class with subclasses whose
+  constructor uses `this` as a value or calls an overridable method.
 - For-each over an `Iterable` (`lower/foreach.rs`) is the loop Java runs: `let it =
   Names::iterator(&names); while it.borrow().has_next() { let s = it.borrow_mut().next(); .. }`,
   with the program's or the JDK's `iterator`, `hasNext` and `next`, so a translated iterator
@@ -552,12 +574,15 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   generic one takes and returns the erased types (`type Function = Rc<dyn Fn(Object) ->
   Object>;`), the lambda's body after its bridge's casts of the arguments. Its default methods
   are an extension trait of the closure type (`trait PredicateMethods`, `impl PredicateMethods
-  for Predicate`, `self` the closure), so `empty.negate().and(longer)` reads as in Java. Each lambda is a closure written where it is created, its captures moved in
-  (`Rc::new(move |a: i32, b: i32| -> i32 { a.wrapping_add(b).wrapping_add(k) }) as IntOp`, `this`
-  as `outer`), and a call is a call of the closure (`op(acc, x)`). Every other functional
-  interface keeps the class per lambda. Not yet: other receivers, `super` in a lambda,
-  interfaces that extend another (`UnaryOperator`) as closure types, typed closures for a generic interface's instantiations, and the parameter and
-  local forms (`impl FnMut`, a plain `let f = |x| ..`).
+  for Predicate`, `self` the closure), so `empty.negate().and(longer)` reads as in Java, and an
+  interface that extends another names its closures (`type UnaryOperator = Function;`). Each
+  lambda is a closure written where it is created, its captures moved in (`Rc::new(move |a:
+  i32, b: i32| -> i32 { a.wrapping_add(b).wrapping_add(k) }) as IntOp`, `this` as `outer`), and
+  a call is a call of the closure (`op(acc, x)`). A local that only calls its lambda is the
+  closure itself, borrowing what it captures (`let scale = |x: i32| -> i32 {
+  x.wrapping_mul(this.borrow().factor) };`). Every other functional interface keeps the class
+  per lambda. Not yet: other receivers, `super` in a lambda, typed closures for a generic
+  interface's instantiations, and the parameter form (`impl FnMut`).
 
 ### Whole programs
 
@@ -614,7 +639,9 @@ The native layer, the JDK methods that bottom out in the JVM, is hand-written in
 (`lower/natives.rs`): `System.arraycopy` (between shared or plain arrays of the same element type,
 overlap as through a temporary, bounds checked first; between arrays of different reference types,
 such as a `String[]` and an `Object[]`, it is rejected, because the two are different Rust types and
-the copy would need the element type at run time to throw `ArrayStoreException`), the `Double` and `Float` bit conversions, `Math` and
+the copy would need the element type at run time to throw `ArrayStoreException`; between arrays
+held as `Object`s it copies when both are arrays of one type and throws `ArrayStoreException`
+otherwise), the `Double` and `Float` bit conversions, `Math` and
 `StrictMath`, `System.identityHashCode` and an inherited `hashCode()` (derived from the object's
 address: stable for the object's life, but like Java's different on every run), the clocks,
 `availableProcessors`, the line separator, `System.err` and `System.out.write`/`flush`.
@@ -662,9 +689,10 @@ Each construct below is rejected at translation with an error that names it:
   interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
-- of threads: `wait`/`notify`, `interrupt`, thread groups, uncaught exception handlers,
+- of threads: `interrupt`, `wait(millis, nanos)`, thread groups, uncaught exception handlers,
   `ThreadLocal` and the `java.util.concurrent` classes; a `StringBuilder`, or a box compared by
-  identity, that threads may share.
+  identity, that threads may share; `synchronized` on a string, a box, an array, an enum
+  constant or a `Class` other than a class literal, where the monitor would be kept.
 
 Also rejected: `Charset.aliases()`, `null` as a `Charset` (and a `Charset` field or array element
 that starts out null), catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and

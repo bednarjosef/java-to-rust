@@ -121,10 +121,11 @@ impl<'a> Gen<'a> {
     }
 
     /// A possibly-null string as a `&str` that a method is called on: null throws
-    /// `NullPointerException`.
+    /// `NullPointerException` (in the checked form where a `catch` or a `finally` sees it, see
+    /// `dereference`).
     pub(super) fn deref(&mut self, e: &'a Expr) -> String {
         let option = self.option_ref(e);
-        format!("{}({option})", self.runtime("non_null"))
+        self.dereference(&[e.id], &option)
     }
 
     /// `x == null` and `x != null` for a string.
@@ -156,8 +157,17 @@ impl<'a> Gen<'a> {
         } else if matches!(other.kind, ExprKind::Var(_) | ExprKind::Str(_)) {
             Code::atom("false")
         } else {
-            let code = self.expr(other);
-            Code::new(format!("{{ {}; false }}", code.text), ATOM)
+            // Only the operand's effects are kept: an assignment is made as a statement, as its
+            // value (the variable, moved out) is not needed.
+            let effect = match &other.kind {
+                ExprKind::Assign { op, target: Place::Var(target), value }
+                    if self.plain(target).is_none() =>
+                {
+                    self.assignment(*op, target, other.ty, value, other.id)
+                }
+                _ => self.expr(other).text,
+            };
+            Code::new(format!("{{ {effect}; false }}"), ATOM)
         };
         if matches!(op, BinOp::Ne) { Code::new(format!("!{}", is_null.at(UNARY)), UNARY) } else { is_null }
     }
@@ -169,11 +179,11 @@ impl<'a> Gen<'a> {
         // Java evaluates the argument before the call throws on a null receiver.
         if self.nullable(&args[0]) && has_effects(&args[1]) {
             let receiver = self.option_ref(&args[0]);
-            let non_null = self.runtime("non_null");
+            let checked = self.dereference(&[args[0].id], "receiver_");
             let (other, test) = if self.nullable(&args[1]) {
-                (self.option_ref(&args[1]), format!("other_ == Some({non_null}(receiver_))"))
+                (self.option_ref(&args[1]), format!("other_ == Some({checked})"))
             } else {
-                (self.value(&args[1], Type::String).text, format!("{non_null}(receiver_) == other_"))
+                (self.value(&args[1], Type::String).text, format!("{checked} == other_"))
             };
             return Code::new(
                 format!("match ({receiver}, {other}) {{ (receiver_, other_) => {test} }}"),
@@ -503,7 +513,13 @@ impl<'a> Gen<'a> {
             {
                 let source = self.pattern_source(value, ty);
                 let rest = self.and_chain(&parts[k + 1..]);
-                texts.push(format!("{source}.is_some_and(|{}| {rest})", self.local(name)));
+                let name = self.local(name);
+                // A failure that goes on from the rest (`?`, `or_break!`) cannot leave a closure.
+                texts.push(if rest.contains('?') || rest.contains("or_break!") {
+                    format!("match {source} {{ Some({name}) => {rest}, None => false }}")
+                } else {
+                    format!("{source}.is_some_and(|{name}| {rest})")
+                });
                 break;
             }
             texts.push(self.expr(part).at(AND + 1));

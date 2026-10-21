@@ -127,6 +127,24 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// A call of static method `index`. When it lends a shared array through a `RefCell` borrow,
+    /// the borrow is a temporary that would live to the end of the statement, past the call, so a
+    /// call with a result binds it in a block of its own: what the statement does with the result
+    /// may borrow the same array again.
+    pub(super) fn static_call(&mut self, index: usize, args: &'a [Expr]) -> Code {
+        let lends = args.iter().enumerate().any(|(i, a)| {
+            self.facts.borrowed_arrays.contains_key(&(index, i))
+                && matches!(&a.kind, ExprKind::Var(name)
+                    if self.plain(name).is_none() && !self.is_borrowed(&self.local(name)))
+        });
+        let args = self.call_args(index, args).join(", ");
+        let call = format!("{}({args})", self.static_fn(index));
+        if lends && self.class.methods[index].ret != Type::Void {
+            return Code::atom(format!("{{ let value = {call}; value }}"));
+        }
+        Code::atom(call)
+    }
+
     /// Whether the Rust name `a` is a borrowed array parameter of the current method or the
     /// variable of a for-each over the rows of a plain array or a slice of a sliced loop: already
     /// a reference, so it is passed on as it is.
@@ -245,6 +263,11 @@ impl<'a> Gen<'a> {
     /// An array that nobody else holds, as a plain `Vec`: a new array, a literal, the result of a
     /// method that returns its own arrays, or a plain local moved out of its variable.
     pub(super) fn owned(&mut self, e: &'a Expr) -> String {
+        if self.facts.catching.contains_key(&e.id) && self.catching_now.insert(e.id) {
+            let text = self.owned(e);
+            self.catching_now.remove(&e.id);
+            return self.caught(e.id, Code::atom(text)).text;
+        }
         match &e.kind {
             ExprKind::NewArray(sizes) => self.owned_new(e.ty, sizes),
             ExprKind::ArrayLit(items) => {
@@ -278,8 +301,7 @@ impl<'a> Gen<'a> {
     }
 
     fn owned_call(&mut self, index: usize, args: &'a [Expr]) -> String {
-        let args = self.call_args(index, args).join(", ");
-        format!("{}({args})", self.static_fn(index))
+        self.static_call(index, args).text
     }
 
     /// `new T[n]` or `new T[n][m]...` as nested `vec!`s. A size that may be negative is checked
@@ -581,7 +603,9 @@ impl<'a> Gen<'a> {
             self.line(&format!("for {var} in {a}.{iter}() {{"));
         } else if writes_elements(body, java) {
             let slot = self.fresh_name(&["index", "slot", "at"]);
+            let wrap = self.wrap_each(name, element(array.ty));
             let element = read_in_bounds(&a, slot, element(array.ty));
+            let element = if wrap { format!("Some({element})") } else { element };
             self.line(&format!("for {slot} in 0..{a}.len() {{"));
             // The loop's frame opens at its header, where a label goes, before the element's line.
             self.open(Kind::Loop(Loop::Plain));
@@ -593,7 +617,8 @@ impl<'a> Gen<'a> {
             self.line("}");
             return;
         } else {
-            self.line(&format!("for {mutable}{var} in {a}.iter().cloned() {{"));
+            let wrap = if self.wrap_each(name, element(array.ty)) { ".map(Some)" } else { "" };
+            self.line(&format!("for {mutable}{var} in {a}.iter().cloned(){wrap} {{"));
         }
         self.loop_body(Loop::Plain, body, &[]);
         self.line("}");

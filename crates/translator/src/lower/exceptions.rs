@@ -48,7 +48,13 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StrictMath#floorMod",
         ],
     ),
-    ("java.lang.ArrayIndexOutOfBoundsException", &["ARRAY_ACCESS", "java.lang.Character#toChars"]),
+    (
+        "java.lang.ArrayIndexOutOfBoundsException",
+        &["ARRAY_ACCESS", "java.lang.Character#toChars", "java.lang.System#arraycopy"],
+    ),
+    ("java.lang.NegativeArraySizeException", &["NEW_ARRAY", "java.util.Arrays#copyOf"]),
+    // `super.clone()` of an object whose class is not `Cloneable`.
+    ("java.lang.CloneNotSupportedException", &["java.lang.Object#clone"]),
     (
         "java.lang.IndexOutOfBoundsException",
         &[
@@ -58,9 +64,21 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.Long#parseUnsignedLong",
         ],
     ),
-    // A call or a field access on an object that may be null.
-    ("java.lang.NullPointerException", &["METHOD_INVOCATION", "MEMBER_SELECT"]),
-    ("java.lang.IllegalArgumentException", &["enum#valueOf", "java.lang.Character#toChars"]),
+    // A call, a field access, an array access or a switch on a reference that may be null.
+    (
+        "java.lang.NullPointerException",
+        &["METHOD_INVOCATION", "MEMBER_SELECT", "ARRAY_ACCESS", "SWITCH", "SWITCH_EXPRESSION"],
+    ),
+    ("java.lang.ClassCastException", &["TYPE_CAST"]),
+    (
+        "java.lang.IllegalArgumentException",
+        &["enum#valueOf", "java.lang.Character#toChars", "java.lang.Object#wait"],
+    ),
+    // A monitor that the thread does not hold.
+    (
+        "java.lang.IllegalMonitorStateException",
+        &["java.lang.Object#wait", "java.lang.Object#notify", "java.lang.Object#notifyAll"],
+    ),
     (
         "java.lang.StringIndexOutOfBoundsException",
         &[
@@ -193,6 +211,32 @@ fn suppress_member() -> (String, String, String) {
     ("java.lang.Throwable".into(), "addSuppressed".into(), "(java.lang.Throwable)void".into())
 }
 
+/// The classes that a static initializer's failure is seen as (see `lower/clinit_errors.rs`): a
+/// program that catches one of these, or a supertype of them, declares them, with the constructors
+/// that the rewritten `<clinit>` calls.
+fn linkage_classes(uses: &mut Uses) {
+    const CAUGHT: [&str; 5] = [
+        "java.lang.Throwable",
+        "java.lang.Error",
+        "java.lang.LinkageError",
+        "java.lang.ExceptionInInitializerError",
+        "java.lang.NoClassDefFoundError",
+    ];
+    if !uses.catches.iter().any(|c| CAUGHT.contains(&c.as_str())) {
+        return;
+    }
+    let members = [
+        ("java.lang.ExceptionInInitializerError", "(java.lang.Throwable)void"),
+        ("java.lang.ExceptionInInitializerError", "(java.lang.String)void"),
+        ("java.lang.NoClassDefFoundError", "(java.lang.String,java.lang.Throwable)void"),
+    ];
+    for (class, signature) in members {
+        uses.classes.insert(class.into());
+        uses.members.insert((class.into(), "<init>".into(), signature.into()));
+        uses.instantiated.insert(class.into());
+    }
+}
+
 /// The uses of the standard classes found in a tree.
 #[derive(Default)]
 struct Uses {
@@ -309,6 +353,7 @@ impl Standard {
         }
         let mut raised = HashSet::new();
         raise_classes(&mut uses, &mut raised);
+        linkage_classes(&mut uses);
         if uses.classes.is_empty() && uses.members.is_empty() {
             return Standard::default();
         }
@@ -328,6 +373,14 @@ impl Standard {
             // The operations of the standard members scanned so far may raise (`addSuppressed`
             // indexes an array), so the classes they raise are decided again on every round.
             raise_classes(&mut uses, &mut raised);
+            // The checks of `addSuppressed` throw these (see `lower/suppress.rs`).
+            if uses.members.contains(&suppress_member()) {
+                for class in super::suppress::CLASSES {
+                    uses.classes.insert(class.into());
+                    uses.members.insert((class.into(), "<init>".into(), "(java.lang.String)void".into()));
+                    uses.instantiated.insert(class.into());
+                }
+            }
             let before = (uses.classes.len(), uses.members.len(), uses.fields.len(), uses.operations.len());
             let owners: Vec<String> = uses
                 .members
@@ -463,9 +516,10 @@ impl<'t> Lowering<'t> {
         for &resource in resources.iter().rev() {
             body = self.with_resource(resource, body)?;
         }
-        let catches: Vec<Catch> = node.list("catches").map(|c| self.catch(c)).collect::<Result<_, _>>()?;
+        let catches: Vec<Catch> =
+            node.list("catches").filter_map(|c| self.catch(c).transpose()).collect::<Result<_, _>>()?;
         let finally = node.get("finallyBlock").map(|block| self.block(block)).transpose()?;
-        if !resources.is_empty() && catches.is_empty() && finally.is_none() {
+        if catches.is_empty() && finally.is_none() {
             return Ok(Stmt::Block(body));
         }
         Ok(Stmt::Try { body, catches, finally })
@@ -635,14 +689,24 @@ impl<'t> Lowering<'t> {
         None
     }
 
-    fn catch(&self, node: Node<'t>) -> Result<Catch, Error> {
+    /// A `catch` clause, or `None` when every class it catches is one that a whole program does
+    /// not translate (`program::untranslated`), such as reflection's
+    /// `InvocationTargetException`: no translated code can throw one, so such an alternative is
+    /// left out.
+    fn catch(&self, node: Node<'t>) -> Result<Option<Catch>, Error> {
         let param = node.child("parameter")?;
         let ty_node = param.child("type")?;
-        let names: Vec<&str> = if ty_node.kind() == "UNION_TYPE" {
+        let mut names: Vec<&str> = if ty_node.kind() == "UNION_TYPE" {
             ty_node.list("typeAlternatives").map(|a| a.java_type()).collect()
         } else {
             vec![ty_node.java_type()]
         };
+        if self.reach.is_some() {
+            names.retain(|name| crate::program::untranslated(name).is_none());
+            if names.is_empty() {
+                return Ok(None);
+            }
+        }
         let mut types = Vec::new();
         for name in names {
             match self.type_index(name) {
@@ -652,7 +716,7 @@ impl<'t> Lowering<'t> {
         }
         let ty = self.ty(param, param.symbol().map_or("", |s| s.ty))?;
         let body = self.block(node.child("block")?)?;
-        Ok(Catch { types, name: param.str("name").to_string(), ty, body, pos: node.pos() })
+        Ok(Some(Catch { types, name: param.str("name").to_string(), ty, body, pos: node.pos() }))
     }
 
     /// `o.getClass().getName()` or `o.getClass().getSimpleName()`, as `Builtin::ClassName` of

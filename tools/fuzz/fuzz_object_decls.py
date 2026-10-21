@@ -150,6 +150,7 @@ class ObjectDeclGen:
         self.emit_helpers()
         self.exception_decls()
         self.kinds, self.methods, self.obj_hooks = saved
+        self.construction_decls()
         if self.chance(0.5):
             t = self.pick([d.name for d in self.decls.values()])
             self.emit(f'static {t} sObj = {self.new_object(t, 1)};')
@@ -465,22 +466,22 @@ class ObjectDeclGen:
                 self.emit(f'static String which({t} x) {{')
                 self.emit(f'    return "which {t} " + x;')
                 self.emit('}')
-        if 'pick' in self.helpers:
+        if 'pick' in self.obj_helpers:
             self.emit('static <T> T pick(boolean c, T a, T b) {')
             self.emit('    return c ? a : b;')
             self.emit('}')
-        if 'boxOf' in self.helpers:
+        if 'boxOf' in self.obj_helpers:
             self.emit('static <T> GBox<T> boxOf(T v) {')
             self.emit('    return new GBox<>(v);')
             self.emit('}')
-        if 'maxOf' in self.helpers:
+        if 'maxOf' in self.obj_helpers:
             self.emit('static <T extends Comparable<T>> T maxOf(T a, T b) {')
             self.emit('    return a.compareTo(b) >= 0 ? a : b;')
             self.emit('}')
-        if 'describe' in self.helpers:
+        if 'describe' in self.obj_helpers:
             self.emit_describe()
         for c in self.classes():
-            if f'make{c.name}' in self.helpers:
+            if f'make{c.name}' in self.obj_helpers:
                 self.emit_factory(c)
 
     def emit_describe(self):

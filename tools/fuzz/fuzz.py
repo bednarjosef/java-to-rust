@@ -83,8 +83,6 @@ def generate(seed, size=30, strings=False, arrays=False, objects=False):
     generic containers (see fuzz_objects.py). Without any, the programs are the same as before
     those options existed.
     """
-    if arrays and objects:
-        raise ValueError('--arrays and --objects do not combine yet')
     return Gen(seed, size, strings, arrays, objects).program()
 
 

@@ -1,6 +1,7 @@
 //! Functional interfaces that are closure types (`analysis::closures`): the interface is a type
-//! alias, `type Op = Rc<dyn Fn(i32, i32) -> i32>;`, a lambda or method reference converted to it
-//! is a closure, and a call of the interface's method calls the closure.
+//! alias, `type Op = Rc<dyn Fn(i32, i32) -> i32>;` (`Arc<dyn Fn(i32, i32) -> i32 + Send + Sync>`
+//! when threads may share its values), a lambda or method reference converted to it is a closure,
+//! and a call of the interface's method calls the closure.
 //!
 //! The closure's body is the lambda class's method, written where the lambda is created with the
 //! method's own names and facts, and its captures are bound before it: the fields that held them
@@ -10,6 +11,10 @@
 //! ```text
 //! { let k = k; Rc::new(move |x: i32| -> i32 { x + k }) as IntOp }
 //! ```
+//!
+//! In a program with threads, a closure type that a thread can reach (`Facts::thread_shared`)
+//! is `Arc<dyn Fn(..) + Send + Sync>` instead, and its closures `Arc::new(..)`: what they capture
+//! is of types that threads share, by the same walk.
 
 use super::*;
 use crate::analysis::closures;
@@ -74,8 +79,21 @@ impl<'a> Gen<'a> {
             .collect();
         let ret = self.ret_text(m);
         let name = struct_name(&self.class.types[t].name);
+        // An interface that extends another has its closures: `type UnaryOperator = Function;`.
+        let above =
+            self.class.types[t].implements.iter().copied().find(|i| self.facts.closure_types.contains(i));
+        let ty = match above {
+            Some(above) => {
+                self.need(Need::Enum(above));
+                self.closure_name(above)
+            }
+            None => {
+                let (handle, bounds) = self.closure_handle(t);
+                format!("{handle}<dyn Fn({}){ret}{bounds}>", params.join(", "))
+            }
+        };
         self.gap();
-        self.line(&format!("{}type {name} = Rc<dyn Fn({}){ret}>;", self.vis(), params.join(", ")));
+        self.line(&format!("{}type {name} = {ty};", self.vis()));
         self.closure_trait(t, &name);
     }
 
@@ -153,8 +171,11 @@ impl<'a> Gen<'a> {
         let args = self.call_args(index, args).join(", ");
         if index != self.closure_method(t) {
             // A default method, of the extension trait.
+            // The trait of the interface that declares it, which `t` may extend.
+            let declaring = self.class.methods[index].class;
             self.need(Need::Body(index));
-            let path = format!("{}Methods", self.closure_name(t));
+            self.need(Need::Enum(declaring));
+            let path = format!("{}Methods", self.closure_name(declaring));
             if path.contains("::") {
                 self.traits.insert(path);
             }
@@ -166,6 +187,56 @@ impl<'a> Gen<'a> {
     /// A lambda converted to its closure type `t`: its captures bound to locals, and the closure
     /// that moves them in, whose body is the lambda class's method.
     pub(super) fn closure(&mut self, t: usize, ctor: usize, args: &'a [Expr]) -> Code {
+        let (prelude, closure) = self.closure_parts(t, ctor, args, false);
+        let closure = format!("{}::new({closure}) as {}", self.closure_handle(t).0, self.closure_name(t));
+        if prelude.is_empty() {
+            return Code::new(closure, AS);
+        }
+        Code::atom(format!("{{ {} {closure} }}", prelude.join(" ")))
+    }
+
+    /// The initializer of a local that only calls its closure (`Facts::closure_locals`): the
+    /// closure itself, `let f = |x: i32| -> i32 { .. };`, with no handle around it.
+    pub(super) fn local_closure(&mut self, name: &str, init: &'a Expr) -> Option<String> {
+        if !self.facts.closure_locals.contains(&(self.method, name.to_string())) {
+            return None;
+        }
+        let ExprKind::Cast(to, lambda) = &init.kind else { return None };
+        let ExprKind::New { args, ctor: Some(ctor), .. } = &lambda.kind else { return None };
+        let t = self.closure_type(*to)?;
+        let (prelude, closure) = self.closure_parts(t, *ctor, args, true);
+        if prelude.is_empty() {
+            return Some(closure);
+        }
+        Some(format!("{{ {} {closure} }}", prelude.join(" ")))
+    }
+
+    /// The closure that `value`, the value of a function's final `return`, is, as the lines that
+    /// bind its captures and the closure: in tail position they need no block of their own.
+    pub(super) fn returned_closure(&mut self, value: &'a Expr) -> Option<(Vec<String>, String)> {
+        let ExprKind::Cast(to, lambda) = &value.kind else { return None };
+        let ExprKind::New { args, ctor: Some(ctor), .. } = &lambda.kind else { return None };
+        let t = self.closure_type(*to)?;
+        let plain =
+            !self.display && !self.optional_return() && !self.facts.owned_returns.contains(&self.method);
+        if !plain || *to != self.ret {
+            return None;
+        }
+        // The function's result type converts the closure without `as`.
+        let (prelude, closure) = self.closure_parts(t, *ctor, args, false);
+        Some((prelude, format!("{}::new({closure})", self.closure_handle(t).0)))
+    }
+
+    /// The lines that bind the captures of a lambda converted to closure type `t`, and the
+    /// closure, `move |x: i32| -> i32 { .. }`. A closure that does not outlive the locals it
+    /// captures (`borrowing`) borrows them instead, when each is a local or a clone of one.
+    fn closure_parts(
+        &mut self,
+        t: usize,
+        ctor: usize,
+        args: &'a [Expr],
+        borrowing: bool,
+    ) -> (Vec<String>, String) {
         let c = self.class.methods[ctor].class;
         let Some(m) = self.class.hierarchy.implementation(self.closure_method(t), c) else {
             unreachable!("a closure type's lambda implements its method")
@@ -210,8 +281,18 @@ impl<'a> Gen<'a> {
         self.this_form = ThisForm::SelfRef;
         let mut prelude = Vec::new();
         let mut moving = false;
+        let borrowed = borrowing
+            && fields
+                .iter()
+                .zip(&values)
+                .all(|(field, value)| field.is_none() || captured_local(value).is_some());
         for (field, value) in fields.iter().zip(&values) {
             let Some(field) = field else { continue };
+            if borrowed {
+                let name = captured_local(value).expect("checked above").to_string();
+                self.field_locals.insert(field.clone(), name);
+                continue;
+            }
             let name = unique(snake_case(field), &mut used);
             // A local passed as it is is moved in by its own name.
             if *value != name {
@@ -255,12 +336,7 @@ impl<'a> Gen<'a> {
         self.restore(saved);
         let moving = if moving { "move " } else { "" };
         let body = self.braced(&text);
-        let closure =
-            format!("Rc::new({moving}|{}|{ret} {body}) as {}", params.join(", "), self.closure_name(t));
-        if prelude.is_empty() {
-            return Code::new(closure, AS);
-        }
-        Code::atom(format!("{{ {} {closure} }}", prelude.join(" ")))
+        (prelude, format!("{moving}|{}|{ret} {body}", params.join(", ")))
     }
 
     /// Whether `this.m(..)` (`receiver`, method `index`) is, in a closure's body, a call of the
@@ -315,9 +391,20 @@ impl<'a> Gen<'a> {
     fn bind_params(&mut self, index: usize, values: &[String]) {
         for (param, value) in self.typed_params(index, true).iter().zip(values) {
             let name = param.split_once(": ").map_or(param.as_str(), |(name, _)| name);
-            if name != value {
-                self.line(&format!("let {param} = {value};"));
+            if name == value {
+                continue;
             }
+            // `x.as_deref()` borrows `x`, which must outlive the statement when it is a value.
+            if let Some(owned) = value.strip_suffix(".as_deref()")
+                && captured_local(owned).is_none()
+            {
+                let base = name.trim_start_matches("mut ").trim_start_matches('_');
+                let temp = self.temp(&format!("{base}_value"));
+                self.line(&format!("let {temp} = {owned};"));
+                self.line(&format!("let {param} = {temp}.as_deref();"));
+                continue;
+            }
+            self.line(&format!("let {param} = {value};"));
         }
     }
 
@@ -334,6 +421,22 @@ impl<'a> Gen<'a> {
             return format!("{{ {} }}", lines.join(" "));
         }
         format!("{{\n{text}{}}}", "    ".repeat(self.indent))
+    }
+
+    /// The handle of the closures of closure type `t`, and the bounds of their `dyn Fn`: `Arc`
+    /// and `Send + Sync` when a thread can reach a value of `t` or of an interface above or below
+    /// it, which share the closures, else `Rc`.
+    fn closure_handle(&self, t: usize) -> (&'static str, &'static str) {
+        let h = &self.class.hierarchy;
+        let mut root = t;
+        while let Some(&above) =
+            self.class.types[root].implements.iter().find(|i| self.facts.closure_types.contains(i))
+        {
+            root = above;
+        }
+        let shared = (self.facts.closure_types.iter())
+            .any(|&u| h.is_subtype(u, root) && self.facts.thread_shared.contains(&u));
+        if shared { ("Arc", " + Send + Sync") } else { ("Rc", "") }
     }
 
     /// The Rust name of closure type `t`, which its values are written as.
@@ -412,6 +515,12 @@ impl<'a> Gen<'a> {
         self.chars = s.chars;
         self.exhaustive = s.exhaustive;
     }
+}
+
+/// The local that a capture's value `x` or `x.clone()` is.
+fn captured_local(value: &str) -> Option<&str> {
+    let name = value.strip_suffix(".clone()").unwrap_or(value);
+    (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(name)
 }
 
 /// Whether `body` returns only at its end.

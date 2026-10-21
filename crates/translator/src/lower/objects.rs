@@ -200,6 +200,7 @@ impl<'t> Lowering<'t> {
             outer: self.nesting(index).filter(|n| n.outer).map(|n| n.enclosing),
             captures: self.captures_of(index)?,
             origin: self.origin(index),
+            cloneable: self.is_cloneable(index),
         })
     }
 
@@ -299,7 +300,9 @@ impl<'t> Lowering<'t> {
         let Some(class) = class else {
             return unsupported(node, &format!("`new {}`", symbol.owner));
         };
-        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+        let enclosing = self.anonymous_enclosing(node, class)?;
+        let declared = node.list("arguments").map(|a| self.expr(a));
+        let args: Vec<Expr> = enclosing.map(Ok).into_iter().chain(declared).collect::<Result<_, _>>()?;
         let args = self.packed_args(node, &symbol, args)?;
         self.check_standard_member(node, &symbol)?;
         let ctor = self.method_index(&symbol);

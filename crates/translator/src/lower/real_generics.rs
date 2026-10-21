@@ -13,7 +13,8 @@
 //! or element of the same type variable, return it, pass it to a parameter of a type variable,
 //! and compare it with `null`. Anything else (a cast, a call on it, a conversion to `Object` or
 //! to text, an array of it) erases the generic. A class qualifies when it extends and implements
-//! nothing, nothing extends it, and its type parameters have no bounds; its uses must all give it
+//! nothing, nothing extends it, and its type parameters have no bounds and each occurs in the type
+//! of one of its instance fields, as a Rust struct must use them; its uses must all give it
 //! type arguments, and its objects must not become `Object`s. A method qualifies when its type
 //! parameters have no bounds and each occurs in a parameter's type, so that Rust can infer it.
 
@@ -75,6 +76,17 @@ pub(super) fn retry<E>(
     }
 }
 
+/// Whether every type variable of class `node` occurs in the type of one of its instance fields:
+/// a Rust struct uses each of its type parameters.
+fn held(node: Node) -> bool {
+    let fields: Vec<&str> = node
+        .list("members")
+        .filter(|m| m.kind() == "VARIABLE" && m.symbol().is_some_and(|s| !s.is_static))
+        .map(|m| m.symbol().map_or("", |s| s.ty))
+        .collect();
+    node.list("typeParameters").all(|v| fields.iter().any(|ty| mentions_var(ty, v.str("name"))))
+}
+
 fn has_bounds(node: Node) -> bool {
     node.list("typeParameters").any(|p| p.list("bounds").next().is_some())
 }
@@ -99,6 +111,7 @@ impl<'t> Lowering<'t> {
                     && node.get("extendsClause").is_none()
                     && node.list("implementsClause").next().is_none()
                     && !extended.contains(self.types[t].name.as_str())
+                    && held(node)
             })
             .collect();
         let methods = (0..self.methods.len())
@@ -111,6 +124,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// Whether every type variable of method `m` occurs in the type of one of its parameters.
+    /// (A class's must occur in one of its fields: see `held`.)
     fn inferable(&self, m: usize) -> bool {
         let node = self.methods[m].node;
         let params: Vec<&str> = node.list("parameters").map(|p| p.symbol().map_or("", |s| s.ty)).collect();
@@ -179,6 +193,7 @@ impl<'t> Lowering<'t> {
                 outer: None,
                 captures: Vec::new(),
                 origin: Origin::Member,
+                cloneable: false,
             });
         }
     }

@@ -166,3 +166,159 @@ fn a_string_builder_that_threads_share_is_rejected() {
     .to_string();
     assert!(error.ends_with("a `StringBuilder` that threads may share not supported yet"), "{error}");
 }
+
+#[test]
+fn a_string_builder_as_an_object_in_a_program_with_threads_is_rejected() {
+    // `Object`'s variant would hold the builder's `Rc`, and an `Object` may cross threads.
+    let error = java_to_rust::translate(
+        "class A {
+            static Object held;
+            public static void main(String[] args) throws InterruptedException {
+                held = new StringBuilder(\"a\");
+                Thread t = new Thread(() -> System.out.println(\"x\"));
+                t.start();
+                t.join();
+                System.out.println(held);
+            }
+        }",
+    )
+    .expect_err("a StringBuilder as an Object with threads is not supported")
+    .to_string();
+    assert!(
+        error.ends_with("a `StringBuilder` as an `Object` in a program with threads not supported yet"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_closure_that_threads_share_is_an_arc_that_any_thread_may_call() {
+    // `Step` reaches the thread through the lambda's capture; `Local` stays on the main thread.
+    let rust = translate(
+        "class A {
+            interface Step { int apply(int x); }
+            interface Local { int apply(int x); }
+            public static void main(String[] args) throws InterruptedException {
+                int k = 3;
+                Step s = x -> x + k;
+                int[] out = new int[1];
+                Thread t = new Thread(() -> out[0] = s.apply(4));
+                t.start();
+                t.join();
+                Local l = x -> x * 2;
+                Local m = l;
+                System.out.println(m.apply(out[0]));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "type AStep = Arc<dyn Fn(i32) -> i32 + Send + Sync>;",
+            "let s = Arc::new(move |x: i32| -> i32 { x.wrapping_add(k) }) as AStep;",
+            "type ALocal = Rc<dyn Fn(i32) -> i32>;",
+        ],
+    );
+}
+
+/// A counter that threads share, with synchronized methods, a lock in a field, and a static
+/// synchronized method.
+const MONITORS: &str = "class A {
+    static int hits;
+    static synchronized void hit() { hits++; }
+    static class Counter {
+        private final Object lock = new Object();
+        private int n;
+        private int m;
+        synchronized void add() { n++; }
+        void addOther() { synchronized (lock) { m++; } }
+        synchronized void await(int k) throws InterruptedException { while (n < k) wait(); notifyAll(); }
+    }
+    static class Adder extends Thread {
+        private final Counter c;
+        Adder(Counter c) { this.c = c; }
+        public void run() { c.add(); c.addOther(); hit(); }
+    }
+    public static void main(String[] args) throws InterruptedException {
+        Counter c = new Counter();
+        Adder a = new Adder(c);
+        a.start();
+        c.await(1);
+        a.join();
+        System.out.println(c.n + c.m + hits);
+    }
+}";
+
+#[test]
+fn a_synchronized_method_of_a_shared_object_holds_its_monitor() {
+    let rust = translate(MONITORS);
+    assert_contains(
+        &rust,
+        &[
+            "fn add(this: &Arc<java::Locked<ACounter>>) {\n        let _monitor = java::enter(this);",
+            "let _monitor = java::enter(&{ this.borrow().lock.clone() });",
+            "static A__MONITOR: java::Locked<()> = java::Locked::new(());",
+            "fn hit() {\n    let _monitor = java::enter_class(&A__MONITOR);",
+            "java::monitor_wait(this, 0);",
+            "java::monitor_notify(this, true);",
+            // A lock object has a lock of its own.
+            "lock: Arc<java::Locked<PlainObject>>,",
+        ],
+    );
+}
+
+#[test]
+fn synchronized_without_threads_or_wait_is_the_null_check_it_was() {
+    let rust = translate(
+        "class A {
+            static class Counter {
+                private int n;
+                synchronized void add() { n++; }
+            }
+            public static void main(String[] args) {
+                Counter c = new Counter();
+                synchronized (c) { c.add(); }
+                System.out.println(c.n);
+            }
+        }",
+    );
+    assert_lacks(&rust, &["java::enter", "_monitor"]);
+    assert_contains(&rust, &["fn add(&mut self) {"]);
+}
+
+#[test]
+fn a_monitor_of_one_thread_is_kept_where_the_program_waits() {
+    let rust = translate(
+        "class A {
+            public static void main(String[] args) throws InterruptedException {
+                Object o = new Object();
+                synchronized (o) {
+                    o.wait(5);
+                    System.out.println(Thread.holdsLock(o));
+                }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["let _monitor = java::enter(&o);", "java::monitor_wait(&o, 5);", "java::holds_lock(&o)"],
+    );
+}
+
+#[test]
+fn a_string_that_threads_lock_is_rejected() {
+    let error = java_to_rust::translate(
+        "class A {
+            static String name = \"a\";
+            static int n;
+            public static void main(String[] args) throws InterruptedException {
+                Thread t = new Thread(() -> { synchronized (name) { n++; } });
+                t.start();
+                t.join();
+                System.out.println(n);
+            }
+        }",
+    )
+    .expect_err("a string has no monitor in the translation")
+    .to_string();
+    assert!(error.ends_with("`synchronized` on a string not supported yet"), "{error}");
+}

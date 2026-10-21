@@ -248,6 +248,11 @@ impl<'a> Gen<'a> {
     }
 
     pub(super) fn expr(&mut self, e: &'a Expr) -> Code {
+        if self.facts.catching.contains_key(&e.id) && self.catching_now.insert(e.id) {
+            let code = self.expr(e);
+            self.catching_now.remove(&e.id);
+            return self.caught(e.id, code);
+        }
         if let Some(code) = self.shared_array(e) {
             return code;
         }
@@ -278,7 +283,14 @@ impl<'a> Gen<'a> {
             }
             ExprKind::This if matches!(e.ty, Type::Enum(_)) => Code::atom(self.this_name()),
             ExprKind::This => Code::atom(format!("{}.clone()", self.this_name())),
-            ExprKind::EnumConstant { class, ordinal } => Code::atom(self.constant_path(*class, *ordinal)),
+            ExprKind::EnumConstant { class, ordinal } => {
+                let path = self.constant_path(*class, *ordinal);
+                // Java initializes an enum on the first use of one of its constants.
+                match self.init_call(*class) {
+                    Some(init) => Code::atom(format!("{{ {init} {path} }}")),
+                    None => Code::atom(path),
+                }
+            }
             ExprKind::Field { object, name } => self.field_read(object, name, e.ty),
             ExprKind::Static { class, name } => self.static_read(*class, name, e.ty),
             ExprKind::New { args, ctor, .. } => {
@@ -400,29 +412,36 @@ impl<'a> Gen<'a> {
             {
                 self.closure(t, *ctor, args)
             }
-            ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
+            // A closure is one of the closure type its interface extends too.
+            ExprKind::Cast(to @ Type::Class(..), value)
+                if self.closure_type(*to).is_some() && self.closure_type(value.ty).is_some() =>
+            {
+                self.expr(value)
+            }
+            ExprKind::Cast(to @ Type::Class(..), value) => self.checked_class_cast(e.id, *to, value),
             // A cast to an enum of a value that may be null, which an enum value is not.
             ExprKind::Cast(to @ Type::Enum(_), value)
                 if matches!(value.ty, Type::Class(..)) && self.nullable(value) =>
             {
-                let option = self.class_cast(*to, value).text;
+                let option = self.checked_class_cast(e.id, *to, value).text;
                 Code::atom(format!("{}({option})", self.runtime("null_enum")))
             }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
-            // string, a box or an array.
-            ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_) | Type::Array(_)), value)
-                if matches!(value.ty, Type::Class(..)) =>
-            {
-                self.class_cast(*to, value)
-            }
+            // string, a builder, a box or an array.
+            ExprKind::Cast(
+                to @ (Type::Enum(_) | Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_)),
+                value,
+            ) if matches!(value.ty, Type::Class(..)) => self.checked_class_cast(e.id, *to, value),
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
                 if let Some(code) = self.narrowed_conditional(e, cond, a, b) {
                     return code;
                 }
-                // The condition of an `if` drops its temporaries before a branch runs.
-                let outer = std::mem::replace(&mut self.guarded, false);
+                // The condition of an `if` drops its temporaries before a branch runs. With threads,
+                // two locks held at once in the condition itself could wait for each other.
+                let guarded = self.facts.threaded && self.conflicts(&[&**cond]);
+                let outer = std::mem::replace(&mut self.guarded, guarded);
                 let cond = self.condition(cond);
                 self.guarded = outer;
                 let chain = std::mem::replace(&mut self.chain, false);
@@ -448,8 +467,7 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Call { args, resolved, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
-                let args = self.call_args(index, args).join(", ");
-                let code = Code::atom(format!("{}({args})", self.static_fn(index)));
+                let code = self.static_call(index, args);
                 self.raising(code, index)
             }
             ExprKind::MethodCall { receiver, args, resolved, is_super, .. } => {
@@ -459,8 +477,7 @@ impl<'a> Gen<'a> {
                 } else if self.inlined(receiver, index) {
                     self.inline_call(index, args)
                 } else if self.class.methods[index].is_static {
-                    let args = self.call_args(index, args).join(", ");
-                    Code::atom(format!("{}({args})", self.static_fn(index)))
+                    self.static_call(index, args)
                 } else if !*is_super && let Some(t) = self.enum_of(receiver) {
                     self.enum_call(t, receiver, index, args)
                 } else {
@@ -482,8 +499,9 @@ impl<'a> Gen<'a> {
     /// Reads a variable after assigning it, for an assignment used as a value.
     pub(super) fn read(&self, target: &str, ty: Type) -> String {
         let name = self.local(target);
-        // An array assigned inside an expression is shared, and its handle is cloned.
-        if ty == Type::String || matches!(ty, Type::Array(_)) { format!("{name}.clone()") } else { name }
+        // The variable keeps its value: a string is copied, and an array's or an object's handle
+        // is cloned (`(k = first.key) == key || key.equals(k)` reads `k` again).
+        if self.clones(ty) { format!("{name}.clone()") } else { name }
     }
 
     pub(super) fn binary(&mut self, op: BinOp, l: Operand, r: Operand, result: Type, id: ExprId) -> Code {
@@ -613,7 +631,7 @@ impl<'a> Gen<'a> {
                 self.format(&mac, parts)
             }
             Builtin::ObjectText => self.object_to_string(&args[0]),
-            Builtin::ObjectClone => self.object_clone(&args[0]),
+            Builtin::ObjectClone => self.object_clone(&args[0], id),
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty, id)
             }
@@ -628,7 +646,12 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
             Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
-            Builtin::NullCheck => self.null_check(&args[0]),
+            Builtin::UnknownClass => {
+                let name = self.value(&args[0], Type::String);
+                let message = "java.lang.ClassNotFoundException: {} is not a class of the translated program";
+                Code::atom(format!("{}(format!({message:?}, {}))", self.runtime("throw_uncaught"), name.text))
+            }
+            Builtin::MonitorEnter => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),
             Builtin::GetClass => self.get_class(&args[0]),

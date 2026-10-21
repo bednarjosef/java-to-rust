@@ -76,12 +76,12 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
     // An array in an `Object` keeps its identity: it is shared.
     let holds_values = super::hierarchy::variants(class, facts, object)
         .into_iter()
-        .any(|c| class.types[c].kind == TypeKind::Runtime && class.array_of(c).is_none());
+        .any(|c| class.types[c].kind == TypeKind::Runtime && class.shared_of(c).is_none());
     // A static `Object` field that is only ever set to objects of the program's classes, such as
     // the sentinel `ImmutableCollections.EMPTY = new Object()`, is never a string or a box.
     let object_of_class = |e: &Expr| {
         matches!(&e.kind, ExprKind::Cast(Type::Class(name, _), inner)
-            if *name == OBJECT && matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_)))
+            if *name == OBJECT && matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_) | Type::StringBuilder))
     };
     let mut sentinels: HashSet<(usize, &str)> = HashSet::new();
     for (t, decl) in class.types.iter().enumerate() {
@@ -114,7 +114,7 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
         ExprKind::Null => false,
         ExprKind::Static { class, name } if sentinels.contains(&(*class, name.as_str())) => false,
         ExprKind::Cast(Type::Class(name, _), inner) if *name == OBJECT => {
-            !matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_))
+            !matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_) | Type::StringBuilder)
         }
         _ => matches!(e.ty, Type::Class(name, _) if name == OBJECT),
     };
@@ -131,10 +131,14 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                 s,
                 &mut |e| {
                     visit_expr(e, &mut |x| match &x.kind {
+                        // A builder is an `Rc`, which an `Object` that threads may share cannot hold.
                         ExprKind::Cast(Type::Class(name, _), inner)
-                            if *name == OBJECT && inner.ty == Type::StringBuilder =>
+                            if *name == OBJECT && inner.ty == Type::StringBuilder && facts.threaded =>
                         {
-                            found.get_or_insert((x.pos, "a `StringBuilder` as an `Object` value"));
+                            found.get_or_insert((
+                                x.pos,
+                                "a `StringBuilder` as an `Object` in a program with threads",
+                            ));
                         }
                         ExprKind::Binary(BinOp::Eq | BinOp::Ne, l, r)
                             if holds_values
@@ -162,31 +166,59 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
 
 /// The `a == b` of `a == b || .. a.equals(b) ..`, the shortcut before an `equals` that `Objects.equals`
 /// takes: whether the identities compare equal or not, the result is what `equals` says when the
-/// values are strings or boxes.
-fn shortcut(e: &Expr) -> Option<ExprId> {
+/// values are strings or boxes. The `==` may be any operand of a chain of `||` with the `equals`
+/// in a later one, as `HashMap.removeNode` writes `!matchValue || (v = node.value) == value ||
+/// (value != null && value.equals(v))`.
+fn shortcut(e: &Expr) -> Vec<ExprId> {
     // Its negation too, `a != b && .. !a.equals(b) ..`, as `EnumMap.equals` writes it.
-    let (ExprKind::Binary(BinOp::Or, l, r) | ExprKind::Binary(BinOp::And, l, r)) = &e.kind else {
-        return None;
+    let (op, test) = match &e.kind {
+        ExprKind::Binary(BinOp::Or, ..) => (BinOp::Or, BinOp::Eq),
+        ExprKind::Binary(BinOp::And, ..) => (BinOp::And, BinOp::Ne),
+        _ => return Vec::new(),
     };
-    let negated = matches!(e.kind, ExprKind::Binary(BinOp::And, ..));
-    let (ExprKind::Binary(BinOp::Eq, a, b) | ExprKind::Binary(BinOp::Ne, a, b)) = &l.kind else {
-        return None;
-    };
-    if negated != matches!(l.kind, ExprKind::Binary(BinOp::Ne, ..)) {
-        return None;
-    }
-    let (ExprKind::Var(a), ExprKind::Var(b)) = (&a.kind, &b.kind) else { return None };
-    let mut equals = false;
-    visit_expr(r, &mut |x| {
-        if let ExprKind::MethodCall { receiver, name, args, .. } = &x.kind
-            && name == "equals"
-            && let (ExprKind::Var(x), [arg]) = (&receiver.kind, &args[..])
-            && let ExprKind::Var(y) = &peel(arg).kind
-        {
-            equals |= (x == a && y == b) || (x == b && y == a);
+    let mut operands = Vec::new();
+    chain(e, op, &mut operands);
+    let mut found = Vec::new();
+    for (i, l) in operands.iter().enumerate() {
+        let ExprKind::Binary(o, a, b) = &l.kind else { continue };
+        // An operand may assign its variable first, as `HashMap.getNode` writes `(k = first.key) == key`.
+        let (true, Some(a), Some(b)) = (*o == test, compared(a), compared(b)) else { continue };
+        let mut equals = false;
+        for r in &operands[i + 1..] {
+            visit_expr(r, &mut |x| {
+                if let ExprKind::MethodCall { receiver, name, args, .. } = &x.kind
+                    && name == "equals"
+                    && let (ExprKind::Var(x), [arg]) = (&receiver.kind, &args[..])
+                    && let ExprKind::Var(y) = &peel(arg).kind
+                {
+                    equals |= (x == a && y == b) || (x == b && y == a);
+                }
+            });
         }
-    });
-    equals.then_some(l.id)
+        if equals {
+            found.push(l.id);
+        }
+    }
+    found
+}
+
+/// The operands of the chain of `op` that `e` is, left to right.
+fn chain<'e>(e: &'e Expr, op: BinOp, operands: &mut Vec<&'e Expr>) {
+    match &e.kind {
+        ExprKind::Binary(o, l, r) if *o == op => {
+            chain(l, op, operands);
+            chain(r, op, operands);
+        }
+        _ => operands.push(e),
+    }
+}
+
+/// The variable that an operand of the shortcut's `==` is: a variable, or an assignment to one.
+fn compared(e: &Expr) -> Option<&String> {
+    match &peel(e).kind {
+        ExprKind::Var(name) | ExprKind::Assign { op: None, target: Place::Var(name), .. } => Some(name),
+        _ => None,
+    }
 }
 
 /// `e` without the conversions to `Object` that lowering adds.
