@@ -234,28 +234,31 @@ pub fn analyze_all(class: &Class) -> Result<Facts, Vec<Error>> {
         closure_types: closures::closure_types(class),
         ..Facts::default()
     };
+    use crate::timings::phase;
     facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
-    ranges::analyze(class, &mut facts);
-    representation(class, &mut facts);
-    validate(class, &facts).map_err(one)?;
+    phase("analysis: ranges", || ranges::analyze(class, &mut facts));
+    phase("analysis: representation", || representation(class, &mut facts));
+    phase("analysis: validate", || validate(class, &facts)).map_err(one)?;
     patterns::check(class).map_err(one)?;
     facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
-    nullness::analyze(class, &mut facts);
-    patterns::check_object_values(class, &facts).map_err(one)?;
-    boxing::analyze(class, &mut facts);
+    phase("analysis: nullness", || nullness::analyze(class, &mut facts));
+    phase("analysis: object values", || patterns::check_object_values(class, &facts)).map_err(one)?;
+    phase("analysis: boxing", || boxing::analyze(class, &mut facts));
     if facts.threaded {
-        threads::check(class, &facts).map_err(one)?;
+        phase("analysis: threads", || threads::check(class, &facts)).map_err(one)?;
     }
-    monitors::check(class, &facts).map_err(one)?;
+    phase("analysis: monitors", || monitors::check(class, &facts)).map_err(one)?;
     facts.class_monitors = monitors::class_monitors(class, &facts);
-    borrowed_params(class, &mut facts);
-    facts.borrowed_objects = borrowed_objects(class, &facts);
+    phase("analysis: borrowing", || {
+        borrowed_params(class, &mut facts);
+        facts.borrowed_objects = borrowed_objects(class, &facts);
+    });
     ascii_strings(class, &mut facts);
-    arrays::analyze(class, &mut facts);
-    indexing::analyze(class, &mut facts);
-    moves::analyze(class, &mut facts);
-    exceptions::analyze(class, &mut facts)?;
+    phase("analysis: arrays", || arrays::analyze(class, &mut facts));
+    phase("analysis: indexing", || indexing::analyze(class, &mut facts));
+    phase("analysis: moves", || moves::analyze(class, &mut facts));
+    phase("analysis: exceptions", || exceptions::analyze(class, &mut facts))?;
     // An uncaught-exception handler gets the failures of the runtime as objects of their classes.
     if threads::handles_uncaught(class) {
         for new in &class.raised {

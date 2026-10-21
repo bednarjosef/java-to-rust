@@ -1008,11 +1008,15 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
     }
 }
 
-/// Whether `decl` is a class of the JDK, which no program may declare.
+/// Whether `decl` is a class of the JDK, which no program may declare. The classes that lowering
+/// provides (the standard exceptions, `Throwable`, `Thread`) have no package, but their JDK name.
 pub(super) fn from_jdk(decl: &TypeDecl) -> bool {
-    ["java", "javax", "jdk", "sun"]
-        .iter()
-        .any(|root| decl.package == *root || decl.package.starts_with(&format!("{root}.")))
+    let in_jdk = |name: &str| {
+        ["java", "javax", "jdk", "sun"]
+            .iter()
+            .any(|root| name == *root || name.starts_with(&format!("{root}.")))
+    };
+    in_jdk(&decl.package) || decl.package.is_empty() && in_jdk(&decl.name)
 }
 
 /// The objects whose text an expression makes, which runs their `toString`.
