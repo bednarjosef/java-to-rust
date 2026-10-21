@@ -864,6 +864,22 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   that the caller catches is then never thrown; for a single file, `Standard.java` has it and
   `ReflectiveOperationException`. Test: `corpus/features/ClassForName.java` and
   `class_for_name_of_a_spelled_out_name_initializes_that_class`.
+- **`String.toUpperCase(locale)` and `toLowerCase(locale)`** (`lower/strings.rs`,
+  `java_runtime::string::uppercase_in`): the locale layer maps codes and keys with them
+  (`Locale.ROOT`), 15 calls in what `LocaleNumbers` reaches. Java's own tells the languages with a
+  case mapping of their own by `locale.getLanguage()`: Turkish and Azeri (the dotted and dotless
+  `i`) and Lithuanian (the dot above); every other language maps as the root locale, which is the
+  runtime's `toUpperCase()`. So the call is `uppercase_in(s, locale.getLanguage())`, which ends
+  the program loudly for those three, and reachability reaches `Locale.getLanguage` with it
+  (`LOCALE_LANGUAGE`). A null locale throws `NullPointerException` from that call, after the
+  receiver is evaluated, as in Java.
+  With it, a class that reachability names but never initializes no longer has its static blocks
+  lowered: `<clinit>` keeps a static block only when the class is initialized, as it already did
+  for static fields, so a call of `Locale.getLanguage` on a null locale does not lower `Locale`'s
+  static block, whose `BaseLocale` constants nothing reached. Test:
+  `corpus/whole-program/CaseInLocale.java` (null locales: `Locale.ROOT` itself initializes
+  `Locale`, whose `ConcurrentHashMap` reaches `AtomicInteger`, a class that extends `Number`, which
+  the object model does not take yet) and the runtime's unit test of the mapping.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 
