@@ -316,7 +316,7 @@ fn changes_object(e: &Expr, object: &Expr, mutating: &HashSet<usize>) -> bool {
 }
 
 /// Whether an expression reads a static field.
-fn reads_static(e: &Expr) -> bool {
+pub(super) fn reads_static(e: &Expr) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::Static { .. }));
     found
