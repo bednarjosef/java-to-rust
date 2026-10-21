@@ -581,7 +581,9 @@ impl<'a> Gen<'a> {
             self.line(&format!("for {var} in {a}.{iter}() {{"));
         } else if writes_elements(body, java) {
             let slot = self.fresh_name(&["index", "slot", "at"]);
+            let wrap = self.wrap_each(name, element(array.ty));
             let element = read_in_bounds(&a, slot, element(array.ty));
+            let element = if wrap { format!("Some({element})") } else { element };
             self.line(&format!("for {slot} in 0..{a}.len() {{"));
             // The loop's frame opens at its header, where a label goes, before the element's line.
             self.open(Kind::Loop(Loop::Plain));
@@ -593,7 +595,8 @@ impl<'a> Gen<'a> {
             self.line("}");
             return;
         } else {
-            self.line(&format!("for {mutable}{var} in {a}.iter().cloned() {{"));
+            let wrap = if self.wrap_each(name, element(array.ty)) { ".map(Some)" } else { "" };
+            self.line(&format!("for {mutable}{var} in {a}.iter().cloned(){wrap} {{"));
         }
         self.loop_body(Loop::Plain, body, &[]);
         self.line("}");
