@@ -4,12 +4,12 @@
 use super::*;
 
 impl<'a> Gen<'a> {
-    pub(super) fn native(&mut self, native: Native, args: &'a [Expr], ty: Type) -> Code {
+    pub(super) fn native(&mut self, native: Native, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
         let call = |g: &mut Self, f: &str, args: Vec<String>| {
             Code::atom(format!("{}({})", g.runtime(f), args.join(", ")))
         };
         match native {
-            Native::Math { name, strict } => self.math(name, strict, args, ty),
+            Native::Math { name, strict } => self.math(name, strict, args, ty, id),
             Native::ArrayCopy => self.array_copy(args),
             Native::DoubleToLongBits => {
                 let x = self.value(&args[0], Type::Double).text;
@@ -107,8 +107,9 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// A `Math` or `StrictMath` function. `ty` is the type of the call, which picks the overload.
-    fn math(&mut self, name: &str, strict: bool, args: &'a [Expr], ty: Type) -> Code {
+    /// A `Math` or `StrictMath` function. `ty` is the type of the call, which picks the overload;
+    /// `id` is the call's, for the checked form of a function that may throw.
+    fn math(&mut self, name: &str, strict: bool, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
         if let Some(code) = self.math_extra(name, args, ty) {
             return code;
         }
@@ -142,7 +143,7 @@ impl<'a> Gen<'a> {
             }
             "floorDiv" | "floorMod" => {
                 let f = if name == "floorDiv" { "floor_div" } else { "floor_mod" };
-                let result = Code::atom(format!("{}({}, {})", self.runtime(f), texts[0], texts[1]));
+                let result = self.may_fail(id, f, "", &format!("{}, {}", texts[0], texts[1]));
                 if ty == operand { result } else { self.convert(result, operand, ty) }
             }
             // HotSpot's own code for `Math`, which the platform's libm is closest to.

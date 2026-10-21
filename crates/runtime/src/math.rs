@@ -27,6 +27,24 @@ pub fn floor_mod<T: Integer + PartialOrd + Default + std::ops::Add<Output = T>>(
     if m != zero && (m < zero) != (b < zero) { m + b } else { m }
 }
 
+/// `Math.floorDiv` where the program observes the `ArithmeticException` of a zero divisor.
+pub fn try_floor_div<T: Integer + PartialOrd + Default + std::ops::Sub<Output = T> + From<i8>>(
+    a: T,
+    b: T,
+) -> Result<T, crate::Exception> {
+    crate::try_div(a, b)?;
+    Ok(floor_div(a, b))
+}
+
+/// `Math.floorMod` where the program observes the `ArithmeticException` of a zero divisor.
+pub fn try_floor_mod<T: Integer + PartialOrd + Default + std::ops::Add<Output = T>>(
+    a: T,
+    b: T,
+) -> Result<T, crate::Exception> {
+    crate::try_rem(a, b)?;
+    Ok(floor_mod(a, b))
+}
+
 /// `Math.round(double)`: the closest `long`, ties toward positive infinity; NaN is 0 and values
 /// beyond the range of `long` saturate, as Rust's `as` does.
 pub fn round(x: f64) -> i64 {

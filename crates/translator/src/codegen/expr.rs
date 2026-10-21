@@ -619,7 +619,7 @@ impl<'a> Gen<'a> {
             | Builtin::CharIsSurrogate
             | Builtin::CharIsHighSurrogate
             | Builtin::CharIsLowSurrogate => self.char_builtin(builtin, args, id),
-            Builtin::Native(native) => self.native(native, args, ty),
+            Builtin::Native(native) => self.native(native, args, ty, id),
             Builtin::String(op) => self.string_builtin(op, args, id),
             // A chained call gives `&Self`; as a value, the builder is another handle to it.
             Builtin::Builder(op) if op.chains() => {
