@@ -368,7 +368,7 @@ impl<'a> Gen<'a> {
             ExprKind::Switch { selector, cases } => self.switch_expr(e.ty, selector, cases),
             ExprKind::Cast(ty, value) if ty.is_small() => self.small_cast(*ty, value, e.id),
             ExprKind::Assign { op: None, target: Place::Index(array, index), value } => {
-                Code::atom(self.index_set(e.id, array, index, e.ty, value, true))
+                Code::atom(self.index_set(e.id, array, index, arrays::element(array.ty), value, true))
             }
             ExprKind::Assign { op: Some(op), target: Place::Index(array, index), value } => {
                 Code::atom(self.index_update(*op, array, index, e.ty, value, e.id, true))

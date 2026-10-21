@@ -3886,6 +3886,31 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
 }
 
 #[test]
+fn an_array_of_references_used_as_an_object_array_is_one_everywhere() {
+    let rust = translate(
+        "class V { int n; V(int n) { this.n = n; } }
+        public class Main {
+            static int count(Object[] xs) { return xs.length; }
+            public static void main(String[] args) {
+                V[] vs = { new V(1) };
+                Object[] mixed = { \"s\", vs[0] };
+                System.out.println(count(vs) + count(mixed) + vs[0].n);
+            }
+        }",
+    );
+    // `V[]` meets `Object[]`, so it is one: the same array is passed, and a read casts back.
+    assert_contains(
+        &rust,
+        &[
+            "fn count(xs: &[Object]) -> i32 {",
+            "let vs: Vec<Object> = vec![Object::V(Rc::new(V::new(1)))];",
+            "count(&vs)",
+            "java::cast(vs[0].as_v(), \"V\").n",
+        ],
+    );
+}
+
+#[test]
 fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
     let rust = translate(GENERICS);
     // The method with the substituted types keeps its own signature; a bridge with the erased
