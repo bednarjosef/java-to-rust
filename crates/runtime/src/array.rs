@@ -315,12 +315,12 @@ pub fn copy_of<T: Clone, A: MadeElements<T>>(a: &A, len: i32, zero: T) -> A {
     A::made(items)
 }
 
-/// `Arrays.copyOf(a, len)`, where the program observes the `NegativeArraySizeException`.
+/// `copy_of` where the program observes the `NegativeArraySizeException`.
 pub fn try_copy_of<T: Clone, A: MadeElements<T>>(a: &A, len: i32, zero: T) -> Result<A, Exception> {
-    if len < 0 {
-        return Err(Exception::new("java.lang.NegativeArraySizeException", len.to_string()));
-    }
-    Ok(copy_of(a, len, zero))
+    let len = try_size(len)?;
+    let mut items = a.items().clone();
+    items.resize(len, zero);
+    Ok(A::made(items))
 }
 
 /// `a[i] = v` as an expression: stores `v` and gives it back.

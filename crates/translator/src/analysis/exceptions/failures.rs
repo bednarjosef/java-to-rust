@@ -476,11 +476,11 @@ pub(super) fn runtime_failures(
                     let checked = matches!(
                         builtin,
                         Builtin::String(StringOp::Substring | StringOp::FromChars | StringOp::GetChars)
+                            | Builtin::ArraysCopyOf
                             | Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _)
                             | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
                             | Builtin::CodePoint(CodePointOp::ToCharsInto)
                             | Builtin::EnumValueOf
-                            | Builtin::ArraysCopyOf
                             | Builtin::Native(Native::ArrayCopy)
                             | Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. })
                             | Builtin::Native(

@@ -77,7 +77,7 @@ pub use locked::{Locked, RawLock, Ref, RefMut};
 pub use math::*;
 pub use monitor::*;
 pub use natives::*;
-pub use null::{Handle, OrNull, non_null, null_enum, or_null, same, try_non_null};
+pub use null::{Handle, OrNull, non_null, null_enum, or_null, same, try_non_null, try_non_null_message};
 pub use out::{
     Out, drain_stdout, eprint_chars, eprintln_chars, err, err_flush, flush, out, print_chars, println_chars,
     standard_close, standard_flush, standard_write, standard_write_bytes, write_byte,

@@ -418,7 +418,7 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
-    /// `Arrays.toString`, `fill`, `sort` and `copyOf`.
+    /// `Arrays.toString`, `fill`, `sort` and `copyOf` (the expression `id`).
     pub(super) fn arrays_builtin(&mut self, builtin: Builtin, args: &'a [Expr], id: ExprId) -> Code {
         let elem = element(args[0].ty);
         let handle = self.handle(&args[0]);

@@ -19,6 +19,10 @@ pub use program::{Program, ProgramError, census_program, survey_program, transla
 pub fn translate(java: &str) -> Result<String, Error> {
     let mut class = lower::lower(&javac::tree(java)?)?;
     analysis::whole_objects(&mut class)?;
-    let facts = analysis::analyze(&class)?;
+    let mut facts = analysis::analyze(&class)?;
+    // A `catch` reads the message of a `NullPointerException`: it names the class file's code.
+    if facts.npe_message_read.is_some() {
+        analysis::npe_messages(&class, &mut facts, &javac::source_names(java)?)?;
+    }
     codegen::generate(&class, &facts)
 }

@@ -25,6 +25,7 @@ pub mod hierarchy;
 mod indexing;
 mod monitors;
 mod moves;
+mod npe_messages;
 mod nullness;
 mod object_values;
 mod objects;
@@ -37,6 +38,8 @@ mod whole_objects;
 
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
+
+pub use npe_messages::npe_messages;
 
 pub use arrays::{RowIndex, Slice, SlicedLoop};
 pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
@@ -175,6 +178,17 @@ pub struct Facts {
     /// `NullPointerException` that a `catch` or a `finally` may see: they are written with the
     /// runtime's checked `non_null`. With the position of the call or the field access.
     pub null_checked: HashMap<ExprId, Pos>,
+    /// Where a `catch` first reads the message of a `NullPointerException` that the runtime
+    /// raises (`getMessage`), which the translation then writes as Java's (see `npe_messages`).
+    pub npe_message_read: Option<Pos>,
+    /// The objects of `null_checked` whose message such a `catch` may read: those that its `try`
+    /// catches itself, and those whose exception leaves their method. Each must have Java's
+    /// message in `npe_messages`, or the program is not translated.
+    pub npe_message_needed: HashSet<ExprId>,
+    /// The message of the `NullPointerException` of the dereference of each object of
+    /// `null_checked` whose message is known: Java's text, or `None` for an exception without
+    /// one (such as `Objects.requireNonNull`'s). Filled in only when `npe_message_read` is set.
+    pub npe_messages: HashMap<ExprId, Option<String>>,
     /// The operations whose failure, which has no checked form of its own, a `catch` or a
     /// `finally` may see: they run inside `java::catching`. With their positions.
     pub catching: HashMap<ExprId, Pos>,
