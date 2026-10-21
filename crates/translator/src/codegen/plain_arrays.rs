@@ -264,9 +264,10 @@ impl<'a> Gen<'a> {
     /// method that returns its own arrays, or a plain local moved out of its variable.
     pub(super) fn owned(&mut self, e: &'a Expr) -> String {
         if self.facts.catching.contains_key(&e.id) && self.catching_now.insert(e.id) {
+            let mark = self.out.len();
             let text = self.owned(e);
             self.catching_now.remove(&e.id);
-            return self.caught(e.id, Code::atom(text)).text;
+            return self.caught(e.id, Code::atom(text), mark).text;
         }
         match &e.kind {
             ExprKind::NewArray(sizes) => self.owned_new(e.ty, sizes),
