@@ -777,7 +777,13 @@ impl<'t> Lowering<'t> {
                 let char_arg = args.first().is_some_and(|a| a.ty == Type::Char);
                 self.character_method(node, name, symbol.ty, char_arg)?
             }
-            ("java.util.Objects", name) => return self.objects_call(node, name, args),
+            // Where the JDK's `Objects` is translated, its calls are calls of it, but for the calls
+            // that the members written for records make on values that are not `Object`s.
+            ("java.util.Objects", name)
+                if self.type_index(symbol.owner).is_none() || node.0["implicit"] == Value::Bool(true) =>
+            {
+                return self.objects_call(node, name, args);
+            }
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);
@@ -802,7 +808,7 @@ impl<'t> Lowering<'t> {
                         let ty = self.ty(r, r.java_type())?;
                         self.synth(ExprKind::This, r.pos(), ty)
                     }
-                    Some(r) => self.expr(r)?,
+                    Some(r) => self.receiver(r, symbol.owner)?,
                     None => self.this(node),
                 };
                 let receiver = Box::new(receiver);

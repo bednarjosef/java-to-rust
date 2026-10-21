@@ -162,9 +162,10 @@ A small subset, end to end:
   `Object`, over strings, boxes, the program's enums and its classes that implement it. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
-  signature that converts and calls it. An array passed as an array of a type variable
-  (`first(String[])` for `<T> T first(T[])`) and intersection bounds (`T extends A & B`) are
-  rejected. A generic class or method that only stores, returns and passes on the values of its type
+  signature that converts and calls it. A type variable with several bounds (`T extends Object &
+  Comparable<? super T>`) erases to the first, and a call of a later bound's method casts to that
+  bound first, as javac's erased code does. An array passed as an array of a type variable
+  (`first(String[])` for `<T> T first(T[])`) is rejected. A generic class or method that only stores, returns and passes on the values of its type
   variables (a stack, a pair, a node, `<T> T choose(boolean, T, T)`) is a Rust generic instead
   (`struct Stack<T>`, `impl<T: Clone> Stack<T>`, `fn choose<T: Clone>(..)`), and its uses keep the
   substituted types with no casts. One that needs more of them (their text, `equals`, a bound, a
@@ -544,8 +545,7 @@ for references) and are answered at the call, so their `Class`-taking natives ar
 
 Each construct below is rejected at translation with an error that names it:
 
-- the exceptions and try-with-resources listed under "Exceptions" above, and intersection bounds
-  (`T extends A & B`);
+- the exceptions and try-with-resources listed under "Exceptions" above;
 - records, local interfaces, enums and records, and record patterns;
 - method references on a receiver other than a local, `this` or a final field, `super` in a
   lambda, the default and static methods of the JDK's functional interfaces;
@@ -580,10 +580,14 @@ overflow checks on (so a wrong "cannot overflow" fact panics), and compares stan
 exit code. Java's runs, translation and the Cargo build run in parallel, one thread per CPU. All
 the Rust programs are one Cargo project under `target/tmp/corpus`, kept between runs, so a program
 is rebuilt only when its translation changes: a warm run takes about as long as translating the
-corpus. The report prints a table with one row per program and lists each failing program with the
-first differing lines of output. `CORPUS_FILTER=text cargo test --test corpus` runs only the
-programs whose name contains `text`, and `CORPUS_THREADS=n` limits it to n threads (one per CPU by
-default). `crates/translator/tests/translation.rs` pins down what the output looks like.
+corpus. Java's results are cached the same way, in `target/tmp/corpus/java-cache`, one file per
+program: a program runs on `java` again only when its Java sources (for a project, all its files
+and their paths), its main class, the JVM arguments or the `java -version` output change, so a
+warm run starts no JVM. `CORPUS_JAVA_FRESH=1` runs every program on Java and stores the results
+anew, for when the cache is doubted. Only a run that Java finished is stored. The report prints a
+table with one row per program and lists each failing program with the first differing lines of
+output. `CORPUS_FILTER=text cargo test --test corpus` runs only the programs whose name contains
+`text`, and `CORPUS_THREADS=n` limits it to n threads (one per CPU by default). `crates/translator/tests/translation.rs` pins down what the output looks like.
 
 ## Plans
 

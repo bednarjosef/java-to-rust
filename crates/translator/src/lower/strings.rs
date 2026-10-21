@@ -104,6 +104,12 @@ impl<'t> Lowering<'t> {
             }
             StringOp::Join => {
                 let array_form = args.len() == 2 && args[1].ty == Type::array(Type::String);
+                if args.len() == 2 && matches!(args[1].ty, Type::Class(..)) && args[0].ty == Type::String {
+                    let mut args = args.into_iter();
+                    let (delimiter, elements) =
+                        (args.next().expect("two arguments"), args.next().expect("two arguments"));
+                    return self.join_iterable(node, delimiter, elements);
+                }
                 if !array_form && args.iter().any(|a| !char_sequence(a.ty)) {
                     return unsupported(node, "`String.join` of anything but strings");
                 }
