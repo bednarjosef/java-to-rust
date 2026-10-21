@@ -275,6 +275,10 @@ pub const OBJECT: &str = "Object";
 /// uses it as a type, beside `OBJECT`.
 pub const COMPARABLE: &str = "Comparable";
 
+/// The name of the type of `java.lang.Number`'s values, which lowering adds to a program that uses
+/// it as a type, beside `OBJECT`: the numeric boxes are its values.
+pub const NUMBER: &str = "Number";
+
 /// The runtime classes whose values an `Object` can hold, with the Java type of those values.
 pub fn runtime_values() -> [(&'static str, Type); 9] {
     [

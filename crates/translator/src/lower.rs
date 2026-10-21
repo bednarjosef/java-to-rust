@@ -45,6 +45,7 @@ mod switch;
 mod sync;
 mod system;
 mod varargs;
+pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use exceptions::{is_standard, standard_names, standard_subclass};
 pub use functional::is_functional;
@@ -203,6 +204,9 @@ struct Lowering<'t> {
     entry: Option<usize>,
     /// The standard exception classes that the program uses (see `exceptions`).
     standard: exceptions::Standard,
+    /// The array types whose arrays become `Object`s or are cast back from them: each is a
+    /// runtime class beside `Object` (see `object::object_types`).
+    object_arrays: std::cell::RefCell<Vec<Type>>,
     /// Where `Object` goes, in a program that uses it (see `object`).
     object: Option<object::ObjectIndexes>,
     /// The class of the objects that `new Object()` creates, when the code has one (see `object`).
@@ -377,6 +381,9 @@ impl<'t> Lowering<'t> {
             "java.lang.Comparable" if self.object.is_some_and(|at| at.comparable.is_some()) => {
                 Ok(Type::class(COMPARABLE))
             }
+            "java.lang.Number" if self.object.is_some_and(|at| at.number.is_some()) => {
+                Ok(Type::class(NUMBER))
+            }
             _ if let Some(erased) = self.erased(node, name) => erased,
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
             "java.lang.Object" => unsupported(node, "Object"),
@@ -423,8 +430,8 @@ impl<'t> Lowering<'t> {
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
                 e => Stmt::Expr(e),
             },
-            // Reachability skipped the branch that the condition guards (`program::never_true`).
-            "IF" if self.never_true(node) => match node.get("elseStatement") {
+            // Reachability skipped the other branch (`program::live_branch`).
+            "IF" if let Some(branch) = self.live_branch(node) => match branch {
                 Some(n) => self.single_stmt(n)?,
                 None => Stmt::Block(Vec::new()),
             },
@@ -547,6 +554,9 @@ impl<'t> Lowering<'t> {
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
                 let value = self.expr(node.child("expression")?)?;
+                if Self::is_object(value.ty) {
+                    self.object_array(node, ty)?;
+                }
                 // A cast between the program's types, up, down or across: `Cast` converts as the
                 // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
                 // `Integer` and unboxes. `(C) super.clone()` is already a `C`: the copy has the
@@ -565,9 +575,9 @@ impl<'t> Lowering<'t> {
                 }
             }
             // As with `if`, reachability skipped the branch that the condition guards.
-            "CONDITIONAL_EXPRESSION" if self.never_true(node) => {
+            "CONDITIONAL_EXPRESSION" if let Some(Some(branch)) = self.live_branch(node) => {
                 let ty = self.ty(node, node.java_type())?;
-                let value = self.convert(self.expr(node.child("falseExpression")?)?, ty);
+                let value = self.convert(self.expr(branch)?, ty);
                 // The branch converts to the type of the whole, as `cond ? 1 : 2L` is a `long`.
                 if value.ty == ty {
                     return Ok(value);
@@ -694,6 +704,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.class_call(node, &symbol, select)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.copy_of_with_class(node, &symbol)? {
+            return Ok(kind);
+        }
         let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
@@ -711,6 +724,9 @@ impl<'t> Lowering<'t> {
         }
         if symbol.owner == "java.lang.Comparable" && symbol.name == "compareTo" {
             return self.comparable_call(node, receiver, args);
+        }
+        if symbol.owner == "java.lang.Number" {
+            return self.number_call(node, &symbol, receiver);
         }
         if symbol.name == "equals"
             && !symbol.is_static
@@ -753,7 +769,16 @@ impl<'t> Lowering<'t> {
             ("java.lang.Math", "min") => Builtin::MathMin,
             ("java.lang.Math", "sqrt") => Builtin::MathSqrt,
             ("java.lang.Math", "pow") => Builtin::MathPow,
-            ("java.util.Arrays", name) => return self.arrays_call(node, name, args),
+            // Where the JDK's `Arrays` is translated, a call that the runtime does not do is one of
+            // it, such as a sort with a `Comparator`.
+            ("java.util.Arrays", name)
+                if self.type_index(symbol.owner).is_none() || {
+                    let types: Vec<&str> = node.list("arguments").map(|a| a.java_type()).collect();
+                    arrays::runtime_arrays_call(name, &types)
+                } =>
+            {
+                return self.arrays_call(node, name, args);
+            }
             ("java.lang.String", "length" | "equals")
                 if symbol.name == "length" || matches!(args[0].ty, Type::String | Type::Null) =>
             {

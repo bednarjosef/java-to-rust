@@ -1622,6 +1622,13 @@ Generics are erased in lowering, and nothing after it knows they existed:
   `java::double_compare`, `java::bool_compare`, a difference of `char`s or ordinals), which throws
   `ClassCastException` when the argument is of another class. A program that only calls a class's
   `compareTo` directly translates as before.
+- `java.lang.Number` is a third synthetic interface of the same kind, `NUMBER`, planned when the
+  program uses it as the type of a value (a variable, a bound such as `T extends Number`, the
+  elements of a `List<? extends Number>`). The six numeric boxes implement it, and its abstract
+  `byteValue()` to `doubleValue()` have an arm per box in `codegen::dispatch::number_arm`: the
+  value converted with `as`, which converts as Java's primitive conversions do (a floating-point
+  value becomes a `byte` or a `short` through an `int`). A program class that extends `Number` is
+  still rejected, as is any extension of a runtime class.
 - Bridges are methods, not conversions in dispatcher arms: when a method overrides one whose erased
   parameter or return types differ (`Integer next()` implementing `T next()` of `Source<Integer>`,
   `compareTo(Point)` implementing `Comparable`'s), lowering adds a method to its class with the
@@ -1631,12 +1638,24 @@ Generics are erased in lowering, and nothing after it knows they existed:
   parameter or return type (`next_integer`, `compare_to_point`); the group names are now unique in
   every class tree the group reaches (`codegen::names`). This also lifts "covariant return types"
   for these overrides.
+- A varargs parameter of a type variable (`T... items`) is an array of its erasure, read where the
+  method declares it, not at the call; an array of references passed for it is passed on, as
+  javac infers `T` from it (and is then rejected below unless it is an `Object[]`).
 - Arrays do not convert: `String[]` is `java::Array<String>` and `Object[]` is
   `java::Array<Option<Object>>`, so an array passed as an array of a type variable
   (`<T> T first(T[] xs)` called with a `String[]`) is rejected ("an array passed as an array of a
-  type variable"), and so is an array of a type variable read as an array of its argument. An
-  array as an `Object` value stays rejected; the plan's `Variant::Array` is not done. A generic
-  array built as `(T[]) new Object[n]` is an `Object[]` and translates.
+  type variable"), and so is an array of a type variable read as an array of its argument. A
+  generic array built as `(T[]) new Object[n]` is an `Object[]` and translates.
+- An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the
+  plan's `Variant::Array`, done as a runtime class beside the strings and the boxes rather than a
+  variant kind of its own: each array type that is converted to `Object` or cast back from it gets
+  a `TypeKind::Runtime` declaration named after the type (`int[]`, `String[][]`), collected while
+  lowering (`lower::object::note_object_array`) and added after `Object`'s other runtime types.
+  Its variant holds the shared `java::Array` (`Object::IntArray(java::Array<i32>)`, with
+  `as_int_array` and `to_int_array`), so the array keeps its identity: `==` and `equals` compare
+  with `Rc::ptr_eq`, `hashCode` is `java::identity_hash`, and it prints as Java's default
+  `toString`, its JVM name and hash (`[I@1b6d3586`). Arrays of a Rust generic's instantiation
+  (`Box<String>[]` under real generics) have no runtime class and are rejected.
 - A value read back out of a generic container is a cast from `Object` that may be null (the
   container's array has null elements), so reading an enum back (`Suit s = list.get(0)`) is
   rejected by the existing "casting a value that may be null to an enum"; strings, boxes and

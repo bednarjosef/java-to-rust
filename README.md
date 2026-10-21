@@ -164,14 +164,17 @@ A small subset, end to end:
   its value. A class without `toString` prints as Java's `Object.toString` does, its binary name and
   its hash code in hexadecimal (`Point@1b6d3586`). `new Object()` makes an object of a class
   without fields, `PlainObject`, equal only to itself and printed as `java.lang.Object@..`, as the
-  JDK's lock objects and placeholder values (`HashSet`'s `PRESENT`) need. An array as an
-  `Object`, and `==` between two `Object`s that may both be strings or boxes (whose identity the
-  translation does not keep, except in the shortcut `a == b || a.equals(b)`) are rejected. The
+  JDK's lock objects and placeholder values (`HashSet`'s `PRESENT`) need. An array becomes an
+  `Object` too (`Object::IntArray(..)`), shared and compared by identity, so a `Deque<int[]>` holds
+  its arrays. `==` between two `Object`s that may both be strings or boxes (whose identity the
+  translation does not keep, except in the shortcut `a == b || a.equals(b)`) is rejected. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
   and a use where javac substituted a type argument gets the checked cast back
   (`java::cast(b.get().as_integer(), ..)`). `Comparable` as a type (a bound, mostly) is an enum like
-  `Object`, over strings, boxes, the program's enums and its classes that implement it. A method
+  `Object`, over strings, boxes, the program's enums and its classes that implement it, and so is
+  `Number` (`T extends Number`, `List<? extends Number>`), over the numeric boxes, whose
+  `intValue()` and the others convert as Java does. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &
@@ -390,9 +393,12 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   or by range with Java's range checks, `fill` by range, `copyOfRange` on primitives,
   `binarySearch` in both forms (`-(insertion point) - 1` when absent), and `deepToString` on
   arrays of primitive or `String` rows. `a.clone()` is a shallow copy; rows of a 2-D array are
-  shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`. Not
-  yet: `copyOf` and `copyOfRange` on `String` arrays (the padding would need nulls that the
-  nullness analysis does not see), `equals(null, b)`, `asList` and `stream`.
+  shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`.
+  `copyOf` works on any array, and `copyOf(a, n, type)` is the same copy (its class is dropped).
+  Translated with the JDK's sources, every other call of `Arrays` (a sort with a `Comparator`, a
+  sort of objects, `asList`) is a call of the translated `java/util/Arrays.java`, and
+  reachability follows only those (`lower::runtime_arrays_call`). Not yet without the JDK:
+  `copyOfRange` on `String` arrays, `equals(null, b)`, `asList` and `stream`.
 - Objects (`analysis/objects.rs`, `analysis/owned.rs`, `analysis/borrowing.rs`). The faithful form
   of an object is `Rc<RefCell<C>>`, because Java references are shared and mutable. A class whose
   objects never change after construction is shared as `Rc<C>`: its fields are written only by its

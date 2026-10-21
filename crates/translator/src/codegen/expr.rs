@@ -391,8 +391,8 @@ impl<'a> Gen<'a> {
             // primitive becoming an `Object`.
             ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
             // A downcast from an interface to an enum that implements it, or from `Object` to a
-            // string or a box.
-            ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_)), value)
+            // string, a box or an array.
+            ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_) | Type::Array(_)), value)
                 if matches!(value.ty, Type::Class(..)) =>
             {
                 self.class_cast(*to, value)

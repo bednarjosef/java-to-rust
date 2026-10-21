@@ -57,12 +57,13 @@ impl<'t> Lowering<'t> {
             Some(p) => return unsupported(p, "record patterns"),
             None => None,
         };
-        // `Object` may also hold a string or a box.
+        // `Object` may also hold a string, a box or an array.
         let target = matches!(ty, Type::Class(..) | Type::Enum(_))
-            || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_)));
+            || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_) | Type::Array(_)));
         if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
             return unsupported(node, "instanceof on these types");
         }
+        self.object_array(node, ty)?;
         Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
     }
 
@@ -185,7 +186,7 @@ impl<'t> Lowering<'t> {
             return e;
         }
         let differs = match (e.ty, to) {
-            (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE => {
+            (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE || b == NUMBER => {
                 !matches!(e.ty, Type::Null | Type::Void) && e.ty != to
             }
             (Type::Class(a, _) | Type::Enum(a), Type::Class(b, _)) => a != b,
@@ -193,6 +194,9 @@ impl<'t> Lowering<'t> {
         };
         if !differs {
             return e;
+        }
+        if Self::is_object(to) {
+            self.note_object_array(e.ty);
         }
         let pos = e.pos;
         self.synth(ExprKind::Cast(to, Box::new(e)), pos, to)
