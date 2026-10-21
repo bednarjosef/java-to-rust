@@ -70,6 +70,18 @@ pub enum StringOp {
     /// `new String(bytes)`, `new String(bytes, charset)` and `new String(bytes, offset, length,
     /// charset)`: the array, then the same charset forms as `GetBytes`.
     FromBytes,
+    /// `s.getBytes(srcBegin, srcEnd, dst, dstBegin)`, the deprecated form that keeps the low byte
+    /// of each `char`.
+    GetLowBytes,
+    CodePointAt,
+    CodePointBefore,
+    CodePointCount,
+    OffsetByCodePoints,
+    /// `s.contentEquals(text)` of a string or a builder: whether the texts are equal.
+    ContentEquals,
+    /// `s.regionMatches(toffset, other, ooffset, len)` and the form with `ignoreCase` first.
+    RegionMatches,
+    StripIndent,
 }
 
 /// A method of `StringBuilder`.
@@ -95,14 +107,26 @@ pub enum BuilderOp {
     Substring,
     IsEmpty,
     CompareTo,
+    AppendCodePoint,
+    /// `sb.repeat(codePoint, count)` and `sb.repeat(text, count)`.
+    Repeat,
+    CodePointAt,
+    CodePointBefore,
+    CodePointCount,
+    OffsetByCodePoints,
+    /// `sb.getChars(srcBegin, srcEnd, dst, dstBegin)`.
+    GetChars,
 }
 
 impl BuilderOp {
-    /// Whether the method changes the builder.
+    /// Whether the method changes the builder (or, for `getChars`, an array).
     pub fn mutates(self) -> bool {
         matches!(
             self,
             BuilderOp::Append
+                | BuilderOp::GetChars
+                | BuilderOp::AppendCodePoint
+                | BuilderOp::Repeat
                 | BuilderOp::Insert
                 | BuilderOp::Reverse
                 | BuilderOp::SetCharAt
@@ -118,6 +142,8 @@ impl BuilderOp {
         matches!(
             self,
             BuilderOp::Append
+                | BuilderOp::AppendCodePoint
+                | BuilderOp::Repeat
                 | BuilderOp::Insert
                 | BuilderOp::Reverse
                 | BuilderOp::DeleteCharAt

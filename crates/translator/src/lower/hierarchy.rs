@@ -164,6 +164,10 @@ impl<'t> Lowering<'t> {
         if let Some(outer) = self.outer_super(receiver) {
             return self.enclosing_instance(outer, receiver.pos());
         }
+        // In a lambda, `super` is that of the class whose code holds it.
+        if let Some(holder) = self.lambda_this(receiver) {
+            return holder;
+        }
         let ty = self.ty(receiver, receiver.java_type())?;
         Ok(self.synth(ExprKind::This, receiver.pos(), ty))
     }

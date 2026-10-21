@@ -830,6 +830,26 @@ impl<'a> Gen<'a> {
     /// A call of method `index`, without arguments, on the object of `e`'s class that `handle`
     /// reaches.
     fn handle_call(&mut self, handle: &str, e: &'a Expr, index: usize) -> String {
+        // A method that the class inherits from a superclass whose enum has it (as
+        // `inherited_call` calls it): the object as a value of that enum first.
+        if let Home::Enum(t) = self.homes[index]
+            && self.enum_of(e) != Some(t)
+        {
+            let obj = match (self.enum_of(e), self.struct_class(e)) {
+                (Some(s), _) => {
+                    self.need(Need::Convert(s, t));
+                    Some(format!("{handle}.{}()", self.to_name(t)))
+                }
+                (None, Some(c)) => {
+                    self.variant_of(t, c).map(|variant| format!("{variant}({handle}.clone())"))
+                }
+                (None, None) => None,
+            };
+            if let Some(obj) = obj {
+                self.need(Need::Body(index));
+                return format!("{obj}.{}()", self.fn_names[index]);
+            }
+        }
         let obj = self.handle_object(handle, e, index);
         if self.facts.self_methods.contains(&index) {
             format!("{obj}.{}{}()", self.method_path(e, index), self.fn_names[index])

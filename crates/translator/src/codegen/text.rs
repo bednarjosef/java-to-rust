@@ -196,6 +196,44 @@ impl<'a> Gen<'a> {
                 let dst = self.array_arg(&args[3], true);
                 self.may_fail(id, "get_chars", "", &format!("{s}, {begin}, {end}, {dst}, {dst_begin}"))
             }
+            StringOp::GetLowBytes => {
+                let s = self.text_ref(&args[0]);
+                let [begin, end, dst_begin] = self.hoisted_ints(args, [1, 2, 4]);
+                let dst = self.array_arg(&args[3], true);
+                call(self, "get_low_bytes", vec![s, begin, end, dst, dst_begin])
+            }
+            StringOp::CodePointAt
+            | StringOp::CodePointBefore
+            | StringOp::CodePointCount
+            | StringOp::OffsetByCodePoints
+            | StringOp::StripIndent => {
+                let f = match op {
+                    StringOp::CodePointAt => "code_point_at",
+                    StringOp::CodePointBefore => "code_point_before",
+                    StringOp::CodePointCount => "code_point_count",
+                    StringOp::OffsetByCodePoints => "offset_by_code_points",
+                    _ => "strip_indent",
+                };
+                let mut parts = vec![self.text_ref(&args[0])];
+                parts.extend(args[1..].iter().map(|a| self.int_arg(a)));
+                call(self, f, parts)
+            }
+            StringOp::ContentEquals => {
+                let (a, b) = (self.text_ref(&args[0]), self.text_ref(&args[1]));
+                call(self, "content_equals", vec![a, b])
+            }
+            StringOp::RegionMatches => {
+                let s = self.text_ref(&args[0]);
+                // `regionMatches(ignoreCase, toffset, other, ooffset, len)` has five arguments.
+                let (ignore_case, rest) = match args.len() {
+                    6 => (self.value(&args[1], Type::Boolean).text, &args[2..]),
+                    _ => ("false".to_string(), &args[1..]),
+                };
+                let toffset = self.int_arg(&rest[0]);
+                let other = self.text_ref(&rest[1]);
+                let (ooffset, len) = (self.int_arg(&rest[2]), self.int_arg(&rest[3]));
+                call(self, "region_matches", vec![s, ignore_case, toffset, other, ooffset, len])
+            }
             StringOp::CharCodes => {
                 let s = self.text_ref(&args[0]);
                 let units = call(self, "units", vec![s]).text;
@@ -465,6 +503,33 @@ impl<'a> Gen<'a> {
             BuilderOp::CompareTo => {
                 let other = self.builder_recv(&rest[0]);
                 method("compare_to", vec![format!("&{other}")])
+            }
+            BuilderOp::Repeat if matches!(rest[0].ty, Type::String | Type::StringBuilder | Type::Null) => {
+                let (name, text) = self.appended("repeat", &rest[0]);
+                let count = self.int_arg(&rest[1]);
+                method(&name, vec![text, count])
+            }
+            BuilderOp::AppendCodePoint
+            | BuilderOp::Repeat
+            | BuilderOp::CodePointAt
+            | BuilderOp::CodePointBefore
+            | BuilderOp::CodePointCount
+            | BuilderOp::OffsetByCodePoints => {
+                let name = match op {
+                    BuilderOp::AppendCodePoint => "append_code_point",
+                    BuilderOp::Repeat => "repeat_code_point",
+                    BuilderOp::CodePointAt => "code_point_at",
+                    BuilderOp::CodePointBefore => "code_point_before",
+                    BuilderOp::CodePointCount => "code_point_count",
+                    _ => "offset_by_code_points",
+                };
+                let ints = rest.iter().map(|a| self.int_arg(a)).collect();
+                method(name, ints)
+            }
+            BuilderOp::GetChars => {
+                let [begin, end, dst_begin] = self.hoisted_ints(args, [1, 2, 4]);
+                let dst = self.array_arg(&args[3], true);
+                method("get_chars", vec![begin, end, dst, dst_begin])
             }
             BuilderOp::New => unreachable!("handled above"),
         }

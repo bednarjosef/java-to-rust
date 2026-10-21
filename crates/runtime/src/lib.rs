@@ -278,6 +278,11 @@ pub fn throw(class: &str, message: &str) -> ! {
     exception::die(Exception::new(class, message))
 }
 
+/// `throw` of an exception made already, such as one without a message.
+pub fn throw_exception(e: Exception) -> ! {
+    exception::die(catching::raise_exception(e))
+}
+
 /// Java's checked cast `(T) x` on a non-null object: the object as a `T` if it is one, which
 /// the translation finds (`x.as_t()`), else a `ClassCastException`. `to` is the binary name of
 /// `T`.

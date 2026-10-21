@@ -6,12 +6,22 @@
 //! variable the test says it skipped and passes. A program is one `.java` file, or a directory
 //! with a source root `src/` and a file `main` that names the main class, as in
 //! `corpus/projects/`. Translating with the JDK takes a few seconds per program, and the programs
-//! run one at a time; `CORPUS_FILTER=text` runs only those whose name contains `text`. A program
-//! reads the file `Name.input` next to it (`input` in a directory) on standard input, and nothing
-//! without one.
+//! run on `CORPUS_THREADS` threads (one per CPU by default); `CORPUS_FILTER=text` runs only those
+//! whose name contains `text`. A program reads the file `Name.input` next to it (`input` in a
+//! directory) on standard input, and nothing without one.
+//!
+//! As in the corpus test, Java's results and the runs of translations that are the same as in an
+//! earlier run that matched Java are kept in the checks' cache (`check_cache::test_root`).
+//! `CHECK_FRESH=1` does all the work again.
+
+#[path = "corpus/parallel.rs"]
+mod parallel;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+
+use java_to_rust::check_cache::{self, Fingerprint};
+use parallel::parallel;
 
 struct Program {
     /// The binary name, such as `functionchains`.
@@ -33,7 +43,7 @@ fn stdin_of(p: &Program) -> Stdio {
 }
 
 /// What a run printed and how it exited.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Run {
     stdout: String,
     code: Option<i32>,
@@ -78,11 +88,22 @@ fn java_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The program's run on Java, compiled with javac into `classes` first.
-fn run_java(p: &Program, classes: &Path) -> Run {
-    let _ = std::fs::remove_dir_all(classes);
+/// The program's run on Java, compiled with javac into `classes` first, or its result stored in
+/// `cache` by an earlier run with the same sources, input and Java version.
+fn run_java(p: &Program, classes: &Path, cache: &Path) -> Run {
     let mut sources = Vec::new();
     java_files(&p.sources, &mut sources);
+    sources.sort();
+    let key = java_key(p, &sources);
+    let stored = key.as_ref().and_then(|key| check_cache::load(cache, key)).and_then(|entry| {
+        let text = String::from_utf8(entry).ok()?;
+        let (code, stdout) = text.split_once('\n')?;
+        Some(Run { stdout: stdout.to_string(), code: Some(code.parse().ok()?) })
+    });
+    if let Some(stored) = stored {
+        return stored;
+    }
+    let _ = std::fs::remove_dir_all(classes);
     let javac = Command::new("javac")
         .arg("-d")
         .arg(classes)
@@ -91,11 +112,47 @@ fn run_java(p: &Program, classes: &Path) -> Run {
         .expect("running `javac` failed; the test needs a JDK on PATH");
     assert!(javac.status.success(), "javac failed on {}: {}", p.name, String::from_utf8_lossy(&javac.stderr));
     let java = Command::new("java").arg("-cp").arg(classes).arg(&p.main).stdin(stdin_of(p)).output();
-    run(java.expect("running `java` failed"))
+    let result = run(java.expect("running `java` failed"));
+    if let (Some(key), Some(code)) = (key, result.code) {
+        check_cache::store(cache, &key, format!("{code}\n{}", result.stdout).as_bytes());
+    }
+    result
 }
 
-/// The program's run translated with the JDK's sources, or why it does not get that far.
-fn run_rust(p: &Program, library: &Path, work: &Path) -> Result<Run, String> {
+/// What decides a program's run on Java: the Java version, the main class, the sources with
+/// their paths in the source root, and the input. None if one cannot be read.
+fn java_key(p: &Program, sources: &[PathBuf]) -> Option<String> {
+    let mut fingerprint = Fingerprint::new();
+    fingerprint.field(b"whole-program java run");
+    fingerprint.field(check_cache::java_version().as_bytes());
+    fingerprint.field(p.main.as_bytes());
+    for file in sources {
+        fingerprint.field(file.strip_prefix(&p.sources).ok()?.to_string_lossy().as_bytes());
+        fingerprint.field(&std::fs::read(file).ok()?);
+    }
+    input_field(p, &mut fingerprint)?;
+    Some(fingerprint.key())
+}
+
+fn input_field(p: &Program, fingerprint: &mut Fingerprint) -> Option<()> {
+    fingerprint.field(b"input");
+    if let Some(input) = &p.input {
+        fingerprint.field(&std::fs::read(input).ok()?);
+    }
+    Some(())
+}
+
+/// The program's run translated with the JDK's sources, or why it does not get that far. A
+/// translation that is the same as in an earlier run that matched Java, with the same runtime,
+/// toolchain and input (`build`, the hash of all but the translation), is not built and run
+/// again: its run is taken from `cache`. A fresh run comes with the key to store it under.
+fn run_rust(
+    p: &Program,
+    library: &Path,
+    work: &Path,
+    cache: &Path,
+    build: Option<&str>,
+) -> (Result<Run, String>, Option<String>) {
     let dir = work.join(&p.name).join("crate");
     let _ = std::fs::remove_dir_all(&dir);
     let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
@@ -109,7 +166,16 @@ fn run_rust(p: &Program, library: &Path, work: &Path) -> Result<Run, String> {
         .output()
         .unwrap();
     if !translated.status.success() {
-        return Err(format!("translation failed: {}", String::from_utf8_lossy(&translated.stderr)));
+        return (Err(format!("translation failed: {}", String::from_utf8_lossy(&translated.stderr))), None);
+    }
+    let key = build.and_then(|build| rust_key(p, &dir, build));
+    let stored = key.as_ref().and_then(|key| check_cache::load(cache, key)).and_then(|entry| {
+        let text = String::from_utf8(entry).ok()?;
+        let (code, stdout) = text.split_once('\n')?;
+        Some(Run { stdout: stdout.to_string(), code: Some(code.parse().ok()?) })
+    });
+    if let Some(stored) = stored {
+        return (Ok(stored), None);
     }
     let target = work.join("cargo");
     let built = Command::new("cargo")
@@ -119,12 +185,31 @@ fn run_rust(p: &Program, library: &Path, work: &Path) -> Result<Run, String> {
         .output()
         .unwrap();
     if !built.status.success() {
-        return Err(format!("does not compile: {}", String::from_utf8_lossy(&built.stderr)));
+        return (Err(format!("does not compile: {}", String::from_utf8_lossy(&built.stderr))), None);
     }
     // The translator names the crate after the main class.
     let crate_name = p.main.rsplit('.').next().unwrap_or_default().to_lowercase();
     let binary = target.join("debug").join(crate_name);
-    Ok(run(Command::new(binary).stdin(stdin_of(p)).output().unwrap()))
+    (Ok(run(Command::new(binary).stdin(stdin_of(p)).output().unwrap())), key)
+}
+
+/// The key of a translated program's run: `build`, the crate the translator wrote in `dir` (its
+/// manifest without the runtime's path, which is another in each worktree), and the input.
+fn rust_key(p: &Program, dir: &Path, build: &str) -> Option<String> {
+    let runtime = runtime();
+    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    let mut fingerprint = Fingerprint::new();
+    fingerprint.field(b"whole-program rust run");
+    fingerprint.field(build.as_bytes());
+    fingerprint.field(manifest.replace(runtime.to_str()?, "<runtime>").as_bytes());
+    fingerprint.tree(&dir.join("src"), &[])?;
+    input_field(p, &mut fingerprint)?;
+    Some(fingerprint.key())
+}
+
+/// The runtime crate, which the translated crates depend on.
+fn runtime() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime").canonicalize().unwrap()
 }
 
 #[test]
@@ -135,25 +220,38 @@ fn whole_programs_match_java() {
     };
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/whole-program");
     let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program");
+    let cache = check_cache::test_root();
+    let (java_cache, rust_cache) = (cache.join("whole-program-java"), cache.join("whole-program-rust"));
+    std::fs::create_dir_all(&work).unwrap();
+    let build = check_cache::rust_build_key(&runtime(), &work);
     let filter = std::env::var("CORPUS_FILTER").ok();
-    let mut failures = Vec::new();
     let programs = programs(&root, &work);
-    let selected = programs.iter().filter(|p| filter.as_ref().is_none_or(|f| p.name.contains(f.as_str())));
-    for p in selected {
-        let java = run_java(p, &work.join(&p.name).join("classes"));
-        let verdict = match run_rust(p, &library, &work) {
-            Ok(rust) if rust == java => "PASS".to_string(),
+    let selected: Vec<&Program> =
+        programs.iter().filter(|p| filter.as_ref().is_none_or(|f| p.name.contains(f.as_str()))).collect();
+    let results = parallel(selected.len(), |i| {
+        let p = selected[i];
+        let java = run_java(p, &work.join(&p.name).join("classes"), &java_cache);
+        let (rust, key) = run_rust(p, &library, &work, &rust_cache, build.as_deref());
+        match rust {
+            Ok(rust) if rust == java => {
+                if let (Some(key), Some(code)) = (key, rust.code) {
+                    check_cache::store(&rust_cache, &key, format!("{code}\n{}", rust.stdout).as_bytes());
+                }
+                ("PASS".to_string(), None)
+            }
             Ok(rust) => {
-                failures.push(format!("{}: Java {java:?}\nRust {rust:?}", p.name));
-                "WRONG OUTPUT".to_string()
+                ("WRONG OUTPUT".to_string(), Some(format!("{}: Java {java:?}\nRust {rust:?}", p.name)))
             }
             Err(why) => {
                 let first = why.lines().next().unwrap_or_default().to_string();
-                failures.push(format!("{}: {why}", p.name));
-                first
+                (first, Some(format!("{}: {why}", p.name)))
             }
-        };
+        }
+    });
+    let mut failures = Vec::new();
+    for (p, (verdict, failure)) in selected.iter().zip(results) {
         println!("{:<24} {verdict}", p.name);
+        failures.extend(failure);
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

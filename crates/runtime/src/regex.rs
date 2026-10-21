@@ -1,9 +1,10 @@
 //! The regular expressions of `String.split`, `replaceAll`, `replaceFirst` and `matches`: the part
 //! of `java.util.regex` that programs commonly use, matched by backtracking in Java's order, so
 //! the same match is found. Supported: literal characters and escapes (`\t`, `\n`, `\.`, `\Q..\E`,
-//! `\xhh`, `\uhhhh`), `.`, the classes `\d \D \s \S \w \W`, character sets (`[a-z_]`, `[^,;]`),
-//! groups (capturing and `(?:..)`), `|`, `^`, `$`, and the greedy and reluctant quantifiers `*`,
-//! `+`, `?`, `{n}`, `{n,}` and `{n,m}`. Anything else (back references, lookaround, flags,
+//! `\xhh`, `\uhhhh`), `.`, the classes `\d \D \s \S \w \W`, the line break `\R`, character sets
+//! (`[a-z_]`, `[^,;]`), groups (capturing and `(?:..)`), back references (`\1`), `|`, `^`, `$`, and
+//! the greedy and reluctant quantifiers `*`, `+`, `?`, `{n}`, `{n,}` and `{n,m}`. Anything else
+//! (lookaround, flags,
 //! possessive quantifiers, Unicode properties, boundaries, set unions and intersections) is
 //! rejected: the translator checks a constant pattern when it translates the call, and any other
 //! pattern fails when it is compiled at run time.
@@ -39,6 +40,10 @@ enum Node {
     End,
     /// A group, with its number if it captures.
     Group(Alt, Option<usize>),
+    /// `\R`: a line break, `\r\n` or one of `\n \u000B \f \r \u0085 \u2028 \u2029`.
+    LineBreak,
+    /// `\n`: the text that group `n` matched last, if it did.
+    BackRef(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -170,6 +175,11 @@ impl Parser<'_> {
             '.' => Node::Any,
             '^' => Node::Start,
             '$' => Node::End,
+            '\\' if self.peek() == Some('R') => {
+                self.at += 1;
+                Node::LineBreak
+            }
+            '\\' if self.peek().is_some_and(|c| matches!(c, '1'..='9')) => Node::BackRef(self.group_number()),
             '\\' => match self.escape(false)? {
                 Escaped::Char(c) => Node::Char(c),
                 Escaped::Class(class, negated) => {
@@ -179,6 +189,21 @@ impl Parser<'_> {
             '*' | '+' | '?' | '{' => return self.malformed("a dangling quantifier"),
             c => Node::Char(c),
         })
+    }
+
+    /// The number of a back reference, after its `\`: its first digit, and each further one as
+    /// long as the number stays one of a group opened before it, as Java reads it.
+    fn group_number(&mut self) -> usize {
+        let mut n = 0;
+        while let Some(digit) = self.peek().and_then(|c| c.to_digit(10)) {
+            let more = n * 10 + digit as usize;
+            if n > 0 && more > self.groups {
+                break;
+            }
+            n = more;
+            self.at += 1;
+        }
+        n
     }
 
     fn number(&mut self) -> Option<u32> {
@@ -247,6 +272,8 @@ impl Parser<'_> {
             'e' => Escaped::Char('\u{1B}'),
             'x' => Escaped::Char(self.hex(2)?),
             'u' => Escaped::Char(self.hex(4)?),
+            // Only outside a set, where `atom` reads them.
+            'R' | '1'..='9' if in_set => return self.malformed("an illegal escape in a set"),
             c if c.is_ascii_alphanumeric() => {
                 let place = if in_set { " in a set" } else { "" };
                 return self.error(&format!("the escape \\{c}{place}"));
@@ -400,6 +427,20 @@ impl Matcher<'_> {
                     || rest == ['\r', '\n']
                     || (rest.len() == 1 && is_line_terminator(rest[0]));
                 at_end && k(pos)
+            }
+            Node::LineBreak => match input.get(pos) {
+                // `\r\n` is tried first, then `\r` alone.
+                Some('\r') => (input.get(pos + 1) == Some(&'\n') && k(pos + 2)) || k(pos + 1),
+                Some(&c) => {
+                    matches!(c, '\n' | '\u{B}' | '\u{C}' | '\u{85}' | '\u{2028}' | '\u{2029}') && k(pos + 1)
+                }
+                None => false,
+            },
+            // A group that has not matched (or does not exist) matches nothing.
+            Node::BackRef(i) => {
+                let Some((start, end)) = self.caps.borrow().get(*i).copied().flatten() else { return false };
+                let len = end - start;
+                pos + len <= input.len() && input[start..end] == input[pos..pos + len] && k(pos + len)
             }
             Node::Group(alt, None) => self.alt(alt, pos, k),
             Node::Group(alt, Some(i)) => self.alt(alt, pos, &mut |end| {
@@ -648,11 +689,19 @@ mod tests {
         assert!(matches_all("abc123", "[a-z]+\\d{3}"));
         assert!(!matches_all("abc", "ab"));
         assert!(matches_all("ab", "(a|ab)b?"));
+        assert_eq!(replace_all("a..b...c", "(\\.)(\\1)+", "/"), "a/b/c");
+        assert_eq!(replace_all("abab cdc", "(\\w)(\\w)\\1\\2", "<$0>"), "<abab> cdc");
+        // `\11` is group 1 then `1` when there is no group 11.
+        assert!(matches_all("aa1", "(a)\\11"));
+        assert!(!matches_all("a", "\\2(a)"));
+        assert_eq!(parts("a\r\nb\nc\rd\u{2028}e", "\\R", 0), ["a", "b", "c", "d", "e"]);
+        assert!(matches_all("\r\n", "\\R"));
+        assert!(matches_all("\r\n", "\\R\\n"));
     }
 
     #[test]
     fn unsupported_patterns_are_rejected() {
-        for p in ["(?i)a", "a++", "\\bword", "[a-z&&[^b]]", "\\1", "\\p{L}"] {
+        for p in ["(?i)a", "a++", "\\bword", "[a-z&&[^b]]", "\\0", "\\p{L}"] {
             assert!(check(p).is_err(), "{p}");
         }
         // Malformed patterns throw as in Java, so they are not rejected.

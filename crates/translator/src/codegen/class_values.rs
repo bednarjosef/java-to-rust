@@ -122,6 +122,8 @@ impl<'a> Gen<'a> {
             OBJECT => return "java::Class::OBJECT".to_string(),
             COMPARABLE => return "java::Class::COMPARABLE".to_string(),
             ENUM => return "java::Class::ENUM".to_string(),
+            NUMBER => return "java::Class::NUMBER".to_string(),
+            CHAR_SEQUENCE => return "java::Class::CHAR_SEQUENCE".to_string(),
             _ => {}
         }
         let (kind, extends) = (decl.kind, decl.extends);
@@ -173,6 +175,183 @@ impl<'a> Gen<'a> {
             }
         };
         Code::atom(format!("{class}.{method}()"))
+    }
+
+    /// `ClassIsInstance(class, x)`, or with `check` the statement `ClassCheck(class, x)`: the
+    /// runtime's test of the binary names of the classes and interfaces of `x`'s class
+    /// (`instance_names`) against the class's.
+    pub(super) fn class_instance(&mut self, check: bool, args: &'a [Expr]) -> Code {
+        let class = if self.nullable(&args[0]) {
+            format!("{}({})", self.runtime("non_null"), self.expr(&args[0]).text)
+        } else {
+            self.expr(&args[0]).at(ATOM)
+        };
+        let names = self.instance_names(&args[1]);
+        let method = if check { "check_cast" } else { "is_instance" };
+        Code::atom(format!("{class}.{method}({names})"))
+    }
+
+    /// The binary names of the class of the value of `x` and of every class and interface above
+    /// it, the class's own first, as an `Option<&[&str]>` that is `None` when `x` is null. For a
+    /// value of an enum of classes, a `match` on its variant.
+    fn instance_names(&mut self, x: &'a Expr) -> String {
+        if matches!(x.kind, ExprKind::Null) || x.ty == Type::Null {
+            return "None".to_string();
+        }
+        let list = |names: Vec<String>| {
+            let names: Vec<String> = names.iter().map(|n| rust_string(n)).collect();
+            format!("&[{}][..]", names.join(", "))
+        };
+        let nullable = self.nullable(x);
+        if let Some(t) = self.enum_of(x) {
+            let value = if nullable { self.option_ref(x) } else { self.expr(x).at(ATOM) };
+            let mut arms = Vec::new();
+            for c in self.enum_variants(t) {
+                let pattern = format!("{}(_)", self.variant(t, c));
+                let pattern = if nullable { format!("Some({pattern})") } else { pattern };
+                arms.push(format!("{pattern} => Some({})", list(self.decl_names(c))));
+            }
+            if nullable {
+                arms.push("None => None".to_string());
+            }
+            return format!("match {value} {{ {} }}", arms.join(", "));
+        }
+        let names = match x.ty {
+            Type::Class(..) => match self.struct_class(x) {
+                Some(c) => self.decl_names(c),
+                None => vec!["java.lang.Object".to_string()],
+            },
+            ty => self.type_names(ty),
+        };
+        let names = list(names);
+        if nullable {
+            let option = self.option_ref(x);
+            return format!("{option}.map(|_| {names})");
+        }
+        if has_effects(x) {
+            let text = self.expr(x).text;
+            return format!("{{ let _ = {text}; Some({names}) }}");
+        }
+        format!("Some({names})")
+    }
+
+    /// The binary names of class `c` of the program, or of a runtime class, and of the classes
+    /// and interfaces above it, its own first.
+    fn decl_names(&mut self, c: usize) -> Vec<String> {
+        if let Some(ty) = self.runtime_of(c) {
+            return self.type_names(ty);
+        }
+        let mut names: Vec<String> = Vec::new();
+        let mut queue = std::collections::VecDeque::from([c]);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(d) = queue.pop_front() {
+            if !seen.insert(d) {
+                continue;
+            }
+            let decl = &self.class.types[d];
+            queue.extend(decl.extends);
+            queue.extend(decl.implements.iter().copied());
+            let name = match decl.name.as_str() {
+                OBJECT => "java.lang.Object".to_string(),
+                COMPARABLE => "java.lang.Comparable".to_string(),
+                ENUM => "java.lang.Enum".to_string(),
+                NUMBER => "java.lang.Number".to_string(),
+                CHAR_SEQUENCE => "java.lang.CharSequence".to_string(),
+                _ => match runtime_type(&decl.name) {
+                    Some(ty) => class_name(self, ty),
+                    None => self.java_class_name(d, false),
+                },
+            };
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        if self.class.types[c].kind == TypeKind::Enum {
+            names.extend(
+                [
+                    "java.lang.Enum",
+                    "java.lang.Comparable",
+                    "java.io.Serializable",
+                    "java.lang.constant.Constable",
+                ]
+                .map(String::from),
+            );
+        }
+        names.push("java.lang.Object".to_string());
+        let mut unique = Vec::new();
+        for name in names {
+            if !unique.contains(&name) {
+                unique.push(name);
+            }
+        }
+        unique
+    }
+
+    /// The binary names of the class of the values of type `ty` (a primitive is its box), and of
+    /// the classes and interfaces above it, its own first.
+    fn type_names(&mut self, ty: Type) -> Vec<String> {
+        let list = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        const SERIAL: &str = "java.io.Serializable";
+        const COMPARE: &str = "java.lang.Comparable";
+        const CONSTABLE: &str = "java.lang.constant.Constable";
+        const DESC: &str = "java.lang.constant.ConstantDesc";
+        const NUM: &str = "java.lang.Number";
+        let ty =
+            if ty.is_numeric() || matches!(ty, Type::Boolean | Type::Char) { Type::boxed(ty) } else { ty };
+        let mut names = match ty {
+            Type::String => {
+                list(&["java.lang.String", SERIAL, COMPARE, "java.lang.CharSequence", CONSTABLE, DESC])
+            }
+            Type::StringBuilder => list(&[
+                "java.lang.StringBuilder",
+                "java.lang.AbstractStringBuilder",
+                SERIAL,
+                COMPARE,
+                "java.lang.CharSequence",
+                "java.lang.Appendable",
+            ]),
+            Type::JavaClass => list(&[
+                "java.lang.Class",
+                SERIAL,
+                "java.lang.reflect.GenericDeclaration",
+                "java.lang.reflect.Type",
+                "java.lang.reflect.AnnotatedElement",
+                "java.lang.invoke.TypeDescriptor$OfField",
+                "java.lang.invoke.TypeDescriptor",
+                CONSTABLE,
+            ]),
+            Type::Boxed(primitive) => {
+                let own = class_name(self, ty);
+                match *primitive {
+                    Type::Int | Type::Long | Type::Float | Type::Double => {
+                        list(&[&own, NUM, SERIAL, COMPARE, CONSTABLE, DESC])
+                    }
+                    Type::Short | Type::Byte => list(&[&own, NUM, SERIAL, COMPARE, CONSTABLE]),
+                    _ => list(&[&own, SERIAL, COMPARE, CONSTABLE]),
+                }
+            }
+            // An array is of its type, and of the arrays of the types above its elements'.
+            Type::Array(element) => {
+                let mut names = vec![array_name(self, *element)];
+                if element.is_reference() || matches!(*element, Type::Enum(_)) {
+                    for name in self.type_names(*element) {
+                        let name =
+                            if name.starts_with('[') { format!("[{name}") } else { format!("[L{name};") };
+                        if !names.contains(&name) {
+                            names.push(name);
+                        }
+                    }
+                }
+                names.extend(list(&["java.lang.Cloneable", SERIAL]));
+                names
+            }
+            _ => match self.class.type_of(ty) {
+                Some(c) => return self.decl_names(c),
+                None => Vec::new(),
+            },
+        };
+        names.push("java.lang.Object".to_string());
+        names
     }
 
     /// `a == b` or `a != b` of two classes, which are the same when their names are.

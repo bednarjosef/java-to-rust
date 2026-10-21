@@ -75,6 +75,12 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             StringOp::FromChars if args.len() == 3 => Some("java.lang.StringIndexOutOfBoundsException"),
             StringOp::Repeat => Some("java.lang.IllegalArgumentException"),
             StringOp::GetChars => Some("java.lang.StringIndexOutOfBoundsException"),
+            StringOp::CodePointAt | StringOp::CodePointBefore | StringOp::GetLowBytes => {
+                Some("java.lang.StringIndexOutOfBoundsException")
+            }
+            StringOp::CodePointCount | StringOp::OffsetByCodePoints => {
+                Some("java.lang.IndexOutOfBoundsException")
+            }
             // Encoding or decoding the whole text with a `Charset` (or the default one) never
             // fails; a charset's name may be unknown, and a range out of bounds.
             StringOp::GetBytes | StringOp::FromBytes
@@ -104,6 +110,16 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | BuilderOp::IsEmpty
             | BuilderOp::CompareTo,
         ) => None,
+        // A negative count, an invalid code point.
+        Builtin::Builder(BuilderOp::AppendCodePoint | BuilderOp::Repeat) => {
+            Some("java.lang.IllegalArgumentException")
+        }
+        Builtin::Builder(BuilderOp::CodePointAt | BuilderOp::CodePointBefore) => {
+            Some("java.lang.StringIndexOutOfBoundsException")
+        }
+        Builtin::Builder(BuilderOp::CodePointCount | BuilderOp::OffsetByCodePoints) => {
+            Some("java.lang.IndexOutOfBoundsException")
+        }
         // Inserting at the start is always in bounds.
         Builtin::Builder(BuilderOp::Insert) if matches!(args[1].kind, ExprKind::Int(0)) => None,
         // An index out of the builder's bounds.
@@ -369,6 +385,7 @@ pub(super) fn runtime_failures(
             | Builtin::GetClass
             | Builtin::ClassLiteral(_)
             | Builtin::ClassMethod(_)
+            | Builtin::ClassIsInstance
             | Builtin::ComparableClassFor
             // A null is a value to them, and an object's own method is a call of its own.
             | Builtin::ObjectsEquals
@@ -401,6 +418,8 @@ pub(super) fn runtime_failures(
                 _,
             ) => {}
             Builtin::MonitorEnter => out.push((NPE, "this synchronized", true, args[0].id)),
+            // A class that is not the object's; a `catch` sees it through `java::catching`.
+            Builtin::ClassCheck => out.push(("java.lang.ClassCastException", "this cast", false, x.id)),
             // An object of a class that is not `Cloneable` refuses to be copied.
             Builtin::ObjectClone => {
                 let refused = class

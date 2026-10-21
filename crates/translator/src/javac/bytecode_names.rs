@@ -9,9 +9,7 @@ use super::{fail, java, parse};
 use crate::ast::{Error, Pos};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::Stdio;
 
 /// The Java version whose messages the translation writes: the one they were checked against.
 /// A program compiled by another reads messages that may differ, which is not translated.
@@ -62,20 +60,15 @@ pub fn program_names(files: &[PathBuf]) -> Result<BytecodeNames, Error> {
 
 fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<BytecodeNames, Error> {
     // The code generator's `binaryQualifier`, which names a member's class as a class file does.
-    let mut child =
-        java("BytecodeNames", &["--add-opens", "jdk.compiler/com.sun.tools.javac.jvm=ALL-UNNAMED"])
-            .args(files)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")).1)?;
-    let mut stdin = child.stdin.take().expect("stdin is piped");
-    let source = source.unwrap_or_default().to_string();
-    let writer = std::thread::spawn(move || stdin.write_all(source.as_bytes()));
-    let output = child.wait_with_output().map_err(|e| fail(format!("running javac failed: {e}")).1)?;
-    let _ = writer.join();
-    if !output.status.success() {
+    let mut command =
+        java("BytecodeNames", &["--add-opens", "jdk.compiler/com.sun.tools.javac.jvm=ALL-UNNAMED"]);
+    let output = match source {
+        // A source on standard input is all that decides the run, which may have been kept.
+        Some(source) if files.is_empty() => super::run_cache::run(command, source),
+        _ => super::run_cache::run_uncached(command.args(files), source.unwrap_or_default()),
+    }
+    .map_err(|e| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")).1)?;
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(fail(format!("compiling the program for its class files failed: {}", stderr.trim())).1);
     }

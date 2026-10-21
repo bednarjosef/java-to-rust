@@ -826,6 +826,13 @@ pub enum Builtin {
     ClassLiteral(Type),
     /// `[class, args...]`: a method of `java.lang.Class`.
     ClassMethod(ClassOp),
+    /// `[class, x]`: `class.isInstance(x)`, whether `x` is not null and of `class` or a subclass,
+    /// told by the binary names of the classes and interfaces of `x`'s class.
+    ClassIsInstance,
+    /// `[class, x]`, a statement: the check of `class.cast(x)`, a `ClassCastException` (`Cannot
+    /// cast A to B`) unless `x` is null or `class.isInstance(x)`. `lower::classes` writes the cast
+    /// that gives the value after it.
+    ClassCheck,
     /// `[x]`: `HashMap.comparableClassFor(x)`, the class of `x` if it says `implements
     /// Comparable` itself, else `null`; the JDK's reads the type argument through reflection.
     ComparableClassFor,

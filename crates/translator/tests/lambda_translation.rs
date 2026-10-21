@@ -239,8 +239,8 @@ fn a_lambda_in_a_lambda_takes_its_captures_from_the_outer_one() {
 }
 
 #[test]
-fn a_method_reference_on_a_computed_receiver_is_rejected() {
-    let message = rejected(
+fn a_method_reference_on_a_computed_receiver_evaluates_it_once() {
+    let rust = translate(
         "import java.util.function.Supplier;
         class A {
             public static void main(String[] args) {
@@ -249,7 +249,9 @@ fn a_method_reference_on_a_computed_receiver_is_rejected() {
             }
         }",
     );
-    assert!(message.contains("a method reference on a receiver that is not a local"), "{message}");
+    // The receiver is made once, before the closure, which captures it.
+    assert!(rust.contains("let receiver = java::StringBuilder::from_text(\"ab\");"), "{rust}");
+    assert!(rust.contains("let receiver = receiver.clone(); Rc::new(move ||"), "{rust}");
 }
 
 #[test]
