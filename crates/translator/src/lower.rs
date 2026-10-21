@@ -81,9 +81,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let failed = lowering.verify(&types, &methods);
         let hierarchy = Hierarchy::new(&types, &methods);
         let raised = lowering.raised_objects(&types, &methods);
-        let closes = lowering.closes.take();
         let name = first.str("simpleName").to_string();
-        let class = Class { name, types, methods, hierarchy, raised, closes };
+        let class = Class { name, types, methods, hierarchy, raised };
         enums::check_nulls(&class)?;
         Ok((class, lowering.real.clone(), failed))
     })
@@ -202,8 +201,6 @@ struct Lowering<'t> {
     entry: Option<usize>,
     /// The standard exception classes that the program uses (see `exceptions`).
     standard: exceptions::Standard,
-    /// The `close` methods that try-with-resources statements call (see `exceptions`).
-    closes: std::cell::RefCell<Vec<(usize, Pos)>>,
     /// Where `Object` goes, in a program that uses it (see `object`).
     object: Option<object::ObjectIndexes>,
     /// The class of the objects that `new Object()` creates, when the code has one (see `object`).

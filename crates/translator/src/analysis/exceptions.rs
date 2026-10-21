@@ -230,15 +230,6 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         }
     }
 
-    // A try-with-resources closes its resources in a `finally`, which is Java's behaviour only
-    // when `close` cannot fail (see `lower/exceptions.rs`).
-    let fails = may_fail(class, facts);
-    for &(close, pos) in &class.closes {
-        if class.hierarchy.group(close).iter().any(|&g| fails[g]) {
-            return error(pos, "a resource whose `close` may fail not supported yet");
-        }
-    }
-
     // A static initializer's exception reaches the program as `ExceptionInInitializerError`, an
     // `Error` that a `try` here is not known to match, so one that observes it is not translated.
     for (m, method) in class.methods.iter().enumerate() {
@@ -280,28 +271,6 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
 
 /// Which methods may fail at all: throw, fail in the runtime (whether or not a handler would see
 /// it), or call a method that may fail.
-fn may_fail(class: &Class, facts: &Facts) -> Vec<bool> {
-    let points: Vec<Vec<Point>> = (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
-    let mut fails = vec![false; class.methods.len()];
-    loop {
-        let mut changed = false;
-        for m in 0..class.methods.len() {
-            if !fails[m]
-                && points[m].iter().any(|p| match &p.raise {
-                    Raise::Call(callees) => callees.iter().any(|&c| fails[c]),
-                    Raise::Throw(_) | Raise::Runtime { .. } => true,
-                })
-            {
-                fails[m] = true;
-                changed = true;
-            }
-        }
-        if !changed {
-            return fails;
-        }
-    }
-}
-
 /// The points of method `m` that may raise an exception, with the `try`s around each.
 fn method_points(class: &Class, facts: &Facts, m: usize) -> Vec<Point> {
     let method = &class.methods[m];
@@ -768,7 +737,9 @@ fn runtime_failures(
             out.push((NPE, "this call", object_checked(receiver), receiver.id))
         }
         ExprKind::NewArray(sizes) => {
-            if sizes.iter().any(|s| !matches!(s.kind, ExprKind::Int(v) if v >= 0)) {
+            // A size the range analysis keeps non-negative cannot throw.
+            let nonnegative = |s: &Expr| facts.index_ranges.get(&s.id).is_some_and(|&(lo, _)| lo >= 0);
+            if sizes.iter().any(|s| !matches!(s.kind, ExprKind::Int(v) if v >= 0) && !nonnegative(s)) {
                 out.push(("java.lang.NegativeArraySizeException", "this array creation", false, x.id));
             }
         }
