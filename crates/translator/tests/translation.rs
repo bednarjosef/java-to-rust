@@ -1992,6 +1992,55 @@ fn a_catch_right_around_the_text_of_an_object_whose_to_string_throws_is_rejected
 }
 
 #[test]
+fn a_catch_around_the_default_text_of_an_object_whose_hash_code_throws_is_rejected() {
+    // `Object`'s `toString` shows the `hashCode`, which may throw what the `catch` catches.
+    let error = java_to_rust::translate(
+        "public class A {
+            static class Item {
+                public int hashCode() { throw new IllegalStateException(\"no hash\"); }
+            }
+            public static void main(String[] args) {
+                try {
+                    System.out.println(\"item \" + new Item());
+                } catch (IllegalStateException e) {
+                    System.out.println(\"caught\");
+                }
+            }
+        }",
+    )
+    .expect_err("a hashCode whose exception a catch around the text sees");
+    assert!(
+        error.to_string().ends_with("catching an exception that this toString may throw not supported yet"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_default_text_of_an_object_whose_hash_code_may_throw_ends_the_program_on_it() {
+    let rust = translate(
+        "public class A {
+            static class Key {
+                final int n;
+                Key(int n) { this.n = n; }
+                public int hashCode() { if (n < 0) throw new IllegalStateException(\"negative\"); return n; }
+            }
+            public static void main(String[] args) {
+                try { new Key(-1).hashCode(); } catch (IllegalStateException e) { System.out.println(\"caught\"); }
+                System.out.println(new Key(3));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn hash_code(&self) -> Result<i32, Throwable> {",
+            "java::default_text(\"A$Key\", ",
+            ".hash_code().unwrap_or_else(java::uncaught))",
+        ],
+    );
+}
+
+#[test]
 fn a_catch_on_the_way_to_the_text_of_an_object_whose_to_string_throws_is_rejected() {
     // The `catch` is around a call of the method that makes the text.
     let error = java_to_rust::translate(
