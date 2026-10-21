@@ -557,6 +557,17 @@ Decisions that changed during the implementation, step by step.
   null there, so a `catch` around it does not see a `NullPointerException` from it
   (`next != null && next.value == value`). The nullness facts themselves hold for the whole
   method.
+- **So do `instanceof` tests and early returns** (for the JDK's `equals` methods, which a
+  `catch (ClassCastException | NullPointerException unused)` in `AbstractMap.equals` and
+  `AbstractSet.equals` observes): `o instanceof T` proves `o` not null and a cast of it to `T`
+  or a class above `T` safe, `!` is followed, `if (c) return;` (or `throw`, `break`,
+  `continue`) narrows the statements after it in its block, and a local initialized from a
+  value so known (`Point p = (Point) o;`) is not null (`features/GuardedCasts.java`).
+- **The casts that lowering inserts do not fail**: javac's conversion of an erased type
+  variable's value (`Entry<K, V> e = i.next()`) is a `Cast` at its value's position, which the
+  analysis does not count as a `ClassCastException`. A deviation: with heap pollution (a raw or
+  unchecked use that puts a value of another class in a generic place) Java's cast fails, and
+  the translation's then ends the program instead of reaching a `catch`.
 - **Still rejected**: a constructor of an exception class that throws (the exception's object is
   built where it is thrown, and by the `From` impl of step 5, neither of which can fail), a
   constructor of an enum that throws (its constants are built where the enum is initialized,

@@ -955,14 +955,21 @@ fn runtime_failures(
     }
     // A cast to a class that the value's type is not under may fail, unless an `instanceof`
     // tested the variable.
-    let instance = |to: &Type, value: &Expr| match (to, &value.kind) {
-        (Type::Class(name, _), ExprKind::Var(v)) => safe.contains(&instance_fact(v, name)),
-        _ => false,
+    // The variable was tested to be an instance of a class under `t`.
+    let instance = |t: usize, value: &Expr| {
+        let ExprKind::Var(v) = &value.kind else { return false };
+        let prefix = instance_fact(v, "");
+        safe.iter()
+            .filter_map(|fact| fact.strip_prefix(&prefix))
+            .any(|name| class.type_index(name).is_some_and(|tested| class.hierarchy.is_subtype(tested, t)))
     };
+    // A cast that lowering inserted (at its value's position) is javac's conversion of an erased
+    // type variable's value, as `Entry<K, V> e = i.next()`, which does not fail.
     if let ExprKind::Cast(to, value) = &x.kind
+        && x.pos != value.pos
         && let (Some(t), Some(s)) = (class.class_index(*to), class.class_index(value.ty))
         && !class.hierarchy.is_subtype(s, t)
-        && !instance(to, value)
+        && !instance(t, value)
     {
         out.push(("java.lang.ClassCastException", "this cast", false, x.id));
     }
