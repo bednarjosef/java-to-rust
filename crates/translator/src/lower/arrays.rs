@@ -93,7 +93,7 @@ impl<'t> Lowering<'t> {
         if !literal && !of_variable {
             return unsupported(node, "`Arrays.copyOf` into a class that is computed");
         }
-        let args = vec![self.call_arg(array)?, self.call_arg(length)?];
+        let args = vec![self.expr(array)?, self.expr(length)?];
         if args[0].ty != self.ty(node, node.java_type())? {
             return unsupported(node, "`Arrays.copyOf` into an array of another type");
         }

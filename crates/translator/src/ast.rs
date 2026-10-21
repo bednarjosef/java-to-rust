@@ -48,8 +48,8 @@ pub enum Type {
     Boxed(&'static Type),
     /// `java.lang.StringBuilder`, a shared and mutable text (`java::StringBuilder`).
     StringBuilder,
-    /// `java.nio.charset.Charset`, only as an expression (`Builtin::Charset`) that is the charset
-    /// argument of `getBytes` or `new String`; no variable has this type.
+    /// `java.nio.charset.Charset`, a value (`java::Charset`) that is never null; its operations
+    /// are `Builtin::Charset`.
     Charset,
 }
 
