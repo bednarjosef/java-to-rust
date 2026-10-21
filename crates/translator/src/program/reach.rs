@@ -405,14 +405,8 @@ impl<'t> Walk<'t> {
         if is_static || is_ctor {
             self.work.push(Item::Init(class.clone()));
         }
-        if is_ctor && self.reach.instantiated.insert(class.clone()) {
-            self.live(class.clone());
-            let decl = self.classes[&class].0;
-            self.initializers(decl, &class, false);
-            // Library code calls these on any object, as string conversion calls `toString`.
-            for (name, signature) in OBJECT_METHODS {
-                self.work.push(Item::Method((class.clone(), name.to_string(), signature.to_string())));
-            }
+        if is_ctor {
+            self.instantiate(class);
         }
         if !is_static && !is_ctor {
             for overrider in self.overriders(&key) {
@@ -420,6 +414,20 @@ impl<'t> Walk<'t> {
             }
         }
         self.scan(node);
+    }
+
+    /// A class whose objects are created: it is live, and its instance initializers run.
+    fn instantiate(&mut self, class: String) {
+        if !self.reach.instantiated.insert(class.clone()) {
+            return;
+        }
+        self.live(class.clone());
+        let decl = self.classes[&class].0;
+        self.initializers(decl, &class, false);
+        // Library code calls these on any object, as string conversion calls `toString`.
+        for (name, signature) in OBJECT_METHODS {
+            self.work.push(Item::Method((class.clone(), name.to_string(), signature.to_string())));
+        }
     }
 
     /// The methods that a call of the instance method `method` may run instead of it: those that
@@ -463,13 +471,40 @@ impl<'t> Walk<'t> {
         self.scan(node);
     }
 
-    /// Makes every declaration that a node of this subtree refers to reachable. Local and
-    /// anonymous classes inside are scanned whole, which over-approximates. Annotations are
-    /// skipped: without reflection they do nothing at run time. So is the branch of an `if` or a
-    /// `?:` whose condition is never true (`never_true`).
+    /// Makes every declaration that a node of this subtree refers to reachable. The local and
+    /// anonymous classes declared inside are not scanned with it: like any class, a local class
+    /// is reached through its constructors and the calls of its methods, and an anonymous class
+    /// is instantiated where its `new` is, its methods reached as overriders of what is called.
+    /// (The `SharedSecrets` accessors that the JDK's static initializers register are anonymous
+    /// classes; scanned whole, each made every method of its interface reachable.) Annotations
+    /// are skipped: without reflection they do nothing at run time. So is the branch of an `if`
+    /// or a `?:` whose condition is never true (`never_true`).
     fn scan(&mut self, value: &'t Value) {
         match value {
             Value::Object(_) if matches!(text(value, "kind"), "ANNOTATION" | "TYPE_ANNOTATION") => {}
+            // A local or anonymous class (an enum constant's body, `<anonymous Planet>`, belongs to
+            // its enum and is scanned with it).
+            Value::Object(_)
+                if CLASS_KINDS.contains(&text(value, "kind"))
+                    && !symbol_type(value).starts_with('<')
+                    && self.classes.contains_key(&class_name(value)) => {}
+            Value::Object(fields) if text(value, "kind") == "NEW_CLASS" && value["classBody"].is_object() => {
+                for (field, child) in fields {
+                    match field.as_str() {
+                        "symbol" => self.symbol(child),
+                        "classBody" => {}
+                        _ => self.scan(child),
+                    }
+                }
+                let body = &value["classBody"];
+                let class = class_name(body);
+                if symbol_type(body).starts_with('<') || !self.classes.contains_key(&class) {
+                    self.scan(body);
+                    return;
+                }
+                self.work.push(Item::Class(class.clone()));
+                self.instantiate(class);
+            }
             // The branch that a condition that is never true guards is not reached.
             Value::Object(_)
                 if matches!(text(value, "kind"), "IF" | "CONDITIONAL_EXPRESSION")
