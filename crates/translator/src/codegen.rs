@@ -121,6 +121,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         ctor_result: None,
         printing: false,
         guarded: false,
+        steady: None,
         annotations: Vec::new(),
         locals: HashMap::new(),
         boxed: HashMap::new(),
@@ -281,6 +282,9 @@ struct Gen<'a> {
     printing: bool,
     /// Whether the statement being emitted also borrows an object mutably (see `conflicts`).
     guarded: bool,
+    /// What the statement being emitted does to the plain objects it names, where it is known
+    /// (`strings::Steady`); `None` outside a statement, where no field is borrowed in place.
+    steady: Option<strings::Steady>,
     /// Placeholders for type annotations decided at the end of the method: (placeholder, type,
     /// annotation).
     annotations: Vec<(String, Type, String)>,

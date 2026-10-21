@@ -177,6 +177,7 @@ impl<'a> Gen<'a> {
             (0..fields.len()).filter(|&i| bound[i].is_none()).filter_map(|i| values[i]).collect();
         let conflicts = self.conflicts(&unbound);
         let outer = std::mem::replace(&mut self.guarded, conflicts);
+        let outer_steady = self.steady.take();
         let mut parts: Vec<String> = base_part.into_iter().collect();
         parts.extend(
             fields
@@ -196,6 +197,7 @@ impl<'a> Gen<'a> {
                 .collect::<Vec<String>>(),
         );
         self.guarded = outer;
+        self.steady = outer_steady;
         self.field_locals.clear();
         let literal = if parts.is_empty() {
             format!("{} {{}}", self.struct_of(m.class))

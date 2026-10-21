@@ -249,7 +249,13 @@ pub fn min(a: f64, b: f64) -> f64 {
 
 /// Java's `String.length()`, which counts UTF-16 code units.
 pub fn string_length(s: &str) -> i32 {
-    s.encode_utf16().count() as i32
+    if s.is_ascii() {
+        return s.len() as i32;
+    }
+    // Each character is one unit but those of four bytes, which are two: count the bytes that
+    // start a character, and once more those that start one of four bytes.
+    let units: usize = s.bytes().map(|b| usize::from((b as i8) >= -0x40) + usize::from(b >= 0xF0)).sum();
+    units as i32
 }
 
 /// Java's `System.exit`.
