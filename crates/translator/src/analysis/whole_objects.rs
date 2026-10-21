@@ -234,9 +234,9 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
     Ok(())
 }
 
-/// Whether a constructor starts by calling another constructor of its class.
+/// Whether a constructor calls another constructor of its class.
 fn delegates(m: &Method) -> bool {
-    matches!(m.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })))
+    crate::ast::delegates(&m.body)
 }
 
 /// The name of a class without its package and enclosing classes: `Head` for
@@ -327,24 +327,31 @@ impl Rewrite {
     fn construct(&mut self, class: &mut Class, m: usize, inits: Vec<Stmt>) {
         let t = class.methods[m].class;
         let mut body = std::mem::take(&mut class.methods[m].body);
-        let mut start = Vec::new();
+        // The statements before `this(..)` or `super(..)` run first, on the zero object, and so
+        // do the stores of the fields that they assign (see `lower::prologues`), before the
+        // superclass's part, which may call a method that reads them.
+        let mut start: Vec<Stmt> = body.drain(..explicit_call(&body).unwrap_or(0)).collect();
+        let mut call = Vec::new();
         let rest = match body.first_mut() {
             Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { args, resolved: Some(r) }, pos, .. }))
             | Some(Stmt::Expr(Expr { kind: ExprKind::SuperInit { args, resolved: Some(r) }, pos, .. }))
                 if self.construct.contains_key(r) =>
             {
                 let (r, pos, args) = (*r, *pos, std::mem::take(args));
-                start.push(self.construct_call(class, t, r, args, pos));
+                call.push(self.construct_call(class, t, r, args, pos));
                 1
             }
             Some(Stmt::Expr(Expr { kind: ExprKind::SuperInit { args, .. }, .. })) => {
                 // A superclass without a fields struct, whose constructor does nothing: only the
                 // arguments' effects remain.
-                start.extend(std::mem::take(args).into_iter().filter(has_effects).map(Stmt::Expr));
+                call.extend(std::mem::take(args).into_iter().filter(has_effects).map(Stmt::Expr));
                 1
             }
             _ => 0,
         };
+        let early = body[rest..].iter().take_while(|s| is_early_field_assignment(s)).count();
+        start.extend(body.drain(rest..rest + early));
+        start.extend(call);
         start.extend(inits);
         start.extend(body.drain(rest..));
         let method = &mut class.methods[m];
@@ -359,7 +366,8 @@ impl Rewrite {
     fn leaf(&mut self, class: &mut Class, m: usize, inits: Vec<Stmt>) {
         let t = class.methods[m].class;
         let zero = class.types[t].extends.and_then(|e| self.zero.get(&e)).copied();
-        let start = match (class.methods[m].body.first_mut(), zero) {
+        let at = explicit_call(&class.methods[m].body);
+        let start = match (at.map(|i| &mut class.methods[m].body[i]), zero) {
             (
                 Some(Stmt::Expr(Expr { kind: ExprKind::SuperInit { args, resolved: Some(r) }, pos, .. })),
                 Some(zero),
@@ -367,7 +375,8 @@ impl Rewrite {
             _ => None,
         };
         let Some((r, pos, args, zero)) = start else {
-            class.methods[m].body.splice(0..0, inits);
+            let at = at.unwrap_or(0);
+            class.methods[m].body.splice(at..at, inits);
             return;
         };
         let synthetic: HashSet<&str> = class.types[t]
@@ -377,18 +386,22 @@ impl Rewrite {
             .chain(class.types[t].captures.iter().map(|c| c.field.as_str()))
             .collect();
         let mut body = std::mem::take(&mut class.methods[m].body);
+        // The statements before `super(..)` (see `construct`) run on the zero object.
+        let prologue: Vec<Stmt> = body.drain(..at.unwrap_or(0)).collect();
         let first = body.remove(0);
         let mut out = vec![first];
+        out.extend(prologue);
         if let Stmt::Expr(Expr { kind: ExprKind::SuperInit { resolved, .. }, .. }) = &mut out[0] {
             *resolved = Some(zero);
         }
         let leading = body
             .iter()
             .take_while(|s| {
-                matches!(s, Stmt::Expr(Expr {
-                    kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, .. },
-                    ..
-                }) if matches!(object.kind, ExprKind::This) && synthetic.contains(name.as_str()))
+                is_early_field_assignment(s)
+                    || matches!(s, Stmt::Expr(Expr {
+                        kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, .. },
+                        ..
+                    }) if matches!(object.kind, ExprKind::This) && synthetic.contains(name.as_str()))
             })
             .count();
         out.extend(body.drain(..leading));

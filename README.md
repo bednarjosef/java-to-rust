@@ -177,7 +177,11 @@ A small subset, end to end:
   does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s. Arrays of strings
   are not converted this way yet. `==` between two `Object`s that may both be strings or boxes (whose identity the
   translation does not keep, except in the shortcut `a == b || a.equals(b)` and in `TreeMap`'s own
-  comparisons of the keys of its entries, which are distinct values) is rejected. The
+  comparisons of the keys of its entries, which are distinct values) is rejected. Whether a side
+  may be one is a points-to analysis of the program (`analysis/object_values.rs`): it follows
+  strings, boxes and the classes of objects through variables, parameters, returns, fields and
+  array elements, each inherited method once for every class that runs it, so an identity map or
+  set whose keys are only ever the program's objects compares them by identity. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
   and a use where javac substituted a type argument gets the checked cast back
@@ -189,8 +193,11 @@ A small subset, end to end:
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &
   Comparable<? super T>`) erases to the first, and a call of a later bound's method casts to that
-  bound first, as javac's erased code does. An array passed as an array of a type variable
-  (`first(String[])` for `<T> T first(T[])`) is rejected. A generic class or method that only stores, returns and passes on the values of its type
+  bound first, as javac's erased code does. An array of references passed as an array of a type
+  variable (`first(String[])` for `<T> T first(T[])`) makes its type an `Object[]` throughout the
+  program when another array type meets it there (see `docs/object-model.md`); a `String[]` that
+  is an `Object[]` is copied where the runtime's string methods take or give one, and sorting or
+  filling one in place with `java.util.Arrays` is rejected. A generic class or method that only stores, returns and passes on the values of its type
   variables (a stack, a pair, a node, `<T> T choose(boolean, T, T)`) is a Rust generic instead
   (`struct Stack<T>`, `impl<T: Clone> Stack<T>`, `fn choose<T: Clone>(..)`), and its uses keep the
   substituted types with no casts. One that needs more of them (their text, `equals`, a bound, a

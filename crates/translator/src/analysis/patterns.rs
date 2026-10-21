@@ -126,8 +126,13 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
     }
     let sentinel = |e: &Expr| matches!(&e.kind, ExprKind::Static { class, name } if sentinels.contains(&(*class, name.as_str())));
     let fences = fence_keys(class, &sentinel);
+    // Which places may hold a string or a box, computed when a comparison needs it.
+    let values = std::cell::OnceCell::new();
+    let may_both_hold_values = |m: usize, l: &Expr, r: &Expr| {
+        values.get_or_init(|| super::object_values::analyze(class, facts)).may_both_be_values(class, m, l, r)
+    };
     let mut found = None;
-    for method in &class.methods {
+    for (m, method) in class.methods.iter().enumerate() {
         let in_sorted_map = in_sorted_map(class, method.class);
         for s in &method.body {
             visit_stmt(
@@ -148,7 +153,8 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                                 && may_be_value(l)
                                 && may_be_value(r)
                                 && !shortcuts.contains(&x.id)
-                                && !(in_sorted_map && sorted_key(l, &fences) && sorted_key(r, &fences)) =>
+                                && !(in_sorted_map && sorted_key(l, &fences) && sorted_key(r, &fences))
+                                && may_both_hold_values(m, l, r) =>
                         {
                             found.get_or_insert((
                                 x.pos,

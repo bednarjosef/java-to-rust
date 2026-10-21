@@ -50,6 +50,7 @@ mod natives;
 mod patterns;
 mod primitives;
 mod program;
+mod prologues;
 mod switch;
 mod sync;
 mod system;
@@ -218,6 +219,12 @@ fn unsupported<T>(node: Node, what: &str) -> Result<T, Error> {
 }
 
 /// `ENHANCED_FOR_LOOP` as `enhanced for loop`.
+/// Whether javac's type `name` is an instantiation of the generic class `class`, such as
+/// `java.lang.Enum<?>` (and not an array of one, `java.lang.Enum<?>[]`).
+fn generic_of(name: &str, class: &str) -> bool {
+    name.strip_prefix(class).is_some_and(|rest| rest.starts_with('<') && rest.ends_with('>'))
+}
+
 fn kind_words(kind: &str) -> String {
     kind.to_lowercase().replace('_', " ")
 }
@@ -377,6 +384,7 @@ impl<'t> Lowering<'t> {
             None => return unsupported(node, "methods without a body"),
         };
         let params = if is_ctor {
+            self.constructor_prologue(node, info.owner, &mut body)?;
             self.run_initializer_blocks(info.owner, &mut body)?;
             self.start_constructor(info.owner, &mut body)?;
             let (first, last) = self.synthetic_params(info.owner)?;
@@ -417,9 +425,10 @@ impl<'t> Lowering<'t> {
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
-            _ if name == "java.lang.Class" || name.starts_with("java.lang.Class<") => Ok(Type::JavaClass),
+            // An array of these (`Class<?>[]`, `Enum<?>[]`) is an array type, below.
+            _ if name == "java.lang.Class" || generic_of(name, "java.lang.Class") => Ok(Type::JavaClass),
             // A value of one of the program's enums (see `enums::enum_call`).
-            _ if (name == "java.lang.Enum" || name.starts_with("java.lang.Enum<"))
+            _ if (name == "java.lang.Enum" || generic_of(name, "java.lang.Enum"))
                 && self.object.is_some_and(|at| at.enumeration.is_some()) =>
             {
                 Ok(Type::class(ENUM))
@@ -499,6 +508,7 @@ impl<'t> Lowering<'t> {
                 };
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
             }
+            "EXPRESSION_STATEMENT" if let Some(set_all) = self.set_all(node)? => set_all,
             "EXPRESSION_STATEMENT" => match self.expr(node.child("expression")?)? {
                 // A native that does nothing here, such as `registerNatives()`, leaves no trace.
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
@@ -893,6 +903,9 @@ impl<'t> Lowering<'t> {
                     arrays::runtime_arrays_call(name, &types)
                 } =>
             {
+                let (writes, copies) =
+                    (matches!(name, "sort" | "fill"), matches!(name, "copyOf" | "copyOfRange"));
+                let args = self.string_array_args(node, args, writes, copies)?;
                 return self.arrays_call(node, name, args);
             }
             ("java.lang.String", "length" | "equals")
@@ -912,7 +925,11 @@ impl<'t> Lowering<'t> {
                 args.insert(0, self.expr(receiver)?);
                 Builtin::String(StringOp::GetBytes)
             }
-            ("java.lang.String", _) => return self.string_call(node, &symbol, receiver, args),
+            ("java.lang.String", _) => {
+                let args = self.string_array_args(node, args, false, false)?;
+                let kind = self.string_call(node, &symbol, receiver, args)?;
+                return Ok(self.object_array_result(node, kind));
+            }
             // `String`'s own `join` of the first `size` elements between a prefix and a suffix,
             // which `StringJoiner` reaches through `SharedSecrets` (`String` is the runtime's).
             ("jdk.internal.access.JavaLangAccess", "join") if args.len() == 5 => {
