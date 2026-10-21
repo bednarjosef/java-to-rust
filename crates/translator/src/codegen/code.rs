@@ -160,7 +160,7 @@ pub(super) fn rust_type(ty: Type) -> &'static str {
         Type::Charset => "java::Charset",
         Type::Void => "()",
         // A boxed type is named by `Gen::ty_name`, which knows whether its identity is observed.
-        Type::Array(_) | Type::Class(_) | Type::Enum(_) | Type::Null | Type::Boxed(_) => {
+        Type::Array(_) | Type::Class(..) | Type::Enum(_) | Type::Null | Type::Boxed(_) => {
             unreachable!("lowering rejects {ty}")
         }
     }

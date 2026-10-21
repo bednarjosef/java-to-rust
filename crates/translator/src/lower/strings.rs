@@ -31,11 +31,10 @@ impl<'t> Lowering<'t> {
     }
 
     /// `x` as `"" + x`, which shows it as `String.valueOf` does.
-    fn as_text(&self, node: Node<'t>, x: Expr) -> Result<Expr, Error> {
-        self.check_text(node, x.ty)?;
+    fn as_text(&self, x: Expr) -> Expr {
         let empty = self.synth(ExprKind::Str(String::new()), x.pos, Type::String);
         let pos = x.pos;
-        Ok(self.synth(ExprKind::Binary(BinOp::Add, Box::new(empty), Box::new(x)), pos, Type::String))
+        self.synth(ExprKind::Binary(BinOp::Add, Box::new(empty), Box::new(x)), pos, Type::String)
     }
 
     /// A call of a method of `String`. `args` are the lowered arguments, without the receiver.
@@ -87,7 +86,7 @@ impl<'t> Lowering<'t> {
                 if !textual(x.ty) || x.ty == Type::Null {
                     return unsupported(node, "`String.valueOf` of an array");
                 }
-                return Ok(self.as_text(node, x)?.kind);
+                return Ok(self.as_text(x).kind);
             }
             "format" => return self.format_call(node, args, &arg_nodes, None),
             "formatted" => {
@@ -143,12 +142,12 @@ impl<'t> Lowering<'t> {
         arg_nodes: &[Node<'t>],
         formatted: Option<(Expr, Node<'t>)>,
     ) -> Result<ExprKind, Error> {
-        let (format_node, values) = match formatted {
+        let format_node = match formatted {
             Some((format, receiver)) => {
                 args.insert(0, format);
-                (Some(receiver), arg_nodes)
+                Some(receiver)
             }
-            None => (arg_nodes.first().copied(), arg_nodes.get(1..).unwrap_or_default()),
+            None => arg_nodes.first().copied(),
         };
         if args[0].ty != Type::String {
             return unsupported(node, "`String.format` with a locale");
@@ -157,9 +156,6 @@ impl<'t> Lowering<'t> {
         // array argument; neither is supported.
         if let Some(array) = args[1..].iter().find(|a| !textual(a.ty)) {
             return error(array.pos, "an array as an argument of `String.format` not supported yet");
-        }
-        for (arg, value) in args[1..].iter().zip(values) {
-            self.check_text(*value, arg.ty)?;
         }
         if let Some(format) = self.constant_text(format_node)
             && let Err(why) = java_runtime::format::check_supported(&format)
@@ -226,15 +222,14 @@ impl<'t> Lowering<'t> {
             _ => None,
         };
         if let Some(i) = shown {
-            let arg_node = node.list("arguments").nth(i).expect("an argument");
             let ty = args[i].ty;
             if matches!(ty, Type::Array(_)) && ty != Type::array(Type::Char) {
                 return unsupported(node, "appending an array that is not a `char[]`");
             }
             // An object shows its `toString`, which runs before the builder is changed.
-            if matches!(ty, Type::Class(_)) {
+            if matches!(ty, Type::Class(..)) {
                 let x = args.remove(i);
-                args.insert(i, self.as_text(arg_node, x)?);
+                args.insert(i, self.as_text(x));
             }
         }
         args.insert(0, receiver);

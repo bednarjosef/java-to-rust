@@ -1,0 +1,849 @@
+//! Exceptions as values (see `analysis::exceptions` for which methods throw).
+//!
+//! A method that throws returns `Result<T, Throwable>`, where `Throwable` is the enum of the
+//! program's exception classes: `return v` is `return Ok(v)`, `throw e` is `return Err(e)`, and a
+//! call of a method that throws is `call?`. A method that does not throw calls one that does with
+//! `call.unwrap_or_else(java::uncaught)`: nothing that escapes there is caught, so the exception
+//! ends the program at once, as Java's would.
+//!
+//! A live `try` (one whose `catch` clauses catch something its body may throw) is a labeled block
+//! that evaluates to `Result<(), Throwable>`: inside it, a failure leaves the block with
+//! `java::or_break!(call, 'attempt)` and `throw e` is `break 'attempt Err(e)`. The `catch` clauses
+//! are the arms of a `match` on the result, in Java's order, each matching the variants of the
+//! classes it catches that no earlier clause caught; what no clause catches goes on as from any
+//! other point of the method. A `try` that catches nothing its body throws is a plain block.
+//!
+//! A `try` with a `finally` runs its body (and the `catch` clause that matches what the body
+//! threw) as labeled blocks that evaluate to how they ended: `Result<(), Throwable>` when only an
+//! exception can leave them early, else `java::Completion`, which also records a `return` (with
+//! its value) and a `break` or `continue` out of the `try` (numbered). The `finally`'s statements
+//! follow the blocks, and then what ended them happens: the exception goes on, the method returns,
+//! the jump is made. A `try` that nothing leaves early is its body followed by the `finally`.
+
+use super::*;
+
+/// Whether a statement can complete normally, so that code after it runs: Java's rules,
+/// conservatively (a statement not known to end abruptly completes), which is also when the Rust
+/// it becomes can.
+pub(super) fn completes(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(..)
+        | Stmt::Throw(_)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::BreakLabel(_)
+        | Stmt::ContinueLabel(_)
+        | Stmt::Yield(_) => false,
+        Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::Exit, _), .. }) => false,
+        Stmt::Block(stmts) => completes_all(stmts),
+        Stmt::If { then, otherwise: Some(otherwise), .. } => completes(then) || completes(otherwise),
+        Stmt::While { cond, body } if matches!(cond.kind, ExprKind::Bool(true)) => breaks_out_of(body, None),
+        Stmt::For { cond: None, body, .. } => breaks_out_of(body, None),
+        Stmt::Labeled { label, body } => match &**body {
+            Stmt::While { cond, body } if matches!(cond.kind, ExprKind::Bool(true)) => {
+                breaks_out_of(body, Some(label))
+            }
+            Stmt::For { cond: None, body, .. } => breaks_out_of(body, Some(label)),
+            other => completes(other) || breaks_out_of(other, Some(label)),
+        },
+        Stmt::Try { body, catches, finally } => {
+            (completes_all(body) || catches.iter().any(|c| completes_all(&c.body)))
+                && finally.as_deref().is_none_or(completes_all)
+        }
+        _ => true,
+    }
+}
+
+/// Whether a statement list can complete normally.
+pub(super) fn completes_all(stmts: &[Stmt]) -> bool {
+    stmts.last().is_none_or(completes)
+}
+
+/// Whether `stmt`, the body of a loop, has a `break` that leaves the loop: an unlabeled one outside
+/// nested loops and switches, or one naming the loop's `label`.
+fn breaks_out_of(stmt: &Stmt, label: Option<&str>) -> bool {
+    fn walk(s: &Stmt, label: Option<&str>, nested: bool) -> bool {
+        match s {
+            Stmt::Break => !nested,
+            Stmt::BreakLabel(l) => Some(l.as_str()) == label,
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::ForEach { body, .. }
+            | Stmt::For { body, .. } => walk(body, label, true),
+            Stmt::Switch { cases, .. } => cases.iter().flat_map(|c| &c.body).any(|b| walk(b, label, true)),
+            Stmt::If { then, otherwise, .. } => {
+                walk(then, label, nested) || otherwise.as_deref().is_some_and(|o| walk(o, label, nested))
+            }
+            Stmt::Block(stmts) => stmts.iter().any(|b| walk(b, label, nested)),
+            Stmt::Labeled { body, .. } => walk(body, label, nested),
+            Stmt::Try { body, catches, finally } => body
+                .iter()
+                .chain(catches.iter().flat_map(|c| &c.body))
+                .chain(finally.iter().flatten())
+                .any(|b| walk(b, label, nested)),
+            _ => false,
+        }
+    }
+    walk(stmt, label, false)
+}
+
+/// The locals that a live `try` block assigns: Rust cannot tell that one declared without a value
+/// is assigned on every path to a read after the `try`, as Java can, so it is given one.
+pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
+    fn assigned(stmts: &[Stmt], out: &mut HashSet<String>) {
+        for s in stmts {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::Assign { target: Place::Var(name), .. }
+                        | ExprKind::IncDec { target: Place::Var(name), .. } = &x.kind
+                        {
+                            out.insert(name.clone());
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    let mut out = HashSet::new();
+    for s in body {
+        visit_stmt(s, &mut |_| {}, &mut |s| {
+            match s {
+                Stmt::Try { body, finally: None, .. }
+                    if facts.live_tries.contains(&(s as *const Stmt as usize)) =>
+                {
+                    assigned(body, &mut out)
+                }
+                // The body and the `catch` clauses of a `try` with a `finally` are blocks whose
+                // ends Rust does not follow into the code after the `finally`, unless nothing
+                // leaves them early.
+                Stmt::Try { body, catches, finally: Some(_) }
+                    if facts.raising_tries.contains(&(s as *const Stmt as usize))
+                        || leaves_early(body, catches) != (false, false) =>
+                {
+                    assigned(body, &mut out);
+                    for catch in catches {
+                        assigned(&catch.body, &mut out);
+                    }
+                }
+                _ => {}
+            }
+        });
+    }
+    out
+}
+
+/// The value Java gives a field of type `ty`, for a local that `try_assigned` names; `None` for a
+/// type whose locals are not given one yet.
+pub(super) fn default_value(ty: Type) -> Option<&'static str> {
+    Some(match ty {
+        Type::Int | Type::Long | Type::Byte | Type::Short | Type::Char => "0",
+        Type::Double | Type::Float => "0.0",
+        Type::Boolean => "false",
+        Type::String => "String::new()",
+        _ => return None,
+    })
+}
+
+/// A local of the method that `try_assigned` names (`assigned`) whose type has no
+/// `default_value`: not supported yet.
+pub(super) fn check_try_assigned(body: &[Stmt], assigned: &HashSet<String>) -> Option<Error> {
+    let mut found = None;
+    for s in body {
+        visit_stmt(s, &mut |_| {}, &mut |s| {
+            if let Stmt::Local { ty, name, init: None, pos } = s
+                && assigned.contains(name)
+                && default_value(*ty).is_none()
+                && found.is_none()
+            {
+                found = Some(Error {
+                    pos: *pos,
+                    message: format!(
+                        "a local of type `{ty}` declared without a value and assigned in a `try` block not supported yet"
+                    ),
+                });
+            }
+        });
+    }
+    found
+}
+
+/// Checks that no `?` or `java::or_break!` of the generated code is inside a closure, where it
+/// would not leave the method or the `try` block. The generator writes some expressions as
+/// closures (an update of an array element or a static field), and a call that throws inside one
+/// is not supported yet.
+pub(super) fn check_closures(code: &str) -> Result<(), Error> {
+    let bytes = code.as_bytes();
+    // The closures being read, each by the bracket depth of its body and whether the body is a
+    // block (which ends with its bracket) or an expression (which ends at a comma or a bracket).
+    let mut closures: Vec<(usize, bool)> = Vec::new();
+    let mut depth = 0usize;
+    let mut i = 0;
+    let fail =
+        || error(Pos::default(), "a call that throws inside a closure of the translation not supported yet");
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'\'' if bytes.get(i + 1) == Some(&b'\\') || bytes.get(i + 2) == Some(&b'\'') => {
+                // A char literal such as '?' or '\n' (a label or a lifetime has no closing quote).
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                // A block body ends with its bracket; an expression body with the one around it.
+                closures.retain(|&(d, _)| d < depth);
+                depth = depth.saturating_sub(1);
+            }
+            b',' | b';' => closures.retain(|&(d, block)| block || d < depth),
+            b'|' => {
+                let before = code[..i].trim_end();
+                let head = before.ends_with(['(', ',', '=', '{']) || before.ends_with(" move");
+                if head && let Some(end) = code[i + 1..].find('|') {
+                    i += end + 2;
+                    let block = code[i..].trim_start().starts_with('{');
+                    closures.push((if block { depth + 1 } else { depth }, block));
+                    continue;
+                }
+            }
+            b'?' if !closures.is_empty() => return fail(),
+            b'o' if !closures.is_empty() && code[i..].starts_with("or_break!") => return fail(),
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+/// A `try` block being written, which an exception (and, with a `finally`, a `return` or a jump)
+/// leaves by its label.
+pub(super) struct Attempt {
+    /// The label it gets when something leaves it.
+    label: String,
+    /// The frame (index into `Gen::frames`) of the block, which writes the label when it is used.
+    frame: usize,
+    /// Whether the block evaluates to a `java::Completion` (the body or a `catch` clause of a
+    /// `try` with a `finally` that a `return` or a jump leaves) rather than a `Result`.
+    completion: bool,
+}
+
+/// A `try` with a `finally` whose body or `catch` clauses are being written: the returns and
+/// jumps out of it run the `finally` first, and then happen.
+pub(super) struct Finally {
+    /// The frame of its body and of its `catch` clauses (they have the same index).
+    frame: usize,
+    /// The jumps out of it, as the frames they go to and whether they `continue`; a jump is
+    /// `java::Completion::Jump(n)` with its index here.
+    jumps: Vec<(usize, bool)>,
+}
+
+/// Whether a `return`, or a `break`, `continue` or `yield` to a statement outside them, leaves the
+/// statements.
+fn jumps_out(stmts: &[Stmt]) -> (bool, bool) {
+    // `labels`: the labels of the statements around the one being walked, inside `stmts`.
+    fn walk(s: &Stmt, in_loop: bool, in_switch: bool, labels: &mut Vec<String>, out: &mut (bool, bool)) {
+        match s {
+            Stmt::Return(..) => out.0 = true,
+            Stmt::Break if !in_loop && !in_switch => out.1 = true,
+            Stmt::Continue if !in_loop => out.1 = true,
+            Stmt::BreakLabel(l) | Stmt::ContinueLabel(l) if !labels.contains(l) => out.1 = true,
+            Stmt::Yield(_) => out.1 = true,
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::ForEach { body, .. }
+            | Stmt::For { body, .. } => walk(body, true, in_switch, labels, out),
+            Stmt::Switch { cases, .. } => {
+                for b in cases.iter().flat_map(|c| &c.body) {
+                    walk(b, in_loop, true, labels, out);
+                }
+            }
+            Stmt::If { then, otherwise, .. } => {
+                walk(then, in_loop, in_switch, labels, out);
+                if let Some(o) = otherwise {
+                    walk(o, in_loop, in_switch, labels, out);
+                }
+            }
+            Stmt::Block(stmts) => stmts.iter().for_each(|b| walk(b, in_loop, in_switch, labels, out)),
+            Stmt::Labeled { label, body } => {
+                labels.push(label.clone());
+                walk(body, in_loop, in_switch, labels, out);
+                labels.pop();
+            }
+            Stmt::Try { body, catches, finally } => {
+                for b in
+                    body.iter().chain(catches.iter().flat_map(|c| &c.body)).chain(finally.iter().flatten())
+                {
+                    walk(b, in_loop, in_switch, labels, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = (false, false);
+    for s in stmts {
+        walk(s, false, false, &mut Vec::new(), &mut out);
+    }
+    out
+}
+
+/// Whether a `return`, and whether a jump, leaves the body or a `catch` clause of a `try`.
+fn leaves_early(body: &[Stmt], catches: &[Catch]) -> (bool, bool) {
+    let (mut returns, mut jumps) = jumps_out(body);
+    for catch in catches {
+        let (r, j) = jumps_out(&catch.body);
+        returns |= r;
+        jumps |= j;
+    }
+    (returns, jumps)
+}
+
+impl<'a> Gen<'a> {
+    /// The Rust type of an exception: the enum of `Throwable`.
+    pub(super) fn throwable_type(&mut self) -> String {
+        self.ty_name(Type::class("java.lang.Throwable"))
+    }
+
+    /// The runtime's function `name` that ends the program with an uncaught exception, which
+    /// shows the exception through its `Display`.
+    fn uncaught(&mut self, name: &str) -> String {
+        let t = self.class.type_index("java.lang.Throwable").expect("a program that throws has `Throwable`");
+        if let Some(t) = self.enum_for(t) {
+            self.need(Need::Display(t));
+        }
+        self.runtime(name)
+    }
+
+    /// The label of the innermost `try` block, which writing it uses; and whether the block is
+    /// a `java::Completion`.
+    fn innermost_attempt(&mut self) -> Option<(String, bool)> {
+        let a = self.attempts.last()?;
+        let (label, frame, completion) = (a.label.clone(), a.frame, a.completion);
+        self.name_frame(frame, &label);
+        Some((label, completion))
+    }
+
+    /// The label of the innermost `try` block that is a `java::Completion`, which writing it uses.
+    fn completion_attempt(&mut self) -> String {
+        let a = self.attempts.iter().rev().find(|a| a.completion).expect("a `try` with a `finally` is open");
+        let (label, frame) = (a.label.clone(), a.frame);
+        self.name_frame(frame, &label);
+        label
+    }
+
+    /// A label for a `try` block or a `catch` clause of the current method: `attempt`, `attempt2`.
+    fn attempt_label(&mut self, base: &str) -> String {
+        self.attempt_count += 1;
+        match self.attempt_count {
+            1 => base.to_string(),
+            n => format!("{base}{n}"),
+        }
+    }
+
+    /// The value with which exception `e` leaves a `try` block: `Err(e)`, or
+    /// `java::Completion::Throw(e)`.
+    fn thrown(&mut self, completion: bool, e: &str) -> String {
+        if completion { format!("{}({e})", self.runtime("Completion::Throw")) } else { format!("Err({e})") }
+    }
+
+    /// The call `code` of method `callee`: as it is when the method does not throw, else with
+    /// what its failure does here (see the module's documentation).
+    pub(super) fn raising(&mut self, code: Code, callee: usize) -> Code {
+        if !self.facts.throwing.contains(&callee) {
+            return code;
+        }
+        Code::atom(self.passed_on(code))
+    }
+
+    /// A `Result` whose error is a `Throwable` (`code`), whose `Ok` value is used and whose error
+    /// goes on from here: it leaves the enclosing `try` block or the method, or ends the program.
+    fn passed_on(&mut self, code: Code) -> String {
+        match self.innermost_attempt() {
+            Some((label, _)) => format!("{}({}, '{label})", self.runtime("or_break!"), code.text),
+            None if self.throwing => format!("{}?", code.at(ATOM)),
+            None => format!("{}.unwrap_or_else({})", code.at(ATOM), self.uncaught("uncaught")),
+        }
+    }
+
+    /// A call of the runtime's function `name` (`generics` after its name, such as `::<i32>`)
+    /// with the arguments `args`, for the operation `id`, which may fail: where a `catch` or a
+    /// `finally` may see the failure, its checked form `try_name`, whose failure goes on from
+    /// here as a thrown exception does.
+    pub(super) fn may_fail(&mut self, id: ExprId, name: &str, generics: &str, args: &str) -> Code {
+        if self.facts.raising.contains(&id) {
+            let call = format!("{}{generics}({args})", self.runtime(&format!("try_{name}")));
+            return Code::atom(self.passed_on(Code::atom(call)));
+        }
+        Code::atom(format!("{}{generics}({args})", self.runtime(name)))
+    }
+
+    /// `impl From<java::Exception> for Throwable`, for the enum of `Throwable` (`t`) of a program
+    /// in which the runtime raises exceptions that the program may see: the failure becomes an
+    /// object of its standard class, built from its message. (`?` and `java::or_break!` convert
+    /// with it.)
+    pub(super) fn raised_impl(&mut self, t: usize) {
+        let Some(throwable) = self.class.type_index("java.lang.Throwable") else { return };
+        if t != throwable || self.facts.raised_classes.is_empty() {
+            return;
+        }
+        let name = self.throwable_type();
+        self.gap();
+        self.line(&format!("impl From<java::Exception> for {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn from(e: java::Exception) -> {name} {{"));
+        self.indent += 1;
+        self.line("let raised_message = e.message.clone().unwrap_or_default();");
+        self.line("match e.class {");
+        self.indent += 1;
+        let outer = self.method;
+        for new in &self.class.raised {
+            let ExprKind::New { class: c, args, ctor: Some(ctor) } = &new.kind else { continue };
+            if !self.facts.raised_classes.contains(c) {
+                continue;
+            }
+            self.method = *ctor;
+            let object = self.new_object_as(*ctor, args, Some(throwable)).text;
+            self.line(&format!("{} => {object},", rust_string(&self.class.types[*c].name)));
+        }
+        self.method = outer;
+        let uncaught = self.uncaught("uncaught");
+        self.line(&format!("_ => {uncaught}(e),"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// `throw value;`.
+    pub(super) fn throw_stmt(&mut self, value: &'a Expr) {
+        let text = self.expr(value).text;
+        self.throw_text(&text);
+    }
+
+    /// A statement that throws the exception `text`: it leaves the enclosing `try` block or the
+    /// method, or ends the program.
+    fn throw_text(&mut self, text: &str) {
+        match self.innermost_attempt() {
+            Some((label, completion)) => {
+                let thrown = self.thrown(completion, text);
+                self.line(&format!("break '{label} {thrown};"));
+            }
+            None if self.throwing => self.line(&format!("return Err({text});")),
+            None => {
+                let end = self.uncaught("throw_uncaught");
+                self.line(&format!("{end}({text});"));
+            }
+        }
+    }
+
+    /// What an exception `e` that no `catch` clause of a `try` matches does: it leaves the
+    /// enclosing `try` block or the method, or ends the program.
+    fn propagate(&mut self, e: &str) -> String {
+        match self.innermost_attempt() {
+            Some((label, completion)) => format!("break '{label} {}", self.thrown(completion, e)),
+            None if self.throwing => format!("return Err({e})"),
+            None => format!("{}({e})", self.uncaught("uncaught")),
+        }
+    }
+
+    /// Whether a jump to the frame at `index` leaves a `try` with a `finally`.
+    pub(super) fn leaves_finally(&self, index: usize) -> bool {
+        self.finallies.last().is_some_and(|f| f.frame > index)
+    }
+
+    /// `return value;` at `pos` (`text` is the value, `None` for a `return` without one), which
+    /// first runs the `finally` of every `try` that it leaves.
+    pub(super) fn return_stmt(&mut self, text: Option<String>, pos: Pos) {
+        if !self.finallies.is_empty() {
+            if self.ctor_result.is_some() {
+                let message = "a `return` of a constructor through a `finally` not supported yet".to_string();
+                self.rejected.get_or_insert(Error { pos, message });
+            }
+            let label = self.completion_attempt();
+            let value = text.unwrap_or_else(|| "()".to_string());
+            let completion = self.runtime("Completion::Return");
+            self.line(&format!("break '{label} {completion}({value});"));
+            return;
+        }
+        match (text, self.ctor_result) {
+            (_, Some(result)) if self.throwing => self.line(&format!("return Ok({result});")),
+            (_, Some(result)) => self.line(&format!("return {result};")),
+            (None, None) if self.throwing => self.line("return Ok(());"),
+            (None, None) => self.line("return;"),
+            (Some(value), None) if self.throwing => self.line(&format!("return Ok({value});")),
+            (Some(value), None) => self.line(&format!("return {value};")),
+        }
+    }
+
+    /// A jump to the frame at `index` that leaves a `try` with a `finally`, which then runs the
+    /// `finally` first; `false` when the jump leaves none. (`yield_value` rejects a `yield`
+    /// through a `finally`.)
+    pub(super) fn jump_through_finally(&mut self, index: usize, cont: bool) -> bool {
+        if !self.leaves_finally(index) {
+            return false;
+        }
+        let f = self.finallies.last_mut().expect("the jump leaves a `try`");
+        let n = match f.jumps.iter().position(|&j| j == (index, cont)) {
+            Some(n) => n,
+            None => {
+                f.jumps.push((index, cont));
+                f.jumps.len() - 1
+            }
+        };
+        let label = self.completion_attempt();
+        let jump = self.runtime("Completion::Jump");
+        self.line(&format!("break '{label} {jump}({n});"));
+        true
+    }
+
+    /// The statements of a `try` block or `catch` clause, as a block that evaluates to the
+    /// `Result` or `java::Completion` (`completion`) its header (written) declares: what leaves it
+    /// leaves by `label`, and its normal end is `Ok(())` or `java::Completion::Normal`.
+    fn attempt_block(&mut self, label: String, completion: bool, stmts: &'a [Stmt], before: &[String]) {
+        self.indent += 1;
+        self.open_block(Kind::Try);
+        self.attempts.push(Attempt { label, frame: self.frames.len() - 1, completion });
+        for line in before {
+            self.line(line);
+        }
+        self.stmts(stmts, false);
+        if completes_all(stmts) {
+            let normal = if completion { self.runtime("Completion::Normal") } else { "Ok(())".to_string() };
+            self.line(&normal);
+        }
+        self.attempts.pop();
+        self.close();
+        self.indent -= 1;
+    }
+
+    /// A `try` statement.
+    pub(super) fn try_stmt(
+        &mut self,
+        stmt: &'a Stmt,
+        body: &'a [Stmt],
+        catches: &'a [Catch],
+        finally: Option<&'a [Stmt]>,
+    ) {
+        let id = stmt as *const Stmt as usize;
+        if let Some(finally) = finally {
+            return self.try_finally(id, body, catches, finally);
+        }
+        if !self.facts.live_tries.contains(&id) {
+            // Nothing that the body throws is caught here.
+            self.line("{");
+            self.indent += 1;
+            self.stmts(body, false);
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
+        let label = self.attempt_label("attempt");
+        let result = self.result_name(&label);
+        let throwable = self.throwable_type();
+        // A body that cannot complete normally ends only by an exception (or leaves the method):
+        // its block is never `Ok`, which its type says, so that the `match` needs no `Ok` arm.
+        let completes = completes_all(body);
+        let ok = if completes { "()" } else { "std::convert::Infallible" };
+        self.line(&format!("let {result}: Result<{ok}, {throwable}> = {{"));
+        self.attempt_block(label, false, body, &[]);
+        self.line("};");
+        self.line(&format!("match {result} {{"));
+        self.indent += 1;
+        if completes {
+            self.line("Ok(()) => {}");
+        }
+        let (arms, all) = self.catch_arms(catches);
+        let count = all.len();
+        for (catch, matched) in &arms {
+            let (pattern, before) = self.catch_pattern(catch, matched, count);
+            self.line(&format!("Err({pattern}) => {{"));
+            self.indent += 1;
+            for line in before {
+                self.line(&line);
+            }
+            self.stmts(&catch.body, false);
+            self.indent -= 1;
+            self.line("}");
+        }
+        if arms.iter().map(|(_, m)| m.len()).sum::<usize>() < count {
+            let text = self.propagate("e");
+            self.line(&format!("Err(e) => {text},"));
+        }
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// A local for the result of a `try` block, distinct from the method's locals.
+    fn result_name(&self, label: &str) -> String {
+        let mut used: HashSet<String> = self.locals.values().cloned().collect();
+        unique(label.to_string(), &mut used)
+    }
+
+    /// The `catch` clauses that match something, each with the variants of the enum of
+    /// `Throwable` it matches that no earlier clause matched; and all the variants.
+    fn catch_arms(&mut self, catches: &'a [Catch]) -> (Vec<(&'a Catch, Vec<usize>)>, Vec<usize>) {
+        if catches.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let t = self.class.type_index("java.lang.Throwable").expect("a program with `try` has `Throwable`");
+        let all = self.enum_variants(t);
+        let mut covered: Vec<usize> = Vec::new();
+        let mut arms = Vec::new();
+        for catch in catches {
+            let matched: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&c| {
+                    !covered.contains(&c)
+                        && catch.types.iter().any(|&ty| self.class.hierarchy.is_subtype(c, ty))
+                })
+                .collect();
+            // A clause that nothing the body throws reaches is not written.
+            if !matched.is_empty() {
+                covered.extend(&matched);
+                arms.push((catch, matched));
+            }
+        }
+        (arms, all)
+    }
+
+    /// The pattern of the arm of a `catch` clause that matches the variants `matched` of the enum
+    /// of `Throwable`, which has `count` variants, with the lines that bind its parameter.
+    fn catch_pattern(&mut self, catch: &'a Catch, matched: &[usize], count: usize) -> (String, Vec<String>) {
+        let t = self.class.type_index("java.lang.Throwable").expect("a program with `try` has `Throwable`");
+        let mut used = false;
+        for s in &catch.body {
+            visit_stmt(s, &mut |e| used |= mentions(e, &catch.name), &mut |_| {});
+        }
+        let name = self.local(&catch.name);
+        let mutable = if assigns_any(&catch.body, &catch.name) { "mut " } else { "" };
+        let bound = if used { format!("{mutable}{name}") } else { "_".to_string() };
+        let ty = self.class.class_index(catch.ty).expect("a catch parameter has a class type");
+        let variants: Vec<String> = matched.iter().map(|&c| self.variant(t, c)).collect();
+        let alternatives = variants.iter().map(|v| format!("{v}(_)")).collect::<Vec<_>>().join(" | ");
+        // The alternatives, bound to a name when the clause uses the value.
+        let any_of = |bound: &str| match (bound, matched.len()) {
+            ("_", _) => alternatives.clone(),
+            (_, 1) => format!("{bound} @ {alternatives}"),
+            _ => format!("{bound} @ ({alternatives})"),
+        };
+        let mut before = Vec::new();
+        let pattern = match hierarchy::rep(self.class, self.facts, ty) {
+            // The parameter is the object of the one class it catches.
+            hierarchy::Rep::Object(_) => format!("{}({bound})", variants[0]),
+            // The parameter is a `Throwable`.
+            hierarchy::Rep::Enum(u) if u == t && matched.len() == count => bound,
+            hierarchy::Rep::Enum(u) if u == t => any_of(&bound),
+            // The parameter is a value of the enum of a class of the program.
+            hierarchy::Rep::Enum(_) if !used => any_of("_"),
+            hierarchy::Rep::Enum(u) => {
+                // The object that the arm binds, under a name that no local of the method has.
+                let caught = self.result_name("caught");
+                if let [c] = matched {
+                    before.push(format!("let {mutable}{name} = {}({caught});", self.variant(u, *c)));
+                    format!("{}({caught})", variants[0])
+                } else {
+                    let arms: Vec<String> = matched
+                        .iter()
+                        .zip(&variants)
+                        .map(|(&c, v)| format!("{v}(o) => {}(o)", self.variant(u, c)))
+                        .collect();
+                    before.push(format!(
+                        "let {mutable}{name} = match {caught} {{ {}, _ => unreachable!(\"the arm matches these\") }};",
+                        arms.join(", ")
+                    ));
+                    any_of(&caught)
+                }
+            }
+        };
+        if used && self.optional_var(self.method, catch.ty, &catch.name) {
+            before.push(format!("let {mutable}{name} = Some({name});"));
+        }
+        (pattern, before)
+    }
+
+    /// A `try` statement with a `finally`. Its body and its `catch` clauses are blocks that
+    /// evaluate to how they ended; the `finally` runs after them, and then what ended them
+    /// happens: an exception goes on, and a `return` or a jump out of the `try` is made.
+    fn try_finally(&mut self, id: usize, body: &'a [Stmt], catches: &'a [Catch], finally: &'a [Stmt]) {
+        let (has_return, has_jump) = leaves_early(body, catches);
+        let completion = has_return || has_jump;
+        if !completion && !self.facts.raising_tries.contains(&id) {
+            // Only the body's end leaves it: the `catch` clauses never run.
+            self.line("{");
+            self.indent += 1;
+            self.stmts(body, false);
+            self.indent -= 1;
+            self.line("}");
+            self.finally_block(finally);
+            return;
+        }
+        // Whether the body or a `catch` clause completes normally, as Java tells: when none does,
+        // the block is never `Ok` or `Normal`, and the code after the `finally` diverges.
+        let ends = completes_all(body) || catches.iter().any(|c| completes_all(&c.body));
+        let label = self.attempt_label("attempt");
+        let result = self.result_name(&label);
+        let never = "std::convert::Infallible";
+        // In a program without exceptions (no `Throwable`, or one without objects), nothing is
+        // thrown.
+        let exceptions =
+            self.class.type_index("java.lang.Throwable").is_some_and(|t| !self.enum_variants(t).is_empty());
+        let throwable = if exceptions { self.throwable_type() } else { never.to_string() };
+        let ty = if completion {
+            let value = if has_return { self.completion_value() } else { never.to_string() };
+            let jump = if has_jump { "usize" } else { never };
+            format!("{}<{value}, {throwable}, {jump}>", self.runtime("Completion"))
+        } else {
+            format!("Result<{}, {throwable}>", if ends { "()" } else { never })
+        };
+        let (arms, all) = self.catch_arms(catches);
+        let finally_completes = completes_all(finally);
+        // When the `finally` does not complete, what ended the `try` is dropped.
+        let last = if finally_completes { result.clone() } else { "_".to_string() };
+        let first = if arms.is_empty() { &last } else { &result };
+        self.line(&format!("let {first}: {ty} = {{"));
+        self.finallies.push(Finally { frame: self.frames.len(), jumps: Vec::new() });
+        self.attempt_block(label, completion, body, &[]);
+        self.line("};");
+        if !arms.is_empty() {
+            self.line(&format!("let {last} = match {result} {{"));
+            self.indent += 1;
+            let count = all.len();
+            for (catch, matched) in &arms {
+                let (pattern, before) = self.catch_pattern(catch, matched, count);
+                let thrown = self.thrown(completion, &pattern);
+                self.line(&format!("{thrown} => {{"));
+                let handler = self.attempt_label("handler");
+                self.attempt_block(handler, completion, &catch.body, &before);
+                self.line("}");
+            }
+            self.line("other => other,");
+            self.indent -= 1;
+            self.line("};");
+        }
+        let Finally { jumps, .. } = self.finallies.pop().expect("the `try` is open");
+        self.finally_block(finally);
+        if !finally_completes {
+            return;
+        }
+        if !completion && ends {
+            let text = self.passed_on(Code::atom(result));
+            self.line(&format!("{text};"));
+            return;
+        }
+        if !completion {
+            self.line(&format!("let Err(e) = {result};"));
+            self.throw_text("e");
+            return;
+        }
+        self.line(&format!("match {result} {{"));
+        self.indent += 1;
+        let normal = self.runtime("Completion::Normal");
+        if ends {
+            self.line(&format!("{normal} => {{}}"));
+        } else {
+            // Nothing writes it: the arm makes the `match` diverge, as the Java statement does.
+            self.line(&format!("{normal} => unreachable!(\"the `try` does not complete normally\"),"));
+        }
+        if has_return {
+            let ret = self.runtime("Completion::Return");
+            let void = self.ret == Type::Void && !self.display;
+            self.line(&format!("{ret}({}) => {{", if void { "_" } else { "value" }));
+            self.indent += 1;
+            self.return_stmt((!void).then(|| "value".to_string()), Pos::default());
+            self.indent -= 1;
+            self.line("}");
+        }
+        if has_jump && jumps.is_empty() {
+            let jump = self.runtime("Completion::Jump");
+            self.line(&format!("{jump}(_) => unreachable!(\"no jump leaves the `try`\"),"));
+        }
+        let count = jumps.len();
+        for (n, (index, cont)) in jumps.into_iter().enumerate() {
+            let jump = self.runtime("Completion::Jump");
+            let pattern = if n + 1 == count { "_".to_string() } else { n.to_string() };
+            self.line(&format!("{jump}({pattern}) => {{"));
+            self.indent += 1;
+            self.jump(index, cont, None);
+            self.indent -= 1;
+            self.line("}");
+        }
+        if exceptions {
+            let throw = self.runtime("Completion::Throw");
+            let text = self.propagate("e");
+            self.line(&format!("{throw}(e) => {text},"));
+        }
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// The type of the value that a `return` inside a `try` with a `finally` gives back.
+    fn completion_value(&mut self) -> String {
+        if self.display {
+            return "fmt::Result".to_string();
+        }
+        let ret = self.plain_ret_text(self.method);
+        ret.strip_prefix(" -> ").unwrap_or("()").to_string()
+    }
+
+    /// The statements of a `finally`, in a block of their own when they declare locals.
+    fn finally_block(&mut self, finally: &'a [Stmt]) {
+        if finally.iter().any(|s| matches!(s, Stmt::Local { .. })) {
+            self.line("{");
+            self.indent += 1;
+            self.stmts(finally, false);
+            self.indent -= 1;
+            self.line("}");
+        } else {
+            self.stmts(finally, false);
+        }
+    }
+
+    /// `o.getClass().getName()`: the binary name of the object's class; with `simple`,
+    /// `o.getClass().getSimpleName()`, the name of the class in its source.
+    pub(super) fn class_name(&mut self, object: &'a Expr, simple: bool) -> Code {
+        let binary = |decl: &TypeDecl| {
+            if simple {
+                decl.name.rsplit('.').next().unwrap_or_default().to_string()
+            } else if crate::lower::is_standard(&decl.name) {
+                decl.name.clone()
+            } else if decl.package.is_empty() {
+                decl.name.replace('.', "$")
+            } else {
+                format!("{}.{}", decl.package, decl.name[decl.package.len() + 1..].replace('.', "$"))
+            }
+        };
+        match self.enum_of(object) {
+            None => {
+                let c = self.struct_class(object).expect("an object has a class");
+                let name = rust_string(&binary(&self.class.types[c]));
+                if has_effects(object) {
+                    let text = self.expr(object).text;
+                    return Code::atom(format!("{{ {text}; String::from({name}) }}"));
+                }
+                Code::atom(format!("String::from({name})"))
+            }
+            Some(t) => {
+                let obj = self.object(object);
+                let arms: Vec<String> = self
+                    .enum_variants(t)
+                    .into_iter()
+                    .map(|c| {
+                        format!("{}(_) => {}", self.variant(t, c), rust_string(&binary(&self.class.types[c])))
+                    })
+                    .collect();
+                Code::atom(format!("String::from(match {obj} {{ {} }})", arms.join(", ")))
+            }
+        }
+    }
+}

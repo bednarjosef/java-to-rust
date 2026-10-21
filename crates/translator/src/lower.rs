@@ -6,7 +6,12 @@
 mod code_point;
 mod enum_nulls;
 mod enums;
+mod exceptions;
+mod generics;
+mod hierarchy;
+mod object;
 mod objects;
+mod real_generics;
 mod statics;
 mod strings;
 mod unsigned;
@@ -14,7 +19,7 @@ mod unsigned;
 use crate::ast::*;
 use objects::{MethodInfo, TypeInfo};
 use serde_json::Value;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 mod arrays;
 mod boxing;
@@ -30,6 +35,7 @@ mod sync;
 mod system;
 mod varargs;
 use arrays::{is_array_length, reads_name};
+pub use exceptions::{is_standard, standard_names, standard_subclass};
 pub use program::lower_program;
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
@@ -40,23 +46,29 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         .filter(|n| !matches!(n.kind(), "EMPTY_STATEMENT" | "ANNOTATION_TYPE"))
         .collect();
     let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
-    let lowering = Lowering::declare(&decls)?;
-    let mut types: Vec<TypeDecl> =
-        (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
-    let mut methods: Vec<Method> =
-        (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
-    for index in (0..types.len()).filter(|&t| lowering.has_static_init(t)) {
-        methods.push(lowering.clinit(index)?);
-    }
-    for index in (0..types.len()).filter(|&t| lowering.types[t].node.kind() == "ENUM") {
-        lowering.constant_bodies(index, &mut methods)?;
-        lowering.check_enum(index, &methods)?;
-        let constants = lowering.enum_constants(index, &types[index].fields, &methods)?;
-        types[index].enum_constants = Some(constants);
-    }
-    let class = Class { name: first.str("simpleName").to_string(), types, methods };
-    enums::check_nulls(&class)?;
-    Ok(class)
+    real_generics::retry(|real| {
+        let mut lowering = Lowering::declare(&decls)?;
+        lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
+        lowering.declare_standard()?;
+        lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
+        lowering.plan_object(&decls);
+        let mut types: Vec<TypeDecl> =
+            (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
+        let mut methods: Vec<Method> =
+            (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
+        lowering.object_methods(&mut methods)?;
+        lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
+        lowering.object_types(&mut types);
+        lowering.param_decls(&mut types);
+        let failed = lowering.verify(&types, &methods);
+        let hierarchy = Hierarchy::new(&types, &methods);
+        let raised = lowering.raised_objects(&types, &methods);
+        let closes = lowering.closes.take();
+        let name = first.str("simpleName").to_string();
+        let class = Class { name, types, methods, hierarchy, raised, closes };
+        enums::check_nulls(&class)?;
+        Ok((class, lowering.real.clone(), failed))
+    })
 }
 
 /// A node of javac's tree.
@@ -127,7 +139,14 @@ impl<'t> Node<'t> {
         })
     }
 
+    /// Whether the declaration has a modifier. `STATIC` comes from the declaration's symbol when it
+    /// has one, which also knows the implicit modifier of an interface's fields and nested types.
     fn has_flag(self, flag: &str) -> bool {
+        if flag == "STATIC"
+            && let Some(s) = self.get("symbol").and_then(|s| s.0["static"].as_bool())
+        {
+            return s;
+        }
         self.get("modifiers")
             .is_some_and(|m| m.0["flags"].as_array().is_some_and(|f| f.iter().any(|x| x == flag)))
     }
@@ -146,8 +165,15 @@ struct Lowering<'t> {
     next_id: Cell<ExprId>,
     /// Index of the class whose members are being lowered: `this` and unqualified names refer to it.
     current: Cell<usize>,
+    /// The method being lowered, whose type variables are in scope.
+    method_ctx: Cell<Option<usize>>,
+    /// The class and method whose type variables a declared type is read in, when that is not
+    /// the code being lowered (see `generics::declared_type`).
+    scope: Cell<Option<(usize, Option<usize>)>>,
     /// Whether the method being lowered is a constructor, which cannot `return` early.
     in_ctor: Cell<bool>,
+    /// The return type of the method being lowered, which a returned value is converted to.
+    ret: Cell<Type>,
     /// Every class of the file, in the order of `Class::types`.
     types: Vec<TypeInfo<'t>>,
     /// Every method and constructor of every class, in the order of `Class::methods`.
@@ -156,17 +182,48 @@ struct Lowering<'t> {
     reach: Option<&'t crate::program::Reach>,
     /// In a whole program, the class whose `main` is the entry point; in a file, every `main` is.
     entry: Option<usize>,
+    /// The standard exception classes that the program uses (see `exceptions`).
+    standard: exceptions::Standard,
+    /// The `close` methods that try-with-resources statements call (see `exceptions`).
+    closes: std::cell::RefCell<Vec<(usize, Pos)>>,
+    /// Where `Object` goes, in a program that uses it (see `object`).
+    object: Option<object::ObjectIndexes>,
+    /// The generic classes and methods that are Rust generics (see `real_generics`).
+    real: real_generics::Real,
+    /// Those of `real` that lowering found cannot be: the program is lowered again without them.
+    failed: RefCell<real_generics::Real>,
 }
 
 impl<'t> Lowering<'t> {
+    /// What lowering adds once every declared method is lowered, for a file and a whole program
+    /// alike: the `<clinit>` of each class with static initialization, and each enum's constant
+    /// bodies and constants. An error comes with the index of the type it is in.
+    fn finish_types(&self, types: &mut [TypeDecl], methods: &mut Vec<Method>) -> Result<(), (usize, Error)> {
+        for index in (0..types.len()).filter(|&t| self.has_static_init(t)) {
+            methods.push(self.clinit(index).map_err(|e| (index, e))?);
+        }
+        for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
+            let in_type = |e| (index, e);
+            self.constant_bodies(index, methods).map_err(in_type)?;
+            self.check_enum(index, methods).map_err(in_type)?;
+            let constants = self.enum_constants(index, &types[index].fields, methods).map_err(in_type)?;
+            types[index].enum_constants = Some(constants);
+        }
+        Ok(())
+    }
+
     fn method(&self, index: usize) -> Result<Method, Error> {
+        let outer = self.method_ctx.replace(Some(index));
+        let method = self.method_in_scope(index);
+        self.method_ctx.set(outer);
+        method
+    }
+
+    fn method_in_scope(&self, index: usize) -> Result<Method, Error> {
         let info = &self.methods[index];
         let node = info.node;
         self.current.set(info.owner);
         self.in_ctor.set(node.str("name") == "<init>");
-        if node.list("typeParameters").next().is_some() {
-            return unsupported(node, "generic methods");
-        }
         let is_ctor = node.str("name") == "<init>";
         let is_static = node.has_flag("STATIC");
         let name = node.str("name").to_string();
@@ -176,6 +233,7 @@ impl<'t> Lowering<'t> {
             let ret_node = node.child("returnType")?;
             self.ty(ret_node, ret_node.java_type())?
         };
+        self.ret.set(ret);
         let params: Vec<Node> = node.list("parameters").collect();
         let param_type = |p: Node<'t>| p.symbol().map_or("", |s| s.ty);
         let is_main = name == "main"
@@ -197,9 +255,13 @@ impl<'t> Lowering<'t> {
         // `constant_bodies` makes its body.
         let abstract_in_enum =
             node.has_flag("ABSTRACT") && self.enum_index(&self.types[info.owner].name).is_some();
+        let in_interface = self.types[info.owner].node.kind() == "INTERFACE";
+        let is_abstract = node.get("body").is_none()
+            && (node.has_flag("ABSTRACT") || in_interface && !is_static)
+            && !abstract_in_enum;
         let mut body = match node.get("body") {
             Some(body) => self.block(body)?,
-            None if abstract_in_enum => Vec::new(),
+            None if abstract_in_enum || is_abstract => Vec::new(),
             None => return unsupported(node, "methods without a body"),
         };
         if is_ctor {
@@ -218,6 +280,9 @@ impl<'t> Lowering<'t> {
             is_ctor,
             class: info.owner,
             pos: node.pos(),
+            is_abstract,
+            overrides: self.overrides(node),
+            type_params: self.method_type_params(index),
         })
     }
 
@@ -241,14 +306,27 @@ impl<'t> Lowering<'t> {
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
             "float" => Ok(Type::Float),
+            // A type variable hides a class of the same name.
+            _ if let Some(erased) = self.type_variable(node, name) => erased,
             _ if self.enum_index(name).is_some() => Ok(Type::enum_type(name)),
-            _ if self.type_index(name).is_some() => Ok(Type::class(name)),
+            _ if let Some(t) = self.type_index(name) => {
+                // A Rust generic used without type arguments.
+                if self.is_real(real_generics::Owner::Class(t)) && !self.class_type_params(t).is_empty() {
+                    self.fail(real_generics::Owner::Class(t));
+                }
+                Ok(Type::class(name))
+            }
             "<nulltype>" => Ok(Type::Null),
             // `this` in the body of an enum constant, which is the constant.
             _ if name.starts_with("<anonymous ") && self.enum_index(&name[11..name.len() - 1]).is_some() => {
                 Ok(Type::enum_type(&name[11..name.len() - 1]))
             }
             _ if name.ends_with("[]") => Ok(Type::array(self.ty(node, &name[..name.len() - 2])?)),
+            "java.lang.Object" if self.object.is_some() => Ok(Type::class(OBJECT)),
+            "java.lang.Comparable" if self.object.is_some_and(|at| at.comparable.is_some()) => {
+                Ok(Type::class(COMPARABLE))
+            }
+            _ if let Some(erased) = self.erased(node, name) => erased,
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
             "java.lang.Object" => unsupported(node, "Object"),
             _ => unsupported(node, &format!("type `{name}`")),
@@ -258,8 +336,8 @@ impl<'t> Lowering<'t> {
     fn block(&self, node: Node<'t>) -> Result<Vec<Stmt>, Error> {
         let mut out = Vec::new();
         for stmt in node.list("statements") {
-            // Every class extends `Object`, whose constructor does nothing.
             if is_super_call(stmt) {
+                out.extend(self.super_init(stmt)?);
                 continue;
             }
             self.stmt_into(stmt, &mut out)?;
@@ -284,7 +362,7 @@ impl<'t> Lowering<'t> {
             "VARIABLE" => {
                 let ty = self.ty(node, node.symbol().map_or("", |s| s.ty))?;
                 let init = match node.get("initializer") {
-                    Some(v) => Some(self.expr(v)?),
+                    Some(v) => Some(self.convert(self.expr(v)?, ty)),
                     None => None,
                 };
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
@@ -332,14 +410,17 @@ impl<'t> Lowering<'t> {
                 Stmt::For { init, cond, update, body }
             }
             "RETURN" => match node.get("expression") {
-                Some(value) => Stmt::Return(Some(self.expr(value)?), node.pos()),
+                Some(value) => {
+                    Stmt::Return(Some(self.convert(self.expr(value)?, self.ret.get())), node.pos())
+                }
                 None => Stmt::Return(None, node.pos()),
             },
             "BREAK" | "CONTINUE" => switch::jump(node),
             "YIELD" => Stmt::Yield(self.expr(node.child("value")?)?),
             "ENHANCED_FOR_LOOP" => self.for_each(node)?,
             "SWITCH" => self.switch_stmt(node)?,
-            "TRY" | "THROW" => return unsupported(node, "exceptions"),
+            "TRY" => self.try_stmt(node)?,
+            "THROW" => self.throw(node)?,
             "LABELED_STATEMENT" => self.labeled(node)?,
             "CLASS" | "INTERFACE" | "ENUM" | "RECORD" => return unsupported(node, "local classes"),
             kind => return unsupported(node, &kind_words(kind)),
@@ -386,41 +467,63 @@ impl<'t> Lowering<'t> {
                     prefix: kind.starts_with("PREFIX"),
                 }
             }
-            "ASSIGNMENT" => ExprKind::Assign {
-                op: None,
-                target: self.target(node.child("variable")?)?,
-                value: Box::new(self.expr(node.child("expression")?)?),
-            },
+            "ASSIGNMENT" => {
+                // A field of a type variable holds its erasure.
+                let variable = node.child("variable")?;
+                let to = match self.field_type(variable)? {
+                    Some(declared) => declared,
+                    None => self.ty(node, node.java_type())?,
+                };
+                ExprKind::Assign {
+                    op: None,
+                    target: self.target(variable)?,
+                    value: Box::new(self.convert(self.expr(node.child("expression")?)?, to)),
+                }
+            }
             kind if kind.ends_with("_ASSIGNMENT") => {
                 let op = binary_op(node, kind.trim_end_matches("_ASSIGNMENT"))?;
                 let value = self.expr(node.child("expression")?)?;
-                if op == BinOp::Add {
-                    self.check_text(node, value.ty)?;
-                }
                 ExprKind::Assign {
                     op: Some(op),
                     target: self.target(node.child("variable")?)?,
                     value: Box::new(value),
                 }
             }
-            "TYPE_CAST" => ExprKind::Cast(
-                self.ty(node, node.java_type())?,
-                Box::new(self.expr(node.child("expression")?)?),
-            ),
+            "TYPE_CAST" => {
+                let ty = self.ty(node, node.java_type())?;
+                let value = self.expr(node.child("expression")?)?;
+                // A cast between the program's types, up, down or across: `Cast` converts as the
+                // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
+                // `Integer` and unboxes.
+                if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
+                    let boxed = self.synth(
+                        ExprKind::Cast(Type::boxed(ty), Box::new(value)),
+                        node.pos(),
+                        Type::boxed(ty),
+                    );
+                    ExprKind::Cast(ty, Box::new(boxed))
+                } else {
+                    ExprKind::Cast(ty, Box::new(value))
+                }
+            }
             // As with `if`, reachability skipped the branch that the condition guards.
             "CONDITIONAL_EXPRESSION" if self.never_true(node) => {
-                let value = self.expr(node.child("falseExpression")?)?;
+                let ty = self.ty(node, node.java_type())?;
+                let value = self.convert(self.expr(node.child("falseExpression")?)?, ty);
                 // The branch converts to the type of the whole, as `cond ? 1 : 2L` is a `long`.
-                if value.ty == self.ty(node, node.java_type())? {
+                if value.ty == ty {
                     return Ok(value);
                 }
-                ExprKind::Cast(self.ty(node, node.java_type())?, Box::new(value))
+                ExprKind::Cast(ty, Box::new(value))
             }
-            "CONDITIONAL_EXPRESSION" => ExprKind::Conditional(
-                Box::new(self.expr(node.child("condition")?)?),
-                Box::new(self.expr(node.child("trueExpression")?)?),
-                Box::new(self.expr(node.child("falseExpression")?)?),
-            ),
+            "CONDITIONAL_EXPRESSION" => {
+                let ty = self.ty(node, node.java_type())?;
+                ExprKind::Conditional(
+                    Box::new(self.expr(node.child("condition")?)?),
+                    Box::new(self.convert(self.expr(node.child("trueExpression")?)?, ty)),
+                    Box::new(self.convert(self.expr(node.child("falseExpression")?)?, ty)),
+                )
+            }
             "METHOD_INVOCATION" => self.call(node)?,
             "NEW_CLASS" => match self.new_text(node)? {
                 Some(kind) => kind,
@@ -439,7 +542,7 @@ impl<'t> Lowering<'t> {
                 None => self.select(node)?,
             },
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => return unsupported(node, "lambdas"),
-            "INSTANCE_OF" => return unsupported(node, "instanceof"),
+            "INSTANCE_OF" => self.instance_of(node)?,
             "SWITCH_EXPRESSION" => self.switch_expr(node)?,
             kind => {
                 let left = node.child("leftOperand");
@@ -450,10 +553,11 @@ impl<'t> Lowering<'t> {
                 {
                     return error(node.pos(), "== on strings compares references; not supported yet");
                 }
-                if op == BinOp::Add && (left.ty == Type::String || right.ty == Type::String) {
-                    self.check_text(node, left.ty)?;
-                    self.check_text(node, right.ty)?;
-                }
+                let (left, right) = if matches!(op, BinOp::Eq | BinOp::Ne) {
+                    self.convert_operands(left, right)
+                } else {
+                    (left, right)
+                };
                 ExprKind::Binary(op, Box::new(left), Box::new(right))
             }
         };
@@ -461,6 +565,12 @@ impl<'t> Lowering<'t> {
         let ty = match kind {
             ExprKind::Builtin(Builtin::Print, _) if node.kind() == "METHOD_INVOCATION" => Type::Void,
             _ => self.ty(node, node.java_type())?,
+        };
+        let kind = match node.kind() {
+            "METHOD_INVOCATION" | "IDENTIFIER" | "MEMBER_SELECT" | "ARRAY_ACCESS" => {
+                self.erased_use(node, kind, ty)?
+            }
+            _ => kind,
         };
         let id = self.next_id.get();
         self.next_id.set(id + 1);
@@ -475,7 +585,16 @@ impl<'t> Lowering<'t> {
     /// The name of the local variable or parameter that an identifier refers to.
     fn local(&self, node: Node) -> Result<String, Error> {
         match node.symbol() {
-            Some(s) if matches!(s.kind, "LOCAL_VARIABLE" | "PARAMETER" | "EXCEPTION_PARAMETER") => {
+            Some(s)
+                if matches!(
+                    s.kind,
+                    "LOCAL_VARIABLE"
+                        | "PARAMETER"
+                        | "EXCEPTION_PARAMETER"
+                        | "BINDING_VARIABLE"
+                        | "RESOURCE_VARIABLE"
+                ) =>
+            {
                 Ok(node.str("name").to_string())
             }
             _ => unsupported(node, &format!("the name `{}` here", node.str("name"))),
@@ -488,6 +607,9 @@ impl<'t> Lowering<'t> {
             return Ok(place);
         }
         match node.kind() {
+            "IDENTIFIER" if node.symbol().is_some_and(|s| s.kind == "BINDING_VARIABLE") => {
+                unsupported(node, "assigning a pattern variable")
+            }
             "IDENTIFIER" => Ok(Place::Var(self.local(node)?)),
             "ARRAY_ACCESS" => {
                 let (array, index) = self.index(node)?;
@@ -506,9 +628,24 @@ impl<'t> Lowering<'t> {
         let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
-            return Ok(ExprKind::ThisCall { args, resolved: self.method_index(&symbol) });
+            let resolved = self.method_index(&symbol);
+            let args = self.convert_args(resolved, args)?;
+            return Ok(ExprKind::ThisCall { args, resolved });
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        if symbol.owner == "java.lang.Object" && self.object.is_some() {
+            return self.object_call(node, &symbol, receiver, args);
+        }
+        if symbol.owner == "java.lang.Comparable" && symbol.name == "compareTo" {
+            return self.comparable_call(node, receiver, args);
+        }
+        if symbol.name == "equals"
+            && !symbol.is_static
+            && matches!(&args[..], [arg] if Self::is_object(arg.ty))
+            && runtime_type(symbol.owner).is_some()
+        {
+            return self.value_equals(node, receiver, args);
+        }
         if let Some(kind) = self.system_property_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
@@ -527,6 +664,10 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.constant_body_call(node, &symbol, receiver, &mut args)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.class_name_call(&symbol, receiver)? {
+            return Ok(kind);
+        }
+        self.check_standard_member(node, &symbol)?;
         let builtin = match (symbol.owner, symbol.name) {
             ("java.io.PrintStream", "println") if system_out => Builtin::Println,
             ("java.io.PrintStream", "print") if system_out => Builtin::Print,
@@ -583,30 +724,39 @@ impl<'t> Lowering<'t> {
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);
+                let args = self.convert_args(resolved, args)?;
                 if symbol.is_static {
                     return Ok(ExprKind::Call { name, args, resolved });
                 }
+                // `super.m()`, or `Iface.super.m()` for a default method of an interface.
+                let is_super = receiver.is_some_and(|r| {
+                    r.kind() == "IDENTIFIER" && r.str("name") == "super"
+                        || r.kind() == "MEMBER_SELECT"
+                            && r.str("identifier") == "super"
+                            && self.types[self.current.get()].node.kind() != "INTERFACE"
+                });
                 let receiver = match receiver {
+                    Some(r) if is_super => {
+                        let ty = self.ty(r, r.java_type())?;
+                        self.synth(ExprKind::This, r.pos(), ty)
+                    }
                     Some(r) => self.expr(r)?,
                     None => self.this(node),
                 };
-                return Ok(ExprKind::MethodCall { receiver: Box::new(receiver), name, args, resolved });
+                let receiver = Box::new(receiver);
+                return Ok(ExprKind::MethodCall { receiver, name, args, resolved, is_super });
             }
             (owner, name) => return unsupported(node, &format!("method `{owner}.{name}`")),
         };
-        if let (Builtin::Println | Builtin::Print, Some(arg)) = (&builtin, args.first()) {
-            self.check_text(node, arg.ty)?;
-        }
         Ok(ExprKind::Builtin(builtin, args))
     }
 }
 
-/// `super();`, which javac writes into every constructor that does not call another one.
+/// `super(...)`, which javac writes into every constructor that does not call another one.
 fn is_super_call(stmt: Node) -> bool {
     stmt.get("expression").is_some_and(|call| {
         call.kind() == "METHOD_INVOCATION"
-            && call.list("arguments").next().is_none()
-            && call.get("methodSelect").is_some_and(|s| s.str("name") == "super")
+            && call.get("methodSelect").is_some_and(|s| s.kind() == "IDENTIFIER" && s.str("name") == "super")
     })
 }
 

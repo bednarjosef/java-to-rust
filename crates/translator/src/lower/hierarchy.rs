@@ -1,0 +1,192 @@
+//! Lowering of the type hierarchy: superclasses, abstract classes and methods, overrides,
+//! `super(...)` and `super.m(...)`, and the implicit conversions between class types, which are
+//! made explicit as `Cast` nodes so that the analyses and the generator see every upcast.
+
+use super::*;
+
+impl<'t> Lowering<'t> {
+    /// The superclass of class `t` when the program declares it; `None` for `Object`. A class
+    /// that extends a class of the runtime is rejected.
+    pub(super) fn superclass(&self, t: usize) -> Result<Option<usize>, Error> {
+        let node = self.types[t].node;
+        let Some(clause) = node.get("extendsClause") else { return Ok(None) };
+        // A generic superclass is its erasure.
+        let name = clause.java_type().split('<').next().unwrap_or_default();
+        match self.type_index(name) {
+            Some(s) if self.types[s].node.kind() == "CLASS" => Ok(Some(s)),
+            Some(_) => unsupported(clause, &format!("extending `{name}`")),
+            None if name == "java.lang.Object" => Ok(None),
+            None => unsupported(clause, &format!("extending `{name}`")),
+        }
+    }
+
+    /// The program's interfaces that type `t` implements (a class or an enum) or extends (an
+    /// interface), directly. `java.lang.Comparable` is accepted and left out: a class that
+    /// implements it only declares its `compareTo`, which the program calls directly; so are
+    /// `java.lang.AutoCloseable` and `java.io.Closeable`, whose `close` a try-with-resources
+    /// calls directly.
+    pub(super) fn interfaces(&self, t: usize) -> Result<Vec<usize>, Error> {
+        let node = self.types[t].node;
+        // javac lists the interfaces that an interface extends as its `implementsClause` too.
+        let mut out = Vec::new();
+        for clause in node.list("implementsClause") {
+            let name = clause.java_type();
+            let raw = name.split('<').next().unwrap_or(name);
+            match self.type_index(raw) {
+                Some(i) if self.types[i].node.kind() == "INTERFACE" => out.push(i),
+                None if matches!(
+                    raw,
+                    "java.lang.Comparable" | "java.lang.AutoCloseable" | "java.io.Closeable"
+                ) => {}
+                _ => return unsupported(clause, &format!("implementing `{raw}`")),
+            }
+        }
+        Ok(out)
+    }
+
+    /// `value instanceof T` and `value instanceof T name` on a value of the program's types.
+    pub(super) fn instance_of(&self, node: Node<'t>) -> Result<ExprKind, Error> {
+        let value = self.expr(node.child("expression")?)?;
+        let type_node = node.child("type")?;
+        let ty = self.ty(type_node, type_node.java_type())?;
+        let binding = match node.get("pattern") {
+            Some(p) if p.kind() == "BINDING_PATTERN" => Some(p.child("variable")?.str("name").to_string()),
+            Some(p) => return unsupported(p, "record patterns"),
+            None => None,
+        };
+        // `Object` may also hold a string or a box.
+        let target = matches!(ty, Type::Class(..) | Type::Enum(_))
+            || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_)));
+        if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
+            return unsupported(node, "instanceof on these types");
+        }
+        Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
+    }
+
+    /// Whether type `a` is type `b` or a subtype of it, through superclasses and interfaces.
+    pub(super) fn is_subclass(&self, a: usize, b: usize) -> bool {
+        a == b
+            || self.superclass(a).ok().flatten().is_some_and(|s| self.is_subclass(s, b))
+            || self.interfaces(a).unwrap_or_default().into_iter().any(|i| self.is_subclass(i, b))
+    }
+
+    /// The methods of the program that a method declaration overrides, from the list javac
+    /// gives with its symbol.
+    pub(super) fn overrides(&self, node: Node<'t>) -> Vec<usize> {
+        let Some(list) = node.get("symbol").and_then(|s| s.0["overrides"].as_array()) else {
+            return Vec::new();
+        };
+        let name = node.str("name");
+        list.iter()
+            .filter_map(|o| {
+                let owner = o["owner"].as_str()?;
+                let sig = o["type"].as_str()?;
+                self.methods
+                    .iter()
+                    .position(|m| self.types[m.owner].name == owner && m.name == name && m.sig == sig)
+            })
+            .collect()
+    }
+
+    /// `super(args)` at the start of a constructor: nothing when the superclass is `Object`,
+    /// whose constructor does nothing, else `SuperInit`.
+    pub(super) fn super_init(&self, stmt: Node<'t>) -> Result<Option<Stmt>, Error> {
+        let call = stmt.child("expression")?;
+        if self.superclass(self.current.get())?.is_none() {
+            return Ok(None);
+        }
+        let Some(symbol) = call.symbol() else { return unsupported(call, "this `super` call") };
+        self.check_standard_member(call, &symbol)?;
+        let args: Vec<Expr> = call.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+        let args = self.packed_args(call, &symbol, args)?;
+        let resolved = self.method_index(&symbol);
+        let args = self.convert_args(resolved, args)?;
+        let kind = ExprKind::SuperInit { args, resolved };
+        Ok(Some(Stmt::Expr(self.synth(kind, call.pos(), Type::Void))))
+    }
+
+    /// The types of the parameters of method `index`.
+    pub(super) fn param_types(&self, index: usize) -> Result<Vec<Type>, Error> {
+        let owner = self.methods[index].owner;
+        self.methods[index]
+            .node
+            .list("parameters")
+            .map(|p| self.declared_type(p, p.symbol().map_or("", |s| s.ty), owner, Some(index)))
+            .collect()
+    }
+
+    /// The arguments of a call of method `index`, each converted to its parameter's type.
+    pub(super) fn convert_args(&self, index: Option<usize>, args: Vec<Expr>) -> Result<Vec<Expr>, Error> {
+        let Some(index) = index else { return Ok(args) };
+        let types = self.param_types(index)?;
+        // Arrays do not convert: a `String[]` is not an `Object[]` in the translation.
+        if let Some(arg) = args.iter().zip(&types).find_map(|(a, &ty)| {
+            let mismatch = matches!(a.ty, Type::Array(_)) && matches!(ty, Type::Array(_)) && a.ty != ty;
+            (mismatch && !self.has_param(ty)).then_some(a)
+        }) {
+            return error(
+                arg.pos,
+                "an array passed as an array of a type variable not supported yet".to_string(),
+            );
+        }
+        Ok(args
+            .into_iter()
+            .zip(types.into_iter().chain(std::iter::repeat(Type::Void)))
+            .map(|(a, ty)| self.convert(a, ty))
+            .collect())
+    }
+
+    /// `e` as a value of type `to`: an object of one class type that Java uses as another (an
+    /// upcast) gets a `Cast`, which the generator turns into the conversion.
+    pub(super) fn convert(&self, e: Expr, to: Type) -> Expr {
+        // An enum that implements an interface is converted to it too, and any value but null
+        // to `Object`.
+        // A Rust generic's type variable takes any value as it is.
+        if self.param_owner(to).is_some() {
+            return e;
+        }
+        let differs = match (e.ty, to) {
+            (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE => {
+                !matches!(e.ty, Type::Null | Type::Void) && e.ty != to
+            }
+            (Type::Class(a, _) | Type::Enum(a), Type::Class(b, _)) => a != b,
+            _ => false,
+        };
+        if !differs {
+            return e;
+        }
+        let pos = e.pos;
+        self.synth(ExprKind::Cast(to, Box::new(e)), pos, to)
+    }
+
+    /// The operands of `==` or `!=` on objects of two class types, the one of the subclass
+    /// converted to the other's type.
+    pub(super) fn convert_operands(&self, left: Expr, right: Expr) -> (Expr, Expr) {
+        if Self::is_object(left.ty) && right.ty != Type::Null {
+            return (left, self.convert(right, Type::class(OBJECT)));
+        }
+        if Self::is_object(right.ty) && left.ty != Type::Null {
+            return (self.convert(left, Type::class(OBJECT)), right);
+        }
+        let (Some(a), Some(b)) = (self.class_of(left.ty), self.class_of(right.ty)) else {
+            return (left, right);
+        };
+        if a == b {
+            (left, right)
+        } else if self.is_subclass(a, b) {
+            (self.convert(left, right.ty), right)
+        } else if self.is_subclass(b, a) {
+            let ty = left.ty;
+            (left, self.convert(right, ty))
+        } else {
+            (left, right)
+        }
+    }
+
+    fn class_of(&self, ty: Type) -> Option<usize> {
+        match ty {
+            Type::Class(name, _) | Type::Enum(name) => self.type_index(name),
+            _ => None,
+        }
+    }
+}

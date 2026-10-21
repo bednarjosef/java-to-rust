@@ -3,7 +3,8 @@
 //! same way as the shared arrays, so an error exits with Java's code. An array of arrays is a
 //! `Vec` of `Vec`s, whose rows are reached with `row` and `row_mut`.
 
-use crate::array::{Array, from_vec, position, size};
+use crate::Exception;
+use crate::array::{Array, from_vec, position, size, try_position, try_size};
 
 /// `new T[len]` as a `Vec`, filled with the default value `zero`.
 #[inline]
@@ -57,6 +58,59 @@ pub fn assign<T>(a: &mut [T], i: i32, v: T) {
 pub fn modify<T: Clone>(a: &mut [T], i: i32, f: impl FnOnce(T) -> T) {
     let k = position(a.len(), i);
     a[k] = f(a[k].clone());
+}
+
+/// `new T[len]` as a `Vec`, where the program observes the `NegativeArraySizeException`.
+pub fn try_new_vec<T: Clone>(len: i32, zero: T) -> Result<Vec<T>, Exception> {
+    Ok(vec![zero; try_size(len)?])
+}
+
+/// `a[i]` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_at<T: Clone>(a: &[T], i: i32) -> Result<T, Exception> {
+    Ok(a[try_position(a.len(), i)?].clone())
+}
+
+/// `a[i] = v` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_put<T: Clone>(a: &mut [T], i: i32, v: T) -> Result<T, Exception> {
+    let k = try_position(a.len(), i)?;
+    a[k] = v.clone();
+    Ok(v)
+}
+
+/// `a[i] op= v` and the like where the program observes the exceptions of the index or of `f`.
+pub fn try_modify<T: Clone>(
+    a: &mut [T],
+    i: i32,
+    f: impl FnOnce(T) -> Result<T, Exception>,
+) -> Result<(), Exception> {
+    let k = try_position(a.len(), i)?;
+    a[k] = f(a[k].clone())?;
+    Ok(())
+}
+
+/// The row `a[i]` of an array of arrays, to be read, where the program observes the
+/// `ArrayIndexOutOfBoundsException`.
+pub fn try_row<T>(a: &[T], i: i32) -> Result<&T, Exception> {
+    Ok(&a[try_position(a.len(), i)?])
+}
+
+/// The row `a[i]` of an array of arrays, to be written, where the program observes the
+/// `ArrayIndexOutOfBoundsException`.
+pub fn try_row_mut<T>(a: &mut [T], i: i32) -> Result<&mut T, Exception> {
+    let k = try_position(a.len(), i)?;
+    Ok(&mut a[k])
+}
+
+/// `position_of` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_position_of<T>(a: &[T], i: i32) -> Result<usize, Exception> {
+    try_position(a.len(), i)
+}
+
+/// `assign` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_assign<T>(a: &mut [T], i: i32, v: T) -> Result<(), Exception> {
+    let k = try_position(a.len(), i)?;
+    a[k] = v;
+    Ok(())
 }
 
 /// A plain array made shared, where it meets code that needs a `java::Array`: the `Vec` of a

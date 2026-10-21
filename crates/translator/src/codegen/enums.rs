@@ -81,7 +81,7 @@ impl<'a> Gen<'a> {
         let name = struct_name(&decl.name);
         self.gap();
         self.line("#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]");
-        self.line(&format!("enum {name} {{"));
+        self.line(&format!("{}enum {name} {{", self.vis()));
         self.indent += 1;
         for c in constants {
             self.line(&format!("{},", variant_name(&c.name)));
@@ -95,7 +95,7 @@ impl<'a> Gen<'a> {
             let ty = self.ty_name(field.ty);
             self.gap();
             let accessor = self.accessor(index, &field.name);
-            self.line(&format!("fn {accessor}(self) -> {ty} {{"));
+            self.line(&format!("{}fn {accessor}(self) -> {ty} {{", self.vis()));
             self.indent += 1;
             self.line("match self {");
             self.indent += 1;
@@ -109,7 +109,7 @@ impl<'a> Gen<'a> {
             self.line("}");
         }
         self.gap();
-        self.line("fn enum_name(self) -> String {");
+        self.line(&format!("{}fn enum_name(self) -> String {{", self.vis()));
         self.indent += 1;
         self.line("let name: &str = match self {");
         self.indent += 1;
@@ -122,7 +122,7 @@ impl<'a> Gen<'a> {
         self.indent -= 1;
         self.line("}");
         self.gap();
-        self.line(&format!("fn enum_value_of(name: &str) -> {name} {{"));
+        self.line(&format!("{}fn enum_value_of(name: &str) -> {name} {{", self.vis()));
         self.indent += 1;
         self.line("match name {");
         self.indent += 1;
@@ -140,7 +140,8 @@ impl<'a> Gen<'a> {
         self.line("}");
         for i in 0..class.methods.len() {
             let m = &class.methods[i];
-            if m.class == index && !m.is_static && !m.is_ctor {
+            // Its own methods, and the default methods of its interfaces that live here.
+            if (m.class == index || self.homes[i] == Home::Class(index)) && !m.is_static && !m.is_ctor {
                 self.gap();
                 self.method(i);
             }

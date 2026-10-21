@@ -38,6 +38,13 @@ impl<'a> Gen<'a> {
                 call(self, "float_to_int_bits", vec![x])
             }
             Native::IdentityHash => {
+                // The address of the class's struct, which `Object.hashCode` hashes too.
+                if self.enum_of(&args[0]).is_none()
+                    && let Some(c) = self.struct_class(&args[0])
+                {
+                    let address = self.receiver_address(&args[0], c);
+                    return call(self, "address_hash", vec![address]);
+                }
                 let object = match &args[0].kind {
                     ExprKind::Var(name) => format!("&{}", self.local(name)),
                     // `this` is already a reference to the `Rc`.

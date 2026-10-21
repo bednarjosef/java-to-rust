@@ -58,6 +58,14 @@ fn set_current(package: &str) {
 /// The path prefix that names a class from the module being written (empty inside its own
 /// module), and its name inside its package (`Outer.Inner` for a nested class).
 pub(super) fn split(name: &str) -> (String, &str) {
+    // The standard exception classes are items of the crate's root, named by their simple names.
+    if crate::lower::is_standard(name) {
+        let simple = name.rsplit('.').next().unwrap_or(name);
+        let root = CONTEXT.with_borrow(|c| {
+            c.as_ref().and_then(|c| c.current.as_deref()).is_some_and(|current| !current.is_empty())
+        });
+        return (if root { "crate::".to_string() } else { String::new() }, simple);
+    }
     CONTEXT.with_borrow(|c| {
         let Some((c, package)) = c.as_ref().and_then(|c| Some((c, c.packages.get(name)?))) else {
             return (String::new(), name);
@@ -95,11 +103,21 @@ fn module_name(segment: &str) -> String {
 /// The `use` lines that code of one module needs, found in its text.
 pub(super) fn use_lines(code: &str) -> Vec<String> {
     let mut std = String::new();
-    if code.match_indices("Cell<").any(|(i, _)| !code[..i].ends_with("Ref")) {
+    // `RefCell<` and a generic struct such as `BoxCell<` are not `Cell<`.
+    if code
+        .match_indices("Cell<")
+        .any(|(i, _)| !code[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_'))
+    {
         std.push_str("use std::cell::Cell;\n");
+    }
+    if code.contains("Ref<'_") {
+        std.push_str("use std::cell::Ref;\n");
     }
     if code.contains("RefCell") {
         std.push_str("use std::cell::RefCell;\n");
+    }
+    if code.contains("RefMut<'_") {
+        std.push_str("use std::cell::RefMut;\n");
     }
     if code.contains("impl fmt::Display") {
         std.push_str("use std::fmt;\n");
@@ -133,7 +151,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The whole program as nested modules, one per package, with `fn main` at the crate root.
-    pub(super) fn program(mut self, live: &[bool]) -> String {
+    pub(super) fn program(&mut self, live: &[bool]) -> String {
         let class = self.class;
         let mut packages = BTreeSet::new();
         for t in &class.types {
@@ -159,9 +177,19 @@ impl<'a> Gen<'a> {
                 self.type_items(index);
             }
         }
+        for (index, decl) in class.types.iter().enumerate() {
+            if self.wanted.contains(&Need::Enum(index)) && decl.package == package {
+                self.type_enum_items(index);
+            }
+        }
+        for (index, decl) in class.types.iter().enumerate() {
+            if decl.enum_constants.is_some() && decl.package == package {
+                self.enum_items(index);
+            }
+        }
         self.statics();
         for (index, m) in class.methods.iter().enumerate() {
-            if m.is_static && class.types[m.class].package == package {
+            if self.emitted_free(index) && class.types[m.class].package == package {
                 self.gap();
                 self.method(index);
             }

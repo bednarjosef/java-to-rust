@@ -125,10 +125,22 @@ pub fn int_bits_to_float(bits: i32) -> f32 {
 /// is mixed (multiplied by an odd constant, high bits taken) so that neighbouring objects do not
 /// get neighbouring hashes.
 pub fn identity_hash<T: ?Sized>(rc: &Rc<T>) -> i32 {
-    let address = Rc::as_ptr(rc) as *const u8 as usize as u64;
+    address_hash(Rc::as_ptr(rc))
+}
+
+/// The identity hash (see `identity_hash`) of the object at `address`, which an `Rc` or a borrow
+/// of the value inside one gives.
+pub fn address_hash<T: ?Sized>(address: *const T) -> i32 {
+    let address = address as *const u8 as usize as u64;
     let mixed = address.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     let hash = (mixed >> 33) as i32;
     if hash == 0 { 1 } else { hash }
+}
+
+/// What `Object.toString()` makes for an object of a class that does not override it: the
+/// class's binary name, `@` and the object's hash code in hexadecimal.
+pub fn default_text(class: &str, hash: i32) -> String {
+    format!("{class}@{hash:x}")
 }
 
 /// `System.currentTimeMillis()`: milliseconds since the Unix epoch.

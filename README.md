@@ -28,8 +28,8 @@ shared and mutable, and a reference that may be null is an `Option` of it. An ar
 counting, not by a garbage collector, so a cycle of objects is never freed. The runtime crate
 (`crates/runtime`) supplies what Rust lacks: Java's exact number semantics (wrapping integer
 overflow, Java's float rules and printing), strings, `StringBuilder`, `String.format`, regular
-expressions and charsets with Java's results. Interfaces, exceptions and generics are not
-translated yet (see "Not yet" below).
+expressions and charsets with Java's results. Collections, lambdas and threads are not translated
+yet (see "Not yet" below).
 
 ### Level 2: analysis-driven Rust
 
@@ -112,9 +112,9 @@ of the slow cases. `NodeList` does not compile yet.
 
 Level 1 end to end for a subset of Java: classes, interfaces, inheritance, generics, the common
 collections, strings and exceptions; no reflection and no threads. Done when the feature corpus
-translates, compiles and matches Java's output. The corpus meets the string, array and expression
-parts of this; the object parts, interfaces, generics, collections and exceptions are not reached
-yet (see "Not yet").
+translates, compiles and matches Java's output. The corpus meets the string, array, expression,
+object, interface, generics and exception parts of this; the collections are not reached yet (see
+"Not yet").
 
 ## Current state
 
@@ -132,6 +132,68 @@ A small subset, end to end:
   object-typed fields and `null` objects, and a user `toString` in `println` and concatenation.
   `synchronized (x)` checks `x` for null and runs the block: a program has one thread, so the lock
   does nothing.
+- **Class trees, interfaces and generics**: class trees of the program's own classes translate,
+  abstract or not and of any depth: `extends`, abstract methods, overriding and virtual calls,
+  `super(...)` and `super.m(...)`, upcasts, `==` on objects of a class tree, and printing through
+  the class's `toString`. So do the program's interfaces: abstract, default, private and static
+  methods, constants, interfaces extending interfaces, `Iface.super.m()`, classes and enums
+  implementing them, and `Comparable` implemented by a class that calls `compareTo` directly.
+  Between the program's own types, `instanceof` is a `matches!` on the type's enum, a pattern `x
+  instanceof Circle c` binds `c` with `if let`, a let chain, `let .. else` (for `if (!(x instanceof
+  Circle c)) return ..;`) or `is_some_and`, and a downcast or a cast across interfaces is checked,
+  throwing `ClassCastException` when it fails. A pattern variable read anywhere else is rejected.
+  `Object` is an enum too, with a variant for each of the program's classes and enums whose values
+  become `Object`s and one for each string or box (`Object::String(..)`, `Object::Integer(5)`), so
+  `Object` variables, fields, parameters, arrays and varargs translate, with `instanceof` and casts
+  to the program's types, `String` and the boxes. The program's `equals(Object)` and `hashCode()`
+  override `Object`'s; a class without them compares and hashes its identity, and a string or a box
+  its value. A class without `toString` prints as Java's `Object.toString` does, its binary name and
+  its hash code in hexadecimal (`Point@1b6d3586`). `getClass()` (reflection), an array as an
+  `Object`, and `==` between two `Object`s that may both be strings or boxes (whose identity the
+  translation does not keep, except in the shortcut `a == b || a.equals(b)`) are rejected. The
+  program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
+  variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
+  and a use where javac substituted a type argument gets the checked cast back
+  (`java::cast(b.get().as_integer(), ..)`). `Comparable` as a type (a bound, mostly) is an enum like
+  `Object`, over strings, boxes, the program's enums and its classes that implement it. A method
+  implementing one whose erased signature differs (`Integer next()` for `T next()`,
+  `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
+  signature that converts and calls it. An array passed as an array of a type variable
+  (`first(String[])` for `<T> T first(T[])`) and intersection bounds (`T extends A & B`) are
+  rejected. A generic class or method that only stores, returns and passes on the values of its type
+  variables (a stack, a pair, a node, `<T> T choose(boolean, T, T)`) is a Rust generic instead
+  (`struct Stack<T>`, `impl<T: Clone> Stack<T>`, `fn choose<T: Clone>(..)`), and its uses keep the
+  substituted types with no casts. One that needs more of them (their text, `equals`, a bound, a
+  cast, an array of them), a class with a supertype or a subclass, a raw use, and a method whose
+  type parameters its parameters do not all mention stay erased. Other interfaces of the JDK
+  (`Runnable`, `Iterable`) and lambdas are rejected with an error that names the construct and its
+  position. The design of the object model, and what is still to come, is in
+  [docs/object-model.md](docs/object-model.md).
+- **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
+  and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
+  `super(message)`, `super(message, cause)`, fields, and overrides of `getMessage` and `toString`)
+  and the standard ones (`Exception`, `RuntimeException`, `IllegalArgumentException`,
+  `IllegalStateException`, `UnsupportedOperationException` and the rest of
+  `crates/translator/java/Standard.java`, written in Java and given to the program by the
+  translator), with `getMessage`, `getCause`, `toString`, `printStackTrace` (without stack frames)
+  and `getClass().getName()` and `getSimpleName()`. A method returns `Result<T, Throwable>` only
+  when some caller catches what it may throw, `?` passes it on, and every other method keeps its
+  plain signature: an exception that nothing catches ends the program where it is thrown, with
+  `Exception in thread "main" ...` on standard error and exit code 1. A `try` is a labeled block
+  that evaluates to a `Result`, and its catch clauses are a `match`. `finally` runs however its
+  `try` ends: after an exception (which then goes on), a `return` (whose value is taken first) and a
+  `break` or `continue` out of the `try`, through nested `try`s; a `return` or an exception in the
+  `finally` replaces how the `try` ended. A failure of the runtime that a `catch` or a `finally`
+  sees (a division by zero, an array index out of bounds, `charAt` or `substring` out of range, a
+  malformed number) is the standard exception Java throws, with Java's message; elsewhere it ends
+  the program as before. try-with-resources closes the program's own resources (a new object whose
+  `close` cannot fail) in the reverse order, before its `catch` clauses and `finally`. Rejected for
+  now, by name: other try-with-resources, catching or letting a `finally` see a null dereference, a
+  negative array size, a failed cast or a failure of the library other than these, a `toString`, a
+  field initializer or a constructor of an exception or an enum that throws something a caller
+  catches, throwing a value that may be null, and a `yield` or a constructor's `return` through a
+  `finally`. A constructor that throws returns a `Result`, as a method does. The design is in
+  [docs/exceptions.md](docs/exceptions.md).
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`).
 - **Library**: a set of `Math`, `StrictMath`, `Double`, `Float`, `Boolean`, `Integer`, `Long`,
   `Byte`, `Short` and `Character` methods, `String`, `StringBuilder` and `StringBuffer`, and
@@ -296,6 +358,35 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   is printed as `{p}` when its `toString` can neither print nor throw. An object parameter that
   the method only uses through (fields, calls, comparison, printing, or passing it on to such a
   parameter) is a `&Rc<..>` that the caller lends.
+- Class hierarchies (`ast/hierarchy.rs`, `analysis/hierarchy.rs`). A class with subclasses keeps
+  its fields in a struct of its own, `ShapeFields`, which the struct of each subclass embeds as
+  `base` (`Circle { base: ShapeFields::new("circle"), radius }`), and its constructors build that
+  struct. Its methods that use the object only for its fields and for calls of such methods that
+  nothing overrides live on that struct (`c.borrow_mut().base.move_()`); the others are emitted for
+  the concrete class, where `this` is the whole object, a superclass's method that the subclass
+  overrides under a name of its own for `super` calls (`withdraw_in_account`). Where every value of
+  a type is an object of one concrete class, a value of the type is that class's object, so an
+  upcast changes nothing. A type that objects of several classes can be is an enum named after it
+  (`codegen/dispatch.rs`), with a variant per class holding that class's object
+  (`Shape::Circle(Rc<RefCell<Circle>>)`): a call on it is a method of the enum that matches the
+  variant and calls what that class runs, a field is read through `base()`, which borrows the
+  fields struct from whichever object it is (`s.base().name`), `==` is `PartialEq` comparing the
+  objects' identity, and `Display` shows each object as its class does. A body inherited from the
+  type that needs the whole object is a method of the enum (`to_string_in_shape(&self)`), and an
+  upcast wraps the object in its variant (`Shape::Circle(c.clone())`) or converts one enum to
+  another (`d.to_animal()`). The enum gets only the methods that the program calls. A class whose
+  objects are never used as a value of a supertype stays out of the enum and can stay an owned
+  value; the classes of one tree are immutable together or not at all, so `base()` has one type.
+  An interface is a type like any other: an enum over the classes that implement it, or that
+  class's object when there is one, with its default methods on the enum
+  (`fn kind_in_shape(&self)`) or in that class, its static methods free functions and its
+  constants `const` items or cells. An enum that implements an interface is a variant holding the
+  constant itself (`Shape::Color(Color)`), compared by value. A type's enum has a variant only
+  for the classes whose objects become values of the type (`hierarchy::flows`: a `new`, an
+  upcast, or running a method that the type declares), so a class whose subclasses' objects are
+  only ever used through an interface stays a plain struct. The methods of an override group share what the analyses decide about their parameters and
+  results, as a call may run any of them. A superclass's static initialization runs before its
+  subclass's.
 
 ### Whole programs
 
@@ -329,7 +420,7 @@ runs again without that assumption.
 
 `--survey` prints what the code reachable from `main` uses that is not supported yet instead of
 translating it: for the program's own code and for its library code, separately, per feature
-(interfaces, inheritance, generic classes, exceptions, lambdas, ...) the classes and pieces of code
+(generic classes, exceptions, lambdas, ...) the classes and pieces of code
 (methods, field initializers, initializer blocks) that use it, those it alone blocks, and up to
 three example places (`file:line`, relative to the source or library root). It also prints the
 order of features that frees the most code at each step, the methods of the runtime's classes
@@ -348,7 +439,7 @@ The native layer, the JDK methods that bottom out in the JVM, is hand-written in
 (`natives.rs`, `math.rs`, `fdlibm/`, `out.rs`) and recognised by owner and name
 (`lower/natives.rs`): `System.arraycopy` (between shared or plain arrays, overlap as through a
 temporary, bounds checked first), the `Double` and `Float` bit conversions, `Math` and
-`StrictMath`, `System.identityHashCode` and an inherited `hashCode()` (derived from the `Rc`'s
+`StrictMath`, `System.identityHashCode` and an inherited `hashCode()` (derived from the object's
 address: stable for the object's life, but like Java's different on every run), the clocks,
 `availableProcessors`, the line separator, `System.err` and `System.out.write`/`flush`.
 `StrictMath` is a port of fdlibm 5.3 and matches Java bit for bit; so does `Math` where HotSpot
@@ -387,12 +478,12 @@ for references) and are answered at the call, so their `Class`-taking natives ar
 
 Each construct below is rejected at translation with an error that names it:
 
-- exceptions (`try`, `catch`, `finally`, `throw`, `throws`);
-- inheritance (`extends`), interfaces, generic classes and generic methods;
-- records, inner, local and anonymous classes, and `instanceof` with patterns;
+- the exceptions and try-with-resources listed under "Exceptions" above, and intersection bounds
+  (`T extends A & B`);
+- records, inner, local and anonymous classes, and record patterns;
 - lambdas and method references, and for-each over an `Iterable`;
-- `Object` as a type, and the `java.util` collections and interfaces (`Map`, `List`, `HashMap`,
-  `ArrayList`), `asList` and streams;
+- the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
+  and streams;
 - threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls
   above.
 

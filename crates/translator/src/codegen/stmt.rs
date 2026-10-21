@@ -25,7 +25,15 @@ impl<'a> Gen<'a> {
                 }
                 continue;
             }
+            if self.early_pattern_exit(stmt, rest) {
+                continue;
+            }
             match stmt {
+                // A `throw` that ends a method that throws is its `Err` result.
+                Stmt::Throw(value) if tail && rest.is_empty() && self.throwing => {
+                    let text = self.expr(value).text;
+                    self.line(&format!("Err({text})"));
+                }
                 _ if tail && rest.is_empty() && self.tail_value(stmt) => self.tail_stmt(stmt),
                 _ => self.stmt(stmt, rest),
             }
@@ -86,14 +94,13 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
             Stmt::For { init, cond, update, body } => self.for_loop(init, cond.as_ref(), update, body),
-            Stmt::Return(None, _) => match self.ctor_result {
-                Some(result) => self.line(&format!("return {result};")),
-                None => self.line("return;"),
-            },
-            Stmt::Return(Some(value), _) => {
+            Stmt::Return(None, pos) => self.return_stmt(None, *pos),
+            Stmt::Return(Some(value), pos) => {
                 let code = self.returned(value);
-                self.line(&format!("return {};", code.text));
+                self.return_stmt(Some(code.text), *pos);
             }
+            Stmt::Throw(value) => self.throw_stmt(value),
+            Stmt::Try { body, catches, finally } => self.try_stmt(stmt, body, catches, finally.as_deref()),
             Stmt::Break => self.plain_jump(false),
             Stmt::Continue => self.plain_jump(true),
             Stmt::Switch { selector, cases } => self.switch_form(selector, cases, None, false),
@@ -127,9 +134,11 @@ impl<'a> Gen<'a> {
         if self.facts.owned_returns.contains(&self.method) {
             return Code::atom(self.owned(value));
         }
+        // (A `finally` that the `return` runs may still read the variable.)
         if let ExprKind::Var(name) = &value.kind
             && value.ty == Type::String
             && !self.borrowed.contains(name)
+            && self.finallies.is_empty()
         {
             return Code::atom(self.local(name));
         }
@@ -152,10 +161,18 @@ impl<'a> Gen<'a> {
         self.nested(body);
         self.indent += 1;
         for u in update {
-            self.effect(u);
+            self.update_effect(u);
         }
         self.indent -= 1;
         self.close();
+    }
+
+    /// An update expression of a `for` loop, a statement of its own.
+    pub(super) fn update_effect(&mut self, u: &'a Expr) {
+        let conflicts = self.conflicts(&[u]) || self.reassigns_through_borrow(u);
+        let outer = std::mem::replace(&mut self.guarded, conflicts);
+        self.effect(u);
+        self.guarded = outer;
     }
 
     pub(super) fn for_loop(
@@ -244,6 +261,14 @@ impl<'a> Gen<'a> {
         let mutable = if mutable { "mut " } else { "" };
         let rust = self.local(name);
         match init {
+            None if self.try_assigned.contains(name) => {
+                // Rust cannot tell that a `try` block or its `catch` clauses assign it before it is
+                // read, as Java can: it starts as the value Java would give a field.
+                let ty_text = self.ty_name(ty);
+                let value = exceptions::default_value(ty).unwrap_or("todo!()");
+                self.line("#[allow(unused_assignments)]");
+                self.line(&format!("let {mutable}{rust}: {ty_text} = {value};"));
+            }
             None => {
                 let ty_text = self.ty_name(ty);
                 self.line(&format!("let {mutable}{rust}: {ty_text};"));
@@ -262,6 +287,15 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The condition of an `if` that guards `then`: a let chain where it binds (see `let_chain`),
+    /// and the names it narrows for `then`, which the caller unnarrows after it.
+    pub(super) fn guard(&mut self, cond: &'a Expr, then: &'a Stmt) -> (String, Vec<String>) {
+        match self.let_chain(cond, &[then], &[]) {
+            Some(chain) => chain,
+            None => (self.condition(cond), Vec::new()),
+        }
+    }
+
     /// The condition of an `if` or `while`, which may not start with a block in Rust.
     pub(super) fn condition(&mut self, cond: &'a Expr) -> String {
         let code = self.expr(cond);
@@ -276,7 +310,7 @@ impl<'a> Gen<'a> {
                 if op.is_comparison()
                     && !l.ty.is_floating()
                     && !r.ty.is_floating()
-                    && !matches!(l.ty, Type::Class(_))
+                    && !matches!(l.ty, Type::Class(..))
                     && !is_null_test(*op, l, r) =>
             {
                 let flipped = match op {

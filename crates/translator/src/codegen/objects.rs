@@ -16,7 +16,13 @@ pub(super) enum Update<'a> {
 /// A field or static field that an update reads and writes.
 enum Slot {
     /// A field of an object; `plain` when the object is an immutable class's `this` in its constructor.
-    Field { obj: String, field: String, plain: bool },
+    Field {
+        obj: String,
+        field: String,
+        plain: bool,
+        /// Whether the object is a value of an enum, whose fields are borrowed with `base()`.
+        on_enum: bool,
+    },
     /// A static field: a `Cell` when `plain`, else a `RefCell`.
     Static { cell: String, plain: bool },
 }
@@ -25,11 +31,12 @@ impl Slot {
     fn read(&self, clone: bool) -> String {
         let copy = !clone;
         match self {
-            Slot::Field { obj, field, plain: true } => {
+            Slot::Field { obj, field, plain: true, .. } => {
                 format!("{obj}.{field}{}", if copy { "" } else { ".clone()" })
             }
-            Slot::Field { obj, field, plain: false } => {
-                format!("{obj}.borrow().{field}{}", if copy { "" } else { ".clone()" })
+            Slot::Field { obj, field, plain: false, on_enum } => {
+                let borrow = if *on_enum { ".base()" } else { ".borrow()" };
+                format!("{obj}{borrow}.{field}{}", if copy { "" } else { ".clone()" })
             }
             Slot::Static { cell, plain: true } => format!("{cell}.get()"),
             Slot::Static { cell, plain: false } => {
@@ -40,8 +47,11 @@ impl Slot {
 
     fn write(&self, value: &str) -> String {
         match self {
-            Slot::Field { obj, field, plain: true } => format!("{obj}.{field} = {value};"),
-            Slot::Field { obj, field, plain: false } => format!("{obj}.borrow_mut().{field} = {value};"),
+            Slot::Field { obj, field, plain: true, .. } => format!("{obj}.{field} = {value};"),
+            Slot::Field { obj, field, plain: false, on_enum } => {
+                let borrow = if *on_enum { ".base_mut()" } else { ".borrow_mut()" };
+                format!("{obj}{borrow}.{field} = {value};")
+            }
             Slot::Static { cell, plain: true } => format!("{cell}.set({value});"),
             Slot::Static { cell, plain: false } => format!("{cell}.with_borrow_mut(|v| *v = {value});"),
         }
@@ -51,25 +61,19 @@ impl Slot {
 /// Whether values of this type are owned heap data or shared arrays or objects, which are cloned
 /// when read.
 pub(super) fn needs_clone(ty: Type) -> bool {
-    matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(_))
+    matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(..))
 }
 
 /// The Rust name of a class: its name in its package without the dots (`Outer.Inner` is
 /// `OuterInner`), after the path of its
 /// module when that is not the module being written (see `modules`).
 pub(super) fn struct_name(name: &str) -> String {
+    // A type variable of a Rust generic is the Rust type parameter.
+    if let Some((_, var)) = name.rsplit_once('#') {
+        return var.to_string();
+    }
     let (path, local) = modules::split(name);
     path + &local.replace('.', "")
-}
-
-/// The Rust type of an object of a class. An immutable class's objects never change, so they need
-/// no `RefCell` to be shared.
-pub(super) fn class_type(name: &str, immutable: bool) -> String {
-    if immutable {
-        format!("Rc<{}>", struct_name(name))
-    } else {
-        format!("Rc<RefCell<{}>>", struct_name(name))
-    }
 }
 
 /// The thread-local cell that holds a static field.
@@ -89,14 +93,89 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Boolean => "false",
         Type::String => "String::new()",
         Type::StringBuilder => "java::StringBuilder::new()",
-        Type::Boxed(_) | Type::Class(_) => "None",
+        Type::Boxed(_) | Type::Class(..) => "None",
         _ => unreachable!("lowering rejects fields of type {ty}"),
     }
 }
 
-/// Which classes are ever instantiated. Only those get a struct and instance methods, so a class
-/// with only static members is plain functions.
-pub(super) fn live_types(class: &Class) -> Vec<bool> {
+/// Which classes get a struct and instance methods: the classes that are ever instantiated, and
+/// the superclasses whose fields struct they embed. A class with only static members is plain
+/// functions.
+pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
+    let mut live = instantiated(class);
+    // The runtime creates the exceptions it raises where the program sees them.
+    for &c in &facts.raised_classes {
+        live[c] = true;
+    }
+    // A class that only ever types a null reference still needs its struct for the type.
+    for t in mentioned(class) {
+        live[t] |= class.hierarchy.is_concrete(t) && !class.hierarchy.has_subtypes(t);
+    }
+    for t in 0..live.len() {
+        if live[t] {
+            for a in class.hierarchy.ancestors(t) {
+                live[a] |= facts.fields_structs.contains(&a);
+            }
+        }
+    }
+    live
+}
+
+/// The methods that a `super.m(...)` call names.
+pub(super) fn super_targets(class: &Class) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    for m in &class.methods {
+        for s in &m.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::MethodCall { resolved: Some(r), is_super: true, .. } = &x.kind {
+                            out.insert(*r);
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    out
+}
+
+/// The classes that a field, parameter, result, local or expression has as its type.
+fn mentioned(class: &Class) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    let mut note = |mut ty: Type| {
+        while let Type::Array(element) = ty {
+            ty = *element;
+        }
+        if let Type::Class(name, _) = ty
+            && let Some(t) = class.type_index(name)
+        {
+            out.insert(t);
+        }
+    };
+    for f in class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics)) {
+        note(f.ty);
+    }
+    for m in &class.methods {
+        note(m.ret);
+        m.params.iter().for_each(|p| note(p.ty));
+        let (mut types, mut locals) = (Vec::new(), Vec::new());
+        for s in &m.body {
+            visit_stmt(s, &mut |e| visit_expr(e, &mut |x| types.push(x.ty)), &mut |s| {
+                if let Stmt::Local { ty, .. } = s {
+                    locals.push(*ty);
+                }
+            });
+        }
+        types.into_iter().chain(locals).for_each(&mut note);
+    }
+    out
+}
+
+/// Which classes are ever instantiated with `new`.
+fn instantiated(class: &Class) -> Vec<bool> {
     let mut live = vec![false; class.types.len()];
     let mut note = |e: &Expr| {
         if let ExprKind::New { class: c, .. } = &e.kind {
@@ -132,14 +211,16 @@ fn own_exprs(stmt: &Stmt) -> Vec<&Expr> {
         | Stmt::Block(_)
         | Stmt::Labeled { .. }
         | Stmt::BreakLabel(_)
-        | Stmt::ContinueLabel(_) => Vec::new(),
+        | Stmt::ContinueLabel(_)
+        | Stmt::Try { .. } => Vec::new(),
+        Stmt::Throw(e) => vec![e],
     }
 }
 
 /// Whether an expression turns an object into text, which runs the object's `toString`; the
 /// object, if so.
 fn converted_objects(x: &Expr) -> Vec<&Expr> {
-    let is_object = |a: &&Expr| matches!(a.ty, Type::Class(_));
+    let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..));
     match &x.kind {
         ExprKind::Builtin(Builtin::Print | Builtin::Println, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
@@ -196,15 +277,18 @@ fn changes_object(e: &Expr, object: &Expr, mutating: &HashSet<usize>) -> bool {
     found
 }
 
-/// Whether an expression reads a field of an object of class `name` or turns one into text.
+/// Whether an expression reads a static field.
 fn reads_static(e: &Expr) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::Static { .. }));
     found
 }
 
-fn reads_class(e: &Expr, name: &str) -> bool {
-    let of_class = |x: &Expr| matches!(x.ty, Type::Class(c) if c == name);
+/// Whether an expression reads a field of an object of class `name`, or of a class of its class
+/// tree, or turns one into text.
+fn reads_class(class: &Class, e: &Expr, name: &str) -> bool {
+    let root = class.type_index(name).map(|t| class.hierarchy.root(t));
+    let of_class = |x: &Expr| matches!(x.ty, Type::Class(c, _) if c == name || class.type_index(c).map(|t| class.hierarchy.root(t)) == root);
     let mut found = false;
     visit_expr(e, &mut |x| {
         found |= match &x.kind {
@@ -218,40 +302,193 @@ fn reads_class(e: &Expr, name: &str) -> bool {
 }
 
 impl<'a> Gen<'a> {
+    /// The concrete class whose objects represent the values of class type `t`: `t` itself, or
+    /// the one class under it whose objects there are.
+    pub(super) fn rep_class(&self, t: usize) -> usize {
+        match hierarchy::rep(self.class, self.facts, t) {
+            hierarchy::Rep::Object(c) => c,
+            hierarchy::Rep::Enum(t) => t,
+        }
+    }
+
+    /// The qualified name of the class whose objects represent the values of class type `name`.
+    fn rep_name<'n>(&self, name: &'n str) -> &'n str
+    where
+        'a: 'n,
+    {
+        match self.class.type_index(name) {
+            Some(t) => &self.class.types[self.rep_class(t)].name,
+            None => name,
+        }
+    }
+
+    /// The Rust name of the struct that holds the fields of an object of class `t`: the class's
+    /// name, or `<Name>Fields` for a class with subclasses, whose struct they embed.
+    pub(super) fn struct_of(&self, t: usize) -> String {
+        let name = struct_name(&self.class.types[t].name);
+        if self.facts.fields_structs.contains(&t) { name + "Fields" } else { name }
+    }
+
     /// The Rust type of an object of class `name`: a plain value for an owned class.
     pub(super) fn object_type(&self, name: &str) -> String {
+        self.object_type_with(name, "")
+    }
+
+    /// The type parameters of class `t` as a Rust generic: `<T: Clone, U: Clone>` to declare them
+    /// and `<T, U>` to use them; empty for any other class.
+    pub(super) fn type_params(&self, params: &[Type]) -> (String, String) {
+        if params.is_empty() {
+            return (String::new(), String::new());
+        }
+        let names: Vec<String> = params.iter().map(|p| struct_name(&p.to_string())).collect();
+        let bounded: Vec<String> = names.iter().map(|n| format!("{n}: Clone")).collect();
+        (format!("<{}>", bounded.join(", ")), format!("<{}>", names.join(", ")))
+    }
+
+    /// Whether `ty` is a type variable of a Rust generic.
+    pub(super) fn is_type_param(&self, ty: Type) -> bool {
+        self.class.class_index(ty).is_some_and(|t| self.class.types[t].kind == TypeKind::Param)
+    }
+
+    /// The struct of class `t` with its own type parameters, as its `impl` names it.
+    pub(super) fn generic_struct(&self, t: usize) -> String {
+        let decl = &self.class.types[self.rep_class(t)];
+        self.struct_of(t) + &self.type_params(&decl.type_params).1
+    }
+
+    /// `object_type` of a generic class with its type arguments, `<i32>`.
+    pub(super) fn object_type_with(&self, name: &str, args: &str) -> String {
+        if let Some(t) = self.class.type_index(name)
+            && self.class.types[t].kind == TypeKind::Param
+        {
+            return struct_name(name);
+        }
+        if let Some(t) = self.class.type_index(name)
+            && let hierarchy::Rep::Enum(t) = hierarchy::rep(self.class, self.facts, t)
+        {
+            self.need(Need::Enum(t));
+            return struct_name(&self.class.types[t].name);
+        }
+        let name = self.rep_name(name);
+        let structure = match self.class.type_index(name) {
+            Some(t) => self.struct_of(t),
+            None => struct_name(name),
+        } + args;
         if self.facts.owned.contains(name) {
-            struct_name(name)
+            structure
+        } else if self.facts.immutable.contains(name) {
+            format!("Rc<{structure}>")
         } else {
-            class_type(name, self.facts.immutable.contains(name))
+            format!("Rc<RefCell<{structure}>>")
         }
     }
 
     /// Whether `e` is an object whose fields are read and written without a `RefCell`: an object of
     /// an immutable class or of an owned class, or `this` when it is borrowed or being built.
     pub(super) fn is_plain(&self, e: &Expr) -> bool {
+        if self.enum_of(e).is_some() {
+            return false;
+        }
         if matches!(e.kind, ExprKind::This) && self.this_form != ThisForm::Shared {
             return true;
         }
         if matches!(e.ty, Type::Enum(_)) {
             return true;
         }
-        matches!(e.ty, Type::Class(name) if self.facts.immutable.contains(name) || self.facts.owned.contains(name))
+        matches!(e.ty, Type::Class(name, _) if {
+            let name = self.rep_name(name);
+            self.facts.immutable.contains(name) || self.facts.owned.contains(name)
+        })
     }
 
-    /// The type of `this` in a method of class `name`: a reference to the object.
-    pub(super) fn this_type(&self, name: &str) -> String {
-        if self.facts.immutable.contains(name) {
-            format!("&{}", struct_name(name))
+    /// The type of `this` in the method being written: a reference to the object.
+    pub(super) fn this_type(&self) -> String {
+        let structure = self.generic_struct(self.this_struct);
+        if self.facts.immutable.contains(&self.class.types[self.this_struct].name) {
+            format!("&{structure}")
         } else {
-            format!("&{}", class_type(name, false))
+            format!("&Rc<RefCell<{structure}>>")
+        }
+    }
+
+    /// The class whose struct an object expression is: `this`'s in the code being written, else
+    /// the class whose objects represent the expression's type.
+    pub(super) fn struct_class(&self, object: &Expr) -> Option<usize> {
+        if matches!(object.kind, ExprKind::This) {
+            return Some(self.this_struct);
+        }
+        self.class.class_index(object.ty).map(|t| self.rep_class(t))
+    }
+
+    /// The path of field `name` from the struct of `object`: `name`, or through the fields
+    /// structs of superclasses that the struct embeds, `base.name`.
+    pub(super) fn field_path(&self, object: &Expr, name: &str) -> String {
+        if let Some(t) = self.enum_of(object) {
+            return self.enum_field_path(t, object.ty, name);
+        }
+        let field = snake_case(name);
+        let (Some(s), Some(owner)) = (self.struct_class(object), self.class.field_owner(object.ty, name))
+        else {
+            return field;
+        };
+        hierarchy::base_path(self.facts, self.class, s, owner) + &field
+    }
+
+    /// The method that a call of `resolved` on `receiver` runs: the one it names for `super.m()`,
+    /// else the implementation of the class whose objects the receiver is.
+    pub(super) fn dispatch(&self, receiver: &Expr, resolved: usize, is_super: bool) -> usize {
+        // A call on an enum is its dispatcher's (see `dispatch`), which counts as the method it names.
+        if is_super || self.class.methods[resolved].is_static || self.enum_of(receiver).is_some() {
+            return resolved;
+        }
+        // A method on a fields struct calls only methods that nothing overrides.
+        if matches!(receiver.kind, ExprKind::This) && matches!(self.homes[self.method], Home::Fields(_)) {
+            return resolved;
+        }
+        match self.class.class_index(receiver.ty) {
+            Some(t) => self.class.hierarchy.implementation(resolved, self.rep_class(t)).unwrap_or(resolved),
+            None => resolved,
+        }
+    }
+
+    /// `e` without the conversions to a superclass type that change nothing: values of both types
+    /// are objects of the same class.
+    pub(super) fn peel(&self, e: &'a Expr) -> &'a Expr {
+        match &e.kind {
+            ExprKind::Cast(Type::Class(to, _), inner) if matches!(inner.ty, Type::Class(..)) => {
+                let same = match (self.class.type_index(to), self.class.class_index(inner.ty)) {
+                    (Some(a), Some(b)) => self.rep_class(a) == self.rep_class(b),
+                    _ => false,
+                };
+                if same { self.peel(inner) } else { e }
+            }
+            _ => e,
+        }
+    }
+
+    /// The method that a call expression runs (see `dispatch`).
+    pub(super) fn target(&self, x: &Expr) -> Option<usize> {
+        match &x.kind {
+            ExprKind::MethodCall { receiver, resolved: Some(r), is_super, .. } => {
+                Some(self.dispatch(receiver, *r, *is_super))
+            }
+            _ => None,
+        }
+    }
+
+    /// The path from the struct of `receiver` to the struct whose `impl` has method `index`:
+    /// `base.` for a method of a superclass's fields struct, else empty.
+    fn method_path(&self, receiver: &Expr, index: usize) -> String {
+        match (self.homes[index], self.struct_class(receiver)) {
+            (Home::Fields(d), Some(s)) => hierarchy::base_path(self.facts, self.class, s, d),
+            _ => String::new(),
         }
     }
 
     /// The name of `this` in the code being written: `self` in a method that borrows its object,
     /// else `this`.
     pub(super) fn this_name(&self) -> &'static str {
-        if self.this_form == ThisForm::SelfRef { "self" } else { "this" }
+        if matches!(self.this_form, ThisForm::SelfRef | ThisForm::Enum) { "self" } else { "this" }
     }
 
     /// Whether the constructors of class `name` build a plain value, which `new` then shares.
@@ -274,7 +511,7 @@ impl<'a> Gen<'a> {
     pub(super) fn place_nullable(&self, place: &Place) -> bool {
         match place {
             Place::Field { object, name } => {
-                matches!(object.ty, Type::Class(owner) if self.field_nullable(owner, name))
+                matches!(object.ty, Type::Class(owner, _) if self.field_nullable(owner, name))
             }
             Place::Static { class, name } => self.facts.nullable_statics.contains(&(*class, name.clone())),
             Place::Var(_) | Place::Index(..) => false,
@@ -285,8 +522,9 @@ impl<'a> Gen<'a> {
     /// expression. Dereferencing a reference that may be null throws `NullPointerException`; the
     /// result is then a `&Rc<..>` when the reference is a place, else the `Rc` itself.
     pub(super) fn object(&mut self, e: &'a Expr) -> String {
+        let e = self.peel(e);
         let (text, place) = self.object_parts(e);
-        if !(matches!(e.ty, Type::Class(_)) && self.nullable(e)) {
+        if !(matches!(e.ty, Type::Class(..)) && self.nullable(e)) {
             return text;
         }
         let non_null = self.runtime("non_null");
@@ -301,6 +539,7 @@ impl<'a> Gen<'a> {
 
     /// `object_place`, and whether the text is a place that can be borrowed rather than a value.
     fn object_parts(&mut self, e: &'a Expr) -> (String, bool) {
+        let e = self.peel(e);
         match &e.kind {
             ExprKind::This => (self.this_name().to_string(), true),
             ExprKind::Var(name) => (self.local(name), true),
@@ -310,9 +549,16 @@ impl<'a> Gen<'a> {
                 (self.field_locals[name].clone(), true)
             }
             ExprKind::Field { object, name } if !matches!(object.ty, Type::Enum(_)) => {
-                let field = snake_case(name);
+                let field = self.field_path(object, name);
                 let obj = self.object(object);
-                if self.is_plain(object) {
+                if let Some(t) = self.enum_of(object) {
+                    let borrow = self.enum_borrow(t, false);
+                    if self.guarded && !self.immutable_enum(t) {
+                        (format!("{{ {obj}{borrow}.{field}.clone() }}"), true)
+                    } else {
+                        (format!("{obj}{borrow}.{field}"), true)
+                    }
+                } else if self.is_plain(object) {
                     (format!("{obj}.{field}"), true)
                 } else if self.guarded {
                     // A borrow that the statement must not hold is ended inside braces, which
@@ -337,12 +583,13 @@ impl<'a> Gen<'a> {
     /// A non-null object as an `Rc` of its own, which holds no borrow: null throws
     /// `NullPointerException`.
     pub(super) fn object_handle(&mut self, e: &'a Expr) -> String {
+        let e = self.peel(e);
         let text = match &e.kind {
-            ExprKind::This => "this.clone()".to_string(),
+            ExprKind::This => format!("{}.clone()", self.this_name()),
             ExprKind::Var(v) => format!("{}.clone()", self.local(v)),
             _ => self.expr(e).text,
         };
-        if matches!(e.ty, Type::Class(_)) && self.nullable(e) {
+        if matches!(e.ty, Type::Class(..)) && self.nullable(e) {
             format!("{}({text})", self.runtime("non_null"))
         } else {
             text
@@ -351,6 +598,7 @@ impl<'a> Gen<'a> {
 
     /// An object reference as an `Option<&Rc<..>>`: `None` for null.
     fn object_option(&mut self, e: &'a Expr) -> String {
+        let e = self.peel(e);
         match &e.kind {
             ExprKind::Null => "None".to_string(),
             _ if self.nullable(e) => format!("{}.as_ref()", self.object_place(e)),
@@ -360,6 +608,7 @@ impl<'a> Gen<'a> {
 
     /// A non-null object reference as a `&Rc<..>`. A variable narrowed by a null check already is.
     pub(super) fn object_ref(&mut self, e: &'a Expr) -> String {
+        let e = self.peel(e);
         match &e.kind {
             // A method that uses `this` as a value has it as a `&Rc<..>`.
             ExprKind::This => self.this_name().to_string(),
@@ -371,6 +620,9 @@ impl<'a> Gen<'a> {
     /// `a == b` and `a != b` on objects: whether they are the same object, as `Rc::ptr_eq`, or
     /// `java::same` where either may be null.
     pub(super) fn identity(&mut self, op: BinOp, l: &'a Expr, r: &'a Expr) -> Code {
+        if self.enum_of(l).is_some() || self.enum_of(r).is_some() {
+            return self.enum_identity(op, l, r);
+        }
         let same = if self.nullable(l) || self.nullable(r) {
             let (a, b) = (self.object_option(l), self.object_option(r));
             format!("{}({a}, {b})", self.runtime("same"))
@@ -384,21 +636,43 @@ impl<'a> Gen<'a> {
     /// The text of a non-null object of `e`'s class, reached through `handle`, a `&Rc<..>`: what
     /// `object_text` gives for an object that may be null once it is not.
     pub(super) fn handle_text(&mut self, handle: &str, e: &'a Expr) -> String {
-        let index = self.to_string_index(e);
-        let mutating = self.facts.mutating.contains(&index);
-        let obj = match () {
-            _ if self.is_plain(e) => handle.to_string(),
-            _ if mutating => format!("{handle}.borrow_mut()"),
-            _ => format!("{handle}.borrow()"),
+        if let Some(t) = self.enum_of(e) {
+            return self.enum_text(t, handle.to_string());
+        }
+        let Some(index) = self.to_string_index(e) else {
+            let c = self.struct_class(e).expect("an object has a class type");
+            let hash = match self.hash_index(c) {
+                Some(i) => self.handle_call(handle, e, i),
+                None => format!("{}({})", self.runtime("address_hash"), self.address(c, handle)),
+            };
+            return self.default_text(c, hash);
         };
         if self.displays(index) {
+            let obj = self.handle_object(handle, e, index);
             if self.lazy_text && !(self.printing && !self.quiet_text(e, 0)) {
                 return obj;
             }
             return format!("{obj}.to_string()");
         }
+        self.handle_call(handle, e, index)
+    }
+
+    /// The object of `e`'s class reached through `handle`, borrowed for method `index` to be
+    /// called on it.
+    fn handle_object(&self, handle: &str, e: &Expr, index: usize) -> String {
+        match () {
+            _ if self.is_plain(e) => handle.to_string(),
+            _ if self.facts.mutating.contains(&index) => format!("{handle}.borrow_mut()"),
+            _ => format!("{handle}.borrow()"),
+        }
+    }
+
+    /// A call of method `index`, without arguments, on the object of `e`'s class that `handle`
+    /// reaches.
+    fn handle_call(&mut self, handle: &str, e: &'a Expr, index: usize) -> String {
+        let obj = self.handle_object(handle, e, index);
         if self.facts.self_methods.contains(&index) {
-            format!("{obj}.{}()", self.fn_names[index])
+            format!("{obj}.{}{}()", self.method_path(e, index), self.fn_names[index])
         } else {
             format!("{}({handle})", self.qualified_fn(index))
         }
@@ -406,14 +680,15 @@ impl<'a> Gen<'a> {
 
     /// `e` as the receiver of a method, borrowed; `this` is already a reference.
     pub(super) fn receiver_ref(&mut self, e: &'a Expr) -> String {
+        let e = self.peel(e);
         match &e.kind {
             ExprKind::This => self.this_name().to_string(),
             // A variable narrowed by a null check is a reference already.
-            ExprKind::Var(name) if matches!(e.ty, Type::Class(_)) && self.borrowed.contains(name) => {
+            ExprKind::Var(name) if matches!(e.ty, Type::Class(..)) && self.borrowed.contains(name) => {
                 self.local(name)
             }
             ExprKind::Var(_) | ExprKind::Field { .. }
-                if matches!(e.ty, Type::Class(_)) && self.nullable(e) =>
+                if matches!(e.ty, Type::Class(..)) && self.nullable(e) =>
             {
                 let (_, place) = self.object_parts(e);
                 let text = self.object(e);
@@ -458,7 +733,45 @@ impl<'a> Gen<'a> {
     /// Whether a statement's own expressions may borrow an object mutably while another borrow made
     /// by the statement is still alive, so that every borrow must end where it is made.
     pub(super) fn stmt_conflicts(&self, stmt: &Stmt) -> bool {
-        self.conflicts(&own_exprs(stmt))
+        self.conflicts(&own_exprs(stmt)) || matches!(stmt, Stmt::Expr(e) if self.reassigns_through_borrow(e))
+    }
+
+    /// Whether evaluating `e` borrows a shared object through a `RefCell`.
+    pub(super) fn reads_through_borrow(&self, e: &Expr) -> bool {
+        let mut found = false;
+        visit_expr(e, &mut |x| found |= self.holds_borrow(x));
+        found
+    }
+
+    /// Whether an assignment to a local reads the local's old object through a `RefCell` borrow,
+    /// as `t = t.left` does: the borrow would outlive the assignment that drops the old object.
+    pub(super) fn reassigns_through_borrow(&self, e: &Expr) -> bool {
+        // The place is a local, or a field of `this` (`head = head.next` in a method of a list).
+        let (name, field) = match &e.kind {
+            ExprKind::Assign { target: Place::Var(name), .. } => (name, false),
+            ExprKind::Assign { target: Place::Field { object, name }, .. }
+                if matches!(object.kind, ExprKind::This) =>
+            {
+                (name, true)
+            }
+            _ => return false,
+        };
+        let ExprKind::Assign { value, .. } = &e.kind else { unreachable!("matched above") };
+        let mut found = false;
+        visit_expr(value, &mut |x| {
+            if self.holds_borrow(x) {
+                visit_expr(x, &mut |y| {
+                    found |= match &y.kind {
+                        ExprKind::Var(v) => !field && v == name,
+                        ExprKind::Field { object, name: f } => {
+                            field && f == name && matches!(object.kind, ExprKind::This)
+                        }
+                        _ => false,
+                    }
+                });
+            }
+        });
+        found
     }
 
     /// Whether the borrows that evaluating the expressions makes may conflict: a `RefCell` borrow
@@ -500,47 +813,69 @@ impl<'a> Gen<'a> {
                 let shared = usize::from(!self.is_plain(object));
                 (shared, shared)
             }
-            ExprKind::MethodCall { receiver, resolved: Some(index), .. } => call(*index, Some(receiver)),
+            ExprKind::MethodCall { receiver, resolved: Some(_), .. } => {
+                call(self.target(x).expect("a resolved call"), Some(receiver))
+            }
             ExprKind::Call { resolved: Some(index), .. }
             | ExprKind::New { ctor: Some(index), .. }
-            | ExprKind::ThisCall { resolved: Some(index), .. } => call(*index, None),
+            | ExprKind::ThisCall { resolved: Some(index), .. }
+            | ExprKind::SuperInit { resolved: Some(index), .. } => call(*index, None),
             _ => (0, 0),
         };
         for object in converted_objects(x) {
-            let (b, m) = call(self.to_string_index(object), Some(object));
-            counts = (counts.0 + b, counts.1 + m);
+            if let Some(t) = self.enum_of(object) {
+                counts = (counts.0 + 1, counts.1 + usize::from(self.enum_text_writes(t)));
+                continue;
+            }
+            if let Some(index) = self.text_index(object) {
+                let (b, m) = call(index, Some(object));
+                counts = (counts.0 + b, counts.1 + m);
+            }
         }
         counts
     }
 
-    /// The index of the `toString` method of an object's class.
-    pub(super) fn to_string_index(&self, e: &Expr) -> usize {
-        let Type::Class(name) = e.ty else { unreachable!("an object has a class type") };
-        self.class
-            .methods
-            .iter()
-            .position(|m| {
-                self.class.types[m.class].name == name && m.name == "toString" && m.params.is_empty()
-            })
-            .expect("lowering checks that the class has toString")
+    /// The index of the `toString` method of an object's class, if the class has one.
+    pub(super) fn to_string_index(&self, e: &Expr) -> Option<usize> {
+        let t = self.struct_class(e).expect("an object has a class type");
+        hierarchy::to_string_impl(self.class, t)
+    }
+
+    /// The method of the program that turning an object into text runs: its class's `toString`,
+    /// or the `hashCode` that `Object`'s calls.
+    fn text_index(&self, e: &Expr) -> Option<usize> {
+        let t = self.struct_class(e).expect("an object has a class type");
+        self.to_string_index(e).or_else(|| self.hash_index(t))
     }
 
     /// Whether `a` reads a shared object through a `RefCell` borrow that would live to the end of
     /// the statement: a field read, or a call of a method that borrows its object.
     fn holds_borrow(&self, a: &Expr) -> bool {
         match &a.kind {
-            ExprKind::Field { object, .. } => !self.is_plain(object),
-            ExprKind::MethodCall { receiver, resolved: Some(index), .. } => {
-                self.facts.self_methods.contains(index) && !self.is_plain(receiver)
+            ExprKind::Field { object, .. } => match self.enum_of(object) {
+                Some(t) => !self.immutable_enum(t),
+                None => !self.is_plain(object),
+            },
+            ExprKind::MethodCall { receiver, .. } => {
+                self.enum_of(receiver).is_none()
+                    && self.target(a).is_some_and(|index| self.facts.self_methods.contains(&index))
+                    && !self.is_plain(receiver)
             }
             _ => false,
         }
     }
 
-    /// The Rust path of a method or constructor, such as `Point::new` or `Point::norm`.
+    /// The Rust path of a method or constructor, such as `Point::new` or `Point::norm`: a function
+    /// of the struct whose `impl` has it.
     pub(super) fn qualified_fn(&self, index: usize) -> String {
-        let owner = self.class.methods[index].class;
-        format!("{}::{}", struct_name(&self.class.types[owner].name), self.fn_names[index])
+        let owner = match self.homes[index] {
+            Home::Enum(t) => {
+                return format!("{}::{}", struct_name(&self.class.types[t].name), self.fn_names[index]);
+            }
+            Home::Class(c) | Home::Fields(c) => c,
+            Home::Free | Home::Nowhere => self.class.methods[index].class,
+        };
+        format!("{}::{}", self.struct_of(owner), self.fn_names[index])
     }
 
     /// A value read from a field of an object.
@@ -556,9 +891,17 @@ impl<'a> Gen<'a> {
         }
         let obj = self.object(object);
         if self.is_plain(object) {
-            return Code::atom(format!("{obj}.{}{clone}", snake_case(name)));
+            return Code::atom(format!("{obj}.{}{clone}", self.field_path(object, name)));
         }
-        let read = format!("{obj}.borrow().{}{clone}", snake_case(name));
+        let borrow = match self.enum_of(object) {
+            Some(t) if self.immutable_enum(t) => {
+                let borrow = self.enum_borrow(t, false);
+                return Code::atom(format!("{obj}{borrow}.{}{clone}", self.field_path(object, name)));
+            }
+            Some(t) => self.enum_borrow(t, false),
+            None => ".borrow()",
+        };
+        let read = format!("{obj}{borrow}.{}{clone}", self.field_path(object, name));
         // The `Ref` lives to the end of the statement, so it is scoped with braces only when the
         // statement also borrows mutably; otherwise the braces would be noise.
         Code::atom(if self.guarded { format!("{{ {read} }}") } else { read })
@@ -580,21 +923,38 @@ impl<'a> Gen<'a> {
     /// `new C(args)`, which calls the constructor that the checker chose. A constructor that builds
     /// a plain value is wrapped here, unless the class is owned.
     pub(super) fn new_object(&mut self, ctor: usize, args: &'a [Expr]) -> Code {
+        let c = self.class.methods[ctor].class;
+        let rep = self.enum_for(c);
+        self.new_object_as(ctor, args, rep)
+    }
+
+    /// `new_object`, as a value of the enum of type `rep` if not `None` (an object of a class
+    /// with subclasses is a value of its class's enum; an upcast makes it one of a superclass's).
+    pub(super) fn new_object_as(&mut self, ctor: usize, args: &'a [Expr], rep: Option<usize>) -> Code {
         let args = self.call_args(ctor, args).join(", ");
         let call = format!("{}({args})", self.qualified_fn(ctor));
-        let name = &self.class.types[self.class.methods[ctor].class].name;
-        Code::atom(if self.facts.owned.contains(name) || !self.builds_plain(name) {
+        let call = self.raising(Code::atom(call), ctor).text;
+        let c = self.class.methods[ctor].class;
+        let name = &self.class.types[c].name;
+        let object = if self.facts.owned.contains(name) || !self.builds_plain(name) {
             call
         } else if self.facts.immutable.contains(name) {
             format!("Rc::new({call})")
         } else {
             format!("Rc::new(RefCell::new({call}))")
+        };
+        Code::atom(match rep {
+            Some(t) => format!("{}({object})", self.variant(t, c)),
+            None => object,
         })
     }
 
     /// `receiver.name(args)`, a call of an instance method. A method that borrows its object is
     /// called with method syntax, on a shared object through `borrow()` or `borrow_mut()`.
     pub(super) fn method_call(&mut self, receiver: &'a Expr, index: usize, args: &'a [Expr]) -> Code {
+        if let Some(code) = self.inherited_call(receiver, index, args) {
+            return code;
+        }
         if !self.facts.self_methods.contains(&index) {
             let mut all = vec![self.receiver_ref(receiver)];
             all.extend(self.call_args(index, args));
@@ -609,18 +969,20 @@ impl<'a> Gen<'a> {
             }
             let args = self.call_args(index, args).join(", ");
             let obj = self.object(receiver);
-            return Code::atom(format!("{obj}.{}({args})", self.fn_names[index]));
+            let path = self.method_path(receiver, index);
+            return Code::atom(format!("{obj}.{path}{}({args})", self.fn_names[index]));
         }
         let borrow = if mutating { ".borrow_mut()" } else { ".borrow()" };
-        let Type::Class(class) = receiver.ty else { unreachable!("a receiver has a class type") };
+        let Type::Class(class, _) = receiver.ty else { unreachable!("a receiver has a class type") };
         // The receiver is borrowed before the arguments run, so arguments that may reach an object
         // of the class run first.
-        if args.iter().any(|a| has_effects(a) || reads_class(a, class)) {
+        if args.iter().any(|a| has_effects(a) || reads_class(self.class, a, class)) {
             return self.bound_call(receiver, index, args, borrow);
         }
         let obj = self.object(receiver);
         let args = self.call_args(index, args).join(", ");
-        let call = format!("{obj}{borrow}.{}({args})", self.fn_names[index]);
+        let path = self.method_path(receiver, index);
+        let call = format!("{obj}{borrow}.{path}{}({args})", self.fn_names[index]);
         Code::atom(if self.guarded { format!("{{ {call} }}") } else { call })
     }
 
@@ -652,14 +1014,29 @@ impl<'a> Gen<'a> {
             bound.push(temp);
         }
         self.guarded = outer;
-        lines.push(format!("{obj}{borrow}.{}({})", self.fn_names[index], bound.join(", ")));
+        let path = self.method_path(receiver, index);
+        lines.push(format!("{obj}{borrow}.{path}{}({})", self.fn_names[index], bound.join(", ")));
         Code::atom(format!("{{ {} }}", lines.join(" ")))
     }
 
     /// The text of an object, which Java gets from its class's `toString` (lowering rejects classes
     /// without one).
     pub(super) fn object_text(&mut self, e: &'a Expr) -> Code {
-        let index = self.to_string_index(e);
+        if let Some(t) = self.enum_of(e) {
+            let obj = self.object(e);
+            return Code::atom(self.enum_text(t, obj));
+        }
+        let Some(index) = self.to_string_index(e) else {
+            let c = self.struct_class(e).expect("an object has a class type");
+            let hash = match self.hash_index(c) {
+                Some(i) => self.method_call(e, i, &[]).text,
+                None => {
+                    let address = self.receiver_address(e, c);
+                    format!("{}({address})", self.runtime("address_hash"))
+                }
+            };
+            return Code::atom(self.default_text(c, hash));
+        };
         if !self.displays(index) {
             return self.text_call(e, index);
         }
@@ -673,6 +1050,10 @@ impl<'a> Gen<'a> {
 
     /// A call of a `toString` that is a plain method.
     fn text_call(&mut self, e: &'a Expr, index: usize) -> Code {
+        // A `toString` that the object's class inherits from a class whose enum has it.
+        if let Some(code) = self.inherited_call(e, index, &[]) {
+            return code;
+        }
         if self.facts.self_methods.contains(&index) {
             return self.method_call(e, index, &[]);
         }
@@ -725,7 +1106,7 @@ impl<'a> Gen<'a> {
         }
         let nullable = self.place_nullable(target);
         let obj = self.object(object);
-        let field = snake_case(name);
+        let field = self.field_path(object, name);
         if self.is_plain(object) {
             let place = format!("{obj}.{field}");
             return Some(match how {
@@ -736,9 +1117,13 @@ impl<'a> Gen<'a> {
         }
         // The right operand runs before the field is borrowed, and the borrow of every field it
         // reads ends first.
-        let place = format!("{obj}.borrow_mut().{field}");
+        let borrow = match self.enum_of(object) {
+            Some(t) => self.enum_borrow(t, true),
+            None => ".borrow_mut()",
+        };
+        let place = format!("{obj}{borrow}.{field}");
         let outer = std::mem::replace(&mut self.guarded, true);
-        let Type::Class(class) = object.ty else { unreachable!("a field of an object") };
+        let Type::Class(class, _) = object.ty else { unreachable!("a field of an object") };
         let text = match how {
             Update::Assign(value) => Some(format!("{place} = {}", self.field_value(value, ty, nullable))),
             Update::Compound(op, value) if let Some(symbol) = self.in_place_op(op, ty, value, e.id) => {
@@ -751,9 +1136,9 @@ impl<'a> Gen<'a> {
             }
             // Wrapping needs the old value, read through the same borrow; the right operand must
             // not borrow an object of the class meanwhile.
-            Update::Compound(_, value) if reads_class(value, class) => None,
+            Update::Compound(_, value) if reads_class(self.class, value, class) => None,
             Update::Compound(..) | Update::Step(_) => {
-                let local = self.temp(&field);
+                let local = self.temp(&snake_case(name));
                 let marked = format!("({local})");
                 let step = match how {
                     Update::Compound(op, value) => self.compound(op, &marked, ty, value, e.id),
@@ -764,7 +1149,16 @@ impl<'a> Gen<'a> {
                 // A method call dereferences by itself.
                 let step = step.replace(&format!("{marked}."), &format!("{local}."));
                 let step = step.replace(&marked, &format!("(*{local})"));
-                Some(format!("{{ let {local} = &mut {place}; {step}; }}"))
+                // An object computed by an expression is a temporary that a `let` would not keep
+                // alive while the field is borrowed: it gets a local of its own.
+                let (bind, place) = if stable {
+                    (String::new(), place)
+                } else {
+                    let handle = self.temp("object");
+                    let value = self.object_handle(object);
+                    (format!("let {handle} = {value}; "), format!("{handle}{borrow}.{field}"))
+                };
+                Some(format!("{{ {bind}let {local} = &mut {place}; {step}; }}"))
             }
         };
         self.guarded = outer;
@@ -875,13 +1269,26 @@ impl<'a> Gen<'a> {
             Place::Field { object, name } if self.is_plain(object) => {
                 // Only a constructor writes a field of an immutable class, through its own `this`;
                 // an owned object's fields are written by its methods.
-                Slot::Field { obj: self.object(object), field: snake_case(name), plain: true }
+                Slot::Field {
+                    obj: self.object(object),
+                    field: self.field_path(object, name),
+                    plain: true,
+                    on_enum: false,
+                }
             }
             Place::Field { object, name } => {
                 let obj = self.temp("object");
                 let owned = self.object_handle(object);
                 lines.push(format!("let {obj} = {owned};"));
-                Slot::Field { obj, field: snake_case(name), plain: false }
+                let on_enum = match self.enum_of(object) {
+                    Some(t) => {
+                        self.need(Need::Base(t));
+                        self.need(Need::BaseMut(t));
+                        true
+                    }
+                    None => false,
+                };
+                Slot::Field { obj, field: self.field_path(object, name), plain: false, on_enum }
             }
             Place::Static { class, name } => {
                 Slot::Static { cell: cell_name(&self.class.types[*class].name, name), plain: is_cell(ty) }
@@ -968,13 +1375,21 @@ impl<'a> Gen<'a> {
     }
 
     /// The struct and `impl` of a class with state: its constructors and instance methods.
+    /// The struct and `impl` of a class with state: its constructors and the instance methods
+    /// emitted there, its own and those it inherits (see `analysis::hierarchy::home`). A class with
+    /// subclasses has a fields struct, `<Name>Fields`, which the structs of its subclasses embed as
+    /// `base`.
     pub(super) fn type_items(&mut self, index: usize) {
         let class = self.class;
         let decl = &class.types[index];
-        let name = struct_name(&decl.name);
+        let (params, args) = self.type_params(&decl.type_params);
+        let name = self.struct_of(index);
         self.gap();
-        self.line(&format!("{}struct {name} {{", self.vis()));
+        self.line(&format!("{}struct {name}{args} {{", self.vis()));
         self.indent += 1;
+        if let Some(base) = hierarchy::embedded(self.facts, class, index) {
+            self.line(&format!("{}base: {},", self.vis(), self.struct_of(base)));
+        }
         for f in &decl.fields {
             let ty = self.field_ty_name(f.ty, self.field_nullable(&decl.name, &f.name));
             self.line(&format!("{}{}: {ty},", self.vis(), snake_case(&f.name)));
@@ -982,12 +1397,16 @@ impl<'a> Gen<'a> {
         self.indent -= 1;
         self.line("}");
         self.gap();
-        self.line(&format!("impl {name} {{"));
+        self.line(&format!("impl{params} {name}{args} {{"));
         self.indent += 1;
+        self.this_struct = index;
         self.field_inits(index);
         let mut display = None;
-        for i in 0..class.methods.len() {
-            if class.methods[i].class == index && !class.methods[i].is_static {
+        // Its own constructors and methods first, then those it inherits.
+        let mut order: Vec<usize> = (0..class.methods.len()).collect();
+        order.sort_by_key(|&i| class.methods[i].class != index);
+        for i in order {
+            if self.emitted_in(i, index) {
                 if self.displays(i) {
                     display = Some(i);
                     continue;
@@ -1001,22 +1420,67 @@ impl<'a> Gen<'a> {
         // `toString` is how the object is displayed.
         if let Some(i) = display {
             self.gap();
-            self.line(&format!("impl fmt::Display for {name} {{"));
+            self.line(&format!("impl{params} fmt::Display for {name}{args} {{"));
             self.indent += 1;
             self.method(i);
+            self.indent -= 1;
+            self.line("}");
+        } else if let Some(i) = hierarchy::to_string_impl(class, index)
+            && let Home::Fields(d) = self.homes[i]
+            && d != index
+            && class.hierarchy.is_concrete(index)
+            && self.displays(i)
+        {
+            // An inherited `toString` displays the superclass's fields struct.
+            let path = hierarchy::base_path(self.facts, class, index, d);
+            self.gap();
+            self.line(&format!("impl fmt::Display for {name} {{"));
+            self.indent += 1;
+            self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
+            self.indent += 1;
+            self.line(&format!("fmt::Display::fmt(&self.{}, f)", path.trim_end_matches('.')));
+            self.indent -= 1;
+            self.line("}");
             self.indent -= 1;
             self.line("}");
         }
     }
 
+    /// Whether method `i` is emitted in the `impl` of the struct of class `t`: it lives there, and
+    /// some object runs it (a superclass's method that every subclass overrides runs only through
+    /// `super`).
+    fn emitted_in(&self, i: usize, t: usize) -> bool {
+        let m = &self.class.methods[i];
+        if m.is_static {
+            return false;
+        }
+        let h = &self.class.hierarchy;
+        let runs = |c: usize| h.implementation(i, c) == Some(i) || self.super_targets.contains(&i);
+        match self.homes[i] {
+            _ if m.is_ctor => m.class == t,
+            Home::Class(c) => c == t && (m.class == c || runs(c)),
+            Home::Fields(d) => {
+                d == t && (h.concretes(d).into_iter().any(runs) || self.super_targets.contains(&i))
+            }
+            _ => false,
+        }
+    }
+
     /// Whether method `index` is a `toString` that becomes the class's `Display` implementation:
-    /// it borrows its object without changing it and never returns null.
+    /// it borrows its object without changing it and never returns null, and it is what an object
+    /// of the struct it is emitted in runs.
     pub(super) fn displays(&self, index: usize) -> bool {
         let m = &self.class.methods[index];
+        let runs = match self.homes[index] {
+            Home::Class(c) => hierarchy::to_string_impl(self.class, c) == Some(index),
+            Home::Fields(_) => true,
+            _ => false,
+        };
         m.name == "toString"
             && m.params.is_empty()
             && !m.is_static
             && m.ret == Type::String
+            && runs
             && self.facts.self_methods.contains(&index)
             && !self.facts.mutating.contains(&index)
             && !self.facts.nullable_returns.contains(&index)
@@ -1026,7 +1490,10 @@ impl<'a> Gen<'a> {
     /// may format it in the middle of the printed line: its `toString` returns a concatenation of
     /// constants, variables and fields that cannot throw.
     fn quiet_text(&self, e: &Expr, depth: usize) -> bool {
-        let index = self.to_string_index(e);
+        if self.enum_of(e).is_some() {
+            return false;
+        }
+        let Some(index) = self.to_string_index(e) else { return false };
         let m = &self.class.methods[index];
         depth < 4
             && self.displays(index)
@@ -1042,11 +1509,11 @@ impl<'a> Gen<'a> {
             | ExprKind::Char(_)
             | ExprKind::Bool(_)
             | ExprKind::Str(_)
-            | ExprKind::Var(_) => !matches!(e.ty, Type::Class(_) | Type::Array(_)),
+            | ExprKind::Var(_) => !matches!(e.ty, Type::Class(..) | Type::Array(_)),
             ExprKind::Field { object, .. } => {
                 matches!(object.kind, ExprKind::This)
                     && match e.ty {
-                        Type::Class(_) => self.quiet_text(e, depth + 1),
+                        Type::Class(..) => self.quiet_text(e, depth + 1),
                         Type::Array(_) => false,
                         _ => true,
                     }
@@ -1054,11 +1521,13 @@ impl<'a> Gen<'a> {
             ExprKind::Binary(op, l, r) => {
                 !matches!(op, BinOp::Div | BinOp::Rem)
                     && [l, r].iter().all(|x| match x.ty {
-                        Type::Class(_) if matches!(x.kind, ExprKind::This) => false,
+                        Type::Class(..) if matches!(x.kind, ExprKind::This) => false,
                         _ => self.quiet(x, depth),
                     })
             }
-            ExprKind::Unary(_, x) | ExprKind::Cast(_, x) => self.quiet(x, depth),
+            ExprKind::Unary(_, x) | ExprKind::Cast(_, x) | ExprKind::InstanceOf { value: x, .. } => {
+                self.quiet(x, depth)
+            }
             ExprKind::Conditional(c, a, b) => [c, a, b].iter().all(|x| self.quiet(x, depth)),
             _ => false,
         }
@@ -1081,9 +1550,9 @@ impl<'a> Gen<'a> {
         if plain {
             self.line("fn field_inits(&mut self) {");
         } else if by_value {
-            self.line(&format!("fn field_inits(this: &mut {}) {{", struct_name(name)));
+            self.line(&format!("fn field_inits(this: &mut {}) {{", self.generic_struct(index)));
         } else {
-            self.line(&format!("fn field_inits(this: &{}) {{", class_type(name, false)));
+            self.line(&format!("fn field_inits(this: &Rc<RefCell<{}>>) {{", self.generic_struct(index)));
         }
         self.indent += 1;
         for f in inits {
@@ -1119,27 +1588,27 @@ impl<'a> Gen<'a> {
             }
             _ => (None, &m.body[..]),
         };
+        let (base, rest) = self.super_init(m.class, rest);
         let initialize = delegate.is_none() && decl.fields.iter().any(|f| f.init.is_some());
         let immutable = self.facts.immutable.contains(&decl.name);
         let mutable = initialize || uses_this(rest);
         match delegate {
             Some((args, index)) => {
                 let args = self.call_args(index, args).join(", ");
-                self.line(&format!("let obj = {}({args});", self.qualified_fn(index)));
+                let call = Code::atom(format!("{}({args})", self.qualified_fn(index)));
+                let call = self.raising(call, index).text;
+                self.line(&format!("let obj = {call};"));
             }
             None => {
-                let fields: Vec<String> = decl
-                    .fields
-                    .iter()
-                    .map(|f| {
-                        format!(
-                            "{}: {}",
-                            snake_case(&f.name),
-                            self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name))
-                        )
-                    })
-                    .collect();
-                let name = struct_name(&decl.name);
+                let mut fields: Vec<String> = base.into_iter().map(|b| format!("base: {b}")).collect();
+                fields.extend(decl.fields.iter().map(|f| {
+                    format!(
+                        "{}: {}",
+                        snake_case(&f.name),
+                        self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name))
+                    )
+                }));
+                let name = self.struct_of(m.class);
                 let fields = fields.join(", ");
                 if immutable {
                     let mut_kw = if mutable { "mut " } else { "" };
@@ -1155,18 +1624,45 @@ impl<'a> Gen<'a> {
             self.line(&format!("let this = {this};"));
         }
         if initialize {
-            self.line(&format!("{}::field_inits(this);", struct_name(&decl.name)));
+            self.line(&format!("{}::field_inits(this);", self.struct_of(m.class)));
         }
         let result = if immutable { "Rc::new(obj)" } else { "obj" };
         self.ctor_result = Some(result);
         self.stmts(without_final_return(rest), false);
         self.ctor_result = None;
-        self.line(result);
+        let result = self.ok(result.to_string());
+        self.line(&result);
+    }
+
+    /// The `super(...)` that starts the statements of a constructor of class `t`, if one does: the
+    /// call of the superclass's constructor that builds the fields struct `t` embeds as `base`,
+    /// and the statements after it. A superclass without a fields struct has a constructor that
+    /// does nothing; only the arguments' effects are written, as statements.
+    pub(super) fn super_init(&mut self, t: usize, stmts: &'a [Stmt]) -> (Option<String>, &'a [Stmt]) {
+        let Some((Stmt::Expr(Expr { kind: ExprKind::SuperInit { args, resolved }, .. }), rest)) =
+            stmts.split_first()
+        else {
+            return (None, stmts);
+        };
+        match (hierarchy::embedded(self.facts, self.class, t), resolved) {
+            (Some(_), Some(ctor)) => {
+                let args = self.call_args(*ctor, args).join(", ");
+                let call = Code::atom(format!("{}({args})", self.qualified_fn(*ctor)));
+                (Some(self.raising(call, *ctor).text), rest)
+            }
+            _ => {
+                for a in args.iter().filter(|a| has_effects(a)) {
+                    let text = self.expr(a).text;
+                    self.line(&format!("{text};"));
+                }
+                (None, rest)
+            }
+        }
     }
 
     /// A blank line before an item, unless the output is empty or a line of an item is last.
     pub(super) fn gap(&mut self) {
-        if self.out.ends_with("}\n") {
+        if self.out.ends_with("}\n") || self.out.ends_with(";\n") {
             self.out.push('\n');
         }
     }

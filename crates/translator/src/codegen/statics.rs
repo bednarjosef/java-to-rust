@@ -117,12 +117,13 @@ impl<'a> Gen<'a> {
     }
 
     /// The call that initializes the class of a static field or method before it is used, or
-    /// `None` when the class is not eager or the code is in that class, which is already
-    /// initialized by then.
+    /// `None` when neither the class nor a superclass is eager, or the code is in that class or
+    /// a subclass of it, which is already initialized by then.
     pub(super) fn init_call(&self, class: usize) -> Option<String> {
         let current = self.class.methods[self.method].class;
-        (self.facts.eager_init.contains(&class) && class != current)
-            .then(|| format!("{}();", init_name(&self.class.types[class].name)))
+        let init = self.facts.init_class(self.class, class)?;
+        let initialized = current == init || self.class.hierarchy.ancestors(current).contains(&init);
+        (!initialized).then(|| format!("{}();", init_name(&self.class.types[init].name)))
     }
 
     /// The `const` read of a constant static field, or `None` for any other static field.

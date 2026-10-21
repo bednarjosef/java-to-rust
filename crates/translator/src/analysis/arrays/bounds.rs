@@ -64,7 +64,8 @@ pub(super) fn in_bounds(
                     ExprKind::Call { args, .. }
                     | ExprKind::MethodCall { args, .. }
                     | ExprKind::New { args, .. }
-                    | ExprKind::ThisCall { args, .. } => {
+                    | ExprKind::ThisCall { args, .. }
+                    | ExprKind::SuperInit { args, .. } => {
                         let arrays = args.iter().filter(|a| matches!(a.ty, Type::Array(_)));
                         lent.extend(arrays.filter_map(root_of).map(str::to_string));
                     }
@@ -435,6 +436,18 @@ impl Walk<'_> {
             }
             Stmt::Labeled { body, .. } => self.stmt(body),
             Stmt::Block(stmts) => self.block(stmts),
+            Stmt::Throw(e) => self.expr(e),
+            // A `catch` or the `finally` may start after any part of the body; the guards from
+            // outside were checked against the whole statement.
+            Stmt::Try { body, catches, finally } => {
+                self.block(body);
+                for catch in catches {
+                    self.block(&catch.body);
+                }
+                if let Some(f) = finally {
+                    self.block(f);
+                }
+            }
             Stmt::Return(None, _)
             | Stmt::Break
             | Stmt::Continue
@@ -573,6 +586,7 @@ fn children(e: &Expr) -> Vec<&Expr> {
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }
         | ExprKind::ThisCall { args, .. }
+        | ExprKind::SuperInit { args, .. }
         | ExprKind::NewArray(args)
         | ExprKind::ArrayLit(args) => args.iter().collect(),
         _ => Vec::new(),
