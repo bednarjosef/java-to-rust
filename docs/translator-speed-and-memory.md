@@ -44,6 +44,44 @@ What this shows:
 - **Lowering is repeated whole.** Each attempt of the Rust generics lowers the whole program again:
   four times for StreamPipeline.
 
+### Methods that can run
+
+Reachability over javac's trees has no points-to facts: a call of `toString`, `equals` or
+`hashCode` on an `Object` in library code reaches the override of every class, so a rejection
+anywhere in that code rejected the program. Lowering now goes on past rejections, and a walk over
+the lowered program (`analysis/live_methods.rs`) keeps only the methods that can run. It uses the
+points-to facts of `object_values`: a call goes to the classes whose objects can reach its
+receiver, and an instance method runs only once some running code creates an object of its class.
+A rejection counts only where it can run. The others get a body that panics, `no object of X is
+created`, and the instance field initializers of classes that no running code creates are dropped.
+Where the facts don't cover a call, the walk gives up and every rejection counts as before.
+
+Measured on 2026-10-21 against main at 0710e6e, release builds, load 4 to 11 on 16 cores:
+
+| program | JDK units read | reached | methods that can run | rejections, all reached code | rejections that can run | time | memory |
+|---|---:|---|---:|---|---|---:|---:|
+| ScannerGrades, before | 624 | 1,222 classes, 7,872 methods | — | first one only | `Charset` subclass (ISO_8859_1.java:42) | 15.2 s | 2.34 GB |
+| ScannerGrades, after | 624 | 1,222 classes, 7,872 methods | 3,721 of 9,072 | 220 (110 distinct) | 69 (49 distinct) | 24.0 s | 2.34 GB |
+| TextAdventure, before | 625 | 1,225 classes, 7,868 methods | — | first one only | `Charset` subclass (ISO_8859_1.java:42) | 14.1 s | 2.41 GB |
+| TextAdventure, after | 625 | 1,225 classes, 7,868 methods | 3,703 of 9,068 | 220 (110 distinct) | 69 (49 distinct) | 28.8 s | 2.41 GB |
+| StreamPipeline, before | 102 | 271 classes, 1,239 methods | — | 0 | 0 | 10.2 s | 1.74 GB |
+| StreamPipeline, after | 102 | 271 classes, 1,239 methods | 1,116 of 1,583 | 0 | 0 | 9.2 s | 1.70 GB |
+
+(Lowered methods outnumber reached ones: lowering adds bridges, lambdas' functions and the
+builders of enum tables.)
+
+- **Two thirds of the rejections in the scanner programs are in code that can't run.** The first
+  that can is now `MethodHandles.arrayElementVarHandle` in `AtomicReferenceArray`, not a `Charset`
+  subclass.
+- **Generated code shrinks where the program translates.** StreamPipeline's Rust goes from 22,173
+  to 18,516 lines, and whole objects, analyses and codegen run 30 to 40 % faster (4.7 s to 3.1 s
+  together). Its output is the same.
+- **Units read and reached classes don't change.** The narrowing happens after lowering. Reaching
+  less in javac, and so cutting its memory, needs the same facts during reachability (step 7
+  below).
+- **Lowering costs more on programs that are rejected.** It used to stop at the first rejection,
+  and now lowers everything (3 to 5 s against 11 to 16 s). The walk itself takes 2 to 3 s.
+
 ## Steps for the translator
 
 In order of payoff for the effort:
@@ -101,10 +139,12 @@ of that code, plus the few methods being worked on at a time. In order:
    instead of one allocation each.
 6. **Output written as it is made**, straight to each crate's files, instead of one string of
    millions of lines.
-7. **Reaching less.** Dispatch of `toString`, `equals` and `hashCode` from library code currently
-   reaches every live class's override, which pulls in large parts of the JDK that the program
-   never runs (the thread pool, currencies, the file system, stack walking). Restricting it to the
-   classes whose objects can reach the call, by the points-to facts, shrinks all three copies.
+7. **Reaching less.** Dispatch of `toString`, `equals` and `hashCode` from library code reaches
+   every live class's override, which pulls in large parts of the JDK that the program never runs
+   (the thread pool, currencies, the file system, stack walking). After lowering, the points-to
+   facts now cut this down to the methods that can run (see "Methods that can run" above). Using
+   the same facts during reachability, so that javac never reads those units, would shrink all
+   three copies.
 
 Expected effect: several times less peak memory; for a project the size of the Minecraft server,
 the difference between the 20 to 40 GB estimated below and a few GB. That is an estimate until

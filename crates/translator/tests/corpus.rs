@@ -5,22 +5,33 @@
 //! Translation, the Java runs, the Cargo build and the Rust runs each use one thread per CPU.
 //! The Rust programs are one Cargo project with a binary per program, kept in `target/tmp`
 //! between runs: a source is rewritten only when its translation changes, so cargo rebuilds
-//! just the programs whose translation changed. Java's results are kept the same way, in
-//! `java_cache`, so a program runs on Java again only when its sources or the Java version change.
-//! `CORPUS_JAVA_FRESH=1` runs every program on Java. `CORPUS_FILTER=text` runs only the programs
-//! whose name contains `text`. A single file gets the lines of `Name.args` next to it as its
-//! arguments and reads `Name.input` next to it on standard input, which is empty without one.
+//! just the programs whose translation changed. Java's results are kept in the checks' cache
+//! (`check_cache`: `~/.cache/java-to-rust-checks` unless `CHECK_CACHE` names another), which
+//! every worktree shares, so a program runs on Java again only when its sources or the Java
+//! version change (`java_cache`); so is the run of each translation that matched Java, so a
+//! program whose translation, runtime and toolchain are unchanged is neither built nor run again
+//! (`rust_cache`). `CORPUS_JAVA_FRESH=1` runs every program on Java, and `CHECK_FRESH=1` does
+//! all the work again. The test prints how long its parts took. `CORPUS_FILTER=text` runs only
+//! the programs whose name contains `text`. A single file gets the lines of `Name.args` next to it
+//! as its arguments and reads `Name.input` next to it on standard input, which is empty without
+//! one.
 
 #[path = "corpus/java_cache.rs"]
 mod java_cache;
+#[path = "corpus/parallel.rs"]
+mod parallel;
+#[path = "corpus/rust_cache.rs"]
+mod rust_cache;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use java_cache::JavaCache;
+use java_to_rust::check_cache;
+use parallel::parallel;
+use rust_cache::{RustCache, Stored};
 
 /// The JVM arguments of every Java run: short-lived JVMs skip the optimizing compiler, the parallel
 /// collector and perf data (whose lock-file warnings go to stdout when many JVMs run at once).
@@ -49,7 +60,7 @@ fn stdin_of(p: &Program) -> Stdio {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct Run {
     stdout: String,
     code: Option<i32>,
@@ -74,32 +85,6 @@ struct Build {
 
 fn run(output: Output) -> Run {
     Run { stdout: String::from_utf8_lossy(&output.stdout).into_owned(), code: output.status.code() }
-}
-
-/// Calls `f` on each index below `n` on one thread per CPU (or `CORPUS_THREADS` threads, to keep
-/// memory down when several test runs share a machine), and returns the results in order.
-fn parallel<R: Send>(n: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    let threads = std::env::var("CORPUS_THREADS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&n: &usize| n > 0)
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    let next = AtomicUsize::new(0);
-    let results: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
-    std::thread::scope(|s| {
-        for _ in 0..threads.min(n) {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n {
-                        break;
-                    }
-                    *results[i].lock().unwrap() = Some(f(i));
-                }
-            });
-        }
-    });
-    results.into_iter().map(|r| r.into_inner().unwrap().expect("every index is run")).collect()
 }
 
 /// Writes `text` to `path` unless the file already holds it, so that cargo does not rebuild a
@@ -282,35 +267,48 @@ fn diff(java: &str, rust: &str) -> String {
     out
 }
 
-/// Compares one program's translation, build and run with Java's.
+/// Compares one program's translation, build and run with Java's. A program with a stored run
+/// (`rust_cache`) is not run; otherwise the run is returned, to be stored if it matched.
 fn check(
     p: &Program,
     translation: &Result<String, String>,
     build: &Build,
+    stored: Option<&Run>,
     expected: &Run,
-) -> Result<(), Failure> {
+) -> (Result<(), Failure>, Option<Run>) {
     if let Err(e) = translation {
-        return Err(Failure { summary: e.clone(), details: String::new() });
+        return (Err(Failure { summary: e.clone(), details: String::new() }), None);
     }
-    let Some(binary) = build.binaries.get(&p.name) else {
-        let errors: Vec<&str> = build
-            .diagnostics
-            .get(&p.name)
-            .into_iter()
-            .flatten()
-            .filter(|(error, _)| *error)
-            .map(|(_, text)| text.as_str())
-            .collect();
-        let details = if errors.is_empty() {
-            build.stderr.lines().filter(|l| l.contains("error")).map(|l| format!("    {l}\n")).collect()
-        } else {
-            errors.iter().map(|e| format!("    {e}\n")).collect()
-        };
-        return Err(Failure { summary: "does not compile".to_string(), details });
+    let (actual, fresh) = match stored {
+        Some(stored) => (stored.clone(), None),
+        None => {
+            let Some(binary) = build.binaries.get(&p.name) else {
+                let errors: Vec<&str> = build
+                    .diagnostics
+                    .get(&p.name)
+                    .into_iter()
+                    .flatten()
+                    .filter(|(error, _)| *error)
+                    .map(|(_, text)| text.as_str())
+                    .collect();
+                let details = if errors.is_empty() {
+                    build
+                        .stderr
+                        .lines()
+                        .filter(|l| l.contains("error"))
+                        .map(|l| format!("    {l}\n"))
+                        .collect()
+                } else {
+                    errors.iter().map(|e| format!("    {e}\n")).collect()
+                };
+                return (Err(Failure { summary: "does not compile".to_string(), details }), None);
+            };
+            let actual = run(Command::new(binary).args(&p.args).stdin(stdin_of(p)).output().unwrap());
+            (actual.clone(), Some(actual))
+        }
     };
-    let actual = run(Command::new(binary).args(&p.args).stdin(stdin_of(p)).output().unwrap());
     if actual == *expected {
-        return Ok(());
+        return (Ok(()), fresh);
     }
     let code = expected.code != actual.code;
     let output = expected.stdout != actual.stdout;
@@ -326,7 +324,7 @@ fn check(
     if output {
         details.push_str(&diff(&expected.stdout, &actual.stdout));
     }
-    Err(Failure { summary: format!("differs from Java: {what}"), details })
+    (Err(Failure { summary: format!("differs from Java: {what}"), details }), None)
 }
 
 #[test]
@@ -343,14 +341,12 @@ fn corpus_matches_java() {
     let bin_dir = work.join("src/bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let runtime = manifest.join("../runtime").canonicalize().unwrap();
-    write_if_changed(
-        &work.join("Cargo.toml"),
-        &format!(
-            "[package]\nname = \"corpus\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
-             [dependencies]\njava-runtime = {{ path = {runtime:?} }}\n\n[profile.dev]\n\
-             debug = 0\nincremental = false\n\n[workspace]\n"
-        ),
+    let cargo_toml = format!(
+        "[package]\nname = \"corpus\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
+         [dependencies]\njava-runtime = {{ path = {runtime:?} }}\n\n[profile.dev]\n\
+         debug = 0\nincremental = false\n\n[workspace]\n"
     );
+    write_if_changed(&work.join("Cargo.toml"), &cargo_toml);
     // A source of a program that left the corpus must not be built as one of the binaries.
     let sources: Vec<String> = programs.iter().map(|p| format!("{}.rs", p.name)).collect();
     for entry in std::fs::read_dir(&bin_dir).unwrap() {
@@ -359,7 +355,10 @@ fn corpus_matches_java() {
             std::fs::remove_file(path).unwrap();
         }
     }
-    let java_cache = JavaCache::open(&work.join("java-cache"), &programs);
+    // Java's results and the runs of unchanged translations are kept in the checks' cache.
+    let cache = check_cache::test_root();
+    let java_cache = JavaCache::open(&cache.join("java"));
+    let rust_cache = RustCache::open(&cache.join("rust"), &runtime, &work, &cargo_toml);
     if let Ok(filter) = std::env::var("CORPUS_FILTER") {
         programs.retain(|p| p.name.contains(&filter));
         assert!(!programs.is_empty(), "no program name contains CORPUS_FILTER={filter}");
@@ -368,37 +367,71 @@ fn corpus_matches_java() {
     // Java's runs do not depend on the translations, so they run while the programs translate
     // and build.
     let classes = work.join("classes");
-    let (translations, build, expected) = std::thread::scope(|s| {
+    let start = Instant::now();
+    let (translations, keys, stored, build, expected, times) = std::thread::scope(|s| {
         let translate = s.spawn(|| {
             let translations = parallel(programs.len(), |i| rust_source(&programs[i]));
+            let translated = start.elapsed();
             for (p, rust) in programs.iter().zip(&translations) {
                 if let Ok(rust) = rust {
                     write_if_changed(&bin_dir.join(format!("{}.rs", p.name)), rust);
                 }
             }
+            let keys: Vec<Option<String>> = programs
+                .iter()
+                .zip(&translations)
+                .map(|(p, t)| t.as_ref().ok().and_then(|rust| rust_cache.key(p, rust)))
+                .collect();
+            let stored: Vec<Option<Stored>> =
+                keys.iter().map(|k| k.as_ref().and_then(|k| rust_cache.load(k))).collect();
             let built: Vec<&str> = programs
                 .iter()
                 .zip(&translations)
-                .filter(|(_, t)| t.is_ok())
-                .map(|(p, _)| p.name.as_str())
+                .zip(&stored)
+                .filter(|((_, t), stored)| t.is_ok() && stored.is_none())
+                .map(|((p, _), _)| p.name.as_str())
                 .collect();
             let build = build_binaries(&work, &built);
-            (translations, build)
+            (translations, translated, keys, stored, build, start.elapsed())
         });
         let expected = parallel(programs.len(), |i| java_cache.run(&programs[i], &classes));
-        let (translations, build) = translate.join().unwrap();
-        (translations, build, expected)
+        let java = start.elapsed();
+        let (translations, translated, keys, stored, build, built) = translate.join().unwrap();
+        (translations, keys, stored, build, expected, [translated, built, java])
     });
 
-    let outcomes = parallel(programs.len(), |i| check(&programs[i], &translations[i], &build, &expected[i]));
+    let outcomes = parallel(programs.len(), |i| {
+        let stored = stored[i].as_ref().map(|s| &s.run);
+        check(&programs[i], &translations[i], &build, stored, &expected[i].0)
+    });
+    let checked = start.elapsed();
 
+    // The rustc warnings of each program: from this build, or stored with its run.
+    let warnings: Vec<Vec<String>> = programs
+        .iter()
+        .zip(&stored)
+        .map(|(p, stored)| match stored {
+            Some(stored) => stored.warnings.clone(),
+            None => build
+                .diagnostics
+                .get(&p.name)
+                .into_iter()
+                .flatten()
+                .filter(|(error, _)| !error)
+                .map(|(_, text)| text.clone())
+                .collect(),
+        })
+        .collect();
     let mut failures = Vec::new();
     let mut report = String::from("\nprogram                          result\n");
     let mut details = String::new();
-    for (p, outcome) in programs.iter().zip(&outcomes) {
-        let warnings = build.diagnostics.get(&p.name).map_or(0, |d| d.iter().filter(|(e, _)| !e).count());
+    for (i, p) in programs.iter().enumerate() {
+        let (outcome, fresh) = &outcomes[i];
+        if let (Ok(()), Some(run), Some(key)) = (outcome, fresh, &keys[i]) {
+            rust_cache.store(key, run, &warnings[i]);
+        }
         let status = match outcome {
-            Ok(()) if warnings > 0 => format!("ok ({warnings} rustc warnings)"),
+            Ok(()) if !warnings[i].is_empty() => format!("ok ({} rustc warnings)", warnings[i].len()),
             Ok(()) => "ok".to_string(),
             Err(failure) => {
                 failures.push(p.name.clone());
@@ -409,16 +442,24 @@ fn corpus_matches_java() {
         report.push_str(&format!("{:<32} {status}\n", p.name));
     }
     println!("{report}");
-    let warning_lines: Vec<&str> = programs
-        .iter()
-        .filter_map(|p| build.diagnostics.get(&p.name))
-        .flatten()
-        .filter(|(error, _)| !error)
-        .map(|(_, text)| text.as_str())
-        .collect();
+    let warning_lines: Vec<&str> = warnings.iter().flatten().map(String::as_str).collect();
     if !warning_lines.is_empty() {
         println!("rustc warnings:\n{}", warning_lines.join("\n"));
     }
+    let [translated, built, java] = times;
+    let java_runs = expected.iter().filter(|(_, stored)| !stored).count();
+    let rust_runs = translations.iter().zip(&stored).filter(|(t, s)| t.is_ok() && s.is_none()).count();
+    println!(
+        "{} programs: translated in {:.1} s; {java_runs} run on Java ({} stored), done at {:.1} s; \
+         {rust_runs} built and run ({} stored), built at {:.1} s; checked at {:.1} s",
+        programs.len(),
+        translated.as_secs_f64(),
+        programs.len() - java_runs,
+        java.as_secs_f64(),
+        stored.iter().flatten().count(),
+        built.as_secs_f64(),
+        checked.as_secs_f64(),
+    );
     assert!(
         failures.is_empty(),
         "{} of {} programs failed: {}\n{details}",
