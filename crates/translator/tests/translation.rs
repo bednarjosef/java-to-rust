@@ -1007,7 +1007,7 @@ fn methods_that_reach_their_object_another_way_take_the_shared_handle() {
         &[
             "fn register(this: &Rc<RefCell<P>>) {\n        share(this);",
             // `o` may be `this`, which the method then must not hold borrowed.
-            "fn copy(this: &Rc<RefCell<P>>, o: &Rc<RefCell<P>>) {\n        this.borrow_mut().x = { o.borrow().x };",
+            "fn copy(this: &Rc<RefCell<P>>, o: &Rc<RefCell<P>>) {\n        this.borrow_mut().x = { let value = o.borrow().x; value };",
             "P::register(&p);",
             "P::copy(&q, &p);",
         ],
@@ -4668,7 +4668,10 @@ fn a_field_assigned_from_a_borrow_of_itself_ends_the_borrow_first() {
             System.out.println(c.pop() + c.pop()); } }",
     );
     // The `Ref` of the old head must end before the field is written.
-    assert_contains(&rust, &["self.head = { java::non_null(self.head.as_ref()).borrow().next.clone() };"]);
+    assert_contains(
+        &rust,
+        &["self.head = { let value = java::non_null(self.head.as_ref()).borrow().next.clone(); value };"],
+    );
 }
 
 #[test]
