@@ -2595,8 +2595,8 @@ fn survey_json_writes_the_census_to_the_file_given() {
 }
 
 #[test]
-fn an_enum_field_assigned_outside_its_constructor_is_rejected() {
-    let error = java_to_rust::translate(
+fn an_enum_field_assigned_outside_its_constructor_is_a_table() {
+    let rust = java_to_rust::translate(
         "public class A {
             enum Planet {
                 MERCURY(3.0);
@@ -2607,11 +2607,10 @@ fn an_enum_field_assigned_outside_its_constructor_is_rejected() {
             public static void main(String[] args) { Planet.MERCURY.grow(); }
         }",
     )
-    .expect_err("an enum field that changes is rejected");
-    assert!(
-        error.to_string().contains("assigning an enum field outside its constructor not supported yet"),
-        "{error}"
-    );
+    .expect("an enum field that changes is a table");
+    assert!(rust.contains("fn init_planet_constant(constant_ordinal: i32, mass: f64)"), "{rust}");
+    assert!(rust.contains("init_planet_constant(0, 3.0);"), "{rust}");
+    assert!(rust.contains("A_PLANET_MASS_OF_CONSTANTS"), "{rust}");
 }
 
 #[test]
@@ -3656,8 +3655,8 @@ fn pattern_variables_are_read_only_where_the_translation_binds_them() {
 }
 
 #[test]
-fn a_cast_of_a_value_that_may_be_null_to_an_enum_is_rejected() {
-    let err = java_to_rust::translate(
+fn a_cast_of_a_value_that_may_be_null_to_an_enum_ends_the_program_on_null() {
+    let rust = java_to_rust::translate(
         "interface S {}
         enum E implements S { X }
         class M {
@@ -3665,11 +3664,8 @@ fn a_cast_of_a_value_that_may_be_null_to_an_enum_is_rejected() {
             public static void main(String[] x) { E e = (E) pick(1); System.out.println(e); }
         }",
     )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("casting a value that may be null to an enum not supported yet"),
-        "{err}"
-    );
+    .unwrap();
+    assert!(rust.contains("java::null_enum("), "{rust}");
 }
 
 const OBJECTS: &str = "
@@ -3885,6 +3881,31 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
             "java::cast(held.as_int_array(), \"[I\")",
             "(Object::IntArray(a), Object::IntArray(b)) => Rc::ptr_eq(a, b),",
             "Object::IntArray(o) => java::identity_hash(o),",
+        ],
+    );
+}
+
+#[test]
+fn an_array_of_references_used_as_an_object_array_is_one_everywhere() {
+    let rust = translate(
+        "class V { int n; V(int n) { this.n = n; } }
+        public class Main {
+            static int count(Object[] xs) { return xs.length; }
+            public static void main(String[] args) {
+                V[] vs = { new V(1) };
+                Object[] mixed = { \"s\", vs[0] };
+                System.out.println(count(vs) + count(mixed) + vs[0].n);
+            }
+        }",
+    );
+    // `V[]` meets `Object[]`, so it is one: the same array is passed, and a read casts back.
+    assert_contains(
+        &rust,
+        &[
+            "fn count(xs: &[Object]) -> i32 {",
+            "let vs: Vec<Object> = vec![Object::V(Rc::new(V::new(1)))];",
+            "count(&vs)",
+            "java::cast(vs[0].as_v(), \"V\").n",
         ],
     );
 }

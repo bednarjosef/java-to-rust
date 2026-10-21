@@ -4,8 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: java-to-rust <Input.java> [-o <output.rs> | --crate <directory>]
-       java-to-rust --main <package.Class> [--source <root>]... [--library <root>]... [<File.java>]...
+const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs> | --crate <directory>]
+       java-to-rust [--timings] --main <package.Class> [--source <root>]... [--library <root>]... [<File.java>]...
                     [-o <output.rs> | --crate <directory> | --survey [--survey-json <file>]]";
 
 /// The stack that translation runs on: the trees of real code, and the recursion over them, can
@@ -27,7 +27,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: Vec<String>) -> Result<(), String> {
+fn run(mut args: Vec<String>) -> Result<(), String> {
+    // `--timings` prints the time of each phase to standard error.
+    if let Some(at) = args.iter().position(|a| a == "--timings") {
+        args.remove(at);
+        java_to_rust::timings::enable();
+    }
     if args
         .iter()
         .any(|a| matches!(a.as_str(), "--main" | "--source" | "--library" | "--survey" | "--survey-json"))

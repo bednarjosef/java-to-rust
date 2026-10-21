@@ -198,7 +198,6 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
     nullness::analyze(class, &mut facts);
-    patterns::check_enum_casts(class, &facts)?;
     patterns::check_object_values(class, &facts)?;
     boxing::analyze(class, &mut facts);
     if facts.threaded {

@@ -30,10 +30,12 @@ impl<'t> Lowering<'t> {
             declares(self.methods[index].node) || declares(self.types[owner].node)
         });
         let passed = args.get(fixed).map(|a| a.ty);
+        // An array of references is an `Object[]` too, passed for `Object...` (see `covariant`).
+        let objects = matches!(ty, Type::Array(e) if Self::is_object(*e));
         let direct = args.len() == params.len()
             && (passed == Some(Type::Null)
                 || passed == Some(ty)
-                || of_variable && matches!(passed, Some(Type::Array(e)) if e.is_reference()));
+                || (of_variable || objects) && matches!(passed, Some(Type::Array(e)) if e.is_reference()));
         if direct {
             return Ok(args);
         }
