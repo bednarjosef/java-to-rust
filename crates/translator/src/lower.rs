@@ -255,6 +255,9 @@ struct Lowering<'t> {
     /// The array types whose arrays become `Object`s or are cast back from them: each is a
     /// runtime class beside `Object` (see `object::object_types`).
     object_arrays: std::cell::RefCell<Vec<Type>>,
+    /// The atomic updates of fields through `Unsafe` that the code makes, each a method that
+    /// lowering adds to the field's class (see `handles`).
+    field_updates: RefCell<Vec<handles::FieldUpdateMethod>>,
     /// The arrays of references that are `Object[]`s (see `covariant`).
     covariant: covariant::Covariant,
     /// Where `Object` goes, in a program that uses it (see `object`).
@@ -318,6 +321,7 @@ impl<'t> Lowering<'t> {
             };
             types[index].enum_constants = Some(constants);
         }
+        self.field_update_methods(methods);
         Ok(())
     }
 
