@@ -431,6 +431,7 @@ pub(super) fn runtime_failures(
                     let checked = matches!(
                         builtin,
                         Builtin::String(StringOp::Substring | StringOp::FromChars)
+                            | Builtin::ArraysCopyOf
                             | Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _)
                             | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
                             | Builtin::CodePoint(CodePointOp::ToCharsInto)

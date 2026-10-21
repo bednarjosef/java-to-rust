@@ -11,17 +11,27 @@ use std::process::Command;
 /// javac's implementation, whose `analyze` of chosen classes `JavaTree` calls (see `javac.rs`).
 const JAVAC_API: &str = "jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED";
 
+/// The packages of javac's implementation that `JavaTree` and `java/BytecodeNames.java`, which
+/// reads what javac's code generator decided, use (see `javac.rs`).
+const JAVAC_PACKAGES: [&str; 5] = ["api", "code", "tree", "util", "jvm"];
+
 fn main() {
     println!("cargo:rerun-if-changed=java/JavaTree.java");
+    println!("cargo:rerun-if-changed=java/BytecodeNames.java");
     println!("cargo:rerun-if-changed=java/Standard.java");
     println!("cargo:rerun-if-changed=java/Functional.java");
     println!("cargo:rerun-if-changed=java/Threads.java");
     let out = std::env::var("OUT_DIR").expect("cargo sets OUT_DIR");
-    let status = Command::new("javac")
-        .args(["-d", &out, "-Xlint:none", "--add-exports", JAVAC_API, "java/JavaTree.java"])
+    let mut javac = Command::new("javac");
+    javac.args(["-d", &out, "-Xlint:none"]);
+    for package in JAVAC_PACKAGES {
+        javac.args(["--add-exports", &format!("jdk.compiler/com.sun.tools.javac.{package}=ALL-UNNAMED")]);
+    }
+    let status = javac
+        .args(["java/JavaTree.java", "java/BytecodeNames.java"])
         .status()
         .expect("building the translator needs javac (a JDK, version 21 or newer) on PATH");
-    assert!(status.success(), "javac failed to compile java/JavaTree.java");
+    assert!(status.success(), "javac failed to compile java/JavaTree.java and java/BytecodeNames.java");
     for (source, json) in [
         ("java/Standard.java", "standard.json"),
         ("java/Functional.java", "functional.json"),
