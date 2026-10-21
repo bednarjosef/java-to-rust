@@ -553,7 +553,9 @@ Decisions that changed during the implementation, step by step.
   returned there is cloned rather than moved, since the `finally` may read it.
 - **A local declared without a value and assigned in the body or a `catch` clause** of a `try`
   with a `finally` that is not a plain block starts at Java's default value, as in a live `try`
-  body.
+  body. A local declared inside the body or the `catch` clause itself (`for (Object e; r < end;
+  r++)` in `ArrayList.batchRemove`) is left alone: it is read only inside the block that assigns
+  it, where Rust follows its assignments as Java does, so its type needs no default value.
 - **`java.io.IOException` and `java.io.FileNotFoundException`** are standard classes now, and
   `getClass().getSimpleName()` is `Builtin::ClassName { simple: true }`, for the target program
   `CheckedExceptions`, which step 5 (catching a malformed number) still blocks.

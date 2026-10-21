@@ -291,8 +291,11 @@ A small subset, end to end:
   program that waits, notifies or asks `holdsLock`, the monitor of an object of one thread is a
   record of the objects the thread holds; elsewhere `synchronized` is the null check it was. A
   `volatile` static is read with acquire and written with release, as every static is.
-  Interrupts, sequentially consistent `volatile`, the atomics and `java.util.concurrent` are
-  next; the design is in [docs/multi-threading.md](docs/multi-threading.md).
+  `interrupt`, `isInterrupted` and `Thread.interrupted()` are Java's: an interrupt ends a
+  `sleep`, `join` or `wait` with `InterruptedException` and clears the status, and a thread keeps
+  its status before it starts and after it ends. In a program that never calls `interrupt`,
+  `sleep`, `join` and `wait` are translated as never throwing it. Sequentially consistent
+  `volatile`, the atomics and `java.util.concurrent` are next; the design is in [docs/multi-threading.md](docs/multi-threading.md).
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`), and so are
   `System.out.println(char[])` and `System.err.print`/`println`, which also print a `char[]`.
   `System.err` is written as it is, after `System.out` is flushed, so the two stay in order.
@@ -681,7 +684,8 @@ platform libm), which agree with it on all but about 0.1 percent of arguments, a
 the JVM sets itself (`java.version`, `java.vendor`, ...) is rejected at translation. The memory
 figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
 JVM's, and `gc()` does nothing. `Runtime.halt` flushes the output and exits without shutdown
-hooks. `Thread.sleep` (both forms), `onSpinWait` and `yield` are the platform's. The runtime's
+hooks. `onSpinWait` and `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
+thread's record, which an interrupt wakes. The runtime's
 descriptor table (`fd.rs`) backs the `FileInputStream`, `FileOutputStream` and `FileDescriptor`
 natives: stdin has its own buffered reader, stdout writes through the buffered `System.out` so
 its order is kept with `println`, stderr is written as it is (unbuffered, like Java's), and files
@@ -713,7 +717,7 @@ Each construct below is rejected at translation with an error that names it:
   interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
-- of threads: `interrupt`, `wait(millis, nanos)`, thread groups, uncaught exception handlers,
+- of threads: `wait(millis, nanos)`, thread groups, uncaught exception handlers,
   `ThreadLocal` and the `java.util.concurrent` classes; a `StringBuilder`, or a box compared by
   identity, that threads may share; `synchronized` on a string, a box, an array, an enum
   constant or a `Class` other than a class literal, where the monitor would be kept.
@@ -762,6 +766,9 @@ as its command-line arguments, on `java` and as the translated binary alike.
   streams as Rust iterators, after the object model, lambdas and for-each over `Iterable` land.
 - [docs/thorough-mode.md](docs/thorough-mode.md): a slower whole-program mode with points-to
   analysis, ownership checked by rustc, enums for class trees, and typed errors.
+- [docs/natural-rust.md](docs/natural-rust.md): making the output read like hand-written Rust
+  (names, layout, a separate JDK crate, non-null values, `Vec` and `for`), how to measure it, and
+  a later port mode that writes natural Rust everywhere and lists each change in behaviour.
 - [docs/closures-and-nested-classes.md](docs/closures-and-nested-classes.md): captures, inner,
   local and anonymous classes, lambdas, method references and for-each over `Iterable`, after
   the object model.

@@ -563,9 +563,15 @@ fn stmt_points(
     match s {
         Stmt::If { cond, then, otherwise } => {
             expr_points(class, facts, m, cond, frames, safe, out);
+            // A branch that a known condition never takes raises nothing (see `guards`).
+            let known = guards::known_condition(class, cond);
             let then_safe = narrowed(safe, cond, true, |v| assigns_stmt(then, v));
-            stmt_points(class, facts, m, then, frames, &then_safe, out);
-            if let Some(o) = otherwise {
+            if known != Some(false) {
+                stmt_points(class, facts, m, then, frames, &then_safe, out);
+            }
+            if let Some(o) = otherwise
+                && known != Some(true)
+            {
                 let else_safe = narrowed(safe, cond, false, |v| assigns_stmt(o, v));
                 stmt_points(class, facts, m, o, frames, &else_safe, out);
             }
