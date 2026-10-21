@@ -4,8 +4,8 @@
 // its real package (`java.lang`, `java.util` or `java.io`) and adds the classes a program uses to it (see
 // `lower/exceptions.rs`). Stack traces and serialization are left out; `cause` is null where
 // Java's field holds the object itself to mean "not set yet", which only `initCause` tells apart.
-// `addSuppressed` does not reject itself or null: this file cannot `throw`, since javac sees its
-// `Throwable` as unrelated to `java.lang.Throwable`.
+// `addSuppressed` does not reject itself or null here: this file cannot `throw`, since javac sees
+// its `Throwable` as unrelated to `java.lang.Throwable`, so `lower/suppress.rs` adds the checks.
 package standard;
 
 class Throwable {
