@@ -159,6 +159,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     let mut raising_tries = HashSet::new();
     let mut raising = HashSet::new();
     let mut null_checked = std::collections::HashMap::new();
+    // The `try`s whose `catch` gets a `NullPointerException` that the runtime raises.
+    let mut runtime_npe_tries = HashSet::new();
     let mut raised_classes = BTreeSet::new();
     for (m, method) in class.methods.iter().enumerate() {
         for p in &points[m] {
@@ -185,6 +187,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
                 {
                     if name == "java.lang.NullPointerException" {
                         null_checked.insert(id, p.pos);
+                        if let Some(f) = catcher {
+                            runtime_npe_tries.insert(f.id);
+                        }
                     } else {
                         raising.insert(id);
                     }
@@ -218,6 +223,46 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         }
         if method.name == "toString" && method.params.is_empty() {
             return error(method.pos, "a toString that throws an exception that is caught not supported yet");
+        }
+    }
+
+    // Java's message of a `NullPointerException` that the runtime raises describes the
+    // dereference ("Cannot invoke ..."); the message of one that code creates is its own.
+    let npe = Kind::Runtime("java.lang.NullPointerException");
+    for method in &class.methods {
+        let mut found = None;
+        for s in &method.body {
+            visit_stmt(s, &mut |_| {}, &mut |s| {
+                let Stmt::Try { catches, .. } = s else { return };
+                if !runtime_npe_tries.contains(&(s as *const Stmt as usize)) {
+                    return;
+                }
+                let Some(catch) = catches.iter().find(|c| c.types.iter().any(|&t| matches(&npe, t))) else {
+                    return;
+                };
+                for b in &catch.body {
+                    visit_stmt(
+                        b,
+                        &mut |e| {
+                            visit_expr(e, &mut |x| {
+                                if let ExprKind::MethodCall { receiver, name, .. } = &x.kind
+                                    && matches!(name.as_str(), "getMessage" | "getLocalizedMessage")
+                                    && matches!(&receiver.kind, ExprKind::Var(v) if *v == catch.name)
+                                {
+                                    found.get_or_insert(x.pos);
+                                }
+                            })
+                        },
+                        &mut |_| {},
+                    );
+                }
+            });
+        }
+        if let Some(pos) = found {
+            return error(
+                pos,
+                "the message of a `NullPointerException` that the runtime raises not supported yet",
+            );
         }
     }
 
@@ -957,14 +1002,21 @@ fn runtime_failures(
     }
     // A cast to a class that the value's type is not under may fail, unless an `instanceof`
     // tested the variable.
-    let instance = |to: &Type, value: &Expr| match (to, &value.kind) {
-        (Type::Class(name, _), ExprKind::Var(v)) => safe.contains(&instance_fact(v, name)),
-        _ => false,
+    // The variable was tested to be an instance of a class under `t`.
+    let instance = |t: usize, value: &Expr| {
+        let ExprKind::Var(v) = &value.kind else { return false };
+        let prefix = instance_fact(v, "");
+        safe.iter()
+            .filter_map(|fact| fact.strip_prefix(&prefix))
+            .any(|name| class.type_index(name).is_some_and(|tested| class.hierarchy.is_subtype(tested, t)))
     };
+    // A cast that lowering inserted (at its value's position) is javac's conversion of an erased
+    // type variable's value, as `Entry<K, V> e = i.next()`, which does not fail.
     if let ExprKind::Cast(to, value) = &x.kind
+        && x.pos != value.pos
         && let (Some(t), Some(s)) = (class.class_index(*to), class.class_index(value.ty))
         && !class.hierarchy.is_subtype(s, t)
-        && !instance(to, value)
+        && !instance(t, value)
     {
         out.push(("java.lang.ClassCastException", "this cast", false, x.id));
     }
