@@ -3926,6 +3926,34 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
 }
 
 #[test]
+fn an_arraycopy_between_objects_matches_the_types_of_their_arrays() {
+    let rust = translate(
+        "public class Main {
+            static void copy(Object src, Object dest, int length) {
+                System.arraycopy(src, 0, dest, 0, length);
+            }
+            public static void main(String[] args) {
+                int[] a = {1, 2};
+                int[] b = new int[2];
+                copy(a, b, 2);
+                copy(new long[] {3L}, new long[1], 1);
+                System.out.println(b[1]);
+            }
+        }",
+    );
+    // The positions are computed before the arrays are looked at, under names no local has.
+    assert_contains(
+        &rust,
+        &[
+            "let (src_pos, dest_pos, length_2) = (0, 0, length); match (&src, &dest) {",
+            "(Object::IntArray(src), Object::IntArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
+            "(Object::LongArray(src), Object::LongArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
+            "_ => java::throw(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"),",
+        ],
+    );
+}
+
+#[test]
 fn an_array_of_references_used_as_an_object_array_is_one_everywhere() {
     let rust = translate(
         "class V { int n; V(int n) { this.n = n; } }

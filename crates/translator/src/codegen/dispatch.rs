@@ -326,6 +326,38 @@ impl<'a> Gen<'a> {
         matches!(self.class.types[c].kind, TypeKind::Enum | TypeKind::Runtime)
     }
 
+    /// `System.arraycopy(src, srcPos, dest, destPos, length)` where `src` and `dest` are
+    /// `Object`s: the copy between their arrays when both are arrays of one type, else Java's
+    /// `ArrayStoreException`. The positions are computed first; a null `src` or `dest` throws
+    /// `NullPointerException`.
+    pub(super) fn object_array_copy(&mut self, args: &'a [Expr]) -> Code {
+        let [src, src_pos, dest, dest_pos, length] = args else {
+            unreachable!("arraycopy has five arguments")
+        };
+        let ints: Vec<String> =
+            [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
+        let (s, d) = (self.object(src), self.object(dest));
+        let copy = self.runtime("arraycopy");
+        let throw = self.runtime("throw");
+        // Names that no local of the method has, as `src` and `dest` may read one.
+        let [p, q, n] = ["src_pos", "dest_pos", "length"].map(|base| self.temp(base));
+        let mut arms = Vec::new();
+        if let Some(t) = self.object_index() {
+            for c in self.enum_variants(t).into_iter().filter(|&c| self.class.array_of(c).is_some()) {
+                let variant = self.variant(t, c);
+                arms.push(format!("({variant}(src), {variant}(dest)) => {copy}(src, {p}, dest, {q}, {n}),"));
+            }
+        }
+        arms.push(format!("_ => {throw}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"),"));
+        Code::atom(format!(
+            "{{ let ({p}, {q}, {n}) = ({}, {}, {}); match (&{s}, &{d}) {{ {} }} }}",
+            ints[0],
+            ints[1],
+            ints[2],
+            arms.join(" ")
+        ))
+    }
+
     /// The JVM's name of an array class, as `getClass().getName()` gives it: `[I`,
     /// `[Ljava.lang.String;`, `[[Lshapes.Point;`.
     fn descriptor(&self, ty: Type) -> String {
