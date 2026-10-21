@@ -136,9 +136,14 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("java.util.HashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
 ];
 
+/// The methods that lowering replaces whatever their signature, as `REPLACED_METHODS`: the
+/// constants of an enum class, which the JDK reads through `SharedSecrets` and reflection.
+const REPLACED_BY_NAME: &[(&str, &str)] =
+    &[("java.util.EnumMap", "getKeyUniverse"), ("java.util.EnumSet", "getUniverse")];
+
 /// Whether the method is one of the `REPLACED_METHODS`.
 pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
-    REPLACED_METHODS.contains(&(class, name, signature))
+    REPLACED_METHODS.contains(&(class, name, signature)) || REPLACED_BY_NAME.contains(&(class, name))
 }
 
 /// Static fields that only Java Flight Recorder sets, through reflection when it starts

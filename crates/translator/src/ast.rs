@@ -257,6 +257,9 @@ pub struct Class {
     /// The `close` methods that try-with-resources statements call, with the position of each
     /// resource; the analysis checks that they cannot fail (see `lower/exceptions.rs`).
     pub closes: Vec<(usize, Pos)>,
+    /// The values of the casts that erasure adds (see `lower/generics.rs`), by id: a value of a
+    /// type variable as its argument, which fails only on heap pollution, and so is taken not to.
+    pub erasure_casts: std::collections::HashSet<ExprId>,
 }
 
 /// What kind of type a declaration is.
@@ -281,6 +284,11 @@ pub const OBJECT: &str = "Object";
 /// The name of the type of `java.lang.Comparable`'s values, which lowering adds to a program that
 /// uses it as a type, beside `OBJECT`.
 pub const COMPARABLE: &str = "Comparable";
+
+/// The name of the type of `java.lang.Enum`'s values, which lowering adds to a program that uses
+/// it as a type (as the JDK's `EnumMap` and `EnumSet` do), beside `OBJECT`: an interface that the
+/// program's enums implement.
+pub const ENUM: &str = "Enum";
 
 /// The runtime classes whose values an `Object` can hold, with the Java type of those values.
 pub fn runtime_values() -> [(&'static str, Type); 9] {

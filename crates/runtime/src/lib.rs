@@ -58,7 +58,7 @@ pub use integer_parse::{parse_radix, try_parse_radix};
 pub use java_arrays::*;
 pub use math::*;
 pub use natives::*;
-pub use null::{OrNull, non_null, or_null, same, try_non_null};
+pub use null::{OrNull, non_null, null_enum, or_null, same, try_non_null};
 pub use out::{Out, flush, out, print_chars, println_chars, write_byte};
 pub use regex::{matches_all, replace_all, replace_first, split};
 pub use string::*;

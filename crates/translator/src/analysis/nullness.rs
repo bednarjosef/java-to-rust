@@ -212,6 +212,8 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
             (!narrowed(a, true) && maybe_null(facts, m, a))
                 || (!narrowed(b, false) && maybe_null(facts, m, b))
         }
+        // A cast to an enum gives an enum value (see `java::null_enum`).
+        ExprKind::Cast(Type::Enum(_), _) => false,
         ExprKind::Cast(_, value) => maybe_null(facts, m, value),
         ExprKind::Builtin(Builtin::ClassMethod(op), _) => op.nullable(),
         ExprKind::Builtin(Builtin::ComparableClassFor, _) => true,

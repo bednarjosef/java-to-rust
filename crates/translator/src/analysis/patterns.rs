@@ -16,7 +16,7 @@
 //! in code that does not declare a `name` of its own is a read of the pattern's variable.
 
 use crate::ast::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub(super) fn check(class: &Class) -> Result<(), Error> {
     for m in &class.methods {
@@ -64,37 +64,6 @@ pub(super) fn check(class: &Class) -> Result<(), Error> {
     Ok(())
 }
 
-/// Rejects a cast to an enum of a value that may be null: an enum is null only in a local that is
-/// assigned `null` (see `lower::enum_nulls`), and a cast would give one a `None` anywhere.
-pub(super) fn check_enum_casts(class: &Class, facts: &super::Facts) -> Result<(), Error> {
-    for (m, method) in class.methods.iter().enumerate() {
-        let mut found = None;
-        for s in &method.body {
-            visit_stmt(
-                s,
-                &mut |e| {
-                    visit_expr(e, &mut |x| {
-                        if let ExprKind::Cast(Type::Enum(_), value) = &x.kind
-                            && matches!(value.ty, Type::Class(..))
-                            && super::maybe_null(facts, m, value)
-                        {
-                            found.get_or_insert(x.pos);
-                        }
-                    })
-                },
-                &mut |_| {},
-            );
-        }
-        if let Some(pos) = found {
-            return Err(Error {
-                pos,
-                message: "casting a value that may be null to an enum not supported yet".to_string(),
-            });
-        }
-    }
-    Ok(())
-}
-
 /// Rejects what the `Object` enum cannot hold or compare: an array as an `Object`, and `==` or
 /// `!=` between two values of `Object` that may both be strings or boxes, whose identity Java
 /// compares and the translation does not keep (a string or a box in an `Object` is a plain value).
@@ -106,8 +75,41 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
     let holds_values = super::hierarchy::variants(class, facts, object)
         .into_iter()
         .any(|c| class.types[c].kind == TypeKind::Runtime);
+    // The assignments of each static, and whether the one there is creates an object. A static
+    // that only ever holds the object that its initializer creates, such as the `NULL` sentinel
+    // of `EnumMap` (`static final Object NULL = new Object() { .. }`), is no string or box.
+    let mut assignments: HashMap<(usize, String), (usize, bool)> = HashMap::new();
+    for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| match &x.kind {
+                        ExprKind::Assign { target: Place::Static { class, name }, value, op } => {
+                            let mut value = value.as_ref();
+                            while let ExprKind::Cast(_, inner) = &value.kind {
+                                value = inner;
+                            }
+                            let creates = op.is_none()
+                                && method.name == "<clinit>"
+                                && matches!(value.kind, ExprKind::New { .. });
+                            let entry = assignments.entry((*class, name.clone())).or_default();
+                            *entry = (entry.0 + 1, creates);
+                        }
+                        ExprKind::IncDec { target: Place::Static { class, name }, .. } => {
+                            assignments.entry((*class, name.clone())).or_default().0 += 2;
+                        }
+                        _ => {}
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    let sentinel = |class: usize, name: &str| assignments.get(&(class, name.to_string())) == Some(&(1, true));
     let may_be_value = |e: &Expr| match &e.kind {
         ExprKind::Null => false,
+        ExprKind::Static { class, name } if sentinel(*class, name) => false,
         ExprKind::Cast(Type::Class(name, _), inner) if *name == OBJECT => {
             !matches!(inner.ty, Type::Class(..) | Type::Enum(_))
         }
@@ -164,8 +166,13 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
 /// takes: whether the identities compare equal or not, the result is what `equals` says when the
 /// values are strings or boxes.
 fn shortcut(e: &Expr) -> Option<ExprId> {
-    let ExprKind::Binary(BinOp::Or, l, r) = &e.kind else { return None };
-    let ExprKind::Binary(BinOp::Eq, a, b) = &l.kind else { return None };
+    // Its negation too, `a != b && .. !a.equals(b) ..`, as `EnumMap.equals` writes it.
+    let (ExprKind::Binary(BinOp::Or, l, r) | ExprKind::Binary(BinOp::And, l, r)) = &e.kind else { return None };
+    let negated = matches!(e.kind, ExprKind::Binary(BinOp::And, ..));
+    let (ExprKind::Binary(BinOp::Eq, a, b) | ExprKind::Binary(BinOp::Ne, a, b)) = &l.kind else { return None };
+    if negated != matches!(l.kind, ExprKind::Binary(BinOp::Ne, ..)) {
+        return None;
+    }
     let (ExprKind::Var(a), ExprKind::Var(b)) = (&a.kind, &b.kind) else { return None };
     let mut equals = false;
     visit_expr(r, &mut |x| {

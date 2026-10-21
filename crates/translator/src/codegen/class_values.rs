@@ -121,6 +121,7 @@ impl<'a> Gen<'a> {
         match decl.name.as_str() {
             OBJECT => return "java::Class::OBJECT".to_string(),
             COMPARABLE => return "java::Class::COMPARABLE".to_string(),
+            ENUM => return "java::Class::ENUM".to_string(),
             _ => {}
         }
         let (kind, extends) = (decl.kind, decl.extends);
@@ -223,6 +224,7 @@ fn class_name(g: &mut Gen, ty: Type) -> String {
         _ => match g.class.type_of(ty) {
             Some(c) if g.class.types[c].name == OBJECT => "java.lang.Object".to_string(),
             Some(c) if g.class.types[c].name == COMPARABLE => "java.lang.Comparable".to_string(),
+            Some(c) if g.class.types[c].name == ENUM => "java.lang.Enum".to_string(),
             Some(c) => g.java_class_name(c, false),
             None => "java.lang.Object".to_string(),
         },

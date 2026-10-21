@@ -5,6 +5,7 @@
 
 mod code_point;
 mod enum_nulls;
+mod enum_tables;
 mod enums;
 mod exceptions;
 mod foreach;
@@ -83,7 +84,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let raised = lowering.raised_objects(&types, &methods);
         let closes = lowering.closes.take();
         let name = first.str("simpleName").to_string();
-        let class = Class { name, types, methods, hierarchy, raised, closes };
+        let erasure_casts = lowering.erasure_casts.take();
+        let class = Class { name, types, methods, hierarchy, raised, closes, erasure_casts };
         enums::check_nulls(&class)?;
         Ok((class, lowering.real.clone(), failed))
     })
@@ -204,6 +206,8 @@ struct Lowering<'t> {
     standard: exceptions::Standard,
     /// The `close` methods that try-with-resources statements call (see `exceptions`).
     closes: std::cell::RefCell<Vec<(usize, Pos)>>,
+    /// See `Class::erasure_casts`.
+    erasure_casts: std::cell::RefCell<std::collections::HashSet<ExprId>>,
     /// Where `Object` goes, in a program that uses it (see `object`).
     object: Option<object::ObjectIndexes>,
     /// The class of the objects that `new Object()` creates, when the code has one (see `object`).
@@ -237,8 +241,18 @@ impl<'t> Lowering<'t> {
         for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
             let in_type = |e| (index, e);
             self.constant_bodies(index, methods).map_err(in_type)?;
-            self.check_enum(index, methods).map_err(in_type)?;
-            let constants = self.enum_constants(index, &types[index].fields, methods).map_err(in_type)?;
+            // An enum whose constructors do more than the pure form allows has tables instead.
+            let pure = self
+                .check_enum(index, methods)
+                .and_then(|()| self.enum_constants(index, &types[index].fields, methods));
+            let constants = match pure {
+                Ok(constants) => constants,
+                Err(_) => {
+                    self.enum_tables(index, types, methods).map_err(in_type)?;
+                    let names = self.enum_constant_names(index);
+                    names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() }).collect()
+                }
+            };
             types[index].enum_constants = Some(constants);
         }
         Ok(())
@@ -340,6 +354,12 @@ impl<'t> Lowering<'t> {
             "java.lang.String" => Ok(Type::String),
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
             _ if name == "java.lang.Class" || name.starts_with("java.lang.Class<") => Ok(Type::JavaClass),
+            // A value of one of the program's enums (see `enums::enum_call`).
+            _ if (name == "java.lang.Enum" || name.starts_with("java.lang.Enum<"))
+                && self.object.is_some_and(|at| at.enumeration.is_some()) =>
+            {
+                Ok(Type::class(ENUM))
+            }
             "java.nio.charset.Charset" => {
                 error(node.pos(), "a `Charset` outside `getBytes` or `new String` not supported yet")
             }

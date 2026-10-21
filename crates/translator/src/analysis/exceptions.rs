@@ -572,6 +572,18 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
     let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..));
     match &x.kind {
         ExprKind::Builtin(Builtin::ClassName { .. } | Builtin::ClassLiteralName { .. }, _) => Vec::new(),
+        // The class, identity or ordinal of an object, which no `toString` gives.
+        ExprKind::Builtin(
+            Builtin::GetClass
+            | Builtin::SameClass { .. }
+            | Builtin::ClassMethod(_)
+            | Builtin::ComparableClassFor
+            | Builtin::EnumOrdinal
+            | Builtin::EnumName
+            | Builtin::EnumCompareTo
+            | Builtin::Native(Native::IdentityHash),
+            _,
+        ) => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
             [&**l, &**r].into_iter().filter(is_object).collect()
@@ -873,10 +885,12 @@ fn runtime_failures(
     {
         out.push((NPE, "this field access", false, x.id));
     }
-    // A cast to a class that the value's type is not under may fail.
+    // A cast to a class that the value's type is not under may fail, but not one that erasure
+    // adds (see `Class::erasure_casts`).
     if let ExprKind::Cast(to, value) = &x.kind
         && let (Some(t), Some(s)) = (class.class_index(*to), class.class_index(value.ty))
         && !class.hierarchy.is_subtype(s, t)
+        && !class.erasure_casts.contains(&value.id)
     {
         out.push(("java.lang.ClassCastException", "this cast", false, x.id));
     }

@@ -82,7 +82,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// The names of an enum's constants, in declaration order (their ordinals).
-    fn enum_constant_names(&self, class: usize) -> impl Iterator<Item = &'t str> {
+    pub(super) fn enum_constant_names(&self, class: usize) -> impl Iterator<Item = &'t str> {
         self.types[class].node.list("members").filter(|m| is_enum_constant(*m)).map(|m| m.str("name"))
     }
 
@@ -208,16 +208,45 @@ impl<'t> Lowering<'t> {
                 return Ok(Some(ExprKind::Builtin(Builtin::EnumValueOf, std::mem::take(args))));
             }
         }
-        let builtin = match (symbol.owner, symbol.name) {
-            ("java.lang.Enum", "ordinal") => Builtin::EnumOrdinal,
-            ("java.lang.Enum", "name" | "toString") => Builtin::EnumName,
-            ("java.lang.Enum", "compareTo") => Builtin::EnumCompareTo,
-            _ => return Ok(None),
-        };
+        if symbol.owner != "java.lang.Enum" {
+            return Ok(None);
+        }
         let receiver = match receiver {
             Some(r) => self.expr(r)?,
             None => self.this(node),
         };
+        // An `Enum` whose enum the type does not say is an `Object` or an `Enum` (see `ty`);
+        // its `toString` is the one of its enum.
+        let erased_ty = receiver.ty;
+        let erased = Self::is_object(erased_ty) || matches!(erased_ty, Type::Class(name, _) if name == ENUM);
+        let builtin = match symbol.name {
+            "ordinal" => Builtin::EnumOrdinal,
+            "toString" if erased => {
+                let receiver = self.convert(receiver, Type::class(OBJECT));
+                return Ok(Some(ExprKind::Builtin(Builtin::ObjectText, vec![receiver])));
+            }
+            "name" | "toString" => Builtin::EnumName,
+            "compareTo" => Builtin::EnumCompareTo,
+            // The class of an enum's constant is its enum's, a constant body's too.
+            "getDeclaringClass" => return Ok(Some(ExprKind::Builtin(Builtin::GetClass, vec![receiver]))),
+            "equals" | "hashCode" if erased => {
+                let at = self.object.expect("an `Object` has its methods");
+                let (resolved, args) = match symbol.name {
+                    "equals" => (at.equals, args.drain(..).map(|a| self.convert(a, Type::class(OBJECT))).collect()),
+                    _ => (at.hash_code, Vec::new()),
+                };
+                let name = symbol.name.to_string();
+                let receiver = Box::new(self.convert(receiver, Type::class(OBJECT)));
+                return Ok(Some(ExprKind::MethodCall { receiver, name, args, resolved: Some(resolved), is_super: false }));
+            }
+            _ => return Ok(None),
+        };
+        if erased {
+            for a in args.iter_mut() {
+                let value = std::mem::replace(a, self.synth(ExprKind::Null, node.pos(), Type::Null));
+                *a = self.convert(value, erased_ty);
+            }
+        }
         args.insert(0, receiver);
         Ok(Some(ExprKind::Builtin(builtin, std::mem::take(args))))
     }

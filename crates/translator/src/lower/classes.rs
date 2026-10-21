@@ -37,6 +37,9 @@ impl<'t> Lowering<'t> {
         if symbol.owner == "java.lang.Object" && symbol.name == "getClass" {
             return Ok(Some(self.get_class(node, receiver)?));
         }
+        if matches!((symbol.owner, symbol.name), ("java.util.EnumMap", "getKeyUniverse") | ("java.util.EnumSet", "getUniverse")) {
+            return Ok(Some(self.enum_universe(node)?));
+        }
         if (symbol.owner, symbol.name) == ("java.util.HashMap", "comparableClassFor") {
             let x = self.expr(node.list("arguments").next().expect("comparableClassFor has an argument"))?;
             return Ok(Some(ExprKind::Builtin(Builtin::ComparableClassFor, vec![x])));
@@ -88,6 +91,38 @@ impl<'t> Lowering<'t> {
             values.push(value);
         }
         Ok(Some(ExprKind::Builtin(Builtin::ClassMethod(op), values)))
+    }
+
+    /// The constants of the enum class `cls`, which `EnumMap.getKeyUniverse(cls)` and
+    /// `EnumSet.getUniverse(cls)` get from the JVM: `cls == A.class ? new Enum[] {A.X, ..} : ..
+    /// : null`, over the program's enums.
+    fn enum_universe(&self, node: Node<'t>) -> Result<ExprKind, Error> {
+        let arg = node.list("arguments").next().expect("the universe of a class");
+        let class = self.expr(arg)?;
+        let ExprKind::Var(name) = &class.kind else {
+            return unsupported(arg, "the constants of this class");
+        };
+        let array = self.ty(node, node.java_type())?;
+        let element = array.element();
+        let pos = node.pos();
+        let (mut chain, mut chain_ty) = (ExprKind::Null, Type::Null);
+        for e in (0..self.types.len()).rev().filter(|&t| self.types[t].node.kind() == "ENUM") {
+            let ty = Type::enum_type(&self.types[e].name);
+            let constants = (0..self.enum_constant_names(e).count())
+                .map(|ordinal| {
+                    let constant = self.synth(ExprKind::EnumConstant { class: e, ordinal }, pos, ty);
+                    self.convert(constant, element)
+                })
+                .collect();
+            let literal = self.synth(ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new()), pos, Type::JavaClass);
+            let var = self.synth(ExprKind::Var(name.clone()), pos, Type::JavaClass);
+            let test = self.synth(ExprKind::Binary(BinOp::Eq, Box::new(var), Box::new(literal)), pos, Type::Boolean);
+            let values = self.synth(ExprKind::ArrayLit(constants), pos, array);
+            let rest = self.synth(chain, pos, chain_ty);
+            chain_ty = array;
+            chain = ExprKind::Conditional(Box::new(test), Box::new(values), Box::new(rest));
+        }
+        Ok(chain)
     }
 
     /// `T.class`, a class literal as a value.

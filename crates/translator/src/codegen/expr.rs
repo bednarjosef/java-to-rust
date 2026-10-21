@@ -395,6 +395,11 @@ impl<'a> Gen<'a> {
             // An upcast or a downcast between the program's types, or a string, a box or a
             // primitive becoming an `Object`.
             ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
+            // A cast to an enum of a value that may be null, which an enum value is not.
+            ExprKind::Cast(to @ Type::Enum(_), value) if matches!(value.ty, Type::Class(..)) && self.nullable(value) => {
+                let option = self.class_cast(*to, value).text;
+                Code::atom(format!("{}({option})", self.runtime("null_enum")))
+            }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
             // string or a box.
             ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_)), value)

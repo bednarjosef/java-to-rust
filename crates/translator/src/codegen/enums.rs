@@ -219,6 +219,9 @@ impl<'a> Gen<'a> {
 
     /// The builtins of enums: `ordinal()`, `name()`, `compareTo` and `valueOf`.
     pub(super) fn enum_builtin(&mut self, builtin: Builtin, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
+        if let Some(t) = self.enum_of(&args[0]) {
+            return self.erased_enum_builtin(builtin, args, t);
+        }
         match builtin {
             Builtin::EnumOrdinal => {
                 let obj = self.expr(&args[0]);
@@ -242,6 +245,34 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}::enum_value_of({text})", struct_name(name)))
             }
             _ => unreachable!("not an enum builtin: {builtin:?}"),
+        }
+    }
+
+    /// An enum's builtin on an `Enum` that is an `Object` (of the enum of type `t`): a `match`
+    /// on the enums it can be.
+    fn erased_enum_builtin(&mut self, builtin: Builtin, args: &'a [Expr], t: usize) -> Code {
+        let enums: Vec<usize> =
+            self.enum_variants(t).into_iter().filter(|&c| self.class.types[c].kind == TypeKind::Enum).collect();
+        let ordinal = |g: &mut Self, e: &'a Expr| {
+            let obj = g.object(e);
+            let mut arms: Vec<String> = enums.iter().map(|&c| format!("{}(e) => e as i32", g.variant(t, c))).collect();
+            arms.push(format!("_ => {}(\"java.lang.Enum\")", g.runtime("cast_failed")));
+            format!("(match {obj} {{ {} }})", arms.join(", "))
+        };
+        match builtin {
+            Builtin::EnumOrdinal => Code::atom(ordinal(self, &args[0])),
+            Builtin::EnumCompareTo => {
+                let (a, b) = (ordinal(self, &args[0]), ordinal(self, &args[1]));
+                Code::new(format!("{a} - {b}"), ADD)
+            }
+            Builtin::EnumName => {
+                let obj = self.object(&args[0]);
+                let mut arms: Vec<String> =
+                    enums.iter().map(|&c| format!("{}(e) => e.enum_name()", self.variant(t, c))).collect();
+                arms.push(format!("_ => {}(\"java.lang.Enum\")", self.runtime("cast_failed")));
+                Code::new(format!("match {obj} {{ {} }}", arms.join(", ")), LOWEST)
+            }
+            _ => unreachable!("not a builtin of an erased enum: {builtin:?}"),
         }
     }
 }

@@ -3581,8 +3581,8 @@ fn pattern_variables_are_read_only_where_the_translation_binds_them() {
 }
 
 #[test]
-fn a_cast_of_a_value_that_may_be_null_to_an_enum_is_rejected() {
-    let err = java_to_rust::translate(
+fn a_cast_of_a_value_that_may_be_null_to_an_enum_ends_the_program_on_null() {
+    let rust = java_to_rust::translate(
         "interface S {}
         enum E implements S { X }
         class M {
@@ -3590,11 +3590,8 @@ fn a_cast_of_a_value_that_may_be_null_to_an_enum_is_rejected() {
             public static void main(String[] x) { E e = (E) pick(1); System.out.println(e); }
         }",
     )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("casting a value that may be null to an enum not supported yet"),
-        "{err}"
-    );
+    .unwrap();
+    assert!(rust.contains("java::null_enum("), "{rust}");
 }
 
 const OBJECTS: &str = "

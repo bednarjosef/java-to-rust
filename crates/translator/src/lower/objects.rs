@@ -54,6 +54,7 @@ impl<'t> Lowering<'t> {
             entry: None,
             standard: exceptions::Standard::default(),
             closes: Default::default(),
+            erasure_casts: Default::default(),
             object: None,
             plain_object: None,
             real: Default::default(),

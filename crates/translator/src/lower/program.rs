@@ -108,7 +108,8 @@ fn lower_with<'t>(
     let hierarchy = Hierarchy::new(&types, &methods);
     let raised = lowering.raised_objects(&types, &methods);
     let closes = lowering.closes.take();
-    let class = Class { name: main.to_string(), types, methods, hierarchy, raised, closes };
+    let erasure_casts = lowering.erasure_casts.take();
+    let class = Class { name: main.to_string(), types, methods, hierarchy, raised, closes, erasure_casts };
     enums::check_nulls(&class).map_err(|e| (None, e))?;
     Ok((class, lowering.real.clone(), failed))
 }
