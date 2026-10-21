@@ -439,6 +439,7 @@ impl Standard {
         let decls: Vec<(String, &'static Value)> = template().iter().map(|d| (qualified(d), d)).collect();
         let decl = template_type;
         let mut scanned: HashSet<(String, String, String)> = HashSet::new();
+        let mut scanned_fields: HashSet<(String, String)> = HashSet::new();
         let text = |v: &Value, field: &str| v[field].as_str().unwrap_or_default().to_string();
         loop {
             // The operations of the standard members scanned so far may raise (`addSuppressed`
@@ -519,6 +520,21 @@ impl Standard {
                         && m["name"].as_str() == Some(member.1.as_str())
                         && m["symbol"]["type"].as_str() == Some(member.2.as_str())
                 });
+                if let Some(node) = node {
+                    uses.scan(node);
+                }
+            }
+            // A field's initializer runs with its class's initialization (`ThreadGroup.MAIN`).
+            for field in uses.fields.clone() {
+                if !scanned_fields.insert(field.clone()) {
+                    continue;
+                }
+                let Some(d) = decl(&field.0) else { continue };
+                let node = d["members"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|m| m["kind"] == "VARIABLE" && m["name"].as_str() == Some(field.1.as_str()));
                 if let Some(node) = node {
                     uses.scan(node);
                 }
