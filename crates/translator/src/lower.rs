@@ -295,7 +295,7 @@ impl<'t> Lowering<'t> {
                 e => Stmt::Expr(e),
             },
             // Reachability skipped the branch that the condition guards (`program::never_true`).
-            "IF" if crate::program::never_true(&node.0["condition"]) => match node.get("elseStatement") {
+            "IF" if self.never_true(node) => match node.get("elseStatement") {
                 Some(n) => self.single_stmt(n)?,
                 None => Stmt::Block(Vec::new()),
             },
@@ -407,6 +407,15 @@ impl<'t> Lowering<'t> {
                 self.ty(node, node.java_type())?,
                 Box::new(self.expr(node.child("expression")?)?),
             ),
+            // As with `if`, reachability skipped the branch that the condition guards.
+            "CONDITIONAL_EXPRESSION" if self.never_true(node) => {
+                let value = self.expr(node.child("falseExpression")?)?;
+                // The branch converts to the type of the whole, as `cond ? 1 : 2L` is a `long`.
+                if value.ty == self.ty(node, node.java_type())? {
+                    return Ok(value);
+                }
+                ExprKind::Cast(self.ty(node, node.java_type())?, Box::new(value))
+            }
             "CONDITIONAL_EXPRESSION" => ExprKind::Conditional(
                 Box::new(self.expr(node.child("condition")?)?),
                 Box::new(self.expr(node.child("trueExpression")?)?),

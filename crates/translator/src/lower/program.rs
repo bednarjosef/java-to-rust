@@ -13,6 +13,12 @@ impl<'t> Lowering<'t> {
         let native = member.kind() == "METHOD" && member.has_flag("NATIVE");
         !native && self.reach.is_none_or(|reach| reach.member(class, member.0))
     }
+
+    /// Whether the condition of an `if` or a `?:` is never true, so that reachability skipped the
+    /// branch it guards (`program::never_true`): that branch is not lowered either.
+    pub(super) fn never_true(&self, node: Node<'t>) -> bool {
+        crate::program::never_true(&node.0["condition"], self.reach.is_some_and(|r| r.sequential))
+    }
 }
 
 /// Lowers the reachable part of a program made of these compilation units, whose entry point is

@@ -18,8 +18,8 @@
 
 use super::Program;
 use super::reach::{
-    CLASS_KINDS, MethodKey, OBJECT_METHODS, RUNTIME_CLASSES, Reach, class_name, has_flag, members,
-    never_true, outside, replaced, symbol_type, text, untranslated,
+    CLASS_KINDS, MethodKey, OBJECT_METHODS, RUNTIME_CLASSES, Reach, class_name, else_branch, has_flag,
+    members, never_true, outside, replaced, symbol_type, text, untranslated,
 };
 use crate::ast::runtime_native;
 use serde_json::{Value, json};
@@ -145,6 +145,8 @@ struct Scan<'a> {
     features: BTreeMap<&'static str, String>,
     calls: BTreeSet<String>,
     refs: BTreeSet<String>,
+    /// Whether the program's streams stay sequential (`Reach::sequential`).
+    sequential: bool,
 }
 
 impl Scan<'_> {
@@ -247,6 +249,7 @@ impl Census {
                 features: header.clone(),
                 calls: BTreeSet::new(),
                 refs: BTreeSet::new(),
+                sequential: reach.sequential,
             };
             if kind == "METHOD" && !member["typeParameters"].as_array().is_none_or(Vec::is_empty) {
                 scan.feature("generic methods", member);
@@ -275,9 +278,12 @@ impl Census {
     fn body(&self, node: &Value, scan: &mut Scan<'_>) {
         match node {
             // Reachability skips the branch, and so does the translation.
-            Value::Object(_) if text(node, "kind") == "IF" && never_true(&node["condition"]) => {
+            Value::Object(_)
+                if matches!(text(node, "kind"), "IF" | "CONDITIONAL_EXPRESSION")
+                    && never_true(&node["condition"], scan.sequential) =>
+            {
                 self.body(&node["condition"], scan);
-                self.body(&node["elseStatement"], scan);
+                self.body(else_branch(node), scan);
             }
             Value::Object(fields) => {
                 let kind = text(node, "kind");
