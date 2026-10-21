@@ -65,6 +65,7 @@ impl<'t> Lowering<'t> {
             capture_refs: Default::default(),
             capture_sites: Default::default(),
             member_outers: Vec::new(),
+            library: Vec::new(),
         }
     }
 

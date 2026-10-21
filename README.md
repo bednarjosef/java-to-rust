@@ -188,13 +188,20 @@ A small subset, end to end:
   (`java::cast(b.get().as_integer(), ..)`). `Comparable` as a type (a bound, mostly) is an enum like
   `Object`, over strings, boxes, the program's enums and its classes that implement it, and so is
   `Number` (`T extends Number`, `List<? extends Number>`), over the numeric boxes, whose
-  `intValue()` and the others convert as Java does. A method
+  `intValue()` and the others convert as Java does, and over the program's classes that extend
+  `Number` (the JDK's `AtomicInteger` and `BigInteger`), whose own `intValue()` to
+  `doubleValue()` run; `Number`'s `byteValue()` and `shortValue()` narrow `intValue()`, and a
+  class that overrides them is rejected. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &
   Comparable<? super T>`) erases to the first, and a call of a later bound's method casts to that
-  bound first, as javac's erased code does. An array passed as an array of a type variable
-  (`first(String[])` for `<T> T first(T[])`) is rejected. A generic class or method that only stores, returns and passes on the values of its type
+  bound first, as javac's erased code does. An array of references passed as an array of a type
+  variable (`first(String[])` for `<T> T first(T[])`) makes its type an `Object[]` throughout the
+  program when another array type meets it there (see `docs/object-model.md`); a `String[]` that
+  is an `Object[]` is copied where the runtime's string methods take or give one, and sorting or
+  filling one in place with `java.util.Arrays` runs the JDK's methods for an `Object[]` (rejected
+  without the JDK's sources). A generic class or method that only stores, returns and passes on the values of its type
   variables (a stack, a pair, a node, `<T> T choose(boolean, T, T)`) is a Rust generic instead
   (`struct Stack<T>`, `impl<T: Clone> Stack<T>`, `fn choose<T: Clone>(..)`), and its uses keep the
   substituted types with no casts. One that needs more of them (their text, `equals`, a bound, a

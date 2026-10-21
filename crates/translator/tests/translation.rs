@@ -1649,6 +1649,36 @@ fn library_roots_are_read_only_where_used() {
 }
 
 #[test]
+fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
+    let library = (
+        "lib/lib/Tags.java",
+        "package lib;\npublic class Tags {\n    public static boolean none(String tag) { return tag == \"\"; }\n    public static boolean differ(String a, String b) { return a != b; }\n}\n",
+    );
+    let main = "package main;\nimport lib.Tags;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Tags.none(\"\") + \" \" + Tags.differ(\"x\", a.length > 0 ? a[0] : \"y\"));\n    }\n}\n";
+    let dir = write_sources("library-string-equality", &[("app/main/Main.java", main), library]);
+    let program = java_to_rust::Program {
+        main: "main.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    // Value equality, `Objects.equals`, of the two strings.
+    assert_contains(&rust, &["tag == \"\"", "!(a == b)"]);
+    // The same comparison in the program's own code compares references, which it cannot.
+    let own = "package main;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(a.length > 0 && a[0] == \"x\");\n    }\n}\n";
+    let dir = write_sources("program-string-equality", &[("app/main/Main.java", own)]);
+    let program = java_to_rust::Program {
+        main: "main.Main".into(),
+        sources: vec![dir.join("app")],
+        ..Default::default()
+    };
+    let err = java_to_rust::translate_program(&program).expect_err("== on the program's strings");
+    assert!(err.to_string().contains("== on strings compares references; not supported yet"), "{err}");
+}
+
+#[test]
 fn program_errors_name_their_file() {
     let dir = write_sources(
         "program-errors",
@@ -3899,6 +3929,22 @@ fn equals_takes_the_object_enum() {
 }
 
 #[test]
+fn a_class_extending_number_implements_it_and_byte_value_narrows_int_value() {
+    let class = |extra: &str| {
+        format!(
+            "class M {{ static class Cell extends Number {{ int v = 300;
+                public int intValue() {{ return v; }} public long longValue() {{ return v; }}
+                public float floatValue() {{ return v; }} public double doubleValue() {{ return v; }} {extra} }}
+                public static void main(String[] x) {{ Number n = new Cell(); System.out.println(n.byteValue() + n.intValue()); }} }}"
+        )
+    };
+    let rust = translate(&class(""));
+    assert_contains(&rust, &["(n.int_value() as i8 as i32)"]);
+    let err = java_to_rust::translate(&class("public byte byteValue() { return 1; }")).unwrap_err();
+    assert!(err.to_string().contains("overriding `Number.byteValue` not supported yet"), "{err}");
+}
+
+#[test]
 fn identity_of_object_values_that_may_be_strings_is_rejected() {
     let err = java_to_rust::translate(
         "class M { public static void main(String[] x) { Object a = \"s\"; Object b = \"s\"; System.out.println(a == b); } }",
@@ -4102,6 +4148,66 @@ fn a_type_variables_array_passed_for_an_erased_array_erases_only_its_generic() {
 }
 
 #[test]
+fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at_builtins() {
+    let rust = translate(
+        "public class Main {
+            static <T> T first(T[] a) { return a[0]; }
+            public static void main(String[] args) {
+                String[] words = \"b a\".split(\" \");
+                Integer[] numbers = {1, 2};
+                System.out.println(first(words) + first(numbers) + String.join(\",\", words));
+            }
+        }",
+    );
+    // `String[]` meets `Integer[]` at `T[]`, so it is an `Object[]` of strings; the runtime's
+    // string builtins take and give copies as `String[]`.
+    assert_contains(
+        &rust,
+        &[
+            "String(String),",
+            "fn first(a: &[Object]) -> Object {",
+            "let words: java::Array<Object> = java::from_vec((&java::from_vec(java::split(\"b a\", \" \", 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>());",
+            "java::join(\",\", &java::from_vec((&words.borrow()).iter().map(|s| java::cast(s.as_string(), \"java.lang.String\")).collect::<Vec<_>>()).borrow())",
+        ],
+    );
+}
+
+#[test]
+fn main_arguments_that_are_an_object_array_are_strings_as_objects() {
+    let rust = translate(
+        "public class Main {
+            static <T> int count(T[] a) { return a.length; }
+            public static void main(String[] args) {
+                System.out.println(count(args) + count(new Integer[] {1}));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["String(String),", "main_args().into_iter().map(|s| Object::String(s)).collect::<Vec<_>>()"],
+    );
+}
+
+#[test]
+fn sorting_a_string_array_that_is_an_object_array_in_place_is_rejected() {
+    let err = java_to_rust::translate(
+        "public class Main {
+            static <T> T first(T[] a) { return a[0]; }
+            public static void main(String[] args) {
+                String[] words = {\"b\", \"a\"};
+                java.util.Arrays.sort(words);
+                System.out.println(first(words) + first(new Integer[] {1}));
+            }
+        }",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("a change in place of a `String[]` that is also an `Object[]`"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_string_builder_as_an_object_is_a_shared_variant_compared_by_identity() {
     let rust = translate(
         "public class Main {
@@ -4203,15 +4309,19 @@ fn wildcards_and_raw_types_erase() {
 }
 
 #[test]
-fn an_array_passed_as_an_array_of_a_type_variable_is_rejected() {
-    let err = java_to_rust::translate(
+fn a_string_array_passed_as_an_array_of_a_type_variable_is_an_object_array() {
+    let rust = translate(
         "class M { static <T> T first(T[] xs) { return xs[0]; }
             public static void main(String[] x) { String[] s = {\"a\"}; System.out.println(first(s)); } }",
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("an array passed as an array of a type variable not supported yet"),
-        "{err}"
+    );
+    // The erased `T[]` is an `Object[]`, which the `String[]` meets, so it is one too.
+    assert_contains(
+        &rust,
+        &[
+            "fn first(xs: &[Object]) -> Object {",
+            "let s: Vec<Object> = vec![Object::String(String::from(\"a\"))];",
+            "java::cast(first(&s).as_string(), \"java.lang.String\")",
+        ],
     );
 }
 
