@@ -28,6 +28,11 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
   local of a class that may be null (returned by a method that can return `null`). Java prints
   `3 box 3`; rustc fails with E0505 "cannot move out of `b` because it is borrowed" (the
   `non_null` borrow for `b.v` is still alive when `b` is moved into `show`).
+- `NullableStaticStringAppend.java`: `s += s` and `s += "!"` on a static `String` that may be
+  null (it is assigned an element of a `String[]`). Java prints `aa` and `null!`; rustc fails with
+  E0277 "`Option<String>` doesn't implement `std::fmt::Display`" and E0308: the compound
+  assignment to a static in `codegen/objects.rs` formats the old value as a plain string and
+  stores the result without `Some`. Found by the fuzzer with `--arrays --strings`.
 - `NullOnlyClass.java`: a class that is only used as the type of a null local (`Named n = null;`,
   never constructed). Java prints `true`; rustc fails with E0425 "cannot find type
   `NullOnlyClassNamed` in this scope" because the class is not emitted.

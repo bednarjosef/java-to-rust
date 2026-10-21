@@ -77,7 +77,7 @@ exactly. The Java run is the expected result, so no expectations are written by 
 
 The test programs come from:
 
-- `corpus/features`: 165 small programs, one or more per language feature;
+- `corpus/features`: 167 small programs, one or more per language feature;
 - `corpus/programs`: 32 larger realistic programs (algorithms, data structures, parsers,
   interpreters, simulations);
 - `corpus/projects`: 3 multi-file programs (`imports`, `pruning`, `statics`), each with a source
@@ -86,7 +86,7 @@ The test programs come from:
 - `tools/fuzz`: random programs generated from a seed (`fuzz.py`, with `fuzz_strings.py` for
   strings and builders under `--strings` and `fuzz_arrays.py` for arrays of up to three
   dimensions, their aliases, rows, loops and helper methods under `--arrays`), run and compared by `run.py`, and shrunk to a minimal
-  case by `reduce.py`. A minimal case that still fails is kept in `known-failures/` (10 programs)
+  case by `reduce.py`. A minimal case that still fails is kept in `known-failures/` (11 programs)
   and stays out of the corpus until it is fixed.
 
 `targets/` holds 28 typical Java programs that the translator does not translate yet, run one by
