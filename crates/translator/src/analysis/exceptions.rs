@@ -31,6 +31,7 @@
 mod entry;
 mod failures;
 mod field_inits;
+mod guards;
 
 use super::Facts;
 use super::hierarchy;
@@ -82,6 +83,8 @@ struct Point {
     /// What the point raises, in words, for an error message.
     what: &'static str,
     frames: Vec<Frame>,
+    /// For a call, the values of its arguments when some are known (see `guards`).
+    known: Vec<Vec<Option<guards::Value>>>,
 }
 
 /// What the callers of a method observe: the exceptions under these types, or all of them.
@@ -96,7 +99,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         return Ok(());
     }
     let h = &class.hierarchy;
-    let points: Vec<Vec<Point>> = (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
+    let mut points: Vec<Vec<Point>> =
+        (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
     let matches = |k: &Kind, t: usize| match k {
         Kind::Class(c) => h.is_subtype(*c, t),
         Kind::Runtime(name) => {
@@ -123,25 +127,61 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     };
 
     // What escapes each method.
-    let mut escapes: Vec<BTreeSet<Kind>> = vec![BTreeSet::new(); class.methods.len()];
-    loop {
-        let mut changed = false;
-        for m in 0..class.methods.len() {
-            let mut out = BTreeSet::new();
-            for p in &points[m] {
-                out.extend(raised(p, &escapes).into_iter().filter(|k| !caught(k, &p.frames)));
+    let escapes_of = |points: &[Vec<Point>]| {
+        let mut escapes: Vec<BTreeSet<Kind>> = vec![BTreeSet::new(); class.methods.len()];
+        loop {
+            let mut changed = false;
+            for m in 0..class.methods.len() {
+                let mut out = BTreeSet::new();
+                for p in &points[m] {
+                    out.extend(raised(p, &escapes).into_iter().filter(|k| !caught(k, &p.frames)));
+                }
+                if initializer[m] && !guarded[m] && !out.is_empty() {
+                    out = BTreeSet::from([Kind::Runtime(INITIALIZER_ERROR)]);
+                }
+                if out != escapes[m] {
+                    escapes[m] = out;
+                    changed = true;
+                }
             }
-            if initializer[m] && !guarded[m] && !out.is_empty() {
-                out = BTreeSet::from([Kind::Runtime(INITIALIZER_ERROR)]);
-            }
-            if out != escapes[m] {
-                escapes[m] = out;
-                changed = true;
+            if !changed {
+                return escapes;
             }
         }
-        if !changed {
+    };
+    let mut escapes = escapes_of(&points);
+    // A call that raises nothing for the arguments it passes is no point (see `guards`). Leaving
+    // one out only shrinks what escapes, so the calls are looked at again until none is left.
+    loop {
+        let mut dropped = Vec::new();
+        for (m, ps) in points.iter().enumerate() {
+            for (i, p) in ps.iter().enumerate() {
+                let Raise::Call(callees) = &p.raise else { continue };
+                if p.known.is_empty() || raised(p, &escapes).is_empty() {
+                    continue;
+                }
+                let callee = callees[0];
+                let quiet = p.known.iter().all(|args| {
+                    let run = guards::run(class, callee, args);
+                    points[callee].iter().all(|q| {
+                        // The start of a method that initializes the caller's own class, which is
+                        // initialized or being initialized, does nothing.
+                        let own = matches!(&q.raise, Raise::Call(cs) if q.what == entry::START && cs.iter().all(|&c| class.methods[c].class == class.methods[m].class));
+                        own || run.skips(q.pos, &q.raise) || raised(q, &escapes).iter().all(|k| caught(k, &q.frames))
+                    })
+                });
+                if quiet {
+                    dropped.push((m, i));
+                }
+            }
+        }
+        if dropped.is_empty() {
             break;
         }
+        for &(m, i) in dropped.iter().rev() {
+            points[m].remove(i);
+        }
+        escapes = escapes_of(&points);
     }
 
     // What the callers of each method observe.
@@ -323,14 +363,12 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         }
     }
 
-    // A static initializer's exception reaches the program as `ExceptionInInitializerError`, an
-    // `Error` that a `try` here is not known to match, so one that observes it is not translated.
+    // A static initializer's exception reaches the program as `ExceptionInInitializerError`,
+    // which ends it here: one that a `catch` (of `Error`, `LinkageError`, `Throwable`) or a
+    // `finally` around a use of the class would see is not translated.
+    let initializer_error = Kind::Runtime(INITIALIZER_ERROR);
     for (m, method) in class.methods.iter().enumerate() {
-        if initializer[m]
-            && !guarded[m]
-            && !escapes[m].is_empty()
-            && (seen[m].all || !seen[m].types.is_empty())
-        {
+        if initializer[m] && !guarded[m] && !escapes[m].is_empty() && observed(&initializer_error, &seen[m]) {
             return error(method.pos, "a static initializer that throws inside a `try` not supported yet");
         }
     }
@@ -514,7 +552,13 @@ fn stmt_points(
     {
         let raise =
             Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: selector.id };
-        out.push(Point { raise, pos: selector.pos, what: "this switch", frames: frames.clone() });
+        out.push(Point {
+            raise,
+            pos: selector.pos,
+            what: "this switch",
+            frames: frames.clone(),
+            known: Vec::new(),
+        });
     }
     match s {
         Stmt::If { cond, then, otherwise } => {
@@ -558,13 +602,20 @@ fn stmt_points(
             if matches!(thrown.kind, ExprKind::Null) || maybe_null(facts, m, thrown) {
                 let raise =
                     Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: thrown.id };
-                out.push(Point { raise, pos: e.pos, what: "this throw", frames: frames.clone() });
+                out.push(Point {
+                    raise,
+                    pos: e.pos,
+                    what: "this throw",
+                    frames: frames.clone(),
+                    known: Vec::new(),
+                });
             } else if let Some(t) = class.class_index(thrown.ty) {
                 out.push(Point {
                     raise: Raise::Throw(t),
                     pos: e.pos,
                     what: "this throw",
                     frames: frames.clone(),
+                    known: Vec::new(),
                 });
             }
         }
@@ -704,13 +755,20 @@ fn expr_points(
     safe: &[String],
     out: &mut Vec<Point>,
 ) {
-    let mut push = |raise: Raise, pos: Pos, what: &'static str| {
-        out.push(Point { raise, pos, what, frames: frames.to_vec() });
-    };
     let callees = class.callees(x);
     if !callees.is_empty() {
-        push(Raise::Call(callees), x.pos, "this call");
+        let known = match callees[..] {
+            [only] => Some(guards::known_args(class, x))
+                .filter(|k| k.first().is_some_and(|args| class.methods[only].params.len() == args.len()))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let raise = Raise::Call(callees);
+        out.push(Point { raise, pos: x.pos, what: "this call", frames: frames.to_vec(), known });
     }
+    let mut push = |raise: Raise, pos: Pos, what: &'static str| {
+        out.push(Point { raise, pos, what, frames: frames.to_vec(), known: Vec::new() });
+    };
     for init in static_inits(class, facts, m, x) {
         push(Raise::Call(vec![init]), x.pos, "this static use");
     }
