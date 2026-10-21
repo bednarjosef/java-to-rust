@@ -62,7 +62,7 @@ struct Scan<'a> {
     /// Whether the code being scanned is an instance method or constructor that runs on objects of
     /// the class: one of the class or of a superclass.
     runs_on: bool,
-    /// Cleared by anything that writes a field outside the constructors, or delegates with `this(...)`.
+    /// Cleared by anything that writes a field outside the constructors.
     immutable: bool,
     /// `this` nodes that are a field object, a method receiver or a constructor's write target.
     allowed: HashSet<ExprId>,
@@ -85,7 +85,6 @@ impl Scan<'_> {
             ExprKind::MethodCall { receiver, .. } if matches!(receiver.kind, ExprKind::This) => {
                 self.allowed.insert(receiver.id);
             }
-            ExprKind::ThisCall { .. } if self.ctor => self.immutable = false,
             ExprKind::Assign { target: Place::Field { object, .. }, .. }
             | ExprKind::IncDec { target: Place::Field { object, .. }, .. } => self.write(object),
             _ => {}

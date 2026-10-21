@@ -43,6 +43,7 @@ use switch::{Frame, Kind};
 mod array_writes;
 mod arrays;
 mod java_arrays;
+mod java_objects;
 mod modules;
 mod natives;
 mod objects;

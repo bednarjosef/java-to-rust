@@ -730,7 +730,6 @@ fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String
     let kind = text(decl, "kind");
     match kind {
         "ANNOTATION_TYPE" => _ = features.insert("annotation types"),
-        "RECORD" => _ = features.insert("records"),
         _ => {}
     }
     // The program's own interfaces translate, generic ones erased, and so does `Comparable`; one

@@ -253,7 +253,7 @@ impl<'a> Gen<'a> {
     }
 
     /// `a == b` for two primitives of `kind`, for `equals`: `Double.equals` compares bits.
-    fn equal(&mut self, kind: Type, a: Code, b: Code) -> Code {
+    pub(super) fn equal(&mut self, kind: Type, a: Code, b: Code) -> Code {
         match kind {
             Type::Double | Type::Float => {
                 let a = self.convert(a, kind, Type::Double);

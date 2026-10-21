@@ -626,6 +626,8 @@ impl<'a> Gen<'a> {
             Builtin::Builder(op) => self.builder_call(op, args),
             Builtin::Format => self.format_builtin(args),
             Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args),
+            Builtin::ObjectsEquals => self.objects_equals(args),
+            Builtin::ObjectsHashCode => self.objects_hash_code(args),
         }
     }
 }

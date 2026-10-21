@@ -52,7 +52,7 @@ impl<'t> Lowering<'t> {
 
     /// Declares a class, named `outer.Name` inside `outer` (a class or a package).
     pub(super) fn declare_type(&mut self, node: Node<'t>, outer: Option<&str>) -> Result<(), Error> {
-        if !matches!(node.kind(), "CLASS" | "ENUM" | "INTERFACE") {
+        if !matches!(node.kind(), "CLASS" | "ENUM" | "INTERFACE" | "RECORD") {
             return unsupported(node, &kind_words(node.kind()));
         }
         let simple = node.str("simpleName");
@@ -72,7 +72,7 @@ impl<'t> Lowering<'t> {
                     sig: member.symbol().map_or("", |s| s.ty),
                 }),
                 "VARIABLE" | "EMPTY_STATEMENT" => {}
-                "ENUM" | "INTERFACE" => self.declare_type(member, Some(&name))?,
+                "ENUM" | "INTERFACE" | "RECORD" => self.declare_type(member, Some(&name))?,
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
                 "CLASS" => return unsupported(member, "inner classes"),
                 "BLOCK" if Self::is_static_block(member) => {}
@@ -164,7 +164,7 @@ impl<'t> Lowering<'t> {
             // Java evaluates an object in front of a static field and ignores it, even null;
             // one without effects is simply dropped.
             if let Some(r) = receiver
-                && r.symbol().is_none_or(|s| !matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM"))
+                && r.symbol().is_none_or(|s| !matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD"))
                 && has_effects(&self.expr(r)?)
             {
                 return unsupported(node, "static fields through an expression with effects");

@@ -26,6 +26,7 @@ mod charsets;
 mod constant_bodies;
 mod initializers;
 mod java_arrays;
+mod java_objects;
 mod natives;
 mod primitives;
 mod program;
@@ -524,6 +525,13 @@ impl<'t> Lowering<'t> {
                 {
                     return error(node.pos(), "== on strings compares references; not supported yet");
                 }
+                // An array's text is its type and identity hash, such as `[I@1b6d3586`.
+                if op == BinOp::Add
+                    && (left.ty == Type::String || right.ty == Type::String)
+                    && (matches!(left.ty, Type::Array(_)) || matches!(right.ty, Type::Array(_)))
+                {
+                    return unsupported(node, "the text of an array");
+                }
                 let (left, right) = if matches!(op, BinOp::Eq | BinOp::Ne) {
                     self.convert_operands(left, right)
                 } else {
@@ -681,6 +689,7 @@ impl<'t> Lowering<'t> {
                 let char_arg = args.first().is_some_and(|a| a.ty == Type::Char);
                 self.character_method(node, name, symbol.ty, char_arg)?
             }
+            ("java.util.Objects", name) => return self.objects_call(node, name, args),
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);

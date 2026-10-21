@@ -640,6 +640,12 @@ pub enum Builtin {
     Unsigned(UnsignedOp, Type),
     /// A code point method of `Character` (`toChars`, `charCount` and the like), see `CodePointOp`.
     CodePoint(CodePointOp),
+    /// `Objects.equals(a, b)` on two strings, boxes of one kind, or objects; for objects a third
+    /// argument is the call `a.equals(b)` that runs when `a` is not null.
+    ObjectsEquals,
+    /// `Objects.hashCode(o)` on a string, a box, an enum or an object; for an object a second
+    /// argument is the call `o.hashCode()` that runs when `o` is not null.
+    ObjectsHashCode,
 }
 
 /// The methods of the boxed classes. The kind of the boxes comes from the types of the operands
