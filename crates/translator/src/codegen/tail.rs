@@ -64,7 +64,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The value `text` as the result of the current method: `Ok(text)` in a method that throws.
-    fn ok(&self, text: String) -> String {
+    pub(super) fn ok(&self, text: String) -> String {
         if self.throwing { format!("Ok({text})") } else { text }
     }
 

@@ -3069,14 +3069,49 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     );
     assert!(err.contains("a `return` of a constructor through a `finally` not supported yet"), "{err}");
     let err = reject(
-        "class P {
-            P(int x) { if (x < 0) throw new IllegalArgumentException(\"negative\"); }
+        "class Bad extends RuntimeException {
+            Bad(int x) { super(\"bad\"); if (x < 0) throw new IllegalStateException(\"negative\"); }
         }
         class A { public static void main(String[] a) {
-            try { new P(-1); } catch (IllegalArgumentException e) { System.out.println(\"caught\"); }
+            try { throw new Bad(-1); } catch (IllegalStateException e) { System.out.println(\"caught\"); }
         } }",
     );
-    assert!(err.contains("constructors that throw an exception that is caught not supported yet"), "{err}");
+    assert!(err.contains("a constructor of an exception that throws not supported yet"), "{err}");
+}
+
+#[test]
+fn a_constructor_that_throws_returns_a_result_that_new_passes_on() {
+    let rust = translate(
+        "class A {
+            static class Range {
+                final int low, high;
+                Range(int low, int high) {
+                    if (low > high) throw new IllegalArgumentException(\"empty\");
+                    this.low = low;
+                    this.high = high;
+                }
+                Range(int high) { this(0, high); }
+            }
+            public static void main(String[] args) {
+                try {
+                    Range r = new Range(args.length - 1);
+                    System.out.println(r.high - r.low);
+                } catch (IllegalArgumentException e) {
+                    System.out.println(e.getMessage());
+                }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn new_i32_i32(low: i32, high: i32) -> Result<ARange, Throwable> {",
+            "return Err(Throwable::IllegalArgumentException(",
+            // A constructor that only delegates returns the other's `Result`.
+            "fn new_i32(high: i32) -> Result<ARange, Throwable> {\n        ARange::new_i32_i32(0, high)\n    }",
+            "java::or_break!(ARange::new_i32(",
+        ],
+    );
 }
 
 const PATTERNS: &str = "

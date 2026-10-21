@@ -22,7 +22,7 @@
 
 use super::Facts;
 use super::hierarchy;
-use super::nullness::maybe_null;
+use super::nullness::{maybe_null, non_null_names};
 use crate::ast::*;
 use crate::lower::standard_subclass;
 use std::collections::{BTreeSet, HashSet};
@@ -201,11 +201,15 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         if method.is_main {
             return error(method.pos, "a call of `main` that is caught not supported yet");
         }
-        if method.is_ctor {
-            return error(
-                method.pos,
-                "constructors that throw an exception that is caught not supported yet",
-            );
+        // An exception object is built where it is thrown, and an enum constant where the enum
+        // is initialized, outside any `try` of the program.
+        let throwable = class.type_index("java.lang.Throwable");
+        let decl = &class.types[method.class];
+        if method.is_ctor && throwable.is_some_and(|t| class.hierarchy.is_subtype(method.class, t)) {
+            return error(method.pos, "a constructor of an exception that throws not supported yet");
+        }
+        if method.is_ctor && decl.enum_constants.is_some() {
+            return error(method.pos, "a constructor of an enum that throws not supported yet");
         }
         if method.name == "toString" && method.params.is_empty() {
             return error(method.pos, "a toString that throws an exception that is caught not supported yet");
@@ -217,7 +221,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     let escapes_ref = &escapes;
     let initializer_raises = |e: &Expr, m: usize| {
         let mut out = Vec::new();
-        expr_points(class, facts, m, e, &[], &mut out);
+        expr_points(class, facts, m, e, &[], &[], &mut out);
         out.iter()
             .any(|p| raised(p, escapes_ref).iter().any(|k| matches!(k, Kind::Class(_))))
             .then_some(e.pos)
@@ -275,7 +279,7 @@ fn method_points(class: &Class, facts: &Facts, m: usize) -> Vec<Point> {
     let mut out = Vec::new();
     let mut frames = Vec::new();
     for s in &method.body {
-        stmt_points(class, facts, m, s, &mut frames, &mut out);
+        stmt_points(class, facts, m, s, &mut frames, &[], &mut out);
     }
     // A constructor runs the initializers of its class's fields, unless it starts with `this(..)`.
     if method.is_ctor
@@ -283,24 +287,66 @@ fn method_points(class: &Class, facts: &Facts, m: usize) -> Vec<Point> {
     {
         for f in &class.types[method.class].fields {
             if let Some(init) = &f.init {
-                expr_points(class, facts, m, init, &[], &mut out);
+                expr_points(class, facts, m, init, &[], &[], &mut out);
             }
         }
     }
     out
 }
 
+/// The names that `cond` proves not null when it is `when`, added to `safe`, leaving out those
+/// that `assigned` says the code they hold for may assign.
+fn narrowed(safe: &[String], cond: &Expr, when: bool, assigned: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut out = safe.to_vec();
+    out.extend(non_null_names(cond, when).into_iter().filter(|v| !assigned(v)).map(str::to_string));
+    out
+}
+
+/// The points of statement `s`, with the `try`s around it (`frames`) and the variables known not
+/// to be null there (`safe`: tested with `!= null` by an enclosing condition, and not assigned
+/// in the code that the test guards).
 fn stmt_points(
     class: &Class,
     facts: &Facts,
     m: usize,
     s: &Stmt,
     frames: &mut Vec<Frame>,
+    safe: &[String],
     out: &mut Vec<Point>,
 ) {
     match s {
+        Stmt::If { cond, then, otherwise } => {
+            expr_points(class, facts, m, cond, frames, safe, out);
+            let then_safe = narrowed(safe, cond, true, |v| assigns_stmt(then, v));
+            stmt_points(class, facts, m, then, frames, &then_safe, out);
+            if let Some(o) = otherwise {
+                let else_safe = narrowed(safe, cond, false, |v| assigns_stmt(o, v));
+                stmt_points(class, facts, m, o, frames, &else_safe, out);
+            }
+        }
+        Stmt::While { cond, body } => {
+            expr_points(class, facts, m, cond, frames, safe, out);
+            let body_safe = narrowed(safe, cond, true, |v| assigns_stmt(body, v));
+            stmt_points(class, facts, m, body, frames, &body_safe, out);
+        }
+        Stmt::For { init, cond, update, body } => {
+            for i in init {
+                stmt_points(class, facts, m, i, frames, safe, out);
+            }
+            let body_safe = match cond {
+                Some(c) => {
+                    expr_points(class, facts, m, c, frames, safe, out);
+                    narrowed(safe, c, true, |v| assigns_stmt(body, v))
+                }
+                None => safe.to_vec(),
+            };
+            for u in update {
+                expr_points(class, facts, m, u, frames, safe, out);
+            }
+            stmt_points(class, facts, m, body, frames, &body_safe, out);
+        }
         Stmt::Throw(e) => {
-            expr_points(class, facts, m, e, frames, out);
+            expr_points(class, facts, m, e, frames, safe, out);
             // The value is converted to `Throwable`; what it is comes from below the conversion.
             let thrown = match &e.kind {
                 ExprKind::Cast(_, inner) => inner,
@@ -322,7 +368,7 @@ fn stmt_points(
                 finally: finally.is_some(),
             });
             for b in body {
-                stmt_points(class, facts, m, b, frames, out);
+                stmt_points(class, facts, m, b, frames, safe, out);
             }
             frames.pop();
             // What a `catch` clause throws leaves the `try`, through its `finally`.
@@ -333,19 +379,19 @@ fn stmt_points(
             });
             for catch in catches {
                 for b in &catch.body {
-                    stmt_points(class, facts, m, b, frames, out);
+                    stmt_points(class, facts, m, b, frames, safe, out);
                 }
             }
             frames.pop();
             for b in finally.iter().flatten() {
-                stmt_points(class, facts, m, b, frames, out);
+                stmt_points(class, facts, m, b, frames, safe, out);
             }
         }
         _ => {
             // The expressions of this statement, then its nested statements.
-            visit_own(s, &mut |e| expr_points(class, facts, m, e, frames, out));
+            visit_own(s, &mut |e| expr_points(class, facts, m, e, frames, safe, out));
             for nested in children(s) {
-                stmt_points(class, facts, m, nested, frames, out);
+                stmt_points(class, facts, m, nested, frames, safe, out);
             }
         }
     }
@@ -390,7 +436,15 @@ fn children(s: &Stmt) -> Vec<&Stmt> {
 
 /// The points inside an expression: its calls, the `toString`s it runs, and the failures of the
 /// runtime it may raise, in the order Java evaluates them.
-fn expr_points(class: &Class, facts: &Facts, m: usize, x: &Expr, frames: &[Frame], out: &mut Vec<Point>) {
+fn expr_points(
+    class: &Class,
+    facts: &Facts,
+    m: usize,
+    x: &Expr,
+    frames: &[Frame],
+    safe: &[String],
+    out: &mut Vec<Point>,
+) {
     let mut push = |raise: Raise, pos: Pos, what: &'static str| {
         out.push(Point { raise, pos, what, frames: frames.to_vec() });
     };
@@ -404,19 +458,37 @@ fn expr_points(class: &Class, facts: &Facts, m: usize, x: &Expr, frames: &[Frame
             push(Raise::Call(shown), object.pos, "this toString");
         }
     }
-    for (name, what, checked) in runtime_failures(class, facts, m, x) {
+    for (name, what, checked) in runtime_failures(class, facts, m, x, safe) {
         push(Raise::Runtime { class: name, checked, id: x.id }, x.pos, what);
     }
     if let ExprKind::Switch { selector, cases } = &x.kind {
         // The statements of a switch expression's cases may `throw` and hold `try`s.
-        expr_points(class, facts, m, selector, frames, out);
+        expr_points(class, facts, m, selector, frames, safe, out);
         let mut nested = frames.to_vec();
         for case in cases {
             for s in &case.body {
-                stmt_points(class, facts, m, s, &mut nested, out);
+                stmt_points(class, facts, m, s, &mut nested, safe, out);
             }
         }
         return;
+    }
+    // The right of `&&` and `||`, and the arms of `?:`, see what their condition proves.
+    match &x.kind {
+        ExprKind::Binary(op @ (BinOp::And | BinOp::Or), l, r) => {
+            expr_points(class, facts, m, l, frames, safe, out);
+            let right_safe = narrowed(safe, l, *op == BinOp::And, |v| assigns(r, v));
+            expr_points(class, facts, m, r, frames, &right_safe, out);
+            return;
+        }
+        ExprKind::Conditional(c, a, b) => {
+            expr_points(class, facts, m, c, frames, safe, out);
+            let a_safe = narrowed(safe, c, true, |v| assigns(a, v));
+            expr_points(class, facts, m, a, frames, &a_safe, out);
+            let b_safe = narrowed(safe, c, false, |v| assigns(b, v));
+            expr_points(class, facts, m, b, frames, &b_safe, out);
+            return;
+        }
+        _ => {}
     }
     let mut children = Vec::new();
     match &x.kind {
@@ -444,7 +516,7 @@ fn expr_points(class: &Class, facts: &Facts, m: usize, x: &Expr, frames: &[Frame
         _ => {}
     }
     for c in children {
-        expr_points(class, facts, m, c, frames, out);
+        expr_points(class, facts, m, c, frames, safe, out);
     }
 }
 
@@ -564,10 +636,14 @@ fn runtime_failures(
     facts: &Facts,
     m: usize,
     x: &Expr,
+    safe: &[String],
 ) -> Vec<(&'static str, &'static str, bool)> {
     const NPE: &str = "java.lang.NullPointerException";
     const INDEX: &str = "java.lang.ArrayIndexOutOfBoundsException";
-    let null = |e: &Expr| (m != usize::MAX && maybe_null(facts, m, e)) || matches!(e.kind, ExprKind::Null);
+    let tested = |e: &Expr| matches!(&e.kind, ExprKind::Var(v) if safe.contains(v));
+    let null = |e: &Expr| {
+        (m != usize::MAX && !tested(e) && maybe_null(facts, m, e)) || matches!(e.kind, ExprKind::Null)
+    };
     let mut out = Vec::new();
     match &x.kind {
         ExprKind::Binary(BinOp::Div | BinOp::Rem, l, r)

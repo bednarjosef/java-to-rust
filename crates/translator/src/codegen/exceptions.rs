@@ -476,6 +476,7 @@ impl<'a> Gen<'a> {
             return;
         }
         match (text, self.ctor_result) {
+            (_, Some(result)) if self.throwing => self.line(&format!("return Ok({result});")),
             (_, Some(result)) => self.line(&format!("return {result};")),
             (None, None) if self.throwing => self.line("return Ok(());"),
             (None, None) => self.line("return;"),

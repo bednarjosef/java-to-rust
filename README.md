@@ -179,8 +179,9 @@ array index out of bounds, `charAt` or `substring` out of range, a malformed num
 standard exception Java throws, with Java's message; elsewhere it ends the program as before.
 Rejected for now, by name: try-with-resources, catching or letting a `finally` see a null
 dereference, a negative array size, a failed cast or a failure of the library other than these,
-a constructor or a `toString` that throws something a caller catches, throwing a value that may
-be null, and a `yield` or a constructor's `return` through a `finally`. The design is in [docs/exceptions.md](docs/exceptions.md).
+a `toString`, a field initializer or a constructor of an exception or an enum that throws
+something a caller catches, throwing a value that may be null, and a `yield` or a constructor's
+`return` through a `finally`. A constructor that throws returns a `Result`, as a method does. The design is in [docs/exceptions.md](docs/exceptions.md).
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of

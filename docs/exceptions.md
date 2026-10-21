@@ -411,7 +411,8 @@ Each step is mergeable on its own, with tests green and the corpus extended.
 5. **Failures of the runtime as values**. Corpus: `features/RuntimeExceptionsCaught.java`,
    `features/ArrayFailuresCaught.java`, `programs/RpnCalculatorErrors.java`.
 6. **Causes, `getCause`, `printStackTrace`, constructors that throw**. Corpus:
-   `features/ExceptionCauses.java`, `features/ThrowingConstructors.java`.
+   `features/ExceptionCauses.java`, `features/ThrowingConstructors.java`,
+   `features/ThrowingConstructorChains.java`, `features/ThrowingConstructorsRegistered.java`.
 7. **try-with-resources**, once interfaces translate.
 
 The survey's "exceptions" feature stops counting `try` and `throw` once step 4 is in; a class
@@ -537,3 +538,26 @@ Decisions that changed during the implementation, step by step.
 - **The array analyses and `try`**: the liveness analysis does not look into a `try` (every
   array it mentions is live throughout it, as for a `switch`), so no array is moved inside one,
   where a failure may lead to a `catch` or a `finally` that reads it.
+
+### Step 6: causes and constructors that throw
+
+- **Causes and `printStackTrace` came with step 3**: `Throwable` in `Standard.java` keeps its
+  cause, `getCause` returns it, a cause-only constructor takes the cause's `toString` as its
+  message, and `printStackTrace` prints the chain with `Caused by: ` lines and no stack frames
+  (the corpus compares standard output and the exit code, not standard error). This step adds
+  the corpus program `features/ExceptionCauses.java`.
+- **A constructor that throws** something a caller catches returns `Result<T, Throwable>`, as a
+  method does: `new` passes the failure on with `?` (or `java::or_break!`), so does a `this(...)`
+  or a `super(...)` that throws, and the object is returned as `Ok(obj)`. A constructor that only
+  delegates to one that throws returns the other's `Result` as it is. A partly built object is
+  dropped, which Java's program could not see either.
+- **Null tests guard the null checks**: a variable tested with `!= null` by an enclosing `if`,
+  loop condition, `&&`, `||` or `?:`, and not assigned in the code the test guards, cannot be
+  null there, so a `catch` around it does not see a `NullPointerException` from it
+  (`next != null && next.value == value`). The nullness facts themselves hold for the whole
+  method.
+- **Still rejected**: a constructor of an exception class that throws (the exception's object is
+  built where it is thrown, and by the `From` impl of step 5, neither of which can fail), a
+  constructor of an enum that throws (its constants are built where the enum is initialized,
+  outside any `try`), a `toString` that throws something a caller catches (`Display::fmt` cannot
+  carry the exception), and a field initializer that throws.
