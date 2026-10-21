@@ -53,6 +53,7 @@ mod array_writes;
 mod arrays;
 mod java_arrays;
 mod java_objects;
+mod main_args;
 mod modules;
 mod natives;
 mod objects;

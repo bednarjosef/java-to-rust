@@ -1354,6 +1354,29 @@ fn a_last_use_moves_instead_of_cloning() {
 }
 
 #[test]
+fn main_args_are_the_command_line_arguments() {
+    let plain = translate(
+        "class A {
+            public static void main(String[] args) { System.out.println(args.length); }
+        }",
+    );
+    assert_contains(&plain, &["let args: Vec<String> = java::main_args();"]);
+    let shared = translate(
+        "class A {
+            static String[] kept;
+            public static void main(String[] args) { kept = args; System.out.println(kept.length); }
+        }",
+    );
+    assert_contains(&shared, &["let args: java::Array<String> = java::from_vec(java::main_args());"]);
+    let nullable = translate(
+        "class A {
+            public static void main(String[] args) { args[0] = null; System.out.println(args.length); }
+        }",
+    );
+    assert_contains(&nullable, &["java::main_args().into_iter().map(Some).collect::<Vec<_>>()"]);
+}
+
+#[test]
 fn varargs_that_are_only_read_are_borrowed_slices() {
     let rust = translate(
         "class A {
@@ -1883,6 +1906,35 @@ fn an_enum_field_that_a_constructor_reads_before_setting_it_is_rejected() {
     )
     .expect_err("a field read before it is set is null");
     assert!(error.to_string().contains("null enums not supported yet"), "{error}");
+}
+
+#[test]
+fn an_enum_element_that_may_be_null_is_an_option_and_used_as_a_value_is_rejected() {
+    let rust = translate(
+        "public class A {
+            enum Kind { TOP, DEAD }
+            public static void main(String[] args) {
+                Kind[] kinds = new Kind[2];
+                kinds[1] = Kind.DEAD;
+                System.out.println(kinds[0] + \" \" + (kinds[1] == Kind.DEAD));
+            }
+        }",
+    );
+    assert_contains(&rust, &["vec![None; 2]", "kinds[1] == Some(AKind::Dead)"]);
+    for use_ in ["kinds[0].ordinal()", "switch (kinds[0]) { default -> 0; }", "take(kinds[0])"] {
+        let error = java_to_rust::translate(&format!(
+            "public class A {{
+                enum Kind {{ TOP, DEAD }}
+                static int take(Kind k) {{ return 1; }}
+                public static void main(String[] args) {{
+                    Kind[] kinds = new Kind[2];
+                    System.out.println({use_});
+                }}
+            }}"
+        ))
+        .expect_err("an element that may be null used as an enum value");
+        assert!(error.to_string().contains("null enums not supported yet"), "{use_}: {error}");
+    }
 }
 
 #[test]
@@ -4001,6 +4053,32 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
             "java::cast(held.as_int_array(), \"[I\")",
             "(Object::IntArray(a), Object::IntArray(b)) => Rc::ptr_eq(a, b),",
             "Object::IntArray(o) => java::identity_hash(o),",
+        ],
+    );
+}
+
+#[test]
+fn a_type_variables_array_passed_for_an_erased_array_erases_only_its_generic() {
+    let rust = translate(
+        "public class Main {
+            static class Fixed<E> {
+                final E[] items;
+                Fixed(E[] items) { this.items = items; }
+            }
+            @SafeVarargs
+            static <T> Fixed<T> fixed(T... a) { return new Fixed<>(a); }
+            static <T> T either(boolean first, T a, T b) { return first ? a : b; }
+            public static void main(String[] args) {
+                System.out.println(fixed(1, 2).items.length + either(true, \"x\", \"y\"));
+            }
+        }",
+    );
+    // `fixed`'s `T[]` is `Fixed`'s erased `Object[]`, so `fixed` is erased; `either` stays generic.
+    assert_contains(
+        &rust,
+        &[
+            "fn fixed(a: java::Array<Object>) -> Rc<MainFixed> {",
+            "fn either<T: Clone>(first: bool, a: T, b: T) -> T {",
         ],
     );
 }
