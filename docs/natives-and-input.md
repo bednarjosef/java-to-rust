@@ -748,9 +748,16 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   `CharSequence`s and `Comparable`s that no constructor shows. `ByteBuffer.equals` reached
   `MemorySessionImpl.checkValidStateRaw` through `ScopedMemoryAccess`, and with it the
   `VarHandle` of `MemorySessionImpl`'s initializer, though only foreign memory creates sessions.
-  Test: the project `corpus/projects/uncreated`. `ReaderLines` goes from 263 to 254 classes,
-  `ScannerGrades` from 1,129 to 1,035 classes and 64 to 60 natives, `StreamPipeline` from 343 to
-  334 classes. `ReaderLines` then stops at `LazyConstantImpl`, the `LazyConstant` in which
+  Test: the project `corpus/projects/uncreated`. It takes 9 classes off `ReaderLines` and 94
+  classes and 4 natives off `ScannerGrades`. With it, the anonymous classes and the
+  `serialPersistentFields` above, `ReaderLines` (`BufferedReader` over `System.in`) reaches 254
+  classes and 24 natives (6 in the runtime) instead of 382 and 37, `ScannerGrades` 1,027 classes
+  and 60 natives (20) instead of 1,258 and 73, and `StreamPipeline` 263 classes and 4 natives.
+  The 18 natives of `ReaderLines` that the runtime lacks are all `Unsafe`: the field offsets,
+  atomics, volatile accesses and `park`/`unpark` of `ConcurrentHashMap` (which `Properties` and
+  `CoderResult`'s cache are) and `ThreadLocalRandom`, and the plain gets and puts of
+  `ArraysSupport.vectorizedMismatch`. `ReaderLines` then stops at `LazyConstantImpl`, the
+  `LazyConstant` in which
   `Charset` keeps its default: `Unsafe.objectFieldOffset` and the acquire and release accesses of
   its `constant` field, which wait for the threads design's symbolic field offsets.
 
