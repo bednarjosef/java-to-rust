@@ -65,37 +65,6 @@ pub(super) fn check(class: &Class) -> Result<(), Error> {
     Ok(())
 }
 
-/// Rejects a cast to an enum of a value that may be null: an enum is null only in a local that is
-/// assigned `null` (see `lower::enum_nulls`), and a cast would give one a `None` anywhere.
-pub(super) fn check_enum_casts(class: &Class, facts: &super::Facts) -> Result<(), Error> {
-    for (m, method) in class.methods.iter().enumerate() {
-        let mut found = None;
-        for s in &method.body {
-            visit_stmt(
-                s,
-                &mut |e| {
-                    visit_expr(e, &mut |x| {
-                        if let ExprKind::Cast(Type::Enum(_), value) = &x.kind
-                            && matches!(value.ty, Type::Class(..))
-                            && super::maybe_null(facts, m, value)
-                        {
-                            found.get_or_insert(x.pos);
-                        }
-                    })
-                },
-                &mut |_| {},
-            );
-        }
-        if let Some(pos) = found {
-            return Err(Error {
-                pos,
-                message: "casting a value that may be null to an enum not supported yet".to_string(),
-            });
-        }
-    }
-    Ok(())
-}
-
 /// Rejects what the `Object` enum cannot hold or compare: an array as an `Object`, and `==` or
 /// `!=` between two values of `Object` that may both be strings or boxes, whose identity Java
 /// compares and the translation does not keep (a string or a box in an `Object` is a plain value).
@@ -195,8 +164,17 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
 /// takes: whether the identities compare equal or not, the result is what `equals` says when the
 /// values are strings or boxes.
 fn shortcut(e: &Expr) -> Option<ExprId> {
-    let ExprKind::Binary(BinOp::Or, l, r) = &e.kind else { return None };
-    let ExprKind::Binary(BinOp::Eq, a, b) = &l.kind else { return None };
+    // Its negation too, `a != b && .. !a.equals(b) ..`, as `EnumMap.equals` writes it.
+    let (ExprKind::Binary(BinOp::Or, l, r) | ExprKind::Binary(BinOp::And, l, r)) = &e.kind else {
+        return None;
+    };
+    let negated = matches!(e.kind, ExprKind::Binary(BinOp::And, ..));
+    let (ExprKind::Binary(BinOp::Eq, a, b) | ExprKind::Binary(BinOp::Ne, a, b)) = &l.kind else {
+        return None;
+    };
+    if negated != matches!(l.kind, ExprKind::Binary(BinOp::Ne, ..)) {
+        return None;
+    }
     let (ExprKind::Var(a), ExprKind::Var(b)) = (&a.kind, &b.kind) else { return None };
     let mut equals = false;
     visit_expr(r, &mut |x| {

@@ -157,7 +157,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
 /// The fields whose nullness is analyzed: strings, arrays and objects. A boxed field is always an
 /// `Option`.
 fn may_be_unset(ty: Type) -> bool {
-    matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(..))
+    matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(..) | Type::JavaClass)
 }
 
 /// Whether every constructor of class `t` sets the field `name` to a value that is not null
@@ -216,7 +216,11 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
             (!narrowed(a, true) && maybe_null(facts, m, a))
                 || (!narrowed(b, false) && maybe_null(facts, m, b))
         }
+        // A cast to an enum gives an enum value (see `java::null_enum`).
+        ExprKind::Cast(Type::Enum(_), _) => false,
         ExprKind::Cast(_, value) => maybe_null(facts, m, value),
+        ExprKind::Builtin(Builtin::ClassMethod(op), _) => op.nullable(),
+        ExprKind::Builtin(Builtin::ComparableClassFor, _) => true,
         // A boxed field is always an `Option`: its default is `null`, and so is an assignment of
         // `null` to it.
         _ if matches!(e.ty, Type::Boxed(_))

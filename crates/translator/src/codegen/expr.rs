@@ -318,6 +318,11 @@ impl<'a> Gen<'a> {
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(..)) => {
                 self.identity(*op, l, r)
             }
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
+                if l.ty == Type::JavaClass || r.ty == Type::JavaClass =>
+            {
+                self.class_identity(*op, l, r)
+            }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if l.ty == Type::StringBuilder => {
                 self.builder_identity(*op, l, r)
             }
@@ -402,6 +407,13 @@ impl<'a> Gen<'a> {
                 self.expr(value)
             }
             ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
+            // A cast to an enum of a value that may be null, which an enum value is not.
+            ExprKind::Cast(to @ Type::Enum(_), value)
+                if matches!(value.ty, Type::Class(..)) && self.nullable(value) =>
+            {
+                let option = self.class_cast(*to, value).text;
+                Code::atom(format!("{}({option})", self.runtime("null_enum")))
+            }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
             // string, a box or an array.
             ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_) | Type::Array(_)), value)
@@ -625,6 +637,10 @@ impl<'a> Gen<'a> {
             Builtin::NullCheck => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),
+            Builtin::GetClass => self.get_class(&args[0]),
+            Builtin::ClassLiteral(ty) => Code::atom(self.type_class(ty)),
+            Builtin::ClassMethod(op) => self.class_method(op, args),
+            Builtin::ComparableClassFor => self.comparable_class_for(&args[0]),
             Builtin::ClassLiteralName { class, simple } => {
                 Code::atom(format!("String::from({})", rust_string(&self.java_class_name(class, simple))))
             }
