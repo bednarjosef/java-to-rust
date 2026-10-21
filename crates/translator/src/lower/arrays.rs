@@ -30,15 +30,24 @@ impl<'t> Lowering<'t> {
     }
 
     /// `for (T x : a) body`.
-    pub(super) fn for_each(&self, node: Node<'t>) -> Result<Stmt, Error> {
+    pub(super) fn for_each(&self, node: Node<'t>, label: Option<&str>) -> Result<Stmt, Error> {
         let variable = node.child("variable")?;
         let ty = self.ty(variable, variable.symbol().map_or("", |s| s.ty))?;
         let array = self.expr(node.child("expression")?)?;
+        // Over an object, the loop calls its iterator (see `foreach`).
+        if matches!(array.ty, Type::Class(..)) {
+            return self.for_each_iterable(node, array, label);
+        }
         if !matches!(array.ty, Type::Array(_)) {
             return unsupported(node, "for-each loops over anything but arrays");
         }
         let body = self.single_stmt(node.child("statement")?)?;
-        Ok(Stmt::ForEach { ty, name: variable.str("name").to_string(), array, body: Box::new(body) })
+        let looped =
+            Stmt::ForEach { ty, name: variable.str("name").to_string(), array, body: Box::new(body) };
+        Ok(match label {
+            Some(label) => Stmt::Labeled { label: label.to_string(), body: Box::new(looped) },
+            None => looped,
+        })
     }
 
     /// `Arrays.toString`, `fill`, `sort` and `copyOf`, for the element types the runtime covers.

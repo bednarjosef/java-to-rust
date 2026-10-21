@@ -7,6 +7,7 @@ mod code_point;
 mod enum_nulls;
 mod enums;
 mod exceptions;
+mod foreach;
 mod functional;
 mod generic_args;
 mod generics;
@@ -63,6 +64,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
         lowering.functional = functional::Functional::select(decls.iter().map(|d| d.0), &declared);
         lowering.declare_functional()?;
+        lowering.declare_plain_object(decls.iter().map(|d| d.0))?;
         lowering.name_nested();
         lowering.plan_captures().map_err(|(_, e)| e)?;
         lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
@@ -204,6 +206,8 @@ struct Lowering<'t> {
     closes: std::cell::RefCell<Vec<(usize, Pos)>>,
     /// Where `Object` goes, in a program that uses it (see `object`).
     object: Option<object::ObjectIndexes>,
+    /// The class of the objects that `new Object()` creates, when the code has one (see `object`).
+    plain_object: Option<usize>,
     /// The generic classes and methods that are Rust generics (see `real_generics`).
     real: real_generics::Real,
     /// Those of `real` that lowering found cannot be: the program is lowered again without them.
@@ -453,7 +457,7 @@ impl<'t> Lowering<'t> {
             },
             "BREAK" | "CONTINUE" => switch::jump(node),
             "YIELD" => Stmt::Yield(self.expr(node.child("value")?)?),
-            "ENHANCED_FOR_LOOP" => self.for_each(node)?,
+            "ENHANCED_FOR_LOOP" => self.for_each(node, None)?,
             "SWITCH" => self.switch_stmt(node)?,
             "TRY" => self.try_stmt(node)?,
             "THROW" => self.throw(node)?,
@@ -777,6 +781,11 @@ impl<'t> Lowering<'t> {
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);
+                // A default method of a JDK interface that lowering provides is not declared.
+                if resolved.is_none() && self.functional.has(symbol.owner) {
+                    let what = format!("the default method {}.{}", symbol.owner, symbol.name);
+                    return unsupported(node, &what);
+                }
                 let args = self.convert_generic_args(node, resolved, args)?;
                 if symbol.is_static {
                     return Ok(ExprKind::Call { name, args, resolved });

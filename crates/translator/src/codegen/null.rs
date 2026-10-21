@@ -93,7 +93,7 @@ impl<'a> Gen<'a> {
     /// for an object.
     fn option_source(&self, name: &str, ty: Type) -> String {
         let rust = self.local(name);
-        if matches!(ty, Type::Class(..) | Type::StringBuilder | Type::Enum(_)) {
+        if matches!(ty, Type::Class(..) | Type::StringBuilder | Type::Enum(_) | Type::Array(_)) {
             return format!("{rust}.as_ref()");
         }
         // An `Option<i32>` is `Copy` and matches as it is; a faithful box is `as_deref`'d.

@@ -395,6 +395,15 @@ impl Check<'_, '_> {
             | ExprKind::SuperInit { args, resolved } => self.args(args, *resolved),
             ExprKind::MethodCall { receiver, args, resolved, .. } => {
                 self.store(receiver, Type::Void);
+                // A method that a real generic class inherits (`Object`'s `equals`, say) sees its
+                // object as a value of the method's class.
+                if let (Type::Class(name, _), Some(r)) = (receiver.ty, resolved)
+                    && let Some(t) = self.lowering.type_index(name)
+                    && self.lowering.is_real(Owner::Class(t))
+                    && self.methods.get(*r).is_some_and(|m| m.class != t)
+                {
+                    self.lowering.fail(Owner::Class(t));
+                }
                 self.args(args, *resolved);
             }
             ExprKind::Unary(_, x) | ExprKind::Length(x) => self.store(x, Type::Void),

@@ -45,6 +45,9 @@ impl<'a> Gen<'a> {
                     let address = self.receiver_address(&args[0], c);
                     return call(self, "address_hash", vec![address]);
                 }
+                if let Some(t) = self.enum_of(&args[0]) {
+                    return self.enum_identity_hash(t, &args[0]);
+                }
                 let object = match &args[0].kind {
                     ExprKind::Var(name) => format!("&{}", self.local(name)),
                     // `this` is already a reference to the `Rc`.
@@ -136,6 +139,25 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// `System.identityHashCode(e)` of a value of the enum of `t` (`Object`, an interface, a
+    /// class with subclasses): the identity hash of the object in its variant, which is what
+    /// `Object.hashCode` gives where no class overrides it; the hash of the value for a string or
+    /// a box, which the translation holds by value; 0 for null.
+    fn enum_identity_hash(&mut self, t: usize, e: &'a Expr) -> Code {
+        let nullable = self.nullable(e);
+        let value = if nullable { format!("{}.as_ref()", self.object_place(e)) } else { self.object_ref(e) };
+        let mut arms = Vec::new();
+        for c in self.enum_variants(t) {
+            let variant = self.variant(t, c);
+            let pattern = if nullable { format!("Some({variant}(o))") } else { format!("{variant}(o)") };
+            arms.push(format!("{pattern} => {},", self.value_hash(c, "o")));
+        }
+        if nullable || arms.is_empty() {
+            arms.push("_ => 0,".to_string());
+        }
+        Code::atom(format!("match {value} {{ {} }}", arms.join(" ")))
+    }
+
     /// A `Math` or `StrictMath` function. `ty` is the type of the call, which picks the overload;
     /// `id` is the call's, for the checked form of a function that may throw.
     fn math(&mut self, name: &str, strict: bool, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
@@ -201,7 +223,7 @@ impl<'a> Gen<'a> {
         };
         let (src_plain, dest_plain) = (plain_name(self, src), plain_name(self, dest));
         if src_plain.is_none() && dest_plain.is_none() {
-            let (s, d) = (self.shared_handle(src), self.shared_handle(dest));
+            let (s, d) = (self.handle(src), self.handle(dest));
             let ints: Vec<String> =
                 [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
             let f = self.runtime("arraycopy");
@@ -240,14 +262,6 @@ impl<'a> Gen<'a> {
         Code::atom(call)
     }
 
-    /// A shared array as the `&Array` the runtime takes.
-    fn shared_handle(&mut self, e: &'a Expr) -> String {
-        match &e.kind {
-            ExprKind::Var(name) => format!("&{}", self.local(name)),
-            _ => format!("&{}", self.expr(e).at(UNARY)),
-        }
-    }
-
     /// An array as a `&[T]` for reading: a plain array borrowed, a shared one through its cell.
     pub(super) fn slice_of(&mut self, e: &'a Expr) -> String {
         match &e.kind {
@@ -256,8 +270,12 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// A shared array as the receiver of `borrow()`: a variable as it is, without a clone.
+    /// A shared array as the receiver of `borrow()`: a variable as it is, without a clone. One
+    /// that may be null throws `NullPointerException` there.
     pub(super) fn array_receiver(&mut self, e: &'a Expr) -> String {
+        if self.nullable(e) {
+            return self.handle(e);
+        }
         match &e.kind {
             ExprKind::Var(name) => self.local(name),
             _ => self.expr(e).receiver(),

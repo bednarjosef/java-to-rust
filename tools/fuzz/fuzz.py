@@ -6,12 +6,13 @@ small bound, and recursion counts down from a depth of at most 4. A program thro
 purpose, through the static field `zero0`, which is never assigned. Each statement is one
 line and a block opens on a line ending in `{`, so the reducer can delete whole statements.
 
-    python3 fuzz.py SEED [SIZE] [--strings] [--objects]     # prints the program for SEED
+    python3 fuzz.py SEED [SIZE] [--strings] [--arrays] [--objects]   # prints the program for SEED
 """
 
 import random
 import sys
 
+from fuzz_arrays import ARRAY_NESTING, ARRAY_STATEMENTS, ArrayGen
 from fuzz_objects import OBJECT_NESTING, OBJECT_STATEMENTS, ObjectGen
 from fuzz_strings import STRING_NESTING, STRING_STATEMENTS, StringGen
 
@@ -73,27 +74,35 @@ STATEMENTS = {
 NESTING = {'if', 'loop', 'switch'}
 
 
-def generate(seed, size=30, strings=False, objects=False):
+def generate(seed, size=30, strings=False, arrays=False, objects=False):
     """Returns the source of `public class Prog` for `seed`, with `size` statements in main.
 
     With `strings`, the programs also use String, StringBuilder, String.format and Arrays
-    (see fuzz_strings.py); with `objects`, class trees, interfaces, `Object` values and generic
-    containers (see fuzz_objects.py). Without either, the programs are the same as before those
-    options existed.
+    (see fuzz_strings.py); with `arrays`, arrays of every depth and their aliases, moves, rows
+    and loops (see fuzz_arrays.py); with `objects`, class trees, interfaces, `Object` values and
+    generic containers (see fuzz_objects.py). Without any, the programs are the same as before
+    those options existed.
     """
-    return Gen(seed, size, strings, objects).program()
+    if arrays and objects:
+        raise ValueError('--arrays and --objects do not combine yet')
+    return Gen(seed, size, strings, arrays, objects).program()
 
 
-class Gen(ObjectGen, StringGen):
-    def __init__(self, seed, size, strings=False, objects=False):
+class Gen(ObjectGen, StringGen, ArrayGen):
+    def __init__(self, seed, size, strings=False, arrays=False, objects=False):
         self.r = random.Random(seed)
         self.size = size
         self.strings = strings
+        self.arrays = arrays
         self.objects = objects
         self.kinds = {**STATEMENTS, **STRING_STATEMENTS} if strings else STATEMENTS
+        if arrays:
+            self.kinds = {**self.kinds, **ARRAY_STATEMENTS}
         if objects:
             self.kinds = {**self.kinds, **OBJECT_STATEMENTS}
-        self.nesting = NESTING | STRING_NESTING | OBJECT_NESTING
+        self.nesting = NESTING | STRING_NESTING | ARRAY_NESTING | OBJECT_NESTING
+        self.walked = set()  # arrays that a loop walks: no statement may assign them
+        self.array_methods = []
         self.count = 0
         self.out = []
         self.indent = 0
@@ -106,6 +115,8 @@ class Gen(ObjectGen, StringGen):
         self.self_ok = False  # the method being generated may call itself
         self.self_sites = 0
         self.throw_at = self.r.randrange(size) if self.r.random() < 0.15 else -1
+        if arrays and self.throw_at < 0 and self.r.random() < 0.2:
+            self.throw_at = self.r.randrange(size)
 
     # Helpers.
 
@@ -126,7 +137,8 @@ class Gen(ObjectGen, StringGen):
         return [v for f in self.frames for v in f] + self.statics
 
     def visible(self, typ, writable=False):
-        return [n for n, t, w in self.all_vars() if t == typ and (w or not writable)]
+        return [n for n, t, w in self.all_vars()
+                if t == typ and (w or not writable) and not (writable and n in self.walked)]
 
     def literal(self, t):
         return self.pick(LITERALS[t])
@@ -155,7 +167,8 @@ class Gen(ObjectGen, StringGen):
                 else:
                     out.append(f'Math.floorMod({self.expr("int", d)}, 5)')
             elif t.endswith('[]'):
-                out.append(self.pick(self.visible(t)))
+                names = self.visible(t)
+                out.append(self.pick(names) if names else f'new {t} {{{self.literal(t[:-2])}}}')
             else:
                 out.append(self.source(t, d))
         return ', '.join(out)
@@ -177,6 +190,10 @@ class Gen(ObjectGen, StringGen):
     def num_leaf(self, t, d=0):
         if self.strings and d > 0 and t in NUMERIC and self.chance(0.15):
             return self.string_num(t, d)
+        if self.arrays and d > 0 and self.chance(0.15):
+            text = self.array_num(t, d)
+            if text:
+                return text
         if self.objects and d > 0 and t == 'int' and self.chance(0.2):
             text = self.object_num(t, d)
             if text:
@@ -347,11 +364,15 @@ class Gen(ObjectGen, StringGen):
         return f'{target} {op} {rhs}'
 
     def element(self, t, d):
-        a = self.pick(self.visible(t + '[]'))
+        names = self.visible(t + '[]')
+        if not names:
+            return None
+        a = self.pick(names)
         return f'{a}[Math.floorMod({self.expr("int", d - 1)}, {a}.length)]'
 
     def length(self):
-        return f'{self.pick(self.visible(self.pick(ARRAY_ELEMS) + "[]"))}.length'
+        names = self.visible(self.pick(ARRAY_ELEMS) + '[]')
+        return f'{self.pick(names)}.length' if names else None
 
     def call(self, t, d):
         options = self.callables(t)
@@ -391,8 +412,9 @@ class Gen(ObjectGen, StringGen):
     def st_array(self, depth):
         t = self.pick(ARRAY_ELEMS)
         at = t + '[]'
-        if self.chance(0.5):
-            name = self.pick(self.visible(at, True))
+        names = self.visible(at, True)
+        if self.chance(0.5) and names:
+            name = self.pick(names)
             self.emit(f'{name} = {self.array_init(t)};')
         else:
             name = self.name('a')
@@ -402,8 +424,9 @@ class Gen(ObjectGen, StringGen):
     def array_init(self, t):
         """A new array of `t`, a fresh literal, or an existing array of that type (an alias)."""
         r = self.r.random()
-        if r < 0.3:
-            return self.pick(self.visible(t + '[]'))
+        names = self.visible(t + '[]')
+        if r < 0.3 and names:
+            return self.pick(names)
         if r < 0.6:
             return f'new {t}[{self.r.randint(1, 6)}]'
         elems = [self.source(t, 2) for _ in range(self.r.randint(1, 4))]
@@ -430,7 +453,10 @@ class Gen(ObjectGen, StringGen):
 
     def st_store(self, depth):
         t = self.pick(ARRAY_ELEMS)
-        a = self.pick(self.visible(t + '[]'))
+        names = self.visible(t + '[]')
+        if not names:
+            return
+        a = self.pick(names)
         target = f'{a}[Math.floorMod({self.expr("int", 2)}, {a}.length)]'
         if t != 'boolean' and self.chance(0.2):
             self.emit(f'{target}++;')
@@ -565,7 +591,9 @@ class Gen(ObjectGen, StringGen):
         self.indent = 2
         self.frames, self.loops, self.method, self.ret, self.self_ok = [[]], [], None, None, False
         for i in range(self.size):
-            if i == self.throw_at:
+            if i == self.throw_at and self.arrays:
+                self.trap()
+            elif i == self.throw_at:
                 # Exit code 1 with the output so far; the zero is never assigned.
                 if self.objects and self.chance(0.5) and self.object_throw():
                     pass
@@ -577,7 +605,9 @@ class Gen(ObjectGen, StringGen):
         for n, t, _ in self.frames[0] + self.statics:
             if self.objects and self.dump_object(n, t):
                 continue
-            if t.endswith('[]'):
+            if self.arrays and '[]' in t:
+                self.dump_any(n, t)
+            elif t.endswith('[]'):
                 self.dump_array(n)
             else:
                 self.emit(f'System.out.println("{n}=" + {n});')
@@ -588,6 +618,8 @@ class Gen(ObjectGen, StringGen):
     def program(self):
         if self.strings:
             self.string_header()
+        elif self.arrays:
+            self.out += ['import java.util.Arrays;', '']
         self.out.append('public class Prog {')
         self.indent = 1
         self.emit('static int zero0 = 0;')
@@ -597,7 +629,12 @@ class Gen(ObjectGen, StringGen):
             self.statics.append((name, t, True))
         if self.strings:
             self.string_statics()
-        for t in ARRAY_ELEMS:
+        # Half the array programs have no array statics: a static array is a way to reach any
+        # shared array, which keeps the translator from lending shared arrays to calls.
+        array_statics = not self.arrays or self.chance(0.5)
+        if self.arrays and array_statics:
+            self.array_statics()
+        for t in ARRAY_ELEMS if array_statics else []:
             name = 'a' + t.capitalize()
             if self.chance(0.5):
                 init = f'new {t}[{self.r.randint(1, 6)}]'
@@ -605,6 +642,8 @@ class Gen(ObjectGen, StringGen):
                 init = '{' + ', '.join(self.literal(t) for _ in range(self.r.randint(1, 4))) + '}'
             self.emit(f'static {t}[] {name} = {init};')
             self.statics.append((name, t + '[]', True))
+        if self.arrays:
+            self.helpers()
         if self.objects:
             self.object_decls()
         for i in range(self.r.randint(0, 4)):
@@ -619,4 +658,4 @@ if __name__ == '__main__':
     seed = int(args[0])
     size = int(args[1]) if len(args) > 1 else 30
     sys.stdout.write(generate(seed, size, strings='--strings' in sys.argv,
-                              objects='--objects' in sys.argv))
+                              arrays='--arrays' in sys.argv, objects='--objects' in sys.argv))
