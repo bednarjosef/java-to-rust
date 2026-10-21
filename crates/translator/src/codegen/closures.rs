@@ -1,6 +1,7 @@
 //! Functional interfaces that are closure types (`analysis::closures`): the interface is a type
-//! alias, `type Op = Rc<dyn Fn(i32, i32) -> i32>;`, a lambda or method reference converted to it
-//! is a closure, and a call of the interface's method calls the closure.
+//! alias, `type Op = Rc<dyn Fn(i32, i32) -> i32>;` (`Arc<dyn Fn(i32, i32) -> i32 + Send + Sync>`
+//! when threads may share its values), a lambda or method reference converted to it is a closure,
+//! and a call of the interface's method calls the closure.
 //!
 //! The closure's body is the lambda class's method, written where the lambda is created with the
 //! method's own names and facts, and its captures are bound before it: the fields that held them
@@ -82,7 +83,12 @@ impl<'a> Gen<'a> {
                 self.need(Need::Enum(above));
                 self.closure_name(above)
             }
-            None => format!("Rc<dyn Fn({}){ret}>", params.join(", ")),
+            None => {
+                // A closure that threads may share is one that any thread may call.
+                let (handle, bounds) =
+                    if self.facts.thread_shared.contains(&t) { ("Arc", " + Send + Sync") } else { ("Rc", "") };
+                format!("{handle}<dyn Fn({}){ret}{bounds}>", params.join(", "))
+            }
         };
         self.gap();
         self.line(&format!("{}type {name} = {ty};", self.vis()));
@@ -268,8 +274,9 @@ impl<'a> Gen<'a> {
         self.restore(saved);
         let moving = if moving { "move " } else { "" };
         let body = self.braced(&text);
+        let handle = if self.facts.thread_shared.contains(&t) { "Arc" } else { "Rc" };
         let closure =
-            format!("Rc::new({moving}|{}|{ret} {body}) as {}", params.join(", "), self.closure_name(t));
+            format!("{handle}::new({moving}|{}|{ret} {body}) as {}", params.join(", "), self.closure_name(t));
         if prelude.is_empty() {
             return Code::new(closure, AS);
         }
