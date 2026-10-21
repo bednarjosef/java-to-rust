@@ -84,6 +84,9 @@ impl<'t> Lowering<'t> {
             }
             ("java.lang.System", "currentTimeMillis") => Native::CurrentTimeMillis,
             ("java.lang.System", "nanoTime") => Native::NanoTime,
+            // The seed generator of `SecureRandom` is the operating system's; the JDK's provider
+            // stack behind it is not translated (`UNTRANSLATED`).
+            ("java.security.SecureRandom", "getSeed") if symbol.ty == "(int)byte[]" => Native::SecureSeed,
             ("java.lang.System", "lineSeparator") => Native::LineSeparator,
             ("java.lang.System", "getenv") => {
                 return error(

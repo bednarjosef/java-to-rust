@@ -197,6 +197,9 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Blocker", "begin", "()boolean"),
     ("jdk.internal.misc.Blocker", "begin", "(boolean)boolean"),
     ("jdk.internal.misc.Blocker", "end", "(boolean)void"),
+    // A translated program has no native library to load (`lower/libraries.rs`).
+    ("jdk.internal.loader.BootLoader", "loadLibrary", "(java.lang.String)void"),
+    ("java.security.SecureRandom", "getSeed", "(int)byte[]"),
 ];
 
 /// A method, by class, name and javac's signature.

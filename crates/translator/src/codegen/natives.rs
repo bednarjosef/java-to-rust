@@ -234,6 +234,17 @@ impl<'a> Gen<'a> {
                 let (off, len) = (self.value(&args[2], Type::Int).text, self.value(&args[3], Type::Int).text);
                 call(self, "crc32_update_bytes", vec![crc, bytes, off, len])
             }
+            Native::NoPendingReferences => Code::atom("false"),
+            Native::SecureSeed => {
+                let num_bytes = self.value(&args[0], Type::Int).text;
+                let call = Code::atom(format!("{}({num_bytes})", self.runtime("try_secure_seed")));
+                if self.facts.raising.contains(&id) {
+                    let checked = format!("{}.map_err({})", call.text, self.runtime("Failure::exception"));
+                    Code::atom(self.passed_on(Code::atom(checked)))
+                } else {
+                    Code::atom(format!("{}({})", self.runtime("or_throw"), call.text))
+                }
+            }
         }
     }
 
