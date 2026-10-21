@@ -81,23 +81,53 @@ fn a_method_reference_is_a_closure_of_the_call_it_makes() {
 }
 
 #[test]
-fn a_lambda_parameter_is_cast_from_the_erased_descriptor() {
+fn a_generic_interfaces_closure_converts_its_arguments_and_its_result() {
     let rust = translate(
-        "import java.util.function.Function;
+        "import java.util.function.Consumer;
+        import java.util.function.Function;
         class A {
             public static void main(String[] args) {
                 Function<Integer, Integer> square = x -> x * x;
                 System.out.println(square.apply(7));
+                Consumer<String> show = s -> System.out.println(s.length());
+                show.accept(\"abc\");
             }
         }",
     );
     assert_contains(
         &rust,
         &[
-            "fn apply_integer(&self, x: i32) -> i32 {",
-            "fn apply(&self, t: Object) -> Object {",
-            "Object::Integer(self.apply_integer(java::cast(t.as_integer(), \"java.lang.Integer\")))",
-            "square.apply(Object::Integer(7))",
+            "type Function = Rc<dyn Fn(Object) -> Object>;",
+            "let square = Rc::new(|t: Object| -> Object { let x: i32 = java::cast(t.as_integer(), \"java.lang.Integer\"); Object::Integer(x.wrapping_mul(x)) }) as Function;",
+            "square(Object::Integer(7))",
+            "let show = Rc::new(|t: Object| {\n        let s: &str = &java::cast(t.as_string(), \"java.lang.String\");\n        java::println!(\"{}\", java::string_length(s));\n    }) as Consumer;",
+        ],
+    );
+    assert_lacks(&rust, &["fn apply_integer", "struct FunctionLambdaInMain"]);
+}
+
+#[test]
+fn a_lambda_that_returns_early_behind_a_bridge_is_a_closure_called_at_once() {
+    let rust = translate(
+        "import java.util.function.Function;
+        class A {
+            public static void main(String[] args) {
+                Function<Integer, Integer> f = x -> {
+                    if (x > 4) {
+                        return x - 4;
+                    }
+                    return 4 - x;
+                };
+                System.out.println(f.apply(1));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "Object::Integer((|x: i32| -> i32 {",
+            "return x.wrapping_sub(4);",
+            "})(java::cast(t.as_integer(), \"java.lang.Integer\")))",
         ],
     );
 }

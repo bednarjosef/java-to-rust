@@ -261,6 +261,8 @@ impl<'a> Gen<'a> {
             ExprKind::MethodCall { receiver, args, resolved: Some(index), is_super, .. } => {
                 if self.closure_type(receiver.ty).is_some() {
                     self.closure_call(receiver, *index, args).text
+                } else if self.inlined(receiver, *index) {
+                    self.inline_call(*index, args).text
                 } else if self.class.methods[*index].is_static {
                     self.owned_call(*index, args)
                 } else if !*is_super && let Some(t) = self.enum_of(receiver) {

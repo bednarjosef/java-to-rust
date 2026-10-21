@@ -8,8 +8,10 @@
 //! `==`, no `instanceof`. The interface declares one abstract method and no default method, and
 //! extends no other interface, nor does any interface extend it; each lambda class implements it
 //! alone, and its method reads its object only through the fields that hold its captures. A
-//! generic interface stays an enum for now. Everything else keeps the object model's form, an
-//! enum with a variant per lambda class.
+//! generic interface's closure takes and returns the erased types: the lambda's method, which
+//! javac typed with the substituted ones, is behind a bridge, and the closure's body is the
+//! bridge's conversions around it. Everything else keeps the object model's form, an enum with a
+//! variant per lambda class.
 
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
@@ -23,7 +25,6 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
         if decl.kind != TypeKind::Interface
             || decl.name == OBJECT
             || decl.name == COMPARABLE
-            || !decl.type_params.is_empty()
             || decl.implements.iter().any(|&i| Some(i) != object)
         {
             continue;
@@ -132,6 +133,14 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
                 ruled_out.insert(t);
                 continue;
             };
+            // A bridge converts the arguments for the lambda's own method, whose body is the
+            // lambda's.
+            let m = match bridged_call(&class.methods[m]) {
+                Some(ExprKind::MethodCall { resolved: Some(sub), .. }) if class.methods[*sub].class == c => {
+                    *sub
+                }
+                _ => m,
+            };
             if class.methods[m].body.iter().any(uses_this) {
                 ruled_out.insert(t);
             }
@@ -139,6 +148,28 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
     }
     candidates.retain(|t| !ruled_out.contains(t));
     candidates
+}
+
+/// The call of a bridge `m` to the method it converts the arguments and the result for: `m`'s one
+/// statement is the call of a method of its own class on `this`, or returns it, converted.
+pub fn bridged_call(m: &Method) -> Option<&ExprKind> {
+    let value = match &m.body[..] {
+        [Stmt::Expr(e)] | [Stmt::Return(Some(e), _)] => e,
+        _ => return None,
+    };
+    let mut value = value;
+    // Only the conversions of the result are around the call.
+    loop {
+        match &value.kind {
+            ExprKind::Cast(_, inner) => value = inner,
+            call @ ExprKind::MethodCall { receiver, resolved: Some(_), .. }
+                if matches!(receiver.kind, ExprKind::This) =>
+            {
+                return Some(call);
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// Whether the statement uses `this` other than to read one of its fields.

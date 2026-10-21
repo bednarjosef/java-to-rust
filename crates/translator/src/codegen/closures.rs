@@ -12,6 +12,7 @@
 //! ```
 
 use super::*;
+use crate::analysis::closures;
 
 /// The method-level state of the generator, set aside while a closure's body is written inside
 /// another method.
@@ -29,6 +30,7 @@ struct Saved {
     locals: HashMap<String, String>,
     boxed: HashMap<String, Type>,
     field_locals: HashMap<String, String>,
+    bound_params: Option<usize>,
     ctor_result: Option<&'static str>,
     attempts: Vec<exceptions::Attempt>,
     finallies: Vec<exceptions::Finally>,
@@ -124,12 +126,29 @@ impl<'a> Gen<'a> {
             }
         }
         let fields = captured_fields(&self.class.methods[ctor]);
+        // The lambda's own method behind a bridge that converts the arguments and the result.
+        let bridged = match closures::bridged_call(&self.class.methods[m]) {
+            Some(ExprKind::MethodCall { resolved: Some(sub), args, .. })
+                if self.class.methods[*sub].class == c =>
+            {
+                Some((*sub, args))
+            }
+            _ => None,
+        };
+        let converts_result = !matches!(&self.class.methods[m].body[..],
+            [Stmt::Expr(e) | Stmt::Return(Some(e), _)] if matches!(e.kind, ExprKind::MethodCall { .. }));
         let saved = self.set_aside();
+        // The names of the captures differ from every local of the lambda class's methods.
+        let mut used: HashSet<String> = HashSet::from(["java".to_string()]);
+        for (i, method) in self.class.methods.iter().enumerate() {
+            if method.class == c && !method.is_ctor {
+                self.enter_method(i);
+                used.extend(self.locals.values().cloned());
+            }
+        }
         self.enter_method(m);
         self.this_struct = c;
         self.this_form = ThisForm::SelfRef;
-        let mut used: HashSet<String> = self.locals.values().cloned().collect();
-        used.insert("java".into());
         let mut prelude = Vec::new();
         let mut moving = false;
         for (field, value) in fields.iter().zip(&values) {
@@ -146,27 +165,116 @@ impl<'a> Gen<'a> {
         let ret = self.ret_text(m);
         self.indent = saved.indent + 1;
         let start = self.out.len();
-        let body = &self.class.methods[m].body;
+        // The parameters of the lambda's method are bound to the converted arguments first.
+        // Then its body is the closure's when the result needs no conversion, and the bridge's
+        // conversion is around its value when it is one `return`; `inline_call` writes it in
+        // the bridge's body otherwise.
+        let mut body_method = m;
+        if let Some((sub, args)) = bridged {
+            let one_return = matches!(&self.class.methods[sub].body[..], [Stmt::Return(Some(_), _)]);
+            let direct = !converts_result && self.ret_text(sub) == ret;
+            if direct || (one_return && !self.facts.throwing.contains(&sub)) {
+                let values = self.call_args(sub, args);
+                self.enter_method(sub);
+                self.bind_params(sub, &values);
+                if direct {
+                    body_method = sub;
+                } else {
+                    self.enter_method(m);
+                    self.bound_params = Some(sub);
+                }
+            }
+        }
+        let body = &self.class.methods[body_method].body;
         self.stmts(body, true);
+        self.bound_params = None;
         if self.throwing && self.class.methods[m].ret == Type::Void && exceptions::completes_all(body) {
             self.line("Ok(())");
         }
         self.resolve_annotations(start);
         let text = std::mem::take(&mut self.out);
         self.restore(saved);
-        let pad = "    ".repeat(self.indent);
         let moving = if moving { "move " } else { "" };
-        // A body of one line stays on the line of the closure.
-        let body = match text.trim_end().lines().collect::<Vec<_>>()[..] {
-            [line] => format!("{{ {} }}", line.trim()),
-            _ => format!("{{\n{text}{pad}}}"),
-        };
+        let body = self.braced(&text);
         let closure =
             format!("Rc::new({moving}|{}|{ret} {body}) as {}", params.join(", "), self.closure_name(t));
         if prelude.is_empty() {
             return Code::new(closure, AS);
         }
         Code::atom(format!("{{ {} {closure} }}", prelude.join(" ")))
+    }
+
+    /// Whether `this.m(..)` (`receiver`, method `index`) is, in a closure's body, a call of the
+    /// lambda's own method by the bridge that converts its result.
+    pub(super) fn inlined(&self, receiver: &Expr, index: usize) -> bool {
+        let c = self.class.methods[index].class;
+        matches!(receiver.kind, ExprKind::This)
+            && matches!(self.class.types[c].origin, Origin::Lambda { .. })
+            && self.class.types[c].implements.iter().any(|i| self.facts.closure_types.contains(i))
+    }
+
+    /// The lambda's own method `index` called by its bridge in a closure's body, written in
+    /// place: `{ let x: i32 = <arg>; x * x }`, the parameters bound to the arguments, or, when the
+    /// method returns early or throws, a closure called at once.
+    pub(super) fn inline_call(&mut self, index: usize, args: &'a [Expr]) -> Code {
+        let bound = self.bound_params == Some(index);
+        let values = if bound { Vec::new() } else { self.call_args(index, args) };
+        let field_locals = self.field_locals.clone();
+        let (this_struct, this_form) = (self.this_struct, self.this_form);
+        let saved = self.set_aside();
+        self.enter_method(index);
+        self.this_struct = this_struct;
+        self.this_form = this_form;
+        self.field_locals = field_locals;
+        let params = self.typed_params(index, true);
+        let ret = self.ret_text(index);
+        let body = &self.class.methods[index].body;
+        let block = !self.throwing && only_tail_return(body);
+        self.indent = saved.indent + 1;
+        let start = self.out.len();
+        if block && !bound {
+            self.bind_params(index, &values);
+        }
+        self.stmts(body, true);
+        if self.throwing && self.class.methods[index].ret == Type::Void && exceptions::completes_all(body) {
+            self.line("Ok(())");
+        }
+        self.resolve_annotations(start);
+        let text = std::mem::take(&mut self.out);
+        self.restore(saved);
+        if block && text.trim().lines().count() == 1 {
+            return Code::new(text.trim().to_string(), LOWEST);
+        }
+        let body = self.braced(&text);
+        if block {
+            return Code::atom(body);
+        }
+        Code::atom(format!("(|{}|{ret} {body})({})", params.join(", "), values.join(", ")))
+    }
+
+    /// `let x: i32 = <value>;` for each parameter of method `index` that its value is not already.
+    fn bind_params(&mut self, index: usize, values: &[String]) {
+        for (param, value) in self.typed_params(index, true).iter().zip(values) {
+            let name = param.split_once(": ").map_or(param.as_str(), |(name, _)| name);
+            if name != value {
+                self.line(&format!("let {param} = {value};"));
+            }
+        }
+    }
+
+    /// The lines `text` as a block at the current indentation: on one line when they are few
+    /// and short, simple statements.
+    fn braced(&self, text: &str) -> String {
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        let simple = lines.len() <= 3
+            && lines.iter().map(|l| l.len() + 1).sum::<usize>() <= 100
+            && lines
+                .iter()
+                .all(|l| !l.ends_with(['{', '(', '[', ',']) && !l.starts_with(['}', ')', ']', '.']));
+        if lines.len() == 1 || simple {
+            return format!("{{ {} }}", lines.join(" "));
+        }
+        format!("{{\n{text}{}}}", "    ".repeat(self.indent))
     }
 
     /// The Rust name of closure type `t`, which its values are written as.
@@ -189,6 +297,7 @@ impl<'a> Gen<'a> {
             locals: std::mem::take(&mut self.locals),
             boxed: std::mem::take(&mut self.boxed),
             field_locals: std::mem::take(&mut self.field_locals),
+            bound_params: self.bound_params.take(),
             ctor_result: self.ctor_result.take(),
             attempts: std::mem::take(&mut self.attempts),
             finallies: std::mem::take(&mut self.finallies),
@@ -224,6 +333,7 @@ impl<'a> Gen<'a> {
         self.locals = s.locals;
         self.boxed = s.boxed;
         self.field_locals = s.field_locals;
+        self.bound_params = s.bound_params;
         self.ctor_result = s.ctor_result;
         self.attempts = s.attempts;
         self.finallies = s.finallies;
@@ -243,6 +353,15 @@ impl<'a> Gen<'a> {
         self.chars = s.chars;
         self.exhaustive = s.exhaustive;
     }
+}
+
+/// Whether `body` returns only at its end.
+fn only_tail_return(body: &[Stmt]) -> bool {
+    let mut returns = false;
+    for s in body.split_last().map_or(&[][..], |(_, rest)| rest) {
+        visit_stmt(s, &mut |_| {}, &mut |s| returns |= matches!(s, Stmt::Return(..)));
+    }
+    !returns
 }
 
 /// The field that each parameter of a lambda class's constructor is stored in, by parameter.

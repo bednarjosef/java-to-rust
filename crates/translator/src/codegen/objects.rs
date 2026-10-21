@@ -496,6 +496,8 @@ impl<'a> Gen<'a> {
         match &e.kind {
             ExprKind::Cast(Type::Class(to, _), inner) if matches!(inner.ty, Type::Class(..)) => {
                 let same = match (self.class.type_index(to), self.class.class_index(inner.ty)) {
+                    // A lambda converted to a closure type becomes the closure there.
+                    (Some(a), _) if self.facts.closure_types.contains(&a) => false,
                     (Some(a), Some(b)) => self.rep_class(a) == self.rep_class(b),
                     _ => false,
                 };

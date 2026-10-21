@@ -111,6 +111,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         exhaustive: false,
         chain: false,
         field_locals: HashMap::new(),
+        bound_params: None,
         ctor_result: None,
         printing: false,
         guarded: false,
@@ -249,6 +250,9 @@ struct Gen<'a> {
     /// The locals that hold the fields that a constructor's initializers computed first, by
     /// Java field name: the later initializers read them there.
     field_locals: HashMap<String, String>,
+    /// In a closure's body, the lambda's method whose parameters are bound to the converted
+    /// arguments already (see `closures::inline_call`).
+    bound_params: Option<usize>,
     /// In a constructor, what a `return` gives back: the object being built.
     ctor_result: Option<&'static str>,
     /// Whether the text being formatted is printed.

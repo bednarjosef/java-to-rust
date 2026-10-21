@@ -444,6 +444,8 @@ impl<'a> Gen<'a> {
                 let index = resolved.expect("calls are resolved by the checker");
                 let code = if self.closure_type(receiver.ty).is_some() {
                     self.closure_call(receiver, index, args)
+                } else if self.inlined(receiver, index) {
+                    self.inline_call(index, args)
                 } else if self.class.methods[index].is_static {
                     let args = self.call_args(index, args).join(", ");
                     Code::atom(format!("{}({args})", self.static_fn(index)))

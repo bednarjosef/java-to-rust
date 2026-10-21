@@ -18,7 +18,7 @@
 mod arrays;
 mod borrowing;
 mod boxing;
-mod closures;
+pub mod closures;
 mod constants;
 mod exceptions;
 pub mod hierarchy;
