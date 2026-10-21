@@ -1239,9 +1239,14 @@ impl<'a> Gen<'a> {
             Update::Compound(_, value) if ty == Type::String => {
                 lines.extend(init);
                 let old = Slot::Static { cell: cell.clone(), plain: false }.read(true);
+                // A static that may be null shows as `null` and is written as `Some`.
+                let nullable = self.place_nullable(target);
+                let old =
+                    if nullable { format!("{old}.unwrap_or_else(|| String::from(\"null\"))") } else { old };
                 let mut parts = vec![Part::Arg(Code::atom(old))];
                 self.parts(value, &mut parts);
                 let text = self.format("format!", parts).text;
+                let text = if nullable { format!("Some({text})") } else { text };
                 lines.push(format!("{cell}.set({text});"));
             }
             Update::Compound(..) | Update::Step(_) => {
@@ -1367,7 +1372,16 @@ impl<'a> Gen<'a> {
                 format!("{}({value})", self.runtime("non_null"))
             }
             Update::Compound(_, value) if ty == Type::String => {
-                let mut parts = vec![Part::Arg(Code::atom(slot.read(self.clones(ty))))];
+                let old = slot.read(self.clones(ty));
+                // A field that may be null is an `Option`, which shows as `null` and is written
+                // as `Some`: the text is never null.
+                let old = if self.place_nullable(place) {
+                    wrap = true;
+                    format!("{old}.unwrap_or_else(|| String::from(\"null\"))")
+                } else {
+                    old
+                };
+                let mut parts = vec![Part::Arg(Code::atom(old))];
                 self.parts(value, &mut parts);
                 lines.push(format!("let {new} = {};", self.format("format!", parts).text));
                 new.clone()
