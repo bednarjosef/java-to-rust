@@ -85,8 +85,11 @@ impl<'a> Gen<'a> {
             }
             None => {
                 // A closure that threads may share is one that any thread may call.
-                let (handle, bounds) =
-                    if self.facts.thread_shared.contains(&t) { ("Arc", " + Send + Sync") } else { ("Rc", "") };
+                let (handle, bounds) = if self.facts.thread_shared.contains(&t) {
+                    ("Arc", " + Send + Sync")
+                } else {
+                    ("Rc", "")
+                };
                 format!("{handle}<dyn Fn({}){ret}{bounds}>", params.join(", "))
             }
         };
