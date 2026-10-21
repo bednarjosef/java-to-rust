@@ -103,12 +103,15 @@ Chains are shortened to their interesting part with `...`; the full ones are in 
 | `ScopedMemoryAccess.registerNatives` | 2 plus stdin | `Buffer.<clinit> -> ScopedMemoryAccess.<clinit>` | real (static field of `Buffer`) | no-op |
 | `Unsafe.writeback0`, `writebackPreSync0`, `writebackPostSync0` | 2 plus stdin | `MappedMemoryUtils.force -> Unsafe.writebackMemory` | artifact (mapped files) | none |
 
-`System.arraycopy` and array `clone` are done in the runtime; `java.lang.reflect.Array.newInstance`
-(the array creation behind `Arrays.copyOf(T[], int)`, `ArrayList.toArray(T[])` and
-`Collection.toArray`) is cut off as reflection today and reached from 5 programs. It is
-`Array.newArray`, a native, and belongs with the hand-written natives once arrays of objects exist:
-`java::Array::filled(length, None)` for the element class given, with `NegativeArraySizeException`
-for a negative length.
+`System.arraycopy` and array `clone` are done in the runtime. `java.lang.reflect.Array.newInstance`
+is not called where the JDK's collections and sorts make an array of another array's class,
+`(T[]) Array.newInstance(a.getClass().getComponentType(), n)` (`toArray(T[])` of
+`ImmutableCollections`, `LinkedList`, `IdentityHashMap` and others, `TimSort`'s work arrays): the
+lowering makes it a new array of `n` nulls of `a`'s type, which is the cast's
+(`lower::arrays::component_array`), and reachability does not enter `Array` there
+(`program::component_array`). `Arrays.copyOf` and `copyOfRange` with a class argument are the
+runtime's copies (see the README). Any other call of `Array.newInstance` still reaches the native
+`Array.newArray`, which is rejected.
 
 ### Numbers
 
@@ -577,11 +580,11 @@ Next, for the programs beyond the typical ones, still independent of threads:
 15. `java.lang.reflect.Array.newArray(Class<?> componentType, int length)` (behind
     `Array.newInstance`, 5 programs through `Arrays.copyOf` and `toArray(T[])`): an array of
     `length` nulls (or zeros) of that component type; `NegativeArraySizeException` for a negative
-    length, `IllegalArgumentException` for `void`. Needs arrays of objects; reachable once
-    `java.lang.reflect.Array` is let through the reflection boundary (4.2).
+    length, `IllegalArgumentException` for `void`. The calls those programs reach are
+    `Array.newInstance(a.getClass().getComponentType(), n)`, which the lowering makes a new array
+    of `a`'s type without the native (see above); a call with any other class still reaches it.
 
-9 to 14 are **done** (4.4 has the details), and 15 is reached now that `java.lang.reflect.Array`
-is translated, but stays a rejection until arrays of objects and `Class` values exist.
+9 to 14 are **done** (4.4 has the details); 15 is not needed by the calls the programs reach.
 
 Everything else in section 1 is either the threads design (the `Unsafe` atomics, `park`,
 `VirtualThread`, `Continuation`, `NativeThread`), the class model (`Object.getClass`, `Class`), or
@@ -638,7 +641,8 @@ Recommended, in order of payoff:
    runtime's, and the 43 `Unsafe` natives are runtime functions.
 7. **`java.lang.reflect.Array` through the reflection boundary**: `Array.newInstance` and
    `getLength` are what `Arrays.copyOf` and `toArray` need; they are array natives, not reflection.
-   **Made** (4.5).
+   **Made** (4.5). The `newInstance` of another array's class is then lowered without the native
+   (above), and `Arrays.copyOf` and `copyOfRange` with a class are the runtime's.
 
 ### 4.3 Surprises
 
@@ -711,7 +715,9 @@ for when a program needs time zones.
   half, so a translated `Scanner` still needs the locale data of the runtime's locale given
   directly before it can run.
 - **`java.lang.reflect.Array` translated** (4.2, 7): `TRANSLATED_ANYWAY` exempts it from the
-  reflection prefix; its natives (`newArray`) now show among the natives reached.
+  reflection prefix; its natives (`newArray`) now show among the natives reached. Later,
+  `Array.newInstance(a.getClass().getComponentType(), n)` became a new array of `a`'s type in the
+  lowering, so the targets' `toArray(T[])` and sorts no longer reach `newArray`.
 - **Sequential streams** (4.2, 4): reachability assumes first that no stream is parallel and skips
   what `AbstractPipeline.isParallel()` guards, in `if` statements and `?:` expressions, then checks
   the assumption on the code so reached (`program/reach/sequential.rs`): every assignment of
