@@ -112,6 +112,13 @@ impl<'t> Lowering<'t> {
                 return Ok(Some(ExprKind::Builtin(Builtin::ClassIsInstance, vec![class, x])));
             }
             ("cast", [x]) => return Ok(Some(self.class_cast(node, receiver, *x)?)),
+            ("getInterfaces", []) if is_literal(receiver) && self.named_class(receiver) => {
+                return Ok(Some(self.literal_interfaces(node, receiver)?));
+            }
+            ("getEnumConstants", []) => {
+                let class = self.expr(receiver)?;
+                return Ok(Some(self.class_enum_constants(node, class)?));
+            }
             ("getResourceAsStream", [name]) => {
                 let class = receiver.java_type();
                 let class =
@@ -133,6 +140,9 @@ impl<'t> Lowering<'t> {
             ("toString", 0) => ClassOp::ToString,
             ("hashCode", 0) => ClassOp::HashCode,
             ("desiredAssertionStatus", 0) => ClassOp::DesiredAssertionStatus,
+            ("getCanonicalName", 0) => ClassOp::GetCanonicalName,
+            ("getPackageName", 0) => ClassOp::GetPackageName,
+            ("isAnnotation", 0) => ClassOp::IsAnnotation,
             ("equals", 1) => ClassOp::Equals,
             _ => return unsupported(node, &format!("`Class.{}` (reflection)", symbol.name)),
         };
@@ -221,19 +231,21 @@ impl<'t> Lowering<'t> {
     }
 
     /// The constants of the enum class `cls`, which `EnumMap.getKeyUniverse(cls)` and
-    /// `EnumSet.getUniverse(cls)` get from the JVM: `cls == A.class ? new Enum[] {A.X, ..} : ..
-    /// : null`, over the program's enums.
+    /// `EnumSet.getUniverse(cls)` get from the JVM (see `class_enum_constants`).
     fn enum_universe(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let arg = node.list("arguments").next().expect("the universe of a class");
         let class = self.expr(arg)?;
-        let ExprKind::Var(name) = &class.kind else {
-            return unsupported(arg, "the constants of this class");
-        };
+        self.class_enum_constants(node, class)
+    }
+
+    /// `cls.getEnumConstants()`, and the constants that `EnumMap` and `EnumSet` get: `{ Class c_ =
+    /// cls; c_ == A.class ? new Enum[] {A.X, ..} : .. : null }`, over the program's enums, and the
+    /// array of the enum's constants directly for a class literal.
+    fn class_enum_constants(&self, node: Node<'t>, class: Expr) -> Result<ExprKind, Error> {
         let array = self.ty(node, node.java_type())?;
         let element = array.element();
         let pos = node.pos();
-        let (mut chain, mut chain_ty) = (ExprKind::Null, Type::Null);
-        for e in (0..self.types.len()).rev().filter(|&t| self.types[t].node.kind() == "ENUM") {
+        let constants = |e: usize| {
             let ty = Type::enum_type(&self.types[e].name);
             let constants = (0..self.enum_constant_names(e).count())
                 .map(|ordinal| {
@@ -241,17 +253,63 @@ impl<'t> Lowering<'t> {
                     self.convert(constant, element)
                 })
                 .collect();
+            self.synth(ExprKind::ArrayLit(constants), pos, array)
+        };
+        if let ExprKind::Builtin(Builtin::ClassLiteral(ty), _) = &class.kind {
+            return Ok(match ty {
+                Type::Enum(name) => match self.types.iter().position(|t| t.name == *name) {
+                    Some(e) => constants(e).kind,
+                    None => ExprKind::Null,
+                },
+                _ => ExprKind::Null,
+            });
+        }
+        let name = self.fresh_name("class");
+        let (mut chain, mut chain_ty) = (ExprKind::Null, Type::Null);
+        for e in (0..self.types.len()).rev().filter(|&t| self.types[t].node.kind() == "ENUM") {
+            let ty = Type::enum_type(&self.types[e].name);
             let literal =
                 self.synth(ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new()), pos, Type::JavaClass);
             let var = self.synth(ExprKind::Var(name.clone()), pos, Type::JavaClass);
             let test =
                 self.synth(ExprKind::Binary(BinOp::Eq, Box::new(var), Box::new(literal)), pos, Type::Boolean);
-            let values = self.synth(ExprKind::ArrayLit(constants), pos, array);
             let rest = self.synth(chain, pos, chain_ty);
             chain_ty = array;
-            chain = ExprKind::Conditional(Box::new(test), Box::new(values), Box::new(rest));
+            chain = ExprKind::Conditional(Box::new(test), Box::new(constants(e)), Box::new(rest));
         }
-        Ok(chain)
+        let body = vec![
+            Stmt::Local { ty: Type::JavaClass, name, init: Some(class), pos },
+            Stmt::Yield(self.synth(chain, pos, chain_ty)),
+        ];
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        })
+    }
+
+    /// `X.class.getInterfaces()` of a class `X` of the program: a new array of the class literals
+    /// of the interfaces it implements, or extends, in the order it names them. An interface that
+    /// the translation has no class for (`Serializable`, a marker that lowering leaves out) is
+    /// rejected rather than left out.
+    fn literal_interfaces(&self, node: Node<'t>, literal: Node<'t>) -> Result<ExprKind, Error> {
+        let class = self.literal_class(literal)?;
+        let pos = node.pos();
+        let mut interfaces = Vec::new();
+        for clause in self.types[class].node.list("implementsClause") {
+            let raw = super::captures::raw(clause.java_type());
+            let ty = match self.ty(clause, &raw) {
+                Ok(ty @ (Type::Class(..) | Type::Enum(_))) => ty,
+                _ => {
+                    return unsupported(node, &format!("`getInterfaces` of a class that implements `{raw}`"));
+                }
+            };
+            let literal = ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new());
+            interfaces.push(self.synth(literal, pos, Type::JavaClass));
+        }
+        if interfaces.is_empty() {
+            return Ok(ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)]));
+        }
+        Ok(ExprKind::ArrayLit(interfaces))
     }
 
     /// `T.class`, a class literal as a value.

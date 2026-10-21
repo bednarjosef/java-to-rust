@@ -414,9 +414,10 @@ impl<'t> Lowering<'t> {
         })
     }
 
-    /// `X.class.isAssignableFrom(c)` of a class `X` of the program that no class of the runtime
-    /// extends: whether `c` is one of the program's classes that are or extend `X`. An interface,
-    /// or a class such as `Number` that the runtime's boxes extend, is not supported.
+    /// `X.class.isAssignableFrom(c)` of a class or interface `X` of the program that no class of
+    /// the runtime extends or implements: whether `c` is one of the program's classes that are or
+    /// extend or implement `X`. A class such as `Number` that the runtime's boxes extend is not
+    /// supported.
     pub(super) fn is_assignable_from(
         &self,
         node: Node<'t>,
@@ -428,8 +429,10 @@ impl<'t> Lowering<'t> {
             Type::Class(name, _) => self.type_index(name),
             _ => None,
         };
-        let supported =
-            |t: &usize| self.types[*t].node.kind() == "CLASS" && self.types[*t].javac != "java.lang.Number";
+        let supported = |t: &usize| {
+            matches!(self.types[*t].node.kind(), "CLASS" | "INTERFACE")
+                && self.types[*t].javac != "java.lang.Number"
+        };
         let Some(target) = target.filter(supported) else {
             return unsupported(node, "`isAssignableFrom` of this class");
         };

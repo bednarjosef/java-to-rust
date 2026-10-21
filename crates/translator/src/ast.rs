@@ -872,12 +872,18 @@ pub enum ClassOp {
     Equals,
     /// `desiredAssertionStatus()`: assertions are off, as in a JVM started without `-ea`.
     DesiredAssertionStatus,
+    /// `getCanonicalName()`, `null` for a local or anonymous class.
+    GetCanonicalName,
+    GetPackageName,
+    /// `isAnnotation()`: false, as a translation has no class values of annotation types (their
+    /// class literals are rejected, and no object's class is one).
+    IsAnnotation,
 }
 
 impl ClassOp {
     /// Whether the result can be `null`.
     pub fn nullable(self) -> bool {
-        matches!(self, ClassOp::GetSuperclass | ClassOp::GetComponentType)
+        matches!(self, ClassOp::GetSuperclass | ClassOp::GetComponentType | ClassOp::GetCanonicalName)
     }
 }
 

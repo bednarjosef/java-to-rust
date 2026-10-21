@@ -98,6 +98,39 @@ impl Class {
         self.simple.to_string()
     }
 
+    /// `getCanonicalName()`: the name in the source with its outer classes (`a.Outer.Inner`,
+    /// `int[]`), `null` for a local or anonymous class, a class inside one, and an array of one.
+    /// javac names a local class `Outer$1Local` and an anonymous one `Outer$1`, with an empty
+    /// simple name, which tells them apart from member classes.
+    pub fn get_canonical_name(&self) -> Option<String> {
+        if let Some(component) = self.get_component_type() {
+            return component.get_canonical_name().map(|name| format!("{name}[]"));
+        }
+        if self.kind == Kind::Primitive {
+            return Some(self.name.to_string());
+        }
+        let mut segments = self.name.split('$');
+        let first = segments.next().unwrap_or_default();
+        let nested: Vec<&str> = segments.collect();
+        let local = nested.iter().any(|s| s.is_empty() || s.starts_with(|c: char| c.is_ascii_digit()));
+        if self.simple.is_empty() || local || nested.last().is_some_and(|last| *last != self.simple) {
+            return None;
+        }
+        Some(std::iter::once(first).chain(nested).collect::<Vec<_>>().join("."))
+    }
+
+    /// `getPackageName()`: the package of the class, of an array's element class, `java.lang`
+    /// for a primitive type and `""` for the unnamed package.
+    pub fn get_package_name(&self) -> String {
+        if let Some(component) = self.get_component_type() {
+            return component.get_package_name();
+        }
+        if self.kind == Kind::Primitive {
+            return "java.lang".to_string();
+        }
+        self.name.rsplit_once('.').map_or(String::new(), |(package, _)| package.to_string())
+    }
+
     /// `getSuperclass()`: `null` for `Object`, an interface and a primitive type.
     pub fn get_superclass(&self) -> Option<Class> {
         self.superclass.map(|f| f())
@@ -199,5 +232,27 @@ mod tests {
         assert_eq!(Class::OBJECT.get_superclass(), None);
         assert!(points.is_array() && !point.is_array());
         assert_ne!(point, Class::STRING);
+    }
+
+    #[test]
+    fn canonical_and_package_names_are_javas() {
+        let inner = Class::new("a.b.Outer$Inner", "Inner", Some(|| Class::OBJECT));
+        let local = Class::new("a.b.Outer$1Local", "Local", Some(|| Class::OBJECT));
+        let anonymous = Class::new("a.b.Outer$1", "", Some(|| Class::OBJECT));
+        let in_local = Class::new("Outer$1Local$Inner", "Inner", Some(|| Class::OBJECT));
+        let inners = Class::array("[La.b.Outer$Inner;", "Inner[]", || {
+            Class::new("a.b.Outer$Inner", "Inner", Some(|| Class::OBJECT))
+        });
+        assert_eq!(inner.get_canonical_name().as_deref(), Some("a.b.Outer.Inner"));
+        assert_eq!(inners.get_canonical_name().as_deref(), Some("a.b.Outer.Inner[]"));
+        assert_eq!(local.get_canonical_name(), None);
+        assert_eq!(anonymous.get_canonical_name(), None);
+        assert_eq!(in_local.get_canonical_name(), None);
+        assert_eq!(Class::INT.get_canonical_name().as_deref(), Some("int"));
+        assert_eq!(inner.get_package_name(), "a.b");
+        assert_eq!(inners.get_package_name(), "a.b");
+        assert_eq!(in_local.get_package_name(), "");
+        assert_eq!(Class::INT.get_package_name(), "java.lang");
+        assert_eq!(Class::STRING.get_package_name(), "java.lang");
     }
 }
