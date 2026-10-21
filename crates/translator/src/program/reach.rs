@@ -133,6 +133,7 @@ pub const TRANSLATED_ANYWAY: &[&str] = &["java.lang.reflect.Array"];
 pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Unsafe", "arrayBaseOffset", "(java.lang.Class<?>)long"),
     ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int"),
+    ("java.util.HashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
 ];
 
 /// Whether the method is one of the `REPLACED_METHODS`.

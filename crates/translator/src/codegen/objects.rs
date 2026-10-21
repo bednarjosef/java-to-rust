@@ -93,6 +93,7 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Boolean => "false",
         Type::String => "String::new()",
         Type::StringBuilder => "java::StringBuilder::new()",
+        Type::JavaClass => "java::Class::OBJECT",
         Type::Boxed(_) | Type::Class(..) => "None",
         _ => unreachable!("lowering rejects fields of type {ty}"),
     }

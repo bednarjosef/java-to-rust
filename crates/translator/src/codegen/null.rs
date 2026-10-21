@@ -105,6 +105,8 @@ impl<'a> Gen<'a> {
     pub(super) fn option_ref(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             _ if matches!(e.ty, Type::Boxed(_)) => self.expr(e).text,
+            // A class is `Copy`, so an `Option` of one is too.
+            _ if e.ty == Type::JavaClass => self.expr(e).at(ATOM),
             _ if e.ty == Type::StringBuilder => self.builder_option(e),
             ExprKind::Null => "None::<&str>".to_string(),
             ExprKind::Var(name) => self.option_source(name, e.ty),
@@ -206,6 +208,10 @@ impl<'a> Gen<'a> {
         }
         if !nullable_type(e.ty) || !self.nullable(e) {
             return None;
+        }
+        if e.ty == Type::JavaClass {
+            let option = self.expr(e).at(ATOM);
+            return Some(Part::Arg(Code::atom(format!("{}({option})", self.runtime("or_null")))));
         }
         if let Type::Enum(_) = e.ty {
             // A nullable enum local is an `Option` of the enum, shown as its name or as `null`.

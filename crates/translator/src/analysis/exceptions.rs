@@ -777,6 +777,10 @@ fn runtime_failures(
             | Builtin::ClassName { .. }
             | Builtin::ClassLiteralName { .. }
             | Builtin::SameClass { .. }
+            | Builtin::GetClass
+            | Builtin::ClassLiteral(_)
+            | Builtin::ClassMethod(_)
+            | Builtin::ComparableClassFor
             // A null is a value to them, and an object's own method is a call of its own.
             | Builtin::ObjectsEquals
             | Builtin::ObjectsHashCode => {}

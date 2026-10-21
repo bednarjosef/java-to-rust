@@ -48,6 +48,8 @@ pub enum Type {
     Boxed(&'static Type),
     /// `java.lang.StringBuilder`, a shared and mutable text (`java::StringBuilder`).
     StringBuilder,
+    /// `java.lang.Class<?>`, the class of a value (`java::Class`; see `lower::classes`).
+    JavaClass,
     /// `java.nio.charset.Charset`, only as an expression (`Builtin::Charset`) that is the charset
     /// argument of `getBytes` or `new String`; no variable has this type.
     Charset,
@@ -136,6 +138,7 @@ impl Type {
                 | Type::Null
                 | Type::Boxed(_)
                 | Type::StringBuilder
+                | Type::JavaClass
         )
     }
 
@@ -216,6 +219,7 @@ impl fmt::Display for Type {
             Type::Null => f.write_str("null"),
             Type::StringBuilder => f.write_str("StringBuilder"),
             Type::Charset => f.write_str("Charset"),
+            Type::JavaClass => f.write_str("Class"),
             Type::Boxed(primitive) => f.write_str(match primitive {
                 Type::Int => "Integer",
                 Type::Char => "Character",
@@ -752,6 +756,43 @@ pub enum Builtin {
     SameClass {
         same: bool,
     },
+    /// `[o]`: `o.getClass()`, a `java::Class`.
+    GetClass,
+    /// `[]`: the class literal `T.class` of the type, a `java::Class`.
+    ClassLiteral(Type),
+    /// `[class, args...]`: a method of `java.lang.Class`.
+    ClassMethod(ClassOp),
+    /// `[x]`: `HashMap.comparableClassFor(x)`, the class of `x` if it says `implements
+    /// Comparable` itself, else `null`; the JDK's reads the type argument through reflection.
+    ComparableClassFor,
+}
+
+/// The methods of `java.lang.Class` that a program can use without reflection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassOp {
+    GetName,
+    GetSimpleName,
+    /// `null` for `Object`, an interface or a primitive type.
+    GetSuperclass,
+    /// `null` for a class that is not an array.
+    GetComponentType,
+    IsArray,
+    IsInterface,
+    IsPrimitive,
+    IsEnum,
+    ToString,
+    HashCode,
+    /// `[class, other]`: `equals`, of two classes.
+    Equals,
+    /// `desiredAssertionStatus()`: assertions are off, as in a JVM started without `-ea`.
+    DesiredAssertionStatus,
+}
+
+impl ClassOp {
+    /// Whether the result can be `null`.
+    pub fn nullable(self) -> bool {
+        matches!(self, ClassOp::GetSuperclass | ClassOp::GetComponentType)
+    }
 }
 
 /// The methods of the boxed classes. The kind of the boxes comes from the types of the operands

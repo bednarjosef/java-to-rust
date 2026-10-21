@@ -16,6 +16,7 @@ mod character;
 mod character_classes;
 mod character_tables;
 mod charset;
+mod class;
 mod code_point;
 mod exact;
 mod exception;
@@ -41,6 +42,7 @@ pub use builder::{StringBuilder, same_builder};
 pub use character::*;
 pub use character_classes::*;
 pub use charset::*;
+pub use class::Class;
 pub use code_point::{
     char_count, code_point_string, high_surrogate, is_bmp_code_point, is_supplementary_code_point,
     is_valid_code_point, low_surrogate, to_chars, to_code_point,

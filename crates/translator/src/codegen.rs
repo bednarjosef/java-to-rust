@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 mod boxing;
 mod character;
 mod charsets;
+mod class_values;
 mod classes;
 mod code;
 mod code_point;

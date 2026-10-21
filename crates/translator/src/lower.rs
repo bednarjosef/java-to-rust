@@ -339,6 +339,7 @@ impl<'t> Lowering<'t> {
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
+            _ if name == "java.lang.Class" || name.starts_with("java.lang.Class<") => Ok(Type::JavaClass),
             "java.nio.charset.Charset" => {
                 error(node.pos(), "a `Charset` outside `getBytes` or `new String` not supported yet")
             }
@@ -578,6 +579,7 @@ impl<'t> Lowering<'t> {
                 let (array, index) = self.index(node)?;
                 ExprKind::Index(Box::new(array), Box::new(index))
             }
+            "MEMBER_SELECT" if classes::is_literal(node) => self.class_literal(node)?,
             "MEMBER_SELECT" if is_array_length(node) => {
                 ExprKind::Length(Box::new(self.expr(node.child("expression")?)?))
             }
@@ -588,7 +590,7 @@ impl<'t> Lowering<'t> {
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => self.lambda(node)?,
             "INSTANCE_OF" => self.instance_of(node)?,
             "SWITCH_EXPRESSION" => self.switch_expr(node)?,
-            "EQUAL_TO" | "NOT_EQUAL_TO" if classes::compares_classes(node) => self.class_comparison(node)?,
+            "EQUAL_TO" | "NOT_EQUAL_TO" if self.compares_classes(node) => self.class_comparison(node)?,
             kind => {
                 let left = node.child("leftOperand");
                 let op = binary_op(node, kind);

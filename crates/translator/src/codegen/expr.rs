@@ -318,6 +318,11 @@ impl<'a> Gen<'a> {
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(..)) => {
                 self.identity(*op, l, r)
             }
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
+                if l.ty == Type::JavaClass || r.ty == Type::JavaClass =>
+            {
+                self.class_identity(*op, l, r)
+            }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if l.ty == Type::StringBuilder => {
                 self.builder_identity(*op, l, r)
             }
@@ -607,6 +612,10 @@ impl<'a> Gen<'a> {
             Builtin::NullCheck => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),
+            Builtin::GetClass => self.get_class(&args[0]),
+            Builtin::ClassLiteral(ty) => Code::atom(self.type_class(ty)),
+            Builtin::ClassMethod(op) => self.class_method(op, args),
+            Builtin::ComparableClassFor => self.comparable_class_for(&args[0]),
             Builtin::ClassLiteralName { class, simple } => {
                 Code::atom(format!("String::from({})", rust_string(&self.java_class_name(class, simple))))
             }
