@@ -98,6 +98,47 @@ The test programs come from:
 `targets/` holds 28 typical Java programs that the translator does not translate yet, run one by
 one and as a whole program (`targets/run.sh`); `targets/README.md` records what rejects each one.
 
+### How the checks are cached
+
+`scripts/check.sh` is the check every branch passes; the staging gate adds the whole-program test
+and `targets/run.sh`. Much of their work gives the same result every time until its inputs
+change, so they keep those results in `~/.cache/java-to-rust-checks` (`CHECK_CACHE` names another
+directory), shared by every worktree and branch:
+
+- `java/`, `whole-program-java/`: what Java printed for each test program and its exit code,
+  under a hash of the program's sources and their paths, its main class, arguments, input, the
+  JVM's arguments and the `java -version` output (with the variables that the `java` launcher
+  reads options from). A program runs on the JVM only when one of those changed.
+- `javac/`: javac's tree of a single source file (the output of `JavaTree`, and of
+  `BytecodeNames` for one source), under a hash of the source, the compiled classes of
+  `crates/translator/java/`, the JVM's arguments and the Java version. Only runs that succeeded
+  are kept. The translator keeps them only when `CHECK_CACHE` is set, as `scripts/check.sh` sets
+  it, never for other users.
+- `rust/`, `whole-program-rust/`, `targets/`: the output and exit code of each translated program
+  whose run matched Java's (or `Name.expected`), under a hash of everything that decides its
+  binary and its run: the generated Rust source (or crate, without the runtime's path), all
+  files of `crates/runtime` and the manifests it inherits from, `rustc -vV` and `cargo -V`,
+  cargo's configuration files, the variables of cargo and Rust that can change a build (all
+  `CARGO*` and `RUST*` ones but those of where and with how many jobs to build), the program's
+  arguments and its input. When the key is found, the program is not built and run; its stored
+  output is still compared with Java's. A program that fails is never stored, so it is built and
+  run every time.
+
+Every comparison is still made, against real Java's output: a cache only skips work whose result
+it already holds, and a missing or unreadable entry means doing the work. So the checks rely on
+the test programs being deterministic, as the comparison with Java already does. An entry is never
+stale, only unused, so the directory can be deleted at any time.
+
+`CHECK_FRESH=1 scripts/check.sh` (and the same variable for `cargo test`, `targets/run.sh`) does
+all the work again: every program runs on Java, every source goes through javac, every program is
+built and run; the results are stored anew. The corpus test prints a line with how many programs
+ran on Java and were built, and how long each part took (`cargo test --test corpus -- --nocapture`).
+
+`targets/run.sh` translates TARGETS_JOBS programs at a time (2 by default) with a translator built
+in the `checks` profile (optimized, with the debug build's assertions and overflow checks), and
+builds and runs each program as soon as its translation is done. The whole-program test runs its
+programs on `CORPUS_THREADS` threads.
+
 Measured: the corpus test (pass or fail per program, with the first differing lines of output),
 the clippy and rustc warnings of the generated code, and the speed of the benchmarks against Java.
 Not measured yet: the share of values that became owned or plain, the remaining `Option`s and
@@ -798,14 +839,11 @@ The corpus test runs every program in `corpus/` with `java`, translates and buil
 overflow checks on (so a wrong "cannot overflow" fact panics), and compares standard output and
 exit code. Java's runs, translation and the Cargo build run in parallel, one thread per CPU. All
 the Rust programs are one Cargo project under `target/tmp/corpus`, kept between runs, so a program
-is rebuilt only when its translation changes: a warm run takes about as long as translating the
-corpus. Java's results are cached the same way, in `target/tmp/corpus/java-cache`, one file per
-program: a program runs on `java` again only when its Java sources (for a project, all its files
-and their paths), its main class, its command-line arguments, the JVM arguments or the
-`java -version` output change, so a
-warm run starts no JVM. `CORPUS_JAVA_FRESH=1` runs every program on Java and stores the results
-anew, for when the cache is doubted. Only a run that Java finished is stored. The report prints a
-table with one row per program and lists each failing program with the first differing lines of
+is rebuilt only when its translation changes. Java's results and the runs of unchanged
+translations are kept in the checks' cache (see "How the checks are cached" above), so a warm run
+starts no JVM and builds only the programs whose translation changed. `CORPUS_JAVA_FRESH=1` runs
+every program on Java and stores the results anew, for when the cache is doubted; only a run that
+Java finished is stored. The report prints a table with one row per program and lists each failing program with the first differing lines of
 output. A single-file program with a `Name.args` file next to it runs with the lines of that file
 as its command-line arguments, on `java` and as the translated binary alike.
 `CORPUS_FILTER=text cargo test --test corpus` runs only the programs whose name contains
@@ -833,6 +871,10 @@ as its command-line arguments, on `java` and as the translated binary alike.
   translator's scale, output in several crates, reading build tools, dependencies' sources,
   generated sources, resources and tests, the library coverage they lean on, and working
   through their blockers.
+- [docs/reflection-and-plugins.md](docs/reflection-and-plugins.md): why the translation stays
+  closed-world, and how code reached by name still runs: a reflection table built from constant
+  names, `ServiceLoader` lists and a recording run on the JVM; plugins translated with the
+  program; open doors for native plugins loaded at run time; an embedded JVM as the last resort.
 - [docs/closures-and-nested-classes.md](docs/closures-and-nested-classes.md): captures, inner,
   local and anonymous classes, lambdas, method references and for-each over `Iterable`, after
   the object model.
