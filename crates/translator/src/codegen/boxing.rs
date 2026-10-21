@@ -89,7 +89,8 @@ impl<'a> Gen<'a> {
         let from = e.ty.unboxed();
         let prim = if matches!(e.ty, Type::Boxed(_)) {
             // A null throws, in the checked form where a `catch` may see it.
-            let code = if self.nullable(e) { Code::atom(self.dereference(&[e.id], &code.text)) } else { code };
+            let code =
+                if self.nullable(e) { Code::atom(self.dereference(&[e.id], &code.text)) } else { code };
             self.unbox_code(code, from, false)
         } else {
             code
