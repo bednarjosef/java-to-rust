@@ -247,15 +247,19 @@ A small subset, end to end:
     `max`/`min`, `parseDouble`, `parseFloat`, `parseBoolean`, `logicalAnd`/`logicalOr`/
     `logicalXor`, and the `valueOf` of both with Java's grammar and rounding (whitespace,
     suffixes, hexadecimal floats).
-  - `Integer` and `Long`: parsing with a radix, the bit and radix methods (`toHexString`,
-    `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), and the unsigned methods
-    (`divideUnsigned`, `remainderUnsigned`, `compareUnsigned`, `toUnsignedString`,
-    `parseUnsignedInt`, `toUnsignedLong`, `toUnsignedInt`), which `Byte` and `Short` share.
-  - `Character`: the code point methods (`toChars`, `toString(int)`, `charCount`,
-    `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint`, ...), the tests
+  - `Integer` and `Long`: parsing with a radix and over a `begin`/`end` range of a `String`
+    (`parseInt(s, begin, end, radix)`, `valueOf(s, radix)`), the bit and radix methods
+    (`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), and the unsigned
+    methods (`divideUnsigned`, `remainderUnsigned`, `compareUnsigned`, `toUnsignedString`,
+    `parseUnsignedInt` with a radix or a range, `toUnsignedLong`, `toUnsignedInt`), which `Byte` and
+    `Short` share. Their `NumberFormatException` and `IndexOutOfBoundsException` messages are Java's.
+  - `Short` and `Byte`: `parseShort`/`parseByte` and `valueOf`, with or without a radix.
+  - `Character`: the code point methods (`toChars`, `toChars(int, char[], int)`, `toString(int)`,
+    `charCount`, `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint`, ...), the tests
     `isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`, `digit`,
-    `forDigit` and `getNumericValue`, case conversion, and the `MIN_VALUE`, `MAX_VALUE` and
-    `MIN_NORMAL` constants of the wrapper classes.
+    `forDigit` and `getNumericValue`, with their `int` code point overloads (`isLetter(int)`,
+    `toUpperCase(int)`, `digit(int, int)`, ...), case conversion, and the `MIN_VALUE`, `MAX_VALUE`
+    and `MIN_NORMAL` constants of the wrapper classes.
   - `String`: searching, slicing, case, trimming, replacing, comparing, `split`, `replaceAll`,
     `matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf` and `new String(char[])`,
     and `String.valueOf(char[])` and `valueOf(char[], offset, count)` (which throw as Java does
@@ -281,10 +285,11 @@ keeps the same bits, so they become `b = b.wrapping_add(x as i8)` and `b = b.wra
 Strings are Rust strings, so a lone surrogate `char` turns into `?` when it is printed or
 concatenated (as Java's UTF-8 output prints it), even where Java would later pair it up. The
 `Character` methods are exact on Latin-1, ASCII and fullwidth letters and digits, and
-`isWhitespace` excludes no-break spaces as Java does. Beyond Latin-1, `isLetter`, `isAlphabetic`
-and `isDigit` use Rust's Unicode tables, which are not Java's general categories, so they can
-differ from Java there; `Character.digit` recognises only ASCII and fullwidth letters and digits,
-so it can differ from Java on other decimal digits.
+`isWhitespace` excludes no-break spaces as Java does. The letter, digit, numeric value and case
+tables are generated from the JDK's own data, so the `Character` tests and conversions, including
+the `int` overloads for supplementary code points, follow Java's. Case conversion uses Rust's
+Unicode tables with Java's exceptions added, and `isAlphabetic` uses Rust's `is_alphabetic`; both
+can differ from Java on code points the corpus does not test.
 
 The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`, `charAt` agree on
 `"né😀e"`), and throw what Java throws (`StringIndexOutOfBoundsException` with Java's message).
@@ -587,9 +592,7 @@ Each construct below is rejected at translation with an error that names it:
 - threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls
   above.
 
-Also rejected: the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and
-the like), `Character.toChars(int, char[], int)`, `Charset` values kept in variables, and the
-unsigned and parse methods with other argument counts.
+Also rejected: `Charset` values kept in variables.
 
 Checked by `--survey` on the JDK's sources: the library code that `HashMap` reaches uses
 interfaces, generic classes, inheritance, exceptions, inner classes and reflection, so none of it

@@ -936,10 +936,21 @@ pub fn has_effects(e: &Expr) -> bool {
                     _
                 )
                 | ExprKind::Builtin(
-                    Builtin::Unsigned(UnsignedOp::Divide | UnsignedOp::Remainder | UnsignedOp::Parse, _),
+                    Builtin::Unsigned(
+                        UnsignedOp::Divide
+                            | UnsignedOp::Remainder
+                            | UnsignedOp::Parse
+                            | UnsignedOp::ParseRange,
+                        _
+                    ),
                     _
                 )
-                | ExprKind::Builtin(Builtin::CodePoint(CodePointOp::ToChars | CodePointOp::ToString), _)
+                | ExprKind::Builtin(
+                    Builtin::CodePoint(
+                        CodePointOp::ToChars | CodePointOp::ToCharsInto | CodePointOp::ToString,
+                    ),
+                    _
+                )
         ) || matches!(x.kind, ExprKind::Builtin(Builtin::Builder(op), _) if op.mutates())
     });
     found

@@ -27,6 +27,22 @@ pub fn try_parse_radix<T: TryFrom<i128>>(s: Option<&str>, radix: i32) -> Result<
     T::try_from(value).map_err(|_| fail(for_input(s, radix)))
 }
 
+/// `Short.parseShort(s, radix)` and `Byte.parseByte(s, radix)`. Java reads an `int` first, so a
+/// value beyond `int` is "For input string", and a value out of the type's range is reported as
+/// "Value out of range" with the string and the radix.
+pub fn try_parse_small_radix<T: TryFrom<i32>>(s: Option<&str>, radix: i32) -> Result<T, Exception> {
+    let value = try_parse_radix::<i32>(s, radix)?;
+    T::try_from(value).map_err(|_| {
+        let message = format!("Value out of range. Value:\"{}\" Radix:{radix}", s.unwrap_or_default());
+        Exception::new("java.lang.NumberFormatException", message)
+    })
+}
+
+/// `parse_small_radix` where the program does not observe the `NumberFormatException`.
+pub fn parse_small_radix<T: TryFrom<i32>>(s: Option<&str>, radix: i32) -> T {
+    try_parse_small_radix(s, radix).unwrap_or_else(uncaught)
+}
+
 /// The value of a string in `radix`, or Java's message for why it is rejected. Only the range of
 /// the target type can reject a number that is read, and `parse_radix` checks that.
 fn read(s: &str, radix: i32) -> Result<i128, String> {

@@ -105,10 +105,13 @@ impl<'t> Lowering<'t> {
             "forDigit" => (Builtin::CharForDigit, "(int,int)"),
             _ => return unsupported(node, &format!("method `Character.{name}`")),
         };
-        let supported = signature.starts_with(params) && (params != "(int)" || char_arg);
-        if !supported {
-            return unsupported(node, &format!("`Character.{name}` on a code point"));
+        if signature.starts_with(params) && (params != "(int)" || char_arg) {
+            return Ok(builtin);
         }
-        Ok(builtin)
+        // The `int` overload of the same method, which works on a code point (see `lower/code_point.rs`).
+        match super::code_point::character_op(name) {
+            Some(op) if signature.starts_with("(int") => Ok(Builtin::CodePoint(op)),
+            _ => unsupported(node, &format!("`Character.{name}` on a code point")),
+        }
     }
 }
