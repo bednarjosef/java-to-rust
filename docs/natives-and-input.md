@@ -738,6 +738,12 @@ for when a program needs time zones.
   `ENABLED` is `Boolean.getBoolean` of a property that only `-D` sets, so it joins the JFR flags in
   `FALSE_FLAGS`, and the condition of a skipped branch is no longer scanned (the lowering drops
   it), so the class is not reached for its flag.
+- **`String.chars()`** (`program::STRING_CHARS`): `String` is the runtime's, so the JDK's
+  `chars()`, which streams the string's `byte[]` through `StringLatin1.CharsSpliterator`, is not
+  translated. The call is the JDK's `Arrays.stream(int[])` over the string's UTF-16 code units
+  instead, which streams the same values with the same spliterator characteristics (`ORDERED`,
+  `SIZED`, `SUBSIZED`, `IMMUTABLE`); reachability reaches that method for every `String.chars`
+  call. Without the JDK's sources the call is rejected.
 
 With these, `StreamPipeline` reaches 264 classes (176 instantiated), 1,144 methods and 4 natives,
 all in the runtime (the `CDS` ones and `Unsafe.registerNatives`), against the 372 classes and 28

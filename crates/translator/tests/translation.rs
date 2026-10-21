@@ -4101,3 +4101,10 @@ fn an_element_that_may_be_null_is_passed_as_the_receiver_that_it_is() {
     );
     assert_contains(&rust, &["PBox::start(java::non_null(boxes[i as usize].as_ref()));"]);
 }
+
+#[test]
+fn string_chars_needs_the_jdk_sources() {
+    let err = java_to_rust::translate("class A { public static void main(String[] a) { \"abc\".chars(); } }")
+        .expect_err("`String.chars` streams with the JDK's code");
+    assert!(err.to_string().contains("translate the program with the JDK's sources"), "{err}");
+}

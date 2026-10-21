@@ -836,6 +836,14 @@ variants are the union over its concretes as for any type; `to_<super interface>
 conversions are generated on demand. A class implementing two interfaces appears in both
 enums. Interface methods are always object-level (interfaces have no instance fields).
 
+A class may implement an interface's method with a method it inherits from a superclass that
+does not implement the interface (`Spliterators.EmptySpliterator.OfInt`): javac's `overrides`
+of the superclass's method cannot list it, so `JavaTree` gives the class's symbol an `inherits`
+list of such pairs, and reachability and lowering add the interface's method to the overrides of
+the inherited one (with a bridge when erasure changes its signature). An interface that declares
+`Object`'s `equals` or `hashCode` again (`Comparator`) dispatches a class or enum without its
+own to `Object`'s.
+
 ### 1.13 Dropping long chains
 
 Objects are freed by reference counting, and Rust frees an object's fields when it frees the
