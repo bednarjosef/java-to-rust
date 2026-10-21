@@ -25,6 +25,7 @@ mod idiomatic;
 mod math;
 mod names;
 mod null;
+mod object_clone;
 mod primitives;
 mod statics;
 mod stmt;
