@@ -9,10 +9,11 @@ mod survey;
 
 pub use census::{Census, census_program};
 pub use reach::{
-    CLASS_KINDS, FieldUpdate, LOCALE_LANGUAGE, PRINT_FORMATTED, Reach, STRING_STREAMS, class_bound,
-    class_for_name, class_name, component_array, computed_for_name, created_by_name, direct_stream_call,
-    is_ensure_initialized, literal_class, live_branch, module_for_name, standard_stream_field,
-    stream_of_call, unsafe_field_access, unsafe_field_update, untranslated, writes_string_array,
+    CLASS_KINDS, FieldUpdate, LOCALE_LANGUAGE, PRINT_FORMATTED, Reach, STRING_STREAMS, TRANSLATED_PROPERTIES,
+    class_bound, class_for_name, class_name, component_array, computed_for_name, created_by_name,
+    direct_stream_call, is_ensure_initialized, literal_class, live_branch, module_for_name,
+    standard_stream_field, stream_of_call, unsafe_field_access, unsafe_field_update, untranslated,
+    writes_string_array,
 };
 pub use survey::Survey;
 

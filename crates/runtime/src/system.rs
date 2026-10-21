@@ -1,13 +1,13 @@
 //! The JVM services that programs call directly: `System.getProperty`, the memory figures and
-//! `gc` of `Runtime`, `Runtime.halt`, and `Thread`'s sleeps and yields. A property is answered at
-//! run time from the machine it runs on, as the JVM answers it, and only for keys whose value the
-//! JVM does not set itself (the translation rejects the rest). The memory figures are plausible
+//! `gc` of `Runtime`, `Runtime.halt`, and `Thread`'s sleeps and yields. A property whose value
+//! depends on the machine or the run is answered here from the machine it runs on, as the JVM
+//! answers it; the translation fixes the others (see `lower::system`). The memory figures are plausible
 //! constants, not the JVM's, which depend on the machine and its flags.
 
 use crate::exit;
 
-/// The value of a system property this runtime answers, or `None` for any other key (which
-/// `System.getProperty` gives as null).
+/// The value of a system property that depends on the machine or the run (the translation fixes
+/// the others, see `lower::system`).
 pub fn system_property(key: &str) -> String {
     let env = |name: &str| std::env::var(name).unwrap_or_default();
     match key {
@@ -22,6 +22,10 @@ pub fn system_property(key: &str) -> String {
             "linux" => "Linux".to_string(),
             other => other.to_string(),
         },
+        // The kernel's release, which the JVM reads with `uname`.
+        "os.version" => std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default(),
         "os.arch" => match std::env::consts::ARCH {
             "x86_64" => "amd64".to_string(),
             "aarch64" => "aarch64".to_string(),
@@ -29,6 +33,12 @@ pub fn system_property(key: &str) -> String {
         },
         _ => unreachable!("the translation answers only the keys it lowers: {key}"),
     }
+}
+
+/// `System.getProperty("java.home")`: the `JAVA_HOME` of the run, or else `fallback`, the home of
+/// the JDK the translator ran with.
+pub fn java_home(fallback: &str) -> String {
+    std::env::var("JAVA_HOME").ok().filter(|home| !home.is_empty()).unwrap_or_else(|| fallback.to_string())
 }
 
 /// `Runtime.totalMemory()`: the heap the runtime has, in bytes. Not the JVM's figure.

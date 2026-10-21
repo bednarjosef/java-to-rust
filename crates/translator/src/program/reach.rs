@@ -516,6 +516,11 @@ pub fn writes_string_array(node: &Value) -> bool {
             .is_some_and(|a| text(a, "javaType") == "java.lang.String[]")
 }
 
+/// The translator's `System.getProperties()` (`java/overlay/java/lang/TranslatedProperties.java`,
+/// see `lower::system`).
+pub const TRANSLATED_PROPERTIES: JdkMethod =
+    ("java.lang.TranslatedProperties", "all", "()java.util.Properties");
+
 /// A method of the JDK, by class, name and javac's type of it.
 pub type JdkMethod = (&'static str, &'static str, &'static str);
 
@@ -1285,6 +1290,11 @@ impl<'t> Walk<'t> {
                 for (class, method, signature) in *methods {
                     self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
                 }
+            }
+            // The translator's properties (see `lower::system`).
+            "METHOD" if owner == "java.lang.System" && name == "getProperties" => {
+                let (class, method, signature) = TRANSLATED_PROPERTIES;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
             }
             // Formatted where it is called, and printed by `PRINT_FORMATTED`.
             "METHOD" if owner == "java.io.PrintStream" && matches!(name.as_str(), "printf" | "format") => {

@@ -96,6 +96,11 @@ impl<'a> Gen<'a> {
                 let chars = self.slice_of(&args[0]);
                 call(self, if newline { "eprintln_chars" } else { "eprint_chars" }, vec![chars])
             }
+            // `java.home` falls back to the translator's JDK, its argument.
+            Native::SystemProperty("java.home") => {
+                let fallback = self.text_ref(&args[0]);
+                call(self, "java_home", vec![fallback])
+            }
             Native::SystemProperty(key) => call(self, "system_property", vec![rust_string(key)]),
             Native::TotalMemory => call(self, "total_memory", vec![]),
             Native::FreeMemory => call(self, "free_memory", vec![]),

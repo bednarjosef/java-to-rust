@@ -736,10 +736,18 @@ delegates to fdlibm. HotSpot replaces `Math.sin`, `cos`, `tan`, `exp`, `log`, `p
 platform libm), which agree with it on all but about 0.1 percent of arguments, and
 `Math.log10` is computed correctly rounded, as HotSpot's is.
 
-`System.getProperty` is answered at run time for the keys whose values do not depend on the JVM:
-`line.separator`, `file.separator`, `path.separator`, `user.dir`, `user.home`, `user.name`,
-`java.io.tmpdir`, `os.name` and `os.arch`. Any other key gives null, or the default given; a key
-the JVM sets itself (`java.version`, `java.vendor`, ...) is rejected at translation. The memory
+`System.getProperty` gives what a plain `java Main` run gives (`lower/system.rs`). The keys that
+depend on the machine or the run are answered when the program runs: `line.separator`,
+`file.separator`, `path.separator`, `user.dir`, `user.home`, `user.name`, `java.io.tmpdir`,
+`os.name`, `os.arch` and `os.version`, and `java.home`, which is the run's `JAVA_HOME`, or else
+the home of the JDK the translator ran with. `java.class.path` is `.`. Any other key that the JDK
+on the translator's path sets (`java -XshowSettings:properties`: `java.version`, `java.vendor`,
+`file.encoding`, `user.language`, ...) has that JDK's value, fixed in the translation; a key it
+does not set (`java.locale.providers`, `java.util.currency.data`, the program's own) gives null,
+or the default given. The key must be a literal or a constant, and the two keys whose value the
+translation cannot match are rejected: `sun.java.command` (the command line) and
+`user.timezone` (set once `TimeZone` runs). In a whole program `System.getProperties()` is a
+`Properties` of the keys of a plain run, made once (`java/overlay/java/lang/TranslatedProperties.java`). The memory
 figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
 JVM's, and `gc()` does nothing. `Runtime.halt` flushes the output and exits without shutdown
 hooks. `onSpinWait` and `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
