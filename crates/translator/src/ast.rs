@@ -686,6 +686,12 @@ pub enum Builtin {
     /// The `String[]` that `main` gets as `args`: the command-line arguments, each a new string.
     /// Built fresh where it is read (`lower::arrays::args_decl`), so it is an owned array.
     MainArgs,
+    /// A `String[]` that is an `Object[]` (see `lower::covariant`) as the `String[]` that a
+    /// builtin of strings reads (`String.join`, `Arrays.toString`): a copy, each element cast back.
+    StringArrayOf,
+    /// The new `String[]` that a builtin makes (`split`) as the `Object[]` that a `String[]` is
+    /// where it is covariant: a copy, which no other name sees.
+    ObjectArrayOf,
     /// The body of an instance method of a class that has no objects (`Reach::dormant`): it never
     /// runs.
     NoObject {

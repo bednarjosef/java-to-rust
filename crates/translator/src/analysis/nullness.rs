@@ -62,6 +62,12 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 {
                     elements.push(x.ty.element());
                 }
+                // A copy of an array between `String[]` and `Object[]` has the same nulls.
+                ExprKind::Builtin(Builtin::StringArrayOf | Builtin::ObjectArrayOf, args)
+                    if facts.nullable_elements.contains(&args[0].ty.element()) =>
+                {
+                    elements.push(x.ty.element());
+                }
                 ExprKind::ArrayLit(items) if items.iter().any(|item| maybe_null(facts, m, item)) => {
                     elements.push(x.ty.element());
                 }
