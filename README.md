@@ -498,10 +498,16 @@ for references) and are answered at the call, so their `Class`-taking natives ar
 
 Each construct below is rejected at translation with an error that names it:
 
+- For-each over an `Iterable` (`lower/foreach.rs`) is the loop Java runs: `let it =
+  Names::iterator(&names); while it.borrow().has_next() { let s = it.borrow_mut().next(); .. }`,
+  with the program's or the JDK's `iterator`, `hasNext` and `next`, so a translated iterator
+  throws `ConcurrentModificationException` and ends early where Java's does. The element is cast
+  from the erased type of `next` to the loop variable's.
 - the exceptions and try-with-resources listed under "Exceptions" above, and intersection bounds
   (`T extends A & B`);
 - records, local interfaces, enums and records, and record patterns;
-- lambdas and method references, and for-each over an `Iterable`;
+- lambdas and method references, and in a single file a for-each over an `Iterable` (whose
+  interfaces come with the lambdas work);
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
 - threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls

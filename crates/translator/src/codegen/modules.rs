@@ -93,9 +93,14 @@ fn path(package: &str) -> String {
     out
 }
 
+/// The module of a package segment. `java` is the runtime crate's name in the generated code
+/// (`use java_runtime as java`), and `std`, `core` and the path keywords have meanings of their
+/// own, so those take a `_`: the JDK's `java.util` is `java_::util`.
 fn module_name(segment: &str) -> String {
     match snake_case(segment) {
-        name if name == "super" => "super_".to_string(),
+        name if matches!(name.as_str(), "java" | "std" | "core" | "alloc" | "super" | "self" | "crate") => {
+            format!("{name}_")
+        }
         name => name,
     }
 }

@@ -7,6 +7,7 @@ mod code_point;
 mod enum_nulls;
 mod enums;
 mod exceptions;
+mod foreach;
 mod generics;
 mod hierarchy;
 mod object;
@@ -432,7 +433,7 @@ impl<'t> Lowering<'t> {
             },
             "BREAK" | "CONTINUE" => switch::jump(node),
             "YIELD" => Stmt::Yield(self.expr(node.child("value")?)?),
-            "ENHANCED_FOR_LOOP" => self.for_each(node)?,
+            "ENHANCED_FOR_LOOP" => self.for_each(node, None)?,
             "SWITCH" => self.switch_stmt(node)?,
             "TRY" => self.try_stmt(node)?,
             "THROW" => self.throw(node)?,
