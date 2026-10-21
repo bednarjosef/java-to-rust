@@ -242,7 +242,10 @@ impl<'t> Lowering<'t> {
             let in_type = |e| (index, e);
             self.constant_bodies(index, methods).map_err(in_type)?;
             self.check_enum(index, methods).map_err(in_type)?;
-            let constants = self.enum_constants(index, &types[index].fields, methods).map_err(in_type)?;
+            let bodies = self.constant_body_fields(index).map_err(in_type)?;
+            self.add_body_fields(&bodies, &mut types[index].fields).map_err(in_type)?;
+            let constants =
+                self.enum_constants(index, &types[index].fields, methods, &bodies).map_err(in_type)?;
             types[index].enum_constants = Some(constants);
         }
         Ok(())

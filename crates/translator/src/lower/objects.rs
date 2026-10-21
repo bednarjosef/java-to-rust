@@ -220,7 +220,9 @@ impl<'t> Lowering<'t> {
     /// `Class.name`. `None` for anything else, including fields of library classes.
     pub(super) fn field_place(&self, node: Node<'t>) -> Result<Option<Place>, Error> {
         let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD") else { return Ok(None) };
-        let Some(class) = self.type_index(symbol.owner) else { return Ok(None) };
+        let Some(class) = self.type_index(symbol.owner).or_else(|| self.body_field_owner(&symbol)) else {
+            return Ok(None);
+        };
         let receiver = match node.kind() {
             "IDENTIFIER" => None,
             "MEMBER_SELECT" => Some(node.child("expression")?),
