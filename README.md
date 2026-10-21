@@ -202,14 +202,19 @@ A small subset, end to end:
   Circle c`, `case Circle c when c.r() > 10`, `case null`, `case Square(double side)`, records
   nested in records, `default`) is an `if let` chain over the selector's enum, and an exhaustive
   one over a sealed hierarchy or an enum needs no `default`: a null selector throws
-  `NullPointerException` unless a `case null` takes it. `sealed`, `permits` and `non-sealed` are
-  accepted. Of `java.lang.Class`, only comparing classes and naming them translate:
-  `getClass() != o.getClass()`, `a.getClass().equals(b.getClass())` and `a.getClass() ==
-  Dog.class` (a `matches!` of the variant where the class is a variant of an enum), and
-  `Dog.class.getName()` and `getSimpleName()`. Any other use of a `Class` is rejected, as are a
-  record with an array component (its text would be the array's identity), a generic record in a
-  record pattern, and the class literal of a standard class. An accessor written in the record
-  runs at each use of a pattern variable that names a component, not once.
+  `NullPointerException` unless a `case null` takes it. `x instanceof Segment(Point(int fx, var
+  fy), Point to)` is the same test in an `if let` chain, its negated form included. `sealed`,
+  `permits` and `non-sealed` are accepted. Comparing the classes of the program's objects
+  (`getClass() != o.getClass()`, `a.getClass().equals(b.getClass())`, `a.getClass() ==
+  Dog.class`) is a `matches!` of the variant where the class is a variant of an enum, and
+  `Dog.class.getName()` a constant. Any other class is a value, a `java::Class` that is `Copy`
+  and equal by binary name: `x.getClass()` of an object, string, box, array or enum constant,
+  class literals (`int[].class`, `String.class`, `Dog.class`), and `getName`, `getSimpleName`,
+  `getSuperclass`, `getComponentType`, `isArray`, `isInterface`, `isPrimitive`, `isEnum`,
+  `toString`, `hashCode` and `equals`. Reflection (`getDeclaredFields`, `newInstance`, ...) is
+  rejected, as are a record with an array component (its text would be the array's identity) and
+  a generic record in a record pattern. An accessor written in the record runs at each use of a
+  pattern variable that names a component, not once.
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
   and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
   `super(message)`, `super(message, cause)`, fields, and overrides of `getMessage` and `toString`)
@@ -360,6 +365,23 @@ overridden method becomes a `match self` with an arm per overriding constant and
 body (if it is not abstract) for the rest. `valueOf` of a name that is no constant throws
 `IllegalArgumentException` with Java's message (`No enum constant Main.Size.HUGE`), which a
 `catch` can take (`Size::try_enum_value_of(s)?`).
+
+An enum whose constructor does more than set fields to constant values (a loop, a call, an
+argument that is another enum's constant or a static method's result, as the JDK's
+`StreamOpFlag` has) keeps its fields in tables instead: field `f` is a static array
+`fOfConstants` indexed by ordinal, the constructor is a function `init_shape_constant(ordinal, ..)` (for an enum `Shape`)
+that fills a constant's row, and the enum's static initialization builds every constant, in
+order, before its other static initializers (an exception there is Java's
+`ExceptionInInitializerError`). A read of `e.f` is `fOfConstants[e.ordinal()]`, and the enum's
+methods initialize it first. Unlike Java, using a constant (`Shape.SQUARE`, `values()`, a
+`switch`) does not initialize the enum by itself; reading its fields or calling its methods does.
+
+`java.lang.Enum` as a type (the JDK's `EnumMap` and `EnumSet`, `<E extends Enum<E>>`) is an enum
+over the program's enums, like `Object`; `ordinal()`, `name()`, `compareTo` and
+`getDeclaringClass()` on it match on the enums it can be, and the constants of an enum's class,
+which the JDK reads through `SharedSecrets`, are those of the program's enum whose class it is. A
+cast to an enum of a value that may be null (a key from a generic collection) ends the program
+if the value is null, as the translation has no null enums.
 
 ### Analyses
 

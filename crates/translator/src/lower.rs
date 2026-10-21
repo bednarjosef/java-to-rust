@@ -5,6 +5,7 @@
 
 mod code_point;
 mod enum_nulls;
+mod enum_tables;
 mod enums;
 mod exceptions;
 mod foreach;
@@ -247,11 +248,24 @@ impl<'t> Lowering<'t> {
         for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
             let in_type = |e| (index, e);
             self.constant_bodies(index, methods).map_err(in_type)?;
-            self.check_enum(index, methods).map_err(in_type)?;
             let bodies = self.constant_body_fields(index).map_err(in_type)?;
-            self.add_body_fields(&bodies, &mut types[index].fields).map_err(in_type)?;
-            let constants =
-                self.enum_constants(index, &types[index].fields, methods, &bodies).map_err(in_type)?;
+            let own_fields = types[index].fields.len();
+            let pure = self.check_enum(index, methods).and_then(|()| {
+                self.add_body_fields(&bodies, &mut types[index].fields)?;
+                self.enum_constants(index, &types[index].fields, methods, &bodies)
+            });
+            // An enum whose constructors do more than the pure form allows has tables instead,
+            // when its constants' bodies declare no fields.
+            let constants = match pure {
+                Ok(constants) => constants,
+                Err(e) if bodies.iter().any(|b| !b.is_empty()) => return Err(in_type(e)),
+                Err(_) => {
+                    types[index].fields.truncate(own_fields);
+                    self.enum_tables(index, types, methods).map_err(in_type)?;
+                    let names = self.enum_constant_names(index);
+                    names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() }).collect()
+                }
+            };
             types[index].enum_constants = Some(constants);
         }
         Ok(())
@@ -357,6 +371,13 @@ impl<'t> Lowering<'t> {
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
+            _ if name == "java.lang.Class" || name.starts_with("java.lang.Class<") => Ok(Type::JavaClass),
+            // A value of one of the program's enums (see `enums::enum_call`).
+            _ if (name == "java.lang.Enum" || name.starts_with("java.lang.Enum<"))
+                && self.object.is_some_and(|at| at.enumeration.is_some()) =>
+            {
+                Ok(Type::class(ENUM))
+            }
             "java.nio.charset.Charset" => Ok(Type::Charset),
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
@@ -605,6 +626,7 @@ impl<'t> Lowering<'t> {
                 let (array, index) = self.index(node)?;
                 ExprKind::Index(Box::new(array), Box::new(index))
             }
+            "MEMBER_SELECT" if classes::is_literal(node) => self.class_literal(node)?,
             "MEMBER_SELECT" if is_array_length(node) => {
                 ExprKind::Length(Box::new(self.expr(node.child("expression")?)?))
             }
@@ -615,7 +637,7 @@ impl<'t> Lowering<'t> {
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => self.lambda(node)?,
             "INSTANCE_OF" => self.instance_of(node)?,
             "SWITCH_EXPRESSION" => self.switch_expr(node)?,
-            "EQUAL_TO" | "NOT_EQUAL_TO" if classes::compares_classes(node) => self.class_comparison(node)?,
+            "EQUAL_TO" | "NOT_EQUAL_TO" if self.compares_classes(node) => self.class_comparison(node)?,
             "EQUAL_TO" | "NOT_EQUAL_TO" if charsets::compares_charsets(node) => {
                 self.charset_comparison(node)?
             }

@@ -13,6 +13,7 @@ mod boxing;
 mod chains;
 mod character;
 mod charsets;
+mod class_values;
 mod classes;
 mod closures;
 mod code;
