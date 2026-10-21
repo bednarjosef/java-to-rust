@@ -473,13 +473,21 @@ impl Standard {
                 {
                     uses.classes.insert(outer.to_string());
                 }
-                for m in d["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "METHOD") {
+                // Only a class whose objects the program may create runs its methods, and only an
+                // interface that the program uses is implemented: a field's type alone is neither.
+                let interface = d["kind"] == "INTERFACE";
+                let live = uses.members.iter().any(|m| m.0 == class && (interface || m.1 == "<init>"));
+                let methods = d["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "METHOD");
+                for m in methods.filter(|_| live) {
                     let member = (class.clone(), text(m, "name"), text(&m["symbol"], "type"));
                     // An interface's abstract methods, which its lambdas implement.
-                    let is_abstract = d["kind"] == "INTERFACE" && m["body"].is_null();
-                    // A method that overrides one that is used, which a call of that one may run.
+                    let is_abstract = interface && m["body"].is_null();
+                    // A method that implements an interface's method that is used, which a call of
+                    // that one may run (`ThreadGroup.uncaughtException`).
                     let overrides = m["symbol"]["overrides"].as_array().into_iter().flatten().any(|o| {
-                        uses.members.contains(&(text(o, "owner"), member.1.clone(), text(o, "type")))
+                        let owner = text(o, "owner");
+                        decl(&owner).is_some_and(|i| i["kind"] == "INTERFACE")
+                            && uses.members.contains(&(owner, member.1.clone(), text(o, "type")))
                     });
                     if is_abstract || overrides {
                         uses.members.insert(member);

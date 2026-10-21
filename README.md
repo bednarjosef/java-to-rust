@@ -294,7 +294,14 @@ A small subset, end to end:
   `interrupt`, `isInterrupted` and `Thread.interrupted()` are Java's: an interrupt ends a
   `sleep`, `join` or `wait` with `InterruptedException` and clears the status, and a thread keeps
   its status before it starts and after it ends. In a program that never calls `interrupt`,
-  `sleep`, `join` and `wait` are translated as never throwing it. Sequentially consistent
+  `sleep`, `join` and `wait` are translated as never throwing it. Uncaught-exception handlers
+  are Java's: a thread's own handler, else its `ThreadGroup` (whose `uncaughtException` a subclass
+  may override), else the default handler gets the exception that ends a thread, `main`'s
+  included, and a handler that throws prints the JVM's `Exception: <class> thrown from the
+  UncaughtExceptionHandler in thread "<name>"`; a failure of the runtime whose class the
+  translation does not declare (one no `catch` or `finally` could see either) still ends the
+  thread with the message and skips the handlers. Thread groups have a name, a parent and
+  Java's `toString`, and a thread joins its creator's group. Sequentially consistent
   `volatile`, the atomics and `java.util.concurrent` are next; the design is in [docs/multi-threading.md](docs/multi-threading.md).
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`), and so are
   `System.out.println(char[])` and `System.err.print`/`println`, which also print a `char[]`.
@@ -717,7 +724,7 @@ Each construct below is rejected at translation with an error that names it:
   interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
-- of threads: `wait(millis, nanos)`, thread groups, uncaught exception handlers,
+- of threads: `wait(millis, nanos)`, thread groups beyond their name, parent and handler,
   `ThreadLocal` and the `java.util.concurrent` classes; a `StringBuilder`, or a box compared by
   identity, that threads may share; `synchronized` on a string, a box, an array, an enum
   constant or a `Class` other than a class literal, where the monitor would be kept.
