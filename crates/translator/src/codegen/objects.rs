@@ -510,9 +510,8 @@ impl<'a> Gen<'a> {
     /// Whether a field or static field can hold null.
     pub(super) fn place_nullable(&self, place: &Place) -> bool {
         match place {
-            Place::Field { object, name } => {
-                matches!(object.ty, Type::Class(owner, _) if self.field_nullable(owner, name))
-            }
+            // The field may be declared by a superclass of the object's type.
+            Place::Field { object, name } => self.facts.field_nullable(object.ty, name),
             Place::Static { class, name } => self.facts.nullable_statics.contains(&(*class, name.clone())),
             Place::Var(_) | Place::Index(..) => false,
         }
