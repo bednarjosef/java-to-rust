@@ -756,6 +756,10 @@ for when a program needs time zones.
   `LinesSpliterator` has those characteristics and no size, so a `count()` runs the pipeline's
   `peek` and `map` lambdas, as Java does, where a sized stream would skip them. Reachability
   reaches those methods for every such call; without the JDK's sources the call is rejected.
+- **`JavaLangAccess.join`**: `StringJoiner` joins through `SharedSecrets.getJavaLangAccess()`,
+  whose implementation is an anonymous class of `System` that calls `String`'s package-private
+  `join(prefix, suffix, delimiter, elements, size)`. `String` is the runtime's, so the call is the
+  runtime's `java::join_range`, and the accessor, which stays null, is not used.
 
 With these, `StreamPipeline` reaches 264 classes (176 instantiated), 1,144 methods and 4 natives,
 all in the runtime (the `CDS` ones and `Unsafe.registerNatives`), against the 372 classes and 28
