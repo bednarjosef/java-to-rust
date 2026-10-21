@@ -780,12 +780,16 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   Reachability makes that constructor reachable for each such class whose binary name reachable
   code writes as a string literal, as `LocaleProviderAdapter.Type`'s constants do; a name that
   code computes (`SPILocaleProviderAdapter`'s `getCanonicalName() + "$" + ...`) finds nothing.
+  Since javac gives a library unit only for a class that reachability names, a literal that could
+  be the qualified name of a class that no unit declares yet is noted as missing when code
+  creates objects by name (`Walk::note_named`), and the next round has its unit.
   A `catch` alternative of a class that a whole program does not translate, such as
   `InvocationTargetException`, is left out: translated code cannot throw one. Test: the corpus
   program `corpus/whole-program/ClassesByName.java` and
   `objects_created_from_a_class_name_are_of_the_classes_that_code_names`. `ScannerGrades` now
   reaches the five adapters, which reflection cut before: 1,179 classes and 62 natives (21 in the
-  runtime) instead of 1,027 and 60; the new natives are `UnixFileSystem.getBooleanAttributes0`,
+  runtime) instead of 1,027 and 60 (and the same 1,179 classes with the units that javac gives as
+  they are asked for, where main's `Unsafe` field accesses bring the natives to 44); the new natives are `UnixFileSystem.getBooleanAttributes0`,
   through the data file that `Currency` reads, and `VM.getNanoTimeAdjustment`, which the runtime
   has. It still stops at `Bundles`, which extends the untranslated `ResourceBundle`.
 

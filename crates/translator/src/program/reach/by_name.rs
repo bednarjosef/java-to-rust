@@ -9,7 +9,10 @@
 //! extend or implement `T` and have a constructor without parameters. Reachability makes that
 //! constructor reachable for each candidate whose name reachable code spells out as a string
 //! literal, the way the names of the adapters are written; a name that code computes, by
-//! concatenation or from a file, finds nothing, and the creation fails loudly when it runs.
+//! concatenation or from a file, finds nothing, and the creation fails loudly when it runs. As
+//! javac gives a library's units only for the classes that reachability names, the literals that
+//! could name a class no unit declares are noted as missing (`Walk::note_named`), so that the
+//! next round has their units.
 
 use super::{Item, Walk, class_name, has_flag, text};
 use serde_json::Value;
@@ -76,9 +79,16 @@ impl Walk<'_> {
         }
     }
 
-    /// A string literal of reachable code, which may name a class that a cast creates.
+    /// A string literal of reachable code, which may name a class that a cast creates. One that
+    /// could name a class that no unit declares is kept for `note_named`.
     pub(super) fn named(&mut self, literal: &str) {
-        if !self.classes.contains_key(literal) || !self.named.insert(literal.to_string()) {
+        if !self.classes.contains_key(literal) {
+            if could_name_class(literal) && !self.literals.contains(literal) {
+                self.literals.insert(literal.to_string());
+            }
+            return;
+        }
+        if !self.named.insert(literal.to_string()) {
             return;
         }
         let targets: Vec<String> = self.by_name.iter().cloned().collect();
@@ -103,6 +113,18 @@ impl Walk<'_> {
         }
     }
 
+    /// When reachable code creates objects by class name, the qualified names in its string
+    /// literals that no unit declares are classes it may need (`Walk::missing`): javac gives
+    /// their units in the next round, where they are candidates like any other.
+    pub(super) fn note_named(&mut self) {
+        if self.by_name.is_empty() {
+            return;
+        }
+        for literal in std::mem::take(&mut self.literals) {
+            self.missing(&literal);
+        }
+    }
+
     /// Whether the class `class` is `target` or extends or implements it, directly or not.
     fn is_subtype(&self, class: &str, target: &str) -> bool {
         let mut work = vec![class.to_string()];
@@ -117,4 +139,14 @@ impl Walk<'_> {
         }
         false
     }
+}
+
+/// Whether a string could be the binary name of a top-level class in a package: identifiers
+/// joined by dots, at least two (`sun.util.cldr.CLDRLocaleProviderAdapter`).
+fn could_name_class(text: &str) -> bool {
+    let is_identifier = |part: &str| {
+        part.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+            && part.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    };
+    text.contains('.') && text.split('.').all(is_identifier)
 }

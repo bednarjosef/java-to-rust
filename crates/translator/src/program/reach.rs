@@ -363,6 +363,7 @@ pub fn reach(units: &[&Value], main: &str) -> Result<Reach, String> {
         walk.work.push(Item::Init(main.to_string()));
         walk.work.push(Item::Method(entry));
         walk.run();
+        walk.note_named();
         walk.reach.sequential = sequential;
         Ok(walk)
     };
@@ -405,6 +406,9 @@ struct Walk<'t> {
     by_name: HashSet<String>,
     /// The string literals of reachable code that are names of classes.
     named: HashSet<String>,
+    /// The string literals of reachable code that could be names of classes that no unit
+    /// declares (`by_name`).
+    literals: HashSet<String>,
 }
 
 impl<'t> Walk<'t> {
