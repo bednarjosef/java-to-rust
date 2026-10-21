@@ -408,7 +408,11 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
 - Class hierarchies (`ast/hierarchy.rs`, `analysis/hierarchy.rs`). A class with subclasses keeps
   its fields in a struct of its own, `ShapeFields`, which the struct of each subclass embeds as
   `base` (`Circle { base: ShapeFields::new("circle"), radius }`), and its constructors build that
-  struct. Its methods that use the object only for its fields and for calls of such methods that
+  struct. When a constructor of such a class uses `this` as a value or calls a method that a
+  subclass overrides, its class tree builds objects as Java does instead (`analysis/whole_objects.rs`):
+  the object is allocated with every field zero, null or false, then each class's constructor body
+  runs on it, the superclass's first, as a method (`construct_stage(&self, ..)`), so an override
+  that the superclass's constructor calls sees the subclass's fields unset. Its methods that use the object only for its fields and for calls of such methods that
   nothing overrides live on that struct (`c.borrow_mut().base.move_()`); the others are emitted for
   the concrete class, where `this` is the whole object, a superclass's method that the subclass
   overrides under a name of its own for `super` calls (`withdraw_in_account`). Where every value of

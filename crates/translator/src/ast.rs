@@ -1123,3 +1123,122 @@ pub fn visit_place(place: &Place, f: &mut dyn FnMut(&Expr)) {
         Place::Var(_) | Place::Static { .. } => {}
     }
 }
+
+/// Calls `f` on every expression inside `e` and then on `e`, innermost first, so that `f` may
+/// replace an expression after its parts.
+pub fn rewrite_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
+    match &mut e.kind {
+        ExprKind::Unary(_, x)
+        | ExprKind::Cast(_, x)
+        | ExprKind::InstanceOf { value: x, .. }
+        | ExprKind::Length(x)
+        | ExprKind::Field { object: x, .. } => rewrite_expr(x, f),
+        ExprKind::Assign { target, value, .. } => {
+            rewrite_place(target, f);
+            rewrite_expr(value, f);
+        }
+        ExprKind::IncDec { target, .. } => rewrite_place(target, f),
+        ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) => {
+            rewrite_expr(l, f);
+            rewrite_expr(r, f);
+        }
+        ExprKind::NewArray(items) | ExprKind::ArrayLit(items) => {
+            items.iter_mut().for_each(|a| rewrite_expr(a, f))
+        }
+        ExprKind::Conditional(c, a, b) => {
+            rewrite_expr(c, f);
+            rewrite_expr(a, f);
+            rewrite_expr(b, f);
+        }
+        ExprKind::MethodCall { receiver, args, .. } => {
+            rewrite_expr(receiver, f);
+            args.iter_mut().for_each(|a| rewrite_expr(a, f))
+        }
+        ExprKind::Call { args, .. }
+        | ExprKind::Builtin(_, args)
+        | ExprKind::New { args, .. }
+        | ExprKind::ThisCall { args, .. }
+        | ExprKind::SuperInit { args, .. } => args.iter_mut().for_each(|a| rewrite_expr(a, f)),
+        ExprKind::Switch { selector, cases } => {
+            rewrite_expr(selector, f);
+            rewrite_cases(cases, f);
+        }
+        _ => {}
+    }
+    f(e);
+}
+
+fn rewrite_place(place: &mut Place, f: &mut dyn FnMut(&mut Expr)) {
+    match place {
+        Place::Index(array, index) => {
+            rewrite_expr(array, f);
+            rewrite_expr(index, f);
+        }
+        Place::Field { object, .. } => rewrite_expr(object, f),
+        Place::Var(_) | Place::Static { .. } => {}
+    }
+}
+
+fn rewrite_cases(cases: &mut [Case], f: &mut dyn FnMut(&mut Expr)) {
+    for case in cases {
+        for label in &mut case.labels {
+            if let CaseLabel::Value(e) = label {
+                rewrite_expr(e, f);
+            }
+        }
+        case.body.iter_mut().for_each(|s| rewrite_stmt(s, f));
+    }
+}
+
+/// `rewrite_expr` on every expression of `stmt`, at any depth.
+pub fn rewrite_stmt(stmt: &mut Stmt, f: &mut dyn FnMut(&mut Expr)) {
+    match stmt {
+        Stmt::Local { init: Some(e), .. }
+        | Stmt::Expr(e)
+        | Stmt::Return(Some(e), _)
+        | Stmt::Yield(e)
+        | Stmt::Throw(e) => rewrite_expr(e, f),
+        Stmt::If { cond, then, otherwise } => {
+            rewrite_expr(cond, f);
+            rewrite_stmt(then, f);
+            if let Some(o) = otherwise {
+                rewrite_stmt(o, f);
+            }
+        }
+        Stmt::While { cond, body } | Stmt::DoWhile { body, cond } => {
+            rewrite_expr(cond, f);
+            rewrite_stmt(body, f);
+        }
+        Stmt::For { init, cond, update, body } => {
+            init.iter_mut().for_each(|s| rewrite_stmt(s, f));
+            if let Some(cond) = cond {
+                rewrite_expr(cond, f);
+            }
+            update.iter_mut().for_each(|e| rewrite_expr(e, f));
+            rewrite_stmt(body, f);
+        }
+        Stmt::ForEach { array, body, .. } => {
+            rewrite_expr(array, f);
+            rewrite_stmt(body, f);
+        }
+        Stmt::Block(stmts) => stmts.iter_mut().for_each(|s| rewrite_stmt(s, f)),
+        Stmt::Switch { selector, cases } => {
+            rewrite_expr(selector, f);
+            rewrite_cases(cases, f);
+        }
+        Stmt::Labeled { body, .. } => rewrite_stmt(body, f),
+        Stmt::Try { body, catches, finally } => {
+            body.iter_mut().for_each(|s| rewrite_stmt(s, f));
+            for catch in catches {
+                catch.body.iter_mut().for_each(|s| rewrite_stmt(s, f));
+            }
+            finally.iter_mut().flatten().for_each(|s| rewrite_stmt(s, f));
+        }
+        Stmt::Local { init: None, .. }
+        | Stmt::Return(None, _)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::BreakLabel(_)
+        | Stmt::ContinueLabel(_) => {}
+    }
+}
