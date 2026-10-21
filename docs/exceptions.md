@@ -56,7 +56,10 @@ signature. Everything else is decided here.
    program even where a `catch` would see them. (Before, the JDK's collections' `toString`s were
    all taken as observed: `AbstractList.Itr.next` catches the `IndexOutOfBoundsException` of
    `get`, whose message formats a `List` with `%s`.) An explicit `o.toString()` is an ordinary
-   call.
+   call, except that one of the JDK's own `toString`s, by the same rule, lets out only what the
+   program's code that it runs throws (an iterator or an element of the program), and the
+   `catch` clauses around the call are not looked for in its own code: `sj.toString()` of a
+   `StringJoiner` inside a `try` that catches `RuntimeException` is translated.
 6. **Failures of the runtime become values only where they are observed.** Division by zero,
    array indexes and sizes, null dereferences, parsing and the string indexes raise exceptions in
    the runtime today by printing them and exiting (`java::throw`). That stays the translation
@@ -82,14 +85,22 @@ signature. Everything else is decided here.
    catches one of `Error`, `Throwable`, `LinkageError`, `ExceptionInInitializerError` or
    `NoClassDefFoundError` gets the state machine of section 4, step 8: the first use throws the
    failure, and every later use throws `NoClassDefFoundError`. A `finally` around the use is
-   rejected unless the program catches one of those classes.
+   rejected unless the program catches one of those classes. The JDK's own static initializers
+   run on the JDK's own constants and flags, so like its `toString`s they throw only for bugs, and
+   they run none of the program's code: one lets out nothing, although the analysis's calls of an
+   interface in it reach the program's implementations too (a `Function.apply` reaches each lambda
+   of the program), and the `catch` clauses around a use of the class are not looked for in its
+   own code. (Before, the initializers of `StreamOpFlag`, which fills `EnumMap`s whose `put`
+   checks the key's class, and of `Collectors` were rejected when a stream was first used inside a
+   `try` with a `finally`.)
 10. **Rejected for now**, each with a message naming the construct: observing the message of a
     `NullPointerException` the runtime raises where Java's is not certain (Java's helpful
     message names the class file's code; see "The messages of `NullPointerException`" in
     section 4; the message of one that code creates, as `Objects.requireNonNull(x, "msg")`
     does, is its own),
     catching `StackOverflowError`, `OutOfMemoryError` or `VirtualMachineError` (the translation
-    cannot raise them), a `toString` that throws an exception that a call of it observes, or a
+    cannot raise them), a `toString` that throws an exception that a call of it observes (for one
+    of the JDK's, an exception of the program's code that it runs), or a
     `toString` of the program that throws what a `catch` around an object's text, or around a
     call on the way to it, would catch (it is `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace` and `initCause`.
 
@@ -738,7 +749,13 @@ Decisions that changed during the implementation, step by step.
   `Facts::npe_message_read`) makes the checked dereferences (`Facts::null_checked`) whose
   exception it may get carry Java's text (`java::try_non_null_message`): those that its `try`
   catches, and those whose exception leaves a method that a call in the `try` may run
-  (`Facts::npe_message_needed`). The others stay bare. Only then does the translation compile
+  (`Facts::npe_message_needed`). The others stay bare. Adding a suppressed exception to it
+  (`addSuppressed`, as each try-with-resources does when closing throws too) does not read
+  either one, since only `getSuppressed` gets a suppressed exception back (the runtime's stack
+  traces do not show it): in a program that calls `getSuppressed`, the suppressed one is read.
+  The `catch` of a rewritten static initializer of the JDK (section 0.9), which makes what it
+  catches the cause of its `ExceptionInInitializerError`, reads nothing either: the JDK's
+  initializers throw only for bugs (see the rule for them under static initializers). Only then does the translation compile
   the program a second time, with javac's code generator (`java/BytecodeNames.java`,
   `javac::BytecodeNames`), which tells how the class file names each method
   (`Gen.binaryQualifier`, and the erased descriptor), each static field and each local: the
