@@ -193,6 +193,9 @@ impl RawLock {
         // In the wait set while the monitor is still held, so a `notify` after this sees the waiter.
         lock().push(Waiter { lock: address, ticket, notified: false });
         let (depth, entered) = (self.depth.get(), self.entered.load(Ordering::Relaxed));
+        // Every hold of the lock is a monitor's: a borrow of the object's fields across the wait
+        // would let another thread in while it lasts.
+        assert!(depth == entered, "translation bug: `wait` while a borrow of the object is held");
         self.entered.store(0, Ordering::Relaxed);
         self.depth.set(1);
         self.release();
@@ -282,6 +285,13 @@ impl<T> Locked<T> {
 
     pub fn into_inner(self) -> T {
         self.value.into_inner()
+    }
+
+    /// Replaces the data, locked: a static field's store, as `LocalKey::set` of a thread-local
+    /// `RefCell`. The old value is dropped once the lock is released.
+    pub fn set(&self, value: T) {
+        let old = std::mem::replace(&mut *self.borrow_mut(), value);
+        drop(old);
     }
 }
 

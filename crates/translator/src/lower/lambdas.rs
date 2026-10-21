@@ -183,6 +183,7 @@ impl<'t> Lowering<'t> {
                 outer: self.nesting(t).filter(|n| n.outer).map(|n| n.enclosing),
                 captures: self.captures_of(t)?,
                 origin: self.origin(t),
+                cloneable: false,
             })
         };
         self.current.set(t);
@@ -225,6 +226,7 @@ impl<'t> Lowering<'t> {
             class: l.class,
             pos: l.node.pos(),
             is_abstract: false,
+            is_synchronized: false,
             overrides,
             type_params: Vec::new(),
         };

@@ -81,6 +81,14 @@ pub enum Native {
     ThreadAlive,
     ThreadJoin,
     ThreadRename,
+    /// `o.wait()` and `o.wait(millis)`: the object, and the timeout in milliseconds (0 for none).
+    MonitorWait,
+    /// `o.notify()`, or with `all` `o.notifyAll()`: the object.
+    MonitorNotify {
+        all: bool,
+    },
+    /// `Thread.holdsLock(o)`: the object.
+    HoldsLock,
     /// `FileInputStream.open0(name)`: opens the file and returns its descriptor.
     FileOpenRead,
     /// `FileOutputStream.open0(name, append)`: creates or opens the file and returns its descriptor.

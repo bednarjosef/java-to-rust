@@ -823,6 +823,12 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   parameter and now stop at a panic of `analysis/whole_objects.rs` on `HashMap.ValueIterator`, whose
   superclass `HashMap.HashIterator` is an inner class too. Test: the corpus program
   `corpus/whole-program/UntranslatedNulls.java`.
+- **`Boolean.getBoolean` is false for every key**: it is true only for a property set to
+  `"true"`, which the JVM does for none of its own (`java -XshowSettings:properties`), only `-D`
+  on the command line, and the translation has no `System.setProperty`. So the lowering makes it
+  `false`, evaluating a key whose evaluation has effects. `DigitList`'s `COMPAT` flag
+  (`jdk.compat.DecimalFormat`) stopped `ScannerGrades` and `TextAdventure`, which now go on to
+  `LocaleResources`' `ReferenceQueue`. Test: `corpus/features/SystemProperties.java`.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

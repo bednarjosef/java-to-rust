@@ -941,7 +941,9 @@ impl<'a> Gen<'a> {
             | ExprKind::SuperInit { resolved: Some(index), .. } => call(*index, None),
             // A native that waits counts as a borrow: no lock may be held across it.
             ExprKind::Builtin(
-                Builtin::Native(Native::Sleep { .. } | Native::ThreadJoin | Native::ThreadStart),
+                Builtin::Native(
+                    Native::Sleep { .. } | Native::ThreadJoin | Native::ThreadStart | Native::MonitorWait,
+                ),
                 _,
             ) => (1, 0),
             _ => (0, 0),
@@ -1737,15 +1739,19 @@ impl<'a> Gen<'a> {
         let plain = self.builds_plain(name);
         let by_value = plain || self.facts.immutable.contains(name);
         self.this_form = if plain { ThisForm::SelfRef } else { ThisForm::Shared };
+        // An initializer that raises makes the function return a `Result`, as a method does.
+        let throws = self.inits_throw(index);
+        let outer_throwing = std::mem::replace(&mut self.throwing, throws);
+        let ret = if throws { format!(" -> Result<(), {}>", self.throwable_type()) } else { String::new() };
         self.gap();
         if plain {
-            self.line("fn field_inits(&mut self) {");
+            self.line(&format!("fn field_inits(&mut self){ret} {{"));
         } else if by_value {
-            self.line(&format!("fn field_inits(this: &mut {}) {{", self.generic_struct(index)));
+            self.line(&format!("fn field_inits(this: &mut {}){ret} {{", self.generic_struct(index)));
         } else {
             let (pointer, cell) = (self.pointer(index), self.cell(index));
             self.line(&format!(
-                "fn field_inits(this: &{pointer}<{cell}<{}>>) {{",
+                "fn field_inits(this: &{pointer}<{cell}<{}>>){ret} {{",
                 self.generic_struct(index)
             ));
         }
@@ -1763,6 +1769,11 @@ impl<'a> Gen<'a> {
                 self.line(&format!("this.borrow_mut().{field} = {value};"));
             }
         }
+        if throws {
+            let ok = self.ok("()".to_string());
+            self.line(&ok);
+        }
+        self.throwing = outer_throwing;
         self.indent -= 1;
         self.line("}");
     }
@@ -1820,7 +1831,9 @@ impl<'a> Gen<'a> {
             self.line(&format!("let this = {this};"));
         }
         if initialize {
-            self.line(&format!("{}::field_inits(this);", self.struct_of(m.class)));
+            let name = self.struct_of(m.class);
+            let call = self.run_inits(m.class, format!("{name}::field_inits(this)"));
+            self.line(&call);
         }
         let result = match () {
             _ if !immutable => "obj",

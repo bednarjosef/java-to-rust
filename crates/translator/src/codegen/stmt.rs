@@ -17,8 +17,17 @@ impl<'a> Gen<'a> {
         let folded = tail && self.folds_into_return(stmts);
         let end = if folded { stmts.len() - 2 } else { stmts.len() };
         let mut narrowed = Vec::new();
+        let mut synchronized = false;
         for (i, stmt) in stmts[..end].iter().enumerate() {
             let rest = &stmts[i + 1..];
+            // The block of a `synchronized` that `synchronized_block` wrote with its lock.
+            if std::mem::take(&mut synchronized) {
+                continue;
+            }
+            if self.synchronized_block(stmt, rest.first(), tail && rest.len() == 1) {
+                synchronized = true;
+                continue;
+            }
             if let Some(name) = self.early_null_exit(stmt, rest) {
                 if self.borrowed.insert(name.to_string()) {
                     narrowed.push(name);
@@ -260,6 +269,10 @@ impl<'a> Gen<'a> {
         }
         let mutable = if mutable { "mut " } else { "" };
         let rust = self.local(name);
+        if let Some(closure) = init.and_then(|init| self.local_closure(name, init)) {
+            self.line(&format!("let {rust} = {closure};"));
+            return;
+        }
         match init {
             None if self.try_assigned.contains(name) => {
                 // Rust cannot tell that a `try` block or its `catch` clauses assign it before it is

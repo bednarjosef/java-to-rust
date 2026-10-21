@@ -97,7 +97,10 @@ impl<'t> Lowering<'t> {
                 | "parseBoolean",
                 true,
             ) => BoxedOp::Parse,
-            ("valueOf", true) if args.first().is_some_and(|a| a.ty == Type::String) => BoxedOp::Parse,
+            // `valueOf(null)` resolves to the `String` overload, as `null` is no primitive.
+            ("valueOf", true) if args.first().is_some_and(|a| matches!(a.ty, Type::String | Type::Null)) => {
+                BoxedOp::Parse
+            }
             ("valueOf", true) => BoxedOp::Box,
             ("toString" | "hashCode", true) => {
                 if name == "toString" {

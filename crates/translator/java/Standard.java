@@ -4,8 +4,8 @@
 // its real package (`java.lang`, `java.util` or `java.io`) and adds the classes a program uses to it (see
 // `lower/exceptions.rs`). Stack traces and serialization are left out; `cause` is null where
 // Java's field holds the object itself to mean "not set yet", which only `initCause` tells apart.
-// `addSuppressed` does not reject itself or null: this file cannot `throw`, since javac sees its
-// `Throwable` as unrelated to `java.lang.Throwable`.
+// `addSuppressed` does not reject itself or null here: this file cannot `throw`, since javac sees
+// its `Throwable` as unrelated to `java.lang.Throwable`, so `lower/suppress.rs` adds the checks.
 package standard;
 
 class Throwable {
@@ -104,6 +104,28 @@ class Error extends Throwable {
 
     public Error(Throwable cause) {
         super(cause);
+    }
+}
+
+class LinkageError extends Error {
+    public LinkageError(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+
+class ExceptionInInitializerError extends LinkageError {
+    public ExceptionInInitializerError(Throwable thrown) {
+        super(null, thrown);
+    }
+
+    public ExceptionInInitializerError(String message) {
+        super(message, null);
+    }
+}
+
+class NoClassDefFoundError extends LinkageError {
+    public NoClassDefFoundError(String message, Throwable cause) {
+        super(message, cause);
     }
 }
 
@@ -255,6 +277,23 @@ class IllegalStateException extends RuntimeException {
     }
 
     public IllegalStateException(Throwable cause) {
+        super(cause);
+    }
+}
+
+class IllegalMonitorStateException extends RuntimeException {
+    public IllegalMonitorStateException() {
+    }
+
+    public IllegalMonitorStateException(String s) {
+        super(s);
+    }
+
+    public IllegalMonitorStateException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public IllegalMonitorStateException(Throwable cause) {
         super(cause);
     }
 }

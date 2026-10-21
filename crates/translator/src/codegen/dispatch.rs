@@ -386,8 +386,8 @@ impl<'a> Gen<'a> {
     /// The Java type of the values of runtime class `c`, if it is one: a string, a box, or the
     /// arrays of an array class.
     pub(super) fn runtime_of(&self, c: usize) -> Option<Type> {
-        if let Some(array) = self.class.array_of(c) {
-            return Some(array);
+        if let Some(shared) = self.class.shared_of(c) {
+            return Some(shared);
         }
         (self.class.types[c].kind == TypeKind::Runtime)
             .then(|| runtime_type(&self.class.types[c].name))
@@ -398,7 +398,9 @@ impl<'a> Gen<'a> {
     /// enum's constant or a plain box, `o.clone()` for an object or a string.
     fn held(&self, c: usize) -> &'static str {
         let copied = match self.runtime_of(c) {
-            Some(ty) => ty != Type::String && !matches!(ty, Type::Array(_)) && !self.faithful_box(ty),
+            Some(ty) => {
+                !matches!(ty, Type::String | Type::StringBuilder | Type::Array(_)) && !self.faithful_box(ty)
+            }
             None => self.holds_value(c),
         };
         if copied { "*o" } else { "o.clone()" }
@@ -552,6 +554,11 @@ impl<'a> Gen<'a> {
                 None => {
                     let c = self.value_class(value);
                     match self.variant_of(t, c) {
+                        // A borrowed optional string is an `Option<&str>`.
+                        Some(variant) if matches!(&value.kind, ExprKind::Var(name) if self.borrowed_optional.contains(name)) =>
+                        {
+                            format!("{option}.map(|s| {variant}(s.to_string()))")
+                        }
                         Some(variant) => format!("{option}.map({variant})"),
                         None => {
                             format!("{option}.map(|_| -> {} {{ {} }})", self.ty_name(to), absent(self, c))
@@ -1057,6 +1064,7 @@ impl<'a> Gen<'a> {
         let same = match self.runtime_of(c).map(Type::unboxed) {
             Some(Type::Double | Type::Float) => "o.to_bits() == b.to_bits()",
             Some(Type::Array(_)) => "Rc::ptr_eq(o, b)",
+            Some(Type::StringBuilder) => "o.same(b)",
             _ if self.holds_value(c) => "o == b",
             _ if self.facts.thread_shared.contains(&c) => "Arc::ptr_eq(o, b)",
             _ => "Rc::ptr_eq(o, b)",
@@ -1158,7 +1166,7 @@ impl<'a> Gen<'a> {
     /// The hash code of a value of class `c`, reached through `handle`, a reference to what the
     /// variant holds, whose class does not override `hashCode`.
     pub(super) fn value_hash(&mut self, c: usize, handle: &str) -> String {
-        if self.class.array_of(c).is_some() {
+        if self.class.shared_of(c).is_some() {
             return format!("{}({handle})", self.runtime("identity_hash"));
         }
         let Some(ty) = self.runtime_of(c) else {
@@ -1260,6 +1268,7 @@ impl<'a> Gen<'a> {
                 // program with threads, an `Arc`, as a shared object is.
                 let array = self.class.array_of(c).is_some();
                 let same = match () {
+                    _ if self.runtime_of(c) == Some(Type::StringBuilder) => "a.same(b)",
                     _ if self.holds_value(c) && !array => "a == b",
                     _ if self.facts.thread_shared.contains(&c) || array && self.facts.threaded => {
                         "Arc::ptr_eq(a, b)"
@@ -1291,6 +1300,8 @@ impl<'a> Gen<'a> {
         self.match_arms(t, variants, &|g: &mut Self, c| {
             match g.runtime_of(c) {
                 Some(Type::String) => return ("f.write_str(o)".to_string(), true),
+                // A builder shows its text, as its `toString` makes it.
+                Some(Type::StringBuilder) => return ("fmt::Display::fmt(o, f)".to_string(), true),
                 // An array shows as `[I@` and its identity hash.
                 Some(Type::Array(_)) => {
                     let text = g.default_arm_text(t, c);

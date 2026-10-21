@@ -212,6 +212,7 @@ impl<'a> Gen<'a> {
             }
         }
         self.statics();
+        self.class_monitors();
         for (index, m) in class.methods.iter().enumerate() {
             if self.emitted_free(index) && class.types[m.class].package == package {
                 self.gap();

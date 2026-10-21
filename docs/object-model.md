@@ -1746,6 +1746,13 @@ Generics are erased in lowering, and nothing after it knows they existed:
   with `Rc::ptr_eq`, `hashCode` is `java::identity_hash`, and it prints as Java's default
   `toString`, its JVM name and hash (`[I@1b6d3586`). Arrays of a Rust generic's instantiation
   (`Box<String>[]` under real generics) have no runtime class and are rejected.
+  A `StringBuilder` as an `Object` (a `Supplier<StringBuilder>`'s value, the elements of a
+  `List<StringBuilder>`) is done the same way: the runtime class `java.lang.StringBuilder` is added
+  when a builder is converted to `Object` or cast back, its variant holds the shared
+  `java::StringBuilder`, `==`, `equals` and `hashCode` are the builder's identity (`same`,
+  `identity_hash`), and it prints as its text (`ast::hierarchy::shared_of` gives the type of
+  either kind of runtime class). In a program with threads it is rejected, since the builder is
+  an `Rc` that an `Object` crossing threads cannot hold.
   `System.arraycopy` where the source or the destination is such an `Object` (the JDK's code
   generic over the kind of array, `SpinedBuffer.OfPrimitive`'s `T_ARR`) converts both to `Object`
   and matches their variants: two arrays of one type are copied as any two arrays are, anything
@@ -1822,3 +1829,26 @@ per-instantiation variants are not done, and a generic that needs them stays era
   arguments, a cell that may hold null, nested instantiations, generic methods) and
   `corpus/programs/LinkedQueue.java` (a generic queue of generic pairs driving a breadth-first
   search, and a generic tally). The collections project's `Node<T>` became real.
+
+### `Object.clone` in class trees
+
+- `super.clone()` of `Object` is a copy of the object's runtime class, as Java's is, in any class
+  of a tree: on the enum of the class (the method that calls it uses `this` as a value, so it is
+  object-level) it is a `match` with a struct literal per variant, which reads each field of the
+  variant's struct and of the fields structs it embeds as `base`, cloning a field where its type's
+  values are cloned (handles are shared, as Java shares the references). On a struct it reads the
+  fields through `this` as before. `(C) super.clone()` in `C` is the copy itself, of `C`'s type; a
+  cast to another type converts it.
+- Whether a class may be copied is `TypeDecl::cloneable`: it, a superclass or an interface it
+  implements extends `Cloneable`, which lowering reads from javac's tree since `Cloneable` itself
+  is not a type of the program. A variant that is not `Cloneable` throws
+  `CloneNotSupportedException` with its binary name (`java::clone_refused`): a failure of the
+  runtime (`lower/exceptions.rs` `RAISED`, for `Object#clone`), which a `catch` sees through
+  `java::try_clone_refused`, so `EnumSet.clone`'s and `ArrayList.clone`'s `try` translate.
+- `AssertionError(Object)` joined `java/Standard.java` (`EnumSet.clone`'s `catch` throws one),
+  and `Arrays.copyOf` fails only with `NegativeArraySizeException`, so a `catch` of another
+  class around it is no longer rejected.
+- Corpus: `corpus/features/CloneInClassTrees.java` (a `Cloneable` abstract superclass copying
+  objects of its subclasses, a subclass's `clone` over its superclass's, a superclass that is not
+  `Cloneable` clearing a cache in its copy, a subclass whose objects refuse, caught) and
+  `corpus/features/CloneRefusedUncaught.java` (the refusal ending the program).

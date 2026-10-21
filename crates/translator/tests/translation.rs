@@ -3926,6 +3926,31 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
 }
 
 #[test]
+fn a_string_builder_as_an_object_is_a_shared_variant_compared_by_identity() {
+    let rust = translate(
+        "public class Main {
+            public static void main(String[] args) {
+                StringBuilder sb = new StringBuilder(\"a\");
+                Object held = sb;
+                Object text = \"a\";
+                ((StringBuilder) held).append('b');
+                System.out.println(held + \" \" + (held == sb) + \" \" + held.equals(text) + \" \" + text);
+            }
+        }",
+    );
+    // The variant holds the builder's handle, so it is the same builder, which prints its text.
+    assert_contains(
+        &rust,
+        &[
+            "StringBuilder(java::StringBuilder),",
+            "let held = Object::StringBuilder(sb.clone());",
+            "Object::StringBuilder(o) => matches!(other, Object::StringBuilder(b) if o.same(b)),",
+            "Object::StringBuilder(o) => fmt::Display::fmt(o, f),",
+        ],
+    );
+}
+
+#[test]
 fn an_arraycopy_between_objects_matches_the_types_of_their_arrays() {
     let rust = translate(
         "public class Main {
@@ -4168,4 +4193,44 @@ fn string_streams_need_the_jdk_sources() {
         let err = java_to_rust::translate(&source).expect_err("a string's stream runs the JDK's code");
         assert!(err.to_string().contains(&format!("`String.{method}` streams with the JDK's code")), "{err}");
     }
+}
+
+#[test]
+fn clone_in_a_class_tree_copies_each_runtime_class() {
+    // `Object.clone` copies every field of the runtime class, the embedded superclass fields
+    // too, and refuses a class that is not `Cloneable` when the copy is made.
+    let rust = translate(
+        "class A {
+            static class Shape {
+                int x;
+                Shape copy() throws CloneNotSupportedException { return (Shape) super.clone(); }
+            }
+            static class Circle extends Shape implements Cloneable { int r; }
+            public static void main(String[] a) throws CloneNotSupportedException {
+                Shape s = new Circle();
+                System.out.println(s.copy().x);
+                try { new Shape().copy(); } catch (CloneNotSupportedException e) { System.out.println(e); }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "AShape::Shape(_) => java::try_clone_refused(\"A$Shape\")?",
+            "AShape::Circle(o) => { let o = o.borrow(); AShape::Circle(Rc::new(RefCell::new(ACircle { base: AShapeFields { x: o.base.x }, r: o.r }))) }",
+        ],
+    );
+}
+
+#[test]
+fn clone_of_another_object_is_rejected() {
+    let err = java_to_rust::translate(
+        "class A implements Cloneable {
+            int x;
+            Object other(A a) throws CloneNotSupportedException { return a.clone(); }
+            public static void main(String[] args) {}
+        }",
+    )
+    .expect_err("only `super.clone()` is translated");
+    assert!(err.to_string().contains("`clone` of an object other than `this`"), "{err}");
 }

@@ -69,19 +69,6 @@ pub fn box_bool(v: bool) -> Boxed<bool> {
     BOOLEANS.with(|cache| cache[v as usize].clone())
 }
 
-/// `Integer.parseInt`, `Long.parseLong` and the like: Rust's integer parsing reads Java's
-/// syntax for radix 10 (an optional sign, then digits and nothing else).
-pub fn parse_number<T: std::str::FromStr>(s: &str) -> T {
-    try_parse_number(s).unwrap_or_else(crate::uncaught)
-}
-
-/// `parse_number` where the program observes the `NumberFormatException`.
-pub fn try_parse_number<T: std::str::FromStr>(s: &str) -> Result<T, crate::Exception> {
-    s.parse().map_err(|_| {
-        crate::Exception::new("java.lang.NumberFormatException", format!("For input string: \"{s}\""))
-    })
-}
-
 /// `Long.hashCode`, which is `Integer.hashCode` of the value's high and low halves mixed.
 pub fn long_hash(v: i64) -> i32 {
     (v ^ ((v as u64) >> 32) as i64) as i32
@@ -193,16 +180,6 @@ mod tests {
             assert_eq!(parse_double(text), java, "{text:?}");
         }
         assert!(parse_double("NaN").is_nan());
-    }
-
-    #[test]
-    fn parses_integers_like_java() {
-        assert_eq!(parse_number::<i32>("-12"), -12);
-        assert_eq!(parse_number::<i32>("+7"), 7);
-        assert_eq!(parse_number::<i64>("123456789012"), 123456789012);
-        assert_eq!(parse_number::<i32>("2147483647"), i32::MAX);
-        assert!("2147483648".parse::<i32>().is_err());
-        assert!(" 1".parse::<i64>().is_err());
     }
 
     #[test]

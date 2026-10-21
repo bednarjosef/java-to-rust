@@ -23,6 +23,7 @@ mod dispatch;
 mod enums;
 mod exceptions;
 mod expr;
+mod field_inits;
 mod files;
 mod idiomatic;
 mod math;
@@ -164,6 +165,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         g.enum_items(index);
     }
     g.statics();
+    g.class_monitors();
     for i in 0..class.methods.len() {
         if g.emitted_free(i) {
             g.gap();
@@ -542,22 +544,28 @@ impl<'a> Gen<'a> {
         }
         self.indent += 1;
         if m.name == "<clinit>" {
-            self.init_guard(name);
+            // A rewritten `<clinit>` keeps its own state, which is its guard (`lower/clinit_errors.rs`).
+            if !crate::lower::rewritten_clinit(&self.class.types[m.class]) {
+                self.init_guard(name);
+            }
             // Java initializes the superclass first.
             let superclass = self.class.hierarchy.superclass(m.class);
             if let Some(s) = superclass.and_then(|s| self.facts.init_class(self.class, s)) {
-                self.line(&format!("{}();", statics::init_name(&self.class.types[s].name)));
+                let call = self.init_run(s);
+                self.line(&format!("{call};"));
             }
         } else if self.facts.entry_init.contains(&index)
             && let Some(t) = self.facts.init_class(self.class, m.class)
         {
-            self.line(&format!("{}();", statics::init_name(&self.class.types[t].name)));
+            let call = self.init_run(t);
+            self.line(&format!("{call};"));
         }
         // The program ends when its last thread does, not when `main` returns.
         if m.is_main && self.facts.threaded {
             let guard = self.runtime("main_thread");
             self.line(&format!("let _main = {guard}();"));
         }
+        self.method_monitor(index);
         let initializes = m.name == "<clinit>" && self.facts.threaded;
         if !never_runs {
             self.written.insert(index);

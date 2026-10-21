@@ -415,20 +415,21 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({option})", self.runtime("null_enum")))
             }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
-            // string, a box or an array.
-            ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_) | Type::Array(_)), value)
-                if matches!(value.ty, Type::Class(..)) =>
-            {
-                self.checked_class_cast(e.id, *to, value)
-            }
+            // string, a builder, a box or an array.
+            ExprKind::Cast(
+                to @ (Type::Enum(_) | Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_)),
+                value,
+            ) if matches!(value.ty, Type::Class(..)) => self.checked_class_cast(e.id, *to, value),
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
                 if let Some(code) = self.narrowed_conditional(e, cond, a, b) {
                     return code;
                 }
-                // The condition of an `if` drops its temporaries before a branch runs.
-                let outer = std::mem::replace(&mut self.guarded, false);
+                // The condition of an `if` drops its temporaries before a branch runs. With threads,
+                // two locks held at once in the condition itself could wait for each other.
+                let guarded = self.facts.threaded && self.conflicts(&[&**cond]);
+                let outer = std::mem::replace(&mut self.guarded, guarded);
                 let cond = self.condition(cond);
                 self.guarded = outer;
                 let chain = std::mem::replace(&mut self.chain, false);
@@ -620,7 +621,7 @@ impl<'a> Gen<'a> {
                 self.format(&mac, parts)
             }
             Builtin::ObjectText => self.object_to_string(&args[0]),
-            Builtin::ObjectClone => self.object_clone(&args[0]),
+            Builtin::ObjectClone => self.object_clone(&args[0], id),
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty, id)
             }
@@ -640,7 +641,7 @@ impl<'a> Gen<'a> {
                 let message = "java.lang.ClassNotFoundException: {} is not a class of the translated program";
                 Code::atom(format!("{}(format!({message:?}, {}))", self.runtime("throw_uncaught"), name.text))
             }
-            Builtin::NullCheck => self.null_check(&args[0]),
+            Builtin::MonitorEnter => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),
             Builtin::GetClass => self.get_class(&args[0]),
