@@ -57,7 +57,9 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
     lowering.object_types(&mut types);
     let hierarchy = Hierarchy::new(&types, &methods);
     let raised = lowering.raised_objects(&types, &methods);
-    let class = Class { name: first.str("simpleName").to_string(), types, methods, hierarchy, raised };
+    let closes = lowering.closes.take();
+    let class =
+        Class { name: first.str("simpleName").to_string(), types, methods, hierarchy, raised, closes };
     enums::check_nulls(&class)?;
     Ok(class)
 }
@@ -167,6 +169,8 @@ struct Lowering<'t> {
     entry: Option<usize>,
     /// The standard exception classes that the program uses (see `exceptions`).
     standard: exceptions::Standard,
+    /// The `close` methods that try-with-resources statements call (see `exceptions`).
+    closes: std::cell::RefCell<Vec<(usize, Pos)>>,
     /// Where `Object` goes, in a program that uses it (see `object`).
     object: Option<object::ObjectIndexes>,
 }
@@ -517,7 +521,11 @@ impl<'t> Lowering<'t> {
             Some(s)
                 if matches!(
                     s.kind,
-                    "LOCAL_VARIABLE" | "PARAMETER" | "EXCEPTION_PARAMETER" | "BINDING_VARIABLE"
+                    "LOCAL_VARIABLE"
+                        | "PARAMETER"
+                        | "EXCEPTION_PARAMETER"
+                        | "BINDING_VARIABLE"
+                        | "RESOURCE_VARIABLE"
                 ) =>
             {
                 Ok(node.str("name").to_string())

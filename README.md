@@ -177,7 +177,9 @@ then goes on), a `return` (whose value is taken first) and a `break` or `continu
 ended. A failure of the runtime that a `catch` or a `finally` sees (a division by zero, an
 array index out of bounds, `charAt` or `substring` out of range, a malformed number) is the
 standard exception Java throws, with Java's message; elsewhere it ends the program as before.
-Rejected for now, by name: try-with-resources, catching or letting a `finally` see a null
+try-with-resources closes the program's own resources (a new object whose `close` cannot fail) in
+the reverse order, before its `catch` clauses and `finally`. Rejected for now, by name: other
+try-with-resources, catching or letting a `finally` see a null
 dereference, a negative array size, a failed cast or a failure of the library other than these,
 a `toString`, a field initializer or a constructor of an exception or an enum that throws
 something a caller catches, throwing a value that may be null, and a `yield` or a constructor's

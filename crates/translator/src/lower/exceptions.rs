@@ -369,15 +369,72 @@ impl<'t> Lowering<'t> {
         Ok(Stmt::Throw(self.convert(value, ty)))
     }
 
-    /// `try { .. } catch (..) { .. } finally { .. }`.
+    /// `try { .. } catch (..) { .. } finally { .. }`, and try-with-resources (`resources`).
     pub(super) fn try_stmt(&self, node: Node<'t>) -> Result<Stmt, Error> {
-        if node.list("resources").next().is_some() {
-            return unsupported(node, "try-with-resources");
+        let mut body = self.block(node.child("block")?)?;
+        let resources: Vec<Node<'t>> = node.list("resources").collect();
+        for &resource in resources.iter().rev() {
+            body = self.with_resource(resource, body)?;
         }
-        let body = self.block(node.child("block")?)?;
-        let catches = node.list("catches").map(|c| self.catch(c)).collect::<Result<_, _>>()?;
+        let catches: Vec<Catch> = node.list("catches").map(|c| self.catch(c)).collect::<Result<_, _>>()?;
         let finally = node.get("finallyBlock").map(|block| self.block(block)).transpose()?;
+        if !resources.is_empty() && catches.is_empty() && finally.is_none() {
+            return Ok(Stmt::Block(body));
+        }
         Ok(Stmt::Try { body, catches, finally })
+    }
+
+    /// The statements `body` inside the resource `resource` of a try-with-resources: the
+    /// resource's declaration, then `try { body } finally { r.close(); }`. That is what Java does
+    /// when `r` is not null and its `close` cannot fail, which the resource being a new object
+    /// and the analysis's check of `Class::closes` make sure of: otherwise Java would skip the
+    /// `close` of a null and add the exception of a `close` to the body's as suppressed.
+    fn with_resource(&self, resource: Node<'t>, body: Vec<Stmt>) -> Result<Vec<Stmt>, Error> {
+        let Some(init) = resource.get("initializer").filter(|_| resource.kind() == "VARIABLE") else {
+            return unsupported(resource, "try-with-resources over an existing variable");
+        };
+        if init.kind() != "NEW_CLASS" {
+            return unsupported(init, "a resource that is not a new object");
+        }
+        let mut declared = Vec::new();
+        self.stmt_into(resource, &mut declared)?;
+        let [Stmt::Local { ty, name, pos, .. }] = &declared[..] else {
+            return unsupported(resource, "this resource");
+        };
+        let (ty, name, pos) = (*ty, name.clone(), *pos);
+        let class = match ty {
+            Type::Class(class) => self.type_index(class),
+            _ => None,
+        };
+        let Some(close) = class.and_then(|t| self.close_method(t)) else {
+            return unsupported(resource, "a resource without a `close()` of the program");
+        };
+        self.closes.borrow_mut().push((close, pos));
+        let receiver = Box::new(self.synth(ExprKind::Var(name), pos, ty));
+        let call = ExprKind::MethodCall {
+            receiver,
+            name: "close".to_string(),
+            args: Vec::new(),
+            resolved: Some(close),
+            is_super: false,
+        };
+        let close = Stmt::Expr(self.synth(call, pos, Type::Void));
+        declared.push(Stmt::Try { body, catches: Vec::new(), finally: Some(vec![close]) });
+        Ok(declared)
+    }
+
+    /// The program's `close()` of type `t`, declared there or inherited from a superclass.
+    fn close_method(&self, t: usize) -> Option<usize> {
+        let mut at = Some(t);
+        while let Some(c) = at {
+            let found =
+                self.methods.iter().position(|m| m.owner == c && m.name == "close" && m.sig == "()void");
+            if found.is_some() {
+                return found;
+            }
+            at = self.superclass(c).ok().flatten();
+        }
+        None
     }
 
     fn catch(&self, node: Node<'t>) -> Result<Catch, Error> {

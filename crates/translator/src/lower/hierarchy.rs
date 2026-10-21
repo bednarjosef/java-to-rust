@@ -24,7 +24,9 @@ impl<'t> Lowering<'t> {
 
     /// The program's interfaces that type `t` implements (a class or an enum) or extends (an
     /// interface), directly. `java.lang.Comparable` is accepted and left out: a class that
-    /// implements it only declares its `compareTo`, which the program calls directly.
+    /// implements it only declares its `compareTo`, which the program calls directly; so are
+    /// `java.lang.AutoCloseable` and `java.io.Closeable`, whose `close` a try-with-resources
+    /// calls directly.
     pub(super) fn interfaces(&self, t: usize) -> Result<Vec<usize>, Error> {
         let node = self.types[t].node;
         // javac lists the interfaces that an interface extends as its `implementsClause` too.
@@ -39,7 +41,10 @@ impl<'t> Lowering<'t> {
                     }
                     out.push(i)
                 }
-                None if raw == "java.lang.Comparable" => {}
+                None if matches!(
+                    raw,
+                    "java.lang.Comparable" | "java.lang.AutoCloseable" | "java.io.Closeable"
+                ) => {}
                 _ => return unsupported(clause, &format!("implementing `{raw}`")),
             }
         }

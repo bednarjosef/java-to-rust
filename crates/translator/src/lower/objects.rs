@@ -43,6 +43,7 @@ impl<'t> Lowering<'t> {
             reach: None,
             entry: None,
             standard: exceptions::Standard::default(),
+            closes: Default::default(),
             object: None,
         }
     }

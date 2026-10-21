@@ -216,6 +216,15 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         }
     }
 
+    // A try-with-resources closes its resources in a `finally`, which is Java's behaviour only
+    // when `close` cannot fail (see `lower/exceptions.rs`).
+    let fails = may_fail(class, facts);
+    for &(close, pos) in &class.closes {
+        if class.hierarchy.group(close).iter().any(|&g| fails[g]) {
+            return error(pos, "a resource whose `close` may fail not supported yet");
+        }
+    }
+
     // Static initializers, and the initializers of fields and enum constants, run outside any
     // `try` of the program: Java would wrap what they throw in `ExceptionInInitializerError`.
     let escapes_ref = &escapes;
@@ -271,6 +280,30 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     facts.raising = raising;
     facts.raised_classes = raised_classes;
     Ok(())
+}
+
+/// Which methods may fail at all: throw, fail in the runtime (whether or not a handler would see
+/// it), or call a method that may fail.
+fn may_fail(class: &Class, facts: &Facts) -> Vec<bool> {
+    let points: Vec<Vec<Point>> = (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
+    let mut fails = vec![false; class.methods.len()];
+    loop {
+        let mut changed = false;
+        for m in 0..class.methods.len() {
+            if !fails[m]
+                && points[m].iter().any(|p| match &p.raise {
+                    Raise::Call(callees) => callees.iter().any(|&c| fails[c]),
+                    Raise::Throw(_) | Raise::Runtime { .. } => true,
+                })
+            {
+                fails[m] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return fails;
+        }
+    }
 }
 
 /// The points of method `m` that may raise an exception, with the `try`s around each.

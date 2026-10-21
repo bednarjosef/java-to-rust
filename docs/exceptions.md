@@ -413,7 +413,8 @@ Each step is mergeable on its own, with tests green and the corpus extended.
 6. **Causes, `getCause`, `printStackTrace`, constructors that throw**. Corpus:
    `features/ExceptionCauses.java`, `features/ThrowingConstructors.java`,
    `features/ThrowingConstructorChains.java`, `features/ThrowingConstructorsRegistered.java`.
-7. **try-with-resources**, once interfaces translate.
+7. **try-with-resources** over the program's own `AutoCloseable` classes. Corpus:
+   `features/TryWithResources.java`.
 
 The survey's "exceptions" feature stops counting `try` and `throw` once step 4 is in; a class
 extending a standard exception class stops counting as "extending classes outside the sources"
@@ -561,3 +562,24 @@ Decisions that changed during the implementation, step by step.
   constructor of an enum that throws (its constants are built where the enum is initialized,
   outside any `try`), a `toString` that throws something a caller catches (`Display::fmt` cannot
   carry the exception), and a field initializer that throws.
+
+### Step 7: try-with-resources
+
+- **Lowered to `finally`**: `try (R r = new R(..)) body` is `{ R r = new R(..); try body finally
+  { r.close(); } }`, one nested `try` per resource so that they close in the reverse order and a
+  resource whose creation fails closes the ones before it; the statement's own `catch` clauses
+  and `finally` go around all of that, as Java runs them after the resources are closed. This is
+  Java's behaviour when the resource is not null and its `close` cannot fail: Java skips the
+  `close` of a null resource, and an exception of `close` while the body's exception is on its
+  way is added to that one as suppressed (`addSuppressed`), which the plain `finally` would
+  replace instead.
+- **So only those are accepted**: a resource declared with a `new` object of the program's
+  class, whose `close()` is the program's (declared in the class or a superclass), and the
+  analysis rejects a `close` of any override that may fail at all (a `throw`, a failure of the
+  runtime, or a call of a method that may fail): "a resource whose `close` may fail not
+  supported yet". `AutoCloseable` and `Closeable` are accepted in `implements` and left out, as
+  `Comparable` is, since the program calls `close` directly.
+- **Still rejected**: a resource that is an existing variable (`try (r)`), one that is not a new
+  object, and a resource of a library class (the library's streams and scanners do not
+  translate). The survey's "try-with-resources" feature still counts every such statement, since
+  the library's resources are what the survey's sources use.

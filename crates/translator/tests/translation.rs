@@ -3080,6 +3080,48 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
 }
 
 #[test]
+fn a_try_with_resources_closes_each_resource_in_a_finally() {
+    let rust = translate(
+        "class A {
+            static class R implements AutoCloseable {
+                final String name;
+                R(String name) { this.name = name; }
+                public void close() { System.out.println(\"close \" + name); }
+            }
+            public static void main(String[] args) {
+                try (R a = new R(\"a\"); R b = new R(\"b\")) {
+                    System.out.println(a.name + b.name);
+                }
+            }
+        }",
+    );
+    // `b` is closed first, then `a`, however the body ends.
+    assert_contains(&rust, &["let a = ", "let b = ", ".close();\n        }\n        a.", ".close();"]);
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
+    let err = reject(
+        "class A {
+            static class R implements AutoCloseable {
+                public void close() { throw new IllegalStateException(\"closing\"); }
+            }
+            public static void main(String[] args) {
+                try (R r = new R()) { System.out.println(1); }
+            }
+        }",
+    );
+    assert!(err.contains("a resource whose `close` may fail not supported yet"), "{err}");
+    let err = reject(
+        "class A {
+            static class R implements AutoCloseable { public void close() {} }
+            public static void main(String[] args) {
+                R r = new R();
+                try (r) { System.out.println(1); }
+            }
+        }",
+    );
+    assert!(err.contains("try-with-resources over an existing variable not supported yet"), "{err}");
+}
+
+#[test]
 fn a_constructor_that_throws_returns_a_result_that_new_passes_on() {
     let rust = translate(
         "class A {

@@ -215,6 +215,9 @@ pub struct Class {
     /// the program could catch them, `message` a `String` variable: how a failure of the runtime
     /// becomes the program's exception (see `lower/exceptions.rs`).
     pub raised: Vec<Expr>,
+    /// The `close` methods that try-with-resources statements call, with the position of each
+    /// resource; the analysis checks that they cannot fail (see `lower/exceptions.rs`).
+    pub closes: Vec<(usize, Pos)>,
 }
 
 /// What kind of type a declaration is.

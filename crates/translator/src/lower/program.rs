@@ -74,7 +74,8 @@ pub fn lower_program<'t>(
     lowering.object_types(&mut types);
     let hierarchy = Hierarchy::new(&types, &methods);
     let raised = lowering.raised_objects(&types, &methods);
-    let class = Class { name: main.to_string(), types, methods, hierarchy, raised };
+    let closes = lowering.closes.take();
+    let class = Class { name: main.to_string(), types, methods, hierarchy, raised, closes };
     enums::check_nulls(&class).map_err(|e| (None, e))?;
     Ok(class)
 }
