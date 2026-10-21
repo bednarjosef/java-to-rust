@@ -53,8 +53,10 @@ pub(super) fn retry<E>(
     mut run: impl FnMut(Option<&Real>) -> Result<(Class, Real, Real), E>,
 ) -> Result<Class, E> {
     let mut real: Option<Real> = None;
+    let mut attempt = 0;
     loop {
-        match run(real.as_ref()) {
+        attempt += 1;
+        match crate::timings::phase(&format!("lowering attempt {attempt}"), || run(real.as_ref())) {
             Ok((class, _, failed)) if failed.is_empty() => return Ok(class),
             Ok((_, used, failed)) => real = Some(used.without(&failed)),
             Err(e) if real.as_ref().is_some_and(Real::is_empty) => return Err(e),

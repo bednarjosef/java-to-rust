@@ -8,6 +8,7 @@ pub mod codegen;
 pub mod javac;
 pub mod lower;
 pub mod program;
+pub mod timings;
 pub mod types;
 
 pub use ast::Error;

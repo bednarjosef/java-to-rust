@@ -6,9 +6,11 @@ mod records;
 
 use crate::ast::{Error, Pos};
 use serde_json::Value;
-use std::io::Write;
+use std::collections::HashSet;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread::JoinHandle;
 
 /// The command that runs `JavaTree`.
 fn java_tree() -> Command {
@@ -19,6 +21,9 @@ fn java_tree() -> Command {
         "-XX:TieredStopAtLevel=1",
         "-XX:+UseSerialGC",
         "-XX:-UsePerfData",
+        // `JavaTree` attributes the classes of a program one by one, with javac's own `analyze`.
+        "--add-exports",
+        "jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
         "-cp",
         env!("OUT_DIR"),
         "JavaTree",
@@ -64,32 +69,11 @@ pub fn tree(source: &str) -> Result<Value, Error> {
 /// `{"units": [{"file": ..., "tree": ...}]}`: the files given, then the units javac loaded from
 /// the source path. A compile error is returned with the file it is in.
 pub fn program_tree(files: &[PathBuf], sourcepath: &[PathBuf]) -> Result<Value, (Option<String>, Error)> {
-    let fail = |message: String| (None, Error { pos: Pos::default(), message });
-    let mut command = java_tree();
-    command.arg("--program");
-    if !sourcepath.is_empty() {
-        let joined = std::env::join_paths(sourcepath).map_err(|e| fail(format!("bad source path: {e}")))?;
-        command.arg("--sourcepath").arg(joined);
-    }
-    let output = command
-        .args(files)
+    let output = program_command(files, sourcepath)?
         .output()
         .map_err(|e| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // The first compile error, printed as `FILE:LINE:COLUMN: message`.
-        let first = stderr.lines().next().unwrap_or("javac failed");
-        if let Some((place, message)) = first.split_once(": ") {
-            let mut parts = place.rsplitn(3, ':');
-            let (column, line, file) = (parts.next(), parts.next(), parts.next());
-            if let (Some(column), Some(line), Some(file)) =
-                (column.and_then(|c| c.parse().ok()), line.and_then(|l| l.parse().ok()), file)
-            {
-                let error = Error { pos: Pos { line, column }, message: message.trim().to_string() };
-                return Err((Some(file.to_string()), error));
-            }
-        }
-        return Err(fail(stderr.trim().to_string()));
+        return Err(compile_error(&output.stderr));
     }
     let mut tree = parse(&output.stdout).map_err(|e| fail(format!("unreadable javac tree: {e}")))?;
     if let Some(units) = tree["units"].as_array_mut() {
@@ -97,6 +81,138 @@ pub fn program_tree(files: &[PathBuf], sourcepath: &[PathBuf]) -> Result<Value, 
         records::complete(&mut trees);
     }
     Ok(tree)
+}
+
+fn fail(message: String) -> (Option<String>, Error) {
+    (None, Error { pos: Pos::default(), message })
+}
+
+/// The command that runs `JavaTree` on the files of a program.
+fn program_command(files: &[PathBuf], sourcepath: &[PathBuf]) -> Result<Command, (Option<String>, Error)> {
+    let mut command = java_tree();
+    command.arg("--program");
+    if !sourcepath.is_empty() {
+        let joined = std::env::join_paths(sourcepath).map_err(|e| fail(format!("bad source path: {e}")))?;
+        command.arg("--sourcepath").arg(joined);
+    }
+    command.args(files);
+    Ok(command)
+}
+
+/// The first compile error that `JavaTree` printed, as `FILE:LINE:COLUMN: message`, with its file.
+fn compile_error(stderr: &[u8]) -> (Option<String>, Error) {
+    let stderr = String::from_utf8_lossy(stderr);
+    let first = stderr.lines().next().unwrap_or("javac failed");
+    if let Some((place, message)) = first.split_once(": ") {
+        let mut parts = place.rsplitn(3, ':');
+        let (column, line, file) = (parts.next(), parts.next(), parts.next());
+        if let (Some(column), Some(line), Some(file)) =
+            (column.and_then(|c| c.parse().ok()), line.and_then(|l| l.parse().ok()), file)
+        {
+            let error = Error { pos: Pos { line, column }, message: message.trim().to_string() };
+            return (Some(file.to_string()), error);
+        }
+    }
+    fail(stderr.trim().to_string())
+}
+
+/// A javac run over a program that attributes the units of the source path only as they are
+/// asked for (`JavaTree --program --serve`), where `program_tree` has javac attribute every unit
+/// it loads: for a program that uses the JDK's collections, those are thousands of units, of
+/// which the code reachable from `main` uses a few dozen.
+pub struct Session {
+    child: Child,
+    input: Option<ChildStdin>,
+    output: BufReader<ChildStdout>,
+    errors: Option<JoinHandle<Vec<u8>>>,
+    /// The units so far as javac printed them, `{"file": ..., "tree": ...}`: the program's files
+    /// in the order given, then the others in the order they came.
+    units: Vec<Value>,
+    /// The classes asked for so far.
+    asked: HashSet<String>,
+}
+
+impl Session {
+    /// Starts javac on the program's files, with `sourcepath` as its source path, and reads their
+    /// units. A compile error is returned with the file it is in.
+    pub fn start(files: &[PathBuf], sourcepath: &[PathBuf]) -> Result<Session, (Option<String>, Error)> {
+        let mut child = program_command(files, sourcepath)?
+            .arg("--serve")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")))?;
+        let input = child.stdin.take();
+        let output = BufReader::new(child.stdout.take().expect("stdout is piped"));
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        let errors = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
+            bytes
+        });
+        let mut session =
+            Session { child, input, output, errors: Some(errors), units: Vec::new(), asked: HashSet::new() };
+        session.units = session.read()?;
+        Ok(session)
+    }
+
+    /// Asks for the units that declare these classes, those not asked for before, and returns
+    /// how many new units javac gave.
+    pub fn load(&mut self, classes: &[String]) -> Result<usize, (Option<String>, Error)> {
+        let names: Vec<&str> =
+            classes.iter().filter(|c| self.asked.insert(c.to_string())).map(String::as_str).collect();
+        if names.is_empty() {
+            return Ok(0);
+        }
+        let input = self.input.as_mut().expect("the input is open while the session lives");
+        if writeln!(input, "{}", names.join(",")).and_then(|()| input.flush()).is_err() {
+            return Err(self.failure());
+        }
+        let units = self.read()?;
+        let count = units.len();
+        self.units.extend(units);
+        Ok(count)
+    }
+
+    /// The units so far, with the members that javac adds to records written (see `records`):
+    /// those that the units' code may use.
+    pub fn units(&self) -> Vec<Value> {
+        let mut units = self.units.clone();
+        let mut trees: Vec<&mut Value> = units.iter_mut().map(|u| &mut u["tree"]).collect();
+        records::complete(&mut trees);
+        units
+    }
+
+    /// The units of one line of `JavaTree`'s output.
+    fn read(&mut self) -> Result<Vec<Value>, (Option<String>, Error)> {
+        let mut line = Vec::new();
+        match self.output.read_until(b'\n', &mut line) {
+            Ok(n) if n > 0 && line.ends_with(b"\n") => {}
+            _ => return Err(self.failure()),
+        }
+        let mut tree = parse(&line).map_err(|e| fail(format!("unreadable javac tree: {e}")))?;
+        Ok(match tree["units"].take() {
+            Value::Array(units) => units,
+            _ => Vec::new(),
+        })
+    }
+
+    /// Why javac stopped: the compile error that it printed.
+    fn failure(&mut self) -> (Option<String>, Error) {
+        self.input = None;
+        let _ = self.child.wait();
+        let stderr = self.errors.take().and_then(|e| e.join().ok()).unwrap_or_default();
+        compile_error(&stderr)
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // The end of its input ends javac.
+        self.input = None;
+        let _ = self.child.wait();
+    }
 }
 
 /// Reads javac's JSON without serde_json's nesting limit: real code nests deeper than it allows,
