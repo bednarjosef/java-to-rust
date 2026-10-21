@@ -28,7 +28,8 @@
 //! JDK's own `toString`s throw only for bugs (a collection changed while it is shown) and are not
 //! looked at. An explicit `o.toString()` is an ordinary call, except that one of the JDK's own
 //! `toString`s lets out only what the program's code that it runs throws, and the `catch` clauses
-//! around the call are not looked for in its own code.
+//! around the call are not looked for in its own code. The JDK's static initializers run on the
+//! JDK's own constants and flags, and so none of the program's code: one lets out nothing.
 
 mod entry;
 mod failures;
@@ -129,14 +130,20 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     };
 
     // The JDK's own `toString`s throw only for bugs, as for an object's text (see the module's
-    // comment): an explicit call of one lets out only what the program's code that it runs
-    // throws, and what the caller's `catch` clauses catch is not looked for in its own code.
+    // comment): a call of one lets out only what the program's code that it runs throws, and
+    // what the caller's `catch` clauses catch is not looked for in its own code. So do the JDK's
+    // static initializers, which run on the JDK's own constants and flags and so run none of the
+    // program's code: one lets out nothing, although the calls of interfaces in it reach the
+    // program's implementations too (`Function.apply` reaches each lambda of the program).
     let jdk: Vec<bool> = class.methods.iter().map(|m| from_jdk(&class.types[m.class])).collect();
-    let jdk_to_string: Vec<bool> = class
+    let bugs_only: Vec<bool> = class
         .methods
         .iter()
         .enumerate()
-        .map(|(i, m)| jdk[i] && m.name == "toString" && m.params.is_empty() && !m.is_static)
+        .map(|(i, m)| {
+            let to_string = m.name == "toString" && m.params.is_empty() && !m.is_static;
+            jdk[i] && (to_string || initializer[i] && !guarded[i])
+        })
         .collect();
 
     // What escapes each method, and of that, what the program's code throws: all of it for a
@@ -159,7 +166,10 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
                 if !jdk[m] {
                     program = out.clone();
                 }
-                if jdk_to_string[m] {
+                if bugs_only[m] {
+                    if initializer[m] {
+                        program.clear();
+                    }
                     out = program.clone();
                 }
                 if initializer[m] && !guarded[m] {
@@ -222,7 +232,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         for m in 0..class.methods.len() {
             for p in &points[m] {
                 let Raise::Call(callees) = &p.raise else { continue };
-                let mut here = if jdk_to_string[m] { Seen::default() } else { seen[m].clone() };
+                let mut here = if bugs_only[m] { Seen::default() } else { seen[m].clone() };
                 for f in &p.frames {
                     here.types.extend(f.catches.iter().copied());
                     here.all |= f.finally;
@@ -298,7 +308,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
                 let Raise::Runtime { checked, id, .. } = p.raise else { continue };
                 let seen_here = catcher.is_some()
                     || p.frames.iter().any(|f| f.finally)
-                    || (!jdk_to_string[m] && observed(&Kind::Runtime(name), &seen[m]));
+                    || (!bugs_only[m] && observed(&Kind::Runtime(name), &seen[m]));
                 let raised_class = class.type_index(name).filter(|&c| class.hierarchy.is_concrete(c));
                 if seen_here
                     && checked

@@ -82,7 +82,14 @@ signature. Everything else is decided here.
    catches one of `Error`, `Throwable`, `LinkageError`, `ExceptionInInitializerError` or
    `NoClassDefFoundError` gets the state machine of section 4, step 8: the first use throws the
    failure, and every later use throws `NoClassDefFoundError`. A `finally` around the use is
-   rejected unless the program catches one of those classes.
+   rejected unless the program catches one of those classes. The JDK's own static initializers
+   run on the JDK's own constants and flags, so like its `toString`s they throw only for bugs, and
+   they run none of the program's code: one lets out nothing, although the analysis's calls of an
+   interface in it reach the program's implementations too (a `Function.apply` reaches each lambda
+   of the program), and the `catch` clauses around a use of the class are not looked for in its
+   own code. (Before, the initializers of `StreamOpFlag`, which fills `EnumMap`s whose `put`
+   checks the key's class, and of `Collectors` were rejected when a stream was first used inside a
+   `try` with a `finally`.)
 10. **Rejected for now**, each with a message naming the construct: observing the message of a
     `NullPointerException` the runtime raises (Java's helpful message names bytecode locals;
     `getMessage()` in a `catch` that such an exception reaches is rejected, while the message of
