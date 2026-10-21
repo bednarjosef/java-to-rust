@@ -2320,10 +2320,10 @@ fn lambda_sources(dir: &str) -> std::path::PathBuf {
     let java = [
         "package app;",
         "public class Main {",
-        "    static Runnable a() { return () -> {}; }",
-        "    static Runnable b() { return () -> {}; }",
-        "    static Runnable c() { return () -> {}; }",
-        "    static Runnable d() { return () -> {}; }",
+        "    static Runnable a() { return new StringBuilder()::reverse; }",
+        "    static Runnable b() { return new StringBuilder()::reverse; }",
+        "    static Runnable c() { return new StringBuilder()::reverse; }",
+        "    static Runnable d() { return new StringBuilder()::reverse; }",
         "    public static void main(String[] args) {",
         "        a().run(); b().run(); c().run(); d().run();",
         "    }",
@@ -2377,7 +2377,7 @@ fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
         "survey_split_lib",
         &[(
             "Helper.java",
-            "public class Helper { static int run() { Runnable r = () -> {}; r.run(); return 1; } }",
+            "public class Helper { static int run() { Runnable r = new StringBuilder()::reverse; r.run(); return 1; } }",
         )],
     );
     let program = java_to_rust::Program {
@@ -2391,9 +2391,9 @@ fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
     let library_table = feature_table(&report, "Library code: features");
     assert!(report.find("Program code:").unwrap() < report.find("Library code:").unwrap(), "{report}");
     assert!(feature_row(program_table, "local interfaces").contains("Main.java:"), "{program_table}");
-    assert!(!program_table.contains("lambdas"), "{program_table}");
+    assert!(!program_table.contains("computed method receivers"), "{program_table}");
     // The library's example is relative to its root, not the absolute path.
-    let row = feature_row(library_table, "lambdas");
+    let row = feature_row(library_table, "computed method receivers");
     assert!(row.contains("Helper.java:1"), "{row}");
     assert!(!row.contains(lib.to_str().unwrap()), "{row}");
     assert!(!library_table.contains("local interfaces"), "{library_table}");
@@ -2408,9 +2408,10 @@ fn the_survey_names_up_to_three_example_places_per_feature() {
     };
     let report = survey(&program).report;
     let table = feature_table(&report, "Program code: features");
-    // Four pieces use a lambda; the first three are named, relative to the source root.
+    // Four pieces use a computed receiver; the first three are named, relative to the source root.
     assert!(
-        feature_row(table, "lambdas").ends_with("app/Main.java:3, app/Main.java:4, app/Main.java:5"),
+        feature_row(table, "computed method receivers")
+            .ends_with("app/Main.java:3, app/Main.java:4, app/Main.java:5"),
         "{table}"
     );
     assert_lacks(&report, &["app/Main.java:6"]);
@@ -2430,7 +2431,7 @@ fn the_survey_json_lists_the_pieces_with_their_example_places() {
     assert_eq!(a["source"], "program");
     assert_eq!(a["kind"], "method");
     assert_eq!(a["location"], "app/Main.java:3");
-    assert_eq!(a["features"]["lambdas"], "app/Main.java:3");
+    assert_eq!(a["features"]["computed method receivers"], "app/Main.java:3");
     assert!(json["runtime_calls"].is_array(), "{json}");
     assert!(json["natives"].is_array(), "{json}");
 }
@@ -3001,11 +3002,11 @@ fn a_class_whose_subclasses_never_become_its_values_is_not_an_enum() {
 #[test]
 fn interfaces_outside_the_program_are_rejected_except_comparable() {
     let err = java_to_rust::translate(
-        "class C implements Runnable { public void run() {} }
-        class A { public static void main(String[] a) { new C().run(); } }",
+        "class C implements java.util.EventListener { public void close() {} }
+        class A { public static void main(String[] a) { new C().close(); } }",
     )
     .unwrap_err();
-    assert!(err.to_string().contains("implementing `java.lang.Runnable` not supported yet"), "{err}");
+    assert!(err.to_string().contains("implementing `java.util.EventListener` not supported yet"), "{err}");
     let rust = translate(
         "class V implements Comparable<V> {
             final int n;

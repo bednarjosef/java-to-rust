@@ -538,7 +538,9 @@ impl<'a> Gen<'a> {
 /// A borrow scoped with braces, `{ x.borrow().f }`, is a function argument of its own in a
 /// guarded statement, where rustc's unused_braces lint would ask to drop braces that end the
 /// borrow; there it is written `{ let value = x.borrow().f; value }`. The lint leaves the
-/// arguments of a macro alone, and so does this. Text in string literals is left alone.
+/// arguments of a macro alone, and so does this. Text in string literals is left alone, and so
+/// is a block with statements (`{ a = 1; a }`, `{ init_prog(); X.get() }`), which the lint
+/// accepts and which would not be an expression after `let value =`.
 fn scoped_arguments(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -569,6 +571,7 @@ fn scoped_arguments(text: &str) -> String {
                 && text[i + 2 + len..].starts_with('}')
                 && text[i + 2..i + 2 + len].ends_with(' ')
                 && !text[i + 2..i + 2 + len].contains("let ")
+                && !text[i + 2..i + 2 + len].contains(';')
                 && matches!(bytes.get(i + 3 + len), Some(b')' | b','))
             {
                 let inner = text[i + 2..i + 1 + len].trim_end();

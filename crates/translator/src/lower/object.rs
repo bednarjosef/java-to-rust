@@ -84,7 +84,8 @@ impl<'t> Lowering<'t> {
     /// and `methods` declared so far.
     pub(super) fn plan_object(&mut self, decls: &[Node<'t>]) {
         let comparable = uses_comparable(decls);
-        if uses_object(decls, &self.real_type_parameters()) || comparable {
+        let unrelated = decls.iter().any(|d| self.compares_unrelated(d.0));
+        if uses_object(decls, &self.real_type_parameters()) || comparable || unrelated {
             let decl = self.types.len();
             let equals = self.methods.len();
             let comparable = comparable.then_some(ComparableIndexes {
@@ -92,6 +93,32 @@ impl<'t> Lowering<'t> {
                 compare_to: equals + 2,
             });
             self.object = Some(ObjectIndexes { decl, equals, hash_code: equals + 1, comparable });
+        }
+    }
+
+    /// Whether the tree `v` compares with `==` or `!=` two values of the program's types of which
+    /// neither is a subtype of the other, such as a class and an interface it does not implement:
+    /// both are converted to `Object` for that (see `convert_operands`).
+    fn compares_unrelated(&self, v: &Value) -> bool {
+        match v {
+            Value::Object(fields) => {
+                let kind = fields.get("kind").and_then(Value::as_str);
+                if matches!(kind, Some("EQUAL_TO" | "NOT_EQUAL_TO")) {
+                    let operand = |side: &str| {
+                        let ty = v[side]["javaType"].as_str().unwrap_or_default();
+                        self.type_index(ty.split('<').next().unwrap_or(ty))
+                    };
+                    if let (Some(a), Some(b)) = (operand("leftOperand"), operand("rightOperand"))
+                        && !self.is_subclass(a, b)
+                        && !self.is_subclass(b, a)
+                    {
+                        return true;
+                    }
+                }
+                fields.values().any(|x| self.compares_unrelated(x))
+            }
+            Value::Array(items) => items.iter().any(|x| self.compares_unrelated(x)),
+            _ => false,
         }
     }
 

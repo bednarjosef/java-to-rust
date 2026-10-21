@@ -32,7 +32,19 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
 /// kinds of javac's tree of the operations that may raise it (a method call by its owner and
 /// name: `owner#name`, or `owner#` for any method of the owner).
 const RAISED: &[(&str, &[&str])] = &[
-    ("java.lang.ArithmeticException", &["DIVIDE", "REMAINDER", "DIVIDE_ASSIGNMENT", "REMAINDER_ASSIGNMENT"]),
+    (
+        "java.lang.ArithmeticException",
+        &[
+            "DIVIDE",
+            "REMAINDER",
+            "DIVIDE_ASSIGNMENT",
+            "REMAINDER_ASSIGNMENT",
+            "java.lang.Math#floorDiv",
+            "java.lang.Math#floorMod",
+            "java.lang.StrictMath#floorDiv",
+            "java.lang.StrictMath#floorMod",
+        ],
+    ),
     ("java.lang.ArrayIndexOutOfBoundsException", &["ARRAY_ACCESS"]),
     ("java.lang.StringIndexOutOfBoundsException", &["java.lang.String#charAt", "java.lang.String#substring"]),
     (

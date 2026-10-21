@@ -350,6 +350,11 @@ impl<'t> Walk<'_, 't> {
                 self.need(n);
             }
         }
+        // A lambda's code is its body, or the call that a method reference makes.
+        if let Some((params, body)) = l.lambda_code(self.class) {
+            self.scopes = vec![params];
+            return self.walk(body);
+        }
         for member in info.node.list("members").filter(|m| l.keeps(*m, &info.javac)) {
             match member.kind() {
                 "METHOD" => {
@@ -440,6 +445,12 @@ impl<'t> Walk<'_, 't> {
         }
         let l = self.lowering;
         match node.kind() {
+            // A lambda is an object of its class, created here.
+            "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" if l.lambda_class(node).is_some() => {
+                if let Some(class) = l.lambda_class(node) {
+                    self.uses_class(class, Some(node), true)?;
+                }
+            }
             "BLOCK" | "FOR_LOOP" | "SWITCH" | "SWITCH_EXPRESSION" | "CATCH" | "TRY" | "LAMBDA_EXPRESSION" => {
                 self.scopes.push(Vec::new());
                 if node.kind() == "CATCH" {
@@ -504,8 +515,13 @@ impl<'t> Walk<'_, 't> {
                 }
             }
             "IDENTIFIER" => {
-                let Some(symbol) = node.symbol() else { return Ok(()) };
                 let name = node.str("name");
+                // `this` in a lambda is the object of the class whose code holds it.
+                if name == "this" && l.nesting(self.class).is_some_and(|n| n.kind == inner::NestKind::Lambda)
+                {
+                    self.need(l.lambda_holder(self.class));
+                }
+                let Some(symbol) = node.symbol() else { return Ok(()) };
                 if LOCAL_KINDS.contains(&symbol.kind) {
                     if !self.in_scope(name) {
                         self.free(name, node);

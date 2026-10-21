@@ -291,8 +291,11 @@ impl Census {
                 let kind = text(node, "kind");
                 let ty = text(node, "javaType");
                 match kind {
-                    "LAMBDA_EXPRESSION" => scan.feature("lambdas", node),
-                    "MEMBER_REFERENCE" => scan.feature("method references", node),
+                    // A method reference translates unless its receiver is computed (any field is
+                    // taken for a final one here).
+                    "MEMBER_REFERENCE" if crate::lower::computed_receiver(node, &|_, _| true).is_some() => {
+                        scan.feature("computed method receivers", node)
+                    }
                     // An anonymous class body is a class node too, but no local declaration.
                     "INTERFACE" | "ENUM" | "RECORD" if !is_anonymous(symbol_type(node)) => {
                         scan.feature("local interfaces, enums and records", node)

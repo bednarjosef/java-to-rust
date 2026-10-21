@@ -16,6 +16,9 @@ impl<'t> Lowering<'t> {
         if self.standard.has(class) {
             return self.standard.keeps(member, class);
         }
+        if self.functional.has(class) {
+            return true;
+        }
         self.reach.is_none_or(|reach| reach.member(class, member.0))
     }
 
@@ -68,8 +71,11 @@ fn lower_with<'t>(
             reachable_members(decl, reach, &mut reachable);
         }
     }
-    lowering.standard = super::exceptions::Standard::select(reachable);
+    lowering.standard = super::exceptions::Standard::select(reachable.iter().copied());
     lowering.declare_standard().map_err(|e| (None, e))?;
+    let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
+    lowering.functional = super::functional::Functional::select(reachable, &declared);
+    lowering.declare_functional().map_err(|e| (None, e))?;
     unit_of.resize(lowering.types.len(), usize::MAX);
     lowering.name_nested();
     lowering.plan_captures().map_err(|(t, e)| ((unit_of[t] != usize::MAX).then_some(unit_of[t]), e))?;
@@ -82,7 +88,8 @@ fn lower_with<'t>(
         .filter(|d| reach.classes.contains(&crate::program::class_name(d.0)))
         .collect();
     lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
-    lowering.plan_object(&decls);
+    let planned: Vec<Node> = decls.iter().copied().chain(lowering.functional_decls()).collect();
+    lowering.plan_object(&planned);
     let mut types = Vec::new();
     for (t, package) in packages.into_iter().enumerate() {
         let mut decl = lowering.type_decl(t).map_err(|e| (unit(t), e))?;
