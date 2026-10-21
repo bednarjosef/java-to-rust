@@ -350,8 +350,21 @@ fn statement(s: &Stmt, rest: &[&Stmt]) -> Result<(), Error> {
             check(array, &outside)?;
             nested(body)?;
         }
-        Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _) | Stmt::Yield(e) => {
+        Stmt::Local { init: Some(e), .. }
+        | Stmt::Expr(e)
+        | Stmt::Return(Some(e), _)
+        | Stmt::Yield(e)
+        | Stmt::Throw(e) => {
             check(e, &rest)?;
+        }
+        Stmt::Try { body, catches, finally } => {
+            block(body)?;
+            for catch in catches {
+                block(&catch.body)?;
+            }
+            if let Some(finally) = finally {
+                block(finally)?;
+            }
         }
         Stmt::Switch { selector, cases } => {
             let mut outside = rest.clone();

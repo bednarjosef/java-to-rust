@@ -558,6 +558,13 @@ pub fn check_replacement(pattern: &str, replacement: &str) -> Result<(), String>
     }
 }
 
+/// Whether `pattern` compiles, and `replacement` (if given) is a replacement for it, so that a
+/// call with them never throws.
+pub fn never_fails(pattern: &str, replacement: Option<&str>) -> bool {
+    let Ok(regex) = compile(pattern) else { return false };
+    replacement.is_none_or(|r| parse_replacement(r, regex.groups).is_ok())
+}
+
 fn replace(s: &str, regex: &str, replacement: &str, all: bool) -> String {
     let regex = compiled(regex);
     let pieces = parse_replacement(replacement, regex.groups).unwrap_or_else(|(class, m)| throw(class, &m));

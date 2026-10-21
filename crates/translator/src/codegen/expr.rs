@@ -413,11 +413,12 @@ impl<'a> Gen<'a> {
             ExprKind::Call { args, resolved, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
                 let args = self.call_args(index, args).join(", ");
-                Code::atom(format!("{}({args})", self.static_fn(index)))
+                let code = Code::atom(format!("{}({args})", self.static_fn(index)));
+                self.raising(code, index)
             }
             ExprKind::MethodCall { receiver, args, resolved, is_super, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
-                if self.class.methods[index].is_static {
+                let code = if self.class.methods[index].is_static {
                     let args = self.call_args(index, args).join(", ");
                     Code::atom(format!("{}({args})", self.static_fn(index)))
                 } else if !*is_super && let Some(t) = self.enum_of(receiver) {
@@ -428,7 +429,8 @@ impl<'a> Gen<'a> {
                         return self.identity_call(receiver, target, args);
                     }
                     self.method_call(receiver, target, args)
-                }
+                };
+                self.raising(code, index)
             }
             ExprKind::ThisCall { .. } | ExprKind::SuperInit { .. } => {
                 unreachable!("lowering keeps `this(...)` and `super(...)` first in a constructor")
@@ -475,8 +477,8 @@ impl<'a> Gen<'a> {
                 if constant || self.facts.safe_division.contains(&id) {
                     infix(if op == BinOp::Div { "/" } else { "%" }, MUL, &left, &right)
                 } else {
-                    let f = self.runtime(if op == BinOp::Div { "div" } else { "rem" });
-                    Code::atom(format!("{f}({}, {})", left.typed(), right.text))
+                    let f = if op == BinOp::Div { "div" } else { "rem" };
+                    self.may_fail(id, f, "", &format!("{}, {}", left.typed(), right.text))
                 }
             }
             BinOp::Shl | BinOp::Shr | BinOp::UShr => self.shift(op, left, right, result),
@@ -561,6 +563,7 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
             Builtin::NullCheck => self.null_check(&args[0]),
+            Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::MathAbs => {
                 let x = self.value(&args[0], ty);
                 // Math.abs(Integer.MIN_VALUE) is Integer.MIN_VALUE.
@@ -617,7 +620,7 @@ impl<'a> Gen<'a> {
             | Builtin::CharIsHighSurrogate
             | Builtin::CharIsLowSurrogate => self.char_builtin(builtin, args, id),
             Builtin::Native(native) => self.native(native, args, ty),
-            Builtin::String(op) => self.string_builtin(op, args),
+            Builtin::String(op) => self.string_builtin(op, args, id),
             // A chained call gives `&Self`; as a value, the builder is another handle to it.
             Builtin::Builder(op) if op.chains() => {
                 let code = self.builder_call(op, args);
@@ -625,7 +628,7 @@ impl<'a> Gen<'a> {
             }
             Builtin::Builder(op) => self.builder_call(op, args),
             Builtin::Format => self.format_builtin(args),
-            Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args),
+            Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args, id),
         }
     }
 }

@@ -131,10 +131,18 @@ pub fn variants(class: &Class, facts: &Facts, t: usize) -> Vec<usize> {
 /// struct, which borrows only the fields). A call of an inherited method, or `super.m()`, makes
 /// the receiver a value of the type that declares the method. An enum's constants are values of
 /// the enum.
-pub fn flows(class: &Class, field_level: &HashSet<usize>) -> Vec<HashSet<usize>> {
+/// The classes in `raised` are those whose objects the runtime creates when an operation fails.
+pub fn flows(
+    class: &Class,
+    field_level: &HashSet<usize>,
+    raised: &std::collections::BTreeSet<usize>,
+) -> Vec<HashSet<usize>> {
     let h = &class.hierarchy;
     let n = class.types.len();
     let mut flows: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    for &c in raised {
+        flows[c].insert(c);
+    }
     let mut edges: HashSet<(usize, usize)> = HashSet::new();
     for (t, decl) in class.types.iter().enumerate() {
         if matches!(decl.kind, TypeKind::Enum | TypeKind::Runtime) {
@@ -149,6 +157,26 @@ pub fn flows(class: &Class, field_level: &HashSet<usize>) -> Vec<HashSet<usize>>
         for c in h.concretes(method.class) {
             if c != method.class && h.implementation(m, c) == Some(m) {
                 edges.insert((c, method.class));
+            }
+        }
+    }
+    // Every exception may be thrown, which makes it a `Throwable`, and a `catch` clause makes the
+    // `Throwable`s under the classes it names values of those classes.
+    if let Some(throwable) = class.type_index("java.lang.Throwable") {
+        for t in (0..n).filter(|&t| t != throwable && h.is_subtype(t, throwable)) {
+            edges.insert((t, throwable));
+        }
+        for m in &class.methods {
+            for s in &m.body {
+                visit_stmt(s, &mut |_| {}, &mut |s| {
+                    if let Stmt::Try { catches, .. } = s {
+                        for catch in catches {
+                            for &t in catch.types.iter().chain(&class.class_index(catch.ty)) {
+                                edges.insert((throwable, t));
+                            }
+                        }
+                    }
+                });
             }
         }
     }
@@ -209,6 +237,14 @@ pub fn flows(class: &Class, field_level: &HashSet<usize>) -> Vec<HashSet<usize>>
 
 /// How values of class type `t` are represented.
 pub fn rep(class: &Class, facts: &Facts, t: usize) -> Rep {
+    // A thrown value is a `Throwable`, which `catch` clauses match by class; a standard class
+    // that several classes extend is one too, rather than an enum of its own.
+    if let Some(throwable) = class.type_index("java.lang.Throwable")
+        && (t == throwable
+            || (crate::lower::is_standard(&class.types[t].name) && variants(class, facts, t).len() > 1))
+    {
+        return Rep::Enum(throwable);
+    }
     if class.hierarchy.is_concrete(t) && !class.hierarchy.has_subtypes(t) {
         return Rep::Object(t);
     }

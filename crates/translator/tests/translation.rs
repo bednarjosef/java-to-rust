@@ -2868,6 +2868,359 @@ fn interfaces_outside_the_program_are_rejected_except_comparable() {
     assert_contains(&rust, &["fn compare_to(&self, o: &Rc<V>) -> i32 {"]);
 }
 
+#[test]
+fn a_method_whose_exception_is_caught_returns_a_result() {
+    let rust = translate(
+        "class Missing extends Exception { Missing(String m) { super(m); } }
+        class A {
+            static int find(int[] xs, int x) throws Missing {
+                for (int i = 0; i < xs.length; i++) { if (xs[i] == x) return i; }
+                throw new Missing(\"no \" + x);
+            }
+            static int twice(int[] xs, int x) throws Missing { return find(xs, x) * 2; }
+            public static void main(String[] a) {
+                int[] xs = {4, 5};
+                try {
+                    System.out.println(twice(xs, 5));
+                    System.out.println(twice(xs, 6));
+                } catch (Missing e) {
+                    System.out.println(e.getMessage());
+                }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn find(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
+            "Err(Throwable::Missing(Rc::new(",
+            "fn twice(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
+            "find(xs, x)?",
+            "let attempt: Result<(), Throwable> = 'attempt: {",
+            "java::or_break!(twice(&xs, 5), 'attempt)",
+            "Err(Throwable::Missing(e)) => {",
+        ],
+    );
+}
+
+#[test]
+fn an_exception_that_nothing_catches_ends_the_program_where_it_is_thrown() {
+    let rust = translate(
+        "class A {
+            static int check(int x) {
+                if (x < 0) throw new IllegalArgumentException(\"negative: \" + x);
+                return x;
+            }
+            public static void main(String[] a) {
+                System.out.println(check(3));
+                System.out.println(check(-3));
+            }
+        }",
+    );
+    // Nothing observes the exception, so `check` keeps its plain signature.
+    assert_contains(
+        &rust,
+        &["fn check(x: i32) -> i32 {", "java::throw_uncaught(Throwable::IllegalArgumentException("],
+    );
+    assert_lacks(&rust, &["Result<", "'attempt"]);
+}
+
+#[test]
+fn a_call_outside_any_try_of_a_method_that_throws_ends_the_program_on_failure() {
+    let rust = translate(
+        "class A {
+            static int check(int x) {
+                if (x < 0) throw new IllegalStateException(\"negative\");
+                return x;
+            }
+            public static void main(String[] a) {
+                try { check(-1); } catch (IllegalStateException e) { System.out.println(\"caught\"); }
+                System.out.println(check(-2));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["fn check(x: i32) -> Result<i32, Throwable> {", "check(-2).unwrap_or_else(java::uncaught)"],
+    );
+}
+
+#[test]
+fn catch_clauses_match_in_order_and_a_try_that_catches_nothing_is_a_block() {
+    let rust = translate(
+        "class A {
+            static void run(int x) {
+                if (x == 1) throw new IllegalArgumentException(\"one\");
+                if (x == 2) throw new IllegalStateException(\"two\");
+                if (x == 3) throw new UnsupportedOperationException(\"three\");
+            }
+            public static void main(String[] a) {
+                for (int i = 0; i < 4; i++) {
+                    try {
+                        run(i);
+                    } catch (IllegalStateException e) {
+                        System.out.println(\"state \" + e.getMessage());
+                    } catch (RuntimeException e) {
+                        System.out.println(\"other \" + e);
+                    }
+                }
+                try { System.out.println(\"quiet\"); } catch (RuntimeException e) { System.out.println(\"never\"); }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "Err(Throwable::IllegalStateException(e)) => {",
+            "Err(e @ (Throwable::IllegalArgumentException(_) | Throwable::UnsupportedOperationException(_))) => {",
+        ],
+    );
+    assert_lacks(&rust, &["'attempt2"]);
+}
+
+#[test]
+fn a_finally_runs_after_the_block_and_then_the_exception_goes_on() {
+    let rust = translate(
+        "class A {
+            static int log = 0;
+            static void withdraw(int amount) {
+                try {
+                    if (amount > 100) throw new IllegalStateException(\"too much\");
+                    System.out.println(amount);
+                } finally {
+                    log++;
+                }
+            }
+            public static void main(String[] a) {
+                try { withdraw(500); } catch (IllegalStateException e) { System.out.println(e.getMessage()); }
+                try { System.out.println(1); } finally { System.out.println(2); }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn withdraw(amount: i32) -> Result<(), Throwable> {",
+            "let attempt: Result<(), Throwable> = 'attempt: {",
+            "break 'attempt Err(Throwable::IllegalStateException(",
+            "attempt?;",
+        ],
+    );
+    // A `try` that nothing leaves early is its block, then the `finally`.
+    assert_contains(&rust, &["{\n        java::println!(\"1\");\n    }\n    java::println!(\"2\");"]);
+}
+
+#[test]
+fn a_return_or_a_jump_through_a_finally_happens_after_it() {
+    let rust = translate(
+        "class A {
+            static int find(int[] values, int target) {
+                try {
+                    for (int i = 0; i < values.length; i++) {
+                        if (values[i] == target) return i;
+                    }
+                    return -1;
+                } finally {
+                    System.out.println(\"searched\");
+                }
+            }
+            public static void main(String[] a) {
+                System.out.println(find(new int[] {4, 5}, 5));
+                for (int i = 0; i < 5; i++) {
+                    try {
+                        if (i == 1) continue;
+                        if (i == 3) break;
+                        System.out.println(i);
+                    } finally {
+                        System.out.println(\"after \" + i);
+                    }
+                }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "let attempt: java::Completion<i32, std::convert::Infallible, std::convert::Infallible> = 'attempt: {",
+            "break 'attempt java::Completion::Return(i);",
+            "java::Completion::Return(value) => {\n            return value;\n        }",
+            "break 'attempt java::Completion::Jump(0);",
+            "java::Completion::Jump(0) => {\n                continue;",
+            "java::Completion::Jump(_) => {\n                break;",
+        ],
+    );
+}
+
+#[test]
+fn a_runtime_failure_that_a_catch_sees_is_a_checked_call_that_throws() {
+    let rust = translate(
+        "class A {
+            static int ratio(int a, int b) { return a / b; }
+            public static void main(String[] args) {
+                int[] v = new int[2];
+                try {
+                    v[args.length + 2] = ratio(1, args.length);
+                } catch (ArithmeticException e) {
+                    System.out.println(\"zero: \" + e.getMessage());
+                } catch (ArrayIndexOutOfBoundsException e) {
+                    System.out.println(\"out\");
+                }
+                System.out.println(\"a b\".split(\" +\").length);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn ratio(a: i32, b: i32) -> Result<i32, Throwable> {",
+            "java::try_div(a, b)?",
+            "java::or_break!(java::try_put(&mut v, ",
+            "impl From<java::Exception> for Throwable {",
+            "\"java.lang.ArithmeticException\" => ",
+            "_ => java::uncaught(e),",
+        ],
+    );
+}
+
+#[test]
+fn exceptions_the_translation_cannot_reproduce_are_rejected() {
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
+    let err = reject(
+        "class A { public static void main(String[] a) {
+            try { int[] v = new int[a.length - 1]; System.out.println(v.length); }
+            catch (NegativeArraySizeException e) { System.out.println(\"negative\"); }
+        } }",
+    );
+    assert!(
+        err.contains(
+            "catching the `NegativeArraySizeException` that this array creation may throw not supported yet"
+        ),
+        "{err}"
+    );
+    let err = reject(
+        "class A { static String s(int n) { return n > 0 ? \"x\" : null; }
+            public static void main(String[] a) {
+                try { System.out.println(s(a.length).length()); }
+                catch (NullPointerException e) { System.out.println(\"null\"); }
+            } }",
+    );
+    assert!(
+        err.contains("catching the `NullPointerException` that this call may throw not supported yet"),
+        "{err}"
+    );
+    let err = reject(
+        "class A { public static void main(String[] a) {
+            RuntimeException e = a.length > 0 ? new RuntimeException() : null;
+            throw e;
+        } }",
+    );
+    assert!(err.contains("throwing a value that may be null not supported yet"), "{err}");
+    let err = reject(
+        "class A { public static void main(String[] a) {
+            int n = switch (a.length) {
+                case 0 -> { try { yield 1; } finally { System.out.println(2); } }
+                default -> 3;
+            };
+            System.out.println(n);
+        } }",
+    );
+    assert!(err.contains("a `yield` through a `finally` not supported yet"), "{err}");
+    let err = reject(
+        "class P {
+            int x;
+            P(int x) { try { if (x < 0) return; this.x = x; } finally { System.out.println(\"built\"); } }
+        }
+        class A { public static void main(String[] a) { System.out.println(new P(1).x); } }",
+    );
+    assert!(err.contains("a `return` of a constructor through a `finally` not supported yet"), "{err}");
+    let err = reject(
+        "class Bad extends RuntimeException {
+            Bad(int x) { super(\"bad\"); if (x < 0) throw new IllegalStateException(\"negative\"); }
+        }
+        class A { public static void main(String[] a) {
+            try { throw new Bad(-1); } catch (IllegalStateException e) { System.out.println(\"caught\"); }
+        } }",
+    );
+    assert!(err.contains("a constructor of an exception that throws not supported yet"), "{err}");
+}
+
+#[test]
+fn a_try_with_resources_closes_each_resource_in_a_finally() {
+    let rust = translate(
+        "class A {
+            static class R implements AutoCloseable {
+                final String name;
+                R(String name) { this.name = name; }
+                public void close() { System.out.println(\"close \" + name); }
+            }
+            public static void main(String[] args) {
+                try (R a = new R(\"a\"); R b = new R(\"b\")) {
+                    System.out.println(a.name + b.name);
+                }
+            }
+        }",
+    );
+    // `b` is closed first, then `a`, however the body ends.
+    assert_contains(&rust, &["let a = ", "let b = ", ".close();\n        }\n        a.", ".close();"]);
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
+    let err = reject(
+        "class A {
+            static class R implements AutoCloseable {
+                public void close() { throw new IllegalStateException(\"closing\"); }
+            }
+            public static void main(String[] args) {
+                try (R r = new R()) { System.out.println(1); }
+            }
+        }",
+    );
+    assert!(err.contains("a resource whose `close` may fail not supported yet"), "{err}");
+    let err = reject(
+        "class A {
+            static class R implements AutoCloseable { public void close() {} }
+            public static void main(String[] args) {
+                R r = new R();
+                try (r) { System.out.println(1); }
+            }
+        }",
+    );
+    assert!(err.contains("try-with-resources over an existing variable not supported yet"), "{err}");
+}
+
+#[test]
+fn a_constructor_that_throws_returns_a_result_that_new_passes_on() {
+    let rust = translate(
+        "class A {
+            static class Range {
+                final int low, high;
+                Range(int low, int high) {
+                    if (low > high) throw new IllegalArgumentException(\"empty\");
+                    this.low = low;
+                    this.high = high;
+                }
+                Range(int high) { this(0, high); }
+            }
+            public static void main(String[] args) {
+                try {
+                    Range r = new Range(args.length - 1);
+                    System.out.println(r.high - r.low);
+                } catch (IllegalArgumentException e) {
+                    System.out.println(e.getMessage());
+                }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn new_i32_i32(low: i32, high: i32) -> Result<ARange, Throwable> {",
+            "return Err(Throwable::IllegalArgumentException(",
+            // A constructor that only delegates returns the other's `Result`.
+            "fn new_i32(high: i32) -> Result<ARange, Throwable> {\n        ARange::new_i32_i32(0, high)\n    }",
+            "java::or_break!(ARange::new_i32(",
+        ],
+    );
+}
+
 const PATTERNS: &str = "
     interface Shape { double area(); }
     class Circle implements Shape {

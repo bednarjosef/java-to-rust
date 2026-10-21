@@ -28,7 +28,8 @@ impl<'a> Gen<'a> {
         match stmt {
             Stmt::Return(Some(value), _) => {
                 let code = self.returned(value);
-                self.line(&code.text);
+                let text = self.ok(code.text);
+                self.line(&text);
             }
             Stmt::Block(stmts) => self.stmts(stmts, true),
             Stmt::If { cond, then, otherwise } => self.if_stmt(cond, then, otherwise.as_deref(), true),
@@ -57,8 +58,14 @@ impl<'a> Gen<'a> {
         let conflicts = self.stmt_conflicts(stmt);
         let outer = std::mem::replace(&mut self.guarded, conflicts);
         let code = self.returned(value);
-        self.line(&code.text);
+        let text = self.ok(code.text);
+        self.line(&text);
         self.guarded = outer;
+    }
+
+    /// The value `text` as the result of the current method: `Ok(text)` in a method that throws.
+    pub(super) fn ok(&self, text: String) -> String {
+        if self.throwing { format!("Ok({text})") } else { text }
     }
 
     /// The statements of a case of a switch expression, then its value. `T x = e; yield x;`, with
@@ -97,9 +104,7 @@ impl<'a> Gen<'a> {
     }
 
     /// An `if` and its `else if` chain. In tail position every branch is a value, so the `if` is
-    /// the value of the function. Only `narrow_if`'s null tests are skipped there; they would need
-    /// their branches as statements. A negated pattern binds its variable only in `narrow_if`'s
-    /// form, so that one is written with branches as statements, which return.
+    /// the value of the function, also in `narrow_if`'s forms.
     pub(super) fn if_stmt(
         &mut self,
         cond: &'a Expr,
@@ -107,7 +112,7 @@ impl<'a> Gen<'a> {
         otherwise: Option<&'a Stmt>,
         tail: bool,
     ) {
-        if (!tail || null::negated_pattern(cond).is_some()) && self.narrow_if(cond, then, otherwise) {
+        if self.narrow_if(cond, then, otherwise, tail) {
             return;
         }
         let (cond_text, narrowed) = self.guard(cond, then);

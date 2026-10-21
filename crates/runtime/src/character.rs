@@ -6,7 +6,7 @@
 //! is generated from the JDK; the case and alphabetic tests are Rust's, which agree with Java's.
 
 use super::character_tables::{DIGITS, FRACTIONS, LETTERS, NUMERIC_OFFSETS, UPPER_CASE_EXCEPTIONS};
-use super::{string_length, throw};
+use super::{Exception, string_length};
 use std::fmt;
 
 /// Formats a `char` the way Java prints it. A lone surrogate, which no Rust string can hold,
@@ -26,21 +26,31 @@ pub fn char_to_string(c: u16) -> String {
 
 /// Java's `s.charAt(index)`: the UTF-16 code unit at `index`.
 pub fn char_at(s: &str, index: i32) -> u16 {
-    let unit = usize::try_from(index).ok().and_then(|i| s.encode_utf16().nth(i));
-    unit.unwrap_or_else(|| out_of_bounds(index, string_length(s)))
+    try_char_at(s, index).unwrap_or_else(crate::uncaught)
 }
 
 /// `s.charAt(index)` on an ASCII string, where code units are bytes.
 pub fn ascii_char_at(s: &str, index: i32) -> u16 {
+    try_ascii_char_at(s, index).unwrap_or_else(crate::uncaught)
+}
+
+/// `char_at` where the program observes the `StringIndexOutOfBoundsException`.
+pub fn try_char_at(s: &str, index: i32) -> Result<u16, Exception> {
+    let unit = usize::try_from(index).ok().and_then(|i| s.encode_utf16().nth(i));
+    unit.ok_or_else(|| out_of_bounds(index, string_length(s)))
+}
+
+/// `ascii_char_at` where the program observes the `StringIndexOutOfBoundsException`.
+pub fn try_ascii_char_at(s: &str, index: i32) -> Result<u16, Exception> {
     match usize::try_from(index).ok().and_then(|i| s.as_bytes().get(i)) {
-        Some(&b) => b as u16,
-        None => out_of_bounds(index, s.len() as i32),
+        Some(&b) => Ok(b as u16),
+        None => Err(out_of_bounds(index, s.len() as i32)),
     }
 }
 
-fn out_of_bounds(index: i32, length: i32) -> ! {
+fn out_of_bounds(index: i32, length: i32) -> Exception {
     let message = format!("Index {index} out of bounds for length {length}");
-    throw("java.lang.StringIndexOutOfBoundsException", &message)
+    Exception::new("java.lang.StringIndexOutOfBoundsException", message)
 }
 
 pub(super) fn scalar(c: u16) -> Option<char> {

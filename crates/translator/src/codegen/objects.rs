@@ -103,6 +103,10 @@ pub(super) fn default_value(ty: Type) -> &'static str {
 /// functions.
 pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
     let mut live = instantiated(class);
+    // The runtime creates the exceptions it raises where the program sees them.
+    for &c in &facts.raised_classes {
+        live[c] = true;
+    }
     // A class that only ever types a null reference still needs its struct for the type.
     for t in mentioned(class) {
         live[t] |= class.hierarchy.is_concrete(t) && !class.hierarchy.has_subtypes(t);
@@ -207,7 +211,9 @@ fn own_exprs(stmt: &Stmt) -> Vec<&Expr> {
         | Stmt::Block(_)
         | Stmt::Labeled { .. }
         | Stmt::BreakLabel(_)
-        | Stmt::ContinueLabel(_) => Vec::new(),
+        | Stmt::ContinueLabel(_)
+        | Stmt::Try { .. } => Vec::new(),
+        Stmt::Throw(e) => vec![e],
     }
 }
 
@@ -917,8 +923,17 @@ impl<'a> Gen<'a> {
     /// `new C(args)`, which calls the constructor that the checker chose. A constructor that builds
     /// a plain value is wrapped here, unless the class is owned.
     pub(super) fn new_object(&mut self, ctor: usize, args: &'a [Expr]) -> Code {
+        let c = self.class.methods[ctor].class;
+        let rep = self.enum_for(c);
+        self.new_object_as(ctor, args, rep)
+    }
+
+    /// `new_object`, as a value of the enum of type `rep` if not `None` (an object of a class
+    /// with subclasses is a value of its class's enum; an upcast makes it one of a superclass's).
+    pub(super) fn new_object_as(&mut self, ctor: usize, args: &'a [Expr], rep: Option<usize>) -> Code {
         let args = self.call_args(ctor, args).join(", ");
         let call = format!("{}({args})", self.qualified_fn(ctor));
+        let call = self.raising(Code::atom(call), ctor).text;
         let c = self.class.methods[ctor].class;
         let name = &self.class.types[c].name;
         let object = if self.facts.owned.contains(name) || !self.builds_plain(name) {
@@ -928,8 +943,7 @@ impl<'a> Gen<'a> {
         } else {
             format!("Rc::new(RefCell::new({call}))")
         };
-        // An object of a class with subclasses is a value of the class's enum.
-        Code::atom(match self.enum_for(c) {
+        Code::atom(match rep {
             Some(t) => format!("{}({object})", self.variant(t, c)),
             None => object,
         })
@@ -1036,6 +1050,10 @@ impl<'a> Gen<'a> {
 
     /// A call of a `toString` that is a plain method.
     fn text_call(&mut self, e: &'a Expr, index: usize) -> Code {
+        // A `toString` that the object's class inherits from a class whose enum has it.
+        if let Some(code) = self.inherited_call(e, index, &[]) {
+            return code;
+        }
         if self.facts.self_methods.contains(&index) {
             return self.method_call(e, index, &[]);
         }
@@ -1577,7 +1595,9 @@ impl<'a> Gen<'a> {
         match delegate {
             Some((args, index)) => {
                 let args = self.call_args(index, args).join(", ");
-                self.line(&format!("let obj = {}({args});", self.qualified_fn(index)));
+                let call = Code::atom(format!("{}({args})", self.qualified_fn(index)));
+                let call = self.raising(call, index).text;
+                self.line(&format!("let obj = {call};"));
             }
             None => {
                 let mut fields: Vec<String> = base.into_iter().map(|b| format!("base: {b}")).collect();
@@ -1610,7 +1630,8 @@ impl<'a> Gen<'a> {
         self.ctor_result = Some(result);
         self.stmts(without_final_return(rest), false);
         self.ctor_result = None;
-        self.line(result);
+        let result = self.ok(result.to_string());
+        self.line(&result);
     }
 
     /// The `super(...)` that starts the statements of a constructor of class `t`, if one does: the
@@ -1626,7 +1647,8 @@ impl<'a> Gen<'a> {
         match (hierarchy::embedded(self.facts, self.class, t), resolved) {
             (Some(_), Some(ctor)) => {
                 let args = self.call_args(*ctor, args).join(", ");
-                (Some(format!("{}({args})", self.qualified_fn(*ctor))), rest)
+                let call = Code::atom(format!("{}({args})", self.qualified_fn(*ctor)));
+                (Some(self.raising(call, *ctor).text), rest)
             }
             _ => {
                 for a in args.iter().filter(|a| has_effects(a)) {
