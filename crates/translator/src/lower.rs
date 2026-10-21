@@ -29,6 +29,7 @@ mod arrays;
 mod boxing;
 mod captures;
 mod charsets;
+mod classes;
 mod constant_bodies;
 mod initializers;
 mod inner;
@@ -587,6 +588,7 @@ impl<'t> Lowering<'t> {
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => self.lambda(node)?,
             "INSTANCE_OF" => self.instance_of(node)?,
             "SWITCH_EXPRESSION" => self.switch_expr(node)?,
+            "EQUAL_TO" | "NOT_EQUAL_TO" if classes::compares_classes(node) => self.class_comparison(node)?,
             kind => {
                 let left = node.child("leftOperand");
                 let op = binary_op(node, kind);
@@ -673,6 +675,9 @@ impl<'t> Lowering<'t> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.class_call(node, &symbol, select)? {
             return Ok(kind);
         }
         let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
