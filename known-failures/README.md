@@ -14,7 +14,8 @@ pass. Java's output is what `java File.java` prints. When a failure is fixed, mo
   null (it is assigned an element of a `String[]`). Java prints `aa` and `null!`; rustc fails with
   E0277 "`Option<String>` doesn't implement `std::fmt::Display`" and E0308: the compound
   assignment to a static in `codegen/objects.rs` formats the old value as a plain string and
-  stores the result without `Some`. Found by the fuzzer with `--arrays --strings`.
+  stores the result without `Some`. Found by the fuzzer with `--arrays --strings`, where it is
+  the only failure: seeds 4, 34, 184, 214, 222 and 224 of 300.
 - `StringContainsCharSequence.java`: `"a\\b".replace("ab", "abc").contains(...)` with a `split`
   element as the argument. Java prints nothing; the translator rejects it with "type
   `java.lang.CharSequence` not supported yet", since `replace` with string arguments and
