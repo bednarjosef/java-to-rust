@@ -3,7 +3,7 @@
 //! `StreamOpFlag` (`DISTINCT(0, set(Type.SPLITERATOR).set(Type.STREAM))`). Their fields are
 //! tables, built once at the enum's static initialization, as Java builds the constants then:
 //! instance field `f` becomes the static array `fOfConstants`, indexed by ordinal; each
-//! constructor becomes the static method `initConstant(constantOrdinal, ..)` that fills the
+//! constructor becomes the static method `initShapeConstant(constantOrdinal, ..)` (for an enum `Shape`) that fills the
 //! constant's row; the enum's `<clinit>` creates the tables and calls it for each constant, in
 //! order, before its other static initializers; and every read or write of `e.f` becomes
 //! `fOfConstants[e.ordinal()]`. An enum that fits the pure form keeps it, so its fields stay
@@ -16,7 +16,7 @@ fn table(field: &str) -> String {
     format!("{field}OfConstants")
 }
 
-/// The parameter of an `initConstant` that names the constant it builds.
+/// The parameter of a constant builder that names the constant it builds.
 const ORDINAL: &str = "constantOrdinal";
 
 impl<'t> Lowering<'t> {
@@ -33,6 +33,8 @@ impl<'t> Lowering<'t> {
         self.in_ctor.set(false);
         let pos = self.types[index].node.pos();
         let enum_ty = Type::enum_type(&self.types[index].name);
+        let (builder, fields_builder) =
+            (constant_builder(&self.types[index].name), fields_builder(&self.types[index].name));
         let fields = std::mem::take(&mut types[index].fields);
         let count = self.enum_constant_names(index).count();
         // The tables, at Java's default values: an enum-typed field holds a constant until its
@@ -79,7 +81,7 @@ impl<'t> Lowering<'t> {
                 })
                 .collect();
             methods.push(Method {
-                name: "initFields".to_string(),
+                name: fields_builder.clone(),
                 params: vec![Param { name: ORDINAL.to_string(), ty: Type::Int }],
                 ret: Type::Void,
                 body,
@@ -110,16 +112,16 @@ impl<'t> Lowering<'t> {
             if method.is_ctor {
                 method.is_ctor = false;
                 method.is_static = true;
-                method.name = "initConstant".to_string();
+                method.name = builder.clone();
                 method.params.insert(0, Param { name: ORDINAL.to_string(), ty: Type::Int });
                 if let (Some(f), false) = (fields_init, starts_with_this_call) {
                     let ordinal = self.synth(ExprKind::Var(ORDINAL.to_string()), method.pos, Type::Int);
-                    let call = ExprKind::Call { name: "initFields".to_string(), args: vec![ordinal], resolved: Some(f) };
+                    let call = ExprKind::Call { name: fields_builder.clone(), args: vec![ordinal], resolved: Some(f) };
                     method.body.insert(0, Stmt::Expr(self.synth(call, method.pos, Type::Void)));
                 }
             }
             for stmt in &mut method.body {
-                rewrite_stmt(stmt, &mut |e| self.constant_init(e));
+                rewrite_stmt(stmt, &mut |e| self.constant_init(e, &builder));
             }
             // Any other `this` is the constant being built: `values()[constantOrdinal]`.
             for stmt in &mut method.body {
@@ -144,7 +146,7 @@ impl<'t> Lowering<'t> {
             };
             let mut args = self.convert_args(Some(ctor), args)?;
             args.insert(0, self.synth(ExprKind::Int(ordinal as i32), member.pos(), Type::Int));
-            let call = ExprKind::Call { name: "initConstant".to_string(), args, resolved: Some(ctor) };
+            let call = ExprKind::Call { name: builder.clone(), args, resolved: Some(ctor) };
             creates.push(Stmt::Expr(self.synth(call, member.pos(), Type::Void)));
         }
         match methods.iter().position(|m| m.class == index && m.name == "<clinit>") {
@@ -213,9 +215,9 @@ impl<'t> Lowering<'t> {
             .unwrap_or(Type::Int)
     }
 
-    /// In a constructor become `initConstant`: `this`'s ordinal as the `constantOrdinal`
-    /// parameter, and `this(..)` as a call of the other `initConstant`.
-    fn constant_init(&self, e: &mut Expr) {
+    /// In a constructor become a constant builder: `this`'s ordinal as the `constantOrdinal`
+    /// parameter, and `this(..)` as a call of the other builder.
+    fn constant_init(&self, e: &mut Expr, builder: &str) {
         let pos = e.pos;
         match &mut e.kind {
             ExprKind::Builtin(Builtin::EnumOrdinal, args) if matches!(args[..], [Expr { kind: ExprKind::This, .. }]) => {
@@ -224,7 +226,7 @@ impl<'t> Lowering<'t> {
             ExprKind::ThisCall { args, resolved } => {
                 let mut args = std::mem::take(args);
                 args.insert(0, self.synth(ExprKind::Var(ORDINAL.to_string()), pos, Type::Int));
-                e.kind = ExprKind::Call { name: "initConstant".to_string(), args, resolved: *resolved };
+                e.kind = ExprKind::Call { name: builder.to_string(), args, resolved: *resolved };
             }
             _ => {}
         }

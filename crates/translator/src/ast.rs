@@ -287,6 +287,21 @@ pub const ENUM: &str = "Enum";
 /// it as a type, beside `OBJECT`: the numeric boxes are its values.
 pub const NUMBER: &str = "Number";
 
+/// The name of the function that builds a constant of the enum `name` with tables
+/// (`lower/enum_tables.rs`): its constructor, `initShapeConstant` for `Main.Shape`.
+pub fn constant_builder(name: &str) -> String {
+    format!("init{}Constant", simple_enum_name(name))
+}
+
+/// The name of the function that runs the field initializers of the enum `name` with tables.
+pub fn fields_builder(name: &str) -> String {
+    format!("init{}Fields", simple_enum_name(name))
+}
+
+fn simple_enum_name(name: &str) -> &str {
+    name.rsplit(['.', '$']).next().unwrap_or(name)
+}
+
 /// The runtime classes whose values an `Object` can hold, with the Java type of those values.
 pub fn runtime_values() -> [(&'static str, Type); 9] {
     [

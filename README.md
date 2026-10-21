@@ -344,7 +344,7 @@ body (if it is not abstract) for the rest. `valueOf` of a name that is no consta
 An enum whose constructor does more than set fields to constant values (a loop, a call, an
 argument that is another enum's constant or a static method's result, as the JDK's
 `StreamOpFlag` has) keeps its fields in tables instead: field `f` is a static array
-`fOfConstants` indexed by ordinal, the constructor is a function `init_constant(ordinal, ..)`
+`fOfConstants` indexed by ordinal, the constructor is a function `init_shape_constant(ordinal, ..)` (for an enum `Shape`)
 that fills a constant's row, and the enum's static initialization builds every constant, in
 order, before its other static initializers (an exception there is Java's
 `ExceptionInInitializerError`). A read of `e.f` is `fOfConstants[e.ordinal()]`, and the enum's
