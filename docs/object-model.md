@@ -1715,7 +1715,10 @@ Generics are erased in lowering, and nothing after it knows they existed:
   in a tag beside the elements would need an array type of its own through all of the array code,
   so it is not done, with two deviations: storing an object of another class in such an array
   does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s
-  (`[Ljava.lang.Object;`).
+  (`[Ljava.lang.Object;`). Arrays of strings are left out: the runtime's string methods make and
+  take `java::Array<String>` (`split`, `String.join`, `main`'s arguments), so a `String[]` passed
+  for an array of a type variable is still rejected ("an array passed as an array of a type
+  variable").
 - An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the
   plan's `Variant::Array`, done as a runtime class beside the strings and the boxes rather than a
   variant kind of its own: each array type that is converted to `Object` or cast back from it gets

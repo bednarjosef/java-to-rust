@@ -11,6 +11,10 @@
 //! erasure writes (`generics::erased_use`), whose stores convert to `Object`, and whose for-each
 //! variable is cast from `Object` (`arrays::for_each`). Every other array keeps its exact type.
 //!
+//! An array of strings is not covariant: the runtime's string methods make and take
+//! `java::Array<String>`, so a `String[]` passed for an array of a type variable is still
+//! rejected.
+//!
 //! Such an array does not remember its element class: storing an object of another class in it
 //! does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s.
 
@@ -45,8 +49,18 @@ impl<'t> Lowering<'t> {
         }
     }
 
+    /// An array of strings stays a `java::Array<String>`: the runtime's string methods make and
+    /// take those (`split`, `String.join`, `main`'s arguments).
     fn note_covariant(&self, ty: Type) -> bool {
-        if self.object.is_none() || self.has_param(ty) || self.covariant.known.contains(&ty) {
+        let mut innermost = ty;
+        while let Type::Array(element) = innermost {
+            innermost = *element;
+        }
+        if self.object.is_none()
+            || self.has_param(ty)
+            || innermost == Type::String
+            || self.covariant.known.contains(&ty)
+        {
             return false;
         }
         let mut noted = self.covariant.noted.borrow_mut();
