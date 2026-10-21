@@ -124,7 +124,7 @@ impl<'a> Gen<'a> {
 
     /// `variant`, when the enum of `t` has a variant for class `c`: it has none when no object of
     /// `c` is ever created, where code that has one never runs.
-    fn variant_of(&self, t: usize, c: usize) -> Option<String> {
+    pub(super) fn variant_of(&self, t: usize, c: usize) -> Option<String> {
         self.enum_variants(t).contains(&c).then(|| self.variant(t, c))
     }
 
