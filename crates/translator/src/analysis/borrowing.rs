@@ -189,7 +189,12 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
     // A call may run any method of an override group, so the group changes its object, or writes
     // or touches other objects, when one of its methods does.
     let spread = |set: &HashSet<usize>| -> HashSet<usize> { set.iter().flat_map(|&m| h.group(m)).collect() };
-    let mutating = spread(&mutating);
+    // A method of an immutable class changes nothing: its object has no `RefCell` to borrow
+    // mutably, whatever the other methods of its group do.
+    let mutating = spread(&mutating)
+        .into_iter()
+        .filter(|&m| !facts.immutable.contains(name(class.methods[m].class)))
+        .collect();
     let writers = spread(&writers);
     let isolated: HashSet<usize> = isolated;
     let isolated =
