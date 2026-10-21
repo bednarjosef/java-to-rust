@@ -64,7 +64,15 @@ const RAISED: &[(&str, &[&str])] = &[
         &["METHOD_INVOCATION", "MEMBER_SELECT", "ARRAY_ACCESS", "SWITCH", "SWITCH_EXPRESSION"],
     ),
     ("java.lang.ClassCastException", &["TYPE_CAST"]),
-    ("java.lang.IllegalArgumentException", &["enum#valueOf", "java.lang.Character#toChars"]),
+    (
+        "java.lang.IllegalArgumentException",
+        &["enum#valueOf", "java.lang.Character#toChars", "java.lang.Object#wait"],
+    ),
+    // A monitor that the thread does not hold.
+    (
+        "java.lang.IllegalMonitorStateException",
+        &["java.lang.Object#wait", "java.lang.Object#notify", "java.lang.Object#notifyAll"],
+    ),
     (
         "java.lang.StringIndexOutOfBoundsException",
         &[

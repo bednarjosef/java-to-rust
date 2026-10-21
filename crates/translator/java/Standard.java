@@ -259,6 +259,23 @@ class IllegalStateException extends RuntimeException {
     }
 }
 
+class IllegalMonitorStateException extends RuntimeException {
+    public IllegalMonitorStateException() {
+    }
+
+    public IllegalMonitorStateException(String s) {
+        super(s);
+    }
+
+    public IllegalMonitorStateException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public IllegalMonitorStateException(Throwable cause) {
+        super(cause);
+    }
+}
+
 class IndexOutOfBoundsException extends RuntimeException {
     public IndexOutOfBoundsException() {
     }

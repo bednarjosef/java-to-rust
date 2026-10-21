@@ -139,7 +139,8 @@ A small subset, end to end:
 - **Classes**: static and instance methods, overloading, varargs, fields with initializers,
   instance initializer blocks, static fields, constructors (including `this(...)`), `new`,
   object-typed fields and `null` objects, and a user `toString` in `println` and concatenation.
-  `synchronized (x)` checks `x` for null and runs the block; it does not lock yet (see "Threads").
+  `synchronized (x)` checks `x` for null and runs the block, holding `x`'s monitor where the
+  program can tell (see "Threads").
   An override may return a subtype of the overridden method's return type (a
   covariant return): the override's value is converted to the overridden method's representation,
   so a caller that goes through the supertype sees the same value as Java's. In a class that
@@ -262,10 +263,16 @@ A small subset, end to end:
   immutable, and every other class keeps `Rc<RefCell<C>>`; arrays are `java::SharedArray<T>`; and
   statics are process-wide (`java::Atomic<T>` for primitives, `java::Locked<T>` otherwise, and a
   `java::ClassInit` that runs a class's initializer once). A program without threads translates
-  exactly as before. `synchronized` does not lock yet, and a `volatile` static is read with
-  acquire and written with release, as every static is. Monitors, interrupts, sequentially
-  consistent `volatile`, the atomics and `java.util.concurrent` are next; the design is in
-  [docs/multi-threading.md](docs/multi-threading.md).
+  exactly as before. Monitors are Java's: synchronized methods (static ones on the class's
+  monitor), `synchronized` blocks (on objects and on class literals), `wait` with and without a
+  timeout, `notify`, `notifyAll` and `Thread.holdsLock`, with `IllegalMonitorStateException`. The
+  monitor of a shared object is the reentrant lock of its `java::Locked`
+  (`let _monitor = java::enter(this);`), held for the region and released however it ends; in a
+  program that waits, notifies or asks `holdsLock`, the monitor of an object of one thread is a
+  record of the objects the thread holds; elsewhere `synchronized` is the null check it was. A
+  `volatile` static is read with acquire and written with release, as every static is.
+  Interrupts, sequentially consistent `volatile`, the atomics and `java.util.concurrent` are
+  next; the design is in [docs/multi-threading.md](docs/multi-threading.md).
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`), and so are
   `System.out.println(char[])` and `System.err.print`/`println`, which also print a `char[]`.
   `System.err` is written as it is, after `System.out` is flushed, so the two stay in order.
@@ -673,9 +680,10 @@ Each construct below is rejected at translation with an error that names it:
   interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
-- of threads: `wait`/`notify`, `interrupt`, thread groups, uncaught exception handlers,
+- of threads: `interrupt`, `wait(millis, nanos)`, thread groups, uncaught exception handlers,
   `ThreadLocal` and the `java.util.concurrent` classes; a `StringBuilder`, or a box compared by
-  identity, that threads may share.
+  identity, that threads may share; `synchronized` on a string, a box, an array, an enum
+  constant or a `Class` other than a class literal, where the monitor would be kept.
 
 Also rejected: `Charset.aliases()`, `null` as a `Charset` (and a `Charset` field or array element
 that starts out null), catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and

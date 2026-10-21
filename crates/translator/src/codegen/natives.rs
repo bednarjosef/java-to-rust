@@ -115,6 +115,9 @@ impl<'a> Gen<'a> {
                 call(self, &format!("current_thread::<{ty}>"), vec![])
             }
             Native::ThreadStart => self.thread_start(args),
+            Native::MonitorWait | Native::MonitorNotify { .. } | Native::HoldsLock => {
+                self.monitor_native(native, args, id)
+            }
             Native::ThreadAlive => {
                 let tid = self.value(&args[0], Type::Long).text;
                 call(self, "thread_alive", vec![tid])

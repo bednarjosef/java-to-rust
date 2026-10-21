@@ -941,7 +941,9 @@ impl<'a> Gen<'a> {
             | ExprKind::SuperInit { resolved: Some(index), .. } => call(*index, None),
             // A native that waits counts as a borrow: no lock may be held across it.
             ExprKind::Builtin(
-                Builtin::Native(Native::Sleep { .. } | Native::ThreadJoin | Native::ThreadStart),
+                Builtin::Native(
+                    Native::Sleep { .. } | Native::ThreadJoin | Native::ThreadStart | Native::MonitorWait,
+                ),
                 _,
             ) => (1, 0),
             _ => (0, 0),
