@@ -1,5 +1,6 @@
 import com.sun.source.tree.*;
 import com.sun.source.util.*;
+import com.sun.tools.javac.api.JavacTaskImpl;
 import java.io.*;
 import java.lang.reflect.Method;
 import java.net.URI;
@@ -78,14 +79,22 @@ public class JavaTree {
      * prints {@code {"units":[{"file":...,"tree":...},...]}}: the files given, in order, then every
      * unit javac loaded from the source path and attributed. Compile errors are printed as
      * {@code FILE:LINE:COLUMN: message}.
+     *
+     * <p>javac attributes every unit it loads, and loads every unit their code names in turn:
+     * thousands of the JDK's for a program that uses a collection. With {@code --serve} only the
+     * given files are attributed at first, and the others as they are asked for (see
+     * {@link #serve}).
      */
     private static void program(List<String> args) throws Exception {
         List<String> options = new ArrayList<>(List.of("-proc:none", "-Xlint:none", "-XDshould-stop.at=FLOW"));
         List<File> files = new ArrayList<>();
+        boolean serve = false;
         for (int i = 0; i < args.size(); i++) {
             if (args.get(i).equals("--sourcepath") && i + 1 < args.size()) {
                 options.add("-sourcepath");
                 options.add(args.get(++i));
+            } else if (args.get(i).equals("--serve")) {
+                serve = true;
             } else {
                 files.add(new File(args.get(i)));
             }
@@ -109,24 +118,78 @@ public class JavaTree {
         elements = task.getElements();
         types = task.getTypes();
         task.parse().forEach(units::add);
+        PrintStream stdout = new PrintStream(new FileOutputStream(FileDescriptor.out), false, StandardCharsets.UTF_8);
+        if (serve) {
+            serve((JavacTaskImpl) task, units, diagnostics, stdout);
+            return;
+        }
         task.analyze();
-        boolean failed = false;
-        for (Diagnostic<? extends JavaFileObject> d : diagnostics.getDiagnostics()) {
-            if (d.getKind() == Diagnostic.Kind.ERROR) {
-                String file = d.getSource() == null ? "" : d.getSource().getName();
-                System.err.println(file + ":" + d.getLineNumber() + ":" + d.getColumnNumber() + ": " + d.getMessage(Locale.ROOT));
-                failed = true;
-            }
-        }
-        if (failed) {
-            System.exit(1);
-        }
+        failOnErrors(diagnostics);
         for (CompilationUnitTree unit : analyzed) {
             if (!units.contains(unit)) {
                 units.add(unit);
             }
         }
+        print(Trees.instance(task), units, stdout);
+    }
+
+    /**
+     * Serve mode: attributes the classes of the given units and prints the units as a line
+     * {@code {"units":[...]}}; then reads lines of qualified class names separated by commas from
+     * standard input, and answers each with a line of the same form: the units that declare those
+     * classes, attributed, that it has not printed before. A class that the source path does not
+     * have, or not as a source file, adds no unit. It ends at the end of the input. javac
+     * attributes a unit as a whole run would, so the units are the same, and only those asked for
+     * are attributed at all.
+     */
+    private static void serve(JavacTaskImpl task, List<CompilationUnitTree> given,
+            DiagnosticCollector<JavaFileObject> diagnostics, PrintStream stdout) throws IOException {
         Trees trees = Trees.instance(task);
+        // The given units' classes have symbols once entered.
+        task.enter();
+        Set<CompilationUnitTree> printed = new HashSet<>(given);
+        List<CompilationUnitTree> units = given;
+        BufferedReader in = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+        while (true) {
+            List<Element> classes = new ArrayList<>();
+            for (CompilationUnitTree unit : units) {
+                for (Tree decl : unit.getTypeDecls()) {
+                    if (trees.getElement(new TreePath(new TreePath(unit), decl)) instanceof TypeElement t) {
+                        classes.add(t);
+                    }
+                }
+            }
+            task.analyze(classes);
+            failOnErrors(diagnostics);
+            print(trees, units, stdout);
+            String line = in.readLine();
+            if (line == null) {
+                return;
+            }
+            units = new ArrayList<>();
+            for (String name : line.split(",")) {
+                TypeElement type = name.isEmpty() ? null : elements.getTypeElement(name);
+                TreePath path = type == null ? null : trees.getPath(outermost(type));
+                if (path != null && printed.add(path.getCompilationUnit())) {
+                    units.add(path.getCompilationUnit());
+                }
+            }
+        }
+    }
+
+    /** The outermost class that declares a class, or the class itself. */
+    private static TypeElement outermost(TypeElement type) {
+        TypeElement top = type;
+        for (Element at = type; at != null && !(at instanceof PackageElement); at = at.getEnclosingElement()) {
+            if (at instanceof TypeElement t) {
+                top = t;
+            }
+        }
+        return top;
+    }
+
+    /** Prints the units as a line {@code {"units":[{"file":...,"tree":...},...]}}. */
+    private static void print(Trees trees, List<CompilationUnitTree> units, PrintStream stdout) {
         StringBuilder out = new StringBuilder("{\"units\":[");
         for (CompilationUnitTree unit : units) {
             if (unit != units.get(0)) {
@@ -139,9 +202,23 @@ public class JavaTree {
             out.append('}');
         }
         out.append("]}\n");
-        PrintStream stdout = new PrintStream(new FileOutputStream(FileDescriptor.out), false, StandardCharsets.UTF_8);
         stdout.print(out);
         stdout.flush();
+    }
+
+    /** Prints the compile errors as {@code FILE:LINE:COLUMN: message} and exits, if there are any. */
+    private static void failOnErrors(DiagnosticCollector<JavaFileObject> diagnostics) {
+        boolean failed = false;
+        for (Diagnostic<? extends JavaFileObject> d : diagnostics.getDiagnostics()) {
+            if (d.getKind() == Diagnostic.Kind.ERROR) {
+                String file = d.getSource() == null ? "" : d.getSource().getName();
+                System.err.println(file + ":" + d.getLineNumber() + ":" + d.getColumnNumber() + ": " + d.getMessage(Locale.ROOT));
+                failed = true;
+            }
+        }
+        if (failed) {
+            System.exit(1);
+        }
     }
 
     private static Elements elements;
@@ -207,7 +284,7 @@ public class JavaTree {
             Element element = trees.getElement(path);
             if (element != null) {
                 out.append(",\"symbol\":");
-                symbol(element, tree instanceof MethodTree, out);
+                symbol(element, tree instanceof MethodTree || tree instanceof ClassTree, out);
             }
         }
         Class<?> type = tree.getKind().asInterface();
@@ -285,6 +362,9 @@ public class JavaTree {
         string(typeText(e.asType()), out);
         if (declaration && e.getKind() == ElementKind.METHOD && owner instanceof TypeElement t) {
             overrides((ExecutableElement) e, t, out);
+        }
+        if (declaration && e instanceof TypeElement t && (e.getKind() == ElementKind.CLASS || e.getKind() == ElementKind.ENUM)) {
+            inherits(t, out);
         }
         // The value of a constant variable, as text: javac's compile-time constant.
         if (e instanceof VariableElement v && v.getConstantValue() != null) {
@@ -434,6 +514,65 @@ public class JavaTree {
                     out.append(",\"type\":");
                     string(typeText(x.asType()), out);
                     out.append('}');
+                }
+            }
+        }
+        if (any) {
+            out.append(']');
+        }
+    }
+
+    /**
+     * The methods that class {@code c} inherits from a superclass that implement a method of an
+     * interface of {@code c} which that superclass does not implement: javac lists such an
+     * implementation with neither method, as only {@code c} makes the one implement the other.
+     */
+    private void inherits(TypeElement c, StringBuilder out) {
+        List<TypeElement> interfaces = new ArrayList<>();
+        List<TypeMirror> work = new ArrayList<>(types.directSupertypes(c.asType()));
+        while (!work.isEmpty()) {
+            TypeMirror next = work.remove(work.size() - 1);
+            if (types.asElement(next) instanceof TypeElement i && !interfaces.contains(i)) {
+                if (i.getKind().isInterface()) {
+                    interfaces.add(i);
+                }
+                work.addAll(types.directSupertypes(i.asType()));
+            }
+        }
+        String mark = ",\"inherits\":[";
+        boolean any = false;
+        for (TypeMirror up = c.getSuperclass(); types.asElement(up) instanceof TypeElement s; up = s.getSuperclass()) {
+            if (s.getQualifiedName().contentEquals("java.lang.Object")) {
+                break;
+            }
+            for (Element member : s.getEnclosedElements()) {
+                if (!(member instanceof ExecutableElement m) || member.getKind() != ElementKind.METHOD
+                        || m.getModifiers().contains(Modifier.STATIC) || m.getModifiers().contains(Modifier.PRIVATE)) {
+                    continue;
+                }
+                for (TypeElement i : interfaces) {
+                    if (types.isSubtype(types.erasure(s.asType()), types.erasure(i.asType()))) {
+                        continue;
+                    }
+                    for (Element candidate : i.getEnclosedElements()) {
+                        if (candidate instanceof ExecutableElement x && candidate.getKind() == ElementKind.METHOD
+                                && !x.getModifiers().contains(Modifier.STATIC)
+                                && x.getSimpleName().equals(m.getSimpleName()) && elements.overrides(m, x, c)) {
+                            out.append(any ? "," : mark);
+                            any = true;
+                            out.append("{\"name\":");
+                            string(m.getSimpleName().toString(), out);
+                            out.append(",\"owner\":");
+                            string(className(s), out);
+                            out.append(",\"type\":");
+                            string(typeText(m.asType()), out);
+                            out.append(",\"implements\":{\"owner\":");
+                            string(className(i), out);
+                            out.append(",\"type\":");
+                            string(typeText(x.asType()), out);
+                            out.append("}}");
+                        }
+                    }
                 }
             }
         }

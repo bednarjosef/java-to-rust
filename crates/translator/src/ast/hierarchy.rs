@@ -219,6 +219,23 @@ impl Hierarchy {
 }
 
 impl Class {
+    /// Whether method `m` is part of a class's static initialization: its `<clinit>`, or the
+    /// functions that build the constants of an enum with tables (`lower/enum_tables.rs`), which
+    /// only it calls. What it throws reaches the program as `ExceptionInInitializerError`.
+    pub fn is_initializer(&self, m: usize) -> bool {
+        let method = &self.methods[m];
+        method.name == "<clinit>" || self.builds_constants(m)
+    }
+
+    /// Whether method `m` is a function that builds the constants of an enum with tables.
+    pub fn builds_constants(&self, m: usize) -> bool {
+        let method = &self.methods[m];
+        let decl = &self.types[method.class];
+        method.is_static
+            && decl.kind == TypeKind::Enum
+            && (method.name == constant_builder(&decl.name) || method.name == fields_builder(&decl.name))
+    }
+
     /// The index of the type with this qualified name.
     pub fn type_index(&self, name: &str) -> Option<usize> {
         self.types.iter().position(|t| t.name == name)
@@ -229,8 +246,47 @@ impl Class {
     pub fn type_of(&self, ty: Type) -> Option<usize> {
         match ty {
             Type::Class(name, _) | Type::Enum(name) => self.type_index(name),
+            // An array that becomes an `Object` has a runtime class named after its type.
+            Type::Array(_) => self.type_index(&ty.to_string()),
             _ => self.type_index(runtime_name(ty)?),
         }
+    }
+
+    /// The array type of runtime class `c`, when it is the class of arrays that become `Object`s
+    /// (named after the type, `int[]` or `shapes.Point[][]`).
+    pub fn array_of(&self, c: usize) -> Option<Type> {
+        let decl = &self.types[c];
+        if decl.kind != TypeKind::Runtime || !decl.name.ends_with("[]") {
+            return None;
+        }
+        self.named_type(&decl.name)
+    }
+
+    /// The type that `Type`'s text names: a primitive, a string, a box, an array, or a class or
+    /// enum of the program.
+    fn named_type(&self, name: &str) -> Option<Type> {
+        if let Some(element) = name.strip_suffix("[]") {
+            return Some(Type::array(self.named_type(element)?));
+        }
+        let primitives = [
+            Type::Int,
+            Type::Long,
+            Type::Double,
+            Type::Byte,
+            Type::Short,
+            Type::Char,
+            Type::Float,
+            Type::Boolean,
+            Type::String,
+            Type::StringBuilder,
+        ];
+        let known = primitives.into_iter().chain(runtime_values().into_iter().map(|(_, t)| t));
+        if let Some(ty) = known.into_iter().find(|t| t.to_string() == name) {
+            return Some(ty);
+        }
+        let t = self.type_index(name)?;
+        let name = self.types[t].name.as_str();
+        Some(if self.types[t].kind == TypeKind::Enum { Type::enum_type(name) } else { Type::class(name) })
     }
 
     /// The type that a class type names.

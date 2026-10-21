@@ -1,7 +1,8 @@
 //! Arrays in generated code. A `java::Array` is a shared handle, so each access goes through a
 //! runtime helper that checks the index the way Java does; creation checks every size before it
 //! allocates anything, as Java does. An array that no other name can see is a plain `Vec`,
-//! written by `plain_arrays`.
+//! written by `plain_arrays`. In a program that starts threads the handle is a
+//! `java::SharedArray`, which the same helpers take.
 
 use super::array_writes::lends_array;
 use super::*;
@@ -12,7 +13,8 @@ impl<'a> Gen<'a> {
         match ty {
             Type::Array(elem) => {
                 let elem = self.element_ty_name(*elem);
-                format!("{}<{elem}>", self.runtime("Array"))
+                let array = if self.facts.threaded { "SharedArray" } else { "Array" };
+                format!("{}<{elem}>", self.runtime(array))
             }
             Type::Class(name, []) => self.object_type(name),
             Type::Class(name, args) => {
@@ -36,6 +38,13 @@ impl<'a> Gen<'a> {
     /// Whether elements of type `elem` may be null, in any array.
     pub(super) fn nullable_element(&self, elem: Type) -> bool {
         self.facts.nullable_elements.contains(&elem)
+    }
+
+    /// Whether the loop variable `name` over elements of type `elem` is an `Option` while the
+    /// elements are not: the name is nullable elsewhere in the method, so the elements are wrapped
+    /// in `Some` as the loop binds them.
+    pub(super) fn wrap_each(&self, name: &str, elem: Type) -> bool {
+        self.optional_var(self.method, elem, name) && !self.nullable_element(elem)
     }
 
     /// Whether `a = value` computes the value from `a` itself where `a` is a shared array: a
@@ -65,6 +74,17 @@ impl<'a> Gen<'a> {
         if self.nullable_element(elem) { self.optional_to(e, elem).text } else { self.value(e, elem).text }
     }
 
+    /// The runtime's function `name` that makes an array (`filled`, `from_vec`), or its `shared_`
+    /// twin in a program with threads.
+    pub(super) fn array_maker(&mut self, name: &str) -> String {
+        if self.facts.threaded { self.runtime(&format!("shared_{name}")) } else { self.runtime(name) }
+    }
+
+    /// `text`, a `java::Array` that a function of the runtime made, as an array of the program.
+    pub(super) fn made_array(&mut self, text: String) -> String {
+        if self.facts.threaded { format!("{}({text})", self.runtime("to_shared")) } else { text }
+    }
+
     /// The value of a new array's elements: zero, `false`, or `None` for references.
     pub(super) fn element_zero(&self, elem: Type) -> &'static str {
         if elem.is_reference() { "None" } else { zero_value(elem) }
@@ -75,7 +95,7 @@ impl<'a> Gen<'a> {
         if self.nullable(e) {
             // Using a null array throws `NullPointerException`.
             let place = self.object_place(e);
-            return format!("{}({place}.as_ref())", self.runtime("non_null"));
+            return self.dereference(&[e.id], &format!("{place}.as_ref()"));
         }
         match &e.kind {
             ExprKind::Var(name) => format!("&{}", self.local(name)),
@@ -112,17 +132,17 @@ impl<'a> Gen<'a> {
         let zero = self.element_zero(ty.element_at(sizes.len()));
         if let [size] = sizes {
             let n = self.value(size, Type::Int).text;
-            return Code::atom(format!("{}({n}, {zero})", self.runtime("filled")));
+            return Code::atom(format!("{}({n}, {zero})", self.array_maker("filled")));
         }
         let dims: Vec<String> = sizes.iter().map(|s| self.value(s, Type::Int).text).collect();
         let last = sizes.len() - 1;
-        let mut text = format!("{}(dims[{last}], {zero})", self.runtime("filled"));
+        let mut text = format!("{}(dims[{last}], {zero})", self.array_maker("filled"));
         for level in (0..last).rev() {
             // The rows built here are elements of level `level`; they are `Some` where that
             // element type is nullable, as the array they fill is.
             let row =
                 if self.nullable_element(ty.element_at(level + 1)) { format!("Some({text})") } else { text };
-            text = format!("{}(dims[{level}], |_| {row})", self.runtime("tabulate"));
+            text = format!("{}(dims[{level}], |_| {row})", self.array_maker("tabulate"));
         }
         let check = self.runtime("check_sizes");
         Code::new(format!("{{ let dims = [{}]; {check}(&dims); {text} }}", dims.join(", ")), LOWEST)
@@ -132,7 +152,7 @@ impl<'a> Gen<'a> {
     pub(super) fn array_lit(&mut self, ty: Type, items: &'a [Expr]) -> Code {
         let elem = element(ty);
         let items: Vec<String> = items.iter().map(|item| self.element_value(item, elem)).collect();
-        Code::atom(format!("{}(vec![{}])", self.runtime("from_vec"), items.join(", ")))
+        Code::atom(format!("{}(vec![{}])", self.array_maker("from_vec"), items.join(", ")))
     }
 
     /// `a[i] = v`, as a call of a runtime helper. Java evaluates the array, the index and then
@@ -357,7 +377,8 @@ impl<'a> Gen<'a> {
             self.expr(array).text
         };
         let each = self.runtime("each");
-        self.line(&format!("for {mutable}{var} in {each}({source}) {{"));
+        let wrap = if self.wrap_each(name, element(array.ty)) { ".map(Some)" } else { "" };
+        self.line(&format!("for {mutable}{var} in {each}({source}){wrap} {{"));
         self.loop_body(Loop::Plain, body, &[]);
         self.line("}");
     }

@@ -4,21 +4,26 @@
 //! outside it is reported as an error naming the construct.
 
 mod code_point;
+mod covariant;
 mod enum_nulls;
+mod enum_tables;
 mod enums;
 mod exceptions;
 mod foreach;
 mod functional;
 mod generic_args;
 mod generics;
+mod handles;
 mod hierarchy;
 mod lambdas;
+mod local_names;
 mod object;
 mod object_clone;
 mod objects;
 mod real_generics;
 mod statics;
 mod strings;
+mod stubs;
 mod unsigned;
 
 use crate::ast::*;
@@ -28,6 +33,7 @@ use std::cell::{Cell, RefCell};
 
 mod arrays;
 mod boxing;
+mod by_name;
 mod captures;
 mod charsets;
 mod classes;
@@ -45,6 +51,7 @@ mod switch;
 mod sync;
 mod system;
 mod varargs;
+pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use exceptions::{is_standard, standard_names, standard_subclass};
 pub use functional::is_functional;
@@ -53,18 +60,22 @@ pub use program::lower_program;
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
+    charsets::check(unit)?;
     // A `;` at top level and an annotation type (`@interface`) do nothing when the program runs.
     let decls: Vec<Node> = unit
         .list("typeDecls")
         .filter(|n| !matches!(n.kind(), "EMPTY_STATEMENT" | "ANNOTATION_TYPE"))
         .collect();
     let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
-    real_generics::retry(|real| {
+    real_generics::retry(|real, covariant| {
         let mut lowering = Lowering::declare(&decls)?;
+        lowering.covariant = covariant.clone();
         lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
         lowering.declare_standard()?;
         let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
-        lowering.functional = functional::Functional::select(decls.iter().map(|d| d.0), &declared);
+        // The standard classes may name interfaces too (`Thread` holds a `Runnable`).
+        let trees = decls.iter().map(|d| d.0).chain(lowering.standard.classes.iter().map(|(_, d)| *d));
+        lowering.functional = functional::Functional::select(trees, &declared);
         lowering.declare_functional()?;
         lowering.declare_plain_object(decls.iter().map(|d| d.0))?;
         lowering.name_nested();
@@ -203,6 +214,11 @@ struct Lowering<'t> {
     entry: Option<usize>,
     /// The standard exception classes that the program uses (see `exceptions`).
     standard: exceptions::Standard,
+    /// The array types whose arrays become `Object`s or are cast back from them: each is a
+    /// runtime class beside `Object` (see `object::object_types`).
+    object_arrays: std::cell::RefCell<Vec<Type>>,
+    /// The arrays of references that are `Object[]`s (see `covariant`).
+    covariant: covariant::Covariant,
     /// Where `Object` goes, in a program that uses it (see `object`).
     object: Option<object::ObjectIndexes>,
     /// The class of the objects that `new Object()` creates, when the code has one (see `object`).
@@ -239,11 +255,24 @@ impl<'t> Lowering<'t> {
         for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
             let in_type = |e| (index, e);
             self.constant_bodies(index, methods).map_err(in_type)?;
-            self.check_enum(index, methods).map_err(in_type)?;
             let bodies = self.constant_body_fields(index).map_err(in_type)?;
-            self.add_body_fields(&bodies, &mut types[index].fields).map_err(in_type)?;
-            let constants =
-                self.enum_constants(index, &types[index].fields, methods, &bodies).map_err(in_type)?;
+            let own_fields = types[index].fields.len();
+            let pure = self.check_enum(index, methods).and_then(|()| {
+                self.add_body_fields(&bodies, &mut types[index].fields)?;
+                self.enum_constants(index, &types[index].fields, methods, &bodies)
+            });
+            // An enum whose constructors do more than the pure form allows has tables instead,
+            // when its constants' bodies declare no fields.
+            let constants = match pure {
+                Ok(constants) => constants,
+                Err(e) if bodies.iter().any(|b| !b.is_empty()) => return Err(in_type(e)),
+                Err(_) => {
+                    types[index].fields.truncate(own_fields);
+                    self.enum_tables(index, types, methods).map_err(in_type)?;
+                    let names = self.enum_constant_names(index);
+                    names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() }).collect()
+                }
+            };
             types[index].enum_constants = Some(constants);
         }
         Ok(())
@@ -253,7 +282,9 @@ impl<'t> Lowering<'t> {
         let outer = self.method_ctx.replace(Some(index));
         let method = self.method_in_scope(index);
         self.method_ctx.set(outer);
-        method
+        let mut method = method?;
+        local_names::distinct_locals(&mut method);
+        Ok(method)
     }
 
     fn method_in_scope(&self, index: usize) -> Result<Method, Error> {
@@ -349,9 +380,14 @@ impl<'t> Lowering<'t> {
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
-            "java.nio.charset.Charset" => {
-                error(node.pos(), "a `Charset` outside `getBytes` or `new String` not supported yet")
+            _ if name == "java.lang.Class" || name.starts_with("java.lang.Class<") => Ok(Type::JavaClass),
+            // A value of one of the program's enums (see `enums::enum_call`).
+            _ if (name == "java.lang.Enum" || name.starts_with("java.lang.Enum<"))
+                && self.object.is_some_and(|at| at.enumeration.is_some()) =>
+            {
+                Ok(Type::class(ENUM))
             }
+            "java.nio.charset.Charset" => Ok(Type::Charset),
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
@@ -372,10 +408,15 @@ impl<'t> Lowering<'t> {
             _ if name.starts_with("<anonymous ") && self.enum_index(&name[11..name.len() - 1]).is_some() => {
                 Ok(Type::enum_type(&name[11..name.len() - 1]))
             }
-            _ if name.ends_with("[]") => Ok(Type::array(self.ty(node, &name[..name.len() - 2])?)),
+            _ if name.ends_with("[]") => {
+                Ok(self.covariant_array(Type::array(self.ty(node, &name[..name.len() - 2])?)))
+            }
             "java.lang.Object" if self.object.is_some() => Ok(Type::class(OBJECT)),
             "java.lang.Comparable" if self.object.is_some_and(|at| at.comparable.is_some()) => {
                 Ok(Type::class(COMPARABLE))
+            }
+            "java.lang.Number" if self.object.is_some_and(|at| at.number.is_some()) => {
+                Ok(Type::class(NUMBER))
             }
             _ if let Some(erased) = self.erased(node, name) => erased,
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
@@ -423,8 +464,8 @@ impl<'t> Lowering<'t> {
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
                 e => Stmt::Expr(e),
             },
-            // Reachability skipped the branch that the condition guards (`program::never_true`).
-            "IF" if self.never_true(node) => match node.get("elseStatement") {
+            // Reachability skipped the other branch (`program::live_branch`).
+            "IF" if let Some(branch) = self.live_branch(node) => match branch {
                 Some(n) => self.single_stmt(n)?,
                 None => Stmt::Block(Vec::new()),
             },
@@ -483,6 +524,7 @@ impl<'t> Lowering<'t> {
 
     fn expr(&self, node: Node<'t>) -> Result<Expr, Error> {
         let kind = match node.kind() {
+            _ if charsets::is_charset_op(node) => self.charset_op(node)?,
             "PARENTHESIZED" => return self.expr(node.child("expression")?),
             "INT_LITERAL" => ExprKind::Int(self.number(node)?),
             "LONG_LITERAL" => ExprKind::Long(self.number(node)?),
@@ -529,9 +571,18 @@ impl<'t> Lowering<'t> {
                     Some(declared) => declared,
                     None => self.ty(node, node.java_type())?,
                 };
+                let target = self.target(variable)?;
+                // An element of a covariant array is an `Object` (see `covariant`).
+                let to = match &target {
+                    Place::Index(array, _) => match array.ty {
+                        Type::Array(element) if Self::is_object(*element) => *element,
+                        _ => to,
+                    },
+                    _ => to,
+                };
                 ExprKind::Assign {
                     op: None,
-                    target: self.target(variable)?,
+                    target,
                     value: Box::new(self.convert(self.expr(node.child("expression")?)?, to)),
                 }
             }
@@ -544,9 +595,20 @@ impl<'t> Lowering<'t> {
                     value: Box::new(value),
                 }
             }
+            "TYPE_CAST" if let Some(name) = crate::program::created_by_name(node.0) => {
+                self.created_by_name(node, Node(name))?
+            }
+            "TYPE_CAST" if arrays::casts_component_array(node) => self.component_array(node)?,
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
                 let value = self.expr(node.child("expression")?)?;
+                if Self::is_object(value.ty) {
+                    self.object_array(node, ty)?;
+                }
+                // `(T[]) objects` or `(Object[]) versions`.
+                if value.ty != ty {
+                    self.meets_object_array(value.ty, ty);
+                }
                 // A cast between the program's types, up, down or across: `Cast` converts as the
                 // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
                 // `Integer` and unboxes. `(C) super.clone()` is already a `C`: the copy has the
@@ -565,9 +627,9 @@ impl<'t> Lowering<'t> {
                 }
             }
             // As with `if`, reachability skipped the branch that the condition guards.
-            "CONDITIONAL_EXPRESSION" if self.never_true(node) => {
+            "CONDITIONAL_EXPRESSION" if let Some(Some(branch)) = self.live_branch(node) => {
                 let ty = self.ty(node, node.java_type())?;
-                let value = self.convert(self.expr(node.child("falseExpression")?)?, ty);
+                let value = self.convert(self.expr(branch)?, ty);
                 // The branch converts to the type of the whole, as `cond ? 1 : 2L` is a `long`.
                 if value.ty == ty {
                     return Ok(value);
@@ -592,6 +654,7 @@ impl<'t> Lowering<'t> {
                 let (array, index) = self.index(node)?;
                 ExprKind::Index(Box::new(array), Box::new(index))
             }
+            "MEMBER_SELECT" if classes::is_literal(node) => self.class_literal(node)?,
             "MEMBER_SELECT" if is_array_length(node) => {
                 ExprKind::Length(Box::new(self.expr(node.child("expression")?)?))
             }
@@ -602,7 +665,10 @@ impl<'t> Lowering<'t> {
             "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => self.lambda(node)?,
             "INSTANCE_OF" => self.instance_of(node)?,
             "SWITCH_EXPRESSION" => self.switch_expr(node)?,
-            "EQUAL_TO" | "NOT_EQUAL_TO" if classes::compares_classes(node) => self.class_comparison(node)?,
+            "EQUAL_TO" | "NOT_EQUAL_TO" if self.compares_classes(node) => self.class_comparison(node)?,
+            "EQUAL_TO" | "NOT_EQUAL_TO" if charsets::compares_charsets(node) => {
+                self.charset_comparison(node)?
+            }
             kind => {
                 let left = node.child("leftOperand");
                 let op = binary_op(node, kind);
@@ -688,13 +754,19 @@ impl<'t> Lowering<'t> {
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
+        if let Some(kind) = self.handle_access(node, &symbol)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);
         }
         if let Some(kind) = self.class_call(node, &symbol, select)? {
             return Ok(kind);
         }
-        let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
+        if let Some(kind) = self.copy_of_with_class(node, &symbol)? {
+            return Ok(kind);
+        }
+        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
             let resolved = self.method_index(&symbol);
@@ -711,6 +783,9 @@ impl<'t> Lowering<'t> {
         }
         if symbol.owner == "java.lang.Comparable" && symbol.name == "compareTo" {
             return self.comparable_call(node, receiver, args);
+        }
+        if symbol.owner == "java.lang.Number" {
+            return self.number_call(node, &symbol, receiver);
         }
         if symbol.name == "equals"
             && !symbol.is_static
@@ -753,7 +828,16 @@ impl<'t> Lowering<'t> {
             ("java.lang.Math", "min") => Builtin::MathMin,
             ("java.lang.Math", "sqrt") => Builtin::MathSqrt,
             ("java.lang.Math", "pow") => Builtin::MathPow,
-            ("java.util.Arrays", name) => return self.arrays_call(node, name, args),
+            // Where the JDK's `Arrays` is translated, a call that the runtime does not do is one of
+            // it, such as a sort with a `Comparator`.
+            ("java.util.Arrays", name)
+                if self.type_index(symbol.owner).is_none() || {
+                    let types: Vec<&str> = node.list("arguments").map(|a| a.java_type()).collect();
+                    arrays::runtime_arrays_call(name, &types)
+                } =>
+            {
+                return self.arrays_call(node, name, args);
+            }
             ("java.lang.String", "length" | "equals")
                 if symbol.name == "length" || matches!(args[0].ty, Type::String | Type::Null) =>
             {

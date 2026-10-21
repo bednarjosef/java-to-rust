@@ -350,7 +350,8 @@ impl<'a> Gen<'a> {
                 self.line(&format!("{text};"));
             }
             ExprKind::Assign { op: None, target: Place::Index(array, index), value } => {
-                let text = self.index_set(e.id, array, index, e.ty, value, false);
+                // The element type, which is `Object` for a covariant array.
+                let text = self.index_set(e.id, array, index, arrays::element(array.ty), value, false);
                 self.line(&format!("{text};"));
             }
             ExprKind::Assign { op: Some(op), target: Place::Index(array, index), value } => {

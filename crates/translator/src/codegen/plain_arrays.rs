@@ -277,7 +277,11 @@ impl<'a> Gen<'a> {
             ExprKind::Var(name) => self.local(name),
             ExprKind::Call { args, resolved: Some(index), .. } => self.owned_call(*index, args),
             ExprKind::MethodCall { receiver, args, resolved: Some(index), is_super, .. } => {
-                if self.class.methods[*index].is_static {
+                if self.closure_type(receiver.ty).is_some() {
+                    self.closure_call(receiver, *index, args).text
+                } else if self.inlined(receiver, *index) {
+                    self.inline_call(*index, args).text
+                } else if self.class.methods[*index].is_static {
                     self.owned_call(*index, args)
                 } else if !*is_super && let Some(t) = self.enum_of(receiver) {
                     self.enum_call(t, receiver, *index, args).text
@@ -292,8 +296,7 @@ impl<'a> Gen<'a> {
     }
 
     fn owned_call(&mut self, index: usize, args: &'a [Expr]) -> String {
-        let args = self.call_args(index, args).join(", ");
-        format!("{}({args})", self.static_fn(index))
+        self.static_call(index, args).text
     }
 
     /// `new T[n]` or `new T[n][m]...` as nested `vec!`s. A size that may be negative is checked
@@ -348,7 +351,8 @@ impl<'a> Gen<'a> {
             return None;
         }
         let value = self.owned(e);
-        Some(Code::atom(format!("{}({value})", self.runtime("share"))))
+        let share = self.runtime(if self.facts.threaded { "share_across" } else { "share" });
+        Some(Code::atom(format!("{share}({value})")))
     }
 
     /// `a[i]` of a plain array or row, as a value.
@@ -594,7 +598,9 @@ impl<'a> Gen<'a> {
             self.line(&format!("for {var} in {a}.{iter}() {{"));
         } else if writes_elements(body, java) {
             let slot = self.fresh_name(&["index", "slot", "at"]);
+            let wrap = self.wrap_each(name, element(array.ty));
             let element = read_in_bounds(&a, slot, element(array.ty));
+            let element = if wrap { format!("Some({element})") } else { element };
             self.line(&format!("for {slot} in 0..{a}.len() {{"));
             // The loop's frame opens at its header, where a label goes, before the element's line.
             self.open(Kind::Loop(Loop::Plain));
@@ -606,7 +612,8 @@ impl<'a> Gen<'a> {
             self.line("}");
             return;
         } else {
-            self.line(&format!("for {mutable}{var} in {a}.iter().cloned() {{"));
+            let wrap = if self.wrap_each(name, element(array.ty)) { ".map(Some)" } else { "" };
+            self.line(&format!("for {mutable}{var} in {a}.iter().cloned(){wrap} {{"));
         }
         self.loop_body(Loop::Plain, body, &[]);
         self.line("}");

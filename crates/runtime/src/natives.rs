@@ -2,19 +2,18 @@
 //! the bit conversions of `Double` and `Float`, identity hash codes, clocks and the few system
 //! properties that are the same on every run. They behave as HotSpot's do.
 
-use crate::array::Array;
+use crate::array::Elements;
 use crate::throw;
-use std::rc::Rc;
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// `System.arraycopy(src, src_pos, dest, dest_pos, length)` between shared arrays. When `src`
 /// and `dest` are the same array the copy behaves as if it went through a temporary array.
-pub fn arraycopy<T: Clone>(src: &Array<T>, src_pos: i32, dest: &Array<T>, dest_pos: i32, length: i32) {
-    if Rc::ptr_eq(src, dest) {
-        copy_within(&mut dest.borrow_mut(), src_pos, dest_pos, length);
+pub fn arraycopy<T: Clone, A: Elements<T>>(src: &A, src_pos: i32, dest: &A, dest_pos: i32, length: i32) {
+    if src.address() == dest.address() {
+        copy_within(&mut dest.items_mut(), src_pos, dest_pos, length);
     } else {
-        copy_slice(&src.borrow(), src_pos, &mut dest.borrow_mut(), dest_pos, length);
+        copy_slice(&src.items(), src_pos, &mut dest.items_mut(), dest_pos, length);
     }
 }
 
@@ -115,7 +114,7 @@ pub fn int_bits_to_float(bits: i32) -> f32 {
 }
 
 /// `System.identityHashCode(o)` and an `Object.hashCode()` that no class overrides, for an
-/// object behind an `Rc`.
+/// object behind an `Rc` or an `Arc`.
 ///
 /// HotSpot draws the hash from a thread-local random generator the first time it is asked for
 /// and stores it in the object header, so no program can print the same values as Java and none
@@ -124,8 +123,8 @@ pub fn int_bits_to_float(bits: i32) -> f32 {
 /// time in all but rare collisions, and, like HotSpot's, a positive 31-bit number. The address
 /// is mixed (multiplied by an odd constant, high bits taken) so that neighbouring objects do not
 /// get neighbouring hashes.
-pub fn identity_hash<T: ?Sized>(rc: &Rc<T>) -> i32 {
-    address_hash(Rc::as_ptr(rc))
+pub fn identity_hash<H: crate::Handle>(handle: &H) -> i32 {
+    address_hash(handle.address())
 }
 
 /// The identity hash (see `identity_hash`) of the object at `address`, which an `Rc` or a borrow
@@ -175,6 +174,7 @@ pub fn line_separator() -> String {
 mod tests {
     use super::*;
     use crate::from_vec;
+    use std::rc::Rc;
 
     #[test]
     fn arraycopy_overlapping_moves_as_through_a_temporary() {

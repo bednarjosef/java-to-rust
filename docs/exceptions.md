@@ -179,7 +179,8 @@ the program as Java's uncaught exception would. Without the `finally`, the handl
 `lower/exceptions.rs` holds a table of the standard classes: their qualified name, their
 superclass, which of the four `Throwable` constructor shapes they have (`()`, `(String)`,
 `(String, Throwable)`, `(Throwable)`) and any other constructor (`(int)` of the index
-exceptions, `(Object)` of `AssertionError`, taken with a `String` argument only):
+exceptions, and the `AssertionError` constructors with a detail of any type: `(Object)`, which
+takes a `Throwable` as the cause, and the primitive ones):
 
 ```
 java.lang.Throwable
@@ -417,8 +418,10 @@ Each step is mergeable on its own, with tests green and the corpus extended.
 6. **Causes, `getCause`, `printStackTrace`, constructors that throw**. Corpus:
    `features/ExceptionCauses.java`, `features/ThrowingConstructors.java`,
    `features/ThrowingConstructorChains.java`, `features/ThrowingConstructorsRegistered.java`.
-7. **try-with-resources** over the program's own `AutoCloseable` classes. Corpus:
-   `features/TryWithResources.java`.
+7. **try-with-resources** over the program's own `AutoCloseable` classes, declared or as an
+   existing variable (`try (r)`, `try (this.r)`). Corpus: `features/TryWithResources.java`,
+   `features/TryWithExistingLocal.java`, `features/TryWithExistingField.java`,
+   `features/TryWithExistingSuppressed.java`.
 
 The survey's "exceptions" feature stops counting `try` and `throw` once step 4 is in; a class
 extending a standard exception class stops counting as "extending classes outside the sources"
@@ -592,13 +595,22 @@ Decisions that changed during the implementation, step by step.
   `try` per resource closes them in the reverse order, and a resource whose creation fails closes
   the ones before it; the statement's own `catch` clauses and `finally` go around all of that, as
   Java runs them after the resources are closed.
+- **An existing variable is the same**: `try (r) body`, and `try (this.r) body` or `try (r)` of a
+  final field, is `try (final var r$resource = r) body`, the declared path above with the
+  variable's value copied into a hidden local. The value is read when the statement starts, as
+  Java reads it; the body cannot change it, since Java requires it to be effectively final. A
+  `null` variable is not closed, so it throws no `NullPointerException`: the `close` is guarded
+  by `if (r$resource != null)`. Two resources
+  of one statement mix freely (a declared one and an existing one), and the close order is the
+  same.
 - **So only those are accepted**: a resource declared with a `new` object of the program's
-  class, whose `close()` is the program's (declared in the class or a superclass).
+  class, or an existing variable of such a class, whose `close()` is the program's (declared in
+  the class or a superclass).
   `AutoCloseable` and `Closeable` are accepted in `implements` and left out, as `Comparable` is,
   since the program calls `close` directly. `Throwable.addSuppressed` is the translator's own
   (`crates/translator/java/Standard.java`): it does not reject adding the exception to itself or
   adding `null`, which Java does with `IllegalArgumentException` and `NullPointerException`.
-- **Still rejected**: a resource that is an existing variable (`try (r)`), one that is not a new
-  object, and a resource of a library class (the library's streams and scanners do not
-  translate). The survey's "try-with-resources" feature still counts every such statement, since
+- **Still rejected**: an existing variable of a library type such as `AutoCloseable`, which the
+  translator does not know as a type yet (a lambda of it is rejected the same way), and a
+  resource of a library class (the library's streams and scanners do not translate). The survey's "try-with-resources" feature still counts every such statement, since
   the library's resources are what the survey's sources use.

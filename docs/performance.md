@@ -1,7 +1,8 @@
 # Performance
 
-How fast translated programs run compared with Java. The programs are in `benchmarks/`; the script
-that times them is `scripts/benchmark.py`:
+How fast translated programs run compared with Java (and, in "Translating whole programs" below,
+how fast whole programs translate). The programs are in `benchmarks/`; the script that times
+them is `scripts/benchmark.py`:
 
     python3 scripts/benchmark.py [--runs N] [Program ...]
 
@@ -68,11 +69,27 @@ Earlier table: the array-ownership branch (`fd9bace`), a single run at load 72, 
 
 Causes of the changes:
 
-- **Statics (+68%) is a real slowdown.** The generated Rust is the same as the earlier
-  translator's (`diff` shows no change). In back-to-back runs of the two translators, the median
-  went from 1550 to 2090 ms, so the cause is in the runtime. A copy of the runtime with the old
-  `throw` body recovers about 170 ms: `throw` now calls `exception::die`. The other 370 ms are in
-  the new `array.rs` (`post_update` and `set`), which was not isolated further.
+- **Statics (+68%) is a real slowdown, but the hot loop does no extra work.** The generated Rust
+  is the same as the earlier translator's. Counted with `perf_event_open` (`perf` is not installed
+  here, so the count is read directly from the kernel), both runtimes retire the same instructions:
+  47,531,803,862 for `fd9bace` and 47,531,804,122 for HEAD, in the per-commit bisect builds. The
+  `statics::main` code is identical in both binaries apart from two string addresses. The cycle
+  counts differ: in interleaved runs at load 15, `fd9bace` took 8.7 to 9.0 billion cycles and HEAD
+  took 10.6 to 10.9 billion.
+  - The hot loop starts at a different offset in the two binaries (`0x17540` and `0x173e0`), so
+    the difference looks like code placement. Building the same HEAD crate with
+    `-C llvm-args=-align-all-functions=6` brought it back to 8.5 to 8.9 billion cycles. That is a
+    build setting, not a runtime change, and it was not applied: it affects every benchmark.
+  - The throw path and the accessors are already `#[cold]`/`#[inline(never)]` (throw) and
+    `#[inline]` (`position`, `get`, `set`), since before `fd9bace`, and no call into them is in
+    the hot loop. So there was no throw or accessor change to fix.
+  - Across the runtime commits since `fd9bace`, the instruction count is 47.5 billion from
+    `3f5f715` on. Cycles for those same commits range from 7.6 to 13.5 billion on the loaded
+    machine, with no commit that stands out. No commit is named as the cause.
+  - The earlier split (about 170 ms for `throw`, 370 ms for `array.rs`) came from wall-clock runs.
+    The instruction counts do not support it, so it should not be read as a measured cause.
+  - Not done: the per-benchmark instruction comparison of the other programs in
+    `scripts/benchmark.py`. No runtime change was made, so nothing could have become slower.
 - **SortMillion (+42%), Collatz (+32%), Sieve (+23%), BinaryTrees (+190%) did not get slower in
   Rust.** The generated Rust is the same as the earlier translator's, except for Collatz
   (`n = n / 2` is now `n /= 2`, the same operation). BinaryTrees ran at 5.8 s on both translators
@@ -103,7 +120,8 @@ medians, load average 72 at start). Times in milliseconds.
 | Statics        |    1800 |    1763 |      0.98 |           - |           - |            - |
 | StringBuild    |      33 |       2 |      0.05 |           - |           - |            - |
 
-NodeList does not compile. See below.
+NodeList did not compile on that branch; it compiles now and runs since the drop of long chains
+was made iterative. See below.
 
 The four programs that use arrays most, before (main at `18ab2fb`) and after the array
 ownership work, run back to back in the same minutes:
@@ -168,29 +186,100 @@ Read from the generated Rust under `target/benchmarks/<Name>/crate/src/main.rs`.
 Mandelbrot (0.33x, kernel 0.99x), Collatz (0.38x) and NBody (1.02x) are at or faster than Java
 and need no change.
 
-## NodeList: compiles, overflows the stack (2026-10-21)
+## Translating whole programs
 
-Earlier, `benchmarks/NodeList.java` did not compile: the translator emitted
-`current = java::non_null(current.as_ref()).borrow().next.clone();`, the `Ref` from `borrow()`
-lived until the end of the statement, and rustc rejected the assignment with E0506. The
-translator now wraps that read in a block, so the `Ref` is dropped first, and the program
-compiles.
+How fast the translator itself runs in whole-program mode (`--main`, `--library` with the JDK's
+`java.base` sources), which `targets/run.sh` and `tests/whole_program.rs` use. `--timings` (or
+the environment variable `JAVA_TO_RUST_TIMINGS`) prints the time of each phase to standard error:
+javac with the number of units it attributed, reachability with its rounds, lowering (each
+attempt of the Rust generics), the analyses and the generator.
 
-It still does not produce the right result. Java prints `checksum 8650087554848663653` and exits
-0. The Rust binary prints nothing and aborts with SIGABRT (exit -6) on the default 8 MB main
-thread stack. With the stack limit raised (`ulimit -s unlimited`) it prints the same checksum as
-Java, so the arithmetic agrees.
+**Cause of the slow translations.** javac, given the JDK's sources as its source path, attributes
+every unit it loads, and loads every class that the code of an attributed unit names, so a
+program that touches `HashMap`, `ArrayList` or only `System.out` had some 2500 of the JDK's units
+attributed and exported: a 356 MB JSON tree, 3.6 GB in the java process and 3.4 GB in the
+translator, which held the tree whole as `serde_json` values. Reachability then used a few dozen
+of them (36 for `IntegerKeyedGroups`). Two such translations at once, with other builds, were
+enough to make the machine thrash; a translation that ran then took ten minutes or more, which is
+how `IntegerKeyedGroups`, later `InventoryManagement`, `ListOperations`, `CheckedExceptions` and
+`EnumAbstractMethods` hit `run.sh`'s 600 s limit in turn. Nothing in those programs was slow.
 
-The cause is the drop of the list. Each round ends by dropping a list of about 667k nodes, each
-an `Rc<RefCell<NodeListNode>>` whose `next` field holds the next node. Rust's automatic drop of
-`NodeListNode` drops `next` inside the drop of the node, so freeing the head recurses once per
-node and overflows the stack. Java's garbage collector has no such recursion. The fix belongs in the
-translator, not in this benchmark: either an iterative `Drop` for the node that walks the chain
-while each node is uniquely owned (`Rc::strong_count` is 1), or the same unlinking in a loop
-before the list goes out of scope. Nothing in `crates/` was changed for this benchmark.
+**Fix.** `JavaTree --serve` (`javac::Session`) attributes the program's own files and then only
+the units asked for, with javac's `JavacTaskImpl.analyze` of chosen classes (hence
+`--add-exports jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED`). `program::load` runs
+reachability over the units so far and asks for the classes it named that no unit declares
+(`Reach::missing`), until javac gives no more; reachability only grows with the units, so the
+last round reaches what it reached over all 2500. The library's units come in the order they
+were asked for, so a first unsupported construct may be reported in another class than before
+(`EnumAbstractMethods` now stops at `EnumMap` instead of `EnumSet`, `EventListeners` at
+`ArrayDeque` instead of `ArrayList`, `ListOperations` at `ArrayList` instead of `List`), and the
+three programs of `corpus/whole-program` name some overloads differently; with the units in the
+same order, the output of all 28 targets and the corpus programs is byte for byte that of a
+javac run over every unit. `--survey` still has javac attribute everything.
 
-The script reports NodeList as "output differs from Java (exit -6, Java exit 0)" and exits with
-status 1.
+Measured on a quiet build slot, release translator, wall time of the translation and peak RSS
+of the translator and of its java process:
+
+| program | before | after |
+|---|---|---|
+| IntegerKeyedGroups | 20.6 s, 3.43 GB + 3.64 GB | 3.2 s, 0.09 GB + 0.98 GB |
+| WordFrequency | 26.9 s, 3.43 GB + 3.65 GB | 3.2 s, 0.10 GB + 1.10 GB |
+| ListOperations | 21.2 s, 3.43 GB + 3.29 GB | 3.7 s, 0.19 GB + 1.16 GB |
+| CheckedExceptions | 21.7 s, 3.43 GB + 3.71 GB | 2.6 s, 3 MB + 0.89 GB |
+
+All 28 targets and the 3 whole-program corpus programs took 20 to 37 s each before and 2.1 to
+3.1 s after, except the two that read with `Scanner` and format with `MessageFormat`
+(`ScannerGrades`, `TextAdventure`: 630 units, 14 s, 1.2 GB + 2.3 GB) and `StreamPipeline` (161
+units, 6.6 s, 0.35 GB + 1.9 GB). Each reachability round completes the records of copies of
+only the units that this changes (those with a record or without a package), which halved the
+translator's peak for those three. With the debug translator, which `run.sh` uses, the first
+three of the table took 36, 41 and 40 s before and 4.8, 4.2 and 5.3 s after. Most of what
+remains for a small program is the JVM and javac starting and attributing the program's own
+file (2.4 s and 0.9 GB for `CheckedExceptions`, which uses no library unit); for the large ones,
+javac's attribution and the reachability rounds, each of which walks every unit again.
+`-Xmx512m` halves the java process's peak (to about 0.5 GB) at no visible cost for the small
+programs, and 256 MB makes it three times slower; it is not set, as the large ones need more.
+
+## NodeList: stack overflow when the list is freed (fixed)
+
+`benchmarks/NodeList.java` builds a linked list of about 667,000 nodes. It compiled once the
+assignment from a field read was fixed on main, but the binary aborted with SIGABRT: when the
+list went out of scope, Rust's drop of `next` recursed once per node and overflowed the 8 MB
+main stack. With `ulimit -s unlimited` it printed Java's checksum.
+
+A class whose fields can lead back to objects of the same class now gets a `Drop` that frees
+deep chains iteratively (docs/object-model.md, "1.13 Dropping long chains"). Near the top of the
+stack the `Drop` only compares the stack address with a thread-local and leaves the fields to
+Rust's recursive drop; 128 KB of stack deeper it moves the links onto a heap stack. Only
+classes on a cycle of field types change: both benchmarks here have one.
+
+`python3 scripts/benchmark.py BinaryTrees NodeList`, five runs per side, medians in ms:
+
+| run                                   | load | BinaryTrees Java | BinaryTrees Rust | NodeList Java | NodeList Rust |
+|---------------------------------------|-----:|-----------------:|-----------------:|--------------:|--------------:|
+| main at `45ad1c1`                     |   46 |             1873 |            11428 |             - | aborts (exit -6) |
+| heap stack for every drop             |   19 |             1337 |             9610 |           230 |           481 |
+| recursion counter, heap stack below 200 levels | 12 |       763 |             6977 |           234 |           466 |
+
+The machine's load moved the Java and Rust times by up to a factor of two between these runs, so
+the cost of the `Drop` was measured separately: the generated crate of each benchmark built
+twice, once as generated and once with the `Unlink` and `Drop` impls removed (NodeList then run
+with an unlimited stack), the two binaries run alternately, median of the runs in ms:
+
+| version of the runtime                           | runs | BinaryTrees with / without | ratio | NodeList with / without | ratio |
+|--------------------------------------------------|-----:|---------------------------:|------:|------------------------:|------:|
+| heap stack for every drop                        |    7 |                6769 / 5739 |  1.18 |               471 / 480 |  0.98 |
+| recursion counter, heap stack below 200 levels   |    9 |                6413 / 6059 |  1.06 |               470 / 500 |  0.94 |
+| stack address test, heap stack below 128 KB      |   10 |                6745 / 6255 |  1.08 |               471 / 474 |  0.99 |
+| the same, committed (deep path out of line)      |   10 |                6773 / 6539 |  1.04 |               495 / 544 |  0.91 |
+
+BinaryTrees frees about 300 million nodes, so it is the worst case: every node runs the `Drop`.
+In the last version that is eight instructions and one call more than Rust's own drop of a
+node (a thread-local load, a compare, and a call into the node's drop glue that is no longer
+inlined into `Rc::drop_slow`), about 1 to 1.5 ns per node, 4 to 8 percent of its run time
+across the A/B runs at loads 5 to 15. NodeList is unchanged within the noise: its chain is freed on the
+heap stack, which costs no more than recursion. Programs without a cycle of field types are
+not touched.
 
 ## Deviations from the plan
 

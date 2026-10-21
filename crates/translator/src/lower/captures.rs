@@ -118,20 +118,41 @@ impl<'t> Lowering<'t> {
     fn name_captures(&mut self, t: usize) -> Result<(), Error> {
         let superclass = self.superclass(t)?.filter(|&s| self.types[s].nested.is_some());
         let enclosing = self.types[t].nested.as_ref().map(|n| n.enclosing);
-        let inherited_outer = superclass.and_then(|s| self.nesting(s)).is_some_and(|s| s.outer);
         let outer = self.nesting(t).is_some_and(|n| n.outer);
-        if outer
-            && inherited_outer
-            && superclass.and_then(|s| self.nesting(s)).map(|s| s.enclosing) != enclosing
-        {
-            return unsupported(self.types[t].node, "a nested class extending one nested in another class");
-        }
+        // The superclass's enclosing instance, when it holds one: the same field serves this
+        // class when both are nested in the same class and it is the same object, so unless a
+        // constructor gives the superclass another (`o.super(..)`); otherwise each holds its own.
+        let super_outer = superclass.and_then(|s| self.nesting(s)).filter(|s| s.outer);
+        let inherited_outer =
+            super_outer.is_some_and(|s| Some(s.enclosing) == enclosing) && !super_calls(self.types[t].node).1;
+        let ancestors: Vec<usize> =
+            std::iter::successors(self.superclass(t)?, |&s| self.superclass(s).ok().flatten()).collect();
         let fields: HashSet<String> = std::iter::once(t)
-            .chain(std::iter::successors(self.superclass(t)?, |&s| self.superclass(s).ok().flatten()))
+            .chain(ancestors.iter().copied())
             .flat_map(|c| self.declared_fields(c))
             .collect();
         if outer && fields.contains(OUTER) {
             return unsupported(self.types[t].node, "a field named `outer` in a nested class");
+        }
+        // The synthetic fields of the superclasses, which this class's own must not hide.
+        let synthetic: HashSet<String> = ancestors
+            .iter()
+            .filter_map(|&s| self.nesting(s))
+            .flat_map(|n| {
+                n.outer
+                    .then(|| n.outer_field.clone())
+                    .into_iter()
+                    .chain(n.captures.iter().map(|c| c.field.clone()))
+            })
+            .collect();
+        let mut outer_field = match super_outer {
+            Some(s) if inherited_outer => s.outer_field.clone(),
+            _ => OUTER.to_string(),
+        };
+        if outer && !inherited_outer {
+            while fields.contains(&outer_field) || synthetic.contains(&outer_field) {
+                outer_field.push('_');
+            }
         }
         let declared = self.constructor_names(t);
         let from_super: HashMap<&str, String> = superclass
@@ -141,7 +162,9 @@ impl<'t> Lowering<'t> {
         let has_superclass = self.superclass(t)?.is_some();
         let nested = self.types[t].nested.as_mut().expect("a nested class");
         nested.own_outer = outer && !inherited_outer;
-        let mut taken: HashSet<String> = fields.clone();
+        let mut taken: HashSet<String> = fields.into_iter().chain(synthetic).collect();
+        taken.insert(outer_field.clone());
+        nested.outer_field = outer_field;
         // A subclass's struct holds its superclass's fields as `base`.
         if has_superclass {
             taken.insert("base".to_string());
@@ -256,13 +279,20 @@ impl<'t> Lowering<'t> {
             value = if first && self.in_constructor() {
                 self.synth(ExprKind::Var(OUTER.to_string()), pos, ty)
             } else {
-                let kind = ExprKind::Field { object: Box::new(value), name: OUTER.to_string() };
+                let kind = ExprKind::Field { object: Box::new(value), name: nested.outer_field.clone() };
                 self.synth(kind, pos, ty)
             };
             class = enclosing;
             first = false;
         }
         Ok(value)
+    }
+
+    /// `enclosing_instance`, as a value of class `target`'s type: the enclosing instance that a
+    /// constructor of an inner class of `target` takes, which may be one of a subclass.
+    pub(super) fn enclosing_instance_of(&self, target: usize, pos: Pos) -> Result<Expr, Error> {
+        let value = self.enclosing_instance(target, pos)?;
+        Ok(self.convert(value, self.self_type(target)))
     }
 
     /// `this` for a member that `node` names without an object: the current class's, or that of
@@ -295,14 +325,28 @@ impl<'t> Lowering<'t> {
         if node.str("identifier") != "this" {
             return None;
         }
-        let class = node.get("expression")?.symbol().and_then(|s| self.type_index(raw(s.ty)))?;
+        let class = node.get("expression")?.symbol().and_then(|s| self.type_index(&raw(s.ty)))?;
         Some(self.enclosing_instance(class, node.pos()))
     }
 }
 
-/// A class's name without its type arguments.
-pub(super) fn raw(name: &str) -> &str {
-    name.split('<').next().unwrap_or(name)
+/// A class's name without its type arguments, wherever they are: javac writes an inner class of a
+/// generic class as `java.util.AbstractList<E>.Itr`, which is `java.util.AbstractList.Itr`.
+pub(super) fn raw(name: &str) -> String {
+    if name.starts_with('<') {
+        return name.to_string();
+    }
+    let mut out = String::with_capacity(name.len());
+    let mut depth = 0usize;
+    for c in name.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Adds the names that the code declares (locals, parameters, catch and pattern variables).
@@ -326,6 +370,23 @@ pub(super) fn declared_names(node: Node, out: &mut HashSet<String>) {
     }
 }
 
+/// Whether the constructors of the class `decl` call their superclass's constructor without an
+/// enclosing instance (`super(..)`), and whether with one (`o.super(..)`). javac writes the
+/// implicit `super()` into each constructor, and declares the default one.
+fn super_calls(decl: Node) -> (bool, bool) {
+    let mut out = (false, false);
+    let constructors = decl.list("members").filter(|m| m.kind() == "METHOD" && m.str("name") == "<init>");
+    for first in constructors.filter_map(|m| m.get("body")?.list("statements").next()) {
+        if is_super_call(first) {
+            match first.get("expression").and_then(|c| c.get("methodSelect")?.get("expression")) {
+                Some(_) => out.1 = true,
+                None => out.0 = true,
+            }
+        }
+    }
+    out
+}
+
 impl<'t> Walk<'_, 't> {
     /// The code of the class: its methods, field initializers and initializer blocks, what its
     /// superclass's constructor needs passed, and what the classes nested in it need.
@@ -338,7 +399,9 @@ impl<'t> Walk<'_, 't> {
             for c in &nested.captures {
                 self.free(c.name, c.node);
             }
-            if nested.outer {
+            // `o.super(..)` gives the superclass its enclosing instance; a plain `super(..)` passes
+            // the one this class's code reaches.
+            if nested.outer && super_calls(info.node).0 {
                 self.need(nested.enclosing);
             }
         }
@@ -555,7 +618,7 @@ impl<'t> Walk<'_, 't> {
                     .get("expression")
                     .and_then(|e| e.symbol())
                     .filter(|s| crate::program::CLASS_KINDS.contains(&s.kind));
-                match (node.str("identifier"), class.and_then(|s| l.type_index(raw(s.ty)))) {
+                match (node.str("identifier"), class.and_then(|s| l.type_index(&raw(s.ty)))) {
                     ("this", Some(class)) => self.need(class),
                     // `Outer.super.m()` runs on the enclosing instance of `Outer`, as `Outer.this` does.
                     ("super", Some(class))

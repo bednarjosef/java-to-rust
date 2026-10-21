@@ -2,7 +2,7 @@
 //! an array. Each takes the array as a shared handle, as `arrays_builtin` does; `equals` and
 //! `hashCode` also accept a null array, which is `None`.
 
-use super::arrays::{element, zero_value};
+use super::arrays::element;
 use super::*;
 
 impl<'a> Gen<'a> {
@@ -36,7 +36,7 @@ impl<'a> Gen<'a> {
             ArraysOp::CopyOfRange => {
                 let a = self.handle(&args[0]);
                 let (from, to) = (self.value(&args[1], Type::Int).text, self.value(&args[2], Type::Int).text);
-                let zero = zero_value(elem);
+                let zero = self.element_zero(elem);
                 format!("{}({a}, {from}, {to}, {zero})", self.runtime("copy_of_range"))
             }
             ArraysOp::BinarySearch => {
@@ -90,7 +90,8 @@ impl<'a> Gen<'a> {
             format!("{}({a}, {b})", self.runtime("same"))
         } else {
             let (a, b) = (self.handle(l), self.handle(r));
-            format!("Rc::ptr_eq({a}, {b})")
+            let pointer = if self.facts.threaded { "Arc" } else { "Rc" };
+            format!("{pointer}::ptr_eq({a}, {b})")
         };
         if op == BinOp::Ne { Code::new(format!("!{same}"), UNARY) } else { Code::atom(same) }
     }

@@ -37,6 +37,32 @@ impl<'t> Lowering<'t> {
         self.synth(ExprKind::Binary(BinOp::Add, Box::new(empty), Box::new(x)), pos, Type::String)
     }
 
+    /// `s.chars()`: the JDK's `Arrays.stream(int[])` over the string's UTF-16 code units, which
+    /// streams the same values with the same characteristics as the JDK's own spliterator.
+    fn string_chars(&self, node: Node<'t>, receiver: Option<Node<'t>>) -> Result<ExprKind, Error> {
+        let (owner, name, sig) = crate::program::STRING_CHARS;
+        let Some(stream) = self
+            .methods
+            .iter()
+            .position(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == sig)
+        else {
+            return error(
+                node.pos(),
+                "`String.chars` streams with the JDK's code: translate the program with the JDK's sources \
+                 (`--main` and `--library`) for it"
+                    .to_string(),
+            );
+        };
+        let receiver = self.expr(receiver.expect("an instance method has a receiver"))?;
+        let pos = receiver.pos;
+        let units = self.synth(
+            ExprKind::Builtin(Builtin::String(StringOp::CharCodes), vec![receiver]),
+            pos,
+            Type::array(Type::Int),
+        );
+        Ok(ExprKind::Call { name: name.to_string(), args: vec![units], resolved: Some(stream) })
+    }
+
     /// A call of a method of `String`. `args` are the lowered arguments, without the receiver.
     pub(super) fn string_call(
         &self,
@@ -74,6 +100,7 @@ impl<'t> Lowering<'t> {
             "equalsIgnoreCase" => StringOp::EqualsIgnoreCase,
             "concat" => StringOp::Concat,
             "toCharArray" => StringOp::ToCharArray,
+            "chars" if args.is_empty() => return self.string_chars(node, receiver),
             "hashCode" => StringOp::HashCode,
             "toString" | "intern" => StringOp::Identity,
             "equals" => StringOp::EqualsOther,
@@ -249,7 +276,7 @@ impl<'t> Lowering<'t> {
         {
             return Ok(None);
         }
-        let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
+        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let tys: Vec<Type> = args.iter().map(|a| a.ty).collect();
         let chars = Type::array(Type::Char);
         let bytes = Type::array(Type::Byte);

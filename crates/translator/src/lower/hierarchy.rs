@@ -11,7 +11,8 @@ impl<'t> Lowering<'t> {
         let node = self.types[t].node;
         let Some(clause) = node.get("extendsClause") else { return Ok(None) };
         // A generic superclass is its erasure.
-        let name = clause.java_type().split('<').next().unwrap_or_default();
+        let name = super::captures::raw(clause.java_type());
+        let name = name.as_str();
         match self.type_index(name) {
             Some(s) if self.types[s].node.kind() == "CLASS" => Ok(Some(s)),
             Some(_) => unsupported(clause, &format!("extending `{name}`")),
@@ -49,20 +50,28 @@ impl<'t> Lowering<'t> {
 
     /// `value instanceof T` and `value instanceof T name` on a value of the program's types.
     pub(super) fn instance_of(&self, node: Node<'t>) -> Result<ExprKind, Error> {
+        // A record pattern has no type of its own.
+        if let Some(p) = node.get("pattern").filter(|p| p.kind() == "DECONSTRUCTION_PATTERN") {
+            return self.record_instance_of(node, p);
+        }
         let value = self.expr(node.child("expression")?)?;
         let type_node = node.child("type")?;
         let ty = self.ty(type_node, type_node.java_type())?;
         let binding = match node.get("pattern") {
             Some(p) if p.kind() == "BINDING_PATTERN" => Some(p.child("variable")?.str("name").to_string()),
-            Some(p) => return unsupported(p, "record patterns"),
+            Some(p) => return unsupported(p, "this pattern"),
             None => None,
         };
-        // `Object` may also hold a string or a box.
+        if let Some(name) = &binding {
+            self.forget_alias(name);
+        }
+        // `Object` may also hold a string, a box or an array.
         let target = matches!(ty, Type::Class(..) | Type::Enum(_))
-            || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_)));
+            || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_) | Type::Array(_)));
         if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
             return unsupported(node, "instanceof on these types");
         }
+        self.object_array(node, ty)?;
         Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
     }
 
@@ -102,14 +111,22 @@ impl<'t> Lowering<'t> {
         // found from the current class.
         let outer = match call.child("methodSelect")?.get("expression") {
             Some(qualifier) => {
-                let Some(nested) = self.nesting(superclass).filter(|n| n.outer) else {
+                let Some(nested) = self.nesting(superclass) else {
                     return unsupported(
                         qualifier,
                         "a qualified `super(..)` of a class without an enclosing instance",
                     );
                 };
                 let value = self.expr(qualifier)?;
-                Some(self.convert(value, self.self_type(nested.enclosing)))
+                // A superclass whose code does not use its enclosing instance does not hold it.
+                if !nested.outer {
+                    if has_effects(&value) {
+                        return unsupported(qualifier, "an enclosing instance with effects that is not used");
+                    }
+                    None
+                } else {
+                    Some(self.convert(value, self.self_type(nested.enclosing)))
+                }
             }
             None => None,
         };
@@ -130,7 +147,7 @@ impl<'t> Lowering<'t> {
             return None;
         }
         let class =
-            node.get("expression")?.symbol().and_then(|s| self.type_index(super::captures::raw(s.ty)))?;
+            node.get("expression")?.symbol().and_then(|s| self.type_index(&super::captures::raw(s.ty)))?;
         (class != self.current.get() && self.types[class].node.kind() != "INTERFACE").then_some(class)
     }
 
@@ -158,10 +175,14 @@ impl<'t> Lowering<'t> {
     pub(super) fn convert_args(&self, index: Option<usize>, args: Vec<Expr>) -> Result<Vec<Expr>, Error> {
         let Some(index) = index else { return Ok(args) };
         let types = self.param_types(index)?;
-        // Arrays do not convert: a `String[]` is not an `Object[]` in the translation.
+        for (a, &ty) in args.iter().zip(&types) {
+            self.fail_on_covariant(a.ty, ty);
+        }
+        // Arrays do not convert: a `Version[]` is an `Object[]` in the translation only when it is
+        // covariant (see `covariant`).
         if let Some(arg) = args.iter().zip(&types).find_map(|(a, &ty)| {
             let mismatch = matches!(a.ty, Type::Array(_)) && matches!(ty, Type::Array(_)) && a.ty != ty;
-            (mismatch && !self.has_param(ty)).then_some(a)
+            (mismatch && !self.has_param(ty) && !self.meets_object_array(a.ty, ty)).then_some(a)
         }) {
             return error(
                 arg.pos,
@@ -184,8 +205,11 @@ impl<'t> Lowering<'t> {
         if self.param_owner(to).is_some() {
             return e;
         }
+        if e.ty != to {
+            self.meets_object_array(e.ty, to);
+        }
         let differs = match (e.ty, to) {
-            (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE => {
+            (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE || b == NUMBER => {
                 !matches!(e.ty, Type::Null | Type::Void) && e.ty != to
             }
             (Type::Class(a, _) | Type::Enum(a), Type::Class(b, _)) => a != b,
@@ -193,6 +217,9 @@ impl<'t> Lowering<'t> {
         };
         if !differs {
             return e;
+        }
+        if Self::is_object(to) {
+            self.note_object_array(e.ty);
         }
         let pos = e.pos;
         self.synth(ExprKind::Cast(to, Box::new(e)), pos, to)

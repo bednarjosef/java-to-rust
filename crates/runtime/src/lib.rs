@@ -12,10 +12,12 @@ use std::fmt;
 
 mod boxed;
 mod builder;
+mod chains;
 mod character;
 mod character_classes;
 mod character_tables;
 mod charset;
+mod class;
 mod code_point;
 mod code_point_case_tables;
 mod code_point_chars;
@@ -31,21 +33,27 @@ mod initializer;
 mod integer;
 mod integer_parse;
 mod java_arrays;
+mod locked;
 mod math;
+mod monitor;
 mod natives;
 mod null;
 mod out;
 mod parse_range;
 pub mod regex;
+mod statics;
 pub mod string;
 mod system;
+mod thread;
 mod unsigned;
 mod vm;
 pub use boxed::*;
 pub use builder::{StringBuilder, same_builder};
+pub use chains::{Chain, Link, Unlink, drop_links};
 pub use character::*;
 pub use character_classes::*;
 pub use charset::*;
+pub use class::Class;
 pub use code_point::{
     char_count, code_point_string, high_surrogate, is_bmp_code_point, is_supplementary_code_point,
     is_valid_code_point, low_surrogate, to_chars, to_code_point,
@@ -61,14 +69,18 @@ pub use initializer::*;
 pub use integer::*;
 pub use integer_parse::{parse_radix, parse_small_radix, try_parse_radix, try_parse_small_radix};
 pub use java_arrays::*;
+pub use locked::{Locked, RawLock, Ref, RefMut};
 pub use math::*;
+pub use monitor::*;
 pub use natives::*;
-pub use null::{OrNull, non_null, or_null, same, try_non_null};
+pub use null::{Handle, OrNull, non_null, null_enum, or_null, same, try_non_null};
 pub use out::{Out, eprint_chars, eprintln_chars, flush, out, print_chars, println_chars, write_byte};
 pub use parse_range::{parse_range, parse_unsigned_range, try_parse_range, try_parse_unsigned_range};
 pub use regex::{matches_all, replace_all, replace_first, split};
+pub use statics::*;
 pub use string::*;
 pub use system::*;
+pub use thread::*;
 pub use unsigned::{
     compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,
     try_parse_unsigned,
@@ -255,6 +267,14 @@ pub fn cast<T>(value: Option<T>, to: &str) -> T {
         Some(value) => value,
         None => cast_failed(to),
     }
+}
+
+/// `cast`, where a `catch` or a `finally` sees its `ClassCastException`: the failure is
+/// returned, to go on as a thrown exception does.
+pub fn try_cast<T>(value: Option<T>, to: &str) -> Result<T, Exception> {
+    value.ok_or_else(|| {
+        Exception::new("java.lang.ClassCastException", format!("cannot be cast to class {to}"))
+    })
 }
 
 /// The `ClassCastException` of a cast to class `to` (by binary name) that fails.

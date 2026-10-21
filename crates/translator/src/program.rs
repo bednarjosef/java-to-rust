@@ -6,7 +6,10 @@
 mod reach;
 mod survey;
 
-pub use reach::{CLASS_KINDS, Reach, class_name, never_true};
+pub use reach::{
+    CLASS_KINDS, Reach, STRING_CHARS, class_name, component_array, created_by_name, live_branch,
+    unsafe_field_access, untranslated,
+};
 pub use survey::Survey;
 
 use crate::ast::{Error, Pos};
@@ -56,18 +59,62 @@ fn fail(message: String) -> ProgramError {
 /// Translates a whole program into the source of one Rust program that uses the `java-runtime`
 /// crate.
 pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
-    let tree = compile(program)?;
-    let units: Vec<&Value> = tree["units"].as_array().into_iter().flatten().collect();
+    use crate::timings::phase;
+    let (units, reach) = load(program)?;
+    let units: Vec<&Value> = units.iter().collect();
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
-    let reach = reach::reach(&trees, &program.main).map_err(fail)?;
-    let mut class = lower::lower_program(&trees, &reach, &program.main).map_err(|(unit, error)| {
-        ProgramError { file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string), error }
-    })?;
-    analysis::whole_objects(&mut class)
+    let mut class =
+        phase("lower", || lower::lower_program(&trees, &reach, &program.main)).map_err(|(unit, error)| {
+            ProgramError { file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string), error }
+        })?;
+    phase("whole objects", || analysis::whole_objects(&mut class))
         .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
     let located = |error: Error| ProgramError { file: locate(&units, &class, error.pos), error };
-    let facts = analysis::analyze(&class).map_err(located)?;
-    codegen::generate(&class, &facts).map_err(located)
+    let facts = phase("analyze", || analysis::analyze(&class)).map_err(located)?;
+    phase("codegen", || codegen::generate(&class, &facts)).map_err(located)
+}
+
+/// The units of the program and of the library classes that its reachable code uses, with what
+/// that code reaches. javac attributes the program's files, and a library's unit only when
+/// reachability names one of its classes: each round reaches from `main` over the units so far
+/// and asks javac for those of the classes it named that none of them declares
+/// (`Reach::missing`), until it gets no more. What a round reaches only grows with the units, so
+/// the last round reaches what a walk over every unit that javac can load would; the units are a
+/// few dozen where javac, left to itself, attributes thousands (see `javac::Session`). The
+/// program's files come first, in the order given, and then the library's in the order they
+/// were asked for, so that the first unsupported construct reported is near the program's code.
+fn load(program: &Program) -> Result<(Vec<Value>, Reach), ProgramError> {
+    let files = source_files(program)?;
+    let javac_error = |(file, error)| ProgramError { file, error };
+    let (mut javac, mut reaching) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    let start = std::time::Instant::now();
+    let mut session = javac::Session::start(&files, &sourcepath(program)).map_err(javac_error)?;
+    javac += start.elapsed();
+    for round in 1.. {
+        let start = std::time::Instant::now();
+        let reach = {
+            let units = session.units();
+            let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
+            reach::reach(&trees, &program.main).map_err(fail)?
+        };
+        reaching += start.elapsed();
+        let start = std::time::Instant::now();
+        let loaded = session.load(&reach.missing.iter().cloned().collect::<Vec<_>>()).map_err(javac_error)?;
+        javac += start.elapsed();
+        if loaded == 0 {
+            let units = session.finish();
+            if crate::timings::enabled() {
+                let (javac, reaching) = (javac.as_secs_f64(), reaching.as_secs_f64());
+                let (classes, methods) = (reach.classes.len(), reach.methods.len());
+                eprintln!("timing: javac: {javac:.3} s, {} units", units.len());
+                eprintln!(
+                    "timing: reach: {reaching:.3} s, {round} rounds, {classes} classes and {methods} methods"
+                );
+            }
+            return Ok((units, reach));
+        }
+    }
+    unreachable!("the rounds end when javac has no more units to give")
 }
 
 /// The file of the code at `pos` that an analysis or the generator rejected, which the error
@@ -115,14 +162,14 @@ pub fn survey_program(program: &Program) -> Result<Survey, ProgramError> {
     Ok(survey::survey(&units, &reach, program, &files))
 }
 
-/// javac's trees of the program, with those of the library classes it uses.
-fn compile(program: &Program) -> Result<Value, ProgramError> {
-    javac_tree(program, &source_files(program)?)
+/// javac's trees of the program, with those of every library unit that javac loads for it.
+fn javac_tree(program: &Program, files: &[PathBuf]) -> Result<Value, ProgramError> {
+    javac::program_tree(files, &sourcepath(program)).map_err(|(file, error)| ProgramError { file, error })
 }
 
-fn javac_tree(program: &Program, files: &[PathBuf]) -> Result<Value, ProgramError> {
-    let sourcepath: Vec<PathBuf> = program.sources.iter().chain(&program.libraries).cloned().collect();
-    javac::program_tree(files, &sourcepath).map_err(|(file, error)| ProgramError { file, error })
+/// The roots that javac loads classes from: the program's, then the libraries'.
+fn sourcepath(program: &Program) -> Vec<PathBuf> {
+    program.sources.iter().chain(&program.libraries).cloned().collect()
 }
 
 /// The program's own files: the given files and every `.java` file under the source roots, sorted

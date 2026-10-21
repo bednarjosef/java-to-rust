@@ -7,6 +7,16 @@ pub fn non_null<T>(value: Option<T>) -> T {
     }
 }
 
+/// A cast to an enum of a reference that may be null, such as a key that an erased collection
+/// of the JDK hands back: the enum, as a translated enum value is never null. A null ends the
+/// program, as the translation cannot go on with it.
+pub fn null_enum<T>(value: Option<T>) -> T {
+    match value {
+        Some(value) => value,
+        None => crate::exception::die("a null enum value, which the translation does not support yet"),
+    }
+}
+
 /// `non_null` where the program observes the `NullPointerException`. Java's message names what
 /// was null in terms of the bytecode, which a translation cannot reproduce; the translator
 /// rejects programs that read it.
@@ -32,9 +42,27 @@ impl<T: std::fmt::Display> std::fmt::Display for OrNull<T> {
 }
 
 /// `a == b` on references that may be null: both null, or the same object.
-pub fn same<T: ?Sized>(a: Option<&std::rc::Rc<T>>, b: Option<&std::rc::Rc<T>>) -> bool {
+pub fn same<H: Handle>(a: Option<&H>, b: Option<&H>) -> bool {
     match (a, b) {
-        (Some(a), Some(b)) => std::rc::Rc::ptr_eq(a, b),
+        (Some(a), Some(b)) => a.address() == b.address(),
         (a, b) => a.is_none() && b.is_none(),
+    }
+}
+
+/// A handle of an object: an `Rc`, or an `Arc` for an object that threads share. Its address is
+/// the object's identity.
+pub trait Handle {
+    fn address(&self) -> *const u8;
+}
+
+impl<T: ?Sized> Handle for std::rc::Rc<T> {
+    fn address(&self) -> *const u8 {
+        std::rc::Rc::as_ptr(self) as *const u8
+    }
+}
+
+impl<T: ?Sized> Handle for std::sync::Arc<T> {
+    fn address(&self) -> *const u8 {
+        std::sync::Arc::as_ptr(self) as *const u8
     }
 }

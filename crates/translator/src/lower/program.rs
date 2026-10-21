@@ -22,10 +22,12 @@ impl<'t> Lowering<'t> {
         self.reach.is_none_or(|reach| reach.member(class, member.0))
     }
 
-    /// Whether the condition of an `if` or a `?:` is never true, so that reachability skipped the
-    /// branch it guards (`program::never_true`): that branch is not lowered either.
-    pub(super) fn never_true(&self, node: Node<'t>) -> bool {
-        crate::program::never_true(&node.0["condition"], self.reach.is_some_and(|r| r.sequential))
+    /// The only branch of an `if` or a `?:` that can run, when reachability skipped the other
+    /// (`program::live_branch`): that one is not lowered either. `None` for an `if` without the
+    /// branch.
+    pub(super) fn live_branch(&self, node: Node<'t>) -> Option<Option<Node<'t>>> {
+        let sequential = self.reach.is_some_and(|r| r.sequential);
+        crate::program::live_branch(node.0, sequential).map(|v| (!v.is_null()).then_some(Node(v)))
     }
 }
 
@@ -37,17 +39,20 @@ pub fn lower_program<'t>(
     reach: &'t Reach,
     main: &str,
 ) -> Result<Class, (Option<usize>, Error)> {
-    super::real_generics::retry(|real| lower_with(units, reach, main, real))
+    super::real_generics::retry(|real, covariant| lower_with(units, reach, main, real, covariant))
 }
 
-/// `lower_program` with the Rust generics `real`, or with the candidates when it is `None`.
+/// `lower_program` with the Rust generics `real`, or with the candidates when it is `None`, and
+/// the arrays `covariant`.
 fn lower_with<'t>(
     units: &[&'t Value],
     reach: &'t Reach,
     main: &str,
     real: Option<&super::real_generics::Real>,
+    covariant: &super::covariant::Covariant,
 ) -> Result<(Class, super::real_generics::Real, super::real_generics::Real), (Option<usize>, Error)> {
     let mut lowering = Lowering::empty();
+    lowering.covariant = covariant.clone();
     lowering.reach = Some(reach);
     // The unit and the package of each class, in `Class::types` order.
     let mut unit_of = Vec::new();
@@ -64,6 +69,13 @@ fn lower_with<'t>(
         unit_of.resize(lowering.types.len(), index);
         packages.resize(lowering.types.len(), package);
     }
+    // The classes that are not translated but are types of variables, which are only ever null.
+    for (class, methods) in &reach.stubs {
+        lowering.declare_stub(class, methods).map_err(|e| (None, e))?;
+        let package = class.rsplit_once('.').map_or("", |(package, _)| package);
+        unit_of.resize(lowering.types.len(), usize::MAX);
+        packages.resize(lowering.types.len(), package.to_string());
+    }
     // The standard exception classes that reachable code uses; they belong to no unit.
     let mut reachable = Vec::new();
     for unit in units {
@@ -74,7 +86,9 @@ fn lower_with<'t>(
     lowering.standard = super::exceptions::Standard::select(reachable.iter().copied());
     lowering.declare_standard().map_err(|e| (None, e))?;
     let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
-    lowering.functional = super::functional::Functional::select(reachable.iter().copied(), &declared);
+    // The standard classes may name interfaces too (`Thread` holds a `Runnable`).
+    let trees = reachable.iter().copied().chain(lowering.standard.classes.iter().map(|(_, d)| *d));
+    lowering.functional = super::functional::Functional::select(trees, &declared);
     lowering.declare_functional().map_err(|e| (None, e))?;
     lowering.declare_plain_object(reachable.iter().copied()).map_err(|e| (None, e))?;
     unit_of.resize(lowering.types.len(), usize::MAX);
