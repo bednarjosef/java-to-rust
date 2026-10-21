@@ -61,9 +61,9 @@ class ExceptionGen:
         if not self.exceptions:
             return self.st_obj_print(depth)
         r = self.r.random()
-        if r < 0.08:
+        if r < 0.03:
             return self.caught_cast(depth)
-        if r < 0.14:
+        if r < 0.06:
             return self.caught_null(depth)
         checked = self.chance(0.3)
         self.emit('try {')

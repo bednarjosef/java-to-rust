@@ -745,6 +745,14 @@ impl<'a> Gen<'a> {
         };
         self.enter_method(r);
         let m = &self.class.methods[r];
+        // The arms bind the object to `o`, which must not hide a parameter of that name.
+        let names: Vec<String> = m.params.iter().map(|p| self.local(&p.name)).collect();
+        for p in &m.params {
+            if self.local(&p.name) == "o" {
+                let fresh = (1..).map(|n| format!("o{n}")).find(|f| !names.contains(f)).expect("a free name");
+                self.locals.insert(p.name.clone(), fresh);
+            }
+        }
         let params = self.typed_params(r, false);
         let ret = self.ret_text(r);
         let args: Vec<String> = m.params.iter().map(|p| self.local(&p.name)).collect();
@@ -934,6 +942,12 @@ impl<'a> Gen<'a> {
         let temp = self.temp("address");
         let same = format!("std::ptr::addr_eq({temp}, {})", self.address(c, "b"));
         let test = self.equals_test(c, &place, optional, &same);
+        // An argument that cannot be the object is still evaluated.
+        let test = if test == "false" && has_effects(&args[0]) {
+            format!("{{ let _ = {place}; false }}")
+        } else {
+            test
+        };
         Code::atom(format!("{{ let {temp} = {address}; {test} }}"))
     }
 
