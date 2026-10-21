@@ -35,6 +35,8 @@ pub enum Native {
     OutWrite,
     /// `System.out.flush()`.
     OutFlush,
+    /// `System.err.flush()`.
+    ErrFlush,
     /// `System.out.print(char[])` and `println(char[])`.
     PrintChars {
         newline: bool,
@@ -108,6 +110,18 @@ pub enum Native {
     FileWrite,
     /// `writeBytes(b, off, len, append)`.
     FileWriteBytes,
+    /// `FileInputStream.isRegularFile0(fd)`, `length0()` and `position0()`.
+    FileIsRegular,
+    FileLength,
+    FilePosition,
+    /// The natives of the stream under the translator's `System.out` and `System.err` objects
+    /// (`java/overlay/java/io/StandardOutput.java`), the runtime's buffered standard output and
+    /// error (`java_runtime::out`): `write0(fd, b)`, `writeBytes0(fd, b, off, len)`,
+    /// `flush0(fd)` and `close0(fd)`.
+    StandardWrite,
+    StandardWriteBytes,
+    StandardFlush,
+    StandardClose,
     /// A native that does nothing in a translated program, such as `registerNatives()`: its
     /// statement is dropped.
     Nothing,
@@ -154,6 +168,10 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         }
         ("java.io.FileDescriptor", "getHandle", "(int)long") => Native::DescriptorHandle,
         ("java.io.FileDescriptor", "getAppend", "(int)boolean") => Native::DescriptorAppend,
+        ("java.io.StandardOutput", "write0", "(int,int)void") => Native::StandardWrite,
+        ("java.io.StandardOutput", "writeBytes0", "(int,byte[],int,int)void") => Native::StandardWriteBytes,
+        ("java.io.StandardOutput", "flush0", "(int)void") => Native::StandardFlush,
+        ("java.io.StandardOutput", "close0", "(int)void") => Native::StandardClose,
         ("java.util.zip.CRC32", "update", "(int,int)int") => Native::Crc32Update,
         ("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int") => Native::Crc32UpdateBytes,
         ("java.lang.Thread", "nextThreadNum", "()int") => Native::ThreadNumber,
@@ -179,7 +197,11 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
     declared_native(class, name, signature).is_some()
         || matches!(
             (class, name),
-            ("java.io.FileInputStream", "open0" | "read0" | "readBytes" | "available0" | "skip0" | "close0")
+            (
+                "java.io.FileInputStream",
+                "open0" | "read0" | "readBytes" | "available0" | "skip0" | "close0" | "isRegularFile0"
+                    | "length0" | "position0"
+            )
                 | ("java.io.FileOutputStream", "open0" | "write" | "writeBytes" | "close0")
                 | ("java.io.FileDescriptor", "close0")
                 // Lowered as code on the referent (`lower::references`).

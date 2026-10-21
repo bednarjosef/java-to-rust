@@ -39,6 +39,8 @@ pub enum StringOp {
     EqualsIgnoreCase,
     Concat,
     ToCharArray,
+    /// `s.getChars(srcBegin, srcEnd, dst, dstBegin)`: the receiver, then the arguments.
+    GetChars,
     /// The UTF-16 code units of a string as an `int[]`, which `s.chars()` streams (see
     /// `program::reach::STRING_STREAMS`).
     CharCodes,

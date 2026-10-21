@@ -3,7 +3,7 @@
 //! properties that are the same on every run. They behave as HotSpot's do.
 
 use crate::array::Elements;
-use crate::throw;
+use crate::{Exception, throw};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -47,25 +47,95 @@ fn check_copy<T>(
     dest_pos: i32,
     length: i32,
 ) -> (usize, usize, usize) {
+    match copy_bounds::<T>(src_len, src_pos, dest_len, dest_pos, length) {
+        Ok(bounds) => bounds,
+        Err(message) => throw("java.lang.ArrayIndexOutOfBoundsException", &message),
+    }
+}
+
+/// The positions of a copy as `usize`, or the message of the `ArrayIndexOutOfBoundsException`
+/// that HotSpot throws for them.
+fn copy_bounds<T>(
+    src_len: usize,
+    src_pos: i32,
+    dest_len: usize,
+    dest_pos: i32,
+    length: i32,
+) -> Result<(usize, usize, usize), String> {
     let name = element_name::<T>();
-    let fail = |message: String| -> ! { throw("java.lang.ArrayIndexOutOfBoundsException", &message) };
     if src_pos < 0 {
-        fail(format!("arraycopy: source index {src_pos} out of bounds for {name}[{src_len}]"));
+        return Err(format!("arraycopy: source index {src_pos} out of bounds for {name}[{src_len}]"));
     }
     if dest_pos < 0 {
-        fail(format!("arraycopy: destination index {dest_pos} out of bounds for {name}[{dest_len}]"));
+        return Err(format!("arraycopy: destination index {dest_pos} out of bounds for {name}[{dest_len}]"));
     }
     if length < 0 {
-        fail(format!("arraycopy: length {length} is negative"));
+        return Err(format!("arraycopy: length {length} is negative"));
     }
     let (from, to, n) = (src_pos as usize, dest_pos as usize, length as usize);
     if from + n > src_len {
-        fail(format!("arraycopy: last source index {} out of bounds for {name}[{src_len}]", from + n));
+        return Err(format!("arraycopy: last source index {} out of bounds for {name}[{src_len}]", from + n));
     }
     if to + n > dest_len {
-        fail(format!("arraycopy: last destination index {} out of bounds for {name}[{dest_len}]", to + n));
+        return Err(format!(
+            "arraycopy: last destination index {} out of bounds for {name}[{dest_len}]",
+            to + n
+        ));
     }
-    (from, to, n)
+    Ok((from, to, n))
+}
+
+/// `copy_bounds` as the failure of a checked form.
+fn try_bounds<T>(
+    src_len: usize,
+    src_pos: i32,
+    dest_len: usize,
+    dest_pos: i32,
+    length: i32,
+) -> Result<(), Exception> {
+    copy_bounds::<T>(src_len, src_pos, dest_len, dest_pos, length)
+        .map(|_| ())
+        .map_err(|message| Exception::new("java.lang.ArrayIndexOutOfBoundsException", message))
+}
+
+/// `arraycopy`, where a `catch` or a `finally` sees its `ArrayIndexOutOfBoundsException`: the
+/// failure is returned, to go on as a thrown exception does, and nothing is copied.
+pub fn try_arraycopy<T: Clone, A: Elements<T>>(
+    src: &A,
+    src_pos: i32,
+    dest: &A,
+    dest_pos: i32,
+    length: i32,
+) -> Result<(), Exception> {
+    let (src_len, dest_len) = (src.items().len(), dest.items().len());
+    try_bounds::<T>(src_len, src_pos, dest_len, dest_pos, length)?;
+    arraycopy(src, src_pos, dest, dest_pos, length);
+    Ok(())
+}
+
+/// `copy_slice`, where the program observes the exception (see `try_arraycopy`).
+pub fn try_copy_slice<T: Clone>(
+    src: &[T],
+    src_pos: i32,
+    dest: &mut [T],
+    dest_pos: i32,
+    length: i32,
+) -> Result<(), Exception> {
+    try_bounds::<T>(src.len(), src_pos, dest.len(), dest_pos, length)?;
+    copy_slice(src, src_pos, dest, dest_pos, length);
+    Ok(())
+}
+
+/// `copy_within`, where the program observes the exception (see `try_arraycopy`).
+pub fn try_copy_within<T: Clone>(
+    a: &mut [T],
+    src_pos: i32,
+    dest_pos: i32,
+    length: i32,
+) -> Result<(), Exception> {
+    try_bounds::<T>(a.len(), src_pos, a.len(), dest_pos, length)?;
+    copy_within(a, src_pos, dest_pos, length);
+    Ok(())
 }
 
 /// How HotSpot names an array's element type in an `arraycopy` message.

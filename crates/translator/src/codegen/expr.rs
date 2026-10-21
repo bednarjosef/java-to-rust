@@ -634,7 +634,7 @@ impl<'a> Gen<'a> {
     pub(super) fn builtin(&mut self, builtin: Builtin, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
         match builtin {
             Builtin::ArraysToString | Builtin::ArraysFill | Builtin::ArraysSort | Builtin::ArraysCopyOf => {
-                self.arrays_builtin(builtin, args)
+                self.arrays_builtin(builtin, args, id)
             }
             Builtin::Arrays(op) => self.arrays_op(op, args),
             Builtin::Println | Builtin::Print => {

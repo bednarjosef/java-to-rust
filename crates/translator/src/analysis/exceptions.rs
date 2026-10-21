@@ -323,13 +323,16 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         }
     }
 
-    // A static initializer's exception reaches the program as `ExceptionInInitializerError`, an
-    // `Error` that a `try` here is not known to match, so one that observes it is not translated.
+    // A static initializer's exception reaches the program as `ExceptionInInitializerError`, and
+    // a later use of the class as `NoClassDefFoundError`: a `try` that may see either (a `catch`
+    // of one of them or of an `Error` above them, or a `finally`) is not translated. A `catch`
+    // of other classes, such as `ClassCastException`, never sees them.
+    let linkage = [Kind::Runtime(INITIALIZER_ERROR), Kind::Runtime("java.lang.NoClassDefFoundError")];
     for (m, method) in class.methods.iter().enumerate() {
         if initializer[m]
             && !guarded[m]
             && !escapes[m].is_empty()
-            && (seen[m].all || !seen[m].types.is_empty())
+            && linkage.iter().any(|k| observed(k, &seen[m]))
         {
             return error(method.pos, "a static initializer that throws inside a `try` not supported yet");
         }
@@ -556,8 +559,11 @@ fn stmt_points(
                 ExprKind::Cast(_, inner) => inner,
                 _ => e,
             };
-            // A value that may be null throws a `NullPointerException` instead, by `throw` itself.
-            if matches!(thrown.kind, ExprKind::Null) || maybe_null(facts, m, thrown) {
+            // A value that may be null throws a `NullPointerException` instead, by `throw` itself,
+            // unless an enclosing condition tested it.
+            if matches!(thrown.kind, ExprKind::Null)
+                || (maybe_null(facts, m, thrown) && !is_tested(thrown, safe))
+            {
                 let raise =
                     Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: thrown.id };
                 out.push(Point { raise, pos: e.pos, what: "this throw", frames: frames.clone() });

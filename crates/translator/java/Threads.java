@@ -112,6 +112,11 @@ class Thread {
         return daemon;
     }
 
+    /** A translated program's threads are all platform threads. */
+    public final boolean isVirtual() {
+        return false;
+    }
+
     public final void setDaemon(boolean on) {
         if (isAlive()) {
             throw new IllegalThreadStateException();

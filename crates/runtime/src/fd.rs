@@ -1,13 +1,15 @@
 //! The file descriptors behind the natives of `java.io.FileInputStream`, `FileOutputStream` and
 //! `FileDescriptor` (`ast::Native::File*`). A descriptor is an index into a table of the process, as
 //! the JVM's is: 0, 1 and 2 are standard input, output and error. Standard output
-//! goes through `out` so that it stays in order with `println!`; standard input is read through a
-//! buffered reader that only the table uses. A failure is a Java exception (`Failure`), which the
-//! generated code raises with `or_throw`.
+//! goes through `out` so that it stays in order with `println!`. Standard input is descriptor 0
+//! itself, read without a buffer in between, so that each read returns what the JVM's would; what
+//! standard output has written goes out before it is read, so that a prompt shows. A failure is a
+//! Java exception (`Failure`), which the generated code raises with `or_throw`, or passes on as a
+//! thrown exception where the program may catch it.
 
 use crate::{out, throw};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 use std::sync::{LazyLock, Mutex};
 
 pub const STDIN_FD: i32 = 0;
@@ -30,16 +32,74 @@ enum Entry {
     Write(File),
 }
 
-/// The descriptors of the process. `stdin` is a parameter so that tests can supply their input.
+/// The descriptors of the process. Tests supply standard input as a reader (`stdin`); the
+/// process's is descriptor 0.
 pub struct FdTable {
-    stdin: Box<dyn BufRead + Send>,
+    stdin: Option<Box<dyn BufRead + Send>>,
     /// Indexed by descriptor; `None` once closed.
     entries: Vec<Option<Entry>>,
 }
 
 /// The table every thread of the program uses.
-static FDS: LazyLock<Mutex<FdTable>> =
-    LazyLock::new(|| Mutex::new(FdTable::new(Box::new(BufReader::new(io::stdin())))));
+static FDS: LazyLock<Mutex<FdTable>> = LazyLock::new(|| {
+    let mut table = FdTable::new(Box::new(io::empty()));
+    table.stdin = None;
+    Mutex::new(table)
+});
+
+/// Descriptor 0 as a file, which reads and seeks it directly. Rust's `Stdin` would read through a
+/// buffer of its own, and return other counts than the JVM's reads.
+#[cfg(unix)]
+fn process_stdin() -> std::mem::ManuallyDrop<File> {
+    use std::os::unix::io::FromRawFd;
+    // Safety: the file is never dropped, so descriptor 0 stays open, and nothing else in the
+    // process reads it.
+    std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(0) })
+}
+
+#[cfg(not(unix))]
+fn process_stdin() -> std::mem::ManuallyDrop<File> {
+    panic!("the runtime reads standard input on Unix-like systems only")
+}
+
+/// What `available()` of an open file says: the bytes from its position to its end for a regular
+/// file, and what a pipe, a terminal or a socket holds (`FIONREAD`) otherwise, as the JVM's
+/// `available0` answers.
+fn file_available(file: &File) -> io::Result<i32> {
+    let meta = file.metadata()?;
+    if meta.is_file() {
+        let position = (&mut &*file).stream_position()?;
+        return Ok(meta.len().saturating_sub(position).min(i32::MAX as u64) as i32);
+    }
+    Ok(pending_bytes(file))
+}
+
+/// The bytes that can be read from a pipe, terminal or socket without waiting.
+#[cfg(target_os = "linux")]
+fn pending_bytes(file: &File) -> i32 {
+    use std::os::unix::io::AsRawFd;
+    unsafe extern "C" {
+        fn ioctl(fd: i32, request: std::ffi::c_ulong, ...) -> i32;
+    }
+    const FIONREAD: std::ffi::c_ulong = 0x541B;
+    let mut count: i32 = 0;
+    // Safety: `FIONREAD` writes one `int` to the address it is given.
+    if unsafe { ioctl(file.as_raw_fd(), FIONREAD, &mut count as *mut i32) } == 0 { count.max(0) } else { 0 }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pending_bytes(_: &File) -> i32 {
+    0
+}
+
+/// `skip0(n)` of a regular file: the position moves by `n`, which may go past the end or, for a
+/// negative `n`, back, and the distance moved is the answer.
+fn file_skip(mut file: &File, n: i64) -> Result<i64, Failure> {
+    let seek_error = |e: io::Error| Failure { class: "java.io.IOException", message: reason(&e) };
+    let start = file.stream_position().map_err(seek_error)?;
+    let end = file.seek(SeekFrom::Current(n)).map_err(seek_error)?;
+    Ok(end as i64 - start as i64)
+}
 
 fn closed() -> Failure {
     Failure { class: "java.io.IOException", message: "Stream Closed".to_string() }
@@ -68,6 +128,13 @@ fn not_found(name: &str, e: &io::Error) -> Failure {
     Failure { class: "java.io.FileNotFoundException", message: format!("{name} ({})", reason(e)) }
 }
 
+impl Failure {
+    /// The failure as the exception that the program may catch.
+    pub fn exception(self) -> crate::Exception {
+        crate::Exception::new(self.class, self.message)
+    }
+}
+
 /// Raises the exception of a failed native, as an uncaught Java exception does.
 pub fn or_throw<T>(result: Result<T, Failure>) -> T {
     result.unwrap_or_else(|f| throw(f.class, &f.message))
@@ -75,7 +142,8 @@ pub fn or_throw<T>(result: Result<T, Failure>) -> T {
 
 impl FdTable {
     pub fn new(stdin: Box<dyn BufRead + Send>) -> Self {
-        FdTable { stdin, entries: vec![Some(Entry::Stdin), Some(Entry::Stdout), Some(Entry::Stderr)] }
+        let entries = vec![Some(Entry::Stdin), Some(Entry::Stdout), Some(Entry::Stderr)];
+        FdTable { stdin: Some(stdin), entries }
     }
 
     /// The lowest free descriptor, as POSIX allocates them.
@@ -117,20 +185,28 @@ impl FdTable {
         Ok(self.insert(Entry::Write(file)))
     }
 
-    /// The stream an input descriptor reads from.
-    fn reader(&mut self, fd: i32) -> Result<&mut dyn Read, Failure> {
-        match self.entries.get_mut(fd as usize).and_then(Option::as_mut) {
-            Some(Entry::Stdin) => Ok(&mut self.stdin),
-            Some(Entry::Read(file)) => Ok(file),
-            Some(_) => Err(bad_descriptor()),
-            None => Err(closed()),
-        }
+    /// Reads once from an input descriptor into `bytes`, as one `read` system call does.
+    fn read_into(&mut self, fd: i32, bytes: &mut [u8]) -> Result<usize, Failure> {
+        let entry = self.entries.get_mut(fd as usize).and_then(Option::as_mut);
+        let count = match entry {
+            Some(Entry::Stdin) => {
+                out::drain_stdout();
+                match &mut self.stdin {
+                    Some(given) => given.read(bytes),
+                    None => process_stdin().read(bytes),
+                }
+            }
+            Some(Entry::Read(file)) => file.read(bytes),
+            Some(_) => return Err(bad_descriptor()),
+            None => return Err(closed()),
+        };
+        count.map_err(io_failure)
     }
 
     /// `read0()`: the next byte as `0..=255`, or `-1` at the end.
     pub fn read(&mut self, fd: i32) -> Result<i32, Failure> {
         let mut byte = [0u8];
-        match self.reader(fd)?.read(&mut byte).map_err(io_failure)? {
+        match self.read_into(fd, &mut byte)? {
             0 => Ok(-1),
             _ => Ok(byte[0] as i32),
         }
@@ -144,7 +220,7 @@ impl FdTable {
         }
         let (off, len) = (off as usize, len as usize);
         let mut bytes = vec![0u8; len];
-        let count = self.reader(fd)?.read(&mut bytes).map_err(io_failure)?;
+        let count = self.read_into(fd, &mut bytes)?;
         if count == 0 {
             return Ok(-1);
         }
@@ -154,53 +230,64 @@ impl FdTable {
         Ok(count as i32)
     }
 
-    /// `available0()`: the bytes that can be read without waiting. For standard input this
-    /// waits until some input is buffered, since a pipe or terminal has no other count.
+    /// `available0()`: the bytes that can be read without waiting (`file_available`). For the
+    /// input a test supplies, what its reader holds.
     pub fn available(&mut self, fd: i32) -> Result<i32, Failure> {
-        match self.entries.get_mut(fd as usize).and_then(Option::as_mut) {
-            Some(Entry::Stdin) => {
-                let buffered = self.stdin.fill_buf().map_err(io_failure)?.len();
-                Ok(buffered as i32)
-            }
-            Some(Entry::Read(file)) => {
-                let size = file.metadata().map_err(io_failure)?.len();
-                let position = file.stream_position().map_err(io_failure)?;
-                Ok(size.saturating_sub(position).min(i32::MAX as u64) as i32)
-            }
-            Some(_) => Err(bad_descriptor()),
+        if let Some(Some(Entry::Stdin)) = self.entries.get(fd as usize)
+            && let Some(given) = &mut self.stdin
+        {
+            return Ok(given.fill_buf().map_err(io_failure)?.len().min(i32::MAX as usize) as i32);
+        }
+        self.with_file(fd, file_available)?.ok_or_else(bad_descriptor)?.map_err(io_failure)
+    }
+
+    /// `skip0(n)`, which `FileInputStream.skip` calls for a regular file only (`file_skip`). The
+    /// input a test supplies skips up to `n` bytes of what it has.
+    pub fn skip(&mut self, fd: i32, n: i64) -> Result<i64, Failure> {
+        if let Some(Some(Entry::Stdin)) = self.entries.get(fd as usize)
+            && let Some(given) = &mut self.stdin
+        {
+            let skipped = io::copy(&mut given.take(n.max(0) as u64), &mut io::sink());
+            return Ok(skipped.map_err(io_failure)? as i64);
+        }
+        self.with_file(fd, |f| file_skip(f, n))?.ok_or_else(bad_descriptor)?
+    }
+
+    /// `f` of the open file behind a descriptor: `None` for the input a test supplies and for
+    /// the standard output streams.
+    fn with_file<T>(&self, fd: i32, f: impl FnOnce(&File) -> T) -> Result<Option<T>, Failure> {
+        match self.entries.get(fd as usize).and_then(Option::as_ref) {
+            Some(Entry::Stdin) if self.stdin.is_none() => Ok(Some(f(&process_stdin()))),
+            Some(Entry::Read(file) | Entry::Write(file)) => Ok(Some(f(file))),
+            Some(_) => Ok(None),
             None => Err(closed()),
         }
     }
 
-    /// `skip0(n)`: skips up to `n` bytes and returns how many were skipped. A file stops at its
-    /// end; standard input skips what its input provides.
-    pub fn skip(&mut self, fd: i32, n: i64) -> Result<i64, Failure> {
-        if n <= 0 {
-            return Ok(0);
-        }
-        match self.entries.get_mut(fd as usize).and_then(Option::as_mut) {
-            Some(Entry::Stdin) => {
-                let skipped = io::copy(&mut (&mut self.stdin).take(n as u64), &mut io::sink());
-                Ok(skipped.map_err(io_failure)? as i64)
-            }
-            Some(Entry::Read(file)) => {
-                let size = file.metadata().map_err(io_failure)?.len();
-                let position = file.stream_position().map_err(io_failure)?;
-                let skipped = size.saturating_sub(position).min(n as u64);
-                file.seek(SeekFrom::Current(skipped as i64)).map_err(io_failure)?;
-                Ok(skipped as i64)
-            }
-            Some(_) => Err(bad_descriptor()),
-            None => Err(closed()),
-        }
+    /// `isRegularFile0(fd)`: whether the descriptor is a regular file, which `FileInputStream`
+    /// then skips and measures directly. A descriptor that is not open is not one.
+    pub fn is_regular_file(&self, fd: i32) -> bool {
+        matches!(self.with_file(fd, |f| f.metadata().is_ok_and(|m| m.is_file())), Ok(Some(true)))
+    }
+
+    /// `length0()`: the size of the file.
+    pub fn length(&self, fd: i32) -> Result<i64, Failure> {
+        let length = self.with_file(fd, |f| f.metadata().map(|m| m.len() as i64))?;
+        length.unwrap_or(Ok(0)).map_err(io_failure)
+    }
+
+    /// `position0()`: the position in the file.
+    pub fn position(&self, fd: i32) -> Result<i64, Failure> {
+        let position = self.with_file(fd, |mut f| f.stream_position().map(|p| p as i64))?;
+        position.unwrap_or(Ok(0)).map_err(io_failure)
     }
 
     /// `write(b)` and `writeBytes`: the bytes go to the descriptor's stream. Standard output is
     /// the runtime's buffered `out`.
     pub fn write(&mut self, fd: i32, bytes: &[u8]) -> Result<(), Failure> {
         match self.entries.get_mut(fd as usize).and_then(Option::as_mut) {
-            Some(Entry::Stdout) => out().write_all(bytes).map_err(io_failure),
-            Some(Entry::Stderr) => io::stderr().write_all(bytes).map_err(io_failure),
+            Some(Entry::Stdout) => Ok(out::raw_write(STDOUT_FD, bytes)),
+            Some(Entry::Stderr) => Ok(out::raw_write(STDERR_FD, bytes)),
             Some(Entry::Write(file)) => file.write_all(bytes).map_err(io_failure),
             Some(_) => Err(bad_descriptor()),
             None => Err(closed()),
@@ -293,6 +380,18 @@ pub fn fd_write(fd: i32, b: i32) -> Result<(), Failure> {
 pub fn fd_write_bytes(fd: i32, buf: &[i8], off: i32, len: i32) -> Result<(), Failure> {
     let bytes: Vec<u8> = buf[off as usize..(off + len) as usize].iter().map(|&b| b as u8).collect();
     with(|t| t.write(fd, &bytes))
+}
+
+pub fn fd_is_regular_file(fd: i32) -> bool {
+    with(|t| t.is_regular_file(fd))
+}
+
+pub fn fd_length(fd: i32) -> Result<i64, Failure> {
+    with(|t| t.length(fd))
+}
+
+pub fn fd_position(fd: i32) -> Result<i64, Failure> {
+    with(|t| t.position(fd))
 }
 
 pub fn fd_close(fd: i32) {

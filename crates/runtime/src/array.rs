@@ -315,6 +315,14 @@ pub fn copy_of<T: Clone, A: MadeElements<T>>(a: &A, len: i32, zero: T) -> A {
     A::made(items)
 }
 
+/// `Arrays.copyOf(a, len)`, where the program observes the `NegativeArraySizeException`.
+pub fn try_copy_of<T: Clone, A: MadeElements<T>>(a: &A, len: i32, zero: T) -> Result<A, Exception> {
+    if len < 0 {
+        return Err(Exception::new("java.lang.NegativeArraySizeException", len.to_string()));
+    }
+    Ok(copy_of(a, len, zero))
+}
+
 /// `a[i] = v` as an expression: stores `v` and gives it back.
 pub fn store<T: Clone>(a: &impl Elements<T>, i: i32, v: T) -> T {
     set(a, i, v.clone());

@@ -10,7 +10,7 @@ impl<'a> Gen<'a> {
         };
         match native {
             Native::Math { name, strict } => self.math(name, strict, args, ty, id),
-            Native::ArrayCopy => self.array_copy(args),
+            Native::ArrayCopy => self.array_copy(args, id),
             Native::DoubleToLongBits => {
                 let x = self.value(&args[0], Type::Double).text;
                 call(self, "double_to_long_bits", vec![x])
@@ -65,6 +65,11 @@ impl<'a> Gen<'a> {
                 call(self, "write_byte", vec![b])
             }
             Native::OutFlush => call(self, "flush", vec![]),
+            Native::ErrFlush => call(self, "err_flush", vec![]),
+            Native::StandardWrite
+            | Native::StandardWriteBytes
+            | Native::StandardFlush
+            | Native::StandardClose => self.standard_native(native, args),
             Native::ErrPrint { newline } => {
                 let mac = self.runtime(if newline { "eprintln!" } else { "eprint!" });
                 if args.is_empty() {
@@ -140,7 +145,10 @@ impl<'a> Gen<'a> {
             | Native::FileSkip
             | Native::FileClose
             | Native::FileWrite
-            | Native::FileWriteBytes => self.file_native(native, args),
+            | Native::FileWriteBytes
+            | Native::FileIsRegular
+            | Native::FileLength
+            | Native::FilePosition => self.file_native(native, args, id),
             // The lowering drops its statement; anywhere else it is the unit it returns.
             Native::Nothing => Code::atom("()"),
             Native::CdsConfigStatus => call(self, "cds_config_status", vec![]),
@@ -275,13 +283,14 @@ impl<'a> Gen<'a> {
 
     /// `System.arraycopy(src, srcPos, dest, destPos, length)`. Shared arrays go through
     /// `java::arraycopy`, which also handles a copy within one array; plain arrays are copied
-    /// between slices, or within one with `java::copy_within`.
-    fn array_copy(&mut self, args: &'a [Expr]) -> Code {
+    /// between slices, or within one with `java::copy_within`. Where a `catch` or a `finally` sees
+    /// the copy's failure (`Facts::raising`), the checked form of each.
+    fn array_copy(&mut self, args: &'a [Expr], id: ExprId) -> Code {
         let [src, src_pos, dest, dest_pos, length] = args else {
             unreachable!("arraycopy has five arguments")
         };
         if matches!(src.ty, Type::Class(name, _) if name == OBJECT) {
-            return self.object_array_copy(args);
+            return self.object_array_copy(args, id);
         }
         let plain_name = |g: &Self, e: &Expr| match &e.kind {
             ExprKind::Var(name) if g.plain(name).is_some() => Some(name.clone()),
@@ -292,8 +301,8 @@ impl<'a> Gen<'a> {
             let (s, d) = (self.handle(src), self.handle(dest));
             let ints: Vec<String> =
                 [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
-            let f = self.runtime("arraycopy");
-            return Code::atom(format!("{f}({s}, {}, {d}, {}, {})", ints[0], ints[1], ints[2]));
+            let args = format!("{s}, {}, {d}, {}, {}", ints[0], ints[1], ints[2]);
+            return self.may_fail(id, "arraycopy", "", &args);
         }
         // A `&mut` borrow of a plain destination conflicts with a later argument that reads it,
         // such as `a.length - 1`, so then the positions that are not constants are computed first,
@@ -311,10 +320,10 @@ impl<'a> Gen<'a> {
                 ints.push(code.text);
             }
         }
-        let call = match (&src_plain, &dest_plain) {
+        match (&src_plain, &dest_plain) {
             (Some(s), Some(d)) if s == d => {
                 let a = self.mut_ref(&self.local(d));
-                format!("{}({a}, {}, {}, {})", self.runtime("copy_within"), ints[0], ints[1], ints[2])
+                self.may_fail(id, "copy_within", "", &format!("{a}, {}, {}, {}", ints[0], ints[1], ints[2]))
             }
             _ => {
                 let s = self.slice_of(src);
@@ -322,10 +331,14 @@ impl<'a> Gen<'a> {
                     Some(d) => self.mut_ref(&self.local(d)),
                     None => format!("&mut {}.borrow_mut()", self.array_receiver(dest)),
                 };
-                format!("{}({s}, {}, {d}, {}, {})", self.runtime("copy_slice"), ints[0], ints[1], ints[2])
+                self.may_fail(
+                    id,
+                    "copy_slice",
+                    "",
+                    &format!("{s}, {}, {d}, {}, {}", ints[0], ints[1], ints[2]),
+                )
             }
-        };
-        Code::atom(call)
+        }
     }
 
     /// An array as a `&[T]` for reading: a plain array borrowed, a shared one through its cell.

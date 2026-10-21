@@ -108,32 +108,6 @@ impl<'t> Lowering<'t> {
                 Native::HoldsLock
             }
             ("java.lang.Thread", "yield") => Native::ThreadYield,
-            ("java.io.FileInputStream", "open0") => Native::FileOpenRead,
-            ("java.io.FileInputStream", "read0") => {
-                self.stream_native(node, receiver, args, Native::FileRead)?
-            }
-            ("java.io.FileInputStream", "readBytes") => {
-                self.stream_native(node, receiver, args, Native::FileReadBytes)?
-            }
-            ("java.io.FileInputStream", "available0") => {
-                self.stream_native(node, receiver, args, Native::FileAvailable)?
-            }
-            ("java.io.FileInputStream", "skip0") => {
-                self.stream_native(node, receiver, args, Native::FileSkip)?
-            }
-            ("java.io.FileInputStream" | "java.io.FileOutputStream" | "java.io.FileDescriptor", "close0") => {
-                self.stream_native(node, receiver, args, Native::FileClose)?
-            }
-            ("java.io.FileOutputStream", "open0") => Native::FileOpenWrite,
-            // The `append` argument is not passed on: the runtime's descriptor remembers the mode.
-            ("java.io.FileOutputStream", "write") => {
-                args.truncate(1);
-                self.stream_native(node, receiver, args, Native::FileWrite)?
-            }
-            ("java.io.FileOutputStream", "writeBytes") => {
-                args.truncate(3);
-                self.stream_native(node, receiver, args, Native::FileWriteBytes)?
-            }
             ("java.io.PrintStream", name @ ("print" | "println"))
                 if stream == Some("err") && symbol.ty == "(char[])void" =>
             {
@@ -155,6 +129,7 @@ impl<'t> Lowering<'t> {
             ("java.io.PrintStream", "write") if stream == Some("out") && symbol.ty == "(int)void" => {
                 Native::OutWrite
             }
+            ("java.io.PrintStream", "flush") if stream == Some("err") => Native::ErrFlush,
             ("java.io.PrintStream", "flush") if stream.is_some() => Native::OutFlush,
             // A native of a translated class: the runtime's, or a rejection that names it. (A
             // native of the JDK that the translator's own class has in Java, as `Thread` has
@@ -191,6 +166,15 @@ impl<'t> Lowering<'t> {
         symbol: &Symbol<'t>,
         select: Node<'t>,
     ) -> Result<Option<ExprKind>, Error> {
+        if let Some(name) = crate::program::ensured_class(node.0) {
+            let Some(class) = self.type_index(&name) else {
+                return unsupported(
+                    node,
+                    &format!("initializing `{name}`, which is not a class of the program"),
+                );
+            };
+            return Ok(Some(ExprKind::Builtin(Builtin::InitializeClass { class }, Vec::new())));
+        }
         let method = match (symbol.owner, symbol.name, symbol.ty) {
             ("jdk.internal.misc.CDS", "initializeFromArchive", _) => "CDS.initializeFromArchive",
             ("jdk.internal.misc.Unsafe", "arrayBaseOffset", "(java.lang.Class<?>)long") => {
@@ -254,20 +238,87 @@ impl<'t> Lowering<'t> {
         args.push(self.synth(call, node.pos(), Type::Void));
     }
 
-    /// A native of a stream or descriptor: the receiver goes first, as the descriptor the object
-    /// model supplies. The lowering of that descriptor is the object model's, not this one's.
-    fn stream_native(
+    /// A native of `FileInputStream`, `FileOutputStream` or `FileDescriptor`, which acts on the
+    /// descriptor of its object: the number in the `fd` field of the stream's `FileDescriptor`
+    /// (or of the `FileDescriptor` itself), which goes first among the arguments. `open0` stores
+    /// the number it opens there, and `close0` sets it to -1 once it is closed, as the JVM's
+    /// natives do. `None` for any other method.
+    pub(super) fn descriptor_call(
         &self,
         node: Node<'t>,
+        symbol: &Symbol<'t>,
         receiver: Option<Node<'t>>,
         args: &mut Vec<Expr>,
-        native: Native,
-    ) -> Result<Native, Error> {
-        let stream = match receiver {
-            Some(r) => self.expr(r)?,
-            None => self.this(node),
+    ) -> Result<Option<ExprKind>, Error> {
+        if !symbol.native {
+            return Ok(None);
+        }
+        let native = match (symbol.owner, symbol.name) {
+            ("java.io.FileInputStream", "open0") => Native::FileOpenRead,
+            ("java.io.FileInputStream", "read0") => Native::FileRead,
+            ("java.io.FileInputStream", "readBytes") => Native::FileReadBytes,
+            ("java.io.FileInputStream", "available0") => Native::FileAvailable,
+            ("java.io.FileInputStream", "skip0") => Native::FileSkip,
+            ("java.io.FileInputStream", "length0") => Native::FileLength,
+            ("java.io.FileInputStream", "position0") => Native::FilePosition,
+            // Its argument is the stream's own descriptor, which the stream's `fd` gives.
+            ("java.io.FileInputStream", "isRegularFile0") => {
+                args.clear();
+                Native::FileIsRegular
+            }
+            ("java.io.FileDescriptor", "close0") => Native::FileClose,
+            ("java.io.FileOutputStream", "open0") => Native::FileOpenWrite,
+            // The `append` argument is not passed on: the runtime's descriptor remembers the mode.
+            ("java.io.FileOutputStream", "write") => {
+                args.truncate(1);
+                Native::FileWrite
+            }
+            ("java.io.FileOutputStream", "writeBytes") => {
+                args.truncate(3);
+                Native::FileWriteBytes
+            }
+            _ => return Ok(None),
         };
-        args.insert(0, stream);
-        Ok(native)
+        let pos = node.pos();
+        if let Some(r) = receiver
+            && !(r.kind() == "IDENTIFIER" && r.str("name") == "this")
+        {
+            return unsupported(r, "a native of a stream on another object than `this`");
+        }
+        let descriptor_ty = self.ty(node, "java.io.FileDescriptor")?;
+        let descriptor = || {
+            let object = self.this(node);
+            if symbol.owner == "java.io.FileDescriptor" {
+                return object;
+            }
+            let field = Place::Field { object: Box::new(object), name: "fd".into() };
+            self.synth(super::objects::read(field), pos, descriptor_ty)
+        };
+        let number = || Place::Field { object: Box::new(descriptor()), name: "fd".into() };
+        let call =
+            |args: Vec<Expr>, ty: Type| self.synth(ExprKind::Builtin(Builtin::Native(native), args), pos, ty);
+        Ok(Some(match native {
+            Native::FileOpenRead | Native::FileOpenWrite => {
+                let value = Box::new(call(std::mem::take(args), Type::Int));
+                ExprKind::Assign { op: None, target: number(), value }
+            }
+            Native::FileClose => {
+                let fd = self.synth(super::objects::read(number()), pos, Type::Int);
+                let closed = self.synth(ExprKind::Int(-1), pos, Type::Int);
+                let reset = ExprKind::Assign { op: None, target: number(), value: Box::new(closed) };
+                let block = vec![
+                    Stmt::Expr(call(vec![fd], Type::Void)),
+                    Stmt::Expr(self.synth(reset, pos, Type::Int)),
+                ];
+                ExprKind::Switch {
+                    selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+                    cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+                }
+            }
+            _ => {
+                args.insert(0, self.synth(super::objects::read(number()), pos, Type::Int));
+                ExprKind::Builtin(Builtin::Native(native), std::mem::take(args))
+            }
+        }))
     }
 }

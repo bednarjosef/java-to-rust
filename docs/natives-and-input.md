@@ -188,7 +188,7 @@ also answers `isInstance`, `isAssignableFrom` and `getSuperclass`.
 | Native | Programs | Chain | Real? | Rust |
 |---|---|---|---|---|
 | `FileInputStream.readBytes`, `read0`, `available0`, `initIDs` | 2 (Scanner); `ReaderLinesFd` | `Scanner.hasNext -> readInput -> Reader.read -> StreamDecoder.implRead -> readBytes -> InputStream.read -> FileInputStream.read -> readBytes` | real: this is reading standard input | done in `fd.rs` (`fd_read_bytes`, `fd_read`, `fd_available`); `initIDs` no-op |
-| `FileInputStream.open0`, `length0`, `position0`, `isRegularFile0` | 2 (Scanner) | `Currency.initStatic -> FileReader.<init>`; `JarLoader` | artifact (currency data file, jars) | `open0` done; the others with `std::fs` when a program reads files |
+| `FileInputStream.open0`, `length0`, `position0`, `isRegularFile0` | 2 (Scanner) | `Currency.initStatic -> FileReader.<init>`; `JarLoader` | artifact (currency data file, jars) | done in `fd.rs` (`length0`, `position0` and `isRegularFile0` of the stream's descriptor) |
 | `FileDescriptor.initIDs`, `getHandle`, `getAppend`, `close0` | 2 (Scanner); `ReaderLinesFd` | `FileDescriptor.<clinit> -> initIDs`, `getHandle(0)` | real: `FileDescriptor.in` is created in the initializer | `initIDs` no-op, `getHandle` `-1` (Windows only), `getAppend` `false` for 0, 1, 2, `close0` done |
 | `FileCleanable.cleanupClose0` | 2 | `FileDescriptor.<clinit> -> (anonymous JavaIOFileDescriptorAccess) -> FileCleanable.register` | artifact | none |
 | `RandomAccessFile.*` (7), `UnixFileSystem.*` (7), `sun.nio.fs.UnixNativeDispatcher.*` (15), `sun.nio.ch.UnixFileDispatcherImpl.*` (14), `FileDispatcherImpl.*` (3) | 2 (Scanner) | `Scanner.close -> Closeable.close -> URLClassPath.JarLoader.close -> ensureOpen -> getJarFile -> JarFile.<init> -> ZipFile ... RandomAccessFile.open0` | artifact: `Closeable.close` dispatches to every live `Closeable`, and class loading made jar loaders live | none now; `std::fs` once programs use files |
@@ -263,6 +263,8 @@ builds it in `System.initPhase1`: `new BufferedInputStream(new FileInputStream(F
 | `ScannerSumFd` | 1,647 | 1,101 | 10,693 | 13,533 | 191 |
 
 ### `System.in` is not followed today
+
+(This was the state of the survey; `System.in` is now the JVM's object, see section 5.)
 
 `System` is a runtime class, so reachability stops at the field `System.in`: its static type is
 `InputStream`, and `InputStream.read()` is abstract. In `ReaderLines` no class that can read is
@@ -702,8 +704,8 @@ cannot be stood in for there, since javac reads an exported package of java.base
 
 Not done, because they need objects, exceptions or threads: everything else of section 1, in
 particular `Throwable.fillInStackTrace(int)` and `NullPointerException.getExtendedNPEMessage()`
-(above), the `Unsafe` memory and atomic operations, `Array.newArray` and the `FileInputStream`
-natives of a stream's object (`length0`, `position0`, `isRegularFile0`). The `TimeZone` natives
+(above), the `Unsafe` memory and atomic operations, `Array.newArray`. The `FileInputStream`
+natives of a stream's object (`length0`, `position0`, `isRegularFile0`) are done since (section 5). The `TimeZone` natives
 need no objects but read the system's zone configuration (`TZ`, `/etc/localtime`), which is left
 for when a program needs time zones.
 
@@ -905,6 +907,98 @@ and `ComparatorSorting` reach 4 natives, all in the runtime, and `GenericContain
 `StreamPipeline` reaches 372 classes and 28 natives (5 in the runtime); `ScannerGrades` and
 `TextAdventure` reach 1,163 and 1,169 classes and 73 natives each (22 in the runtime), having lost
 `StackTraceElement.initStackTraceElements` too.
+
+## 5. Standard streams and `java.io` in a translation
+
+Translated with the JDK's sources (`--main` and `--library`), a program can use `System.out`,
+`System.err` and `System.in` as objects: keep one in a variable, a field or a parameter, wrap it
+(`new PrintStream(new BufferedOutputStream(System.out))`, `new BufferedReader(new
+InputStreamReader(System.in))`), and subclass `OutputStream`, `InputStream`, `FilterOutputStream`,
+`ByteArrayOutputStream` or `PrintStream`. The byte streams of `java.io` are the JDK's own classes,
+translated; the runtime writes only the bottom (the descriptors) and three classes are stand-ins,
+for the reasons below. Without the JDK's sources, `System.out` as a value is rejected with
+"`System.out` as a value needs the JDK's sources".
+
+### System.out, System.err and System.in as values
+
+A call written on `System.out` or `System.err` itself (`System.out.println(x)`, `print`, `printf`,
+`format`, `flush`, `write(int)`; `System.err.print`, `println`, `flush`) stays the runtime's
+direct call, as without the JDK, and reachability does not enter `PrintStream` for it. Any other
+use of the field reads a static field of a holder class that the translator adds to the JDK's
+sources (`crates/translator/java/overlay/java/io`, put before java.base on javac's source path):
+
+- `System.out` and `System.err` are `StandardOutput.out` and `StandardOutput.err`: a
+  `PrintStream` with automatic flushing over a `StandardOutput`, an `OutputStream` whose four
+  natives (`write0`, `writeBytes0`, `flush0`, `close0`) are the runtime's standard streams
+  (`out.rs`: `standard_write`, `standard_write_bytes`, `standard_flush`, `standard_close`).
+- `System.in` is `StandardInput.in`: a `BufferedInputStream` over a `FileInputStream` of
+  `FileDescriptor.in`, the object the JVM makes, all three translated from the JDK; the
+  `FileInputStream` natives are the runtime's descriptor table (`fd.rs`), which now has
+  `length0`, `position0` and `isRegularFile0` too, and answers `available` on a pipe or a terminal
+  with the bytes waiting (`FIONREAD`).
+
+The JVM's `System.out` is a `PrintStream` over a `BufferedOutputStream` of 128 bytes over a
+`FileOutputStream`. The translation does not build that chain, because the direct calls and the
+value must write through one buffer to stay in order: `System.out.write('x')` through the value
+followed by `System.out.println()` direct must give `x` then the newline, and an unflushed
+`write` must be lost at exit in both. So the runtime keeps the `BufferedOutputStream`'s 128 bytes
+itself (`out.rs`, `buffered`), with its rules: a byte waits there until a newline (automatic
+flushing), a flush, a print, or the buffer filling; a range of 128 bytes or more goes past it;
+what is still there when the program ends is lost. Both ways of printing come down to it, so the
+bytes, their order between standard output and standard error, the flushes and the exit code are
+Java's. An out-of-range `write(byte[], off, len)` throws what the JVM's buffer throws (the
+`arraycopy` message for a range under 128 bytes, a bare `IndexOutOfBoundsException` above).
+
+`PrintStream` is the overlay's (`PrintStream.java`), not the JDK's: the JDK's encodes text
+through a `BufferedWriter` over an `OutputStreamWriter`, whose `StreamEncoder` needs
+`CharsetEncoder`, `ByteBuffer` and `CoderResult`, which do not translate yet. The overlay's
+encodes each piece of text with `String.getBytes(charset)` (the runtime's `Charset`) and writes
+the bytes through its own `write(byte[], int, int)`, as the JDK's encoder does, so a subclass
+that overrides `write` sees the same bytes; `println` of a subclass goes through its `print` and
+then the line separator, as in the JDK; errors set `checkError` and are not thrown. `printf` and
+`format` on a `PrintStream` value are formatted at the call, as `System.out.printf` is, and
+printed through the package-private `formattedText`.
+
+`Charset` and `StandardCharsets` are runtime classes, so reachability does not enter the JDK's
+charset machinery (its provider lookup reaches `GB18030`, which reads a JVM property).
+
+### Readers and writers over byte streams
+
+`Reader`, `Writer`, `BufferedReader`, `BufferedWriter`, `PrintWriter` and the byte streams
+(`BufferedInputStream`, `BufferedOutputStream`, `FilterOutputStream`, `ByteArrayInputStream`,
+`ByteArrayOutputStream`, `FileInputStream`, `FileOutputStream`) are translated from the JDK.
+`InputStreamReader` and `OutputStreamWriter` are the overlay's, for the same reason as
+`PrintStream`: the JDK's decode and encode through `StreamDecoder` and `StreamEncoder`.
+
+- The overlay's `InputStreamReader` reads into a buffer of 8192 bytes, reading again in one call
+  only while the stream has bytes available, and decodes with `new String(bytes, off, len,
+  charset)`, which replaces malformed input as the JDK's decoder does. Bytes at the end of a read
+  that may begin a character (part of a UTF-8 sequence, an odd UTF-16 byte, a high surrogate)
+  wait for the next read.
+- The overlay's `OutputStreamWriter` does what `StreamEncoder` does with its buffer: it starts at
+  512 bytes, grows up to 8192 for a long write, is passed to the stream when the next character
+  does not fit, on `flush` and on `close`, and is lost if the program ends without either, as in
+  Java. A lone surrogate and a character the charset cannot encode become the replacement (`?`,
+  U+FFFD in UTF-16).
+
+### What differs from Java
+
+- `InputStreamReader` and `OutputStreamWriter` take UTF-8, US-ASCII, ISO-8859-1, UTF-16BE and
+  UTF-16LE; any other charset (UTF-16 with a byte-order mark among them) is an
+  `UnsupportedOperationException` when the reader or writer is created.
+- `InputStreamReader` may ask its stream for a different number of bytes per read than the JDK's,
+  which a program can only see through an `InputStream` subclass that counts its calls.
+- `printf` and `format` on a `PrintStream` subclass print the formatted text with one `print`
+  call, where the JDK's `Formatter` calls `append` (and so `print`) once per piece, and an
+  override of `format` itself is not called by `printf`.
+- `PrintStream.append(csq, start, end)` takes the substring of `String.valueOf(csq)`, which for a
+  program's own `CharSequence` is not its `subSequence`.
+- The JDK's `BufferedInputStream.close` clears the buffer with an atomic compare-and-set; the
+  translation compares and writes in two steps, so a close that races a read in another thread
+  is not guaranteed to see the read's buffer as the JVM's is.
+- Standard input is the process's descriptor 0 on Unix only; elsewhere reading it panics.
+- `Scanner(System.in)` still does not translate: `Scanner` reaches `java.util.regex`, which needs
+  `Character.UnicodeScript` (`CharPredicates.java`), not yet supported.
 
 ## Reproducing
 

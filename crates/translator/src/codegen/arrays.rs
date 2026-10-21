@@ -409,7 +409,7 @@ impl<'a> Gen<'a> {
     }
 
     /// `Arrays.toString`, `fill`, `sort` and `copyOf`.
-    pub(super) fn arrays_builtin(&mut self, builtin: Builtin, args: &'a [Expr]) -> Code {
+    pub(super) fn arrays_builtin(&mut self, builtin: Builtin, args: &'a [Expr], id: ExprId) -> Code {
         let elem = element(args[0].ty);
         let handle = self.handle(&args[0]);
         match builtin {
@@ -432,7 +432,7 @@ impl<'a> Gen<'a> {
             Builtin::ArraysCopyOf => {
                 let len = self.value(&args[1], Type::Int).text;
                 let zero = self.element_zero(elem);
-                Code::atom(format!("{}({handle}, {len}, {zero})", self.runtime("copy_of")))
+                self.may_fail(id, "copy_of", "", &format!("{handle}, {len}, {zero}"))
             }
             _ => unreachable!("only the Arrays builtins are handled here"),
         }

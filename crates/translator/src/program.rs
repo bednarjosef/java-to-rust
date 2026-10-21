@@ -7,8 +7,9 @@ mod reach;
 mod survey;
 
 pub use reach::{
-    CLASS_KINDS, LOCALE_LANGUAGE, Reach, STRING_STREAMS, class_for_name, class_name, component_array,
-    created_by_name, live_branch, unsafe_field_access, untranslated,
+    CLASS_KINDS, ENSURE_INITIALIZED, LOCALE_LANGUAGE, PRINT_FORMATTED, Reach, STRING_STREAMS, class_for_name,
+    class_name, component_array, created_by_name, direct_stream_call, ensured_class, live_branch,
+    standard_stream_field, stream_of_call, unsafe_compare_and_set, unsafe_field_access, untranslated,
 };
 pub use survey::Survey;
 
@@ -252,10 +253,17 @@ fn javac_tree(program: &Program, files: &[PathBuf]) -> Result<Value, ProgramErro
     javac::program_tree(files, &sourcepath(program)).map_err(|(file, error)| ProgramError { file, error })
 }
 
-/// The roots that javac loads classes from: the program's, then the libraries'.
+/// The roots that javac loads classes from: the program's, then with libraries the translator's
+/// own classes that replace or add to the JDK's (`OVERLAY`), then the libraries'.
 fn sourcepath(program: &Program) -> Vec<PathBuf> {
-    program.sources.iter().chain(&program.libraries).cloned().collect()
+    let overlay = (!program.libraries.is_empty()).then(|| PathBuf::from(OVERLAY));
+    program.sources.iter().cloned().chain(overlay).chain(program.libraries.iter().cloned()).collect()
 }
+
+/// The translator's classes of `java.io` for a translation with the JDK's sources, ahead of the
+/// JDK's on the source path: a `PrintStream` that the translation can take, and the objects that
+/// `System.in`, `System.out` and `System.err` are (see docs/natives-and-input.md).
+const OVERLAY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/java/overlay");
 
 /// The program's own files: the given files and every `.java` file under the source roots, sorted
 /// and without duplicates.

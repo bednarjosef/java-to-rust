@@ -64,8 +64,12 @@ impl<'t> Lowering<'t> {
         node: Node<'t>,
         symbol: &Symbol<'t>,
     ) -> Result<Option<ExprKind>, Error> {
-        let Some(put) = crate::program::unsafe_field_access(symbol.owner, symbol.name, symbol.ty) else {
-            return Ok(None);
+        let cas = crate::program::unsafe_compare_and_set(symbol.owner, symbol.name, symbol.ty);
+        let access = crate::program::unsafe_field_access(symbol.owner, symbol.name, symbol.ty);
+        let put = match access {
+            Some(put) => put,
+            None if cas => false,
+            None => return Ok(None),
         };
         let args: Vec<Node> = node.list("arguments").collect();
         let Some((class, field)) = self.handle(args[1]) else {
@@ -92,6 +96,9 @@ impl<'t> Lowering<'t> {
             return unsupported(node, &format!("the offset of `{field}`, which is not a field of the class"));
         };
         let ty = self.declared_type(member, member.symbol().map_or("", |s| s.ty), class, None)?;
+        if cas {
+            return self.compare_and_set(node, object, field, ty, args[2], args[3]).map(Some);
+        }
         let place = Place::Field { object: Box::new(object), name: field.to_string() };
         if put {
             let value = self.expr(args[2])?;
@@ -106,5 +113,57 @@ impl<'t> Lowering<'t> {
         let read = self.synth(objects::read(place), node.pos(), ty);
         let ret = self.ty(node, node.java_type())?;
         Ok(Some(self.convert(read, ret).kind))
+    }
+
+    /// `U.compareAndSet<Kind>(o, OFFSET, expected, x)` of a field handle: `{ boolean same = o.f ==
+    /// expected; if (same) o.f = x; yield same; }`, comparing references by identity as the JVM
+    /// does. The object is evaluated twice, so it must be `this` or a local. The comparison and
+    /// the write are two steps, not one atomic one: the JDK's code uses it where one thread
+    /// closes a stream (`BufferedInputStream`'s buffer), and a close that races a read in
+    /// another thread is the documented deviation (docs/natives-and-input.md).
+    fn compare_and_set(
+        &self,
+        node: Node<'t>,
+        object: Expr,
+        field: &str,
+        ty: Type,
+        expected: Node<'t>,
+        value: Node<'t>,
+    ) -> Result<ExprKind, Error> {
+        if !matches!(object.kind, ExprKind::This | ExprKind::Var(_)) {
+            return unsupported(node, "`Unsafe.compareAndSet` on an object that is not `this` or a local");
+        }
+        let pos = node.pos();
+        let copy = |e: &Expr| {
+            self.synth(
+                match &e.kind {
+                    ExprKind::Var(name) => ExprKind::Var(name.clone()),
+                    _ => ExprKind::This,
+                },
+                pos,
+                e.ty,
+            )
+        };
+        let place = |o: Expr| Place::Field { object: Box::new(o), name: field.to_string() };
+        let current = self.synth(objects::read(place(copy(&object))), pos, ty);
+        let expected = self.convert(self.expr(expected)?, ty);
+        let value = self.convert(self.expr(value)?, ty);
+        let same = self.fresh_name("same");
+        let var = || self.synth(ExprKind::Var(same.clone()), pos, Type::Boolean);
+        let test = self.synth(
+            ExprKind::Binary(BinOp::Eq, Box::new(current), Box::new(expected)),
+            pos,
+            Type::Boolean,
+        );
+        let set = ExprKind::Assign { op: None, target: place(object), value: Box::new(value) };
+        let block = vec![
+            Stmt::Local { ty: Type::Boolean, name: same.clone(), init: Some(test), pos },
+            Stmt::If { cond: var(), then: Box::new(Stmt::Expr(self.synth(set, pos, ty))), otherwise: None },
+            Stmt::Yield(var()),
+        ];
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        })
     }
 }

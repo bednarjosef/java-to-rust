@@ -824,6 +824,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.system_property_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.descriptor_call(node, &symbol, receiver, &mut args)? {
+            return Ok(kind);
+        }
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {
             return Ok(ExprKind::Builtin(builtin, args));
         }
@@ -848,6 +851,9 @@ impl<'t> Lowering<'t> {
             ("java.io.PrintStream", "print") if system_out => Builtin::Print,
             ("java.io.PrintStream", "printf" | "format") if system_out => {
                 return self.printf_call(node, args);
+            }
+            ("java.io.PrintStream", "printf" | "format") if self.type_index(symbol.owner).is_some() => {
+                return self.print_stream_format(node, receiver, args);
             }
             ("java.lang.System", "exit") => Builtin::Exit,
             ("java.lang.Math", "abs") => Builtin::MathAbs,
