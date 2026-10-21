@@ -219,6 +219,23 @@ impl Hierarchy {
 }
 
 impl Class {
+    /// Whether method `m` is part of a class's static initialization: its `<clinit>`, or the
+    /// functions that build the constants of an enum with tables (`lower/enum_tables.rs`), which
+    /// only it calls. What it throws reaches the program as `ExceptionInInitializerError`.
+    pub fn is_initializer(&self, m: usize) -> bool {
+        let method = &self.methods[m];
+        method.name == "<clinit>" || self.builds_constants(m)
+    }
+
+    /// Whether method `m` is a function that builds the constants of an enum with tables.
+    pub fn builds_constants(&self, m: usize) -> bool {
+        let method = &self.methods[m];
+        let decl = &self.types[method.class];
+        method.is_static
+            && decl.kind == TypeKind::Enum
+            && (method.name == constant_builder(&decl.name) || method.name == fields_builder(&decl.name))
+    }
+
     /// The index of the type with this qualified name.
     pub fn type_index(&self, name: &str) -> Option<usize> {
         self.types.iter().position(|t| t.name == name)

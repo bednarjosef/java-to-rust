@@ -18,6 +18,7 @@
 mod arrays;
 mod borrowing;
 mod boxing;
+pub mod closures;
 mod constants;
 mod exceptions;
 pub mod hierarchy;
@@ -162,6 +163,9 @@ pub struct Facts {
     pub null_checked: HashMap<ExprId, Pos>,
     /// The standard classes whose objects the runtime raises where the program may see them.
     pub raised_classes: std::collections::BTreeSet<usize>,
+    /// The functional interfaces whose values are closures, `Rc<dyn Fn(A) -> R>` (see
+    /// `closures`).
+    pub closure_types: HashSet<usize>,
 }
 
 impl Facts {
@@ -184,6 +188,7 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     let mut facts = Facts {
         fields_structs: hierarchy::fields_structs(class),
         field_owners: hierarchy::field_owners(class),
+        closure_types: closures::closure_types(class),
         ..Facts::default()
     };
     ranges::analyze(class, &mut facts);
@@ -193,7 +198,6 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
     nullness::analyze(class, &mut facts);
-    patterns::check_enum_casts(class, &facts)?;
     patterns::check_object_values(class, &facts)?;
     boxing::analyze(class, &mut facts);
     if facts.threaded {

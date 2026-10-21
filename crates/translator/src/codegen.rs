@@ -13,7 +13,9 @@ mod boxing;
 mod chains;
 mod character;
 mod charsets;
+mod class_values;
 mod classes;
+mod closures;
 mod code;
 mod code_point;
 mod covariant;
@@ -112,6 +114,8 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         exhaustive: false,
         chain: false,
         field_locals: HashMap::new(),
+        bound_params: None,
+        traits: std::collections::BTreeSet::new(),
         ctor_result: None,
         printing: false,
         guarded: false,
@@ -135,6 +139,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         attempt_count: 0,
         try_assigned: HashSet::new(),
         dereferenced: HashSet::new(),
+        written: HashSet::new(),
         rejected: None,
         chains: chains::Chains::default(),
     };
@@ -255,6 +260,12 @@ struct Gen<'a> {
     /// The locals that hold the fields that a constructor's initializers computed first, by
     /// Java field name: the later initializers read them there.
     field_locals: HashMap<String, String>,
+    /// In a closure's body, the lambda's method whose parameters are bound to the converted
+    /// arguments already (see `closures::inline_call`).
+    bound_params: Option<usize>,
+    /// The extension traits of closure types in other modules that the module being written
+    /// calls default methods of, by path (see `closures::closure_trait`).
+    traits: std::collections::BTreeSet<String>,
     /// In a constructor, what a `return` gives back: the object being built.
     ctor_result: Option<&'static str>,
     /// Whether the text being formatted is printed.
@@ -304,6 +315,9 @@ struct Gen<'a> {
     try_assigned: HashSet<String>,
     /// The objects of `Facts::null_checked` whose checked dereference has been written.
     dereferenced: HashSet<ExprId>,
+    /// The methods whose bodies have been written. A body that is not, as no call needs it or
+    /// it never runs, dereferences nothing.
+    written: HashSet<usize>,
     /// The first construct found that cannot be translated, which `generate` reports.
     rejected: Option<Error>,
 }
@@ -539,6 +553,9 @@ impl<'a> Gen<'a> {
             self.line(&format!("let _main = {guard}();"));
         }
         let initializes = m.name == "<clinit>" && self.facts.threaded;
+        if !never_runs {
+            self.written.insert(index);
+        }
         if never_runs {
             self.line(&no_object(&self.class.types[m.class].name));
         } else if m.is_ctor {

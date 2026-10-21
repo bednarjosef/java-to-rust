@@ -27,17 +27,43 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Completes the records of these compilation units.
 pub(super) fn complete(units: &mut [&mut Value]) {
+    let survey = survey(&units.iter().map(|u| &**u).collect::<Vec<_>>());
     for unit in units.iter_mut() {
-        hoist_local_types(unit);
+        complete_unit(unit, &survey);
     }
+}
+
+/// What `complete_unit` needs to know of all the compilation units: what they call, and their
+/// interfaces, records and enums. Where a local type is declared does not change it.
+pub(super) fn survey(units: &[&Value]) -> Survey {
     let mut survey = Survey::default();
-    for unit in units.iter() {
+    for unit in units {
         survey.scan(unit);
     }
     survey.hashed_closure();
-    for unit in units.iter_mut() {
-        visit_records(unit, &mut |record| complete_record(record, &survey));
+    survey
+}
+
+/// Completes the records of one compilation unit, with the survey of all of them.
+pub(super) fn complete_unit(unit: &mut Value, survey: &Survey) {
+    hoist_local_types(unit);
+    visit_records(unit, &mut |record| complete_record(record, survey));
+}
+
+/// Whether `complete_unit` may change the compilation unit: it has no package (and so may have
+/// local types to hoist), or it declares a record.
+pub(super) fn changes(unit: &Value) -> bool {
+    fn has_record(v: &Value) -> bool {
+        match v {
+            Value::Object(fields) => {
+                fields.get("kind").and_then(Value::as_str) == Some("RECORD")
+                    || fields.values().any(has_record)
+            }
+            Value::Array(items) => items.iter().any(has_record),
+            _ => false,
+        }
     }
+    unit["packageName"].is_null() || has_record(unit)
 }
 
 /// An interface: the names and types of its methods without parameters, and the interfaces it
@@ -46,7 +72,7 @@ type Interface = (Vec<(String, String)>, Vec<String>);
 
 /// What the units use, which decides the members written.
 #[derive(Default)]
-struct Survey {
+pub(super) struct Survey {
     /// Methods that a call or a method reference names, as (owner, name).
     called: HashSet<(String, String)>,
     /// Whether the program uses `java.lang.Object` (see `lower::object::uses_object`).

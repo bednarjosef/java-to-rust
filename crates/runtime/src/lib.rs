@@ -17,6 +17,7 @@ mod character;
 mod character_classes;
 mod character_tables;
 mod charset;
+mod class;
 mod code_point;
 mod code_point_case_tables;
 mod code_point_chars;
@@ -52,6 +53,7 @@ pub use chains::{Chain, Link, Unlink, drop_links};
 pub use character::*;
 pub use character_classes::*;
 pub use charset::*;
+pub use class::Class;
 pub use code_point::{
     char_count, code_point_string, high_surrogate, is_bmp_code_point, is_supplementary_code_point,
     is_valid_code_point, low_surrogate, to_chars, to_code_point,
@@ -71,7 +73,7 @@ pub use locked::{Locked, RawLock, Ref, RefMut};
 pub use math::*;
 pub use monitor::*;
 pub use natives::*;
-pub use null::{Handle, OrNull, non_null, or_null, same, try_non_null};
+pub use null::{Handle, OrNull, non_null, null_enum, or_null, same, try_non_null};
 pub use out::{Out, eprint_chars, eprintln_chars, flush, out, print_chars, println_chars, write_byte};
 pub use parse_range::{parse_range, parse_unsigned_range, try_parse_range, try_parse_unsigned_range};
 pub use regex::{matches_all, replace_all, replace_first, split};
