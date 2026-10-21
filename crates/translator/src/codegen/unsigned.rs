@@ -31,6 +31,7 @@ impl<'a> Gen<'a> {
         kind: Type,
         args: &'a [Expr],
         ty: Type,
+        id: ExprId,
     ) -> Code {
         match op {
             UnsignedOp::Divide | UnsignedOp::Remainder => {
@@ -53,27 +54,7 @@ impl<'a> Gen<'a> {
                 };
                 Code::atom(format!("{}({value}, {radix})", self.runtime("to_unsigned_string")))
             }
-            UnsignedOp::Parse => {
-                let text = &args[0];
-                let text = if self.nullable(text) {
-                    self.option_ref(text)
-                } else {
-                    format!("Some({})", self.str_ref(text))
-                };
-                let radix = match args.get(1) {
-                    Some(radix) => self.value(radix, Type::Int).text,
-                    None => "10".to_string(),
-                };
-                let bits = if kind == Type::Long { 64 } else { 32 };
-                Code::new(
-                    format!(
-                        "{}({text}, {radix}, {bits}) as {}",
-                        self.runtime("parse_unsigned"),
-                        rust_type(kind)
-                    ),
-                    AS,
-                )
-            }
+            UnsignedOp::Parse | UnsignedOp::ParseRange => self.parse_unsigned_builtin(kind, args, id),
             UnsignedOp::Widen => {
                 let value = self.value(&args[0], kind);
                 Code::new(

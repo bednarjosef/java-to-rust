@@ -22,10 +22,12 @@ impl<'t> Lowering<'t> {
         self.reach.is_none_or(|reach| reach.member(class, member.0))
     }
 
-    /// Whether the condition of an `if` or a `?:` is never true, so that reachability skipped the
-    /// branch it guards (`program::never_true`): that branch is not lowered either.
-    pub(super) fn never_true(&self, node: Node<'t>) -> bool {
-        crate::program::never_true(&node.0["condition"], self.reach.is_some_and(|r| r.sequential))
+    /// The only branch of an `if` or a `?:` that can run, when reachability skipped the other
+    /// (`program::live_branch`): that one is not lowered either. `None` for an `if` without the
+    /// branch.
+    pub(super) fn live_branch(&self, node: Node<'t>) -> Option<Option<Node<'t>>> {
+        let sequential = self.reach.is_some_and(|r| r.sequential);
+        crate::program::live_branch(node.0, sequential).map(|v| (!v.is_null()).then_some(Node(v)))
     }
 }
 
@@ -109,8 +111,7 @@ fn lower_with<'t>(
     let failed = lowering.verify(&types, &methods);
     let hierarchy = Hierarchy::new(&types, &methods);
     let raised = lowering.raised_objects(&types, &methods);
-    let closes = lowering.closes.take();
-    let class = Class { name: main.to_string(), types, methods, hierarchy, raised, closes };
+    let class = Class { name: main.to_string(), types, methods, hierarchy, raised };
     enums::check_nulls(&class).map_err(|e| (None, e))?;
     Ok((class, lowering.real.clone(), failed))
 }

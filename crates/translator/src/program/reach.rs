@@ -31,6 +31,12 @@ pub struct Reach {
     /// whose instance methods can run.
     pub live: HashSet<String>,
     pub methods: HashSet<MethodKey>,
+    /// Instance methods of classes that are not live, among `methods`: reachable code calls them,
+    /// but no object of their class exists, so the receiver of every call is null and their
+    /// bodies never run. They are declared with a body that says so (`Builtin::NoObject`), and
+    /// what their bodies use is not reached. Interfaces are left out, as the runtime's strings
+    /// and boxes are objects of `CharSequence` and `Comparable` that no constructor shows.
+    pub dormant: HashSet<MethodKey>,
     pub fields: HashSet<FieldKey>,
     /// Methods that reachable code calls but that are not among the sources: those of the
     /// classes the runtime provides (see `RUNTIME_CLASSES`), and any that are missing; and the
@@ -55,6 +61,13 @@ impl Reach {
             kind if CLASS_KINDS.contains(&kind) => self.classes.contains(&class_name(member)),
             _ => true,
         }
+    }
+
+    /// Whether a method of the class with qualified name `class` (a node of its `members`) is
+    /// one of the `dormant` ones, whose body never runs.
+    pub fn dormant(&self, class: &str, member: &Value) -> bool {
+        let key = (class.to_string(), text(member, "name").to_string(), symbol_type(member).to_string());
+        self.dormant.contains(&key)
     }
 }
 
@@ -97,7 +110,6 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.ref.ReferenceQueue",
     "java.lang.ref.SoftReference",
     "java.lang.ref.WeakReference",
-    "java.util.Arrays",
     "sun.util.logging.PlatformLogger",
 ];
 
@@ -199,6 +211,47 @@ pub const FALSE_FLAGS: &[(&str, &str)] = &[
     ("sun.nio.ch.FileChannelImpl", "jfrTracing"),
 ];
 
+/// Static fields that only the class data sharing archive sets, through the native
+/// `CDS.initializeFromArchive` at the start of their class's static initializer, which then tests
+/// each against null once to build the value itself when the archive had none. The runtime's
+/// `initializeFromArchive` sets nothing, so that test always finds null, and the branch that
+/// would use the archived value never runs.
+pub const ARCHIVED_FIELDS: &[(&str, &str)] = &[
+    ("java.lang.module.Configuration", "EMPTY_CONFIGURATION"),
+    ("java.util.ImmutableCollections", "archivedObjects"),
+    ("java.util.jar.Attributes.Name", "KNOWN_NAMES"),
+];
+
+/// Whether `condition` tests one of the `ARCHIVED_FIELDS` against null with `==` (`equal`) or
+/// `!=`.
+fn archived_null_test(condition: &Value, equal: bool) -> bool {
+    let kind = if equal { "EQUAL_TO" } else { "NOT_EQUAL_TO" };
+    let archived = |v: &Value| {
+        let symbol = &v["symbol"];
+        text(symbol, "kind") == "FIELD"
+            && ARCHIVED_FIELDS.contains(&(text(symbol, "owner"), text(symbol, "name")))
+    };
+    let null = |v: &Value| text(v, "kind") == "NULL_LITERAL";
+    let (left, right) = (&condition["leftOperand"], &condition["rightOperand"]);
+    text(condition, "kind") == kind && (archived(left) && null(right) || null(left) && archived(right))
+}
+
+/// The only branch of an `if` statement or a `?:` that can run, when its condition is never true
+/// (`never_true`: the `else` branch, `Null` for an `if` without one) or always true (a test that
+/// one of the `ARCHIVED_FIELDS` is null: the `then` branch).
+pub fn live_branch(node: &Value, sequential: bool) -> Option<&Value> {
+    if !matches!(text(node, "kind"), "IF" | "CONDITIONAL_EXPRESSION") {
+        return None;
+    }
+    let condition = &node["condition"];
+    let condition =
+        if text(condition, "kind") == "PARENTHESIZED" { &condition["expression"] } else { condition };
+    if never_true(condition, sequential) {
+        return Some(else_branch(node));
+    }
+    archived_null_test(condition, true).then(|| then_branch(node))
+}
+
 /// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
 /// branch can run: it reads one of the `FALSE_FLAGS`, or, when the program's streams are all
 /// `sequential` (see `sequential.rs`), it is a pipeline's `isParallel()` or a test whether one
@@ -218,14 +271,20 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
                 && FALSE_FLAGS.contains(&(text(symbol, "owner"), text(symbol, "name")))
         }
         "METHOD_INVOCATION" => sequential && sequential::is_parallel_test(condition),
+        "NOT_EQUAL_TO" => archived_null_test(condition, false),
         "GREATER_THAN" => sequential && sequential::has_children_test(condition),
         _ => false,
     }
 }
 
 /// The branch of an `if` statement or a `?:` that can run when its condition is never true.
-pub fn else_branch(node: &Value) -> &Value {
+fn else_branch(node: &Value) -> &Value {
     &node[if text(node, "kind") == "IF" { "elseStatement" } else { "falseExpression" }]
+}
+
+/// The branch of an `if` statement or a `?:` that runs when its condition is true.
+fn then_branch(node: &Value) -> &Value {
+    &node[if text(node, "kind") == "IF" { "thenStatement" } else { "trueExpression" }]
 }
 
 /// The feature that the class with qualified name `class` belongs to, if it is not translated.
@@ -246,6 +305,17 @@ pub fn outside(class: &str) -> bool {
 /// classes, or a standard exception class (see `lower::exceptions`).
 pub fn provided(class: &str) -> bool {
     RUNTIME_CLASSES.contains(&class) || crate::lower::is_standard(class)
+}
+
+/// Whether the node is a call of `java.util.Arrays` that the runtime does rather than the JDK's
+/// source, such as `Arrays.sort` of an `int[]`.
+pub fn runtime_arrays_call(node: &Value) -> bool {
+    let symbol = &node["symbol"];
+    text(node, "kind") == "METHOD_INVOCATION" && text(symbol, "owner") == "java.util.Arrays" && {
+        let args: Vec<&str> =
+            node["arguments"].as_array().into_iter().flatten().map(|a| text(a, "javaType")).collect();
+        crate::lower::runtime_arrays_call(text(symbol, "name"), &args)
+    }
 }
 
 /// The methods that a for-each over an `Iterable` calls.
@@ -414,7 +484,8 @@ impl<'t> Walk<'t> {
     }
 
     /// The initializers that run for the class's static initialization (`statics`) or for every
-    /// object it creates.
+    /// object it creates. A class's `serialPersistentFields` is kept only if code reads it
+    /// (`for_serialization`).
     fn initializers(&mut self, decl: &'t Value, class: &str, statics: bool) {
         for member in members(decl) {
             let is_static = match text(member, "kind") {
@@ -427,7 +498,7 @@ impl<'t> Walk<'t> {
             }
             if text(member, "kind") == "BLOCK" {
                 self.scan(member);
-            } else if has_effects(&member["initializer"]) {
+            } else if has_effects(&member["initializer"]) && !for_serialization(member) {
                 self.work.push(Item::Field((class.to_string(), text(member, "name").to_string())));
             }
         }
@@ -451,24 +522,30 @@ impl<'t> Walk<'t> {
             }
             return;
         };
-        if !self.reach.methods.insert(key.clone()) {
-            return;
-        }
         let class = key.0.clone();
         let is_ctor = key.1 == "<init>";
         let is_static = node["symbol"]["static"].as_bool() == Some(true);
+        if !self.reach.methods.insert(key.clone()) {
+            // A dormant method runs once its class is live.
+            if !self.reach.live.contains(&class) || !self.reach.dormant.remove(&key) {
+                return;
+            }
+        } else if !is_static && !is_ctor && !self.reach.live.contains(&class) && self.has_objects(&class) {
+            // Until an object of its class is created, only its signature is used.
+            self.reach.dormant.insert(key.clone());
+            self.waiting.entry(class.clone()).or_default().push(key);
+            self.work.push(Item::Class(class));
+            for part in ["typeParameters", "returnType", "parameters", "thrown"] {
+                self.scan(&node[part]);
+            }
+            return;
+        }
         self.work.push(Item::Class(class.clone()));
         if is_static || is_ctor {
             self.work.push(Item::Init(class.clone()));
         }
-        if is_ctor && self.reach.instantiated.insert(class.clone()) {
-            self.live(class.clone());
-            let decl = self.classes[&class].0;
-            self.initializers(decl, &class, false);
-            // Library code calls these on any object, as string conversion calls `toString`.
-            for (name, signature) in OBJECT_METHODS {
-                self.work.push(Item::Method((class.clone(), name.to_string(), signature.to_string())));
-            }
+        if is_ctor {
+            self.instantiate(class);
         }
         if !is_static && !is_ctor {
             for overrider in self.overriders(&key) {
@@ -476,6 +553,28 @@ impl<'t> Walk<'t> {
             }
         }
         self.scan(node);
+    }
+
+    /// Whether `class` is a class whose objects come from its constructors, which reachability
+    /// sees: not an interface, which the runtime's classes and lambdas implement too.
+    fn has_objects(&self, class: &str) -> bool {
+        self.classes
+            .get(class)
+            .is_some_and(|(decl, _)| matches!(text(decl, "kind"), "CLASS" | "ENUM" | "RECORD"))
+    }
+
+    /// A class whose objects are created: it is live, and its instance initializers run.
+    fn instantiate(&mut self, class: String) {
+        if !self.reach.instantiated.insert(class.clone()) {
+            return;
+        }
+        self.live(class.clone());
+        let decl = self.classes[&class].0;
+        self.initializers(decl, &class, false);
+        // Library code calls these on any object, as string conversion calls `toString`.
+        for (name, signature) in OBJECT_METHODS {
+            self.work.push(Item::Method((class.clone(), name.to_string(), signature.to_string())));
+        }
     }
 
     /// The methods that a call of the instance method `method` may run instead of it: those that
@@ -525,21 +624,21 @@ impl<'t> Walk<'t> {
     /// by dispatch once the class is instantiated. (The body of an enum constant is not such a
     /// class, see `local_classes`, and is scanned with its constant.) Annotations are skipped:
     /// without reflection they do nothing at run time. So is the branch of an `if` or a `?:`
-    /// whose condition is never true (`never_true`).
+    /// that never runs (`live_branch`).
     fn scan(&mut self, value: &'t Value) {
         match value {
             Value::Object(_) if matches!(text(value, "kind"), "ANNOTATION" | "TYPE_ANNOTATION") => {}
             Value::Object(_)
                 if CLASS_KINDS.contains(&text(value, "kind"))
                     && self.classes.contains_key(&class_name(value)) => {}
-            // The branch that a condition that is never true guards is not reached, and neither
-            // is the condition, which the lowering drops: a flag's class need not exist.
-            Value::Object(_)
-                if matches!(text(value, "kind"), "IF" | "CONDITIONAL_EXPRESSION")
-                    && never_true(&value["condition"], self.sequential) =>
-            {
-                self.scan(else_branch(value));
+            // The branch that never runs is not reached, and neither is the condition, which the
+            // lowering drops: a flag's class need not exist.
+            Value::Object(_) if let Some(branch) = live_branch(value, self.sequential) => {
+                self.scan(branch);
             }
+            // A call of `java.util.Arrays` that the runtime does (`lower::runtime_arrays_call`)
+            // reaches only what its arguments do.
+            Value::Object(_) if runtime_arrays_call(value) => self.scan(&value["arguments"]),
             Value::Object(fields) => {
                 // A for-each over an `Iterable` calls its iterator's methods, which javac's tree
                 // does not show.
@@ -674,6 +773,24 @@ pub(super) fn has_flag(node: &Value, flag: &str) -> bool {
     node["modifiers"]["flags"].as_array().is_some_and(|f| f.iter().any(|x| x == flag))
 }
 
+/// Whether a field is the `serialPersistentFields` of a serializable class: serialization reads it
+/// by reflection, which a translation has not, and its initializer only creates the
+/// `ObjectStreamField`s that describe the fields, from arguments without effects. Some thirty
+/// classes of java.base have one (`String`, `Random`, `ConcurrentHashMap`, ...), whose
+/// `Long.TYPE` and `String.class` arguments are `Class` values.
+fn for_serialization(field: &Value) -> bool {
+    let describes = |element: &Value| {
+        text(element, "kind") == "NEW_CLASS"
+            && text(&element["symbol"], "owner") == "java.io.ObjectStreamField"
+            && !has_effects(&element["arguments"])
+    };
+    let init = &field["initializer"];
+    text(field, "name") == "serialPersistentFields"
+        && has_flag(field, "STATIC")
+        && text(init, "kind") == "NEW_ARRAY"
+        && init["initializers"].as_array().is_some_and(|elements| elements.iter().all(describes))
+}
+
 /// Whether evaluating an initializer may do more than compute a value: call a method, create an
 /// object, assign, or throw on a division.
 fn has_effects(value: &Value) -> bool {
@@ -745,6 +862,85 @@ mod tests {
         assert!(reach.methods.contains(&method("Other", "run")), "{reach:?}");
         assert!(!reach.methods.contains(&method("Tracer", "trace")), "{reach:?}");
         assert!(!reach.classes.contains("Tracer"), "{reach:?}");
+    }
+
+    #[test]
+    fn only_the_branch_that_finds_no_archived_value_is_reached() {
+        let archived = json!({"kind": "IDENTIFIER",
+            "symbol": {"kind": "FIELD", "owner": "java.util.ImmutableCollections", "name": "archivedObjects", "static": true}});
+        let test = |kind: &str| {
+            json!({"kind": "PARENTHESIZED", "expression": {"kind": kind,
+                "leftOperand": archived, "rightOperand": {"kind": "NULL_LITERAL"}}})
+        };
+        let is_null = json!({"kind": "IF", "condition": test("EQUAL_TO"),
+            "thenStatement": call("Build", "run"), "elseStatement": call("Restore", "run")});
+        let not_null = json!({"kind": "IF", "condition": test("NOT_EQUAL_TO"),
+            "thenStatement": call("Restore", "again"), "elseStatement": call("Build", "again")});
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![is_null, not_null])]),
+            class("Build", &[("run", vec![]), ("again", vec![])]),
+            class("Restore", &[("run", vec![]), ("again", vec![])]),
+        ]});
+        let reach = reach(&[&unit], "Main").unwrap();
+        let method = |class: &str, name: &str| (class.to_string(), name.to_string(), "()void".to_string());
+        assert!(reach.methods.contains(&method("Build", "run")), "{reach:?}");
+        assert!(reach.methods.contains(&method("Build", "again")), "{reach:?}");
+        assert!(!reach.classes.contains("Restore"), "{reach:?}");
+    }
+
+    #[test]
+    fn a_call_of_arrays_that_the_runtime_does_is_not_followed_into_the_jdk() {
+        let sort = |arg: &str| {
+            json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "METHOD_INVOCATION",
+                "symbol": {"kind": "METHOD", "owner": "java.util.Arrays", "name": "sort", "type": "()void", "static": true},
+                "arguments": [{"kind": "IDENTIFIER", "javaType": arg}]}})
+        };
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![sort("int[]")])]),
+            class("java.util.Arrays", &[("sort", vec![call("DualPivot", "run")])]),
+            class("DualPivot", &[("run", vec![])]),
+        ]});
+        let runtime = reach(&[&unit], "Main").unwrap();
+        assert!(!runtime.classes.contains("DualPivot"), "{runtime:?}");
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![sort("Shape[]")])]),
+            class("java.util.Arrays", &[("sort", vec![call("DualPivot", "run")])]),
+            class("DualPivot", &[("run", vec![])]),
+        ]});
+        let translated = reach(&[&unit], "Main").unwrap();
+        assert!(translated.classes.contains("DualPivot"), "{translated:?}");
+    }
+
+    #[test]
+    fn serial_persistent_fields_are_not_initialized_unless_read() {
+        let describe = json!({"kind": "NEW_CLASS",
+            "symbol": {"kind": "CONSTRUCTOR", "owner": "java.io.ObjectStreamField", "name": "<init>",
+                       "type": "(java.lang.String,java.lang.Class)void"},
+            "arguments": [{"kind": "STRING_LITERAL", "value": "seed"}]});
+        let field = |name: &str, init: Value| {
+            json!({"kind": "VARIABLE", "name": name, "symbol": {"type": "java.io.ObjectStreamField[]", "static": true},
+                   "initializer": {"kind": "NEW_ARRAY", "initializers": [init]}})
+        };
+        let holder = |fields: Value| {
+            let mut holder = class("Holder", &[("run", vec![])]);
+            holder["members"].as_array_mut().unwrap().push(fields);
+            let unit = json!({"typeDecls": [
+                class("Main", &[("main", vec![call("Holder", "run")])]),
+                holder,
+                class("java.io.ObjectStreamField", &[]),
+                class("Describe", &[("run", vec![])]),
+            ]});
+            reach(&[&unit], "Main").unwrap()
+        };
+        let key = ("Holder".to_string(), "serialPersistentFields".to_string());
+        let reach = holder(field("serialPersistentFields", describe.clone()));
+        assert!(!reach.fields.contains(&key), "{reach:?}");
+        // Another name, or an element that does something, is initialized with its class.
+        let reach = holder(field("persistent", describe));
+        assert!(reach.fields.contains(&("Holder".to_string(), "persistent".to_string())), "{reach:?}");
+        let reach = holder(field("serialPersistentFields", call("Describe", "run")["expression"].clone()));
+        assert!(reach.fields.contains(&key), "{reach:?}");
+        assert!(reach.methods.contains(&("Describe".into(), "run".into(), "()void".into())), "{reach:?}");
     }
 
     #[test]

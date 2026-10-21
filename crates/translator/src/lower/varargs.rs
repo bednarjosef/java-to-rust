@@ -18,9 +18,22 @@ impl<'t> Lowering<'t> {
         let params: Vec<Node<'t>> = self.methods[index].node.list("parameters").collect();
         let Some(last) = params.last().copied() else { return Ok(args) };
         let fixed = params.len() - 1;
-        let ty = self.ty(last, last.symbol().map_or("", |s| s.ty))?;
-        // `f(xs)` with `xs` of the parameter's own array type passes it on, not as one element.
-        let direct = args.len() == params.len() && (args[fixed].ty == Type::Null || args[fixed].ty == ty);
+        // The parameter's type is read where it is declared: `T...` is an array of the method's
+        // own type variable.
+        let declared = last.symbol().map_or("", |s| s.ty);
+        let owner = self.methods[index].owner;
+        let ty = self.declared_type(last, declared, owner, Some(index))?;
+        // `f(xs)` with `xs` of the parameter's own array type passes it on, not as one element,
+        // and so does an array of references passed for `T...`, whose `T` javac infers from it.
+        let of_variable = declared.strip_suffix("[]").is_some_and(|element| {
+            let declares = |node: Node<'t>| node.list("typeParameters").any(|p| p.str("name") == element);
+            declares(self.methods[index].node) || declares(self.types[owner].node)
+        });
+        let passed = args.get(fixed).map(|a| a.ty);
+        let direct = args.len() == params.len()
+            && (passed == Some(Type::Null)
+                || passed == Some(ty)
+                || of_variable && matches!(passed, Some(Type::Array(e)) if e.is_reference()));
         if direct {
             return Ok(args);
         }
