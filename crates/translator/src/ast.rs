@@ -689,6 +689,11 @@ pub enum Builtin {
     /// is of no class of the translated program, and the program ends with a
     /// `ClassNotFoundException` that nothing catches.
     UnknownClass,
+    /// `[]`: runs the static initialization of the class, as its first use would, for
+    /// `Class.forName` with a name that the code spells out (`lower::by_name`).
+    InitializeClass {
+        class: usize,
+    },
     /// The lock of a `synchronized` block, the statement before the block: evaluated, and a
     /// `NullPointerException` when it is null. Where the program can tell (`codegen::sync`), the
     /// block holds the lock's monitor.
@@ -1012,6 +1017,7 @@ pub fn has_effects(e: &Expr) -> bool {
                         | Builtin::Exit
                         | Builtin::NoObject { .. }
                         | Builtin::UnknownClass
+                        | Builtin::InitializeClass { .. }
                         | Builtin::Native(_),
                     _
                 )

@@ -195,7 +195,8 @@ java.lang.Throwable
         java.lang.StringIndexOutOfBoundsException), java.lang.NegativeArraySizeException,
       java.lang.NullPointerException, java.lang.UnsupportedOperationException,
       java.util.NoSuchElementException, java.util.ConcurrentModificationException
-    java.lang.InterruptedException, java.lang.CloneNotSupportedException
+    java.lang.InterruptedException, java.lang.CloneNotSupportedException,
+    java.lang.ReflectiveOperationException (java.lang.ClassNotFoundException)
   java.lang.Error
     java.lang.AssertionError, java.lang.LinkageError
       java.lang.ExceptionInInitializerError, java.lang.NoClassDefFoundError

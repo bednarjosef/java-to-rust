@@ -13,7 +13,7 @@ mod by_name;
 mod sequential;
 mod stubs;
 
-pub use by_name::created_by_name;
+pub use by_name::{class_for_name, created_by_name};
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
 /// constructor) and javac's signature, such as `(int)void`.
@@ -781,6 +781,11 @@ impl<'t> Walk<'t> {
                 }
                 if text(value, "kind") == "VARIABLE" {
                     self.stub_type(text(&value["symbol"], "type"));
+                }
+                // A class that `Class.forName` names exists, and is initialized if the call says
+                // so (`lower::by_name`).
+                if let Some((class, initialize)) = class_for_name(value) {
+                    self.work.push(if initialize { Item::Init(class) } else { Item::Class(class) });
                 }
                 if text(value, "kind") == "STRING_LITERAL"
                     && let Some(literal) = value["value"].as_str()

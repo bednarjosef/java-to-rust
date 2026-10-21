@@ -202,6 +202,24 @@ class CloneNotSupportedException extends Exception {
     }
 }
 
+class ReflectiveOperationException extends Exception {
+    public ReflectiveOperationException() {
+    }
+
+    public ReflectiveOperationException(String s) {
+        super(s);
+    }
+}
+
+class ClassNotFoundException extends ReflectiveOperationException {
+    public ClassNotFoundException() {
+    }
+
+    public ClassNotFoundException(String s) {
+        super(s);
+    }
+}
+
 class ArithmeticException extends RuntimeException {
     public ArithmeticException() {
     }

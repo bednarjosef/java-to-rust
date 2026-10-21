@@ -269,6 +269,7 @@ pub(super) fn runtime_failures(
             | Builtin::Exit
             | Builtin::NoObject { .. }
             | Builtin::UnknownClass
+            | Builtin::InitializeClass { .. }
             | Builtin::ClassName { .. }
             | Builtin::ClassLiteralName { .. }
             | Builtin::SameClass { .. }
