@@ -139,6 +139,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         attempt_count: 0,
         try_assigned: HashSet::new(),
         dereferenced: HashSet::new(),
+        checked_cast: None,
         written: HashSet::new(),
         rejected: None,
         chains: chains::Chains::default(),
@@ -147,6 +148,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
     if modules.is_some() {
         let text = g.program(&live);
         g.check_dereferences();
+        g.check_casts();
         return (text, g.needs.take(), g.rejected);
     }
     for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
@@ -169,6 +171,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         }
     }
     g.check_dereferences();
+    g.check_casts();
     let mut header = format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name);
     let uses = modules::use_lines(&g.out);
     if !uses.is_empty() {
@@ -313,8 +316,11 @@ struct Gen<'a> {
     /// The current method's locals declared without a value that a `try` block assigns (see
     /// `exceptions::try_assigned`).
     try_assigned: HashSet<String>,
-    /// The objects of `Facts::null_checked` whose checked dereference has been written.
+    /// The objects of `Facts::null_checked` whose checked dereference has been written, and the
+    /// casts of `Facts::raising` whose checked form has.
     dereferenced: HashSet<ExprId>,
+    /// The cast of `Facts::raising` that `class_cast` is writing, in the checked form.
+    checked_cast: Option<ExprId>,
     /// The methods whose bodies have been written. A body that is not, as no call needs it or
     /// it never runs, dereferences nothing.
     written: HashSet<usize>,

@@ -352,6 +352,16 @@ fn instance_fact(v: &str, name: &str) -> String {
     format!("{v} instanceof {name}")
 }
 
+/// The name of the class or interface that an `instanceof` or a cast tests: one of the program,
+/// a runtime class (a string or a box) or an enum.
+fn instance_name(ty: Type) -> Option<&'static str> {
+    match ty {
+        Type::Class(name, _) | Type::Enum(name) => Some(name),
+        Type::String | Type::Boxed(_) => runtime_name(ty),
+        _ => None,
+    }
+}
+
 /// What `cond` proves when it is `when`, by variable: that it is not null (its null tests), and
 /// for a top-level `instanceof` when true, that it is an instance of the class too; through a
 /// `!`, what its operand proves.
@@ -370,7 +380,7 @@ fn proved(cond: &Expr, when: bool) -> Vec<(&str, String)> {
                 && !parts[k + 1..].iter().any(|later| assigns(later, v))
             {
                 out.push((v, v.clone()));
-                if let Type::Class(name, _) = ty {
+                if let Some(name) = instance_name(*ty) {
                     out.push((v, instance_fact(v, name)));
                 }
             }
@@ -440,6 +450,16 @@ fn stmt_points(
     safe: &[String],
     out: &mut Vec<Point>,
 ) {
+    // A switch on a string that is null throws, as its selector is dereferenced.
+    if let Stmt::Switch { selector, .. } = s
+        && selector.ty == Type::String
+        && !is_tested(selector, safe)
+        && maybe_null(facts, m, selector)
+    {
+        let raise =
+            Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: selector.id };
+        out.push(Point { raise, pos: selector.pos, what: "this switch", frames: frames.clone() });
+    }
     match s {
         Stmt::If { cond, then, otherwise } => {
             expr_points(class, facts, m, cond, frames, safe, out);
@@ -771,6 +791,27 @@ fn constant_pattern(builtin: &Builtin, args: &[Expr]) -> bool {
     }
 }
 
+/// An argument of the runtime's `format` of each argument's kind, as the code generator passes
+/// it (`format_arg`), with any value.
+fn format_samples(args: &[Expr]) -> Vec<java_runtime::format::Arg<'static>> {
+    use java_runtime::format::Arg;
+    args.iter()
+        .map(|a| match a.ty.unboxed() {
+            Type::Null => Arg::Null,
+            Type::Boolean => Arg::Bool(false),
+            Type::Char => Arg::Char(0),
+            Type::Byte => Arg::Byte(0),
+            Type::Short => Arg::Short(0),
+            Type::Int => Arg::Int(0),
+            Type::Long => Arg::Long(0),
+            Type::Float => Arg::Float(0.0),
+            Type::Double => Arg::Double(0.0),
+            Type::String => Arg::Str(""),
+            _ => Arg::Text(""),
+        })
+        .collect()
+}
+
 fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
     match builtin {
         Builtin::String(op) => match op {
@@ -864,6 +905,15 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         // or, for null, `IllegalArgumentException`. Not checked, so a catch of it is rejected.
         Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported) => Some("?"),
         Builtin::Charset(_) => None,
+        // A literal format that fits its arguments' types never throws.
+        Builtin::Format => match &args[0].kind {
+            ExprKind::Str(format)
+                if java_runtime::format::never_fails(format, &format_samples(&args[1..])) =>
+            {
+                None
+            }
+            _ => Some("?"),
+        },
         _ => Some("?"),
     }
 }
@@ -907,13 +957,16 @@ fn runtime_failures(
         }
         ExprKind::Index(array, _) => {
             if null(array) {
-                out.push((NPE, "this array access", false, x.id));
+                out.push((NPE, "this array access", true, array.id));
             }
             if !facts.in_bounds.contains(&x.id) {
                 out.push((INDEX, "this array access", true, x.id));
             }
         }
-        ExprKind::Length(array) if null(array) => out.push((NPE, "this length", false, x.id)),
+        ExprKind::Length(array) if null(array) => out.push((NPE, "this length", true, array.id)),
+        ExprKind::Switch { selector, .. } if selector.ty == Type::String && null(selector) => {
+            out.push((NPE, "this switch", true, selector.id))
+        }
         ExprKind::Field { object, .. } if null(object) => {
             out.push((NPE, "this field access", object_checked(object), object.id))
         }
@@ -974,14 +1027,15 @@ fn runtime_failures(
             // A null is a value to them, and an object's own method is a call of its own.
             | Builtin::ObjectsEquals
             | Builtin::ObjectsHashCode => {}
+            // The receiver, a string, is dereferenced with the checked form (`Facts::null_checked`).
             Builtin::StringLength | Builtin::StringEquals => {
                 if args.first().is_some_and(null) {
-                    out.push((NPE, "this call", false, x.id));
+                    out.push((NPE, "this call", true, args[0].id));
                 }
             }
             Builtin::StringCharAt => {
                 if args.first().is_some_and(null) {
-                    out.push((NPE, "this call", false, x.id));
+                    out.push((NPE, "this call", true, args[0].id));
                 }
                 if !facts.index_in_bounds.contains(&x.id) {
                     out.push(("java.lang.StringIndexOutOfBoundsException", "this charAt", true, x.id));
@@ -1000,10 +1054,10 @@ fn runtime_failures(
                 | BoxedOp::Logical(_),
                 _,
             ) => {}
-            Builtin::NullCheck => out.push((NPE, "this synchronized", false, x.id)),
+            Builtin::NullCheck => out.push((NPE, "this synchronized", true, args[0].id)),
             Builtin::NullChecked | Builtin::Unmatched => {
                 if null(&args[0]) {
-                    out.push((NPE, "this null check", false, x.id));
+                    out.push((NPE, "this null check", true, args[0].id));
                 }
             }
             // A zero divisor throws, as in a division.
@@ -1033,13 +1087,16 @@ fn runtime_failures(
                         | Builtin::Boxed(BoxedOp::Equals, _)
                         | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
                 );
-                let checked = if takes_null || matches!(builtin, Builtin::String(StringOp::Join)) {
+                let checked = if takes_null || matches!(builtin, Builtin::String(StringOp::Join) | Builtin::Format) {
                     &args[..args.len().min(1)]
                 } else {
                     &args[..]
                 };
+                // Only the first may be the receiver, which is dereferenced with the checked
+                // form; the code generator rejects a call that does not (`check_dereferences`).
                 if !takes_null && checked.iter().any(null) {
-                    out.push((NPE, "this call", false, x.id));
+                    let receiver = !checked[1..].iter().any(null);
+                    out.push((NPE, "this call", receiver, if receiver { args[0].id } else { x.id }));
                 }
                 if let Some(failure) = library_failure(builtin, args)
                     && !constant_pattern(builtin, args)
@@ -1062,7 +1119,7 @@ fn runtime_failures(
     | ExprKind::IncDec { target: Place::Index(array, _), .. } = &x.kind
     {
         if null(array) {
-            out.push((NPE, "this array access", false, x.id));
+            out.push((NPE, "this array access", true, array.id));
         }
         if !facts.in_bounds.contains(&x.id) {
             out.push((INDEX, "this array access", true, x.id));
@@ -1092,7 +1149,17 @@ fn runtime_failures(
         && !class.hierarchy.is_subtype(s, t)
         && !instance(t, value)
     {
-        out.push(("java.lang.ClassCastException", "this cast", false, x.id));
+        out.push(("java.lang.ClassCastException", "this cast", true, x.id));
+    }
+    // So may a cast of an object to a string, a box or an enum, unless an `instanceof` tested it.
+    if let ExprKind::Cast(to, value) = &x.kind
+        && x.pos != value.pos
+        && matches!(value.ty, Type::Class(..))
+        && matches!(to, Type::String | Type::Boxed(_) | Type::Enum(_))
+        && let Some(name) = instance_name(*to)
+        && !matches!(&value.kind, ExprKind::Var(v) if safe.contains(&instance_fact(v, name)))
+    {
+        out.push(("java.lang.ClassCastException", "this cast", true, x.id));
     }
     // A box that may be null is unboxed by arithmetic and comparisons.
     if let ExprKind::Binary(_, l, r) = &x.kind {
