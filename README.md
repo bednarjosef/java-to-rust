@@ -811,6 +811,11 @@ as its command-line arguments, on `java` and as the translated binary alike.
 
 ## Plans
 
+- [docs/architecture.md](docs/architecture.md): how the translator is built (the pipeline, the
+  size of each stage) and the four changes that come before the plans below: a representation
+  plan between the analyses and the generator, a generator that produces items with module paths,
+  snapshot tests, and failures turned into rejections per method.
+
 - [docs/lists-and-streams.md](docs/lists-and-streams.md): `ArrayList` as a `Vec` and sequential
   streams as Rust iterators, after the object model, lambdas and for-each over `Iterable` land.
 - [docs/thorough-mode.md](docs/thorough-mode.md): a slower whole-program mode with points-to

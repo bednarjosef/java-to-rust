@@ -64,8 +64,10 @@ clever. Lost precision costs looks, never behaviour.
      no name clash needs it.
    - One file per package or top-level class instead of one `main.rs`.
    - The translated JDK goes into its own crate next to the program. The program's output becomes
-     small and readable on its own, and the JDK crate is built once and reused, which also cuts
-     compile time.
+     small and readable on its own, and the JDK crate is rebuilt only when what it depends on in
+     the program changes, which also cuts compile time. (It depends on the program because the
+     translation sees the whole program: the program's classes take part in the JDK's dispatch;
+     see [large-projects.md](large-projects.md).)
 2. **References that are never null** become plain values, with no `Option`. Most objects are
    created with `new` and never set to null; following that across fields, parameters, return
    values and collection elements removes most of the noise.

@@ -37,8 +37,13 @@ than ten times longer.
 Today everything goes into one `main.rs`. For a large project rustc becomes the bottleneck: one
 crate of millions of lines takes an hour or more and a lot of memory to build.
 
-- **The translated JDK as its own crate**, built once and reused (also step 1 of
-  [natural-rust.md](natural-rust.md)).
+- **The translated JDK as its own crate** (also step 1 of [natural-rust.md](natural-rust.md)).
+  It cannot simply be built once and reused: the translation sees the whole program, so the JDK's
+  translated code depends on the program's classes (a program class that implements `Comparable`
+  or extends `AbstractList` is one of the cases in the JDK's dispatch, and the analyses' facts
+  about JDK methods depend on what the program passes them). It is reused between translations
+  of the same program, and between programs only when what it depends on is the same, or where
+  the dispatch at the boundary goes through a table of functions that the program fills in.
 - **One crate per library and per group of packages**, so rustc builds them in parallel and a
   change rebuilds only the crates it touches. The cut follows the dependency graph between
   packages; cycles between packages are common in Java and must stay inside one crate.
