@@ -10,3 +10,10 @@ license = "GPL-3.0-or-later"
 # build some seconds and an incremental build of the translator nothing.
 [profile.dev.package."*"]
 opt-level = 3
+
+# The translator that targets/run.sh runs: whole-program translations with the JDK's sources take
+# up to a minute each in a debug build and seconds optimized. It keeps the debug build's checks
+# (debug assertions, overflow checks), so it translates as the tests' translator does.
+[profile.checks]
+inherits = "dev"
+opt-level = 2
