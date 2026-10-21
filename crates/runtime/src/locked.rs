@@ -13,10 +13,14 @@
 //! part of a deadlock (see docs/multi-threading.md, 1.3). In a build with debug assertions (the
 //! corpus test's) a wait that lasts longer than `WATCHDOG` is that rule broken, and panics with a
 //! message that says so instead of hanging.
+//!
+//! The same lock is the object's monitor (`monitor.rs`): `synchronized` holds it for a whole
+//! region, which may be long and may wait for other monitors, as Java's does. A thread that waits
+//! for a lock held as a monitor is not watched.
 
 use std::cell::{Cell, RefCell};
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,28 +40,41 @@ pub(crate) fn thread_token() -> usize {
 }
 
 /// Where threads that wait for a lock sleep: a few condition variables shared by all locks, picked
-/// by the lock's address, so that a lock is two words.
+/// by the lock's address, so that a lock stays small. The mutex guards the wait sets of the
+/// bucket's monitors: one entry per thread in `Object.wait`.
 struct Bucket {
-    mutex: Mutex<()>,
+    mutex: Mutex<Vec<Waiter>>,
     condvar: Condvar,
     waiters: AtomicUsize,
 }
 
+/// A thread in `Object.wait` on the monitor at `lock`, and whether a `notify` has picked it. Each
+/// waiter has its own entry, so a notification is for one waiter and no later one can take it.
+struct Waiter {
+    lock: usize,
+    ticket: u64,
+    notified: bool,
+}
+
+static TICKETS: AtomicU64 = AtomicU64::new(0);
+
 const BUCKETS: usize = 64;
 
-static PARKING: [Bucket; BUCKETS] =
-    [const { Bucket { mutex: Mutex::new(()), condvar: Condvar::new(), waiters: AtomicUsize::new(0) } };
-        BUCKETS];
+static PARKING: [Bucket; BUCKETS] = [const {
+    Bucket { mutex: Mutex::new(Vec::new()), condvar: Condvar::new(), waiters: AtomicUsize::new(0) }
+}; BUCKETS];
 
 fn bucket(address: usize) -> &'static Bucket {
     &PARKING[(address >> 4) % BUCKETS]
 }
 
 /// A reentrant lock: the token of the thread that holds it (0 when free), and how many times that
-/// thread has taken it.
-pub(crate) struct RawLock {
+/// thread has taken it, of which how many as the object's monitor. (The monitor's wait set is in
+/// the lock's bucket.)
+pub struct RawLock {
     owner: AtomicUsize,
     depth: Cell<usize>,
+    entered: AtomicUsize,
 }
 
 // `depth` is only read and written by the thread that holds the lock.
@@ -65,7 +82,7 @@ unsafe impl Sync for RawLock {}
 
 impl RawLock {
     pub(crate) const fn new() -> RawLock {
-        RawLock { owner: AtomicUsize::new(0), depth: Cell::new(0) }
+        RawLock { owner: AtomicUsize::new(0), depth: Cell::new(0), entered: AtomicUsize::new(0) }
     }
 
     #[inline]
@@ -84,7 +101,7 @@ impl RawLock {
 
     #[cold]
     fn wait(&self, me: usize) {
-        let started = Instant::now();
+        let mut started = Instant::now();
         let bucket = bucket(self as *const RawLock as usize);
         let mut spins = 0u32;
         loop {
@@ -113,6 +130,10 @@ impl RawLock {
                 drop(guard);
             }
             bucket.waiters.fetch_sub(1, Ordering::SeqCst);
+            // A monitor may be held for long, as Java holds it.
+            if self.entered.load(Ordering::Relaxed) > 0 {
+                started = Instant::now();
+            }
             if cfg!(debug_assertions) && started.elapsed() > WATCHDOG {
                 panic!(
                     "translation bug: a thread waited {} seconds for the data lock of an object, which \
@@ -135,6 +156,95 @@ impl RawLock {
                 bucket.condvar.notify_all();
             }
         }
+    }
+}
+
+impl RawLock {
+    /// Enters the lock as the object's monitor: `synchronized`.
+    #[inline]
+    pub(crate) fn enter(&self) {
+        self.acquire();
+        self.entered.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Exits the monitor that `enter` entered.
+    #[inline]
+    pub(crate) fn exit(&self) {
+        self.entered.fetch_sub(1, Ordering::Relaxed);
+        self.release();
+    }
+
+    /// Whether the calling thread holds the monitor: `Thread.holdsLock`.
+    pub(crate) fn held_by_current(&self) -> bool {
+        self.owner.load(Ordering::Relaxed) == thread_token() && self.entered.load(Ordering::Relaxed) > 0
+    }
+
+    /// `Object.wait`: gives up the monitor, every entry of it, until another thread notifies this
+    /// one or the timeout passes, then takes it again as it was held. `false`, with nothing done,
+    /// when the calling thread does not hold the monitor.
+    pub(crate) fn wait_notified(&self, timeout: Option<Duration>) -> bool {
+        if !self.held_by_current() {
+            return false;
+        }
+        let address = self as *const RawLock as usize;
+        let bucket = bucket(address);
+        let lock = || bucket.mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let ticket = TICKETS.fetch_add(1, Ordering::Relaxed);
+        // In the wait set while the monitor is still held, so a `notify` after this sees the waiter.
+        lock().push(Waiter { lock: address, ticket, notified: false });
+        let (depth, entered) = (self.depth.get(), self.entered.load(Ordering::Relaxed));
+        self.entered.store(0, Ordering::Relaxed);
+        self.depth.set(1);
+        self.release();
+        let deadline = timeout.map(|t| Instant::now() + t);
+        let mut guard = lock();
+        loop {
+            let at = guard.iter().position(|w| w.ticket == ticket).expect("a waiter leaves its own entry");
+            let now = Instant::now();
+            if guard[at].notified || deadline.is_some_and(|d| now >= d) {
+                guard.swap_remove(at);
+                break;
+            }
+            let step =
+                deadline.map_or(Duration::from_millis(50), |d| (d - now).min(Duration::from_millis(50)));
+            guard = bucket.condvar.wait_timeout(guard, step).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        drop(guard);
+        self.acquire();
+        self.depth.set(depth);
+        self.entered.store(entered, Ordering::Relaxed);
+        true
+    }
+
+    /// `Object.notify`, or with `all` `notifyAll`: wakes one of the threads waiting in `wait`,
+    /// or all of them. `false` when the calling thread does not hold the monitor.
+    pub(crate) fn notify(&self, all: bool) -> bool {
+        if !self.held_by_current() {
+            return false;
+        }
+        let address = self as *const RawLock as usize;
+        let bucket = bucket(address);
+        let mut waiters = bucket.mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let waiting = waiters.iter_mut().filter(|w| w.lock == address && !w.notified);
+        let picked = if all {
+            waiting.fold(false, |_, w| {
+                w.notified = true;
+                true
+            })
+        } else {
+            // The one that has waited longest.
+            match waiting.min_by_key(|w| w.ticket) {
+                Some(w) => {
+                    w.notified = true;
+                    true
+                }
+                None => false,
+            }
+        };
+        if picked {
+            bucket.condvar.notify_all();
+        }
+        true
     }
 }
 
@@ -200,6 +310,11 @@ impl<T: ?Sized> Locked<T> {
     #[inline]
     pub fn with_borrow_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         f(&mut self.borrow_mut())
+    }
+
+    /// The lock, which is the object's monitor too.
+    pub(crate) fn raw(&self) -> &RawLock {
+        &self.lock
     }
 
     /// The data of an object that nothing else holds, as `RefCell::get_mut`: no lock is needed.

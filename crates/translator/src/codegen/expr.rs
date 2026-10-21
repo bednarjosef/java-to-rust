@@ -406,12 +406,12 @@ impl<'a> Gen<'a> {
             {
                 self.expr(value)
             }
-            ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
+            ExprKind::Cast(to @ Type::Class(..), value) => self.checked_class_cast(e.id, *to, value),
             // A cast to an enum of a value that may be null, which an enum value is not.
             ExprKind::Cast(to @ Type::Enum(_), value)
                 if matches!(value.ty, Type::Class(..)) && self.nullable(value) =>
             {
-                let option = self.class_cast(*to, value).text;
+                let option = self.checked_class_cast(e.id, *to, value).text;
                 Code::atom(format!("{}({option})", self.runtime("null_enum")))
             }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
@@ -419,7 +419,7 @@ impl<'a> Gen<'a> {
             ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_) | Type::Array(_)), value)
                 if matches!(value.ty, Type::Class(..)) =>
             {
-                self.class_cast(*to, value)
+                self.checked_class_cast(e.id, *to, value)
             }
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
@@ -488,8 +488,9 @@ impl<'a> Gen<'a> {
     /// Reads a variable after assigning it, for an assignment used as a value.
     pub(super) fn read(&self, target: &str, ty: Type) -> String {
         let name = self.local(target);
-        // An array assigned inside an expression is shared, and its handle is cloned.
-        if ty == Type::String || matches!(ty, Type::Array(_)) { format!("{name}.clone()") } else { name }
+        // The variable keeps its value: a string is copied, and an array's or an object's handle
+        // is cloned (`(k = first.key) == key || key.equals(k)` reads `k` again).
+        if self.clones(ty) { format!("{name}.clone()") } else { name }
     }
 
     pub(super) fn binary(&mut self, op: BinOp, l: Operand, r: Operand, result: Type, id: ExprId) -> Code {
@@ -634,6 +635,11 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
             Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
+            Builtin::UnknownClass => {
+                let name = self.value(&args[0], Type::String);
+                let message = "java.lang.ClassNotFoundException: {} is not a class of the translated program";
+                Code::atom(format!("{}(format!({message:?}, {}))", self.runtime("throw_uncaught"), name.text))
+            }
             Builtin::NullCheck => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),

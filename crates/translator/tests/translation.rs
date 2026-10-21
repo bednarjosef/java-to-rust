@@ -1501,6 +1501,36 @@ fn classes_with_one_name_in_two_packages() {
     );
 }
 
+#[test]
+fn objects_created_from_a_class_name_are_of_the_classes_that_code_names() {
+    let java = "package app;\n\
+        abstract class Shape { abstract String name(); }\n\
+        class Circle extends Shape { String name() { return \"circle\"; } }\n\
+        class Square extends Shape { String name() { return \"square\"; } }\n\
+        public class Main {\n\
+            static Shape make(String n) throws Exception {\n\
+                return (Shape) Class.forName(n).getDeclaredConstructor().newInstance();\n\
+            }\n\
+            public static void main(String[] a) throws Exception {\n\
+                System.out.println(make(a.length > 0 ? a[0] : \"app.Circle\").name());\n\
+            }\n\
+        }\n";
+    let dir = write_sources("by-name", &[("app/Main.java", java)]);
+    let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &[
+            "\"app.Circle\" => {",
+            "Rc::new(Circle::new());",
+            "java::throw_uncaught(format!(\"java.lang.ClassNotFoundException: {} is not a class of the translated program\"",
+        ],
+    );
+    // No code names `Square`, so no name can create one.
+    assert_lacks(&rust, &["Square", "square"]);
+}
+
 /// Writes Java files into a fresh directory under the test's temporary directory.
 fn write_sources(dir: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(dir);
@@ -3462,16 +3492,17 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
         ),
         "{err}"
     );
-    let err = reject(
+    // A string that may be null is dereferenced with the checked form where a catch sees it.
+    let rust = translate(
         "class A { static String s(int n) { return n > 0 ? \"x\" : null; }
             public static void main(String[] a) {
                 try { System.out.println(s(a.length).length()); }
                 catch (NullPointerException e) { System.out.println(\"null\"); }
             } }",
     );
-    assert!(
-        err.contains("catching the `NullPointerException` that this call may throw not supported yet"),
-        "{err}"
+    assert_contains(
+        &rust,
+        &["java::or_break!(java::try_non_null(s(a.len() as i32).as_deref()), 'attempt).len()"],
     );
     let err = reject(
         "class Bad extends RuntimeException {
@@ -3890,6 +3921,34 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
             "java::cast(held.as_int_array(), \"[I\")",
             "(Object::IntArray(a), Object::IntArray(b)) => Rc::ptr_eq(a, b),",
             "Object::IntArray(o) => java::identity_hash(o),",
+        ],
+    );
+}
+
+#[test]
+fn an_arraycopy_between_objects_matches_the_types_of_their_arrays() {
+    let rust = translate(
+        "public class Main {
+            static void copy(Object src, Object dest, int length) {
+                System.arraycopy(src, 0, dest, 0, length);
+            }
+            public static void main(String[] args) {
+                int[] a = {1, 2};
+                int[] b = new int[2];
+                copy(a, b, 2);
+                copy(new long[] {3L}, new long[1], 1);
+                System.out.println(b[1]);
+            }
+        }",
+    );
+    // The positions are computed before the arrays are looked at, under names no local has.
+    assert_contains(
+        &rust,
+        &[
+            "let (src_pos, dest_pos, length_2) = (0, 0, length); match (&src, &dest) {",
+            "(Object::IntArray(src), Object::IntArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
+            "(Object::LongArray(src), Object::LongArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
+            "_ => java::throw(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"),",
         ],
     );
 }

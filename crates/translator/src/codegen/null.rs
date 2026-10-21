@@ -121,10 +121,11 @@ impl<'a> Gen<'a> {
     }
 
     /// A possibly-null string as a `&str` that a method is called on: null throws
-    /// `NullPointerException`.
+    /// `NullPointerException` (in the checked form where a `catch` or a `finally` sees it, see
+    /// `dereference`).
     pub(super) fn deref(&mut self, e: &'a Expr) -> String {
         let option = self.option_ref(e);
-        format!("{}({option})", self.runtime("non_null"))
+        self.dereference(&[e.id], &option)
     }
 
     /// `x == null` and `x != null` for a string.
@@ -178,11 +179,11 @@ impl<'a> Gen<'a> {
         // Java evaluates the argument before the call throws on a null receiver.
         if self.nullable(&args[0]) && has_effects(&args[1]) {
             let receiver = self.option_ref(&args[0]);
-            let non_null = self.runtime("non_null");
+            let checked = self.dereference(&[args[0].id], "receiver_");
             let (other, test) = if self.nullable(&args[1]) {
-                (self.option_ref(&args[1]), format!("other_ == Some({non_null}(receiver_))"))
+                (self.option_ref(&args[1]), format!("other_ == Some({checked})"))
             } else {
-                (self.value(&args[1], Type::String).text, format!("{non_null}(receiver_) == other_"))
+                (self.value(&args[1], Type::String).text, format!("{checked} == other_"))
             };
             return Code::new(
                 format!("match ({receiver}, {other}) {{ (receiver_, other_) => {test} }}"),

@@ -213,28 +213,40 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// `(T) value`, a checked downcast, or a cast across, from the enum of `s`.
-    fn downcast(&mut self, s: usize, to: Type, value: &'a Expr) -> Code {
+    /// `(T) value`, a checked downcast, or a cast across, from the enum of `s`; `checked` when
+    /// a `catch` or a `finally` sees its failure (see `checked_class_cast`).
+    fn downcast(&mut self, s: usize, to: Type, value: &'a Expr, checked: Option<ExprId>) -> Code {
         let t = self.type_of(to).expect("a cast to a type of the program");
         self.need(Need::Narrow(s, t));
         let name = self.as_name(t);
-        let cast = self.runtime("cast");
+        let cast = self.runtime(if checked.is_some() { "try_cast" } else { "cast" });
         let target = rust_string(&self.binary_name(t));
-        if self.nullable(value) {
+        let text = if self.nullable(value) {
             let option = self.object_place(value);
             let enum_name = struct_name(&self.class.types[s].name);
-            return Code::atom(format!(
-                "{option}.as_ref().map(|o| {cast}({enum_name}::{name}(o), {target}))"
-            ));
-        }
-        let obj = self.object(value);
-        Code::atom(format!("{cast}({obj}.{name}(), {target})"))
+            format!("{option}.as_ref().map(|o| {cast}({enum_name}::{name}(o), {target}))")
+        } else {
+            let obj = self.object(value);
+            format!("{cast}({obj}.{name}(), {target})")
+        };
+        self.cast_result(text, checked, self.nullable(value))
     }
 
     /// A cast of a value whose class is known to a type that it is not of, which always fails
     /// (unless the value is null).
-    fn failing_cast(&mut self, to: Type, value: &'a Expr) -> Code {
+    fn failing_cast(&mut self, to: Type, value: &'a Expr, checked: Option<ExprId>) -> Code {
         let t = self.type_of(to).expect("a cast to a type of the program");
+        if checked.is_some() {
+            let ty = self.ty_name(to);
+            let fail =
+                format!("{}(None::<{ty}>, {})", self.runtime("try_cast"), rust_string(&self.binary_name(t)));
+            let text = if self.nullable(value) {
+                format!("{}.as_ref().map(|_| {fail})", self.object_place(value))
+            } else {
+                format!("{{ let _ = {}; {fail} }}", self.expr(value).text)
+            };
+            return self.cast_result(text, checked, self.nullable(value));
+        }
         let failed = format!("{}({})", self.runtime("cast_failed"), rust_string(&self.binary_name(t)));
         if self.nullable(value) {
             let option = self.object_place(value);
@@ -312,6 +324,38 @@ impl<'a> Gen<'a> {
     /// constant of an enum that implements the type, or a string or a box in an `Object`.
     pub(super) fn holds_value(&self, c: usize) -> bool {
         matches!(self.class.types[c].kind, TypeKind::Enum | TypeKind::Runtime)
+    }
+
+    /// `System.arraycopy(src, srcPos, dest, destPos, length)` where `src` and `dest` are
+    /// `Object`s: the copy between their arrays when both are arrays of one type, else Java's
+    /// `ArrayStoreException`. The positions are computed first; a null `src` or `dest` throws
+    /// `NullPointerException`.
+    pub(super) fn object_array_copy(&mut self, args: &'a [Expr]) -> Code {
+        let [src, src_pos, dest, dest_pos, length] = args else {
+            unreachable!("arraycopy has five arguments")
+        };
+        let ints: Vec<String> =
+            [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
+        let (s, d) = (self.object(src), self.object(dest));
+        let copy = self.runtime("arraycopy");
+        let throw = self.runtime("throw");
+        // Names that no local of the method has, as `src` and `dest` may read one.
+        let [p, q, n] = ["src_pos", "dest_pos", "length"].map(|base| self.temp(base));
+        let mut arms = Vec::new();
+        if let Some(t) = self.object_index() {
+            for c in self.enum_variants(t).into_iter().filter(|&c| self.class.array_of(c).is_some()) {
+                let variant = self.variant(t, c);
+                arms.push(format!("({variant}(src), {variant}(dest)) => {copy}(src, {p}, dest, {q}, {n}),"));
+            }
+        }
+        arms.push(format!("_ => {throw}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"),"));
+        Code::atom(format!(
+            "{{ let ({p}, {q}, {n}) = ({}, {}, {}); match (&{s}, &{d}) {{ {} }} }}",
+            ints[0],
+            ints[1],
+            ints[2],
+            arms.join(" ")
+        ))
     }
 
     /// The JVM's name of an array class, as `getClass().getName()` gives it: `[I`,
@@ -460,12 +504,13 @@ impl<'a> Gen<'a> {
     /// A conversion of an object to a supertype: the same object as a value of the supertype's
     /// enum. Where both types have the same representation it changes nothing.
     pub(super) fn class_cast(&mut self, to: Type, value: &'a Expr) -> Code {
+        let checked = self.checked_cast.take();
         if matches!(value.kind, ExprKind::Null) {
             return Code::atom("None");
         }
         match self.narrowing(value, to) {
-            Narrowing::Down(s) => return self.downcast(s, to, value),
-            Narrowing::Known(false) => return self.failing_cast(to, value),
+            Narrowing::Down(s) => return self.downcast(s, to, value, checked),
+            Narrowing::Known(false) => return self.failing_cast(to, value, checked),
             Narrowing::Up | Narrowing::Known(true) => {}
         }
         let Some(t) = self.enum_type(to) else {
