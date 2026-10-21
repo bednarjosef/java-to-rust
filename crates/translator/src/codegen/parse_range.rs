@@ -54,6 +54,11 @@ impl<'a> Gen<'a> {
     /// `Short.parseShort(s)` and `Byte.parseByte(s)`: radix 10 through the small radix runtime.
     pub(super) fn parse_small(&mut self, kind: Type, arg: &'a Expr, radix: &str, id: ExprId) -> Code {
         let text = self.parse_text(arg);
-        self.may_fail(id, "parse_small_radix", &format!("::<{}>", rust_type(kind)), &format!("{text}, {radix}"))
+        self.may_fail(
+            id,
+            "parse_small_radix",
+            &format!("::<{}>", rust_type(kind)),
+            &format!("{text}, {radix}"),
+        )
     }
 }

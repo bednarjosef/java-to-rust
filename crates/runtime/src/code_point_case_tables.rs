@@ -485,4 +485,3 @@ pub(crate) static ALPHABETIC: &[(u32, u32)] = &[
     (0x30000, 0x3134A),
     (0x31350, 0x33479),
 ];
-

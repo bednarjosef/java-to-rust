@@ -51,7 +51,9 @@ pub fn parse_unsigned(s: Option<&str>, radix: i32, bits: u32) -> u64 {
 
 /// The checked form of `parse_unsigned`.
 pub fn try_parse_unsigned(s: Option<&str>, radix: i32, bits: u32) -> Result<u64, Exception> {
-    let Some(s) = s else { return Err(Exception::new("java.lang.NumberFormatException", "Cannot parse null string")) };
+    let Some(s) = s else {
+        return Err(Exception::new("java.lang.NumberFormatException", "Cannot parse null string"));
+    };
     read(s, radix, bits).map_err(|message| Exception::new("java.lang.NumberFormatException", message))
 }
 

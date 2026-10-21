@@ -862,4 +862,3 @@ pub(crate) static FRACTIONS: &[(u32, u32)] = &[
     (0x1ECAD, 0x1ECAF),
     (0x1ED3C, 0x1ED3D),
 ];
-

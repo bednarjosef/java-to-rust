@@ -29,12 +29,12 @@ mod float_parse;
 pub mod format;
 mod integer;
 mod integer_parse;
-mod parse_range;
 mod java_arrays;
 mod math;
 mod natives;
 mod null;
 mod out;
+mod parse_range;
 pub mod regex;
 pub mod string;
 mod system;
@@ -58,14 +58,12 @@ pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_flo
 pub use format::{Arg, format};
 pub use integer::*;
 pub use integer_parse::{parse_radix, parse_small_radix, try_parse_radix, try_parse_small_radix};
-pub use parse_range::{
-    parse_range, parse_unsigned_range, try_parse_range, try_parse_unsigned_range,
-};
 pub use java_arrays::*;
 pub use math::*;
 pub use natives::*;
 pub use null::{OrNull, non_null, or_null, same, try_non_null};
 pub use out::{Out, eprint_chars, eprintln_chars, flush, out, print_chars, println_chars, write_byte};
+pub use parse_range::{parse_range, parse_unsigned_range, try_parse_range, try_parse_unsigned_range};
 pub use regex::{matches_all, replace_all, replace_first, split};
 pub use string::*;
 pub use system::*;

@@ -52,10 +52,17 @@ pub fn try_parse_unsigned_range(
     }
     if units[begin] == u16::from(b'-') {
         let text = String::from_utf16_lossy(&units);
-        return Err(Exception::new(NUMBER_FORMAT, format!("Illegal leading minus sign on unsigned string {text}.")));
+        return Err(Exception::new(
+            NUMBER_FORMAT,
+            format!("Illegal leading minus sign on unsigned string {text}."),
+        ));
     }
     let len = end - begin;
-    let short = if bits == 32 { len <= 5 || (radix == 10 && len <= 9) } else { len <= 12 || (radix == 10 && len <= 18) };
+    let short = if bits == 32 {
+        len <= 5 || (radix == 10 && len <= 9)
+    } else {
+        len <= 12 || (radix == 10 && len <= 18)
+    };
     if short {
         return Ok(read_signed(&units, begin, end, radix, bits)? as u64);
     }

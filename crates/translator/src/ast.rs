@@ -931,7 +931,10 @@ pub fn has_effects(e: &Expr) -> bool {
                 )
                 | ExprKind::Builtin(
                     Builtin::Unsigned(
-                        UnsignedOp::Divide | UnsignedOp::Remainder | UnsignedOp::Parse | UnsignedOp::ParseRange,
+                        UnsignedOp::Divide
+                            | UnsignedOp::Remainder
+                            | UnsignedOp::Parse
+                            | UnsignedOp::ParseRange,
                         _
                     ),
                     _

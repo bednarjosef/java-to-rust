@@ -92,9 +92,11 @@ impl<'t> Lowering<'t> {
             ("parseInt" | "parseLong" | "parseShort" | "parseByte" | "valueOf", true) if args.len() == 2 => {
                 BoxedOp::ParseRadix
             }
-            ("parseInt" | "parseLong" | "parseShort" | "parseByte" | "parseDouble" | "parseFloat" | "parseBoolean", true) => {
-                BoxedOp::Parse
-            }
+            (
+                "parseInt" | "parseLong" | "parseShort" | "parseByte" | "parseDouble" | "parseFloat"
+                | "parseBoolean",
+                true,
+            ) => BoxedOp::Parse,
             ("valueOf", true) if args.first().is_some_and(|a| a.ty == Type::String) => BoxedOp::Parse,
             ("valueOf", true) => BoxedOp::Box,
             ("toString" | "hashCode", true) => {
