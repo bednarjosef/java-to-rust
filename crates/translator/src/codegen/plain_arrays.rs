@@ -574,9 +574,15 @@ impl<'a> Gen<'a> {
             let slot = self.fresh_name(&["index", "slot", "at"]);
             let element = read_in_bounds(&a, slot, element(array.ty));
             self.line(&format!("for {slot} in 0..{a}.len() {{"));
+            // The loop's frame opens at its header, where a label goes, before the element's line.
+            self.open(Kind::Loop(Loop::Plain));
             self.indent += 1;
             self.line(&format!("let {mutable}{var} = {element};"));
             self.indent -= 1;
+            self.nested(body);
+            self.close();
+            self.line("}");
+            return;
         } else {
             self.line(&format!("for {mutable}{var} in {a}.iter().cloned() {{"));
         }

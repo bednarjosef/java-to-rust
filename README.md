@@ -77,7 +77,7 @@ exactly. The Java run is the expected result, so no expectations are written by 
 
 The test programs come from:
 
-- `corpus/features`: 214 small programs, one or more per language feature;
+- `corpus/features`: 215 small programs, one or more per language feature;
 - `corpus/programs`: 32 larger realistic programs (algorithms, data structures, parsers,
   interpreters, simulations);
 - `corpus/projects`: 3 multi-file programs (`imports`, `pruning`, `statics`), each with a source
