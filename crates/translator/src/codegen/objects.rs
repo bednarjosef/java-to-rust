@@ -517,6 +517,13 @@ impl<'a> Gen<'a> {
         else {
             return field;
         };
+        // A field of the struct's class that the expression's type does not have: `super.clone()`
+        // in a superclass copies the fields of the object's own class (`object_clone`).
+        let owner = if self.class.types[owner].fields.iter().any(|f| f.name == name) {
+            owner
+        } else {
+            self.class.hierarchy.field_owner(s, name)
+        };
         hierarchy::base_path(self.facts, self.class, s, owner) + &field
     }
 
