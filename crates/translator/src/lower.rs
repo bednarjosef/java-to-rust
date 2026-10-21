@@ -61,6 +61,7 @@ pub(crate) use clinit_errors::rewritten_clinit;
 pub use exceptions::{is_standard, standard_names, standard_subclass};
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
+pub use primitives::runtime_character_method;
 pub use program::lower_program;
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
@@ -962,7 +963,10 @@ impl<'t> Lowering<'t> {
             (owner, name) if boxing::boxed_type(owner).is_some() && boxing::is_boxed_method(name) => {
                 self.boxed_call(node, &symbol, &mut args, receiver)?
             }
-            ("java.lang.Character", name) => {
+            // The rest of `Character` is the JDK's, where a whole program has it.
+            ("java.lang.Character", name)
+                if runtime_character_method(name, symbol.ty) || self.type_index(symbol.owner).is_none() =>
+            {
                 let char_arg = args.first().is_some_and(|a| a.ty == Type::Char);
                 self.character_method(node, name, symbol.ty, char_arg)?
             }

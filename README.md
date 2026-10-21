@@ -321,7 +321,9 @@ A small subset, end to end:
     `isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`, `digit`,
     `forDigit` and `getNumericValue`, with their `int` code point overloads (`isLetter(int)`,
     `toUpperCase(int)`, `digit(int, int)`, ...), case conversion, and the `MIN_VALUE`, `MAX_VALUE`
-    and `MIN_NORMAL` constants of the wrapper classes.
+    and `MIN_NORMAL` constants of the wrapper classes. In a whole program the rest of
+    `Character` (`getType`, `isTitleCase`, `UnicodeScript`, `UnicodeBlock`, ...) is the JDK's,
+    translated with its `CharacterData` tables.
   - `String`: searching, slicing, case, trimming, replacing, comparing, `split`, `replaceAll`,
     `matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf` and `new String(char[])`,
     and `String.valueOf(char[])` and `valueOf(char[], offset, count)` (which throw as Java does

@@ -582,8 +582,11 @@ impl<'t> Lowering<'t> {
     }
 
     /// Whether class `t` of the program says it implements `java.lang.Comparable`.
+    /// A box translated for its static members (`Character`) is not: its objects are the
+    /// runtime's, which compare themselves.
     pub(super) fn implements_comparable(&self, t: usize) -> bool {
         self.implements_directly(t, "java.lang.Comparable")
+            && super::boxing::boxed_type(&self.types[t].javac).is_none()
     }
 
     /// Whether type `t` of the program names the JDK interface `interface` in its `implements`

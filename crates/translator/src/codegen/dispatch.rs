@@ -1440,6 +1440,10 @@ impl<'a> Gen<'a> {
             return (format!("fmt::Display::fmt({shown}, f)"), true);
         }
         let (text, uses) = self.arm_call(t, c, i, "");
+        // A `toString` that may return null shows "null", as `String.valueOf` does.
+        if self.facts.nullable_returns.contains(&i) {
+            return (format!("f.write_str({text}.as_deref().unwrap_or(\"null\"))"), uses);
+        }
         (format!("f.write_str(&{text})"), uses)
     }
 }

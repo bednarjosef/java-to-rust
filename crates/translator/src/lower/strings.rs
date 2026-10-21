@@ -369,6 +369,12 @@ impl<'t> Lowering<'t> {
             ("java.lang.String", [a] | [a, Type::Int, Type::Int]) if *a == chars => {
                 ExprKind::Builtin(Builtin::String(StringOp::FromChars), args)
             }
+            ("java.lang.String", [a, Type::Int, Type::Int]) if *a == Type::array(Type::Int) => {
+                ExprKind::Builtin(Builtin::String(StringOp::FromCodePoints), args)
+            }
+            ("java.lang.String", [a, Type::Int, Type::Int, Type::Int]) if *a == bytes => {
+                ExprKind::Builtin(Builtin::String(StringOp::FromHighByte), args)
+            }
             (
                 "java.lang.String",
                 [a]

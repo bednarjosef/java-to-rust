@@ -86,24 +86,8 @@ impl<'t> Lowering<'t> {
         signature: &str,
         char_arg: bool,
     ) -> Result<Builtin, Error> {
-        let (builtin, params) = match name {
-            "isDigit" => (Builtin::CharIsDigit, "(char)"),
-            "isLetter" => (Builtin::CharIsLetter, "(char)"),
-            "isUpperCase" => (Builtin::CharIsUpperCase, "(char)"),
-            "isLowerCase" => (Builtin::CharIsLowerCase, "(char)"),
-            "toUpperCase" => (Builtin::CharToUpperCase, "(char)"),
-            "toLowerCase" => (Builtin::CharToLowerCase, "(char)"),
-            "getNumericValue" => (Builtin::CharNumericValue, "(char)"),
-            "isWhitespace" => (Builtin::CharIsWhitespace, "(char)"),
-            "isSpaceChar" => (Builtin::CharIsSpaceChar, "(char)"),
-            "isLetterOrDigit" => (Builtin::CharIsLetterOrDigit, "(char)"),
-            "isAlphabetic" => (Builtin::CharIsAlphabetic, "(int)"),
-            "isSurrogate" => (Builtin::CharIsSurrogate, "(char)"),
-            "isHighSurrogate" => (Builtin::CharIsHighSurrogate, "(char)"),
-            "isLowSurrogate" => (Builtin::CharIsLowSurrogate, "(char)"),
-            "digit" => (Builtin::CharDigit, "(char,int)"),
-            "forDigit" => (Builtin::CharForDigit, "(int,int)"),
-            _ => return unsupported(node, &format!("method `Character.{name}`")),
+        let Some((builtin, params)) = character_builtin(name) else {
+            return unsupported(node, &format!("method `Character.{name}`"));
         };
         if signature.starts_with(params) && (params != "(int)" || char_arg) {
             return Ok(builtin);
@@ -114,4 +98,44 @@ impl<'t> Lowering<'t> {
             _ => unsupported(node, &format!("`Character.{name}` on a code point")),
         }
     }
+}
+
+/// Whether the runtime does the method `name` of `Character` with javac's `signature`: an
+/// instance method or constructor of a box, a method that the boxes share, or one of the `char`
+/// and code point methods that the runtime's tables answer (`character_method`). The JDK's
+/// `Character` is translated for its other static methods and its nested classes
+/// (`Character.getType`, `UnicodeScript`), whose data are the JDK's own `CharacterData` classes.
+pub fn runtime_character_method(name: &str, signature: &str) -> bool {
+    if name == "<init>" || super::boxing::is_boxed_method(name) || super::code_point::is_code_point_name(name)
+    {
+        return true;
+    }
+    match character_builtin(name) {
+        Some((_, params)) if signature.starts_with(params) => true,
+        Some(_) => super::code_point::character_op(name).is_some() && signature.starts_with("(int"),
+        None => false,
+    }
+}
+
+/// The builtin of a `Character` method on a `char`, with the parameters it takes.
+fn character_builtin(name: &str) -> Option<(Builtin, &'static str)> {
+    Some(match name {
+        "isDigit" => (Builtin::CharIsDigit, "(char)"),
+        "isLetter" => (Builtin::CharIsLetter, "(char)"),
+        "isUpperCase" => (Builtin::CharIsUpperCase, "(char)"),
+        "isLowerCase" => (Builtin::CharIsLowerCase, "(char)"),
+        "toUpperCase" => (Builtin::CharToUpperCase, "(char)"),
+        "toLowerCase" => (Builtin::CharToLowerCase, "(char)"),
+        "getNumericValue" => (Builtin::CharNumericValue, "(char)"),
+        "isWhitespace" => (Builtin::CharIsWhitespace, "(char)"),
+        "isSpaceChar" => (Builtin::CharIsSpaceChar, "(char)"),
+        "isLetterOrDigit" => (Builtin::CharIsLetterOrDigit, "(char)"),
+        "isAlphabetic" => (Builtin::CharIsAlphabetic, "(int)"),
+        "isSurrogate" => (Builtin::CharIsSurrogate, "(char)"),
+        "isHighSurrogate" => (Builtin::CharIsHighSurrogate, "(char)"),
+        "isLowSurrogate" => (Builtin::CharIsLowSurrogate, "(char)"),
+        "digit" => (Builtin::CharDigit, "(char,int)"),
+        "forDigit" => (Builtin::CharForDigit, "(int,int)"),
+        _ => return None,
+    })
 }
