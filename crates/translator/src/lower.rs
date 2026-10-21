@@ -803,10 +803,7 @@ impl<'t> Lowering<'t> {
                             && self.types[self.current.get()].node.kind() != "INTERFACE"
                 });
                 let receiver = match receiver {
-                    Some(r) if is_super => {
-                        let ty = self.ty(r, r.java_type())?;
-                        self.synth(ExprKind::This, r.pos(), ty)
-                    }
+                    Some(r) if is_super => self.super_receiver(r)?,
                     Some(r) => self.expr(r)?,
                     None => self.this(node),
                 };
@@ -819,11 +816,15 @@ impl<'t> Lowering<'t> {
     }
 }
 
-/// `super(...)`, which javac writes into every constructor that does not call another one.
+/// `super(...)` or `outer.super(...)`, which javac writes into every constructor that does not
+/// call another one, or a constructor that calls its superclass's with an enclosing instance.
 fn is_super_call(stmt: Node) -> bool {
     stmt.get("expression").is_some_and(|call| {
         call.kind() == "METHOD_INVOCATION"
-            && call.get("methodSelect").is_some_and(|s| s.kind() == "IDENTIFIER" && s.str("name") == "super")
+            && call.get("methodSelect").is_some_and(|s| {
+                s.kind() == "IDENTIFIER" && s.str("name") == "super"
+                    || s.kind() == "MEMBER_SELECT" && s.str("identifier") == "super"
+            })
     })
 }
 

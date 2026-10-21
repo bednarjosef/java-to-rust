@@ -359,9 +359,23 @@ impl<'t> Lowering<'t> {
     /// same class (`this(..)`) or of a subclass (`super(..)`): the enclosing instance, and each
     /// captured local, from the calling constructor's own parameters.
     pub(super) fn passed_on(&self, t: usize, pos: Pos) -> Result<(Vec<Expr>, Vec<Expr>), Error> {
+        self.passed_on_from(t, pos, None)
+    }
+
+    /// `passed_on`, with the enclosing instance of class `t` given as `outer` (`o.super(..)`)
+    /// rather than found from the current class.
+    pub(super) fn passed_on_from(
+        &self,
+        t: usize,
+        pos: Pos,
+        outer: Option<Expr>,
+    ) -> Result<(Vec<Expr>, Vec<Expr>), Error> {
         let Some(nested) = self.nesting(t) else { return Ok((Vec::new(), Vec::new())) };
-        let first =
-            if nested.outer { vec![self.enclosing_instance(nested.enclosing, pos)?] } else { Vec::new() };
+        let first = match outer {
+            Some(value) => vec![value],
+            None if nested.outer => vec![self.enclosing_instance(nested.enclosing, pos)?],
+            None => Vec::new(),
+        };
         let current = self.current.get();
         let mut last = Vec::new();
         for c in &nested.captures {

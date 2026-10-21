@@ -301,7 +301,7 @@ impl<'t> Lowering<'t> {
 }
 
 /// A class's name without its type arguments.
-fn raw(name: &str) -> &str {
+pub(super) fn raw(name: &str) -> &str {
     name.split('<').next().unwrap_or(name)
 }
 
@@ -557,10 +557,11 @@ impl<'t> Walk<'_, 't> {
                     .filter(|s| crate::program::CLASS_KINDS.contains(&s.kind));
                 match (node.str("identifier"), class.and_then(|s| l.type_index(raw(s.ty)))) {
                     ("this", Some(class)) => self.need(class),
+                    // `Outer.super.m()` runs on the enclosing instance of `Outer`, as `Outer.this` does.
                     ("super", Some(class))
                         if l.types[class].node.kind() != "INTERFACE" && class != self.class =>
                     {
-                        return unsupported(node, "`Outer.super`");
+                        self.need(class)
                     }
                     _ => self.children(node)?,
                 }
