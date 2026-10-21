@@ -164,7 +164,7 @@ impl<'a> Gen<'a> {
         };
         let (src_plain, dest_plain) = (plain_name(self, src), plain_name(self, dest));
         if src_plain.is_none() && dest_plain.is_none() {
-            let (s, d) = (self.shared_handle(src), self.shared_handle(dest));
+            let (s, d) = (self.handle(src), self.handle(dest));
             let ints: Vec<String> =
                 [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
             let f = self.runtime("arraycopy");
@@ -203,14 +203,6 @@ impl<'a> Gen<'a> {
         Code::atom(call)
     }
 
-    /// A shared array as the `&Array` the runtime takes.
-    fn shared_handle(&mut self, e: &'a Expr) -> String {
-        match &e.kind {
-            ExprKind::Var(name) => format!("&{}", self.local(name)),
-            _ => format!("&{}", self.expr(e).at(UNARY)),
-        }
-    }
-
     /// An array as a `&[T]` for reading: a plain array borrowed, a shared one through its cell.
     pub(super) fn slice_of(&mut self, e: &'a Expr) -> String {
         match &e.kind {
@@ -219,8 +211,12 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// A shared array as the receiver of `borrow()`: a variable as it is, without a clone.
+    /// A shared array as the receiver of `borrow()`: a variable as it is, without a clone. One
+    /// that may be null throws `NullPointerException` there.
     pub(super) fn array_receiver(&mut self, e: &'a Expr) -> String {
+        if self.nullable(e) {
+            return self.handle(e);
+        }
         match &e.kind {
             ExprKind::Var(name) => self.local(name),
             _ => self.expr(e).receiver(),
