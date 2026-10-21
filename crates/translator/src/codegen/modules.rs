@@ -110,6 +110,13 @@ fn module_name(segment: &str) -> String {
     }
 }
 
+/// Whether `code` has `name` where it is not the end of a longer name or path, such as
+/// `java::Ref<'_` for `Ref<'_`.
+fn bare(code: &str, name: &str) -> bool {
+    code.match_indices(name)
+        .any(|(i, _)| !code[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == ':'))
+}
+
 /// The `use` lines that code of one module needs, found in its text.
 pub(super) fn use_lines(code: &str) -> Vec<String> {
     let mut std = String::new();
@@ -120,13 +127,13 @@ pub(super) fn use_lines(code: &str) -> Vec<String> {
     {
         std.push_str("use std::cell::Cell;\n");
     }
-    if code.contains("Ref<'_") {
+    if bare(code, "Ref<'_") {
         std.push_str("use std::cell::Ref;\n");
     }
     if code.contains("RefCell") {
         std.push_str("use std::cell::RefCell;\n");
     }
-    if code.contains("RefMut<'_") {
+    if bare(code, "RefMut<'_") {
         std.push_str("use std::cell::RefMut;\n");
     }
     if code.contains("impl fmt::Display") {
@@ -134,6 +141,12 @@ pub(super) fn use_lines(code: &str) -> Vec<String> {
     }
     if code.contains("Rc<") || code.contains("Rc::") {
         std.push_str("use std::rc::Rc;\n");
+    }
+    if bare(code, "Arc<") || bare(code, "Arc::") {
+        std.push_str("use std::sync::Arc;\n");
+    }
+    if bare(code, "LazyLock<") {
+        std.push_str("use std::sync::LazyLock;\n");
     }
     let mut uses = Vec::new();
     if !std.is_empty() {

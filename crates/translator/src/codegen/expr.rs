@@ -389,10 +389,16 @@ impl<'a> Gen<'a> {
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
             // An upcast or a downcast between the program's types, or a string, a box or a
             // primitive becoming an `Object`.
+            ExprKind::Cast(to @ Type::Class(..), value)
+                if let Some(t) = self.closure_type(*to)
+                    && let ExprKind::New { args, ctor: Some(ctor), .. } = &value.kind =>
+            {
+                self.closure(t, *ctor, args)
+            }
             ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
             // A downcast from an interface to an enum that implements it, or from `Object` to a
-            // string or a box.
-            ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_)), value)
+            // string, a box or an array.
+            ExprKind::Cast(to @ (Type::Enum(_) | Type::String | Type::Boxed(_) | Type::Array(_)), value)
                 if matches!(value.ty, Type::Class(..)) =>
             {
                 self.class_cast(*to, value)
@@ -436,7 +442,11 @@ impl<'a> Gen<'a> {
             }
             ExprKind::MethodCall { receiver, args, resolved, is_super, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
-                let code = if self.class.methods[index].is_static {
+                let code = if self.closure_type(receiver.ty).is_some() {
+                    self.closure_call(receiver, index, args)
+                } else if self.inlined(receiver, index) {
+                    self.inline_call(index, args)
+                } else if self.class.methods[index].is_static {
                     let args = self.call_args(index, args).join(", ");
                     Code::atom(format!("{}({args})", self.static_fn(index)))
                 } else if !*is_super && let Some(t) = self.enum_of(receiver) {
@@ -591,12 +601,13 @@ impl<'a> Gen<'a> {
                 self.format(&mac, parts)
             }
             Builtin::ObjectText => self.object_to_string(&args[0]),
+            Builtin::ObjectClone => self.object_clone(&args[0]),
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty, id)
             }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
-            Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty),
-            Builtin::CodePoint(op) => self.code_point_builtin(op, args),
+            Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty, id),
+            Builtin::CodePoint(op) => self.code_point_builtin(op, args, id),
             Builtin::Charset(op) => self.charset_builtin(op, args),
             Builtin::CharNumericValue => self.char_numeric_value(args),
             Builtin::CharDigit | Builtin::CharForDigit => self.character_radix(builtin, args),
@@ -604,6 +615,7 @@ impl<'a> Gen<'a> {
                 let code = self.value(&args[0], Type::Int);
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
+            Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
             Builtin::NullCheck => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),

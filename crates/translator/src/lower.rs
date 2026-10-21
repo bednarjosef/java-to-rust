@@ -11,9 +11,11 @@ mod foreach;
 mod functional;
 mod generic_args;
 mod generics;
+mod handles;
 mod hierarchy;
 mod lambdas;
 mod object;
+mod object_clone;
 mod objects;
 mod real_generics;
 mod statics;
@@ -35,6 +37,7 @@ mod initializers;
 mod inner;
 mod java_arrays;
 mod java_objects;
+mod local_types;
 mod natives;
 mod patterns;
 mod primitives;
@@ -43,6 +46,7 @@ mod switch;
 mod sync;
 mod system;
 mod varargs;
+pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use exceptions::{is_standard, standard_names, standard_subclass};
 pub use functional::is_functional;
@@ -51,6 +55,7 @@ pub use program::lower_program;
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
+    charsets::check(unit)?;
     // A `;` at top level and an annotation type (`@interface`) do nothing when the program runs.
     let decls: Vec<Node> = unit
         .list("typeDecls")
@@ -62,7 +67,9 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
         lowering.declare_standard()?;
         let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
-        lowering.functional = functional::Functional::select(decls.iter().map(|d| d.0), &declared);
+        // The standard classes may name interfaces too (`Thread` holds a `Runnable`).
+        let trees = decls.iter().map(|d| d.0).chain(lowering.standard.classes.iter().map(|(_, d)| *d));
+        lowering.functional = functional::Functional::select(trees, &declared);
         lowering.declare_functional()?;
         lowering.declare_plain_object(decls.iter().map(|d| d.0))?;
         lowering.name_nested();
@@ -81,9 +88,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let failed = lowering.verify(&types, &methods);
         let hierarchy = Hierarchy::new(&types, &methods);
         let raised = lowering.raised_objects(&types, &methods);
-        let closes = lowering.closes.take();
         let name = first.str("simpleName").to_string();
-        let class = Class { name, types, methods, hierarchy, raised, closes };
+        let class = Class { name, types, methods, hierarchy, raised };
         enums::check_nulls(&class)?;
         Ok((class, lowering.real.clone(), failed))
     })
@@ -202,8 +208,9 @@ struct Lowering<'t> {
     entry: Option<usize>,
     /// The standard exception classes that the program uses (see `exceptions`).
     standard: exceptions::Standard,
-    /// The `close` methods that try-with-resources statements call (see `exceptions`).
-    closes: std::cell::RefCell<Vec<(usize, Pos)>>,
+    /// The array types whose arrays become `Object`s or are cast back from them: each is a
+    /// runtime class beside `Object` (see `object::object_types`).
+    object_arrays: std::cell::RefCell<Vec<Type>>,
     /// Where `Object` goes, in a program that uses it (see `object`).
     object: Option<object::ObjectIndexes>,
     /// The class of the objects that `new Object()` creates, when the code has one (see `object`).
@@ -224,6 +231,9 @@ struct Lowering<'t> {
     /// The `new` expressions, by address, with the captures of the created class that are
     /// captures of the creating class there (see `captures`).
     capture_sites: std::collections::HashSet<(*const Value, String)>,
+    /// The member classes of local and anonymous classes, each with its outer class, by index:
+    /// they are named after that class (see `inner::name_nested`).
+    member_outers: Vec<(usize, usize)>,
 }
 
 impl<'t> Lowering<'t> {
@@ -238,7 +248,10 @@ impl<'t> Lowering<'t> {
             let in_type = |e| (index, e);
             self.constant_bodies(index, methods).map_err(in_type)?;
             self.check_enum(index, methods).map_err(in_type)?;
-            let constants = self.enum_constants(index, &types[index].fields, methods).map_err(in_type)?;
+            let bodies = self.constant_body_fields(index).map_err(in_type)?;
+            self.add_body_fields(&bodies, &mut types[index].fields).map_err(in_type)?;
+            let constants =
+                self.enum_constants(index, &types[index].fields, methods, &bodies).map_err(in_type)?;
             types[index].enum_constants = Some(constants);
         }
         Ok(())
@@ -294,7 +307,12 @@ impl<'t> Lowering<'t> {
         let is_abstract = node.get("body").is_none()
             && (node.has_flag("ABSTRACT") || in_interface && !is_static)
             && !abstract_in_enum;
+        let dormant = self.reach.is_some_and(|r| r.dormant(&self.types[info.owner].javac, node.0));
         let mut body = match node.get("body") {
+            Some(_) if dormant => {
+                let never = ExprKind::Builtin(Builtin::NoObject { class: info.owner }, Vec::new());
+                vec![Stmt::Expr(self.synth(never, node.pos(), Type::Void))]
+            }
             Some(body) => self.block(body)?,
             None if abstract_in_enum || is_abstract => Vec::new(),
             None => return unsupported(node, "methods without a body"),
@@ -339,16 +357,15 @@ impl<'t> Lowering<'t> {
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
-            "java.nio.charset.Charset" => {
-                error(node.pos(), "a `Charset` outside `getBytes` or `new String` not supported yet")
-            }
+            "java.nio.charset.Charset" => Ok(Type::Charset),
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
             "float" => Ok(Type::Float),
             // A type variable hides a class of the same name.
             _ if let Some(erased) = self.type_variable(node, name) => erased,
-            _ if self.enum_index(name).is_some() => Ok(Type::enum_type(name)),
+            // The declared name, which can differ from javac's (a hoisted enum, see `local_types`).
+            _ if let Some(e) = self.enum_index(name) => Ok(Type::enum_type(&self.types[e].name)),
             _ if let Some(t) = self.type_index(name) => {
                 // A Rust generic used without type arguments.
                 if self.is_real(real_generics::Owner::Class(t)) && !self.class_type_params(t).is_empty() {
@@ -365,6 +382,9 @@ impl<'t> Lowering<'t> {
             "java.lang.Object" if self.object.is_some() => Ok(Type::class(OBJECT)),
             "java.lang.Comparable" if self.object.is_some_and(|at| at.comparable.is_some()) => {
                 Ok(Type::class(COMPARABLE))
+            }
+            "java.lang.Number" if self.object.is_some_and(|at| at.number.is_some()) => {
+                Ok(Type::class(NUMBER))
             }
             _ if let Some(erased) = self.erased(node, name) => erased,
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
@@ -412,8 +432,8 @@ impl<'t> Lowering<'t> {
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
                 e => Stmt::Expr(e),
             },
-            // Reachability skipped the branch that the condition guards (`program::never_true`).
-            "IF" if self.never_true(node) => match node.get("elseStatement") {
+            // Reachability skipped the other branch (`program::live_branch`).
+            "IF" if let Some(branch) = self.live_branch(node) => match branch {
                 Some(n) => self.single_stmt(n)?,
                 None => Stmt::Block(Vec::new()),
             },
@@ -472,6 +492,7 @@ impl<'t> Lowering<'t> {
 
     fn expr(&self, node: Node<'t>) -> Result<Expr, Error> {
         let kind = match node.kind() {
+            _ if charsets::is_charset_op(node) => self.charset_op(node)?,
             "PARENTHESIZED" => return self.expr(node.child("expression")?),
             "INT_LITERAL" => ExprKind::Int(self.number(node)?),
             "LONG_LITERAL" => ExprKind::Long(self.number(node)?),
@@ -536,10 +557,16 @@ impl<'t> Lowering<'t> {
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
                 let value = self.expr(node.child("expression")?)?;
+                if Self::is_object(value.ty) {
+                    self.object_array(node, ty)?;
+                }
                 // A cast between the program's types, up, down or across: `Cast` converts as the
                 // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
-                // `Integer` and unboxes.
-                if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
+                // `Integer` and unboxes. `(C) super.clone()` is already a `C`: the copy has the
+                // node's type, so the cast is the copy itself.
+                if matches!(value.kind, ExprKind::Builtin(Builtin::ObjectClone, _)) {
+                    value.kind
+                } else if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
                     let boxed = self.synth(
                         ExprKind::Cast(Type::boxed(ty), Box::new(value)),
                         node.pos(),
@@ -551,9 +578,9 @@ impl<'t> Lowering<'t> {
                 }
             }
             // As with `if`, reachability skipped the branch that the condition guards.
-            "CONDITIONAL_EXPRESSION" if self.never_true(node) => {
+            "CONDITIONAL_EXPRESSION" if let Some(Some(branch)) = self.live_branch(node) => {
                 let ty = self.ty(node, node.java_type())?;
-                let value = self.convert(self.expr(node.child("falseExpression")?)?, ty);
+                let value = self.convert(self.expr(branch)?, ty);
                 // The branch converts to the type of the whole, as `cond ? 1 : 2L` is a `long`.
                 if value.ty == ty {
                     return Ok(value);
@@ -589,6 +616,9 @@ impl<'t> Lowering<'t> {
             "INSTANCE_OF" => self.instance_of(node)?,
             "SWITCH_EXPRESSION" => self.switch_expr(node)?,
             "EQUAL_TO" | "NOT_EQUAL_TO" if classes::compares_classes(node) => self.class_comparison(node)?,
+            "EQUAL_TO" | "NOT_EQUAL_TO" if charsets::compares_charsets(node) => {
+                self.charset_comparison(node)?
+            }
             kind => {
                 let left = node.child("leftOperand");
                 let op = binary_op(node, kind);
@@ -674,13 +704,19 @@ impl<'t> Lowering<'t> {
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
+        if let Some(kind) = self.handle_access(node, &symbol)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);
         }
         if let Some(kind) = self.class_call(node, &symbol, select)? {
             return Ok(kind);
         }
-        let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
+        if let Some(kind) = self.copy_of_with_class(node, &symbol)? {
+            return Ok(kind);
+        }
+        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
             let resolved = self.method_index(&symbol);
@@ -689,11 +725,17 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ThisCall { args, resolved });
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        if symbol.owner == "java.lang.Object" && symbol.name == "clone" {
+            return self.object_clone(node, receiver);
+        }
         if symbol.owner == "java.lang.Object" && self.object.is_some() {
             return self.object_call(node, &symbol, receiver, args);
         }
         if symbol.owner == "java.lang.Comparable" && symbol.name == "compareTo" {
             return self.comparable_call(node, receiver, args);
+        }
+        if symbol.owner == "java.lang.Number" {
+            return self.number_call(node, &symbol, receiver);
         }
         if symbol.name == "equals"
             && !symbol.is_static
@@ -736,7 +778,16 @@ impl<'t> Lowering<'t> {
             ("java.lang.Math", "min") => Builtin::MathMin,
             ("java.lang.Math", "sqrt") => Builtin::MathSqrt,
             ("java.lang.Math", "pow") => Builtin::MathPow,
-            ("java.util.Arrays", name) => return self.arrays_call(node, name, args),
+            // Where the JDK's `Arrays` is translated, a call that the runtime does not do is one of
+            // it, such as a sort with a `Comparator`.
+            ("java.util.Arrays", name)
+                if self.type_index(symbol.owner).is_none() || {
+                    let types: Vec<&str> = node.list("arguments").map(|a| a.java_type()).collect();
+                    arrays::runtime_arrays_call(name, &types)
+                } =>
+            {
+                return self.arrays_call(node, name, args);
+            }
             ("java.lang.String", "length" | "equals")
                 if symbol.name == "length" || matches!(args[0].ty, Type::String | Type::Null) =>
             {
@@ -810,10 +861,7 @@ impl<'t> Lowering<'t> {
                             && self.types[self.current.get()].node.kind() != "INTERFACE"
                 });
                 let receiver = match receiver {
-                    Some(r) if is_super => {
-                        let ty = self.ty(r, r.java_type())?;
-                        self.synth(ExprKind::This, r.pos(), ty)
-                    }
+                    Some(r) if is_super => self.super_receiver(r)?,
                     Some(r) => self.receiver(r, symbol.owner)?,
                     None => self.this(node),
                 };
@@ -826,11 +874,15 @@ impl<'t> Lowering<'t> {
     }
 }
 
-/// `super(...)`, which javac writes into every constructor that does not call another one.
+/// `super(...)` or `outer.super(...)`, which javac writes into every constructor that does not
+/// call another one, or a constructor that calls its superclass's with an enclosing instance.
 fn is_super_call(stmt: Node) -> bool {
     stmt.get("expression").is_some_and(|call| {
         call.kind() == "METHOD_INVOCATION"
-            && call.get("methodSelect").is_some_and(|s| s.kind() == "IDENTIFIER" && s.str("name") == "super")
+            && call.get("methodSelect").is_some_and(|s| {
+                s.kind() == "IDENTIFIER" && s.str("name") == "super"
+                    || s.kind() == "MEMBER_SELECT" && s.str("identifier") == "super"
+            })
     })
 }
 

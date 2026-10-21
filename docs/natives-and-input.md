@@ -495,7 +495,16 @@ are instance methods of exceptions, trivial once `Throwable` objects exist. In o
    - Behaviour: with an archive, sets the class's archived static fields (such as
      `ImmutableCollections.archivedObjects`); without one, does nothing, and the caller builds the
      values itself (`if (archivedObjects == null) { ... }`).
-   - Rust: nothing. The argument is a class literal, so the call can be dropped.
+   - Rust: nothing. The argument is a class literal, so the call can be dropped. Since nothing
+     sets the archived fields, a null test of one right after the call is always true: the fields
+     whose class tests them directly (`ImmutableCollections.archivedObjects`,
+     `Attributes.Name.KNOWN_NAMES`, `Configuration.EMPTY_CONFIGURATION`) are listed in
+     `program::reach::ARCHIVED_FIELDS`, and reachability, the survey and the lowering keep only
+     the branch that builds the values (`live_branch`). Without it, `ImmutableCollections`'s
+     sentinel `EMPTY` also took `archivedObjects[0]`, which could be any `Object`, so
+     `e1 != EMPTY` in `List12` compared two values that might be strings and was rejected. The
+     classes that copy the field into a local first (`FDBigInteger`, `BaseLocale`) are not
+     covered; the runtime's boxes have no source to translate.
    - **Done** for 4 to 6: `java::cds_config_status()` and `java::cds_random_seed_for_dumping()`
      (both 0), and `initializeFromArchive(C.class)` is dropped before its argument is lowered;
      another argument than a class literal is rejected.
@@ -609,8 +618,8 @@ Recommended, in order of payoff:
    that creates it is. 27 files of java.base register a `SharedSecrets` accessor as an anonymous
    class in a static initializer (`Buffer`, `FileDescriptor`, `System`, ...), so initializing
    `Buffer` reaches every method of `JavaNioAccess`: mapped memory, `writeback`, continuations.
-   This needs javac's trees to name anonymous classes (their qualified name is empty today, so
-   their methods' keys collide), after which their methods are overriders like any other.
+   **Made** (4.5): javac's trees name anonymous classes by their binary names, and their
+   methods are overriders like any other.
 4. **Sequential streams do not reach the parallel paths.** `AbstractPipeline.evaluate` and the
    `opEvaluateParallel*` methods run only when `isParallel()` is true, which needs a reachable
    call of `BaseStream.parallel()`, `Collection.parallelStream()` or a parallel
@@ -715,6 +724,51 @@ for when a program needs time zones.
   `ReduceOps.makeRefCounting`, whose `opEvaluateParallel` and `evaluateParallel` overrides are
   scanned with the method that creates them. The 23 natives come off once anonymous classes are
   reached by dispatch (4.2, 3).
+- **Local and anonymous classes reached by dispatch** (4.2, 3): javac's trees name them by their
+  binary names (`DistinctOps$1`), reachability declares them, and `Walk::scan` no longer scans
+  them with the code that creates them: a constructor is reached by its `new`, an instance
+  method by a call or by dispatch once its class is instantiated. The check of the sequential
+  assumption indexes them the same way.
+- **Nodes without children** (with 3): one more path reached `ForkJoinPool` from sequential
+  code, `Nodes.flatten`, which copies a tree of nodes into an array with a `ForkJoinTask` when
+  `node.getChildCount() > 0`. Only parallel evaluation concatenates nodes (`Nodes.conc`), so the
+  sequential assumption covers that test too, checked by no class that overrides
+  `Node.getChildCount()` having objects.
+- **Flags of the streams' `Tripwire`** (`java.util.Tripwire`, `java.util.stream.Tripwire`): its
+  `ENABLED` is `Boolean.getBoolean` of a property that only `-D` sets, so it joins the JFR flags in
+  `FALSE_FLAGS`, and the condition of a skipped branch is no longer scanned (the lowering drops
+  it), so the class is not reached for its flag.
+
+With these, `StreamPipeline` reaches 264 classes (176 instantiated), 1,144 methods and 4 natives,
+all in the runtime (the `CDS` ones and `Unsafe.registerNatives`), against the 372 classes and 28
+natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` atomics are gone.
+- **`serialPersistentFields` not initialized**: serialization reads it by reflection, and its
+  initializer only creates `ObjectStreamField`s; some thirty classes of java.base have one
+  (`String`, `Random`, `ThreadLocalRandom`, `ConcurrentHashMap`), with `Long.TYPE` and
+  `String.class` arguments that are `Class` values. Reading standard input stopped at `Random`'s.
+  Test: `serial_persistent_fields_are_not_initialized_unless_read` in `reach.rs` and the project
+  `corpus/projects/serialization`.
+- **The instance methods of classes without objects are dormant** (`Reach::dormant`): a call of
+  an instance method of a class that no reachable constructor creates objects of, nor of a
+  subclass, can only throw `NullPointerException` on its null receiver, so the method is declared
+  with its signature and a body that never runs (`Builtin::NoObject`, `unreachable!()` as the
+  codegen writes for classes without objects), and what its body uses is not reached. It wakes up
+  when its class becomes live. Interfaces are left out: the runtime's strings and boxes are
+  `CharSequence`s and `Comparable`s that no constructor shows. `ByteBuffer.equals` reached
+  `MemorySessionImpl.checkValidStateRaw` through `ScopedMemoryAccess`, and with it the
+  `VarHandle` of `MemorySessionImpl`'s initializer, though only foreign memory creates sessions.
+  Test: the project `corpus/projects/uncreated`. It takes 9 classes off `ReaderLines` and 94
+  classes and 4 natives off `ScannerGrades`. With it, the anonymous classes and the
+  `serialPersistentFields` above, `ReaderLines` (`BufferedReader` over `System.in`) reaches 254
+  classes and 24 natives (6 in the runtime) instead of 382 and 37, `ScannerGrades` 1,027 classes
+  and 60 natives (20) instead of 1,258 and 73, and `StreamPipeline` 263 classes and 4 natives.
+  The 18 natives of `ReaderLines` that the runtime lacks are all `Unsafe`: the field offsets,
+  atomics, volatile accesses and `park`/`unpark` of `ConcurrentHashMap` (which `Properties` and
+  `CoderResult`'s cache are) and `ThreadLocalRandom`, and the plain gets and puts of
+  `ArraysSupport.vectorizedMismatch`. `ReaderLines` then stops at `LazyConstantImpl`, the
+  `LazyConstant` in which
+  `Charset` keeps its default: `Unsafe.objectFieldOffset` and the acquire and release accesses of
+  its `constant` field, which wait for the threads design's symbolic field offsets.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

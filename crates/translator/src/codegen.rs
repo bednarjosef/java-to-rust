@@ -10,11 +10,14 @@ use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
 mod boxing;
+mod chains;
 mod character;
 mod charsets;
 mod classes;
+mod closures;
 mod code;
 mod code_point;
+mod covariant;
 mod dispatch;
 mod enums;
 mod exceptions;
@@ -24,6 +27,8 @@ mod idiomatic;
 mod math;
 mod names;
 mod null;
+mod object_clone;
+mod parse_range;
 mod primitives;
 mod statics;
 mod stmt;
@@ -89,6 +94,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         fn_names,
         group_names,
         live: live.clone(),
+        runs: running_types(class, facts),
         wanted: wanted.clone(),
         needs: std::cell::RefCell::new(Needs::new()),
         homes,
@@ -107,6 +113,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         exhaustive: false,
         chain: false,
         field_locals: HashMap::new(),
+        bound_params: None,
         ctor_result: None,
         printing: false,
         guarded: false,
@@ -126,11 +133,15 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         throwing: false,
         attempts: Vec::new(),
         finallies: Vec::new(),
+        yield_slots: Vec::new(),
         attempt_count: 0,
         try_assigned: HashSet::new(),
         dereferenced: HashSet::new(),
+        written: HashSet::new(),
         rejected: None,
+        chains: chains::Chains::default(),
     };
+    g.chains = g.find_chains();
     if modules.is_some() {
         let text = g.program(&live);
         g.check_dereferences();
@@ -195,6 +206,8 @@ enum Part {
 
 struct Gen<'a> {
     class: &'a Class,
+    /// The structs and enums that take part in long chains of objects (see `chains`).
+    chains: chains::Chains,
     facts: &'a Facts,
     /// Where each method is emitted (see `analysis::hierarchy`).
     homes: Vec<Home>,
@@ -202,6 +215,8 @@ struct Gen<'a> {
     group_names: HashMap<usize, String>,
     /// Which classes have a struct (see `live_types`).
     live: Vec<bool>,
+    /// Which classes' instance methods can run (see `running_types`).
+    runs: Vec<bool>,
     /// The enum items to write, which an earlier pass found used (see `generate`).
     wanted: Needs,
     /// The enum items that the code written so far uses.
@@ -243,6 +258,9 @@ struct Gen<'a> {
     /// The locals that hold the fields that a constructor's initializers computed first, by
     /// Java field name: the later initializers read them there.
     field_locals: HashMap<String, String>,
+    /// In a closure's body, the lambda's method whose parameters are bound to the converted
+    /// arguments already (see `closures::inline_call`).
+    bound_params: Option<usize>,
     /// In a constructor, what a `return` gives back: the object being built.
     ctor_result: Option<&'static str>,
     /// Whether the text being formatted is printed.
@@ -282,6 +300,9 @@ struct Gen<'a> {
     /// The `try` statements with a `finally` whose body or `catch` clauses are being written,
     /// innermost last.
     finallies: Vec<exceptions::Finally>,
+    /// The switch expressions (by frame index) that a `yield` leaves through a `finally`: their
+    /// value waits in a `yielded{index}` local (see `switch.rs`).
+    yield_slots: Vec<usize>,
     /// How many `try` blocks of the current method have a label.
     attempt_count: usize,
     /// The current method's locals declared without a value that a `try` block assigns (see
@@ -289,6 +310,9 @@ struct Gen<'a> {
     try_assigned: HashSet<String>,
     /// The objects of `Facts::null_checked` whose checked dereference has been written.
     dereferenced: HashSet<ExprId>,
+    /// The methods whose bodies have been written. A body that is not, as no call needs it or
+    /// it never runs, dereferences nothing.
+    written: HashSet<usize>,
     /// The first construct found that cannot be translated, which `generate` reports.
     rejected: Option<Error>,
 }
@@ -485,6 +509,18 @@ impl<'a> Gen<'a> {
         }
         params.extend(self.typed_params(index, true));
         let ret = self.ret_text(index);
+        // The body of a method or constructor that never runs may call what was never emitted,
+        // such as the default methods of an interface on a class that implements it without
+        // objects, or the methods of a superclass whose values are all of another subclass.
+        // Reach marks a method of a class without objects with a `NoObject` body.
+        let never_runs = !m.is_static && m.name != "<clinit>" && !self.runs[m.class]
+            || matches!(
+                &m.body[..],
+                [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, _), .. })]
+            );
+        if never_runs {
+            self.line("#[allow(unused_variables)]");
+        }
         if self.display {
             self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
         } else {
@@ -506,10 +542,24 @@ impl<'a> Gen<'a> {
         {
             self.line(&format!("{}();", statics::init_name(&self.class.types[t].name)));
         }
-        if m.is_ctor {
+        // The program ends when its last thread does, not when `main` returns.
+        if m.is_main && self.facts.threaded {
+            let guard = self.runtime("main_thread");
+            self.line(&format!("let _main = {guard}();"));
+        }
+        let initializes = m.name == "<clinit>" && self.facts.threaded;
+        if !never_runs {
+            self.written.insert(index);
+        }
+        if never_runs {
+            self.line(&no_object(&self.class.types[m.class].name));
+        } else if m.is_ctor {
             self.constructor(m);
         } else {
-            self.stmts(&m.body, true);
+            self.stmts(&m.body, !initializes);
+            if initializes {
+                self.init_done(name);
+            }
             if self.throwing && m.ret == Type::Void && exceptions::completes_all(&m.body) {
                 self.line("Ok(())");
             }
@@ -545,6 +595,11 @@ impl<'a> Gen<'a> {
         }
         self.boxed = boxed_locals(m);
     }
+}
+
+/// The body of a method that never runs, as no object of the class named `name` is created.
+fn no_object(name: &str) -> String {
+    format!("unreachable!(\"no object of {name} is created\")")
 }
 
 /// A borrow scoped with braces, `{ x.borrow().f }`, is a function argument of its own in a

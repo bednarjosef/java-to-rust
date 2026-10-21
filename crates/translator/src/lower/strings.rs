@@ -249,7 +249,7 @@ impl<'t> Lowering<'t> {
         {
             return Ok(None);
         }
-        let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
+        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let tys: Vec<Type> = args.iter().map(|a| a.ty).collect();
         let chars = Type::array(Type::Char);
         let bytes = Type::array(Type::Byte);
@@ -301,6 +301,7 @@ impl<'t> Lowering<'t> {
             ("signum", 1) => BitsOp::Signum,
             ("toString", 2) => BitsOp::ToStringRadix,
             ("parseInt" | "parseLong", 2) if args[0].ty == Type::String => BitsOp::ParseRadix,
+            ("parseInt" | "parseLong", 4) if args[0].ty == Type::String => BitsOp::ParseRange,
             _ => return None,
         };
         symbol.is_static.then_some(Builtin::Bits(op, kind))

@@ -242,32 +242,17 @@ fn components(record: &Value) -> Vec<Component> {
         .collect()
 }
 
-/// Moves the records, enums and interfaces declared in method bodies to the top level of a unit
-/// without a package, where javac's simple name for them names them too. They are static, so
-/// they see nothing of the method. One whose name another top-level type has stays where it is,
-/// which lowering rejects as a local class.
+/// Moves the records, enums and interfaces declared in method bodies to the top level of their
+/// unit. They are static, so they see nothing of the method, and they capture nothing. Lowering
+/// names them after their package and simple name, and after the method where another top-level
+/// type has that name (`lower::inner`'s `name_hoisted`).
 fn hoist_local_types(unit: &mut Value) {
-    if !unit["packageName"].is_null() {
-        return;
-    }
     let mut local = Vec::new();
     for decl in unit["typeDecls"].as_array_mut().into_iter().flatten() {
         take_local_types(&mut decl["members"], false, &mut local);
     }
-    let mut names: HashSet<String> = unit["typeDecls"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|d| text(d, "simpleName").to_string())
-        .collect();
-    let mut kept = Vec::new();
-    for decl in local {
-        if names.insert(text(&decl, "simpleName").to_string()) {
-            kept.push(decl);
-        }
-    }
     if let Some(decls) = unit["typeDecls"].as_array_mut() {
-        decls.extend(kept);
+        decls.extend(local);
     }
 }
 

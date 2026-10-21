@@ -78,6 +78,10 @@ impl<'a> Gen<'a> {
                 let chars = self.slice_of(&args[0]);
                 call(self, if newline { "println_chars" } else { "print_chars" }, vec![chars])
             }
+            Native::ErrPrintChars { newline } => {
+                let chars = self.slice_of(&args[0]);
+                call(self, if newline { "eprintln_chars" } else { "eprint_chars" }, vec![chars])
+            }
             Native::SystemProperty(key) => call(self, "system_property", vec![rust_string(key)]),
             Native::TotalMemory => call(self, "total_memory", vec![]),
             Native::FreeMemory => call(self, "free_memory", vec![]),
@@ -98,6 +102,33 @@ impl<'a> Gen<'a> {
             }
             Native::OnSpinWait => call(self, "on_spin_wait", vec![]),
             Native::ThreadYield => call(self, "thread_yield", vec![]),
+            Native::ThreadNumber => call(self, "next_thread_number", vec![]),
+            Native::ThreadId => call(self, "next_thread_id", vec![]),
+            Native::MainThreadId => call(self, "main_thread_id", vec![]),
+            Native::HasCurrentThread => call(self, "has_current_thread", vec![]),
+            Native::SetCurrentThread => {
+                let thread = self.value(&args[0], args[0].ty).text;
+                call(self, "set_current_thread", vec![thread])
+            }
+            Native::CurrentThread => {
+                let ty = self.ty_name(ty);
+                call(self, &format!("current_thread::<{ty}>"), vec![])
+            }
+            Native::ThreadStart => self.thread_start(args),
+            Native::ThreadAlive => {
+                let tid = self.value(&args[0], Type::Long).text;
+                call(self, "thread_alive", vec![tid])
+            }
+            Native::ThreadJoin => {
+                let (tid, millis) =
+                    (self.value(&args[0], Type::Long).text, self.value(&args[1], Type::Long).text);
+                call(self, "join_thread", vec![tid, millis])
+            }
+            Native::ThreadRename => {
+                let tid = self.value(&args[0], Type::Long).text;
+                let name = format!("&{}", self.thread_name(&args[1]));
+                call(self, "rename_thread", vec![tid, name])
+            }
             Native::FileOpenRead
             | Native::FileOpenWrite
             | Native::FileRead
@@ -137,6 +168,35 @@ impl<'a> Gen<'a> {
                 call(self, "crc32_update_bytes", vec![crc, bytes, off, len])
             }
         }
+    }
+
+    /// `Thread.start0(t, tid, name, daemon)` with the call `t.run()` that lowering added: the new
+    /// thread gets its own handle of `t`, makes it its current thread and runs the call, outside
+    /// any `try` of the code that starts it. An exception that escapes `run` ends that thread.
+    fn thread_start(&mut self, args: &'a [Expr]) -> Code {
+        let [thread, tid, name, daemon, run] = args else { unreachable!("start0 has the call of run") };
+        let ExprKind::Var(var) = &thread.kind else { unreachable!("start0's thread is a parameter") };
+        let handle = self.value(thread, thread.ty).text;
+        let (tid, daemon) = (self.value(tid, Type::Long).text, self.value(daemon, Type::Boolean).text);
+        let name = self.thread_name(name);
+        let local = self.local(var);
+        let set = self.runtime("set_current_thread");
+        let attempts = std::mem::take(&mut self.attempts);
+        let throwing = std::mem::replace(&mut self.throwing, false);
+        let body = self.expr(run).text;
+        self.attempts = attempts;
+        self.throwing = throwing;
+        let start = self.runtime("start_thread");
+        Code::atom(format!(
+            "{start}({tid}, {name}, {daemon}, {{ let {local} = {handle}; move || {{ let {local} = &{local}; \
+             {set}({local}.clone()); {body}; }} }})"
+        ))
+    }
+
+    /// A thread's name as a `String`, which `Thread` checks is not null.
+    fn thread_name(&mut self, name: &'a Expr) -> String {
+        let text = self.value(name, Type::String).text;
+        if self.nullable(name) { format!("{}({text})", self.runtime("non_null")) } else { text }
     }
 
     /// `System.identityHashCode(e)` of a value of the enum of `t` (`Object`, an interface, a

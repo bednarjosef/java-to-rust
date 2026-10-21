@@ -741,14 +741,23 @@ fn super_calls_are_non_virtual() {
 }
 
 #[test]
-fn a_superclass_constructor_that_leaks_this_is_rejected() {
-    let err = java_to_rust::translate(
+fn a_superclass_constructor_that_calls_an_override_runs_on_the_whole_object() {
+    let rust = translate(
         "abstract class Base { int x; Base() { x = size(); } abstract int size(); }
         class Impl extends Base { @Override int size() { return 3; } }
         class A { public static void main(String[] a) { System.out.println(new Impl().x); } }",
-    )
-    .expect_err("a superclass constructor that calls an overridable method must be rejected");
-    assert!(err.to_string().contains("call overridable methods not supported yet"), "{err}");
+    );
+    // The object is built with every field zero, then the superclass's constructor body runs on
+    // it as a method, where `size()` is the subclass's.
+    assert_contains(
+        &rust,
+        &[
+            "let mut this = Impl { base: BaseFields::new() };",
+            "this.construct_base();",
+            "fn construct_base(&mut self) {",
+            "self.base.x = self.size();",
+        ],
+    );
 }
 
 #[test]
@@ -1470,6 +1479,14 @@ fn unreachable_code_is_not_translated() {
 }
 
 #[test]
+fn anonymous_classes_are_reached_through_their_creation_and_calls() {
+    let rust = translate_project("anonymous", "app.Main");
+    assert_contains(&rust, &["fn run(", "fn area(", "write!(f, \"task {}\", self.name)"]);
+    // `audit` and `describe` are never called, nor is `never`, whose anonymous class uses `extra`.
+    assert_lacks(&rust, &["extra", "Audit", "audit", "describe", "fn never", "\"never\""]);
+}
+
+#[test]
 fn classes_with_one_name_in_two_packages() {
     let rust = translate_project("statics", "com.shop.Main");
     assert_contains(
@@ -1565,13 +1582,14 @@ fn program_errors_name_their_file() {
             ),
             (
                 "p/Other.java",
-                "package p;\nclass Other {\n    static void run() {\n        Thread t = null;\n    }\n}\n",
+                "package p;\nclass Other {\n    static void run() {\n        ProcessBuilder t = null;\n    }\n}\n",
             ),
         ],
     );
     let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
-    let error = java_to_rust::translate_program(&program).expect_err("Thread is not supported").to_string();
-    assert!(error.ends_with("Other.java:4:9: type `java.lang.Thread` not supported yet"), "{error}");
+    let error =
+        java_to_rust::translate_program(&program).expect_err("ProcessBuilder is not supported").to_string();
+    assert!(error.ends_with("Other.java:4:9: type `java.lang.ProcessBuilder` not supported yet"), "{error}");
 }
 
 #[test]
@@ -2351,11 +2369,10 @@ fn local_and_anonymous_classes_are_declared_so_their_calls_are_not_outside() {
     );
     let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
     let report = survey(&program).report;
-    // The local enum of a file with a package is a feature of the method that declares it; its
-    // calls are not calls to classes outside the sources.
-    // classes outside the sources.
+    // The local enum of a file with a package is hoisted to the top level, so it is no feature of
+    // the method that declares it; its calls are not calls to classes outside the sources.
     let table = feature_table(&report, "Program code: features");
-    assert!(feature_row(table, "local interfaces, enums and records").contains("Main.java:"), "{table}");
+    assert!(!table.contains("local interfaces, enums and records"), "{table}");
     assert!(!table.contains("anonymous classes"), "{table}");
     assert!(!table.contains("classes outside"), "{table}");
     assert_lacks(&report, &["(outside)"]);
@@ -2445,7 +2462,8 @@ fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
     let program_table = feature_table(&report, "Program code: features");
     let library_table = feature_table(&report, "Library code: features");
     assert!(report.find("Program code:").unwrap() < report.find("Library code:").unwrap(), "{report}");
-    assert!(feature_row(program_table, "local interfaces").contains("Main.java:"), "{program_table}");
+    // The local enum is hoisted, so the program has no blocker of its own.
+    assert!(!program_table.contains("local interfaces"), "{program_table}");
     assert!(!program_table.contains("computed method receivers"), "{program_table}");
     // The library's example is relative to its root, not the absolute path.
     let row = feature_row(library_table, "computed method receivers");
@@ -2847,6 +2865,39 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             public static native long getuid();
             public static long badOffset() { return theUnsafe.arrayBaseOffset(new int[0].getClass()); }
             public static int badScale() { return theUnsafe.arrayIndexScale(String.class); }
+            public long objectFieldOffset(Class<?> c, String name) {
+                if (c == null || name == null) { throw new NullPointerException(); }
+                return objectFieldOffset1(c, name);
+            }
+            private native long objectFieldOffset1(Class<?> c, String name);
+            public native Object getReferenceVolatile(Object o, long offset);
+            public native void putReferenceVolatile(Object o, long offset, Object x);
+            public final Object getReferenceAcquire(Object o, long offset) { return getReferenceVolatile(o, offset); }
+            public final void putReferenceRelease(Object o, long offset, Object x) { putReferenceVolatile(o, offset, x); }
+            public native int getInt(Object o, long offset);
+            public native void putIntVolatile(Object o, long offset, int x);
+        }",
+    ),
+    (
+        "lib/jdk/internal/misc/Lazy.java",
+        "package jdk.internal.misc;
+        public final class Lazy {
+            private static final Unsafe U = Unsafe.getUnsafe();
+            private static final long VALUE = U.objectFieldOffset(Lazy.class, \"value\");
+            private static final long COUNT = U.objectFieldOffset(Lazy.class, \"count\");
+            private String value;
+            private int count;
+            public String get() {
+                String v = (String) U.getReferenceAcquire(this, VALUE);
+                if (v == null) {
+                    v = \"computed\";
+                    U.putReferenceRelease(this, VALUE, v);
+                    U.putIntVolatile(this, COUNT, U.getInt(this, COUNT) + 1);
+                }
+                return v;
+            }
+            public int count() { return count; }
+            public static long offset() { return VALUE; }
         }",
     ),
     (
@@ -2920,6 +2971,21 @@ fn natives_of_jdk_classes_become_runtime_calls() {
 }
 
 #[test]
+fn an_access_through_a_field_offset_is_the_field() {
+    let rust = translate_with_natives(
+        "jdk-field-handles",
+        "Lazy l = new Lazy(); System.out.println(l.get() + l.get() + l.count());",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    // The offsets are no fields, and `Unsafe`'s accessors are not translated.
+    assert_lacks(
+        &rust,
+        &["LAZY_VALUE", "LAZY_COUNT", "field_offset", "fn get_reference_acquire", "fn get_int"],
+    );
+    assert_contains(&rust, &["self.value", "self.count"]);
+}
+
+#[test]
 fn natives_the_runtime_lacks_are_rejected_by_name() {
     let rejection =
         |dir: &str, statements: &str| translate_with_natives(dir, statements).expect_err("must be rejected");
@@ -2938,6 +3004,8 @@ fn natives_the_runtime_lacks_are_rejected_by_name() {
         error.ends_with("`Unsafe.arrayIndexScale` of a class that is not an array not supported yet"),
         "{error}"
     );
+    let error = rejection("jdk-natives-offset-value", "System.out.println(Lazy.offset());");
+    assert!(error.ends_with("a field offset used as a value not supported yet"), "{error}");
 }
 
 const INTERFACES: &str = "
@@ -3320,6 +3388,36 @@ fn a_null_dereference_that_a_catch_sees_is_a_checked_non_null() {
 }
 
 #[test]
+fn the_message_of_a_null_dereference_is_rejected_and_a_created_ones_is_not() {
+    let program = |message: &str| {
+        format!(
+            "class A {{
+                A next;
+                int v;
+                static int second(A a) {{
+                    try {{
+                        if (a.v > 0) {{ throw new NullPointerException(\"given\"); }}
+                        return a.next.v;
+                    }} catch (NullPointerException e) {{
+                        System.out.println({message});
+                        return -1;
+                    }}
+                }}
+                public static void main(String[] args) {{
+                    System.out.println(second(new A()));
+                }}
+            }}"
+        )
+    };
+    let err = java_to_rust::translate(&program("e.getMessage()")).unwrap_err().to_string();
+    assert!(
+        err.contains("the message of a `NullPointerException` that the runtime raises not supported yet"),
+        "{err}"
+    );
+    java_to_rust::translate(&program("\"caught\"")).expect("a catch that does not read the message");
+}
+
+#[test]
 fn an_eager_static_object_starts_empty_and_is_not_null_once_initialized() {
     let rust = translate(
         "class A {
@@ -3377,31 +3475,6 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
         "{err}"
     );
     let err = reject(
-        "class A { public static void main(String[] a) {
-            RuntimeException e = a.length > 0 ? new RuntimeException() : null;
-            throw e;
-        } }",
-    );
-    assert!(err.contains("throwing a value that may be null not supported yet"), "{err}");
-    let err = reject(
-        "class A { public static void main(String[] a) {
-            int n = switch (a.length) {
-                case 0 -> { try { yield 1; } finally { System.out.println(2); } }
-                default -> 3;
-            };
-            System.out.println(n);
-        } }",
-    );
-    assert!(err.contains("a `yield` through a `finally` not supported yet"), "{err}");
-    let err = reject(
-        "class P {
-            int x;
-            P(int x) { try { if (x < 0) return; this.x = x; } finally { System.out.println(\"built\"); } }
-        }
-        class A { public static void main(String[] a) { System.out.println(new P(1).x); } }",
-    );
-    assert!(err.contains("a `return` of a constructor through a `finally` not supported yet"), "{err}");
-    let err = reject(
         "class Bad extends RuntimeException {
             Bad(int x) { super(\"bad\"); if (x < 0) throw new IllegalStateException(\"negative\"); }
         }
@@ -3428,20 +3501,22 @@ fn a_try_with_resources_closes_each_resource_in_a_finally() {
             }
         }",
     );
-    // `b` is closed first, then `a`, however the body ends.
-    assert_contains(&rust, &["let a = ", "let b = ", ".close();\n        }\n        a.", ".close();"]);
-    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
-    let err = reject(
+    // `b` is closed first, then `a`, however the body ends; this `close` cannot throw, so no
+    // `addSuppressed` is needed.
+    assert_contains(&rust, &["let a = ", "let b = ", "a_failed", "b_failed", ".close();"]);
+    assert!(!rust.contains(".add_suppressed("));
+    let rust = translate(
         "class A {
             static class R implements AutoCloseable {
                 public void close() { throw new IllegalStateException(\"closing\"); }
             }
             public static void main(String[] args) {
-                try (R r = new R()) { System.out.println(1); }
+                try (R r = new R()) { throw new RuntimeException(\"body\"); }
             }
         }",
     );
-    assert!(err.contains("a resource whose `close` may fail not supported yet"), "{err}");
+    assert_contains(&rust, &["r_failed", "add_suppressed"]);
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
     let err = reject(
         "class A {
             static class R implements AutoCloseable { public void close() {} }
@@ -3668,12 +3743,14 @@ fn identity_of_object_values_that_may_be_strings_is_rejected() {
 }
 
 #[test]
-fn an_array_as_an_object_is_rejected() {
-    let err = java_to_rust::translate(
+fn an_array_as_an_object_prints_as_its_jvm_name_and_hash() {
+    let rust = translate(
         "class M { public static void main(String[] x) { Object a = new int[2]; System.out.println(a); } }",
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("an array as an `Object` value not supported yet"), "{err}");
+    );
+    assert_contains(
+        &rust,
+        &["Object::IntArray(o) => f.write_str(&java::default_text(\"[I\", java::identity_hash(o))),"],
+    );
 }
 
 const GENERICS: &str = "
@@ -3781,6 +3858,33 @@ fn a_type_variable_with_several_bounds_is_cast_to_the_later_bound_it_calls() {
             "fn max(a: Object, b: Object) -> Object {",
             "java::cast(a.as_comparable(), \"Comparable\").compare_to(",
             "t.name()",
+        ],
+    );
+}
+
+#[test]
+fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
+    let rust = translate(
+        "public class Main {
+            public static void main(String[] args) {
+                int[] cell = {1, 2};
+                Object held = cell;
+                int[] back = (int[]) held;
+                back[0] = 5;
+                System.out.println(cell[0] + \" \" + (held == cell) + \" \" + (held instanceof String[]));
+                System.out.println(held.hashCode() == cell.hashCode());
+            }
+        }",
+    );
+    // The variant holds the array's handle, so the array keeps its identity in the `Object`.
+    assert_contains(
+        &rust,
+        &[
+            "IntArray(java::Array<i32>),",
+            "let held = Object::IntArray(cell.clone());",
+            "java::cast(held.as_int_array(), \"[I\")",
+            "(Object::IntArray(a), Object::IntArray(b)) => Rc::ptr_eq(a, b),",
+            "Object::IntArray(o) => java::identity_hash(o),",
         ],
     );
 }
@@ -3949,4 +4053,21 @@ fn new_object_creates_a_plain_object_with_its_identity() {
         &rust,
         &["struct PlainObject {", "let o = Rc::new(PlainObject::new());", "java.lang.Object"],
     );
+}
+
+#[test]
+fn an_element_that_may_be_null_is_passed_as_the_receiver_that_it_is() {
+    // `start` uses `this` as a value, so it takes the element's `&Rc<..>`, which the null check
+    // already gives.
+    let rust = translate(
+        "class P {
+            static class Box { int v; static void register(Box b) { b.v++; } void start() { register(this); } }
+            public static void main(String[] args) {
+                Box[] boxes = new Box[2];
+                for (int i = 0; i < 2; i++) { boxes[i] = new Box(); boxes[i].start(); }
+                System.out.println(boxes[0].v + boxes[1].v);
+            }
+        }",
+    );
+    assert_contains(&rust, &["PBox::start(java::non_null(boxes[i as usize].as_ref()));"]);
 }

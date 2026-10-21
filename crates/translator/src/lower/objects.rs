@@ -53,7 +53,7 @@ impl<'t> Lowering<'t> {
             reach: None,
             entry: None,
             standard: exceptions::Standard::default(),
-            closes: Default::default(),
+            object_arrays: Default::default(),
             object: None,
             plain_object: None,
             real: Default::default(),
@@ -63,6 +63,7 @@ impl<'t> Lowering<'t> {
             lambdas: Vec::new(),
             capture_refs: Default::default(),
             capture_sites: Default::default(),
+            member_outers: Vec::new(),
         }
     }
 
@@ -111,7 +112,13 @@ impl<'t> Lowering<'t> {
                 }
                 "EMPTY_STATEMENT" => {}
                 "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
-                    return unsupported(member, "member classes of local and anonymous classes");
+                    // Named after its outer class once that is named (see `inner::name_nested`).
+                    self.member_outers.push((self.types.len(), index));
+                    if member.kind() == "CLASS" && !member.has_flag("STATIC") {
+                        self.declare_inner(index, member)?;
+                    } else {
+                        self.declare_type(member, Some(&name))?;
+                    }
                 }
                 "ENUM" | "INTERFACE" | "RECORD" => self.declare_type(member, Some(&name))?,
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
@@ -157,6 +164,7 @@ impl<'t> Lowering<'t> {
         for member in node
             .list("members")
             .filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m) && self.keeps(*m, javac))
+            .filter(|m| self.handle_declaration(*m).is_none())
         {
             // Moved initializers run in the constructors (see `inner`).
             let field = self.field(member, !(moved && !member.has_flag("STATIC")))?;
@@ -213,7 +221,9 @@ impl<'t> Lowering<'t> {
     /// `Class.name`. `None` for anything else, including fields of library classes.
     pub(super) fn field_place(&self, node: Node<'t>) -> Result<Option<Place>, Error> {
         let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD") else { return Ok(None) };
-        let Some(class) = self.type_index(symbol.owner) else { return Ok(None) };
+        let Some(class) = self.type_index(symbol.owner).or_else(|| self.body_field_owner(&symbol)) else {
+            return Ok(None);
+        };
         let receiver = match node.kind() {
             "IDENTIFIER" => None,
             "MEMBER_SELECT" => Some(node.child("expression")?),
@@ -221,6 +231,7 @@ impl<'t> Lowering<'t> {
         };
         let name = symbol.name.to_string();
         if symbol.is_static {
+            self.check_handle_use(node)?;
             // Java evaluates an object in front of a static field and ignores it, even null;
             // one without effects is simply dropped.
             if let Some(r) = receiver

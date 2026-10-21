@@ -49,6 +49,8 @@ impl<'t> Lowering<'t> {
                     && m.get("initializer").is_some()
                     && !Self::is_constant(m)
                     && !enums::is_enum_constant(m)
+                    && self.keeps(m, &self.types[index].javac)
+                    && self.handle_declaration(m).is_none()
             }
             _ => false,
         })
@@ -70,7 +72,12 @@ impl<'t> Lowering<'t> {
             }
             match member.kind() {
                 "BLOCK" => body.push(Stmt::Block(self.block(member)?)),
-                "VARIABLE" if !Self::is_constant(member) => {
+                // A field that nothing reads, whose initializer does nothing else, is not kept.
+                "VARIABLE"
+                    if !Self::is_constant(member)
+                        && self.keeps(member, &self.types[index].javac)
+                        && self.handle_declaration(member).is_none() =>
+                {
                     let Some(init) = member.get("initializer") else { continue };
                     let ty = self.ty(member, member.symbol().map_or("", |s| s.ty))?;
                     let target = Place::Static { class: index, name: member.str("name").to_string() };

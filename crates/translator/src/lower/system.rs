@@ -18,6 +18,10 @@ const KEYS: &[&str] = &[
     "os.arch",
 ];
 
+/// Keys under `JVM_KEYS` that only the command line sets, never the JVM itself: unknown keys, as
+/// for a program run without them. `Arrays.sort` reads the first to choose its old merge sort.
+const UNSET_KEYS: &[&str] = &["java.util.Arrays.useLegacyMergeSort"];
+
 /// Prefixes of keys that the JVM sets. A program reading one would see the JVM's value, which the
 /// translation cannot give, so these are rejected rather than taken for unknown keys.
 const JVM_KEYS: &[&str] = &[
@@ -45,6 +49,15 @@ impl<'t> Lowering<'t> {
         symbol: &Symbol<'t>,
         args: &mut [Expr],
     ) -> Result<Option<ExprKind>, Error> {
+        // `Boolean.getBoolean(key)`, true when the property is `"true"`: false for an unset key.
+        if (symbol.owner, symbol.name) == ("java.lang.Boolean", "getBoolean") {
+            return match args.first().map(|arg| &arg.kind) {
+                Some(ExprKind::Str(key)) if UNSET_KEYS.contains(&key.as_str()) => {
+                    Ok(Some(ExprKind::Bool(false)))
+                }
+                _ => unsupported(node, "`Boolean.getBoolean` of a key that may be set"),
+            };
+        }
         if (symbol.owner, symbol.name) != ("java.lang.System", "getProperty") {
             return Ok(None);
         }
@@ -65,7 +78,7 @@ impl<'t> Lowering<'t> {
             }
             return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::SystemProperty(name)), Vec::new())));
         }
-        if JVM_KEYS.iter().any(|prefix| key.starts_with(prefix)) {
+        if JVM_KEYS.iter().any(|prefix| key.starts_with(prefix)) && !UNSET_KEYS.contains(&key.as_str()) {
             return unsupported(
                 node,
                 &format!(

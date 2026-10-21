@@ -6,7 +6,7 @@
 mod reach;
 mod survey;
 
-pub use reach::{CLASS_KINDS, Reach, class_name, never_true};
+pub use reach::{CLASS_KINDS, Reach, class_name, live_branch, unsafe_field_access};
 pub use survey::Survey;
 
 use crate::ast::{Error, Pos};
@@ -60,10 +60,12 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
     let (units, reach) = load(program)?;
     let units: Vec<&Value> = units.iter().collect();
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
-    let class =
+    let mut class =
         phase("lower", || lower::lower_program(&trees, &reach, &program.main)).map_err(|(unit, error)| {
             ProgramError { file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string), error }
         })?;
+    phase("whole objects", || analysis::whole_objects(&mut class))
+        .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
     let located = |error: Error| ProgramError { file: locate(&units, &class, error.pos), error };
     let facts = phase("analyze", || analysis::analyze(&class)).map_err(located)?;
     phase("codegen", || codegen::generate(&class, &facts)).map_err(located)

@@ -2,7 +2,9 @@
 //! decoding follow the JDK (`sun.nio.cs` and `String.decodeUTF8_UTF16`), including how each
 //! charset replaces what it cannot encode or decode, so that the output matches Java's bytes.
 
+use crate::string::string_hash;
 use crate::{Array, from_vec, throw};
+use std::fmt;
 
 const REPLACEMENT: char = '\u{FFFD}';
 
@@ -16,6 +18,13 @@ pub enum Charset {
     Utf16,
     Utf16Be,
     Utf16Le,
+}
+
+/// `toString()` is the canonical name, so a charset prints as Java prints it.
+impl fmt::Display for Charset {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// The canonical names and aliases of each charset, which Java matches case-insensitively.
@@ -74,9 +83,56 @@ impl Charset {
             .map(|&(_, charset)| charset)
     }
 
-    /// `Charset.forName(name)`, which throws `UnsupportedCharsetException` for an unknown name.
-    pub fn for_name(name: &str) -> Charset {
+    /// `name()`: the canonical name, which `toString()` gives too.
+    pub fn name(self) -> &'static str {
+        match self {
+            Charset::Utf8 => "UTF-8",
+            Charset::UsAscii => "US-ASCII",
+            Charset::Latin1 => "ISO-8859-1",
+            Charset::Utf16 => "UTF-16",
+            Charset::Utf16Be => "UTF-16BE",
+            Charset::Utf16Le => "UTF-16LE",
+        }
+    }
+
+    /// `displayName()` in English, which these charsets' display names are: their canonical names.
+    pub fn display_name(self) -> &'static str {
+        self.name()
+    }
+
+    /// `hashCode()`, which Java defines as the hash code of the name.
+    pub fn hash_code(self) -> i32 {
+        string_hash(self.name())
+    }
+
+    /// `Charset.defaultCharset()`: UTF-8, as Java 18 and later have it (JEP 400).
+    pub fn default_charset() -> Charset {
+        Charset::Utf8
+    }
+
+    /// `Charset.forName(name)`: a null name is an `IllegalArgumentException`, a malformed name an
+    /// `IllegalCharsetNameException` and an unknown one an `UnsupportedCharsetException`, each
+    /// with the name as its message.
+    pub fn for_name(name: Option<&str>) -> Charset {
+        let name = Charset::legal_name(name);
         Charset::lookup(name).unwrap_or_else(|| throw("java.nio.charset.UnsupportedCharsetException", name))
+    }
+
+    /// `Charset.isSupported(name)`, which checks the name as `for_name` does.
+    pub fn is_supported(name: Option<&str>) -> bool {
+        Charset::lookup(Charset::legal_name(name)).is_some()
+    }
+
+    /// The name, checked as Java checks it: letters and digits, and `-+:_.` after the first
+    /// character.
+    fn legal_name(name: Option<&str>) -> &str {
+        let name = name.unwrap_or_else(|| throw("java.lang.IllegalArgumentException", "Null charset name"));
+        let legal = !name.is_empty()
+            && name.char_indices().all(|(i, c)| c.is_ascii_alphanumeric() || (i > 0 && "-+:_.".contains(c)));
+        if !legal {
+            throw("java.nio.charset.IllegalCharsetNameException", name);
+        }
+        name
     }
 
     /// A charset given by name to `getBytes` or `new String`, which throws

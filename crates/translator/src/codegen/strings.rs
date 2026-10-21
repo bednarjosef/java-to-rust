@@ -50,6 +50,20 @@ impl<'a> Gen<'a> {
             | ExprKind::IncDec { target: Place::Var(target), .. } => {
                 assigned.insert(target.clone());
             }
+            // A field of `this` that a call or an assignment of the concatenation may change is
+            // copied as it is reached too, which also ends its borrow before `self` is borrowed
+            // mutably. No local is named `this`.
+            ExprKind::MethodCall { receiver, resolved: Some(m), .. }
+                if matches!(receiver.kind, ExprKind::This) && self.facts.mutating.contains(m) =>
+            {
+                assigned.insert("this".to_string());
+            }
+            ExprKind::Assign { target: Place::Field { object, .. }, .. }
+            | ExprKind::IncDec { target: Place::Field { object, .. }, .. }
+                if matches!(object.kind, ExprKind::This) =>
+            {
+                assigned.insert("this".to_string());
+            }
             _ => {}
         });
         // An object is formatted through its `Display`, which runs its `toString` when the text is
@@ -74,8 +88,8 @@ impl<'a> Gen<'a> {
             {
                 out.push(Part::Arg(self.object_text(receiver)))
             }
-            // An enum prints through its `Display`, which is its name.
-            _ if matches!(e.ty, Type::Enum(_)) => out.push(Part::Arg(self.expr(e))),
+            // An enum prints through its `Display`, which is its name; so does a charset.
+            _ if matches!(e.ty, Type::Enum(_) | Type::Charset) => out.push(Part::Arg(self.expr(e))),
             // A builder shows its text as it is when it is converted, before later operands run.
             _ if e.ty == Type::StringBuilder => {
                 let sb = self.builder_recv(e);
@@ -118,7 +132,11 @@ impl<'a> Gen<'a> {
                 out.push(Part::Arg(Code::atom(self.object_place(e))))
             }
             _ => {
-                let code = self.expr(e);
+                let mut code = self.expr(e);
+                let copied = matches!(&e.kind, ExprKind::Field { object, .. } if matches!(object.kind, ExprKind::This));
+                if copied && assigned.contains("this") && (e.ty.is_numeric() || e.ty == Type::Boolean) {
+                    code = Code::atom(format!("{{ {} }}", code.text));
+                }
                 if let Some(literal) = code.literal {
                     // A constant made by folding a cast, such as `(long) 1e19`.
                     out.push(Part::Lit(literal_text(literal)));
