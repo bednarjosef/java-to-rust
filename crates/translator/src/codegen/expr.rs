@@ -621,7 +621,7 @@ impl<'a> Gen<'a> {
                 self.format(&mac, parts)
             }
             Builtin::ObjectText => self.object_to_string(&args[0]),
-            Builtin::ObjectClone => self.object_clone(&args[0]),
+            Builtin::ObjectClone => self.object_clone(&args[0], id),
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty, id)
             }

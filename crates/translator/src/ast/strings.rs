@@ -40,8 +40,11 @@ pub enum StringOp {
     Concat,
     ToCharArray,
     /// The UTF-16 code units of a string as an `int[]`, which `s.chars()` streams (see
-    /// `program::reach::STRING_CHARS`).
+    /// `program::reach::STRING_STREAMS`).
     CharCodes,
+    /// The lines of a string as an `Object[]` of strings, which `s.lines()` streams: ended by
+    /// `\n`, `\r` or `\r\n`, without an empty last line.
+    Lines,
     /// `new String(chars)`, `String.valueOf(chars)` and `String.copyValueOf(chars)`, with an
     /// offset and count or without.
     FromChars,

@@ -554,6 +554,11 @@ impl<'a> Gen<'a> {
                 None => {
                     let c = self.value_class(value);
                     match self.variant_of(t, c) {
+                        // A borrowed optional string is an `Option<&str>`.
+                        Some(variant) if matches!(&value.kind, ExprKind::Var(name) if self.borrowed_optional.contains(name)) =>
+                        {
+                            format!("{option}.map(|s| {variant}(s.to_string()))")
+                        }
                         Some(variant) => format!("{option}.map({variant})"),
                         None => {
                             format!("{option}.map(|_| -> {} {{ {} }})", self.ty_name(to), absent(self, c))

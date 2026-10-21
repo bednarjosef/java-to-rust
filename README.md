@@ -143,11 +143,14 @@ A small subset, end to end:
   program can tell (see "Threads").
   An override may return a subtype of the overridden method's return type (a
   covariant return): the override's value is converted to the overridden method's representation,
-  so a caller that goes through the supertype sees the same value as Java's. In a class that
-  implements `Cloneable` with no superclass and no subclasses, `super.clone()` (or `clone()` with no
-  receiver) is a shallow copy of the fields: primitives and strings by value, arrays and object
-  references shared, as Java shares them. `clone` of another object, or in a class with a superclass
-  or a subclass, is rejected.
+  so a caller that goes through the supertype sees the same value as Java's. `super.clone()` (or
+  `clone()` with no receiver) of `Object` is a shallow copy of the object's runtime class: its
+  fields and its superclasses' (the `base` structs), primitives and strings by value, arrays and
+  object references shared, as Java shares them. In a class with subclasses it is a `match` on the
+  object's variant, so the copy of a subclass's object is one of the subclass, as `EnumSet.clone`
+  copies a `RegularEnumSet`. A class that is not `Cloneable` (itself, a superclass or an interface)
+  throws `CloneNotSupportedException` with its binary name, which the program can catch. `clone`
+  of another object than `this` is rejected.
 - **Class trees, interfaces and generics**: class trees of the program's own classes translate,
   abstract or not and of any depth: `extends`, abstract methods, overriding and virtual calls,
   `super(...)` and `super.m(...)`, upcasts, `==` on objects of a class tree, and printing through
@@ -235,20 +238,23 @@ A small subset, end to end:
   `break` or `continue` out of the `try`, through nested `try`s; a `return` or an exception in the
   `finally` replaces how the `try` ended. A failure of the runtime that a `catch` or a `finally`
   sees (a division by zero, an array index out of bounds, `charAt` or `substring` out of range, a
-  malformed number) is the standard exception Java throws, with Java's message; elsewhere it ends
-  the program as before. try-with-resources closes the program's own resources (a new object of
-  the program's class, or an existing variable of it, `try (r)`; a null one is not closed) in the
-  reverse order, before its `catch` clauses and `finally`; a `close`
-  that throws after the body threw is added to that exception as suppressed, and `getSuppressed`
-  returns it. A `throw` of a value that may be null throws `NullPointerException`, and a `yield` or
-  a constructor's `return` through a `finally` runs the `finally` first. A static initializer or a
-  static field initializer that throws ends an uncaught program with
-  `ExceptionInInitializerError`. Rejected for now, by name: try-with-resources over a library type
-  (an `AutoCloseable` variable or lambda), catching or
-  letting a `finally` see a null dereference, a negative array size, a failed cast or a failure of
-  the library other than these, a `toString`, an instance field initializer or a constructor of an
-  exception or an enum that throws something a caller catches, and a `try` or `catch` that observes
-  an `ExceptionInInitializerError`. A constructor that throws returns a `Result`, as a method does. The design is in
+  malformed or `null` number string) is the standard exception Java throws, with Java's message;
+  elsewhere it ends the program as before. try-with-resources closes the program's own resources
+  (a new object of the program's class, or an existing variable of it, `try (r)`; a null one is not
+  closed) in the reverse order, before its `catch` clauses and `finally`; a `close` that throws
+  after the body threw is added to that exception as suppressed, and `getSuppressed` returns it;
+  `addSuppressed` of the exception itself or of `null` throws Java's `IllegalArgumentException` or
+  `NullPointerException`. A `throw` of a value that may be null throws
+  `NullPointerException`, and a `yield` or a constructor's `return` through a `finally` runs the
+  `finally` first. A static initializer or a static field initializer that throws ends an uncaught
+  program with `ExceptionInInitializerError`; where a `catch` of it, of `Error` or of `Throwable`
+  observes it, the first use throws it and every later use throws `NoClassDefFoundError`. A
+  constructor or an instance field initializer that throws returns a `Result`, as a method does.
+  Rejected for now, by name: try-with-resources over a library type (an `AutoCloseable` variable or
+  lambda), catching or letting a `finally` see a null dereference, a negative array size, a failed
+  cast or a failure of the library other than these, a `toString`, a constructor of an exception or
+  an enum that throws something a caller catches, and a `finally` that sees a static initializer's
+  failure in a program that catches none of those classes. The design is in
   [docs/exceptions.md](docs/exceptions.md).
 - **Threads** are the platform's: a class that extends `Thread` and overrides `run`, or a
   `Thread` given a `Runnable` (a class or a lambda), with `start`, `join` (with and without a
@@ -572,10 +578,11 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   interface that extends another names its closures (`type UnaryOperator = Function;`). Each
   lambda is a closure written where it is created, its captures moved in (`Rc::new(move |a:
   i32, b: i32| -> i32 { a.wrapping_add(b).wrapping_add(k) }) as IntOp`, `this` as `outer`), and
-  a call is a call of the closure (`op(acc, x)`). Every other functional interface keeps the
-  class per lambda. Not yet: other receivers, `super` in a lambda, typed closures for a generic
-  interface's instantiations, and the parameter and local forms (`impl FnMut`, a plain `let f =
-  |x| ..`).
+  a call is a call of the closure (`op(acc, x)`). A local that only calls its lambda is the
+  closure itself, borrowing what it captures (`let scale = |x: i32| -> i32 {
+  x.wrapping_mul(this.borrow().factor) };`). Every other functional interface keeps the class
+  per lambda. Not yet: other receivers, `super` in a lambda, typed closures for a generic
+  interface's instantiations, and the parameter form (`impl FnMut`).
 
 ### Whole programs
 

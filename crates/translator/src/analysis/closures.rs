@@ -185,6 +185,65 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
     candidates
 }
 
+/// The locals of closure types, by method and name, that are only called: each declaration of
+/// the name in the method has a lambda converted to its type as its initializer, and every other
+/// use of it is a call of its type's method on it. Nothing else holds such a closure, so it is a
+/// plain Rust closure that the method owns, with no `Rc`.
+pub fn closure_locals(class: &Class, closure_types: &HashSet<usize>) -> HashSet<(usize, String)> {
+    let mut out = HashSet::new();
+    for (index, m) in class.methods.iter().enumerate() {
+        // Per name: whether every declaration qualifies, and the uses that are calls.
+        let mut declared: HashMap<String, bool> = HashMap::new();
+        for s in &m.body {
+            visit_stmt(s, &mut |_| {}, &mut |s| {
+                if let Stmt::Local { ty, name, init, .. } = s {
+                    let lambda = closure_types.contains(&class.class_index(*ty).unwrap_or(usize::MAX))
+                        && matches!(init, Some(Expr { kind: ExprKind::Cast(to, value), .. })
+                            if to == ty && matches!(value.kind, ExprKind::New { ctor: Some(_), .. }));
+                    *declared.entry(name.clone()).or_insert(true) &= lambda;
+                }
+            });
+        }
+        declared.retain(|_, lambda| *lambda);
+        if declared.is_empty() {
+            continue;
+        }
+        let mut uses: HashMap<String, usize> = HashMap::new();
+        let mut calls: HashMap<String, usize> = HashMap::new();
+        let mut assigned: HashSet<String> = HashSet::new();
+        for s in &m.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| match &x.kind {
+                        ExprKind::Var(name) => *uses.entry(name.clone()).or_default() += 1,
+                        ExprKind::MethodCall { receiver, resolved: Some(r), .. } => {
+                            if let ExprKind::Var(name) = &receiver.kind
+                                && let Some(t) = class.class_index(receiver.ty)
+                                && closure_types.contains(&t)
+                                && *r == closure_method(class, t)
+                            {
+                                *calls.entry(name.clone()).or_default() += 1;
+                            }
+                        }
+                        ExprKind::Assign { target: Place::Var(name), .. } => {
+                            assigned.insert(name.clone());
+                        }
+                        _ => {}
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+        for name in declared.keys() {
+            if !assigned.contains(name) && uses.get(name) == calls.get(name) {
+                out.insert((index, name.clone()));
+            }
+        }
+    }
+    out
+}
+
 /// The abstract method of closure type `t`, which its closures run.
 pub fn closure_method(class: &Class, t: usize) -> usize {
     match class.methods.iter().position(|m| m.class == t && is_functional_method(m)) {

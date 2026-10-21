@@ -4187,8 +4187,50 @@ fn an_element_that_may_be_null_is_passed_as_the_receiver_that_it_is() {
 }
 
 #[test]
-fn string_chars_needs_the_jdk_sources() {
-    let err = java_to_rust::translate("class A { public static void main(String[] a) { \"abc\".chars(); } }")
-        .expect_err("`String.chars` streams with the JDK's code");
-    assert!(err.to_string().contains("translate the program with the JDK's sources"), "{err}");
+fn string_streams_need_the_jdk_sources() {
+    for method in ["chars", "lines"] {
+        let source = format!("class A {{ public static void main(String[] a) {{ \"abc\".{method}(); }} }}");
+        let err = java_to_rust::translate(&source).expect_err("a string's stream runs the JDK's code");
+        assert!(err.to_string().contains(&format!("`String.{method}` streams with the JDK's code")), "{err}");
+    }
+}
+
+#[test]
+fn clone_in_a_class_tree_copies_each_runtime_class() {
+    // `Object.clone` copies every field of the runtime class, the embedded superclass fields
+    // too, and refuses a class that is not `Cloneable` when the copy is made.
+    let rust = translate(
+        "class A {
+            static class Shape {
+                int x;
+                Shape copy() throws CloneNotSupportedException { return (Shape) super.clone(); }
+            }
+            static class Circle extends Shape implements Cloneable { int r; }
+            public static void main(String[] a) throws CloneNotSupportedException {
+                Shape s = new Circle();
+                System.out.println(s.copy().x);
+                try { new Shape().copy(); } catch (CloneNotSupportedException e) { System.out.println(e); }
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "AShape::Shape(_) => java::try_clone_refused(\"A$Shape\")?",
+            "AShape::Circle(o) => { let o = o.borrow(); AShape::Circle(Rc::new(RefCell::new(ACircle { base: AShapeFields { x: o.base.x }, r: o.r }))) }",
+        ],
+    );
+}
+
+#[test]
+fn clone_of_another_object_is_rejected() {
+    let err = java_to_rust::translate(
+        "class A implements Cloneable {
+            int x;
+            Object other(A a) throws CloneNotSupportedException { return a.clone(); }
+            public static void main(String[] args) {}
+        }",
+    )
+    .expect_err("only `super.clone()` is translated");
+    assert!(err.to_string().contains("`clone` of an object other than `this`"), "{err}");
 }

@@ -43,6 +43,17 @@ pub fn uncaught<T>(e: impl fmt::Display) -> T {
     die(e)
 }
 
+/// `Object.clone()` of an object of the class with binary name `class`, which is not
+/// `Cloneable`: Java throws a `CloneNotSupportedException` whose message is the class's name.
+pub fn clone_refused<T>(class: &str) -> T {
+    try_clone_refused(class).unwrap_or_else(uncaught)
+}
+
+/// `clone_refused` where the program observes the `CloneNotSupportedException`.
+pub fn try_clone_refused<T>(class: &str) -> Result<T, Exception> {
+    Err(Exception::new("java.lang.CloneNotSupportedException", class))
+}
+
 /// `throw e` where nothing catches what is thrown: the program ends as `uncaught` describes.
 pub fn throw_uncaught(e: impl fmt::Display) -> ! {
     die(e)
@@ -123,7 +134,7 @@ mod tests {
     use super::*;
 
     fn parse(s: &str) -> Result<i32, Exception> {
-        crate::try_parse_number::<i32>(s)
+        crate::try_parse_radix::<i32>(Some(s), 10)
     }
 
     #[test]
@@ -198,7 +209,7 @@ mod tests {
         assert_eq!(crate::try_ascii_char_at("ab", 1), Ok(b'b' as u16));
         assert_eq!(
             message(crate::try_parse_radix::<i32>(None, 10)),
-            "java.lang.NumberFormatException: Cannot parse null string: null"
+            "java.lang.NumberFormatException: Cannot parse null string"
         );
         assert_eq!(
             message(crate::try_parse_radix::<i32>(Some("3000000000"), 10)),

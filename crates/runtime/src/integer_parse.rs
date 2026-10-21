@@ -22,7 +22,7 @@ pub fn parse_radix<T: TryFrom<i128>>(s: Option<&str>, radix: i32) -> T {
 /// `parse_radix` where the program observes the `NumberFormatException`.
 pub fn try_parse_radix<T: TryFrom<i128>>(s: Option<&str>, radix: i32) -> Result<T, Exception> {
     let fail = |message: String| Exception::new("java.lang.NumberFormatException", message);
-    let Some(s) = s else { return Err(fail("Cannot parse null string: null".to_string())) };
+    let Some(s) = s else { return Err(fail("Cannot parse null string".to_string())) };
     let value = read(s, radix).map_err(fail)?;
     T::try_from(value).map_err(|_| fail(for_input(s, radix)))
 }
@@ -88,6 +88,10 @@ pub(crate) fn for_input(s: &str, radix: i32) -> String {
 mod tests {
     use super::*;
 
+    fn message<T: std::fmt::Debug>(r: Result<T, Exception>) -> String {
+        r.unwrap_err().to_string()
+    }
+
     #[test]
     fn reads_signs_and_every_radix() {
         assert_eq!(read("-ff", 16), Ok(-255));
@@ -137,5 +141,26 @@ mod tests {
         assert!(i64::try_from(read("9223372036854775808", 10).unwrap()).is_err());
         assert!(i64::try_from(read(&"9".repeat(200), 10).unwrap()).is_err());
         assert_eq!(i32::try_from(read("-2147483648", 10).unwrap()), Ok(i32::MIN));
+    }
+
+    #[test]
+    fn short_and_byte_report_their_own_range() {
+        assert_eq!(try_parse_small_radix::<i16>(Some("-32768"), 10), Ok(i16::MIN));
+        assert_eq!(
+            message(try_parse_small_radix::<i16>(Some("32768"), 10)),
+            "java.lang.NumberFormatException: Value out of range. Value:\"32768\" Radix:10"
+        );
+        assert_eq!(
+            message(try_parse_small_radix::<i16>(Some("3000000000"), 10)),
+            "java.lang.NumberFormatException: For input string: \"3000000000\""
+        );
+        assert_eq!(
+            message(try_parse_small_radix::<i16>(None, 10)),
+            "java.lang.NumberFormatException: Cannot parse null string"
+        );
+        assert_eq!(
+            message(try_parse_small_radix::<i8>(Some("ff"), 16)),
+            "java.lang.NumberFormatException: Value out of range. Value:\"ff\" Radix:16"
+        );
     }
 }

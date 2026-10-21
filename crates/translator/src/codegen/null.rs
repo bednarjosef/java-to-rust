@@ -166,8 +166,17 @@ impl<'a> Gen<'a> {
         } else if matches!(other.kind, ExprKind::Var(_) | ExprKind::Str(_)) {
             Code::atom("false")
         } else {
-            let code = self.expr(other);
-            Code::new(format!("{{ {}; false }}", code.text), ATOM)
+            // Only the operand's effects are kept: an assignment is made as a statement, as its
+            // value (the variable, moved out) is not needed.
+            let effect = match &other.kind {
+                ExprKind::Assign { op, target: Place::Var(target), value }
+                    if self.plain(target).is_none() =>
+                {
+                    self.assignment(*op, target, other.ty, value, other.id)
+                }
+                _ => self.expr(other).text,
+            };
+            Code::new(format!("{{ {effect}; false }}"), ATOM)
         };
         if matches!(op, BinOp::Ne) { Code::new(format!("!{}", is_null.at(UNARY)), UNARY) } else { is_null }
     }
