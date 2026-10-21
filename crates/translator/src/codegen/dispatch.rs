@@ -591,6 +591,9 @@ impl<'a> Gen<'a> {
 
     /// The enum of type `t` and the items of it that the code uses.
     pub(super) fn type_enum_items(&mut self, t: usize) {
+        if self.facts.closure_types.contains(&t) {
+            return self.closure_alias(t);
+        }
         let name = struct_name(&self.class.types[t].name);
         let variants = self.enum_variants(t);
         self.gap();

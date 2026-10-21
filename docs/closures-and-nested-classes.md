@@ -1277,3 +1277,37 @@ Decisions that change during the implementation are recorded here, milestone by 
   (`Supplier<StringBuilder>`: it would be an `Object`); a lambda converted to a JDK interface
   outside the template in single-file mode; creating a local class declared in a lambda where
   a local hides one of its captures.
+
+### Closure forms
+
+- **The first closure types are a subset of 4.2**: an interface is one when it has one abstract
+  method, no default method, no type parameters, no interface above or below it, every class
+  below it is a lambda's that implements it alone, every `new` of such a class is converted to
+  the interface right away, and no value of it is converted to another type (`Object`,
+  printing, a collection), compared with `==`, tested with `instanceof`, passed to a builtin or
+  called with anything but its method; and each lambda's method uses `this` only to read its
+  capture fields. The generic interfaces of `java.util.function` (whose lambdas have a bridge
+  method besides the substituted one, 4.4) and the JDK's interfaces with default methods (4.6)
+  stay enums for now, as do interfaces seen as objects (condition 3 of 4.2 as written, and
+  identity).
+- **Only the stored form, `Rc<dyn Fn(A) -> R>`,** for every place: locals, parameters (`&Op`, as
+  the borrowing analysis already lends objects), fields, statics, elements and returns. The
+  parameter form `impl FnMut` and the local form `let f = |x| ..` of 4.3 are later refinements,
+  as is a type alias per signature instead of per interface (the alias is named after the
+  interface: `type ClosureFormsIntOp = Rc<dyn Fn(i32, i32) -> i32>;`). The argument and result types are
+  those of the interface's method as its dispatcher would take them (`Fn(&str) -> i32` for a
+  borrowed string parameter, `Result<_, Throwable>` when the method throws).
+- **A lambda is written where it is created** (`codegen/closures.rs`): the lambda class's method
+  is generated inside the creating expression with its own names and facts (the generator's
+  method state is set aside and restored), and its capture fields are locals bound before the
+  closure and moved in (`field_locals`), so `this.k` is `k` and `this.outer` is `outer`. A
+  local passed as it is moves in under its own name; the closure owns what the class's
+  constructor would have borrowed. A closure with no captures has no `move`, and a one-line
+  body stays on the closure's line. The value is `Rc::new(closure) as Op`, so that every place
+  gets the alias's type without an annotation.
+- **A call clones a closure out of a `RefCell`** before running it,
+  `({ let f = a.borrow().op.clone(); f })(3)`, since the closure may reach the object again; a
+  local, a capture or a field of a plain object is called in place (`op(x)`, `(self.op)(x)`).
+- **Corpus**: `features/ClosureForms.java` (captures, `this` through `outer`, a field and a
+  final field of closures, an array of them, a closure returned from a method, a constructor
+  reference, a closure that throws a checked exception, a closure in a closure).

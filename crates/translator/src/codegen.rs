@@ -13,6 +13,7 @@ mod boxing;
 mod character;
 mod charsets;
 mod classes;
+mod closures;
 mod code;
 mod code_point;
 mod dispatch;

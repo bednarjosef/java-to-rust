@@ -259,7 +259,9 @@ impl<'a> Gen<'a> {
             ExprKind::Var(name) => self.local(name),
             ExprKind::Call { args, resolved: Some(index), .. } => self.owned_call(*index, args),
             ExprKind::MethodCall { receiver, args, resolved: Some(index), is_super, .. } => {
-                if self.class.methods[*index].is_static {
+                if self.closure_type(receiver.ty).is_some() {
+                    self.closure_call(receiver, *index, args).text
+                } else if self.class.methods[*index].is_static {
                     self.owned_call(*index, args)
                 } else if !*is_super && let Some(t) = self.enum_of(receiver) {
                     self.enum_call(t, receiver, *index, args).text

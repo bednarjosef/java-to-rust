@@ -111,6 +111,12 @@ pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
     for t in mentioned(class) {
         live[t] |= class.hierarchy.is_concrete(t) && !class.hierarchy.has_subtypes(t);
     }
+    // The lambdas of closure types are closures, not objects.
+    for &t in &facts.closure_types {
+        for c in class.hierarchy.concretes(t) {
+            live[c] = false;
+        }
+    }
     for t in 0..live.len() {
         if live[t] {
             for a in class.hierarchy.ancestors(t) {
@@ -362,6 +368,13 @@ impl<'a> Gen<'a> {
             && self.class.types[t].kind == TypeKind::Param
         {
             return struct_name(name);
+        }
+        // A closure type is its alias, written where its enum would be (see `closures`).
+        if let Some(t) = self.class.type_index(name)
+            && self.facts.closure_types.contains(&t)
+        {
+            self.need(Need::Enum(t));
+            return struct_name(&self.class.types[t].name);
         }
         if let Some(t) = self.class.type_index(name)
             && let hierarchy::Rep::Enum(t) = hierarchy::rep(self.class, self.facts, t)
