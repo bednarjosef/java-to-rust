@@ -277,6 +277,11 @@ pub fn runtime_arrays_call(node: &Value) -> bool {
     }
 }
 
+/// The JDK method that `String.chars()` runs (see `lower::strings`): it streams the string's
+/// UTF-16 code units, as an `int[]`.
+pub const STRING_CHARS: (&str, &str, &str) =
+    ("java.util.Arrays", "stream", "(int[])java.util.stream.IntStream");
+
 /// The methods that a for-each over an `Iterable` calls.
 pub const ITERATION: &[(&str, &str, &str)] = &[
     ("java.lang.Iterable", "iterator", "()java.util.Iterator<T>"),
@@ -649,6 +654,10 @@ impl<'t> Walk<'t> {
     fn symbol(&mut self, symbol: &Value) {
         let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
         match text(symbol, "kind") {
+            "METHOD" if owner == "java.lang.String" && name == "chars" => {
+                let (class, method, signature) = STRING_CHARS;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
             "METHOD" | "CONSTRUCTOR" => {
                 self.work.push(Item::Method((owner, name, text(symbol, "type").to_string())));
             }

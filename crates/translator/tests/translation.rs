@@ -4003,3 +4003,10 @@ fn new_object_creates_a_plain_object_with_its_identity() {
         &["struct PlainObject {", "let o = Rc::new(PlainObject::new());", "java.lang.Object"],
     );
 }
+
+#[test]
+fn string_chars_needs_the_jdk_sources() {
+    let err = java_to_rust::translate("class A { public static void main(String[] a) { \"abc\".chars(); } }")
+        .expect_err("`String.chars` streams with the JDK's code");
+    assert!(err.to_string().contains("translate the program with the JDK's sources"), "{err}");
+}

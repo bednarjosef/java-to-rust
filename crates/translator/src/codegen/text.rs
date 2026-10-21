@@ -180,6 +180,14 @@ impl<'a> Gen<'a> {
                 let units = call(self, "units", vec![s]).text;
                 Code::atom(format!("{}({units})", self.runtime("from_vec")))
             }
+            StringOp::CharCodes => {
+                let s = self.text_ref(&args[0]);
+                let units = call(self, "units", vec![s]).text;
+                Code::atom(format!(
+                    "{}({units}.into_iter().map(i32::from).collect())",
+                    self.runtime("from_vec")
+                ))
+            }
             StringOp::FromChars => {
                 let chars = self.slice_of(&args[0]);
                 match args.get(1..) {
