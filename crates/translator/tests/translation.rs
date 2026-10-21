@@ -3290,6 +3290,37 @@ fn a_null_dereference_that_a_catch_sees_is_a_checked_non_null() {
 }
 
 #[test]
+fn an_eager_static_object_starts_empty_and_is_not_null_once_initialized() {
+    let rust = translate(
+        "class A {
+            static class Empty {
+                static final Empty INSTANCE = new Empty();
+                boolean any() { return false; }
+            }
+            static int count() {
+                try {
+                    return Empty.INSTANCE.any() ? 1 : 0;
+                } catch (NullPointerException e) {
+                    return -1;
+                }
+            }
+            public static void main(String[] args) {
+                System.out.println(count());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "static A_EMPTY_INSTANCE: RefCell<Option<Rc<AEmpty>>> = const { RefCell::new(None) };",
+            "A_EMPTY_INSTANCE.set(Some(Rc::new(AEmpty::new())));",
+            "java::non_null(A_EMPTY_INSTANCE.with_borrow(|v| v.clone()))",
+        ],
+    );
+    assert_lacks(&rust, &["try_non_null"]);
+}
+
+#[test]
 fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
     let err = reject(
