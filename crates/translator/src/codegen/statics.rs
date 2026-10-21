@@ -41,6 +41,9 @@ pub(super) fn is_cell(ty: Type) -> bool {
     )
 }
 
+/// The most statics in one `thread_local!`.
+const THREAD_LOCALS_PER_MACRO: usize = 100;
+
 impl<'a> Gen<'a> {
     /// The constants as `const` items, then the thread-local cells of the other static fields. An
     /// eager class's cells start at Java's default and its `init` function sets them; any other
@@ -80,10 +83,9 @@ impl<'a> Gen<'a> {
         if self.facts.threaded {
             return self.process_statics(&eager, cells);
         }
-        self.line("thread_local! {");
-        self.indent += 1;
+        let mut items = Vec::new();
         for &t in &eager {
-            self.line(&format!(
+            items.push(format!(
                 "{}static {}: Cell<bool> = const {{ Cell::new(false) }};",
                 self.vis(),
                 flag(&class.types[t].name)
@@ -97,10 +99,19 @@ impl<'a> Gen<'a> {
             } else {
                 format!("{kind}::new({init})")
             };
-            self.line(&format!("{}static {cell}: {kind}<{ty}> = {init};", self.vis()));
+            items.push(format!("{}static {cell}: {kind}<{ty}> = {init};", self.vis()));
         }
-        self.indent -= 1;
-        self.line("}");
+        // `thread_local!` expands one static per level of recursion, which Rust limits to 128,
+        // so a module with more statics (`Character.UnicodeBlock` has hundreds) has several.
+        for chunk in items.chunks(THREAD_LOCALS_PER_MACRO) {
+            self.line("thread_local! {");
+            self.indent += 1;
+            for item in chunk {
+                self.line(item);
+            }
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     /// The cell of static field `f` of class `t`: its name, its Rust type, its initial value,

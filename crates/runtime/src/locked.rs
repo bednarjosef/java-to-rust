@@ -64,8 +64,29 @@ static PARKING: [Bucket; BUCKETS] = [const {
     Bucket { mutex: Mutex::new(Vec::new()), condvar: Condvar::new(), waiters: AtomicUsize::new(0) }
 }; BUCKETS];
 
+fn bucket_index(address: usize) -> usize {
+    (address >> 4) % BUCKETS
+}
+
 fn bucket(address: usize) -> &'static Bucket {
-    &PARKING[(address >> 4) % BUCKETS]
+    &PARKING[bucket_index(address)]
+}
+
+/// Wakes the threads that wait in bucket `index`, for an interrupt of one of them.
+pub(crate) fn wake_bucket(index: usize) {
+    let bucket = &PARKING[index];
+    let _guard = bucket.mutex.lock().unwrap_or_else(|e| e.into_inner());
+    bucket.condvar.notify_all();
+}
+
+/// How `Object.wait` ended.
+pub(crate) enum Waited {
+    /// Notified, or the timeout passed.
+    Done,
+    /// The thread does not hold the monitor.
+    NotOwner,
+    /// An interrupt of the thread, before or during the wait.
+    Interrupted,
 }
 
 /// A reentrant lock: the token of the thread that holds it (0 when free), and how many times that
@@ -182,9 +203,12 @@ impl RawLock {
     /// `Object.wait`: gives up the monitor, every entry of it, until another thread notifies this
     /// one or the timeout passes, then takes it again as it was held. `false`, with nothing done,
     /// when the calling thread does not hold the monitor.
-    pub(crate) fn wait_notified(&self, timeout: Option<Duration>) -> bool {
+    pub(crate) fn wait_notified(&self, timeout: Option<Duration>) -> Waited {
         if !self.held_by_current() {
-            return false;
+            return Waited::NotOwner;
+        }
+        if crate::thread::take_interrupt() {
+            return Waited::Interrupted;
         }
         let address = self as *const RawLock as usize;
         let bucket = bucket(address);
@@ -200,23 +224,28 @@ impl RawLock {
         self.depth.set(1);
         self.release();
         let deadline = timeout.map(|t| Instant::now() + t);
+        crate::thread::waiting_in(Some(bucket_index(address)));
         let mut guard = lock();
-        loop {
+        let interrupted = loop {
             let at = guard.iter().position(|w| w.ticket == ticket).expect("a waiter leaves its own entry");
             let now = Instant::now();
-            if guard[at].notified || deadline.is_some_and(|d| now >= d) {
+            // `interrupt` sets the status, then notifies under this mutex: no wakeup is lost. A
+            // waiter both notified and interrupted returns normally with the status set.
+            let interrupted = !guard[at].notified && crate::thread::take_interrupt();
+            if guard[at].notified || interrupted || deadline.is_some_and(|d| now >= d) {
                 guard.swap_remove(at);
-                break;
+                break interrupted;
             }
             let step =
                 deadline.map_or(Duration::from_millis(50), |d| (d - now).min(Duration::from_millis(50)));
             guard = bucket.condvar.wait_timeout(guard, step).unwrap_or_else(|e| e.into_inner()).0;
-        }
+        };
         drop(guard);
+        crate::thread::waiting_in(None);
         self.acquire();
         self.depth.set(depth);
         self.entered.store(entered, Ordering::Relaxed);
-        true
+        if interrupted { Waited::Interrupted } else { Waited::Done }
     }
 
     /// `Object.notify`, or with `all` `notifyAll`: wakes one of the threads waiting in `wait`,

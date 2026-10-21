@@ -73,27 +73,6 @@ pub fn class_for_name(node: &Value) -> Option<(String, bool)> {
     named.then(|| (name.replace('$', "."), initialize))
 }
 
-/// `SharedSecrets.ensureClassInitialized(C.class)`, which the JDK's `SharedSecrets` calls to have
-/// a class register its access object from its static initializer
-/// (`getJavaIOFileDescriptorAccess` runs `FileDescriptor`'s): the class `C`, which the call
-/// initializes. Its body goes through `MethodHandles.Lookup.ensureInitialized`, which is
-/// reflection, so the call is the initialization itself (`REPLACED_METHODS`).
-pub fn ensured_class(node: &Value) -> Option<String> {
-    let symbol = &node["symbol"];
-    let is_ensure = text(node, "kind") == "METHOD_INVOCATION"
-        && text(symbol, "owner") == ENSURE_INITIALIZED.0
-        && text(symbol, "name") == ENSURE_INITIALIZED.1
-        && text(symbol, "type") == ENSURE_INITIALIZED.2;
-    let [literal] = &node["arguments"].as_array()?[..] else { return None };
-    let literal = unparenthesized(literal);
-    let is_literal = text(literal, "kind") == "MEMBER_SELECT" && text(literal, "identifier") == "class";
-    (is_ensure && is_literal).then(|| text(&literal["expression"], "javaType").to_string())
-}
-
-/// `SharedSecrets.ensureClassInitialized(Class)`, by class, name and signature.
-pub const ENSURE_INITIALIZED: (&str, &str, &str) =
-    ("jdk.internal.access.SharedSecrets", "ensureClassInitialized", "(java.lang.Class<?>)void");
-
 /// The class that declares the method of a call `node` named `name` without arguments, and the
 /// receiver it is called on.
 fn call<'v>(node: &'v Value, name: &str) -> Option<(&'v str, &'v Value)> {

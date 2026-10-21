@@ -46,7 +46,10 @@ signature. Everything else is decided here.
    callers observe it. The methods of an override group agree. The `toString` that making an
    object's text runs (`"" + o`, `println(o)`, `append(o)`, `String.valueOf(o)`) is not such a
    call: the text is `Display`, which cannot return an exception, so what that `toString` throws
-   ends the program there. Where a `toString` that the program wrote may run and may throw what a
+   ends the program there. So does what the `hashCode` throws that `Object`'s `toString` shows
+   for a class without a `toString` of its own (`Collections.ReverseComparator2`'s, which asks
+   its comparator), where the `hashCode` is a `Result` because a direct call of it is observed;
+   it counts as that object's `toString` below. Where a `toString` that the program wrote may run and may throw what a
    `catch` around the text, or around a call on the way to it, would catch, the program is
    rejected. The JDK's own `toString`s are not looked at: they throw only for bugs, such as a
    collection changed while it is shown (`ConcurrentModificationException`), which then end the
@@ -390,6 +393,18 @@ written with the checked form exactly when it is in the analysis's set.
   machine rethrows. A method that starts by running an initializer (`Facts::entry_init`) raises
   what that initializer raises at its start (`analysis/exceptions/entry.rs`). An instance field
   initializer's escapes escape each constructor that runs it (`analysis/exceptions/field_inits.rs`).
+  An uncaught initializer that escapes something is rejected only where a `catch` (of `Error`,
+  `LinkageError` or `Throwable`) or a `finally` around a use of its class would see the
+  `ExceptionInInitializerError`.
+- **Calls that raise nothing for their arguments** (`analysis/exceptions/guards.rs`): a call
+  whose arguments are known (literals, constants, a static that its class assigns once from a
+  native of the JVM such as `Unsafe.arrayIndexScale`, a new array of known length) runs its
+  callee on those values. An `if` whose condition is then false, and a loop whose condition is
+  false at the start, are skipped, and so is `new T[n]` of a known `n >= 0`. When nothing else
+  the callee runs raises (as escapes say), the call is no point, and the escapes are computed
+  again. The JDK's `ArraysSupport.exactLog2(Unsafe.ARRAY_INT_INDEX_SCALE)` and `new SetN<>()` of
+  `ImmutableCollections` (a varargs constructor with no elements) are such calls, in static
+  initializers that a program's `catch (Throwable)` or `finally` would otherwise see fail.
 - **What is observed at a point**: the classes under the types of the enclosing `catch`
   clauses, everything when an enclosing `finally` observes (it does unless it only assigns
   variables, fields and array elements with operations that cannot fail: what it does to memory
@@ -538,7 +553,9 @@ Decisions that changed during the implementation, step by step.
   returned there is cloned rather than moved, since the `finally` may read it.
 - **A local declared without a value and assigned in the body or a `catch` clause** of a `try`
   with a `finally` that is not a plain block starts at Java's default value, as in a live `try`
-  body.
+  body. A local declared inside the body or the `catch` clause itself (`for (Object e; r < end;
+  r++)` in `ArrayList.batchRemove`) is left alone: it is read only inside the block that assigns
+  it, where Rust follows its assignments as Java does, so its type needs no default value.
 - **`java.io.IOException` and `java.io.FileNotFoundException`** are standard classes now, and
   `getClass().getSimpleName()` is `Builtin::ClassName { simple: true }`, for the target program
   `CheckedExceptions`, which step 5 (catching a malformed number) still blocks.

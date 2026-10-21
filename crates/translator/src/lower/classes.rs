@@ -47,6 +47,12 @@ impl<'t> Lowering<'t> {
             let x = self.expr(node.list("arguments").next().expect("comparableClassFor has an argument"))?;
             return Ok(Some(ExprKind::Builtin(Builtin::ComparableClassFor, vec![x])));
         }
+        if crate::program::is_ensure_initialized(node.0) {
+            return Ok(Some(self.ensure_initialized(node)?));
+        }
+        if (symbol.owner, symbol.name) == ("java.lang.Class", "getPrimitiveClass") {
+            return Ok(Some(self.primitive_class(node)?));
+        }
         if (symbol.owner, symbol.name) == ("java.lang.Class", "forName")
             && let Some(kind) = self.class_for_name(node)?
         {
@@ -72,6 +78,17 @@ impl<'t> Lowering<'t> {
             // `class_name_call` names the class of the object.
             ("getName" | "getSimpleName", []) if is_get_class(receiver) && self.named_class(receiver) => {
                 return Ok(None);
+            }
+            // A translated program has no resources, not even the JDK's data files, such as
+            // `CharacterName`'s `uniName.dat` or `Currency`'s `currency.data`, which are generated
+            // when the JDK is built and are not in its source: the program ends when it reads one
+            // (`Builtin::MissingResource`).
+            ("getResourceAsStream", [name]) => {
+                let class = receiver.java_type();
+                let class =
+                    class.strip_prefix("java.lang.Class<").and_then(|c| c.strip_suffix('>')).unwrap_or(class);
+                let class = self.synth(ExprKind::Str(class.to_string()), node.pos(), Type::String);
+                return Ok(Some(ExprKind::Builtin(Builtin::MissingResource, vec![class, self.expr(*name)?])));
             }
             _ => {}
         }

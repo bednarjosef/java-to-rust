@@ -11,9 +11,18 @@
 //! erasure writes (`generics::erased_use`), whose stores convert to `Object`, and whose for-each
 //! variable is cast from `Object` (`arrays::for_each`). Every other array keeps its exact type.
 //!
-//! An array of strings is not covariant: the runtime's string methods make and take
-//! `java::Array<String>`, so a `String[]` passed for an array of a type variable is still
-//! rejected.
+//! An array of strings is covariant the same way, though the runtime's string builtins make and
+//! take `java::Array<String>`: where `String[]` is an `Object[]`, the builtins that read one get a
+//! copy as a `String[]` (`Builtin::StringArrayOf`: `String.join`, `Arrays.toString`, `equals`,
+//! `hashCode`, `binarySearch`), those that make one (`split`, `main`'s `args`) make the
+//! `Object[]` (`Builtin::ObjectArrayOf`), and the runtime's `Arrays.sort` and `fill` of strings,
+//! which change the array in place, are rejected on it.
+//!
+//! So is an array of an enum (`Day[]` passed for `E[]` of `<E extends Enum<E>>`, or as an
+//! `Enum<?>[]`): the translation holds its constants as values, Java as objects, so where it is
+//! an `Object[]` its constants are `Object`s (`values()` makes them so), and a read casts each back
+//! to the enum. A null element read as the enum ends the program (`java::null_enum`), but a test
+//! of one against `null` tests the checked cast.
 //!
 //! Such an array does not remember its element class: storing an object of another class in it
 //! does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s.
@@ -40,7 +49,7 @@ impl<'t> Lowering<'t> {
             (Type::Array(x), Type::Array(y)) if matches!((x, y), (Type::Array(_), Type::Array(_))) => {
                 self.meets_object_array(*x, *y)
             }
-            (Type::Array(x), Type::Array(y)) if x != y && x.is_reference() && y.is_reference() => {
+            (Type::Array(x), Type::Array(y)) if x != y && Self::of_objects(*x) && Self::of_objects(*y) => {
                 let a = !Self::is_object(*x) && self.note_covariant(a);
                 let b = !Self::is_object(*y) && self.note_covariant(b);
                 a | b
@@ -49,18 +58,17 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// An array of strings stays a `java::Array<String>`: the runtime's string methods make and
-    /// take those (`split`, `String.join`, `main`'s arguments).
+    /// Whether an array of `element`s is an array of references, which Java converts to an
+    /// array of a supertype: also an array of an enum, whose constants the translation holds as
+    /// values but Java as objects (`Day[]` as `Enum<?>[]` or `Object[]`).
+    pub(super) fn of_objects(element: Type) -> bool {
+        element.is_reference() || matches!(element, Type::Enum(_))
+    }
+
+    /// Notes that array type `ty` is an `Object[]`, unless it already is or holds a Rust generic's
+    /// type variable.
     fn note_covariant(&self, ty: Type) -> bool {
-        let mut innermost = ty;
-        while let Type::Array(element) = innermost {
-            innermost = *element;
-        }
-        if self.object.is_none()
-            || self.has_param(ty)
-            || innermost == Type::String
-            || self.covariant.known.contains(&ty)
-        {
+        if self.object.is_none() || self.has_param(ty) || self.covariant.known.contains(&ty) {
             return false;
         }
         let mut noted = self.covariant.noted.borrow_mut();
@@ -68,6 +76,68 @@ impl<'t> Lowering<'t> {
             noted.push(ty);
         }
         true
+    }
+
+    /// Whether `node`, an `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]`,
+    /// calls the JDK's method for an `Object[]`, which reachability then kept
+    /// (`Reach::string_array_writes`).
+    pub(super) fn jdk_string_array_write(&self, node: Node<'t>) -> bool {
+        self.strings_covariant()
+            && self.reach.is_some_and(|r| r.string_array_writes)
+            && crate::program::writes_string_array(node.0)
+    }
+
+    /// Whether `String[]` is an `Object[]` in this lowering.
+    pub(super) fn strings_covariant(&self) -> bool {
+        self.covariant.known.contains(&Type::array(Type::String))
+    }
+
+    /// The arguments `args` of a call of the runtime's string or array builtins (`node`), each
+    /// whose javac type is `String[]` given as the `String[]` copy that the builtin reads, where
+    /// `String[]` is an `Object[]`. `writes`: the builtin changes the array, which a copy would
+    /// not show, so it is rejected; `copies`: it takes any array, such as an `Object[]`.
+    pub(super) fn string_array_args(
+        &self,
+        node: Node<'t>,
+        args: Vec<Expr>,
+        writes: bool,
+        copies: bool,
+    ) -> Result<Vec<Expr>, Error> {
+        let nodes: Vec<Node> = node.list("arguments").collect();
+        if !self.strings_covariant() || copies || nodes.len() != args.len() {
+            return Ok(args);
+        }
+        let mut out = Vec::new();
+        for (a, n) in args.into_iter().zip(nodes) {
+            if n.java_type() != "java.lang.String[]" || !Self::is_object_array(a.ty) {
+                out.push(a);
+            } else if writes {
+                return unsupported(node, STRING_ARRAY_WRITE);
+            } else {
+                let pos = a.pos;
+                out.push(self.synth(
+                    ExprKind::Builtin(Builtin::StringArrayOf, vec![a]),
+                    pos,
+                    Type::array(Type::String),
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The call `kind` of a builtin that makes a `String[]` (javac's type of `node`), as the
+    /// `Object[]` that `String[]` is where it is covariant.
+    pub(super) fn object_array_result(&self, node: Node<'t>, kind: ExprKind) -> ExprKind {
+        if !self.strings_covariant() || node.java_type() != "java.lang.String[]" {
+            return kind;
+        }
+        let made = self.synth(kind, node.pos(), Type::array(Type::String));
+        ExprKind::Builtin(Builtin::ObjectArrayOf, vec![made])
+    }
+
+    /// Whether `ty` is `Object[]`.
+    fn is_object_array(ty: Type) -> bool {
+        matches!(ty, Type::Array(element) if Self::is_object(*element))
     }
 
     /// Array type `array` as it is translated: an `Object[]` when it is covariant.

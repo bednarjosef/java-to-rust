@@ -37,7 +37,16 @@ impl<'a> Gen<'a> {
                 let x = self.value(&args[0], Type::Float).text;
                 call(self, "float_to_int_bits", vec![x])
             }
-            Native::IdentityHash => {
+            // A null object's is 0 (an enum's `enum_identity_hash` answers that itself).
+            Native::SystemIdentityHash if self.enum_of(&args[0]).is_none() && self.nullable(&args[0]) => {
+                let option = format!("{}.as_ref()", self.object_place(&args[0]));
+                let hash = match self.struct_class(&args[0]) {
+                    Some(c) => format!("{}({})", self.runtime("address_hash"), self.address(c, "h")),
+                    None => format!("{}(h)", self.runtime("identity_hash")),
+                };
+                Code::atom(format!("{option}.map_or(0, |h| {hash})"))
+            }
+            Native::IdentityHash | Native::SystemIdentityHash => {
                 // The address of the class's struct, which `Object.hashCode` hashes too.
                 if self.enum_of(&args[0]).is_none()
                     && let Some(c) = self.struct_class(&args[0])
@@ -98,12 +107,12 @@ impl<'a> Gen<'a> {
             }
             Native::Sleep { nanos: false } => {
                 let millis = self.value(&args[0], Type::Long).text;
-                call(self, "sleep", vec![millis])
+                self.may_fail(id, "sleep", "", &millis)
             }
             Native::Sleep { nanos: true } => {
                 let millis = self.value(&args[0], Type::Long).text;
                 let nanos = self.value(&args[1], Type::Int).text;
-                call(self, "sleep_nanos", vec![millis, nanos])
+                self.may_fail(id, "sleep_nanos", "", &format!("{millis}, {nanos}"))
             }
             Native::OnSpinWait => call(self, "on_spin_wait", vec![]),
             Native::ThreadYield => call(self, "thread_yield", vec![]),
@@ -130,7 +139,28 @@ impl<'a> Gen<'a> {
             Native::ThreadJoin => {
                 let (tid, millis) =
                     (self.value(&args[0], Type::Long).text, self.value(&args[1], Type::Long).text);
-                call(self, "join_thread", vec![tid, millis])
+                self.may_fail(id, "join_thread", "", &format!("{tid}, {millis}"))
+            }
+            Native::ThreadInterrupt => {
+                let tid = self.value(&args[0], Type::Long).text;
+                call(self, "interrupt_thread", vec![tid])
+            }
+            Native::ThreadIsInterrupted => {
+                let tid = self.value(&args[0], Type::Long).text;
+                call(self, "is_interrupted", vec![tid])
+            }
+            Native::ThreadClearInterrupt => call(self, "thread_interrupted", vec![]),
+            Native::InstallUncaught => self.install_uncaught(args),
+            Native::UncaughtException => {
+                let ty = self.ty_name(ty);
+                call(self, &format!("pending_uncaught::<{ty}>"), vec![])
+            }
+            Native::PrintUncaught => {
+                let name = self.thread_name(&args[0]);
+                let e = self.value(&args[1], args[1].ty).text;
+                let e =
+                    if self.nullable(&args[1]) { format!("{}({e})", self.runtime("non_null")) } else { e };
+                call(self, "print_uncaught", vec![format!("&{name}"), format!("&{e}")])
             }
             Native::ThreadRename => {
                 let tid = self.value(&args[0], Type::Long).text;
@@ -201,6 +231,46 @@ impl<'a> Gen<'a> {
         Code::atom(format!(
             "{start}({tid}, {name}, {daemon}, {{ let {local} = {handle}; move || {{ let {local} = &{local}; \
              {set}({local}.clone()); {body}; }} }})"
+        ))
+    }
+
+    /// `Thread.installUncaught0()` with the call `Thread.dispatchUncaught()` that lowering added:
+    /// the runtime gets two functions. The first makes the exception that ends a thread (a value
+    /// of `Throwable`, or a failure of the runtime of a class the program has objects of) the
+    /// pending one that `uncaught0()` returns, and runs the call, on that thread; the second names
+    /// the class of an exception that the handler itself lets escape.
+    fn install_uncaught(&mut self, args: &'a [Expr]) -> Code {
+        let throwable = self.throwable_type();
+        let attempts = std::mem::take(&mut self.attempts);
+        let throwing = std::mem::replace(&mut self.throwing, false);
+        let body = self.expr(&args[0]).text;
+        self.attempts = attempts;
+        self.throwing = throwing;
+        let raised: Vec<String> =
+            self.facts.raised_classes.iter().map(|&c| rust_string(&self.class.types[c].name)).collect();
+        let runtime = if raised.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " else if let Some(e) = e.downcast_ref::<{}>().filter(|e| matches!(e.class, {})) \
+                 {{ {throwable}::from(e.clone()) }}",
+                self.runtime("Exception"),
+                raised.join(" | ")
+            )
+        };
+        let t = self.class.type_index("java.lang.Throwable").expect("the program has `Throwable`");
+        let arms: Vec<String> = self
+            .enum_variants(t)
+            .into_iter()
+            .map(|c| format!("{}(_) => {}", self.variant(t, c), rust_string(&self.java_class_name(c, false))))
+            .collect();
+        let (set, pending) = (self.runtime("set_uncaught_hook"), self.runtime("set_pending_uncaught"));
+        Code::atom(format!(
+            "{set}(|e: &dyn std::any::Any| {{ let uncaught: {throwable} = if let Some(e) = \
+             e.downcast_ref::<{throwable}>() {{ e.clone() }}{runtime} else {{ return false; }}; \
+             {pending}(uncaught); {body}; true }}, |e: &dyn std::any::Any| \
+             e.downcast_ref::<{throwable}>().map(|e| String::from(match e {{ {} }})))",
+            arms.join(", ")
         ))
     }
 

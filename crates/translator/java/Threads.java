@@ -3,20 +3,32 @@
 // natives of the runtime (`java_runtime::thread`). `build.rs` prints its syntax tree with
 // `JavaTree`, and lowering gives it its real package and adds it, with the members a program uses,
 // to the programs that use it, as it adds the standard exception classes of `Standard.java` (see
-// `lower/exceptions.rs`). A program may extend it. Thread groups, interrupts, the thread's state
-// and stack, and virtual threads are left out.
+// `lower/exceptions.rs`). A program may extend it. The thread's state and stack, and virtual
+// threads, are left out. The interrupt status is the runtime's, by the thread's id, so that
+// `sleep`, `join` and `wait` observe it. An uncaught exception goes to the thread's handler once
+// the program has set a handler (`installUncaught0`); until then the runtime prints it, as the
+// thread group would.
 package threads;
 
 class Thread {
+    public interface UncaughtExceptionHandler {
+        void uncaughtException(Thread t, Throwable e);
+    }
+
+    private static UncaughtExceptionHandler defaultUncaughtExceptionHandler;
+
     private String name;
     private final long tid;
     private final Runnable task;
     private boolean daemon;
     private int priority;
     private boolean started;
+    // The thread's group; null for the group `main`.
+    private ThreadGroup group;
+    private UncaughtExceptionHandler uncaughtExceptionHandler;
 
     public Thread() {
-        this(null, genName());
+        this((Runnable) null, genName());
     }
 
     public Thread(Runnable task) {
@@ -24,7 +36,7 @@ class Thread {
     }
 
     public Thread(String name) {
-        this(null, checkName(name));
+        this((Runnable) null, checkName(name));
     }
 
     public Thread(Runnable task, String name) {
@@ -34,6 +46,26 @@ class Thread {
         this.tid = nextThreadId();
         this.daemon = parent.daemon;
         this.priority = parent.priority;
+        this.group = parent.group;
+    }
+
+    public Thread(ThreadGroup group, Runnable task) {
+        this(group, task, genName());
+    }
+
+    public Thread(ThreadGroup group, String name) {
+        this(group, null, checkName(name));
+    }
+
+    public Thread(ThreadGroup group, Runnable task, String name) {
+        this(task, name);
+        if (group != null) {
+            this.group = group;
+        }
+    }
+
+    public Thread(ThreadGroup group, Runnable task, String name, long stackSize) {
+        this(group, task, name);
     }
 
     // The main thread, which `currentThread` makes when the main thread first asks for itself.
@@ -96,6 +128,18 @@ class Thread {
         join0(tid, millis);
     }
 
+    public void interrupt() {
+        interrupt0(tid);
+    }
+
+    public boolean isInterrupted() {
+        return isInterrupted0(tid);
+    }
+
+    public static boolean interrupted() {
+        return clearInterrupt0();
+    }
+
     public final String getName() {
         return name;
     }
@@ -143,10 +187,55 @@ class Thread {
         priority = newPriority;
     }
 
-    // A thread that has ended has no group, whose name `main` the JVM shows otherwise.
+    // A thread that has ended has no group.
     public String toString() {
-        String group = started && !isAlive() ? "" : "main";
-        return "Thread[#" + tid + "," + name + "," + priority + "," + group + "]";
+        String groupName = "";
+        if (!started || isAlive()) {
+            groupName = group != null ? group.getName() : "main";
+        }
+        return "Thread[#" + tid + "," + name + "," + priority + "," + groupName + "]";
+    }
+
+    public final ThreadGroup getThreadGroup() {
+        if (started && !isAlive()) {
+            return null;
+        }
+        return group != null ? group : ThreadGroup.mainGroup();
+    }
+
+    public void setUncaughtExceptionHandler(UncaughtExceptionHandler ueh) {
+        uncaughtExceptionHandler = ueh;
+        installUncaught0();
+    }
+
+    public UncaughtExceptionHandler getUncaughtExceptionHandler() {
+        if (started && !isAlive()) {
+            return null;
+        }
+        UncaughtExceptionHandler ueh = uncaughtExceptionHandler;
+        if (ueh != null) {
+            return ueh;
+        }
+        return getThreadGroup();
+    }
+
+    public static void setDefaultUncaughtExceptionHandler(UncaughtExceptionHandler ueh) {
+        defaultUncaughtExceptionHandler = ueh;
+        installUncaught0();
+    }
+
+    public static UncaughtExceptionHandler getDefaultUncaughtExceptionHandler() {
+        return defaultUncaughtExceptionHandler;
+    }
+
+    void dispatchUncaughtException(Throwable e) {
+        getUncaughtExceptionHandler().uncaughtException(this, e);
+    }
+
+    // What the runtime runs, on the thread that an exception nothing catches ends, once the
+    // program has set a handler: `uncaught0()` is that exception (see `lower/natives.rs`).
+    private static void dispatchUncaught() {
+        currentThread().dispatchUncaughtException(uncaught0());
     }
 
     private static native int nextThreadNum();
@@ -168,4 +257,71 @@ class Thread {
     private static native void join0(long tid, long millis);
 
     private static native void rename0(long tid, String name);
+
+    private static native void interrupt0(long tid);
+
+    private static native boolean isInterrupted0(long tid);
+
+    private static native boolean clearInterrupt0();
+
+    private static native void installUncaught0();
+
+    private static native Throwable uncaught0();
+
+    static native void printUncaught0(String name, Throwable e);
+}
+
+class ThreadGroup implements Thread.UncaughtExceptionHandler {
+    private static final ThreadGroup MAIN = new ThreadGroup(new ThreadGroup(null, "system", 10), "main", 10);
+
+    private final ThreadGroup parent;
+    private final String name;
+    private final int maxPriority;
+
+    private ThreadGroup(ThreadGroup parent, String name, int maxPriority) {
+        this.parent = parent;
+        this.name = name;
+        this.maxPriority = maxPriority;
+    }
+
+    public ThreadGroup(String name) {
+        this(Thread.currentThread().getThreadGroup(), name);
+    }
+
+    public ThreadGroup(ThreadGroup parent, String name) {
+        this(parent, name, parent.maxPriority);
+    }
+
+    static ThreadGroup mainGroup() {
+        return MAIN;
+    }
+
+    public final String getName() {
+        return name;
+    }
+
+    public final ThreadGroup getParent() {
+        return parent;
+    }
+
+    public final int getMaxPriority() {
+        return maxPriority;
+    }
+
+    public void uncaughtException(Thread t, Throwable e) {
+        if (parent != null) {
+            parent.uncaughtException(t, e);
+        } else {
+            Thread.UncaughtExceptionHandler ueh = Thread.getDefaultUncaughtExceptionHandler();
+            if (ueh != null) {
+                ueh.uncaughtException(t, e);
+            } else {
+                Thread.printUncaught0(t.getName(), e);
+            }
+        }
+    }
+
+    public String toString() {
+        return getClass().getName() + "[name=" + getName() + ",maxpri=" + getMaxPriority() + "]";
+    }
 }

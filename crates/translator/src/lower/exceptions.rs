@@ -122,6 +122,25 @@ const RAISED: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// The operation without which the runtime never raises `InterruptedException`.
+const INTERRUPTS: &str = "java.lang.Thread#interrupt";
+
+/// More of `RAISED`, in a program that interrupts a thread (`INTERRUPTS`): `sleep`, `join` and
+/// `wait` end with an interrupt, and `sleep` has a checked form for its negative time as well.
+/// (Elsewhere `sleep` never throws `InterruptedException`, and a `catch` that sees its
+/// `IllegalArgumentException` runs it in `java::catching`.)
+const RAISED_WHEN_INTERRUPTED: &[(&str, &[&str])] = &[
+    (
+        "java.lang.InterruptedException",
+        &["java.lang.Thread#sleep", "java.lang.Thread#join", "java.lang.Object#wait"],
+    ),
+    ("java.lang.IllegalArgumentException", &["java.lang.Thread#sleep"]),
+];
+
+/// The classes of `RAISED` that the runtime may raise without a message as well, which are built
+/// with the constructor without arguments then, so that `getMessage()` is null.
+const BARE: &[&str] = &["java.lang.InterruptedException"];
+
 /// The package of the standard class with this simple name.
 fn package_of(simple: &str) -> &'static str {
     OTHER_PACKAGES.iter().find(|(s, _)| *s == simple).map_or("java.lang", |(_, p)| p)
@@ -184,10 +203,51 @@ fn qualified(decl: &Value) -> String {
     format!("{}.{simple}", package_of(simple))
 }
 
+/// Every class declaration of the template, with its qualified name: the top-level ones, and the
+/// classes and interfaces declared in them (`java.lang.Thread.UncaughtExceptionHandler`), which
+/// lowering declares with their outer class.
+fn template_types() -> &'static [(String, &'static Value)] {
+    static TYPES: OnceLock<Vec<(String, &'static Value)>> = OnceLock::new();
+    TYPES.get_or_init(|| {
+        fn nested(outer: &str, decl: &'static Value, out: &mut Vec<(String, &'static Value)>) {
+            out.push((outer.to_string(), decl));
+            for member in decl["members"].as_array().into_iter().flatten() {
+                if matches!(member["kind"].as_str(), Some("CLASS" | "INTERFACE" | "ENUM" | "RECORD")) {
+                    let simple = member["simpleName"].as_str().unwrap_or_default();
+                    nested(&format!("{outer}.{simple}"), member, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for decl in template() {
+            nested(&qualified(decl), decl, &mut out);
+        }
+        out
+    })
+}
+
+/// The declaration of the template's class with qualified name `name`.
+fn template_type(name: &str) -> Option<&'static Value> {
+    template_types().iter().find(|(n, _)| n == name).map(|(_, d)| *d)
+}
+
 /// Whether `name` is the qualified name of a standard class the translator provides.
 pub fn is_standard(name: &str) -> bool {
     static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
-    NAMES.get_or_init(|| template().iter().map(qualified).collect()).contains(name)
+    NAMES.get_or_init(|| template_types().iter().map(|(n, _)| n.clone()).collect()).contains(name)
+}
+
+/// The name of a standard class inside its package: `Thread`, or `Thread.UncaughtExceptionHandler`
+/// for a class declared in another.
+pub fn standard_local_name(name: &str) -> &str {
+    let mut at = 0;
+    for segment in name.split('.') {
+        if segment.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return &name[at..];
+        }
+        at += segment.len() + 1;
+    }
+    name
 }
 
 /// Whether the standard class `name` is the standard class `ancestor` or a subclass of it.
@@ -197,18 +257,14 @@ pub fn standard_subclass(name: &str, ancestor: &str) -> bool {
         if c == ancestor {
             return true;
         }
-        at = template()
-            .iter()
-            .find(|d| qualified(d) == c)
-            .and_then(|d| d["extendsClause"]["javaType"].as_str())
-            .map(str::to_string);
+        at = template_type(&c).and_then(|d| d["extendsClause"]["javaType"].as_str()).map(str::to_string);
     }
     false
 }
 
 /// The qualified names of every standard class the translator provides.
 pub fn standard_names() -> Vec<String> {
-    template().iter().map(qualified).collect()
+    template_types().iter().map(|(n, _)| n.clone()).collect()
 }
 
 /// What a program uses of the standard classes: the classes to declare, and their members.
@@ -353,12 +409,20 @@ impl Uses {
 /// Declares the classes of `RAISED` that the runtime may raise where a `catch` or a `finally`
 /// might see them, and records them in `raised`.
 fn raise_classes(uses: &mut Uses, raised: &mut HashSet<String>) {
-    for (class, operations) in RAISED {
-        let caught =
-            uses.finally || uses.catches.iter().any(|c| is_standard(c) && standard_subclass(class, c));
+    let interrupted = if uses.operations.contains(INTERRUPTS) { RAISED_WHEN_INTERRUPTED } else { &[] };
+    // An uncaught-exception handler sees every failure that nothing else catches (see
+    // `Native::InstallUncaught`).
+    let handled = uses.members.iter().any(|m| m.0 == "java.lang.Thread" && m.1 == "installUncaught0");
+    for (class, operations) in RAISED.iter().chain(interrupted) {
+        let caught = handled
+            || uses.finally
+            || uses.catches.iter().any(|c| is_standard(c) && standard_subclass(class, c));
         if caught && operations.iter().any(|o| uses.operations.contains(*o)) {
             uses.classes.insert(class.to_string());
             uses.members.insert((class.to_string(), "<init>".into(), "(java.lang.String)void".into()));
+            if BARE.contains(class) {
+                uses.members.insert((class.to_string(), "<init>".into(), "()void".into()));
+            }
             uses.instantiated.insert(class.to_string());
             raised.insert(class.to_string());
         }
@@ -388,8 +452,10 @@ impl Standard {
             ));
         }
         let decls: Vec<(String, &'static Value)> = template().iter().map(|d| (qualified(d), d)).collect();
-        let decl = |name: &str| decls.iter().find(|(n, _)| n == name).map(|(_, d)| *d);
+        let decl = template_type;
         let mut scanned: HashSet<(String, String, String)> = HashSet::new();
+        let mut scanned_fields: HashSet<(String, String)> = HashSet::new();
+        let text = |v: &Value, field: &str| v[field].as_str().unwrap_or_default().to_string();
         loop {
             // The operations of the standard members scanned so far may raise (`addSuppressed`
             // indexes an array), so the classes they raise are decided again on every round.
@@ -415,15 +481,49 @@ impl Standard {
                 if let Some(s) = d["extendsClause"]["javaType"].as_str() {
                     uses.classes.insert(s.to_string());
                 }
+                let interfaces = d["implementsClause"].as_array().into_iter().flatten();
+                uses.classes.extend(interfaces.filter_map(|i| i["javaType"].as_str()).map(str::to_string));
+                // A class declared in another is declared with it.
+                if let Some((outer, _)) = class.rsplit_once('.')
+                    && decl(outer).is_some()
+                {
+                    uses.classes.insert(outer.to_string());
+                }
+                // Only a class whose objects the program may create runs its methods, and only an
+                // interface that the program uses is implemented: a field's type alone is neither.
+                let interface = d["kind"] == "INTERFACE";
+                let live = uses.members.iter().any(|m| m.0 == class && (interface || m.1 == "<init>"));
+                let methods = d["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "METHOD");
+                for m in methods.filter(|_| live) {
+                    let member = (class.clone(), text(m, "name"), text(&m["symbol"], "type"));
+                    // An interface's abstract methods, which its lambdas implement.
+                    let is_abstract = interface && m["body"].is_null();
+                    // A method that implements an interface's method that is used, which a call of
+                    // that one may run (`ThreadGroup.uncaughtException`).
+                    let overrides = m["symbol"]["overrides"].as_array().into_iter().flatten().any(|o| {
+                        let owner = text(o, "owner");
+                        decl(&owner).is_some_and(|i| i["kind"] == "INTERFACE")
+                            && uses.members.contains(&(owner, member.1.clone(), text(o, "type")))
+                    });
+                    if is_abstract || overrides {
+                        uses.members.insert(member);
+                    }
+                }
             }
             // The thread that `start0` starts runs the thread's `run()`.
             if uses.members.iter().any(|m| m.0 == "java.lang.Thread" && m.1 == "start0") {
                 uses.members.insert(("java.lang.Thread".into(), "run".into(), "()void".into()));
             }
-            // A thread prints as its `toString`, which string conversion calls unseen.
-            if uses.classes.contains("java.lang.Thread") {
-                let to_string = ("java.lang.Thread".into(), "toString".into(), "()java.lang.String".into());
-                uses.members.insert(to_string);
+            // The runtime runs `dispatchUncaught()` once a handler is set (see `lower/natives.rs`).
+            if uses.members.iter().any(|m| m.0 == "java.lang.Thread" && m.1 == "installUncaught0") {
+                uses.members.insert(("java.lang.Thread".into(), "dispatchUncaught".into(), "()void".into()));
+            }
+            // A thread or thread group prints as its `toString`, which string conversion calls
+            // unseen.
+            for printed in ["java.lang.Thread", "java.lang.ThreadGroup"] {
+                if uses.classes.contains(printed) {
+                    uses.members.insert((printed.into(), "toString".into(), "()java.lang.String".into()));
+                }
             }
             for member in uses.members.clone() {
                 if !scanned.insert(member.clone()) {
@@ -439,6 +539,21 @@ impl Standard {
                     uses.scan(node);
                 }
             }
+            // A field's initializer runs with its class's initialization (`ThreadGroup.MAIN`).
+            for field in uses.fields.clone() {
+                if !scanned_fields.insert(field.clone()) {
+                    continue;
+                }
+                let Some(d) = decl(&field.0) else { continue };
+                let node = d["members"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|m| m["kind"] == "VARIABLE" && m["name"].as_str() == Some(field.1.as_str()));
+                if let Some(node) = node {
+                    uses.scan(node);
+                }
+            }
             if before == (uses.classes.len(), uses.members.len(), uses.fields.len(), uses.operations.len()) {
                 break;
             }
@@ -449,7 +564,7 @@ impl Standard {
             .map(|(name, d)| (package_of(name.rsplit('.').next().unwrap_or_default()), *d))
             .collect();
         Standard {
-            names: classes.iter().map(|(_, d)| qualified(d)).collect(),
+            names: uses.classes.iter().filter(|c| is_standard(c)).cloned().collect(),
             classes,
             members: uses.members,
             fields: uses.fields,
@@ -472,6 +587,9 @@ impl Standard {
                 self.members.contains(&(class.to_string(), name, sig))
             }
             "VARIABLE" => self.fields.contains(&(class.to_string(), name)),
+            "CLASS" | "INTERFACE" | "ENUM" | "RECORD" => {
+                self.names.contains(&format!("{class}.{}", member.str("simpleName")))
+            }
             _ => false,
         }
     }
@@ -495,6 +613,16 @@ impl<'t> Lowering<'t> {
                 self.next_id.set(id + 1);
                 Expr { kind, pos: Pos::default(), ty, id }
             };
+            // Without a message first: the generator matches it when the message is null.
+            let bare = methods.iter().position(|m| m.is_ctor && m.class == t && m.params.is_empty());
+            if BARE.contains(&decl.name.as_str())
+                && let Some(bare) = bare
+            {
+                out.push(expr(
+                    ExprKind::New { class: t, args: Vec::new(), ctor: Some(bare) },
+                    Type::class(&decl.name),
+                ));
+            }
             let message = expr(ExprKind::Var("raisedMessage".to_string()), Type::String);
             out.push(expr(
                 ExprKind::New { class: t, args: vec![message], ctor: Some(ctor) },

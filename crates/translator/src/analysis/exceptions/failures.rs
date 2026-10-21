@@ -10,6 +10,20 @@ fn object_checked(object: &Expr) -> bool {
     matches!(object.ty, Type::Class(..))
 }
 
+/// Whether every object that a value of type `s` may be (`Facts::flows`, which decides the
+/// variants of its enum) is of a class under `t`, so that a cast of it to `t` cannot fail: the
+/// JDK's `((TreeMap<E,?>) m).keyIterator()` in `TreeMap.KeySet`, whose `m` is only ever a `TreeMap`
+/// where nothing makes a submap.
+fn only_under(class: &Class, facts: &Facts, s: usize, t: usize) -> bool {
+    facts.flows.get(s).is_some_and(|objects| {
+        class
+            .hierarchy
+            .concretes(s)
+            .into_iter()
+            .all(|c| !objects.contains(&c) || class.hierarchy.is_subtype(c, t))
+    })
+}
+
 /// Whether `builtin` is a regular expression call whose pattern (and replacement) are literals
 /// that compile, so that it never throws.
 fn constant_pattern(builtin: &Builtin, args: &[Expr]) -> bool {
@@ -68,6 +82,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             {
                 None
             }
+            // A range outside the array, an invalid code point.
+            StringOp::FromCodePoints | StringOp::FromHighByte => Some("?"),
             // A malformed pattern, a bad group in a replacement, an unknown charset.
             StringOp::ReplaceAll
             | StringOp::ReplaceFirst
@@ -110,10 +126,11 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         Builtin::Native(Native::Math { name: "clamp", .. }) => Some("java.lang.IllegalArgumentException"),
         // The others are functions on numbers, which never throw.
         Builtin::Native(Native::Math { .. }) => None,
-        // A negative time. Nothing interrupts a thread of a translated program, so `sleep` never
-        // throws `InterruptedException`.
+        // A negative time (and an interrupt, which `runtime_failures` adds in a program that
+        // interrupts).
         Builtin::Native(Native::Sleep { .. }) => Some("java.lang.IllegalArgumentException"),
-        // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail.
+        // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail, but for
+        // the interrupt of `join0`, which `runtime_failures` adds.
         Builtin::Native(
             Native::OnSpinWait
             | Native::ThreadYield
@@ -126,18 +143,40 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::ThreadStart
             | Native::ThreadAlive
             | Native::ThreadJoin
-            | Native::ThreadRename,
+            | Native::ThreadRename
+            | Native::ThreadInterrupt
+            | Native::ThreadIsInterrupted
+            | Native::ThreadClearInterrupt
+            | Native::InstallUncaught
+            | Native::UncaughtException
+            | Native::PrintUncaught,
         ) => None,
-        // A monitor that the thread does not hold (and for `wait` a negative timeout, which
-        // `runtime_failures` adds). Nothing interrupts a thread, so `wait` never throws
-        // `InterruptedException`.
+        // A monitor that the thread does not hold (and for `wait` a negative timeout, and an
+        // interrupt, which `runtime_failures` adds).
         Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. }) => {
             Some("java.lang.IllegalMonitorStateException")
         }
         Builtin::Native(Native::HoldsLock) => None,
-        // The answers of the virtual machine about itself, which cannot fail.
+        // What the JVM answers about itself, the clock and the bits of numbers (`vm.rs`, `natives`).
         Builtin::Native(
-            Native::Nothing
+            Native::DoubleToLongBits
+            | Native::DoubleToRawLongBits
+            | Native::LongBitsToDouble
+            | Native::FloatToIntBits
+            | Native::FloatToRawIntBits
+            | Native::IntBitsToFloat
+            | Native::IdentityHash
+            | Native::SystemIdentityHash
+            | Native::CurrentTimeMillis
+            | Native::NanoTime
+            | Native::AvailableProcessors
+            | Native::LineSeparator
+            | Native::SystemProperty(_)
+            | Native::TotalMemory
+            | Native::FreeMemory
+            | Native::MaxMemory
+            | Native::Gc
+            | Native::Nothing
             | Native::CdsConfigStatus
             | Native::CdsRandomSeed
             | Native::ContinuationsSupported
@@ -146,11 +185,7 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::ArrayIndexScale(_)
             | Native::DescriptorHandle
             | Native::DescriptorAppend
-            | Native::Crc32Update
-            | Native::CurrentTimeMillis
-            | Native::NanoTime
-            | Native::AvailableProcessors
-            | Native::LineSeparator,
+            | Native::Crc32Update,
         ) => None,
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
         // of a closed descriptor does nothing.
@@ -320,6 +355,7 @@ pub(super) fn runtime_failures(
             | Builtin::MainArgs
             | Builtin::NoObject { .. }
             | Builtin::UnknownClass
+            | Builtin::MissingResource
             | Builtin::InitializeClass { .. }
             | Builtin::ClassName { .. }
             | Builtin::ClassLiteralName { .. }
@@ -421,6 +457,7 @@ pub(super) fn runtime_failures(
                         // A null string is the `NumberFormatException` of `parse_radix`.
                         | Builtin::Bits(BitsOp::ParseRadix, _)
                         | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
+                        | Builtin::Native(Native::SystemIdentityHash)
                 );
                 let checked = if takes_null || matches!(builtin, Builtin::String(StringOp::Join) | Builtin::Format) {
                     &args[..args.len().min(1)]
@@ -458,13 +495,19 @@ pub(super) fn runtime_failures(
                                     | Native::FileLength
                                     | Native::FilePosition
                             )
-                    );
+                    ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })));
                     out.push((failure, "this call of the library", checked, x.id));
                 }
                 if let Builtin::Native(Native::MonitorWait) = builtin
                     && !matches!(args[1].kind, ExprKind::Long(n) if n >= 0)
                 {
                     out.push(("java.lang.IllegalArgumentException", "this call of the library", true, x.id));
+                }
+                // In a program that interrupts a thread, what waits ends with an interrupt.
+                if facts.interrupts
+                    && matches!(builtin, Builtin::Native(Native::Sleep { .. } | Native::ThreadJoin | Native::MonitorWait))
+                {
+                    out.push(("java.lang.InterruptedException", "this call of the library", true, x.id));
                 }
             }
         },
@@ -503,6 +546,7 @@ pub(super) fn runtime_failures(
         && let (Some(t), Some(s)) = (class.class_index(*to), class.class_index(value.ty))
         && !class.hierarchy.is_subtype(s, t)
         && !instance(t, value)
+        && !only_under(class, facts, s, t)
     {
         out.push(("java.lang.ClassCastException", "this cast", true, x.id));
     }

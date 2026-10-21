@@ -14,7 +14,8 @@ impl<'a> Gen<'a> {
         let class = self.class;
         let decl = &class.types[m.class];
         self.this_form = ThisForm::Local;
-        let (start, rest, initialize) = match m.body.split_first() {
+        let body = self.prologue(&m.body);
+        let (start, rest, initialize) = match body.split_first() {
             Some((Stmt::Expr(Expr { kind: ExprKind::ThisCall { args, resolved }, .. }), rest)) => {
                 let index = resolved.expect("calls are resolved by the checker");
                 let args = self.call_args(index, args).join(", ");
@@ -23,7 +24,7 @@ impl<'a> Gen<'a> {
             }
             _ => {
                 let initialize = !self.inline_inits(m.class) && decl.fields.iter().any(|f| f.init.is_some());
-                let (base, body) = self.super_init(m.class, &m.body);
+                let (base, body) = self.super_init(m.class, body);
                 let (literal, rest) = self.struct_literal(m, initialize, base, body);
                 (literal, rest, initialize)
             }
@@ -53,8 +54,9 @@ impl<'a> Gen<'a> {
 
     /// The struct literal that a constructor starts from, and the statements of its body that are
     /// left. The literal holds the fields' initializers and the leading assignments of the body
-    /// (see `analysis::leading_assignments`). Effects keep Java's order, the initializers in field
-    /// order and then the assignments: an initializer that a later one reads, or that has effects
+    /// (see `analysis::leading_assignments`), written in Java's order, the initializers in field
+    /// order and then the assignments, as the moves of variables expect. Effects keep that order:
+    /// an initializer that a later one reads, or that has effects
     /// when a later one reads a field, is computed into a local first, and so is every value with
     /// effects when the literal's field order would change their order.
     /// The superclass's fields struct, `base`, comes first, built by the constructor's `super(...)`
@@ -178,10 +180,20 @@ impl<'a> Gen<'a> {
         let conflicts = self.conflicts(&unbound);
         let outer = std::mem::replace(&mut self.guarded, conflicts);
         let mut parts: Vec<String> = base_part.into_iter().collect();
+        // The values in Java's order, which a struct literal keeps whatever the order of its
+        // fields: the initializers in field order, then the leading assignments in theirs. The
+        // moves of variables follow that order, so a parameter that one field takes a clone of
+        // and a later assignment moves is cloned first.
+        let assigned: Vec<usize> = leading.iter().map(|&(i, _)| i).collect();
+        let mut order: Vec<usize> = (0..fields.len()).filter(|i| !assigned.contains(i)).collect();
+        for &i in &assigned {
+            order.retain(|&j| j != i);
+            order.push(i);
+        }
         parts.extend(
-            fields
-                .iter()
-                .enumerate()
+            order
+                .into_iter()
+                .map(|i| (i, &fields[i]))
                 .map(|(i, f)| {
                     let field = snake_case(&f.name);
                     let value = match (&bound[i], values[i]) {

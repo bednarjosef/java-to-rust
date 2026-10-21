@@ -516,6 +516,15 @@ fn new(r: f64) -> Circle {
   (`codegen/objects.rs::constructor`): `let obj = Rc::new(RefCell::new(Circle { base:
   BaseFields::new("circle"), r: 0.0 }));` then `field_inits`, then the body on `this`.
 - `this(...)` delegation is unchanged; `super(...)` and `this(...)` are exclusive in Java.
+- Statements before `super(...)` or `this(...)` (Java 25's flexible constructor bodies, which the
+  JDK's `SortedOps` uses; `lower/prologues.rs`) are written before the object is built, so their
+  locals reach the call's arguments and the rest of the body. They cannot use `this`, except to
+  assign a field without an initializer: that value goes into a local, `early$f`, and
+  `this.f = early$f` right after the call stores it, which the struct literal takes in. In the
+  second form above, the stores run on the zero object before the superclass's
+  `construct<Name>`, which may call a method that reads them, as in Java. Before a `super()` of
+  `Object`, which is left out, the statements are the start of the body; a class with field
+  initializers is rejected there, as they would run first.
 - Static initialization order: `init_circle()` calls `init_base()` first (section 2.5).
 
 ### 1.5 `instanceof` with and without pattern, downcasts
@@ -1723,8 +1732,20 @@ Generics are erased in lowering, and nothing after it knows they existed:
   elements of a `List<? extends Number>`). The six numeric boxes implement it, and its abstract
   `byteValue()` to `doubleValue()` have an arm per box in `codegen::dispatch::number_arm`: the
   value converted with `as`, which converts as Java's primitive conversions do (a floating-point
-  value becomes a `byte` or a `short` through an `int`). A program class that extends `Number` is
-  still rejected, as is any extension of a runtime class.
+  value becomes a `byte` or a `short` through an `int`). Any other extension of a runtime class
+  is rejected.
+- Later, a class of the program that extends `Number` implements `NUMBER` too, for the JDK's
+  `AtomicInteger`, `AtomicLong`, `Striped64`, `BigInteger` and `BigDecimal`, which
+  `ThreadLocalRandom`, `Locale`'s statics (through `ConcurrentHashMap`), `pidigits` and
+  `DecimalFormat` reach. Its superclass is `Object` to the translation (`super()` does
+  nothing), and the `intValue()` to `doubleValue()` that it or a subclass declares implement
+  the interface's, so they dispatch like any interface method; an abstract class between
+  (`Striped64`) need not declare them. `Number`'s own `byteValue()` and `shortValue()` are
+  concrete, `(byte) intValue()` and `(short) intValue()`, and the boxes' give the same (Java
+  narrows a `long`, `float` or `double` to a `byte` through an `int`), so a call of either
+  through `Number`, or on such a class, lowers to that narrowing of `intValue()`, and the
+  interface's own two methods are never called. A class that overrides them would need its own
+  arm, and is rejected. A comparison of such an object with a `Number` converts it to `Number`.
 - `java.lang.CharSequence` is a fourth, `CHAR_SEQUENCE`, planned when the program uses it as the
   type of a value (the JDK's `StringJoiner` and `Collectors.joining` take `CharSequence`s). The
   JDK's interface is not translated (it is among `RUNTIME_CLASSES`). Strings implement it, and so
@@ -1743,6 +1764,11 @@ Generics are erased in lowering, and nothing after it knows they existed:
   parameter or return type (`next_integer`, `compare_to_point`); the group names are now unique in
   every class tree the group reaches (`codegen::names`). This also lifts "covariant return types"
   for these overrides.
+- javac writes the type of an inner class of a generic class with the outer class's type
+  arguments (`EnumMap<K,V>.EntryIterator`, `RegularEnumSet<E>.EnumSetIterator<E>`); those are
+  dropped before the type is read (`lower::generics::without_outer_args`), so the inner class's
+  own arguments are the only ones (before, a generic inner class read as its outer class, and
+  its objects never became values of the interface it implements).
 - A varargs parameter of a type variable (`T... items`) is an array of its erasure, read where the
   method declares it, not at the call; an array of references passed for it is passed on, as
   javac infers `T` from it (and is then rejected below unless it is an `Object[]`).
@@ -1765,10 +1791,27 @@ Generics are erased in lowering, and nothing after it knows they existed:
   in a tag beside the elements would need an array type of its own through all of the array code,
   so it is not done, with two deviations: storing an object of another class in such an array
   does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s
-  (`[Ljava.lang.Object;`). Arrays of strings are left out: the runtime's string methods make and
-  take `java::Array<String>` (`split`, `String.join`, `main`'s arguments), so a `String[]` passed
-  for an array of a type variable is still rejected ("an array passed as an array of a type
-  variable").
+  (`[Ljava.lang.Object;`). A `String[]` is covariant the same way, but the runtime's string
+  methods make and take `java::Array<String>` (`split`, `String.join`, `Arrays.toString` of
+  strings, `main`'s arguments), so where one meets a `String[]` that is an `Object[]`, lowering
+  wraps it in a copy (`Builtin::StringArrayOf` casting each element back to `String`,
+  `Builtin::ObjectArrayOf` putting each in `Object::String`), and `main`'s arguments are made as
+  `Object`s. A copy keeps the elements but not the array's identity, which only matters where the
+  builtin keeps or changes the array: those that read it (`join`, `toString`, `equals`,
+  `hashCode`, `copyOf`) and those that make a new one (`split`) are copied. Those that change it
+  in place (`Arrays.sort`, `Arrays.fill`) run the JDK's methods for an `Object[]` instead
+  (`ComparableTimSort`, the fill loop) where the JDK's sources are translated: reachability
+  leaves those calls to the runtime, so when the lowering finds one, `translate_program`
+  reaches and lowers the program again with them kept (`Reach::string_array_writes`), and only
+  such a program pulls in the JDK's sorting code. Without the JDK's sources they are rejected
+  ("a change in place of a `String[]` that is also an `Object[]`"). The strings in such an array are values of `Object`'s `String`
+  class (`analysis::hierarchy::flows`). A program whose `String[]`s never meet another array type
+  translates as before. An array of an enum is covariant too (`Day.values()` passed for `E[]`
+  of `<E extends Enum<E>>`, or as an `Enum<?>[]`, as `EnumSet` keeps its universe): where it is
+  an `Object[]`, its constants are `Object`s (`values()` makes them so), cast back to the enum
+  where read. An enum value is never null in the translation, so a null element read as the
+  enum ends the program ("a null enum value"), while a test of one against `null` tests the
+  checked cast's `Option`.
 - An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the
   plan's `Variant::Array`, done as a runtime class beside the strings and the boxes rather than a
   variant kind of its own: each array type that is converted to `Object` or cast back from it gets

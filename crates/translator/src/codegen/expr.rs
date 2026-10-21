@@ -249,9 +249,10 @@ impl<'a> Gen<'a> {
 
     pub(super) fn expr(&mut self, e: &'a Expr) -> Code {
         if self.facts.catching.contains_key(&e.id) && self.catching_now.insert(e.id) {
+            let mark = self.out.len();
             let code = self.expr(e);
             self.catching_now.remove(&e.id);
-            return self.caught(e.id, code);
+            return self.caught(e.id, code, mark);
         }
         if let Some(code) = self.shared_array(e) {
             return code;
@@ -387,7 +388,10 @@ impl<'a> Gen<'a> {
                     Code::new(format!("{{ let {old} = {name}; {text}; {old} }}"), LOWEST)
                 }
             }
-            ExprKind::Switch { selector, cases } => self.switch_expr(e.ty, selector, cases),
+            ExprKind::Switch { selector, cases } => {
+                let optional = self.nullable(e);
+                self.switch_expr(e.ty, optional, selector, cases)
+            }
             ExprKind::Cast(ty, value) if ty.is_small() => self.small_cast(*ty, value, e.id),
             ExprKind::Assign { op: None, target: Place::Index(array, index), value } => {
                 Code::atom(self.index_set(e.id, array, index, arrays::element(array.ty), value, true))
@@ -663,6 +667,7 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
             Builtin::MainArgs => self.main_args(ty),
+            Builtin::StringArrayOf | Builtin::ObjectArrayOf => self.array_conversion(builtin, &args[0], ty),
             Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
             Builtin::InitializeClass { class } => match self.init_call(class) {
                 Some(init) => Code::atom(format!("{{ {init} }}")),
@@ -672,6 +677,13 @@ impl<'a> Gen<'a> {
                 let name = self.value(&args[0], Type::String);
                 let message = "java.lang.ClassNotFoundException: {} is not a class of the translated program";
                 Code::atom(format!("{}(format!({message:?}, {}))", self.runtime("throw_uncaught"), name.text))
+            }
+            Builtin::MissingResource => {
+                let (class, name) = (self.value(&args[0], Type::String), self.value(&args[1], Type::String));
+                let message =
+                    "java.lang.InternalError: the resource {} of {} is not part of the translated program";
+                let format = format!("format!({message:?}, {}, {})", name.text, class.text);
+                Code::atom(format!("{}({format})", self.runtime("throw_uncaught")))
             }
             Builtin::MonitorEnter => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),

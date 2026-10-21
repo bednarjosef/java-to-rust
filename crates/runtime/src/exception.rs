@@ -39,7 +39,7 @@ impl fmt::Display for Exception {
 /// `Exception in thread "main" ` and the exception's `toString()` (then its stack, which a
 /// translation does not have) to standard error and exits with code 1. Generic in what it
 /// "returns", so that it fits anywhere a value is expected: `f().unwrap_or_else(java::uncaught)`.
-pub fn uncaught<T>(e: impl fmt::Display) -> T {
+pub fn uncaught<T>(e: impl fmt::Display + 'static) -> T {
     die(e)
 }
 
@@ -55,15 +55,20 @@ pub fn try_clone_refused<T>(class: &str) -> Result<T, Exception> {
 }
 
 /// `throw e` where nothing catches what is thrown: the program ends as `uncaught` describes.
-pub fn throw_uncaught(e: impl fmt::Display) -> ! {
+pub fn throw_uncaught(e: impl fmt::Display + 'static) -> ! {
     die(e)
 }
 
 ///
 /// On a thread that the program started, only that thread ends, with the thread's name in the
 /// message; the others go on. On the main thread of a program that started threads, the JVM
-/// waits for the other non-daemon threads before it exits with 1, and so does this.
-pub(crate) fn die(e: impl fmt::Display) -> ! {
+/// waits for the other non-daemon threads before it exits with 1, and so does this. Once the
+/// program has set an uncaught-exception handler, the exception goes to the handlers instead of
+/// being printed here (see `thread::dispatch_uncaught`).
+pub(crate) fn die(e: impl fmt::Display + 'static) -> ! {
+    if crate::thread::dispatch_uncaught(&e) {
+        crate::thread::end_dispatched()
+    }
     if crate::thread::on_worker() {
         crate::thread::end_worker(e)
     }
