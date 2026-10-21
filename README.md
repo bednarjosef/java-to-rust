@@ -148,8 +148,7 @@ A small subset, end to end:
   to the program's types, `String` and the boxes. The program's `equals(Object)` and `hashCode()`
   override `Object`'s; a class without them compares and hashes its identity, and a string or a box
   its value. A class without `toString` prints as Java's `Object.toString` does, its binary name and
-  its hash code in hexadecimal (`Point@1b6d3586`). `getClass()` (reflection), an array as an
-  `Object`, and `==` between two `Object`s that may both be strings or boxes (whose identity the
+  its hash code in hexadecimal (`Point@1b6d3586`). An array as an `Object`, and `==` between two `Object`s that may both be strings or boxes (whose identity the
   translation does not keep, except in the shortcut `a == b || a.equals(b)`) are rejected. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
@@ -170,6 +169,24 @@ A small subset, end to end:
   lambdas below); its other interfaces are rejected with an error that names the construct and
   its position. The design of the object model, and what is still to come, is in
   [docs/object-model.md](docs/object-model.md).
+- **Records, pattern switches and classes**: a record is a class with the members Java gives it
+  (`javac/records.rs` writes them into javac's tree): its fields, the canonical constructor (or a
+  compact one), accessors, `toString` (`Point[x=1, y=2]`), `equals` by component and `hashCode` as
+  `31 * h + hash(component)`. A record that never changes is an `Rc` without a `RefCell`, as any
+  such class is. Local records, enums and interfaces in a file without a package move to the top
+  level (they are static and see nothing of their method). `java.util.Objects.equals`, `hashCode`,
+  `hash`, `isNull` and `nonNull` translate as Java defines them. A `switch` with patterns (`case
+  Circle c`, `case Circle c when c.r() > 10`, `case null`, `case Square(double side)`, records
+  nested in records, `default`) is an `if let` chain over the selector's enum, and an exhaustive
+  one over a sealed hierarchy or an enum needs no `default`: a null selector throws
+  `NullPointerException` unless a `case null` takes it. `sealed`, `permits` and `non-sealed` are
+  accepted. Of `java.lang.Class`, only comparing classes and naming them translate:
+  `getClass() != o.getClass()`, `a.getClass().equals(b.getClass())` and `a.getClass() ==
+  Dog.class` (a `matches!` of the variant where the class is a variant of an enum), and
+  `Dog.class.getName()` and `getSimpleName()`. Any other use of a `Class` is rejected, as are a
+  record with an array component (its text would be the array's identity), a generic record in a
+  record pattern, and the class literal of a standard class. An accessor written in the record
+  runs at each use of a pattern variable that names a component, not once.
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
   and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
   `super(message)`, `super(message, cause)`, fields, and overrides of `getMessage` and `toString`)
@@ -280,7 +297,9 @@ field that is not final is accepted as long as only the constructor sets it. An 
 `toString` is its `Display`, while `name()` stays the constant's name. A constant with a body
 (`PLUS { int apply(int a, int b) { return a + b; } }`) overrides the enum's methods, so each
 overridden method becomes a `match self` with an arm per overriding constant and the enum's own
-body (if it is not abstract) for the rest.
+body (if it is not abstract) for the rest. `valueOf` of a name that is no constant throws
+`IllegalArgumentException` with Java's message (`No enum constant Main.Size.HUGE`), which a
+`catch` can take (`Size::try_enum_value_of(s)?`).
 
 ### Analyses
 

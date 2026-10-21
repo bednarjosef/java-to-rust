@@ -565,7 +565,7 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
 fn text_objects(x: &Expr) -> Vec<&Expr> {
     let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..));
     match &x.kind {
-        ExprKind::Builtin(Builtin::ClassName { .. }, _) => Vec::new(),
+        ExprKind::Builtin(Builtin::ClassName { .. } | Builtin::ClassLiteralName { .. }, _) => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
             [&**l, &**r].into_iter().filter(is_object).collect()
@@ -759,6 +759,8 @@ fn runtime_failures(
             | Builtin::EnumCompareTo
             | Builtin::Exit
             | Builtin::ClassName { .. }
+            | Builtin::ClassLiteralName { .. }
+            | Builtin::SameClass { .. }
             // A null is a value to them, and an object's own method is a call of its own.
             | Builtin::ObjectsEquals
             | Builtin::ObjectsHashCode => {}

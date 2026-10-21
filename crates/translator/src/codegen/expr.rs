@@ -588,6 +588,10 @@ impl<'a> Gen<'a> {
             }
             Builtin::NullCheck => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
+            Builtin::SameClass { same } => self.same_class(same, args),
+            Builtin::ClassLiteralName { class, simple } => {
+                Code::atom(format!("String::from({})", rust_string(&self.java_class_name(class, simple))))
+            }
             Builtin::MathAbs => {
                 let x = self.value(&args[0], ty);
                 // Math.abs(Integer.MIN_VALUE) is Integer.MIN_VALUE.
