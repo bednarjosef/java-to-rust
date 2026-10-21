@@ -238,7 +238,8 @@ fn load(program: &Program, string_array_writes: bool) -> Result<(Vec<Value>, Rea
     if crate::timings::enabled() {
         let (javac, reaching) = (javac.as_secs_f64(), reaching.as_secs_f64());
         let (classes, methods) = (reach.classes.len(), reach.methods.len());
-        eprintln!("timing: javac: {javac:.3} s, {} units", units.len());
+        let memory = crate::timings::memory();
+        eprintln!("timing: javac: {javac:.3} s, {} units{memory}", units.len());
         eprintln!(
             "timing: reach: {reaching:.3} s, {round} rounds ({walks} walks from the start again), {classes} classes and {methods} methods"
         );

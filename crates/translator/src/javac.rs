@@ -176,6 +176,7 @@ impl Session {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")))?;
+        crate::timings::javac_process(Some(child.id()));
         let input = child.stdin.take();
         let output = BufReader::new(child.stdout.take().expect("stdout is piped"));
         let mut stderr = child.stderr.take().expect("stderr is piped");
@@ -211,6 +212,7 @@ impl Session {
             Ok(n) if n > 0 && line.ends_with(b"\n") => {}
             _ => return Err(self.failure()),
         }
+        crate::timings::note_javac();
         let mut tree = parse(&line).map_err(|e| fail(format!("unreadable javac tree: {e}")))?;
         Ok(match tree["units"].take() {
             Value::Array(units) => units,
@@ -220,6 +222,7 @@ impl Session {
 
     /// Why javac stopped: the compile error that it printed.
     fn failure(&mut self) -> (Option<String>, Error) {
+        crate::timings::javac_process(None);
         self.input = None;
         let _ = self.child.wait();
         let stderr = self.errors.take().and_then(|e| e.join().ok()).unwrap_or_default();
@@ -256,6 +259,7 @@ impl Records {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        crate::timings::javac_process(None);
         // The end of its input ends javac.
         self.input = None;
         let _ = self.child.wait();
