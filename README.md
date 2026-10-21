@@ -83,6 +83,12 @@ The test programs come from:
 - `corpus/projects`: 3 multi-file programs (`imports`, `pruning`, `statics`), each with a source
   root `src/` and a file `main` that names the main class. The corpus has no open-source projects
   yet;
+- `corpus/whole-program`: programs that use the JDK's own code, such as `Comparator.comparing`
+  or `Function.andThen`, translated whole with the sources of `java.base` by a test of their own
+  (`tests/whole_program.rs`). The JDK's sources cannot be in the repository, so the test runs
+  only when `JAVA_BASE_SOURCES` names their root (`JAVA_BASE_SOURCES=… cargo test --test
+  whole_program`) and otherwise says it skipped; at about a minute per program, it runs at merges
+  rather than in every check;
 - `tools/fuzz`: random programs generated from a seed (`fuzz.py`, with `fuzz_strings.py` for
   strings and builders under `--strings`, `fuzz_arrays.py` for arrays of up to three dimensions,
   their aliases, rows, loops and helper methods under `--arrays`, and `fuzz_objects.py` for
@@ -451,9 +457,12 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   through `outer` (`self.outer.borrow().base`), also from a lambda in a lambda or in a local or
   anonymous class. A bound method reference takes a local, `this` or a final field as its
   receiver. In single-file mode the JDK's functional interfaces come from
-  `crates/translator/java/Functional.java` (abstract methods only). Not yet: other receivers,
-  `super` in a lambda, the closure forms (`impl FnMut`, `Rc<dyn Fn>`) and the JDK interfaces'
-  default and static methods.
+  `crates/translator/java/Functional.java` (abstract methods only), and a call of one of their
+  default or static methods is rejected with a pointer to whole-program mode. Translated whole
+  with the JDK's sources, those methods are the JDK's own code, lambdas in interface methods
+  included (`Comparator.comparing(Person::name).thenComparingInt(Person::age)`,
+  `f.andThen(g)`, `Predicate.not(p)`, `Iterable.forEach`; `corpus/whole-program`). Not yet: other
+  receivers, `super` in a lambda and the closure forms (`impl FnMut`, `Rc<dyn Fn>`).
 
 ### Whole programs
 
@@ -548,7 +557,8 @@ Each construct below is rejected at translation with an error that names it:
 - the exceptions and try-with-resources listed under "Exceptions" above;
 - records, local interfaces, enums and records, and record patterns;
 - method references on a receiver other than a local, `this` or a final field, `super` in a
-  lambda, the default and static methods of the JDK's functional interfaces;
+  lambda, and without the JDK's sources the default and static methods of its functional
+  interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
 - threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls
