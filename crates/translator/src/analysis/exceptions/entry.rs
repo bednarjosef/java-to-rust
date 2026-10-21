@@ -4,6 +4,9 @@
 
 use super::*;
 
+/// What the entry point raises, in words.
+pub(super) const START: &str = "the start of this method";
+
 /// The point that runs the `<clinit>` of the class that method `m` starts by initializing, when
 /// it has one.
 pub(super) fn entry_point(class: &Class, facts: &Facts, m: usize) -> Option<Point> {
@@ -16,7 +19,8 @@ pub(super) fn entry_point(class: &Class, facts: &Facts, m: usize) -> Option<Poin
     Some(Point {
         raise: Raise::Call(vec![clinit]),
         pos: method.pos,
-        what: "the start of this method",
+        what: START,
         frames: Vec::new(),
+        known: Vec::new(),
     })
 }

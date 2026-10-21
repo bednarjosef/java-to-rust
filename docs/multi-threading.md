@@ -1329,5 +1329,19 @@ Decisions that change during the implementation are recorded here, milestone by 
   `put<Kind><Mode>` through it to a plain read or write of `o.f`; reachability enters neither
   `objectFieldOffset` nor the accessors. The field is not made atomic yet: in a program without
   threads a plain access is exact, and in one with threads the access is under the object's lock,
-  which orders it at least as acquire, release and volatile ask. The compare-and-set and
-  get-and-add forms, `VarHandle`s and array handles come with `java.util.concurrent`.
+  which orders it at least as acquire, release and volatile ask. `VarHandle`s and array handles
+  come with `java.util.concurrent`.
+- **The atomic updates of a field handle came next**, for `AtomicInteger`, `AtomicLong` and
+  `Striped64` once classes extending `Number` translate (`ThreadLocalRandom`'s `<clinit>`, which
+  `Locale`'s statics reach through `ConcurrentHashMap`, creates an `AtomicInteger`).
+  `getAndAdd`, `getAndSet`, `compareAndSet`, `weakCompareAndSet` and `compareAndExchange` of an
+  `int`, `long` or reference field, in every memory-order mode, become a call of a method that
+  lowering adds to the field's class, one per field and form (`compareAndSetValue(expected,
+  value)`), whose body reads, compares and writes the field. A method runs with its object
+  borrowed, or in a program with threads with the object's lock held (`this.borrow_mut()` of an
+  `Arc<java::Locked<C>>`), for the whole call, so no other access of the object comes between
+  the read and the write: the update is atomic without atomic fields, and four threads
+  incrementing one `AtomicInteger` count every increment (`corpus/whole-program/AtomicNumbers.java`).
+  The weak forms never fail spuriously, which Java allows. Reachability does not enter
+  `Unsafe`'s own updates, whose loops pass the offset on as a value. Atomic fields (2.2) remain
+  the refinement for when the lock shows in a profile.

@@ -390,6 +390,18 @@ written with the checked form exactly when it is in the analysis's set.
   machine rethrows. A method that starts by running an initializer (`Facts::entry_init`) raises
   what that initializer raises at its start (`analysis/exceptions/entry.rs`). An instance field
   initializer's escapes escape each constructor that runs it (`analysis/exceptions/field_inits.rs`).
+  An uncaught initializer that escapes something is rejected only where a `catch` (of `Error`,
+  `LinkageError` or `Throwable`) or a `finally` around a use of its class would see the
+  `ExceptionInInitializerError`.
+- **Calls that raise nothing for their arguments** (`analysis/exceptions/guards.rs`): a call
+  whose arguments are known (literals, constants, a static that its class assigns once from a
+  native of the JVM such as `Unsafe.arrayIndexScale`, a new array of known length) runs its
+  callee on those values. An `if` whose condition is then false, and a loop whose condition is
+  false at the start, are skipped, and so is `new T[n]` of a known `n >= 0`. When nothing else
+  the callee runs raises (as escapes say), the call is no point, and the escapes are computed
+  again. The JDK's `ArraysSupport.exactLog2(Unsafe.ARRAY_INT_INDEX_SCALE)` and `new SetN<>()` of
+  `ImmutableCollections` (a varargs constructor with no elements) are such calls, in static
+  initializers that a program's `catch (Throwable)` or `finally` would otherwise see fail.
 - **What is observed at a point**: the classes under the types of the enclosing `catch`
   clauses, everything when an enclosing `finally` observes (it does unless it only assigns
   variables, fields and array elements with operations that cannot fail: what it does to memory
