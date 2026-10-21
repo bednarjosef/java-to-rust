@@ -69,6 +69,47 @@ In order of payoff for the effort:
    of lines takes an hour or more for a release build. One crate per library or group of packages
    builds in parallel and rebuilds only what changed.
 
+## Memory for large projects
+
+Today a translation holds the whole reached program in memory three times over:
+
+1. **In javac**, every attributed unit with its trees and symbols. This is the largest part today
+   (2.5 GB for TextAdventure).
+2. **In transit**, as JSON text that spells out every name and node kind in full (356 MB for the
+   2,500 JDK units javac used to attribute for every program).
+3. **In the translator**, as `serde_json` values (about ten times the text), then the lowered
+   program, the analyses' results and the output text.
+
+Peak memory grows with the code of everything reached. The goal is that it grows with summaries
+of that code, plus the few methods being worked on at a time. In order:
+
+1. **Measure first.** `--timings` prints the time of each phase; it should also print the peak
+   memory of each, in both processes, so the largest consumer is fixed first.
+2. **Summaries instead of bodies.** Most of the translator needs to know *about* a method (what
+   it calls, which objects it can return, which exceptions it can raise), not its code. Read a
+   method, record its summary, drop its body; run the whole-program analyses on the summaries;
+   then load each method's body again, translate it, write it out and drop it. Compilers that
+   optimize whole programs at scale work this way (ThinLTO's summaries).
+3. **javac forgets what it has handed over.** Once a method's tree is exported, javac needs only
+   its symbol and signature; the body can be released, as javac's own compile policy does after
+   generating a class's bytecode.
+4. **A compact transfer format.** A table of names and types written once and referred to by
+   number, nodes as small binary records, streamed through the pipe instead of built as one
+   string. Likely five to ten times smaller than JSON.
+5. **Compact data in the translator.** Typed structures read straight from that format instead of
+   `serde_json` values; names and types interned as 32-bit ids; tree nodes in large blocks
+   instead of one allocation each.
+6. **Output written as it is made**, straight to each crate's files, instead of one string of
+   millions of lines.
+7. **Reaching less.** Dispatch of `toString`, `equals` and `hashCode` from library code currently
+   reaches every live class's override, which pulls in large parts of the JDK that the program
+   never runs (the thread pool, currencies, the file system, stack walking). Restricting it to the
+   classes whose objects can reach the call, by the points-to facts, shrinks all three copies.
+
+Expected effect: several times less peak memory; for a project the size of the Minecraft server,
+the difference between the 20 to 40 GB estimated below and a few GB. That is an estimate until
+step 1 measures it.
+
 ## At scale: the Minecraft server, roughly
 
 Assuming every feature it uses were supported, which is not yet the case. The dedicated server is
