@@ -776,10 +776,16 @@ impl<'t> Lowering<'t> {
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);
-                // A default method of a JDK interface that lowering provides is not declared.
+                // The default and static methods of a JDK interface that lowering declares (see
+                // `functional`) are the JDK's code, which only a translation with its sources has.
                 if resolved.is_none() && self.functional.has(symbol.owner) {
-                    let what = format!("the default method {}.{}", symbol.owner, symbol.name);
-                    return unsupported(node, &what);
+                    let kind = if symbol.is_static { "static" } else { "default" };
+                    let message = format!(
+                        "the {kind} method `{}.{}` is the JDK's code: translate the program with the \
+                         JDK's sources (`--main` and `--library`) for it",
+                        symbol.owner, symbol.name
+                    );
+                    return error(node.pos(), message);
                 }
                 let args = self.convert_generic_args(node, resolved, args)?;
                 if symbol.is_static {

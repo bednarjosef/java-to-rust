@@ -242,8 +242,10 @@ fn validate(class: &Class, facts: &Facts) -> Result<(), Error> {
         for (m, method) in class.methods.iter().enumerate() {
             // `Object`'s `equals` and `hashCode` are the constant's identity, and `Comparable`'s
             // `compareTo` compares the ordinals.
-            let builtin = matches!(method.name.as_str(), "name" | "ordinal" | "toString")
+            // An interface may declare `Object`'s `equals` again (as `Comparator` does).
+            let builtin = matches!(method.name.as_str(), "name" | "ordinal" | "toString" | "hashCode")
                 && method.params.is_empty()
+                || method.name == "equals" && method.params.len() == 1
                 || matches!(class.types[method.class].name.as_str(), OBJECT | COMPARABLE);
             if method.is_abstract
                 && class.hierarchy.is_subtype(e, method.class)
