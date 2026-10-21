@@ -1354,6 +1354,29 @@ fn a_last_use_moves_instead_of_cloning() {
 }
 
 #[test]
+fn main_args_are_the_command_line_arguments() {
+    let plain = translate(
+        "class A {
+            public static void main(String[] args) { System.out.println(args.length); }
+        }",
+    );
+    assert_contains(&plain, &["let args: Vec<String> = java::main_args();"]);
+    let shared = translate(
+        "class A {
+            static String[] kept;
+            public static void main(String[] args) { kept = args; System.out.println(kept.length); }
+        }",
+    );
+    assert_contains(&shared, &["let args: java::Array<String> = java::from_vec(java::main_args());"]);
+    let nullable = translate(
+        "class A {
+            public static void main(String[] args) { args[0] = null; System.out.println(args.length); }
+        }",
+    );
+    assert_contains(&nullable, &["java::main_args().into_iter().map(Some).collect::<Vec<_>>()"]);
+}
+
+#[test]
 fn varargs_that_are_only_read_are_borrowed_slices() {
     let rust = translate(
         "class A {
@@ -1529,6 +1552,30 @@ fn objects_created_from_a_class_name_are_of_the_classes_that_code_names() {
     );
     // No code names `Square`, so no name can create one.
     assert_lacks(&rust, &["Square", "square"]);
+}
+
+#[test]
+fn class_for_name_of_a_spelled_out_name_initializes_that_class() {
+    let registry = "package app;\n\
+        class Registry {\n\
+            static { Main.value = \"registered\"; System.out.println(\"registry\"); }\n\
+        }\n";
+    let java = "package app;\n\
+        public class Main {\n\
+            static String value;\n\
+            public static void main(String[] a) {\n\
+                try {\n\
+                    Class.forName(\"app.Registry\", true, null);\n\
+                } catch (ClassNotFoundException e) {}\n\
+                System.out.println(value);\n\
+            }\n\
+        }\n";
+    let dir = write_sources("for-name", &[("app/Main.java", java), ("app/Registry.java", registry)]);
+    let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    // Only the string names `Registry`, and the call runs its static initializer.
+    assert_contains(&rust, &["init_registry();", "\"registry\""]);
 }
 
 /// Writes Java files into a fresh directory under the test's temporary directory.

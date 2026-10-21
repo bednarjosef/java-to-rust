@@ -189,6 +189,13 @@ pub fn flows(
             if let (Some(t), Some(s)) = (index(*to), index(value.ty)) {
                 edges.insert((s, t));
             }
+            // The rows of `new int[n][m]` as an `Object[]` are `Object`s (`lower::arrays`).
+            if let (ExprKind::NewArray(_), Type::Array(element), Type::Array(row)) =
+                (&value.kind, *to, value.ty)
+                && let (Some(t), Some(s)) = (index(*element), index(*row))
+            {
+                edges.insert((s, t));
+            }
         }
         // `super.m()`: `this` as a value of the superclass.
         ExprKind::This => {

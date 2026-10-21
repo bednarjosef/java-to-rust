@@ -848,6 +848,22 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   reaches 1,191 classes and 49 natives (26 in the runtime) instead of 1,180 and 44, the five new
   natives being the referent ones; `ReaderLines` 262 classes instead of 254, with the same 12
   natives. Test: `corpus/whole-program/References.java`.
+- **`Class.forName` of a name spelled out initializes that class** (`program::class_for_name`,
+  `lower/by_name.rs`): `SharedSecrets` has a class register its access object by running its
+  static initializer, `Class.forName("java.util.ImmutableCollections$Access", true, null)`, which
+  `Stream.toList()` reaches through `getJavaUtilCollectionAccess`. In a closed program a name
+  given as a string literal is a class of the program (the binary name `a.B$C` of a member class
+  is `a.B.C`), so `Class.forName(name)` and `Class.forName(name, initialize, loader)` with a
+  literal name and a literal `initialize` are that class's literal, after its static
+  initialization (`Builtin::InitializeClass`, which is the `init` call that a first use makes, or
+  nothing when the class has nothing to run) if the call initializes. Reachability reaches the
+  class as initialized, and the next round loads its unit if no unit declares it yet. The loader
+  is evaluated for its effects only: a JVM's bootstrap loader (`null`) finds only the JDK's
+  classes, where the translation finds the program's too. A name of no class of the program is
+  rejected, and so are a computed name and a computed `initialize`. The `ClassNotFoundException`
+  that the caller catches is then never thrown; for a single file, `Standard.java` has it and
+  `ReflectiveOperationException`. Test: `corpus/features/ClassForName.java` and
+  `class_for_name_of_a_spelled_out_name_initializes_that_class`.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

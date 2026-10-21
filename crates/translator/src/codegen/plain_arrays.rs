@@ -280,6 +280,7 @@ impl<'a> Gen<'a> {
                 format!("vec![{}]", items.join(", "))
             }
             ExprKind::Var(name) => self.local(name),
+            ExprKind::Builtin(Builtin::MainArgs, _) => self.main_args_vec(e.ty),
             ExprKind::Call { args, resolved: Some(index), .. } => self.owned_call(*index, args),
             ExprKind::MethodCall { receiver, args, resolved: Some(index), is_super, .. } => {
                 if self.closure_type(receiver.ty).is_some() {
