@@ -960,7 +960,7 @@ impl<'a> Gen<'a> {
 
     /// The hash code of a value of class `c`, reached through `handle`, a reference to what the
     /// variant holds, whose class does not override `hashCode`.
-    fn value_hash(&mut self, c: usize, handle: &str) -> String {
+    pub(super) fn value_hash(&mut self, c: usize, handle: &str) -> String {
         let Some(ty) = self.runtime_of(c) else {
             if self.holds_value(c) {
                 // An enum's constant hashes by its identity in Java, which nothing can depend on.
