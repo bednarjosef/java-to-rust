@@ -213,28 +213,40 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// `(T) value`, a checked downcast, or a cast across, from the enum of `s`.
-    fn downcast(&mut self, s: usize, to: Type, value: &'a Expr) -> Code {
+    /// `(T) value`, a checked downcast, or a cast across, from the enum of `s`; `checked` when
+    /// a `catch` or a `finally` sees its failure (see `checked_class_cast`).
+    fn downcast(&mut self, s: usize, to: Type, value: &'a Expr, checked: Option<ExprId>) -> Code {
         let t = self.type_of(to).expect("a cast to a type of the program");
         self.need(Need::Narrow(s, t));
         let name = self.as_name(t);
-        let cast = self.runtime("cast");
+        let cast = self.runtime(if checked.is_some() { "try_cast" } else { "cast" });
         let target = rust_string(&self.binary_name(t));
-        if self.nullable(value) {
+        let text = if self.nullable(value) {
             let option = self.object_place(value);
             let enum_name = struct_name(&self.class.types[s].name);
-            return Code::atom(format!(
-                "{option}.as_ref().map(|o| {cast}({enum_name}::{name}(o), {target}))"
-            ));
-        }
-        let obj = self.object(value);
-        Code::atom(format!("{cast}({obj}.{name}(), {target})"))
+            format!("{option}.as_ref().map(|o| {cast}({enum_name}::{name}(o), {target}))")
+        } else {
+            let obj = self.object(value);
+            format!("{cast}({obj}.{name}(), {target})")
+        };
+        self.cast_result(text, checked, self.nullable(value))
     }
 
     /// A cast of a value whose class is known to a type that it is not of, which always fails
     /// (unless the value is null).
-    fn failing_cast(&mut self, to: Type, value: &'a Expr) -> Code {
+    fn failing_cast(&mut self, to: Type, value: &'a Expr, checked: Option<ExprId>) -> Code {
         let t = self.type_of(to).expect("a cast to a type of the program");
+        if checked.is_some() {
+            let ty = self.ty_name(to);
+            let fail =
+                format!("{}(None::<{ty}>, {})", self.runtime("try_cast"), rust_string(&self.binary_name(t)));
+            let text = if self.nullable(value) {
+                format!("{}.as_ref().map(|_| {fail})", self.object_place(value))
+            } else {
+                format!("{{ let _ = {}; {fail} }}", self.expr(value).text)
+            };
+            return self.cast_result(text, checked, self.nullable(value));
+        }
         let failed = format!("{}({})", self.runtime("cast_failed"), rust_string(&self.binary_name(t)));
         if self.nullable(value) {
             let option = self.object_place(value);
@@ -494,12 +506,13 @@ impl<'a> Gen<'a> {
     /// A conversion of an object to a supertype: the same object as a value of the supertype's
     /// enum. Where both types have the same representation it changes nothing.
     pub(super) fn class_cast(&mut self, to: Type, value: &'a Expr) -> Code {
+        let checked = self.checked_cast.take();
         if matches!(value.kind, ExprKind::Null) {
             return Code::atom("None");
         }
         match self.narrowing(value, to) {
-            Narrowing::Down(s) => return self.downcast(s, to, value),
-            Narrowing::Known(false) => return self.failing_cast(to, value),
+            Narrowing::Down(s) => return self.downcast(s, to, value, checked),
+            Narrowing::Known(false) => return self.failing_cast(to, value, checked),
             Narrowing::Up | Narrowing::Known(true) => {}
         }
         let Some(t) = self.enum_type(to) else {

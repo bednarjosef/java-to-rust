@@ -781,6 +781,42 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   `LazyConstant` in which
   `Charset` keeps its default: `Unsafe.objectFieldOffset` and the acquire and release accesses of
   its `constant` field, which wait for the threads design's symbolic field offsets.
+- **Objects created from a class name** (`program/reach/by_name.rs`, `lower/by_name.rs`):
+  `(T) Class.forName(name).getDeclaredConstructor().newInstance()`, and the older
+  `(T) Class.forName(name).newInstance()`, is how `LocaleProviderAdapter.forType` creates the
+  adapter of each `LocaleProviderAdapter.Type`. A translated program is closed, so the lowering
+  makes it a `switch` over the name with a case for each of the program's top-level classes that
+  is neither abstract nor generic, is a `T` and has a constructor without parameters; any other
+  name ends the program with `java.lang.ClassNotFoundException: NAME is not a class of the
+  translated program` (`Builtin::UnknownClass`), never with an object of another class.
+  Reachability makes that constructor reachable for each such class whose binary name reachable
+  code writes as a string literal, as `LocaleProviderAdapter.Type`'s constants do; a name that
+  code computes (`SPILocaleProviderAdapter`'s `getCanonicalName() + "$" + ...`) finds nothing.
+  Since javac gives a library unit only for a class that reachability names, a literal that could
+  be the qualified name of a class that no unit declares yet is noted as missing when code
+  creates objects by name (`Walk::note_named`), and the next round has its unit.
+  A `catch` alternative of a class that a whole program does not translate, such as
+  `InvocationTargetException`, is left out: translated code cannot throw one. Test: the corpus
+  program `corpus/whole-program/ClassesByName.java` and
+  `objects_created_from_a_class_name_are_of_the_classes_that_code_names`. `ScannerGrades` now
+  reaches the five adapters, which reflection cut before: 1,179 classes and 62 natives (21 in the
+  runtime) instead of 1,027 and 60 (and the same 1,179 classes with the units that javac gives as
+  they are asked for, where main's `Unsafe` field accesses bring the natives to 44); the new natives are `UnixFileSystem.getBooleanAttributes0`,
+  through the data file that `Currency` reads, and `VM.getNanoTimeAdjustment`, which the runtime
+  has. It still stops at `Bundles`, which extends the untranslated `ResourceBundle`.
+- **Untranslated classes as types are stubs** (`program/reach/stubs.rs`, `lower/stubs.rs`): no
+  translated code can create an object of a class that is not translated, so a variable of such
+  a type is only ever null. Reachability records each such class that reachable code declares a
+  variable of (a parameter, local or field), with the instance methods that it calls on one, and
+  the lowering declares it as a class in its package without constructors or fields, whose
+  methods are dormant: a call throws `NullPointerException` on the null receiver, and
+  `instanceof` is false, as in Java. Its static members, constructors, generic and array types
+  stay rejected. `TreeMap.buildFromSorted` takes the `ObjectInputStream` that deserialization
+  reads a map from, and every call that copies a sorted map (`TreeMap(SortedMap)`, `putAll`,
+  `clone`, `TreeSet.addAll`) passes null; `TokenizerParser` and `WordFrequency` stopped at its
+  parameter and now stop at a panic of `analysis/whole_objects.rs` on `HashMap.ValueIterator`, whose
+  superclass `HashMap.HashIterator` is an inner class too. Test: the corpus program
+  `corpus/whole-program/UntranslatedNulls.java`.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

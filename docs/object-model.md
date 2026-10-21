@@ -451,6 +451,12 @@ fn new(r: f64) -> Circle {
   rule (`analysis::leading_assignments`) skips the `super(...)` statement, which lowering
   represents as `ExprKind::SuperInit { args, resolved }` as the first statement (like
   `ThisCall`).
+- A leading assignment may read fields that earlier leading assignments set, as `EnumMap`'s
+  constructor does (`keyUniverse = getKeyUniverse(keyType); vals = new
+  Object[keyUniverse.length]`): the literal then computes the initializers with effects or that
+  read a static first, as Java runs them before the body, and then each leading value into a
+  local that the later ones read in place of the field. Every field is set before anything can
+  read it, so the nullness analysis sees those fields as never null.
 - The superclass's constructor builds a plain value (`plain_constructors`) wherever it can: it
   uses `this` only for the struct being built, calls on `this` only methods that borrow that
   struct, and so do its class's field initializers. A constructor of a class with subclasses

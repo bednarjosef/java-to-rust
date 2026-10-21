@@ -524,8 +524,13 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   of its interface's enum, or a subclass whose constructor passes the arguments of its `new` to
   the superclass's and its captures after them (`ReportInMain::new("squares", &sep)`); its
   `getName` is javac's (`Main$1`) and its `getSimpleName` empty. Local interfaces, enums and
-  records and member classes of local and anonymous classes translate, as do `Outer.super.m()`
-  and `outer.super()`. Not yet: an inner class extending one nested in another class.
+  records and member classes of local and anonymous classes translate, as do `Outer.super.m()`,
+  `outer.super()` and `o.new Inner() { .. }`. A class extending an inner class nested in
+  another class (an inner class of an inner class, of a subclass of the outer class or of an
+  unrelated class, a local or anonymous class in an inner class's method) holds its own
+  enclosing instance as `outer_` next to the superclass's `outer` in `base`; the JDK's
+  `AbstractList.ListItr extends Itr` translates. Not yet: an inner class with subclasses whose
+  constructor uses `this` as a value or calls an overridable method.
 - For-each over an `Iterable` (`lower/foreach.rs`) is the loop Java runs: `let it =
   Names::iterator(&names); while it.borrow().has_next() { let s = it.borrow_mut().next(); .. }`,
   with the program's or the JDK's `iterator`, `hasNext` and `next`, so a translated iterator
