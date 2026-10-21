@@ -848,9 +848,17 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether a statement's own expressions may borrow an object mutably while another borrow made
-    /// by the statement is still alive, so that every borrow must end where it is made.
+    /// by the statement is still alive, or reassign a place that a borrow reads (`t = t.left`, also
+    /// inside a condition, as in `while ((e = e.next) != null)`), so that every borrow must end
+    /// where it is made.
     pub(super) fn stmt_conflicts(&self, stmt: &Stmt) -> bool {
-        self.conflicts(&own_exprs(stmt)) || matches!(stmt, Stmt::Expr(e) if self.reassigns_through_borrow(e))
+        let exprs = own_exprs(stmt);
+        self.conflicts(&exprs)
+            || exprs.iter().any(|e| {
+                let mut found = false;
+                visit_expr(e, &mut |x| found |= self.reassigns_through_borrow(x));
+                found
+            })
     }
 
     /// Whether evaluating `e` borrows a shared object through a `RefCell`.
