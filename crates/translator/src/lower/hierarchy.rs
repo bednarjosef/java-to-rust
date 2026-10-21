@@ -38,9 +38,13 @@ impl<'t> Lowering<'t> {
             }
             match self.type_index(raw) {
                 Some(i) if self.types[i].node.kind() == "INTERFACE" => out.push(i),
+                // `CharSequence` is the object model's (see `object_types`).
                 None if matches!(
                     raw,
-                    "java.lang.Comparable" | "java.lang.AutoCloseable" | "java.io.Closeable"
+                    "java.lang.Comparable"
+                        | "java.lang.AutoCloseable"
+                        | "java.io.Closeable"
+                        | "java.lang.CharSequence"
                 ) => {}
                 _ => return unsupported(clause, &format!("implementing `{raw}`")),
             }
