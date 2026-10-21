@@ -572,10 +572,11 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   interface that extends another names its closures (`type UnaryOperator = Function;`). Each
   lambda is a closure written where it is created, its captures moved in (`Rc::new(move |a:
   i32, b: i32| -> i32 { a.wrapping_add(b).wrapping_add(k) }) as IntOp`, `this` as `outer`), and
-  a call is a call of the closure (`op(acc, x)`). Every other functional interface keeps the
-  class per lambda. Not yet: other receivers, `super` in a lambda, typed closures for a generic
-  interface's instantiations, and the parameter and local forms (`impl FnMut`, a plain `let f =
-  |x| ..`).
+  a call is a call of the closure (`op(acc, x)`). A local that only calls its lambda is the
+  closure itself, borrowing what it captures (`let scale = |x: i32| -> i32 {
+  x.wrapping_mul(this.borrow().factor) };`). Every other functional interface keeps the class
+  per lambda. Not yet: other receivers, `super` in a lambda, typed closures for a generic
+  interface's instantiations, and the parameter form (`impl FnMut`).
 
 ### Whole programs
 
