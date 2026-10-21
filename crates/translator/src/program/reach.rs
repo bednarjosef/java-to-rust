@@ -232,6 +232,16 @@ pub fn stream_of_call(node: &Value) -> Option<&str> {
         .then(|| text(symbol, "name"))
 }
 
+/// Whether `node` is a call that the runtime makes itself on `System.out` or `System.err`
+/// (`direct_stream_call`), which reaches only what its arguments do.
+pub fn runtime_stream_call(node: &Value) -> bool {
+    stream_of_call(node).is_some_and(|stream| {
+        let symbol = &node["symbol"];
+        text(symbol, "owner") == "java.io.PrintStream"
+            && direct_stream_call(stream, text(symbol, "name"), text(symbol, "type"))
+    })
+}
+
 /// Whether the method is one of the `REPLACED_METHODS`, or an access of `Unsafe` through a
 /// field's offset, which the lowering replaces with the field.
 pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
@@ -1146,15 +1156,7 @@ impl<'t> Walk<'t> {
             }
             // So does a call that the runtime makes on `System.out` or `System.err`
             // (`direct_stream_call`).
-            Value::Object(_)
-                if stream_of_call(value).is_some_and(|stream| {
-                    let symbol = &value["symbol"];
-                    text(symbol, "owner") == "java.io.PrintStream"
-                        && direct_stream_call(stream, text(symbol, "name"), text(symbol, "type"))
-                }) =>
-            {
-                self.scan(&value["arguments"])
-            }
+            Value::Object(_) if runtime_stream_call(value) => self.scan(&value["arguments"]),
             // An object created from a class name (`by_name`) reaches the constructors of the
             // classes that the name can be, not reflection.
             Value::Object(_) if let Some(name) = created_by_name(value) => {
@@ -1314,7 +1316,7 @@ fn supertype(ty: &Value) -> Option<String> {
 }
 
 /// A type without its type arguments: `java.util.ArrayList<E>.Itr` is `java.util.ArrayList.Itr`.
-fn strip_arguments(ty: &str) -> String {
+pub(super) fn strip_arguments(ty: &str) -> String {
     let mut depth = 0;
     ty.chars()
         .filter(|&c| {
