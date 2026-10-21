@@ -217,6 +217,10 @@ impl<'a> Gen<'a> {
     /// a `catch` or a `finally` sees its failure (see `checked_class_cast`).
     fn downcast(&mut self, s: usize, to: Type, value: &'a Expr, checked: Option<ExprId>) -> Code {
         let t = self.type_of(to).expect("a cast to a type of the program");
+        // No class of the enum is a `T` (no object of one is created): only null passes.
+        if self.passing(s, t).is_empty() {
+            return self.failing_cast(to, value, checked);
+        }
         self.need(Need::Narrow(s, t));
         let name = self.as_name(t);
         let cast = self.runtime(if checked.is_some() { "try_cast" } else { "cast" });
@@ -307,6 +311,9 @@ impl<'a> Gen<'a> {
             Narrowing::Known(false) => format!("None::<{}>", self.ty_name(to)),
             Narrowing::Down(s) => {
                 let t = self.type_of(to).expect("a test of a type of the program");
+                if self.passing(s, t).is_empty() {
+                    return format!("None::<{}>", self.ty_name(to));
+                }
                 self.need(Need::Narrow(s, t));
                 let name = self.as_name(t);
                 let text = if nullable {
@@ -938,6 +945,9 @@ impl<'a> Gen<'a> {
                 let (text, uses) = g.arm_call(t, c, i, &args);
                 (g.covariant_ret(i, r, text), uses)
             }
+            // What runs no method of the program cannot throw, but the group may (a `hashCode`
+            // that iterates a map), and then every arm gives a `Result`.
+            None if g.facts.throwing.contains(&r) => (format!("Ok({})", g.builtin_arm(r, c)), true),
             None => (g.builtin_arm(r, c), true),
         });
         self.indent -= 1;
@@ -957,6 +967,9 @@ impl<'a> Gen<'a> {
         }
         if self.is_number_method(r) {
             return self.number_arm(r, c);
+        }
+        if self.is_char_sequence_method(r) {
+            return self.char_sequence_arm(r, c);
         }
         match self.class.methods[r].name.as_str() {
             "ordinal" => "*o as i32".to_string(),
@@ -985,6 +998,25 @@ impl<'a> Gen<'a> {
     fn is_comparable_method(&self, r: usize) -> bool {
         let t = &self.class.types[self.class.methods[r].class];
         t.kind == TypeKind::Interface && t.name == COMPARABLE
+    }
+
+    /// Whether method `r` is one of `CharSequence`'s own abstract `length()` and `charAt(int)`.
+    fn is_char_sequence_method(&self, r: usize) -> bool {
+        let t = &self.class.types[self.class.methods[r].class];
+        t.kind == TypeKind::Interface && t.name == CHAR_SEQUENCE
+    }
+
+    /// `CharSequence`'s `length()` or `charAt(index)` (method `r`) for a string or a builder of
+    /// class `c` bound to `o`.
+    fn char_sequence_arm(&mut self, r: usize, c: usize) -> String {
+        let method = &self.class.methods[r];
+        let builder = self.runtime_of(c) == Some(Type::StringBuilder);
+        match (method.name.as_str(), builder) {
+            ("length", true) => "o.length()".to_string(),
+            ("length", false) => format!("{}(o)", self.runtime("string_length")),
+            (_, true) => format!("o.char_at({})", self.local(&method.params[0].name)),
+            (_, false) => format!("{}(o, {})", self.runtime("char_at"), self.local(&method.params[0].name)),
+        }
     }
 
     /// Whether method `r` is one of `Number`'s own abstract `byteValue()` to `doubleValue()`.

@@ -770,7 +770,18 @@ impl<'a> Gen<'a> {
             }
             return format!("{obj}.to_string()");
         }
-        self.handle_call(handle, e, index)
+        let call = self.handle_call(handle, e, index);
+        self.null_text(index, call)
+    }
+
+    /// The text that `call`, a call of `toString` method `index`, gives: `"null"` where it
+    /// returns null, as `String.valueOf` shows it.
+    fn null_text(&self, index: usize, call: String) -> String {
+        if self.facts.nullable_returns.contains(&index) {
+            format!("{call}.unwrap_or_else(|| String::from(\"null\"))")
+        } else {
+            call
+        }
     }
 
     /// The object of `e`'s class reached through `handle`, borrowed for method `index` to be
@@ -848,9 +859,17 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether a statement's own expressions may borrow an object mutably while another borrow made
-    /// by the statement is still alive, so that every borrow must end where it is made.
+    /// by the statement is still alive, or reassign a place that a borrow reads (`t = t.left`, also
+    /// inside a condition, as in `while ((e = e.next) != null)`), so that every borrow must end
+    /// where it is made.
     pub(super) fn stmt_conflicts(&self, stmt: &Stmt) -> bool {
-        self.conflicts(&own_exprs(stmt)) || matches!(stmt, Stmt::Expr(e) if self.reassigns_through_borrow(e))
+        let exprs = own_exprs(stmt);
+        self.conflicts(&exprs)
+            || exprs.iter().any(|e| {
+                let mut found = false;
+                visit_expr(e, &mut |x| found |= self.reassigns_through_borrow(x));
+                found
+            })
     }
 
     /// Whether evaluating `e` borrows a shared object through a `RefCell`.
@@ -1216,7 +1235,8 @@ impl<'a> Gen<'a> {
             return Code::atom(self.default_text(c, hash));
         };
         if !self.displays(index) {
-            return self.text_call(e, index);
+            let call = self.text_call(e, index);
+            return Code::atom(self.null_text(index, call.text));
         }
         if !self.lazy_text || (self.printing && !self.quiet_text(e, 0)) {
             return self.method_call(e, index, &[]);

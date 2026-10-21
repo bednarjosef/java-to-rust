@@ -127,6 +127,24 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// A call of static method `index`. When it lends a shared array through a `RefCell` borrow,
+    /// the borrow is a temporary that would live to the end of the statement, past the call, so a
+    /// call with a result binds it in a block of its own: what the statement does with the result
+    /// may borrow the same array again.
+    pub(super) fn static_call(&mut self, index: usize, args: &'a [Expr]) -> Code {
+        let lends = args.iter().enumerate().any(|(i, a)| {
+            self.facts.borrowed_arrays.contains_key(&(index, i))
+                && matches!(&a.kind, ExprKind::Var(name)
+                    if self.plain(name).is_none() && !self.is_borrowed(&self.local(name)))
+        });
+        let args = self.call_args(index, args).join(", ");
+        let call = format!("{}({args})", self.static_fn(index));
+        if lends && self.class.methods[index].ret != Type::Void {
+            return Code::atom(format!("{{ let value = {call}; value }}"));
+        }
+        Code::atom(call)
+    }
+
     /// Whether the Rust name `a` is a borrowed array parameter of the current method or the
     /// variable of a for-each over the rows of a plain array or a slice of a sliced loop: already
     /// a reference, so it is passed on as it is.
@@ -283,8 +301,7 @@ impl<'a> Gen<'a> {
     }
 
     fn owned_call(&mut self, index: usize, args: &'a [Expr]) -> String {
-        let args = self.call_args(index, args).join(", ");
-        format!("{}({args})", self.static_fn(index))
+        self.static_call(index, args).text
     }
 
     /// `new T[n]` or `new T[n][m]...` as nested `vec!`s. A size that may be negative is checked

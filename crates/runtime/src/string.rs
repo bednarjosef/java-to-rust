@@ -440,6 +440,18 @@ pub fn try_from_chars_range(chars: &[u16], offset: i32, count: i32) -> Result<St
     Ok(from_units(&chars[offset as usize..(offset + count) as usize]))
 }
 
+/// `String.join(prefix, suffix, delimiter, elements, size)` of the JDK: the first `size` of
+/// `elements` joined by `delimiter`, between `prefix` and `suffix`.
+pub fn join_range<T: JoinItem>(
+    prefix: &str,
+    suffix: &str,
+    delimiter: &str,
+    elements: &[T],
+    size: i32,
+) -> String {
+    [prefix, &join(delimiter, &elements[..size as usize]), suffix].concat()
+}
+
 /// The text of each element of a `String.join`: a string, or `null`.
 pub trait JoinItem {
     fn text(&self) -> &str;
@@ -528,6 +540,12 @@ mod tests {
         assert!(is_blank(" \u{2028}\u{1F}"));
         assert_eq!(uppercase("straße"), "STRASSE");
         assert_eq!(join(", ", &[Some("a"), None]), "a, null");
+    }
+
+    #[test]
+    fn joined_ranges_have_a_prefix_and_suffix() {
+        assert_eq!(join_range("[", "]", ", ", &[Some("a"), None, Some("c")], 2), "[a, null]");
+        assert_eq!(join_range("<", ">", "-", &[] as &[&str], 0), "<>");
     }
 
     #[test]

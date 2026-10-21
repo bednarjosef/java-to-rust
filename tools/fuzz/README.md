@@ -176,6 +176,15 @@ With `--objects` (`fuzz_objects.py` for the types and expressions,
   `ArithmeticException`, `RuntimeException`) printing the message, the exception or its field,
   and sometimes `finally`. Rarely a failing cast or a null dereference inside a `try` that
   catches it, which the translator rejects for now
+- Construction trees (`fuzz_constructions.py`, in most programs): one or two chains of one to
+  three classes with subclasses (the root sometimes generic over an item type), with one to
+  three classes without subclasses below them, whose superclass constructors need the whole
+  object: they store `this` in a static or in the previous object's field, pass it to a static
+  method, compare it, and call `weight()` and `show()`, which the subclasses override to read
+  fields still zero, null or false at that point. Some classes of a chain keep plain
+  constructors; constructors may throw `Fail` (before or after the superclass's part), and
+  second constructors delegate with `this(..)`. `main` builds their objects, inside a `try`
+  when a constructor may throw, and prints them, their links and the last one built
 - Deliberate exceptions: a failing cast (`ClassCastException`), a null dereference
   (`NullPointerException`) or a `Fail`, uncaught, at the statement that `zero0` would use
 

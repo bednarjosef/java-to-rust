@@ -604,8 +604,8 @@ root, such as `crate::com::example::util::Counter::new(..)`, and items in packag
 Reachability dispatches calls as Java does: javac lists the methods each method overrides, and a
 call of an instance method also reaches its overriders in every class that an instantiated class
 is, extends or implements. It stops at the classes that the runtime provides (`String`,
-`StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`, the `java.lang.ref`
-references; `RUNTIME_CLASSES`), whose sources reach deep into the JVM, and at what is not
+`StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`; `RUNTIME_CLASSES`),
+whose sources reach deep into the JVM, and at what is not
 translated: reflection (but not `java.lang.reflect.Array`, which is array code), method handles,
 serialization, security and class loading (`Module`, `ResourceBundle`, `ServiceLoader`,
 `jdk.internal.loader`; `UNTRANSLATED`). Library code
@@ -615,7 +615,11 @@ puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints t
 Annotations reach nothing, and neither does the code that Java Flight Recorder's flags guard
 (`jfrTracing` in `Throwable` and the file streams, which only JFR sets, by reflection), or the
 streams' `Tripwire.ENABLED` (a system property that only the JVM's `-D` option sets): it is not
-translated. Nor is what `AbstractPipeline.isParallel()` guards, when a check over the code reached
+translated. Nor is what `ContinuationSupport.isSupported()` guards (false: no virtual threads).
+The `java.lang.ref` references are translated from the JDK's source, their referent natives
+written as code on the referent: with no collector that clears them, a reference keeps its
+referent until `clear`, as on a JVM whose collector never needs the memory. Nor is what
+`AbstractPipeline.isParallel()` guards, when a check over the code reached
 shows that no stream can become parallel (`program/reach/sequential.rs`); otherwise reachability
 runs again without that assumption.
 

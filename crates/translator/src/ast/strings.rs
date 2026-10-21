@@ -42,6 +42,9 @@ pub enum StringOp {
     /// The UTF-16 code units of a string as an `int[]`, which `s.chars()` streams (see
     /// `program::reach::STRING_STREAMS`).
     CharCodes,
+    /// `JavaLangAccess.join(prefix, suffix, delimiter, elements, size)`: the first `size`
+    /// strings of `elements` joined by `delimiter`, between `prefix` and `suffix`.
+    JoinRange,
     /// The lines of a string as an `Object[]` of strings, which `s.lines()` streams: ended by
     /// `\n`, `\r` or `\r\n`, without an empty last line.
     Lines,

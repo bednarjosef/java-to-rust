@@ -756,6 +756,10 @@ for when a program needs time zones.
   `LinesSpliterator` has those characteristics and no size, so a `count()` runs the pipeline's
   `peek` and `map` lambdas, as Java does, where a sized stream would skip them. Reachability
   reaches those methods for every such call; without the JDK's sources the call is rejected.
+- **`JavaLangAccess.join`**: `StringJoiner` joins through `SharedSecrets.getJavaLangAccess()`,
+  whose implementation is an anonymous class of `System` that calls `String`'s package-private
+  `join(prefix, suffix, delimiter, elements, size)`. `String` is the runtime's, so the call is the
+  runtime's `java::join_range`, and the accessor, which stays null, is not used.
 
 With these, `StreamPipeline` reaches 264 classes (176 instantiated), 1,144 methods and 4 natives,
 all in the runtime (the `CDS` ones and `Unsafe.registerNatives`), against the 372 classes and 28
@@ -829,6 +833,21 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   `false`, evaluating a key whose evaluation has effects. `DigitList`'s `COMPAT` flag
   (`jdk.compat.DecimalFormat`) stopped `ScannerGrades` and `TextAdventure`, which now go on to
   `LocaleResources`' `ReferenceQueue`. Test: `corpus/features/SystemProperties.java`.
+- **`java.lang.ref` translated** (`lower/references.rs`): `Reference`, `SoftReference`,
+  `WeakReference`, `PhantomReference` and `ReferenceQueue` were in `RUNTIME_CLASSES`, which the
+  runtime never had, so a type of one stopped the translation (`LocaleResources` and `Bundles`
+  cache their bundles in soft references with a queue, `ThreadLocal` keeps its entries in weak
+  ones). They are now translated from the JDK's source. A translated program has no collector that
+  clears a reference behind its back (an object is freed when its last strong reference goes, and
+  a reference holds one), so a reference behaves as on a JVM whose collector never needs the
+  memory: the referent natives `get0`, `refersTo0` and `clear0` are lowered as the code they stand
+  for on the field `referent`, and no reference is enqueued but by `enqueue`, which waits for
+  `Object.notifyAll`. `ReferenceQueue.poll` pins the current virtual thread's continuation when
+  continuations are supported, which the runtime says they are not (`isSupported0`), so
+  `ContinuationSupport.isSupported()` joins the flags as the first of `FALSE_CALLS`. `ScannerGrades`
+  reaches 1,191 classes and 49 natives (26 in the runtime) instead of 1,180 and 44, the five new
+  natives being the referent ones; `ReaderLines` 262 classes instead of 254, with the same 12
+  natives. Test: `corpus/whole-program/References.java`.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

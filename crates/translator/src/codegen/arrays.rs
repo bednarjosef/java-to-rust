@@ -420,7 +420,8 @@ pub(super) fn name_part(ty: Type) -> String {
         Type::Array(elem) => format!("{}_array", name_part(*elem)),
         Type::Class(name, _) | Type::Enum(name) => struct_name(name).to_lowercase(),
         Type::Boxed(_) => ty.to_string().to_lowercase(),
-        _ => rust_type(ty).to_lowercase(),
+        // A type of the runtime, such as `java::Class`, by its own name.
+        _ => rust_type(ty).rsplit("::").next().unwrap_or_default().to_lowercase(),
     }
 }
 

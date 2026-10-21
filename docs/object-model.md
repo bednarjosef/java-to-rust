@@ -1701,6 +1701,15 @@ Generics are erased in lowering, and nothing after it knows they existed:
   value converted with `as`, which converts as Java's primitive conversions do (a floating-point
   value becomes a `byte` or a `short` through an `int`). A program class that extends `Number` is
   still rejected, as is any extension of a runtime class.
+- `java.lang.CharSequence` is a fourth, `CHAR_SEQUENCE`, planned when the program uses it as the
+  type of a value (the JDK's `StringJoiner` and `Collectors.joining` take `CharSequence`s). The
+  JDK's interface is not translated (it is among `RUNTIME_CLASSES`). Strings implement it, and so
+  do builders, through the runtime class that holds a `StringBuilder` as an `Object`, which keeps
+  the builder's identity: what is appended later shows through the `CharSequence`. Its abstract
+  `length()` and `charAt(int)` have an arm per runtime class in
+  `codegen::dispatch::char_sequence_arm`; `toString()` is the value's text and `isEmpty()` a zero
+  `length()`. Its other methods (`chars()`, `subSequence`, `compare`) and a program class that
+  implements it are rejected.
 - Bridges are methods, not conversions in dispatcher arms: when a method overrides one whose erased
   parameter or return types differ (`Integer next()` implementing `T next()` of `Source<Integer>`,
   `compareTo(Point)` implementing `Comparable`'s), lowering adds a method to its class with the

@@ -15,6 +15,11 @@
 //! `T extends Number`), is a third such type, `NUMBER`, which the numeric boxes implement, with
 //! the abstract `byteValue()` to `doubleValue()` that each box answers by converting its value
 //! (see `codegen::dispatch`).
+//! `java.lang.CharSequence`, when the program uses it as a type (`StringJoiner`'s parameters),
+//! is another, `CHAR_SEQUENCE`, which strings and builders implement, with an abstract `length()`
+//! and `charAt(int)` that each answers as the runtime's string or builder does; its `toString()`
+//! is the value's text and its `isEmpty()` a zero length. The JDK's `CharSequence` is not
+//! translated, and its other methods are rejected.
 //! `java.lang.Enum`, when the program uses it as a type, is a type of the same kind, `ENUM`, with
 //! no methods of its own: the program's enums implement it, and `lower::enums` lowers the calls
 //! of `Enum`'s methods on its values.
@@ -31,6 +36,9 @@ pub(super) struct ObjectIndexes {
     pub(super) hash_code: usize,
     pub(super) comparable: Option<ComparableIndexes>,
     pub(super) number: Option<NumberIndexes>,
+    /// The type of `CharSequence`, after `Enum`'s, and of the first of its
+    /// `CHAR_SEQUENCE_METHODS`, after `Number`'s, when the program uses it.
+    pub(super) char_sequence: Option<NumberIndexes>,
     /// The index of `Enum`'s type, after `Number`'s, when the program uses it.
     pub(super) enumeration: Option<usize>,
 }
@@ -52,6 +60,32 @@ pub(super) const NUMBER_METHODS: [(&str, Type); 6] = [
     ("floatValue", Type::Float),
     ("doubleValue", Type::Double),
 ];
+
+/// The abstract methods of `CharSequence`, in order, with the name of their `int` parameter, if
+/// they have one, and their result types.
+pub(super) const CHAR_SEQUENCE_METHODS: [(&str, Option<&str>, Type); 2] =
+    [("length", None, Type::Int), ("charAt", Some("index"), Type::Char)];
+
+/// Whether the declarations use `java.lang.CharSequence` as the type of a value, as `uses_number`
+/// tells for `Number`.
+pub(super) fn uses_char_sequence(decls: &[Node]) -> bool {
+    decls.iter().any(|d| mentions_char_sequence(d.0))
+}
+
+fn mentions_char_sequence(v: &Value) -> bool {
+    match v {
+        Value::Object(fields) => fields.iter().any(|(key, value)| match key.as_str() {
+            "symbol" => false,
+            "javaType" => value.as_str().is_some_and(|t| {
+                t.trim_end_matches("[]") == "java.lang.CharSequence"
+                    || t.ends_with("? extends java.lang.CharSequence")
+            }),
+            _ => mentions_char_sequence(value),
+        }),
+        Value::Array(items) => items.iter().any(mentions_char_sequence),
+        _ => false,
+    }
+}
 
 /// The runtime classes whose values are `Number`s: the numeric boxes.
 pub(super) fn is_number_box(name: &str) -> bool {
@@ -227,8 +261,14 @@ impl<'t> Lowering<'t> {
     pub(super) fn plan_object(&mut self, decls: &[Node<'t>]) {
         let comparable = uses_comparable(decls);
         let number = uses_number(decls);
+        let char_sequence = uses_char_sequence(decls);
         let unrelated = decls.iter().any(|d| self.compares_unrelated(d.0));
-        if uses_object(decls, &self.real_type_parameters()) || comparable || number || unrelated {
+        if uses_object(decls, &self.real_type_parameters())
+            || comparable
+            || number
+            || char_sequence
+            || unrelated
+        {
             let decl = self.types.len();
             let equals = self.methods.len();
             let runtime = decl + 1 + runtime_values().len();
@@ -241,8 +281,19 @@ impl<'t> Lowering<'t> {
                 .iter()
                 .any(|d| uses_enum(d.0))
                 .then_some(runtime + after + usize::from(number.is_some()));
-            self.object =
-                Some(ObjectIndexes { decl, equals, hash_code: equals + 1, comparable, number, enumeration });
+            let char_sequence = char_sequence.then_some(NumberIndexes {
+                decl: runtime + after + usize::from(number.is_some()) + usize::from(enumeration.is_some()),
+                methods: equals + 2 + after + if number.is_some() { NUMBER_METHODS.len() } else { 0 },
+            });
+            self.object = Some(ObjectIndexes {
+                decl,
+                equals,
+                hash_code: equals + 1,
+                comparable,
+                number,
+                enumeration,
+                char_sequence,
+            });
         }
     }
 
@@ -311,6 +362,14 @@ impl<'t> Lowering<'t> {
             debug_assert_eq!(methods.len(), n.methods);
             for (name, ret) in NUMBER_METHODS {
                 methods.push(Method { class: n.decl, ..method(name, Vec::new(), ret) });
+            }
+        }
+        if let Some(s) = at.char_sequence {
+            debug_assert_eq!(methods.len(), s.methods);
+            for (name, param, ret) in CHAR_SEQUENCE_METHODS {
+                let params =
+                    param.map(|name| Param { name: name.to_string(), ty: Type::Int }).into_iter().collect();
+                methods.push(Method { class: s.decl, ..method(name, params, ret) });
             }
         }
         self.bridges(methods)
@@ -387,6 +446,9 @@ impl<'t> Lowering<'t> {
             if let Some(n) = at.number.filter(|_| is_number_box(name)) {
                 implements.push(n.decl);
             }
+            if let Some(s) = at.char_sequence.filter(|_| name == "java.lang.String") {
+                implements.push(s.decl);
+            }
             types.push(decl(name, "", TypeKind::Runtime, implements));
         }
         if let Some(c) = at.comparable {
@@ -405,11 +467,19 @@ impl<'t> Lowering<'t> {
             let implements = std::iter::once(at.decl).chain(at.comparable.map(|c| c.decl)).collect();
             types.push(decl(ENUM, "", TypeKind::Interface, implements));
         }
+        if let Some(s) = at.char_sequence {
+            debug_assert_eq!(types.len(), s.decl);
+            types.push(decl(CHAR_SEQUENCE, "", TypeKind::Interface, vec![at.decl]));
+        }
         // The arrays that become `Object`s, each named after its type (`int[]`), and the
         // `StringBuilder`s.
         for &ty in self.object_arrays.borrow().iter() {
             let name = if ty == Type::StringBuilder { STRING_BUILDER.to_string() } else { ty.to_string() };
-            types.push(decl(&name, "", TypeKind::Runtime, vec![at.decl]));
+            let mut implements = vec![at.decl];
+            if let Some(s) = at.char_sequence.filter(|_| ty == Type::StringBuilder) {
+                implements.push(s.decl);
+            }
+            types.push(decl(&name, "", TypeKind::Runtime, implements));
         }
     }
 
@@ -671,6 +741,50 @@ impl<'t> Lowering<'t> {
             resolved: Some(n.methods + i),
             is_super: false,
         })
+    }
+
+    /// A call of a method of `CharSequence` on a value converted to it: one of its
+    /// `CHAR_SEQUENCE_METHODS`, or `toString()` as the value's text, or `isEmpty()` as a zero
+    /// `length()`.
+    pub(super) fn char_sequence_call(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol,
+        receiver: Option<Node<'t>>,
+    ) -> Result<ExprKind, Error> {
+        let Some(s) = self.object.and_then(|at| at.char_sequence) else {
+            return unsupported(node, "`CharSequence` as a type");
+        };
+        let Some(receiver) = receiver else { return unsupported(node, "this call") };
+        let receiver = self.convert(self.expr(receiver)?, Type::class(CHAR_SEQUENCE));
+        let pos = receiver.pos;
+        let call = |receiver: Expr, name: &str, args: Vec<Expr>| {
+            let i = CHAR_SEQUENCE_METHODS
+                .iter()
+                .position(|(m, ..)| *m == name)
+                .expect("a method of `CharSequence`");
+            ExprKind::MethodCall {
+                receiver: Box::new(receiver),
+                name: name.to_string(),
+                args,
+                resolved: Some(s.methods + i),
+                is_super: false,
+            }
+        };
+        match symbol.name {
+            "length" => Ok(call(receiver, "length", Vec::new())),
+            "charAt" => {
+                let index = self.expr(node.list("arguments").next().expect("`charAt` has an index"))?;
+                Ok(call(receiver, "charAt", vec![index]))
+            }
+            "toString" => Ok(self.as_text(receiver).kind),
+            "isEmpty" => {
+                let length = self.synth(call(receiver, "length", Vec::new()), pos, Type::Int);
+                let zero = self.synth(ExprKind::Int(0), pos, Type::Int);
+                Ok(ExprKind::Binary(BinOp::Eq, Box::new(length), Box::new(zero)))
+            }
+            name => unsupported(node, &format!("method `CharSequence.{name}`")),
+        }
     }
 
     /// A call of `Object`'s `equals`, `hashCode` or `toString` on a value whose class does not

@@ -98,7 +98,9 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.Character",
     "java.lang.Class",
     "java.lang.ClassLoader",
-    // `Comparable` is the object model's (see `lower::object`), which strings and boxes are.
+    // `CharSequence` and `Comparable` are the object model's (see `lower::object`), which strings
+    // (and builders, and boxes) are.
+    "java.lang.CharSequence",
     "java.lang.Comparable",
     "java.lang.Double",
     "java.lang.Enum",
@@ -117,11 +119,6 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.StringBuilder",
     "java.lang.System",
     "java.lang.Thread",
-    "java.lang.ref.PhantomReference",
-    "java.lang.ref.Reference",
-    "java.lang.ref.ReferenceQueue",
-    "java.lang.ref.SoftReference",
-    "java.lang.ref.WeakReference",
     "sun.util.logging.PlatformLogger",
 ];
 
@@ -230,6 +227,13 @@ pub const FALSE_FLAGS: &[(&str, &str)] = &[
     ("sun.nio.ch.FileChannelImpl", "jfrTracing"),
 ];
 
+/// Static methods without parameters that return `false` in every translated program, like the
+/// `FALSE_FLAGS`. `ContinuationSupport.isSupported()` returns what the native `isSupported0`
+/// gave, which the runtime answers false (no virtual threads, as with `-XX:-VMContinuations`);
+/// it guards the pinning of the current continuation (`Continuation.pin`) that
+/// `ReferenceQueue.poll` and other code under a lock do.
+pub const FALSE_CALLS: &[(&str, &str)] = &[("jdk.internal.vm.ContinuationSupport", "isSupported")];
+
 /// Static fields that only the class data sharing archive sets, through the native
 /// `CDS.initializeFromArchive` at the start of their class's static initializer, which then tests
 /// each against null once to build the value itself when the archive had none. The runtime's
@@ -272,7 +276,7 @@ pub fn live_branch(node: &Value, sequential: bool) -> Option<&Value> {
 }
 
 /// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
-/// branch can run: it reads one of the `FALSE_FLAGS`, or, when the program's streams are all
+/// branch can run: it reads one of the `FALSE_FLAGS` or calls one of the `FALSE_CALLS`, or, when the program's streams are all
 /// `sequential` (see `sequential.rs`), it is a pipeline's `isParallel()` or a test whether one
 /// of its nodes has children (`getChildCount() > 0`); alone, or as the first
 /// operand of `&&`, or as the second after one that only computes a value (the lowering drops the
@@ -289,7 +293,12 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
             text(symbol, "kind") == "FIELD"
                 && FALSE_FLAGS.contains(&(text(symbol, "owner"), text(symbol, "name")))
         }
-        "METHOD_INVOCATION" => sequential && sequential::is_parallel_test(condition),
+        "METHOD_INVOCATION" => {
+            let symbol = &condition["symbol"];
+            let false_call = FALSE_CALLS.contains(&(text(symbol, "owner"), text(symbol, "name")))
+                && text(symbol, "type") == "()boolean";
+            false_call || (sequential && sequential::is_parallel_test(condition))
+        }
         "NOT_EQUAL_TO" => archived_null_test(condition, false),
         "GREATER_THAN" => sequential && sequential::has_children_test(condition),
         _ => false,
@@ -607,6 +616,13 @@ impl<'t> Walk<'t> {
         let node = self.methods.get(&key).filter(|_| !replaced(&key.0, &key.1, &key.2));
         let Some(&node) = node else {
             self.missing(&key.0);
+            // An enum's `values()` and `valueOf()`, which javac declares without code, initialize
+            // the enum: its constants are built with what their arguments call.
+            if matches!(key.1.as_str(), "values" | "valueOf")
+                && self.classes.get(&key.0).is_some_and(|(decl, _)| text(decl, "kind") == "ENUM")
+            {
+                self.work.push(Item::Init(key.0.clone()));
+            }
             // What overrides a method of the runtime, such as `Object.toString`, can still run.
             if self.reach.external.insert(key.clone()) {
                 for overrider in self.overriders(&key) {

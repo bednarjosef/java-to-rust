@@ -28,9 +28,7 @@ impl<'t> Lowering<'t> {
             ("hashCode", 1) if printable => ArraysOp::HashCode,
             ("sort", 1) if elem == Type::String => ArraysOp::SortAll,
             ("sort", 3) if printable && int(1) && int(2) => ArraysOp::SortRange,
-            ("fill", 4) if printable && int(1) && int(2) && assignable(args[3].ty, elem) => {
-                ArraysOp::FillRange
-            }
+            ("fill", 4) if printable && int(1) && int(2) && fills(&args[3], elem) => ArraysOp::FillRange,
             // Of references too, as `copyOf`.
             ("copyOfRange", 3) if int(1) && int(2) => ArraysOp::CopyOfRange,
             ("binarySearch", 2) if printable && key_ok(&args[1], elem) => ArraysOp::BinarySearch,
@@ -59,6 +57,12 @@ impl<'t> Lowering<'t> {
         args.insert(0, array);
         Ok(Some(Builtin::Arrays(ArraysOp::Clone)))
     }
+}
+
+/// Whether `value` may be stored in an element of type `elem`: a value of its type, or null in
+/// an array of strings.
+fn fills(value: &Expr, elem: Type) -> bool {
+    assignable(value.ty, elem) || value.ty == Type::Null && elem.is_reference()
 }
 
 /// Whether `key` may be searched for in an array of `elem`: assignable to it, and not a null

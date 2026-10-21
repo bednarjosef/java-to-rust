@@ -8,7 +8,8 @@ static counters, constructors calling `super(...)` and `this(...)`, overridden a
 methods, `super.m()` calls, `toString`, `equals` and `hashCode` overrides, and a class that
 implements `Comparable`; and generic classes (a box, a pair, a linked stack, a sorted list) and
 generic methods. Each `st_obj_*` method is a statement kind of `main`, and the other methods build
-expressions.
+expressions. Construction trees, whose superclass constructors need the whole object, are planned
+apart from the world (fuzz_constructions.py).
 
 Every program terminates and is deterministic:
 - Each instance method group has a rank, and a method body calls only groups of a lower rank (on
@@ -24,6 +25,7 @@ Variables of object types live in Gen's scopes beside the primitive ones, with t
 primitive code never asks for, so it never sees them.
 """
 
+from fuzz_constructions import ConstructionGen
 from fuzz_object_decls import ObjectDeclGen
 from fuzz_object_stmts import ObjectStmtGen
 
@@ -64,7 +66,10 @@ class Decl:
         self.comparable = False  # declares `implements Comparable<Self>`
 
 
-class ObjectGen(ObjectDeclGen, ObjectStmtGen):
+class ObjectGen(ObjectDeclGen, ObjectStmtGen, ConstructionGen):
+    # Object expressions wait for `plan_world`: what the array statics and helpers, written
+    # before it, generate has none.
+    obj_hooks = False
     # The world: decided before anything is emitted.
 
     def plan_world(self):
@@ -87,11 +92,11 @@ class ObjectGen(ObjectDeclGen, ObjectStmtGen):
         for c in self.classes_in_order():
             self.plan_members(c)
         self.chain = self.overload_chain(trees) if self.chance(0.6) else []
-        self.helpers = {h for h, p in (('pick', 0.5), ('describe', 0.5), ('maxOf', 0.6))
+        self.obj_helpers = {h for h, p in (('pick', 0.5), ('describe', 0.5), ('maxOf', 0.6))
                         if self.chance(p)}
         if 'GBox' in self.generics and self.chance(0.5):
-            self.helpers.add('boxOf')
-        self.helpers |= {f'make{t.name}' for t in trees if self.chance(0.4)}
+            self.obj_helpers.add('boxOf')
+        self.obj_helpers |= {f'make{t.name}' for t in trees if self.chance(0.4)}
 
     def plan_interface(self):
         d = Decl(self.name('I'), 'interface')
@@ -403,7 +408,7 @@ class ObjectGen(ObjectDeclGen, ObjectStmtGen):
         if d > 0:
             options += ['ternary', 'cast', 'element', 'container', 'pick', 'make', 'touch']
             if self.comparable and self.is_sub(self.comparable.name, t) \
-                    and 'maxOf' in self.helpers:
+                    and 'maxOf' in self.obj_helpers:
                 options.append('max')
         kind = self.pick(options)
         text = None
@@ -423,14 +428,14 @@ class ObjectGen(ObjectDeclGen, ObjectStmtGen):
                 text = f'{a}[Math.floorMod({self.expr("int", d - 1)}, {a}.length)]'
         elif kind == 'container':
             text = self.container_read(t, d)
-        elif kind == 'pick' and 'pick' in self.helpers:
+        elif kind == 'pick' and 'pick' in self.obj_helpers:
             text = f'pick({self.bool_expr(d - 1)}, {self.ref_expr(t, d - 1)}, ' \
                    f'{self.ref_expr(t, d - 1)})'
             if not poly:
                 text = f'Prog.<{t}>{text}'
         elif kind == 'make':
             roots = [c for c in self.classes() if c.sup is None and self.is_sub(c.name, t)
-                     and f'make{c.name}' in self.helpers]
+                     and f'make{c.name}' in self.obj_helpers]
             if roots:
                 text = f'make{roots[0].name}({self.expr("int", d - 1)})'
         elif kind == 'touch':
@@ -527,7 +532,7 @@ class ObjectGen(ObjectDeclGen, ObjectStmtGen):
             return self.pick(names)
         diamond = '<>' if poly else f'<{", ".join(args)}>'
         if head == 'GBox':
-            if poly and 'boxOf' in self.helpers and self.chance(0.3):
+            if poly and 'boxOf' in self.obj_helpers and self.chance(0.3):
                 return f'boxOf({self.ref_expr(args[0], d - 1)})'
             return f'new GBox{diamond}({self.ref_expr(args[0], d - 1, poly=poly)})'
         if head == 'GPair':
@@ -648,7 +653,7 @@ class ObjectGen(ObjectDeclGen, ObjectStmtGen):
                    f'{self.ref_expr(k, d - 1, poly=False)})'
         if kind == 'string':
             return f'{self.word(d - 1)}.compareTo({self.word(d - 1)})'
-        if 'maxOf' in self.helpers:
+        if 'maxOf' in self.obj_helpers:
             # Unboxed, as the caller may cast it to a smaller type, which an Integer cannot be.
             return f'((int) maxOf({self.int_value(d - 1)}, {self.int_value(d - 1)}))'
         return None
@@ -718,7 +723,7 @@ class ObjectGen(ObjectDeclGen, ObjectStmtGen):
             if options:
                 n, k = self.pick(options)
                 return f'{n}.{self.call_text(k, d - 1)}'
-        if r < 0.85 and 'describe' in self.helpers:
+        if r < 0.85 and 'describe' in self.obj_helpers:
             return f'describe({self.object_value(d - 1)})'
         nonnull = [n for n, vt in self.object_vars() if self.printable(vt)]
         if nonnull:

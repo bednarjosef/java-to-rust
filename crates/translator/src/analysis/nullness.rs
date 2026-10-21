@@ -65,6 +65,12 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 ExprKind::ArrayLit(items) if items.iter().any(|item| maybe_null(facts, m, item)) => {
                     elements.push(x.ty.element());
                 }
+                // `Arrays.fill` stores its value in every element of the range.
+                ExprKind::Builtin(Builtin::ArraysFill | Builtin::Arrays(ArraysOp::FillRange), args)
+                    if args.last().is_some_and(|v| maybe_null(facts, m, v)) =>
+                {
+                    elements.push(args[0].ty.element());
+                }
                 ExprKind::Call { args, resolved: Some(callee), .. }
                 | ExprKind::MethodCall { args, resolved: Some(callee), .. }
                 | ExprKind::New { args, ctor: Some(callee), .. }
