@@ -109,16 +109,25 @@ impl<'a> Gen<'a> {
     }
 
     /// The path of the variant of class `c` in the enum of `t`: `Shape::Circle`. A variant is
-    /// named after its class, with the class's outer classes when two variants share a name.
+    /// named after its class, with the class's outer classes when two variants share a name, and
+    /// with its package too when two classes of different packages share that
+    /// (`JavaUtilStreamAbstractSetInEntrySet`).
     pub(super) fn variant(&self, t: usize, c: usize) -> String {
         self.need(Need::Enum(t));
+        let variants = hierarchy::variants(self.class, self.facts, t);
+        let shared = |name: &dyn Fn(usize) -> String| {
+            let own = name(c);
+            variants.iter().filter(|&&o| name(o) == own).count() > 1
+        };
         let simple = |c: usize| self.simple_name(c);
-        let name = simple(c);
-        let shared =
-            hierarchy::variants(self.class, self.facts, t).into_iter().filter(|&o| simple(o) == name).count()
-                > 1;
-        let name =
-            if shared { modules::split(&self.class.types[c].name).1.replace(['.', '$'], "") } else { name };
+        let in_package = |c: usize| modules::split(&self.class.types[c].name).1.replace(['.', '$'], "");
+        let name = if !shared(&simple) {
+            simple(c)
+        } else if !shared(&in_package) {
+            in_package(c)
+        } else {
+            self.class.types[c].name.split(['.', '$']).map(capitalized).collect()
+        };
         format!("{}::{name}", struct_name(&self.class.types[t].name))
     }
 
@@ -374,16 +383,22 @@ impl<'a> Gen<'a> {
     /// `System.arraycopy(src, srcPos, dest, destPos, length)` where `src` and `dest` are
     /// `Object`s: the copy between their arrays when both are arrays of one type, else Java's
     /// `ArrayStoreException`. The positions are computed first; a null `src` or `dest` throws
-    /// `NullPointerException`.
-    pub(super) fn object_array_copy(&mut self, args: &'a [Expr]) -> Code {
+    /// `NullPointerException`. Where a `catch` or a `finally` sees the copy's failure
+    /// (`Facts::raising`), the checked form, whose failure goes on from here.
+    pub(super) fn object_array_copy(&mut self, args: &'a [Expr], id: ExprId) -> Code {
         let [src, src_pos, dest, dest_pos, length] = args else {
             unreachable!("arraycopy has five arguments")
         };
         let ints: Vec<String> =
             [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
         let (s, d) = (self.object(src), self.object(dest));
-        let copy = self.runtime("arraycopy");
-        let throw = self.runtime("throw");
+        let checked = self.facts.raising.contains(&id);
+        let copy = self.runtime(if checked { "try_arraycopy" } else { "arraycopy" });
+        let throw = if checked {
+            format!("Err::<(), _>({})", self.runtime("Exception::new"))
+        } else {
+            self.runtime("throw")
+        };
         // Names that no local of the method has, as `src` and `dest` may read one.
         let [p, q, n] = ["src_pos", "dest_pos", "length"].map(|base| self.temp(base));
         let mut arms = Vec::new();
@@ -394,13 +409,17 @@ impl<'a> Gen<'a> {
             }
         }
         arms.push(format!("_ => {throw}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"),"));
-        Code::atom(format!(
+        let code = Code::atom(format!(
             "{{ let ({p}, {q}, {n}) = ({}, {}, {}); match (&{s}, &{d}) {{ {} }} }}",
             ints[0],
             ints[1],
             ints[2],
             arms.join(" ")
-        ))
+        ));
+        if !checked {
+            return code;
+        }
+        Code::atom(self.passed_on(code))
     }
 
     /// The JVM's name of an array class, as `getClass().getName()` gives it: `[I`,
@@ -902,8 +921,14 @@ impl<'a> Gen<'a> {
         let target = struct_name(&self.class.types[to].name);
         self.line(&format!("{}fn {}(&self) -> {target} {{", self.vis(), self.to_name(to)));
         self.indent += 1;
-        self.match_arms(t, &variants, &|g: &mut Self, c| {
-            (format!("{}({})", g.variant(to, c), g.held(c)), true)
+        // The flows of the analysis may keep a class's objects from ever becoming values of `to`
+        // (`hierarchy::flows`); that arm never runs.
+        self.match_arms(t, &variants, &|g: &mut Self, c| match g.variant_of(to, c) {
+            Some(variant) => (format!("{variant}({})", g.held(c)), true),
+            None => {
+                let (from, to) = (&g.class.types[c].name, &g.class.types[to].name);
+                (format!("unreachable!(\"an object of {from} never becomes a value of {to}\")"), true)
+            }
         });
         self.indent -= 1;
         self.line("}");

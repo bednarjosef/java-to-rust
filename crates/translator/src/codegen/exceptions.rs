@@ -184,14 +184,20 @@ pub(super) fn default_value(ty: Type) -> Option<&'static str> {
 }
 
 /// A local of the method that `try_assigned` names (`assigned`) whose type has no
-/// `default_value`: not supported yet.
-pub(super) fn check_try_assigned(body: &[Stmt], assigned: &HashSet<String>) -> Option<Error> {
+/// `default_value` and that is not an `Option` (`optional`), which starts as `None`: not supported
+/// yet.
+pub(super) fn check_try_assigned(
+    body: &[Stmt],
+    assigned: &HashSet<String>,
+    optional: impl Fn(Type, &str) -> bool,
+) -> Option<Error> {
     let mut found = None;
     for s in body {
         visit_stmt(s, &mut |_| {}, &mut |s| {
             if let Stmt::Local { ty, name, init: None, pos } = s
                 && assigned.contains(name)
                 && default_value(*ty).is_none()
+                && !optional(*ty, name)
                 && found.is_none()
             {
                 found = Some(Error {

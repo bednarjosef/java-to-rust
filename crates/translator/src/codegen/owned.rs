@@ -179,6 +179,7 @@ impl<'a> Gen<'a> {
             (0..fields.len()).filter(|&i| bound[i].is_none()).filter_map(|i| values[i]).collect();
         let conflicts = self.conflicts(&unbound);
         let outer = std::mem::replace(&mut self.guarded, conflicts);
+        let outer_steady = self.steady.take();
         let mut parts: Vec<String> = base_part.into_iter().collect();
         // The values in Java's order, which a struct literal keeps whatever the order of its
         // fields: the initializers in field order, then the leading assignments in theirs. The
@@ -208,6 +209,7 @@ impl<'a> Gen<'a> {
                 .collect::<Vec<String>>(),
         );
         self.guarded = outer;
+        self.steady = outer_steady;
         self.field_locals.clear();
         let literal = if parts.is_empty() {
             format!("{} {{}}", self.struct_of(m.class))
@@ -248,5 +250,35 @@ impl<'a> Gen<'a> {
         let owned = matches!(ty, Type::Class(c, _) if self.facts.owned.contains(c));
         assigns_any(rest, name)
             || (owned && self.changes_owned(rest, &|e| matches!(&e.kind, ExprKind::Var(v) if v == name)))
+    }
+
+    /// `local_is_mut` of a local declared without a value: one that a statement of its own block
+    /// assigns once, and nothing else assigns, is first given its value there, as Rust's
+    /// `let x;` allows without `mut`.
+    pub(super) fn declared_local_is_mut(&self, ty: Type, name: &str, rest: &[Stmt]) -> bool {
+        let count = |e: &Expr| {
+            let mut n = 0;
+            visit_expr(e, &mut |x| match &x.kind {
+                ExprKind::Assign { target: Place::Var(v), .. }
+                | ExprKind::IncDec { target: Place::Var(v), .. }
+                    if v == name =>
+                {
+                    n += 1
+                }
+                // A switch expression's cases may loop.
+                ExprKind::Switch { .. } => n += 2,
+                _ => {}
+            });
+            n
+        };
+        let once = rest.iter().any(|s| match s {
+            Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) => count(e) == 1,
+            _ => false,
+        }) && rest.iter().filter(|s| assigns_stmt(s, name)).count() == 1;
+        if !once {
+            return self.local_is_mut(ty, name, rest);
+        }
+        let owned = matches!(ty, Type::Class(c, _) if self.facts.owned.contains(c));
+        owned && self.changes_owned(rest, &|e| matches!(&e.kind, ExprKind::Var(v) if v == name))
     }
 }

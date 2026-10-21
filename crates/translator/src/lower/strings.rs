@@ -178,6 +178,7 @@ impl<'t> Lowering<'t> {
             "equalsIgnoreCase" => StringOp::EqualsIgnoreCase,
             "concat" => StringOp::Concat,
             "toCharArray" => StringOp::ToCharArray,
+            "getChars" if symbol.ty == "(int,int,char[],int)void" => StringOp::GetChars,
             "chars" | "lines" if args.is_empty() => return self.string_stream(node, name, receiver),
             "hashCode" => StringOp::HashCode,
             "toString" | "intern" => StringOp::Identity,
@@ -289,6 +290,39 @@ impl<'t> Lowering<'t> {
         Ok(ExprKind::Builtin(Builtin::Print, vec![text]))
     }
 
+    /// `ps.printf(format, args...)` and `ps.format` of a `PrintStream` object: the text is
+    /// formatted here, as `System.out.printf`'s is, and printed by the translator's
+    /// `PrintStream.formattedText`, which returns the stream as `printf` does.
+    pub(super) fn print_stream_format(
+        &self,
+        node: Node<'t>,
+        receiver: Option<Node<'t>>,
+        args: Vec<Expr>,
+    ) -> Result<ExprKind, Error> {
+        let arg_nodes: Vec<Node<'t>> = node.list("arguments").collect();
+        let format = self.format_call(node, args, &arg_nodes, None)?;
+        let text = self.synth(format, node.pos(), Type::String);
+        let (owner, name, signature) = crate::program::PRINT_FORMATTED;
+        let resolved = self
+            .methods
+            .iter()
+            .position(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == signature);
+        if resolved.is_none() {
+            return unsupported(node, "`printf` of this `PrintStream`");
+        }
+        let receiver = match receiver {
+            Some(r) => self.receiver(r, owner)?,
+            None => self.this(node),
+        };
+        Ok(ExprKind::MethodCall {
+            receiver: Box::new(receiver),
+            name: name.to_string(),
+            args: vec![text],
+            resolved,
+            is_super: false,
+        })
+    }
+
     /// A call of a method of `StringBuilder` (or of `AbstractStringBuilder`, which declares some of
     /// them).
     pub(super) fn builder_call(
@@ -384,6 +418,7 @@ impl<'t> Lowering<'t> {
                 "java.lang.String",
                 [a]
                 | [a, Type::Charset | Type::String]
+                | [a, Type::Int, Type::Int]
                 | [a, Type::Int, Type::Int, Type::Charset | Type::String],
             ) if *a == bytes => ExprKind::Builtin(Builtin::String(StringOp::FromBytes), args),
             (

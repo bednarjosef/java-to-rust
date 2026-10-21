@@ -144,6 +144,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         ctor_result: None,
         printing: false,
         guarded: false,
+        steady: None,
         annotations: Vec::new(),
         locals: HashMap::new(),
         boxed: HashMap::new(),
@@ -208,8 +209,12 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
     if !uses.is_empty() {
         header.push_str(&(uses.join("\n") + "\n"));
     }
-    (header + &g.out, g.needs.take(), g.rejected, g.closures)
+    (header + &g.out + "\n" + ALLOCATOR, g.needs.take(), g.rejected, g.closures)
 }
+
+/// The crate root's allocator: the runtime's, which caches small blocks (runtime `allocator.rs`),
+/// as Java programs make and drop many small objects.
+const ALLOCATOR: &str = "#[global_allocator]\nstatic JAVA_RUNTIME_ALLOCATOR: java_runtime::Allocator = java_runtime::Allocator;\n";
 
 /// How `this` is written in the code being generated.
 #[derive(Clone, Copy, PartialEq)]
@@ -306,6 +311,9 @@ struct Gen<'a> {
     printing: bool,
     /// Whether the statement being emitted also borrows an object mutably (see `conflicts`).
     guarded: bool,
+    /// What the statement being emitted does to the plain objects it names, where it is known
+    /// (`strings::Steady`); `None` outside a statement, where no field is borrowed in place.
+    steady: Option<strings::Steady>,
     /// Placeholders for type annotations decided at the end of the method: (placeholder, type,
     /// annotation).
     annotations: Vec<(String, Type, String)>,
@@ -435,7 +443,8 @@ impl<'a> Gen<'a> {
         self.finallies.clear();
         self.attempt_count = 0;
         self.try_assigned = exceptions::try_assigned(self.facts, &m.body);
-        if let Some(e) = exceptions::check_try_assigned(&m.body, &self.try_assigned) {
+        let optional = |ty: Type, name: &str| self.optional_var(index, ty, name);
+        if let Some(e) = exceptions::check_try_assigned(&m.body, &self.try_assigned, optional) {
             self.rejected.push(e);
         }
         self.name_locals(m);

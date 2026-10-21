@@ -1,6 +1,6 @@
 //! Java's results kept between runs of the corpus test. A program's stored result is reused while
-//! its Java sources, main class, JVM arguments and Java version are unchanged; `CORPUS_JAVA_FRESH=1`
-//! runs every program on Java again and stores the results anew.
+//! its Java sources, main class, JVM arguments, input and Java version are unchanged;
+//! `CORPUS_JAVA_FRESH=1` runs every program on Java again and stores the results anew.
 //!
 //! Each program has one file `<name>.txt` in the cache directory: its key on the first line, its
 //! exit code on the second, and the rest of the file is the standard output as Java printed it.
@@ -78,6 +78,11 @@ impl JavaCache {
             for arg in &p.args {
                 fingerprint.field(arg.as_bytes());
             }
+        }
+        // What the program reads, which changes its output too, and adds nothing without input.
+        if let Some(input) = &p.input {
+            fingerprint.field(b"input");
+            fingerprint.field(&std::fs::read(input).ok()?);
         }
         for file in files {
             let path = file.strip_prefix(root).ok()?;

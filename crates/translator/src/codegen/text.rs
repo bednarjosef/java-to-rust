@@ -25,7 +25,7 @@ impl<'a> Gen<'a> {
             _ if self.nullable(e) => self.deref(e),
             ExprKind::Str(s) => rust_string(s),
             ExprKind::Var(name) => self.local(name),
-            ExprKind::Field { object, .. } if self.field_in_place(object) => self.object_place(e),
+            ExprKind::Field { object, name } if self.field_in_place(object, name) => self.object_place(e),
             _ => self.expr(e).at(ATOM),
         }
     }
@@ -48,11 +48,15 @@ impl<'a> Gen<'a> {
             StringOp::Substring => {
                 let s = self.text_ref(&args[0]);
                 let begin = self.int_arg(&args[1]);
+                // Of an ASCII string, a range of units is the same range of bytes.
+                let ascii = if self.facts.ascii_length.contains(&id) { "ascii_" } else { "" };
                 match args.get(2) {
-                    None => self.may_fail(id, "substring_from", "", &format!("{s}, {begin}")),
+                    None => {
+                        self.may_fail(id, &format!("{ascii}substring_from"), "", &format!("{s}, {begin}"))
+                    }
                     Some(end) => {
                         let end = self.int_arg(end);
-                        self.may_fail(id, "substring", "", &format!("{s}, {begin}, {end}"))
+                        self.may_fail(id, &format!("{ascii}substring"), "", &format!("{s}, {begin}, {end}"))
                     }
                 }
             }
@@ -186,6 +190,12 @@ impl<'a> Gen<'a> {
                 let units = call(self, "units", vec![s]).text;
                 Code::atom(format!("{}({units})", self.array_maker("from_vec")))
             }
+            StringOp::GetChars => {
+                let s = self.text_ref(&args[0]);
+                let [begin, end, dst_begin] = self.hoisted_ints(args, [1, 2, 4]);
+                let dst = self.array_arg(&args[3], true);
+                self.may_fail(id, "get_chars", "", &format!("{s}, {begin}, {end}, {dst}, {dst_begin}"))
+            }
             StringOp::CharCodes => {
                 let s = self.text_ref(&args[0]);
                 let units = call(self, "units", vec![s]).text;
@@ -245,9 +255,13 @@ impl<'a> Gen<'a> {
             StringOp::FromBytes => {
                 let bytes = self.slice_of(&args[0]);
                 match args.get(1..) {
-                    Some([offset, length, charset]) => {
+                    Some([offset, length, rest @ ..]) if rest.len() <= 1 => {
                         let (offset, length) = (self.int_arg(offset), self.int_arg(length));
-                        let charset = self.charset_arg(charset);
+                        // Without a charset, the default one, which is UTF-8.
+                        let charset = match rest {
+                            [charset] => self.charset_arg(charset),
+                            _ => format!("{}::Utf8", self.runtime("Charset")),
+                        };
                         call(self, "new_string_range", vec![bytes, offset, length, charset])
                     }
                     Some([charset]) => {

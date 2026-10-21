@@ -1,0 +1,134 @@
+# Architecture
+
+How the translator is built today, what holds up as it grows, and the four changes that come
+before the larger plans ([natural-rust.md](natural-rust.md),
+[translator-speed-and-memory.md](translator-speed-and-memory.md),
+[large-projects.md](large-projects.md)) and before a second, "port" mode next to today's exact
+translation.
+
+## The pipeline
+
+```
+Java sources
+  │  javac (JavaTree.java, run as a JVM process; JavaTree --serve in whole-program mode)
+  ▼
+javac's attributed trees, as JSON                       crates/translator/src/javac*, program/
+  │  reachability (program/reach*) asks javac for the library units the program reaches
+  ▼
+lowering: one typed tree for the whole program          crates/translator/src/lower*, ast*
+  │  (ast::Class: every type, method and expression; expressions have ExprIds)
+  ▼
+analyses: facts proven about the program                crates/translator/src/analysis*
+  │  (analysis::Facts: about 57 sets and maps keyed by expression, method or type)
+  ▼
+code generation: Rust source text                       crates/translator/src/codegen*
+  │
+  ▼
+main.rs, built against the hand-written runtime         crates/runtime
+```
+
+`lib.rs::translate` shows the single-file path in five lines; `program::translate_program` is the
+whole-program path with reachability, the census and the survey around it.
+
+## Size, on 2026-10-21
+
+| part | files | lines |
+|---|---:|---:|
+| `lower`: javac's tree to the typed tree | 48 | 12,800 |
+| `analysis`: ranges, nullness, ownership, moves, exceptions, threads, monitors, points-to, … | 28 | 10,300 |
+| `codegen`: Rust text | 43 | 14,200 |
+| `program`: reachability, survey, census | 7 | 4,000 |
+| `ast`, `javac`, crate root | 20 | 6,900 |
+| `crates/runtime`: strings, formatting, threads, math, Unicode tables, allocator, … | 50 | 15,600 |
+| `crates/translator/java`: JavaTree, BytecodeNames, Standard.java and the overlay classes | 10 | 3,200 |
+| tests (`crates/translator/tests`) | 11 | 7,100 |
+
+Plus 542 Java programs in `corpus/` (each compared with real Java's output), 28 target programs,
+benchmarks and the fuzzer. Files average about 330 lines, the largest is `codegen/objects.rs` at
+about 2,000; about 11% of the lines are doc comments; clippy runs with warnings as errors.
+
+## What holds up
+
+- **The stages are separate.** Only lowering and `program` read javac's JSON (through
+  `lower::Node`); the analyses and the generator see only the typed tree. Replacing JSON with a
+  compact format touches the first stage only.
+- **Facts are separate from the generator.** The analyses prove; the generator reads what they
+  proved. That is the split a second mode needs.
+- **Behaviour is tested against Java itself**, not against expectations someone wrote: the corpus,
+  the whole-program test, the targets, the fuzzer, and the staging gate that runs them all before
+  anything reaches main.
+
+## Four changes before the larger plans
+
+### 1. A representation plan between the analyses and the generator
+
+Today the generator decides on the spot. About 150 places in `codegen` read a fact and choose:
+proven, so the simple form; not proven, so the general form (`Option` or not, `Rc` or owned,
+`wrapping_add` or `+`, `Result` or not). Every new mode or relaxation would have to be added at
+each of those places.
+
+The plan is one table, filled after the analyses and before the generator: for every value,
+field, parameter, method and class, the decision (owned, shared or locked; nullable or not;
+wrapping or plain arithmetic; raising or not; `Vec` or the JDK's `ArrayList`; …) and the reason
+for it, which is a proof ("the nullness analysis shows it is never null") or, in port mode, a
+relaxation ("port mode: Rust's `HashMap`"). The generator prints the plan and decides nothing.
+
+What this gives:
+
+- **Modes are policies.** Exact mode fills the plan from proofs only; port mode also from
+  relaxations; thorough mode with stronger analyses. One generator for all of them.
+- **Port mode's report is free.** Every plan entry whose reason is a relaxation is a place where
+  the program may behave differently from Java; listing them is the report that
+  [natural-rust.md](natural-rust.md) asks for.
+- **The natural-Rust and ownership work becomes "improve the plan"**, and decisions can be tested
+  as data, without reading generated text.
+
+[thorough-mode.md](thorough-mode.md) already describes this table ("analyses fill the
+representation table and the code generator follows it"); it was never built as one structure.
+
+### 2. The generator produces items with a module path, not one string
+
+The generator appends text directly (about 1,150 `format!`, `push_str` and `write!` calls) and
+holds the current module in a thread-local context (`codegen/modules.rs`). For files per module,
+crates, and natural names, it should produce items, each with the module path it belongs to and
+the items it refers to, and a separate writer should lay them out: one file today, a file per
+module next, crates later (see the crate layering in [large-projects.md](large-projects.md)).
+
+### 3. Snapshot tests instead of strings in one file
+
+`tests/translation.rs` has 418 tests in 4,700 lines that compare generated Rust character for
+character. Every change to the output's shape (natural names, the plan, files) changes hundreds of
+them by hand. Snapshot files, one per feature, with one command to review and accept a change,
+keep the shape visible without making every output change expensive. Behaviour stays guarded by
+the corpus, which compares what programs print, not how they are written.
+
+### 4. A crash in one method is a rejection, not the end of the run
+
+The translator has about 220 `unwrap`, `expect`, `panic!` and `unreachable!` calls. Many guard
+real invariants, but a panic in an analysis ends the whole translation (it ended two censuses
+early). Each stage should catch a failure per method and turn it into a rejection with a position
+and a message, so that a large project gets a list of problems instead of a crash.
+
+## Smaller items
+
+- **Names.** `ast::Class` is the whole program (all its types and methods), not a class; renaming
+  it to `Program` and the like makes the code easier to read for anyone new.
+- **Per-method entry points for the whole-program analyses**, so that they can later run on
+  summaries of methods instead of their bodies ([translator-speed-and-memory.md](translator-speed-and-memory.md)).
+- **The stand-ins for JDK classes** (`Standard.java`, `java/overlay/java/io`) on one written list,
+  each with the reason it exists and what would let it be replaced by the JDK's own class.
+- **Global state in the generator** (the thread-local module context) goes away with change 2,
+  which also matters once the generator runs on every core.
+
+## Order and effort
+
+Calibrated on how long work took agents in this repository (Java's `NullPointerException` messages
+took under an hour from assignment to a green branch; the census tool about five hours):
+
+1. Changes 2, 3 and 4 in parallel, one agent each: a few hours.
+2. Change 1: a short design note first, then the move of the generator's decisions into the plan,
+   one or two agents: about half a day.
+3. Then the larger plans: speed and memory, natural Rust and ownership, large projects.
+
+With three to four agents at once; more mostly produces merge conflicts, since all four changes
+touch the generator.

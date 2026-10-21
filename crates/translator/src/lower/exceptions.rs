@@ -56,7 +56,16 @@ const RAISED: &[(&str, &[&str])] = &[
     ),
     (
         "java.lang.ArrayIndexOutOfBoundsException",
-        &["ARRAY_ACCESS", "java.lang.Character#toChars", "java.lang.System#arraycopy"],
+        &[
+            "ARRAY_ACCESS",
+            "java.lang.Character#toChars",
+            "java.lang.System#arraycopy",
+            // A range outside the array (`ArraysOp::ranged`).
+            "java.util.Arrays#fill",
+            "java.util.Arrays#sort",
+            "java.util.Arrays#copyOfRange",
+            "java.util.Arrays#binarySearch",
+        ],
     ),
     ("java.lang.NegativeArraySizeException", &["NEW_ARRAY", "java.util.Arrays#copyOf"]),
     // `super.clone()` of an object whose class is not `Cloneable`.
@@ -78,7 +87,16 @@ const RAISED: &[(&str, &[&str])] = &[
     ("java.lang.ClassCastException", &["TYPE_CAST"]),
     (
         "java.lang.IllegalArgumentException",
-        &["enum#valueOf", "java.lang.Character#toChars", "java.lang.Object#wait"],
+        &[
+            "enum#valueOf",
+            "java.lang.Character#toChars",
+            "java.lang.Object#wait",
+            // A range the wrong way round (`ArraysOp::ranged`).
+            "java.util.Arrays#fill",
+            "java.util.Arrays#sort",
+            "java.util.Arrays#copyOfRange",
+            "java.util.Arrays#binarySearch",
+        ],
     ),
     // A monitor that the thread does not hold.
     (
@@ -89,11 +107,26 @@ const RAISED: &[(&str, &[&str])] = &[
         "java.lang.StringIndexOutOfBoundsException",
         &[
             "java.lang.String#charAt",
+            "java.lang.String#getChars",
             "java.lang.String#substring",
             "java.lang.String#valueOf",
             "java.lang.String#copyValueOf",
         ],
     ),
+    // The natives of the descriptor streams (`fd.rs`): reading or writing a closed or failing
+    // descriptor, and opening a file that cannot be opened.
+    (
+        "java.io.IOException",
+        &[
+            "java.io.FileInputStream#read0",
+            "java.io.FileInputStream#readBytes",
+            "java.io.FileInputStream#available0",
+            "java.io.FileInputStream#skip0",
+            "java.io.FileOutputStream#write",
+            "java.io.FileOutputStream#writeBytes",
+        ],
+    ),
+    ("java.io.FileNotFoundException", &["java.io.FileInputStream#open0", "java.io.FileOutputStream#open0"]),
     (
         "java.lang.NumberFormatException",
         &[

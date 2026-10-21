@@ -153,12 +153,13 @@ pub fn start_thread(tid: i64, name: String, daemon: bool, body: impl FnOnce() + 
         RECORD.with_borrow_mut(|r| *r = Some(record.clone()));
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(body));
         CURRENT.with_borrow_mut(|c| *c = None);
+        crate::release_thread_cache();
         if let Err(payload) = outcome
             && !payload.is::<Uncaught>()
         {
             // A panic is a bug in the translation, whose message the hook has printed: the
             // program ends, as it would on the main thread.
-            crate::flush();
+            crate::drain_stdout();
             std::process::exit(101);
         }
         {
@@ -265,8 +266,7 @@ pub(crate) fn end_dispatched() -> ! {
 /// the message is printed, and the other threads go on.
 pub(crate) fn end_worker(e: impl std::fmt::Display) -> ! {
     let name = current_record().name();
-    crate::flush();
-    eprintln!("Exception in thread \"{name}\" {e}");
+    crate::out::eprint_text(&format!("Exception in thread \"{name}\" {e}\n"));
     std::panic::resume_unwind(Box::new(Uncaught))
 }
 
@@ -523,7 +523,7 @@ impl Drop for MainThread {
         if !std::thread::panicking() {
             await_threads();
         }
-        crate::flush();
+        crate::drain_stdout();
     }
 }
 
@@ -532,7 +532,7 @@ pub(crate) fn await_threads() {
     if !threads_started() {
         return;
     }
-    crate::flush();
+    crate::drain_stdout();
     let mut live = lock(&LIVE);
     while *live > 0 {
         live = ALL_ENDED.wait(live).unwrap_or_else(|e| e.into_inner());
