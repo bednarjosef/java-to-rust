@@ -49,14 +49,21 @@ impl<'t> Lowering<'t> {
 
     /// `value instanceof T` and `value instanceof T name` on a value of the program's types.
     pub(super) fn instance_of(&self, node: Node<'t>) -> Result<ExprKind, Error> {
+        // A record pattern has no type of its own.
+        if let Some(p) = node.get("pattern").filter(|p| p.kind() == "DECONSTRUCTION_PATTERN") {
+            return self.record_instance_of(node, p);
+        }
         let value = self.expr(node.child("expression")?)?;
         let type_node = node.child("type")?;
         let ty = self.ty(type_node, type_node.java_type())?;
         let binding = match node.get("pattern") {
             Some(p) if p.kind() == "BINDING_PATTERN" => Some(p.child("variable")?.str("name").to_string()),
-            Some(p) => return unsupported(p, "record patterns"),
+            Some(p) => return unsupported(p, "this pattern"),
             None => None,
         };
+        if let Some(name) = &binding {
+            self.forget_alias(name);
+        }
         // `Object` may also hold a string or a box.
         let target = matches!(ty, Type::Class(..) | Type::Enum(_))
             || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_)));

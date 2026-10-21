@@ -185,8 +185,9 @@ A small subset, end to end:
   Circle c`, `case Circle c when c.r() > 10`, `case null`, `case Square(double side)`, records
   nested in records, `default`) is an `if let` chain over the selector's enum, and an exhaustive
   one over a sealed hierarchy or an enum needs no `default`: a null selector throws
-  `NullPointerException` unless a `case null` takes it. `sealed`, `permits` and `non-sealed` are
-  accepted. Of `java.lang.Class`, only comparing classes and naming them translate:
+  `NullPointerException` unless a `case null` takes it. `x instanceof Segment(Point(int fx, var
+  fy), Point to)` is the same test in an `if let` chain, its negated form included. `sealed`,
+  `permits` and `non-sealed` are accepted. Of `java.lang.Class`, only comparing classes and naming them translate:
   `getClass() != o.getClass()`, `a.getClass().equals(b.getClass())` and `a.getClass() ==
   Dog.class` (a `matches!` of the variant where the class is a variant of an enum), and
   `Dog.class.getName()` and `getSimpleName()`. Any other use of a `Class` is rejected, as are a
