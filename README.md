@@ -447,9 +447,9 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   and its place (`OrderInMain`, `ReportInMain2`, `TaskInInit` in a field initializer): a variant
   of its interface's enum, or a subclass whose constructor passes the arguments of its `new` to
   the superclass's and its captures after them (`ReportInMain::new("squares", &sep)`); its
-  `getName` is javac's (`Main$1`) and its `getSimpleName` empty. Not yet: local interfaces, enums and records, member classes of local
-  classes, `Outer.super.m()`, `outer.super()`, and an inner class extending one nested in
-  another class.
+  `getName` is javac's (`Main$1`) and its `getSimpleName` empty. Local interfaces, enums and
+  records and member classes of local and anonymous classes translate, as do `Outer.super.m()`
+  and `outer.super()`. Not yet: an inner class extending one nested in another class.
 - For-each over an `Iterable` (`lower/foreach.rs`) is the loop Java runs: `let it =
   Names::iterator(&names); while it.borrow().has_next() { let s = it.borrow_mut().next(); .. }`,
   with the program's or the JDK's `iterator`, `hasNext` and `next`, so a translated iterator
@@ -569,7 +569,8 @@ for references) and are answered at the call, so their `Class`-taking natives ar
 Each construct below is rejected at translation with an error that names it:
 
 - the exceptions and try-with-resources listed under "Exceptions" above;
-- records, local interfaces, enums and records, and record patterns;
+- record patterns in `instanceof` (those in `switch` translate), and blocks, member classes,
+  static fields and non-constant initializers in an enum constant's body;
 - method references on a receiver other than a local, `this` or a final field, `super` in a
   lambda, and without the JDK's sources the default and static methods of its functional
   interfaces;

@@ -86,7 +86,7 @@ hand-made structs, wherever that is correct.
     every identity hash does.
 11. **Rejected for now**, each with a message naming the construct: `this` captured inside a
     constructor or field initializer (the struct-literal constructor has no handle yet), lambdas
-    and inner classes in an enum constant's body, an intersection cast with two non-marker
+    and blocks or classes in an enum constant's body, an intersection cast with two non-marker
     interfaces (`(Runnable & Callable)`; `(Comparator<T> & Serializable)` keeps `Comparator`),
     and inner classes of generic classes under real generics (they stay erased).
 
@@ -1127,11 +1127,25 @@ Decisions that change during the implementation are recorded here, milestone by 
   is reached by its `new`, an instance method by a call or by dispatch once the class is
   instantiated, as for any other class (the streams work; a stream operation's anonymous `Sink`
   and `StatefulOp` no longer reach their parallel overrides).
-- **Still rejected:** local interfaces, enums and records (the records work); member classes of
-  local and anonymous classes; a nested class extending one nested in another class (the two
-  `outer` fields would differ); a field named `outer` in a nested class with an enclosing
-  instance; `Outer.super.m()`; a qualified `super(..)` (`outer.super()`); an enclosing
-  instance needed in static code (which javac rejects as well).
+- **Local interfaces, enums and records in a file with a package** are hoisted like the others
+  (`lower/local_types.rs`), named by javac's binary name (`Main$1Color`); they capture nothing.
+  **Member classes of local and anonymous classes** are named after their outer class and their
+  own name (`Main$1Counter.Tally`, from javac's `Main$1Counter$Tally`), and capture what they read, like local classes
+  (`Lowering::member_outers`). **`outer.super(..)`** passes the qualifier as the superclass's
+  enclosing object (`hierarchy.rs` `super_init`), and **`Outer.super.m()`** calls the superclass's
+  method on the enclosing object (`hierarchy.rs` `super_receiver`).
+- **Enum constant bodies may declare fields** (`lower/constant_bodies.rs`): each becomes a field
+  of the enum, whose value for a constant is its body's initializer, or the zero of its type for
+  the constants whose body does not declare it. Enum values are recomputed on each read, so the
+  initializer must be pure as the enum's are (a constant), and the fields are of the types
+  `int`, `long`, `double`, `float`, `char`, `boolean` and `String`. Still rejected in a body:
+  blocks, member classes, static fields, fields of other types, and initializers that are not
+  pure, since a side effect would repeat on each read.
+- **Still rejected:** a nested class extending one nested in another class (the two `outer`
+  fields would differ); a field named `outer` in a nested class with an enclosing instance; an
+  enclosing instance needed in static code (which javac rejects as well); and `Outer.this` or
+  `Outer.super` from an inner class that itself extends `Outer` (`enclosing_instance` stops at
+  the first subclass of `Outer`, which is then `this`, not the enclosing object).
 
 ### Inner classes
 
