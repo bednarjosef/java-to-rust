@@ -160,6 +160,7 @@ impl<'a> Gen<'a> {
                 call(self, "unpark", vec![tid])
             }
             Native::InstallUncaught => self.install_uncaught(args),
+            Native::InstallTrace => self.install_trace(args),
             Native::UncaughtException => {
                 let ty = self.ty_name(ty);
                 call(self, &format!("pending_uncaught::<{ty}>"), vec![])
@@ -280,6 +281,23 @@ impl<'a> Gen<'a> {
              {pending}(uncaught); {body}; true }}, |e: &dyn std::any::Any| \
              e.downcast_ref::<{throwable}>().map(|e| String::from(match e {{ {} }})))",
             arms.join(", ")
+        ))
+    }
+
+    /// `Native::InstallTrace` with its call of `Throwable.uncaughtTrace()`: the runtime gets a
+    /// function that makes an uncaught exception of the program's `Throwable` the pending one,
+    /// which `uncaught0()` returns, and gives the text of its stack trace.
+    fn install_trace(&mut self, args: &'a [Expr]) -> Code {
+        let throwable = self.throwable_type();
+        let attempts = std::mem::take(&mut self.attempts);
+        let throwing = std::mem::replace(&mut self.throwing, false);
+        let text = self.value(&args[0], Type::String).text;
+        self.attempts = attempts;
+        self.throwing = throwing;
+        let (set, pending) = (self.runtime("set_trace_hook"), self.runtime("set_pending_uncaught"));
+        Code::atom(format!(
+            "{set}(|e: &dyn std::any::Any| e.downcast_ref::<{throwable}>().map(|e| {{ \
+             {pending}(e.clone()); {text} }}))"
         ))
     }
 

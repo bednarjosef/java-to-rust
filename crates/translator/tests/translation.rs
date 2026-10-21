@@ -4933,3 +4933,71 @@ fn clone_of_another_object_is_rejected() {
     .expect_err("only `super.clone()` is translated");
     assert!(err.to_string().contains("`clone` of an object other than `this`"), "{err}");
 }
+
+#[test]
+fn uncaught_exceptions_with_causes_are_printed_with_their_stack_trace() {
+    let with_cause = translate(
+        "class A { public static void main(String[] a) {
+            throw new IllegalStateException(\"outer\", new RuntimeException(\"inner\"));
+        } }",
+    );
+    assert_contains(&with_cause, &["java::set_trace_hook(", "fn stack_trace_text("]);
+    // An exception that has nothing more than its `toString()` is printed by it.
+    let plain = translate(
+        "class A { public static void main(String[] a) {
+            throw new IllegalStateException(\"plain\");
+        } }",
+    );
+    assert_lacks(&plain, &["set_trace_hook", "stack_trace_text"]);
+}
+
+#[test]
+fn stack_trace_overrides_that_java_runs_unseen_are_rejected() {
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
+    let filling = reject(
+        "class A { static class E extends RuntimeException {
+            public Throwable fillInStackTrace() { System.out.println(\"filled\"); return this; }
+        }
+        public static void main(String[] a) { new E(); } }",
+    );
+    assert!(filling.contains("a `fillInStackTrace` that does more than return the exception"), "{filling}");
+    let printing = reject(
+        "class A { static class E extends RuntimeException {
+            public void printStackTrace(java.io.PrintStream s) {}
+        }
+        public static void main(String[] a) { new E().printStackTrace(); } }",
+    );
+    assert!(printing.contains("overriding `Throwable.printStackTrace` of a stream or writer"), "{printing}");
+}
+
+#[test]
+fn a_static_method_asking_for_its_caller_gets_the_calling_class() {
+    let rust = translate(
+        "class A {
+            static String caller() {
+                return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass().getName();
+            }
+            static class B { static String name() { return caller(); } }
+            public static void main(String[] a) { System.out.println(caller() + B.name()); }
+        }",
+    );
+    assert_contains(&rust, &["fn caller(caller_class: java::Class)", "caller(java::Class::"]);
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
+    let instance = reject(
+        "class A {
+            String caller() { return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass().getName(); }
+            public static void main(String[] a) { System.out.println(new A().caller()); }
+        }",
+    );
+    assert!(
+        instance.contains("asking for the caller (`getCallerClass`) in a method that is not static"),
+        "{instance}"
+    );
+    let walked = reject(
+        "class A {
+            static long depth() { return StackWalker.getInstance().walk(frames -> frames.count()); }
+            public static void main(String[] a) { System.out.println(depth()); }
+        }",
+    );
+    assert!(walked.contains("StackWalker.walk"), "{walked}");
+}

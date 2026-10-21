@@ -73,6 +73,7 @@ impl<'t> Lowering<'t> {
             stubbed: Default::default(),
             annotation_types: Default::default(),
             rejected_classes: Default::default(),
+            callers: Default::default(),
         }
     }
 

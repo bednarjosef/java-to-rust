@@ -37,6 +37,7 @@ use std::cell::{Cell, RefCell};
 mod arrays;
 mod boxing;
 mod by_name;
+mod callers;
 mod captures;
 mod census;
 mod charsets;
@@ -322,6 +323,8 @@ struct Lowering<'t> {
     /// The annotation types (`@interface`) that were left out, by javac's name: an annotation
     /// does nothing when the program runs, but a value of one is not translated.
     annotation_types: std::collections::HashSet<String>,
+    /// What each method asks about its caller (see `callers`).
+    callers: callers::Callers,
 }
 
 /// An error that lowering for a census records: the index of the type whose code it is in, the
@@ -400,6 +403,7 @@ impl<'t> Lowering<'t> {
         let node = info.node;
         self.current.set(info.owner);
         self.in_ctor.set(node.str("name") == "<init>");
+        self.check_throwable_override(node)?;
         let is_ctor = node.str("name") == "<init>";
         let is_static = node.has_flag("STATIC");
         let name = node.str("name").to_string();
@@ -419,7 +423,7 @@ impl<'t> Lowering<'t> {
             && param_type(params[0]) == "java.lang.String[]"
             && self.entry.is_none_or(|entry| entry == info.owner);
         let args_param = is_main.then(|| params[0]);
-        let params = if is_main {
+        let mut params: Vec<Param> = if is_main {
             Vec::new()
         } else {
             params
@@ -429,6 +433,7 @@ impl<'t> Lowering<'t> {
                 })
                 .collect::<Result<_, Error>>()?
         };
+        params.extend(self.caller_param(index, node, is_main)?);
         // An abstract method of an enum is implemented by the constants' bodies, which
         // `constant_bodies` makes its body.
         let abstract_in_enum =
@@ -458,6 +463,9 @@ impl<'t> Lowering<'t> {
         };
         if let Some(param) = args_param.filter(|p| reads_name(&body, p.str("name"))) {
             body.insert(0, self.args_decl(param));
+        }
+        if is_main && let Some(hook) = self.trace_hook(node.pos()) {
+            body.insert(0, hook);
         }
         Ok(Method {
             name,
@@ -904,6 +912,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.class_call(node, &symbol, select)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.caller_class(node, &symbol, select)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.copy_of_with_class(node, &symbol)? {
             return Ok(kind);
         }
@@ -1085,8 +1096,9 @@ impl<'t> Lowering<'t> {
                     );
                     return error(node.pos(), message);
                 }
-                let args = self.convert_generic_args(node, resolved, args)?;
+                let mut args = self.convert_generic_args(node, resolved, args)?;
                 if symbol.is_static {
+                    args.extend(self.caller_arg(node, resolved)?);
                     return Ok(ExprKind::Call { name, args, resolved });
                 }
                 // `super.m()`, or `Iface.super.m()` for a default method of an interface.
