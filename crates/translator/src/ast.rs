@@ -360,6 +360,8 @@ pub enum Origin {
     /// `binary` is the name the JVM gives such a class, up to the part that varies between runs
     /// (`Main$$Lambda`).
     Lambda { method: Option<usize>, binary: String },
+    /// The class of the objects that `new Object()` creates, which Java names `java.lang.Object`.
+    Object,
 }
 
 impl Origin {
@@ -374,6 +376,7 @@ impl Origin {
             }
             Origin::Anonymous { binary, .. } => Some((binary, "")),
             Origin::Lambda { binary, .. } => Some((binary, binary.rsplit('.').next().unwrap_or_default())),
+            Origin::Object => Some(("java.lang.Object", "Object")),
         }
     }
 }

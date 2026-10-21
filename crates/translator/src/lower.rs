@@ -60,6 +60,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
         lowering.functional = functional::Functional::select(decls.iter().map(|d| d.0), &declared);
         lowering.declare_functional()?;
+        lowering.declare_plain_object(decls.iter().map(|d| d.0))?;
         lowering.name_nested();
         lowering.plan_captures().map_err(|(_, e)| e)?;
         lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
@@ -201,6 +202,8 @@ struct Lowering<'t> {
     closes: std::cell::RefCell<Vec<(usize, Pos)>>,
     /// Where `Object` goes, in a program that uses it (see `object`).
     object: Option<object::ObjectIndexes>,
+    /// The class of the objects that `new Object()` creates, when the code has one (see `object`).
+    plain_object: Option<usize>,
     /// The generic classes and methods that are Rust generics (see `real_generics`).
     real: real_generics::Real,
     /// Those of `real` that lowering found cannot be: the program is lowered again without them.

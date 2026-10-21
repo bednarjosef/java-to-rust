@@ -79,7 +79,66 @@ fn mentions_object(v: &Value, real: &HashSet<*const Value>) -> bool {
     }
 }
 
+/// The class of the objects that `new Object()` creates: a class without fields that implements
+/// `Object` like any other, so that such an object is a variant of the `Object` enum, equal only
+/// to itself, hashed and printed by its identity (`java.lang.Object@1b6d3586`, see
+/// `Origin::Object`). The lock objects and the placeholder values of the JDK's collections
+/// (`HashSet`'s `PRESENT`) are such objects.
+pub(super) const PLAIN_OBJECT: &str = "PlainObject";
+
+/// Whether the tree `v` creates an object of `java.lang.Object` itself.
+fn creates_object(v: &Value) -> bool {
+    match v {
+        Value::Object(fields) => {
+            (fields.get("kind").and_then(Value::as_str) == Some("NEW_CLASS")
+                && fields.get("classBody").is_none_or(Value::is_null)
+                && v["symbol"]["owner"].as_str() == Some("java.lang.Object"))
+                || fields.values().any(creates_object)
+        }
+        Value::Array(items) => items.iter().any(creates_object),
+        _ => false,
+    }
+}
+
 impl<'t> Lowering<'t> {
+    /// Declares the class of `new Object()` (`PLAIN_OBJECT`) when one of these trees creates such
+    /// an object.
+    pub(super) fn declare_plain_object<'v>(
+        &mut self,
+        trees: impl IntoIterator<Item = &'v Value>,
+    ) -> Result<(), Error> {
+        if !trees.into_iter().any(creates_object) {
+            return Ok(());
+        }
+        if let Some(clash) = self.types.iter().find(|t| t.name == PLAIN_OBJECT) {
+            return unsupported(clash.node, &format!("a class named `{PLAIN_OBJECT}`"));
+        }
+        let ctor = serde_json::json!({"kind": "METHOD", "name": "<init>", "modifiers": [],
+            "parameters": [], "body": {"kind": "BLOCK", "statements": []},
+            "symbol": {"kind": "CONSTRUCTOR", "name": "<init>", "owner": PLAIN_OBJECT, "type": "()void"}});
+        let decl = serde_json::json!({"kind": "CLASS", "simpleName": PLAIN_OBJECT, "modifiers": [],
+            "members": [ctor], "symbol": {"kind": "CLASS", "name": PLAIN_OBJECT, "owner": "",
+            "type": PLAIN_OBJECT}});
+        self.plain_object = Some(self.types.len());
+        self.declare_type(Node(Box::leak(Box::new(decl))), None)
+    }
+
+    /// `new Object()`, `node`: an object of the class `PLAIN_OBJECT` as an `Object`.
+    pub(super) fn new_plain_object(&self, node: Node<'t>) -> Option<ExprKind> {
+        let t = self.plain_object?;
+        let symbol = node.symbol()?;
+        if symbol.owner != "java.lang.Object" || node.get("classBody").is_some() {
+            return None;
+        }
+        let ctor = self.methods.iter().position(|m| m.owner == t && m.name == "<init>");
+        let new = self.synth(
+            ExprKind::New { class: t, args: Vec::new(), ctor },
+            node.pos(),
+            Type::class(PLAIN_OBJECT),
+        );
+        Some(ExprKind::Cast(Type::class(OBJECT), Box::new(new)))
+    }
+
     /// Plans `Object` for a program that uses it: its type and methods come after the `types`
     /// and `methods` declared so far.
     pub(super) fn plan_object(&mut self, decls: &[Node<'t>]) {
