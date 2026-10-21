@@ -54,6 +54,7 @@ impl<'t> Lowering<'t> {
             entry: None,
             standard: exceptions::Standard::default(),
             closes: Default::default(),
+            object_arrays: Default::default(),
             object: None,
             plain_object: None,
             real: Default::default(),

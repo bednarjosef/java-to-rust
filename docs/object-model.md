@@ -1593,9 +1593,18 @@ Generics are erased in lowering, and nothing after it knows they existed:
 - Arrays do not convert: `String[]` is `java::Array<String>` and `Object[]` is
   `java::Array<Option<Object>>`, so an array passed as an array of a type variable
   (`<T> T first(T[] xs)` called with a `String[]`) is rejected ("an array passed as an array of a
-  type variable"), and so is an array of a type variable read as an array of its argument. An
-  array as an `Object` value stays rejected; the plan's `Variant::Array` is not done. A generic
-  array built as `(T[]) new Object[n]` is an `Object[]` and translates.
+  type variable"), and so is an array of a type variable read as an array of its argument. A
+  generic array built as `(T[]) new Object[n]` is an `Object[]` and translates.
+- An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the
+  plan's `Variant::Array`, done as a runtime class beside the strings and the boxes rather than a
+  variant kind of its own: each array type that is converted to `Object` or cast back from it gets
+  a `TypeKind::Runtime` declaration named after the type (`int[]`, `String[][]`), collected while
+  lowering (`lower::object::note_object_array`) and added after `Object`'s other runtime types.
+  Its variant holds the shared `java::Array` (`Object::IntArray(java::Array<i32>)`, with
+  `as_int_array` and `to_int_array`), so the array keeps its identity: `==` and `equals` compare
+  with `Rc::ptr_eq`, `hashCode` is `java::identity_hash`, and it prints as Java's default
+  `toString`, its JVM name and hash (`[I@1b6d3586`). Arrays of a Rust generic's instantiation
+  (`Box<String>[]` under real generics) have no runtime class and are rejected.
 - A value read back out of a generic container is a cast from `Object` that may be null (the
   container's array has null elements), so reading an enum back (`Suit s = list.get(0)`) is
   rejected by the existing "casting a value that may be null to an enum"; strings, boxes and

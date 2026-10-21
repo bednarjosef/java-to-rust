@@ -3755,6 +3755,33 @@ fn a_type_variable_with_several_bounds_is_cast_to_the_later_bound_it_calls() {
 }
 
 #[test]
+fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
+    let rust = translate(
+        "public class Main {
+            public static void main(String[] args) {
+                int[] cell = {1, 2};
+                Object held = cell;
+                int[] back = (int[]) held;
+                back[0] = 5;
+                System.out.println(cell[0] + \" \" + (held == cell) + \" \" + (held instanceof String[]));
+                System.out.println(held.hashCode() == cell.hashCode());
+            }
+        }",
+    );
+    // The variant holds the array's handle, so the array keeps its identity in the `Object`.
+    assert_contains(
+        &rust,
+        &[
+            "IntArray(java::Array<i32>),",
+            "let held = Object::IntArray(cell.clone());",
+            "java::cast(held.as_int_array(), \"[I\")",
+            "(Object::IntArray(a), Object::IntArray(b)) => Rc::ptr_eq(a, b),",
+            "Object::IntArray(o) => java::identity_hash(o),",
+        ],
+    );
+}
+
+#[test]
 fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
     let rust = translate(GENERICS);
     // The method with the substituted types keeps its own signature; a bridge with the erased

@@ -205,6 +205,9 @@ struct Lowering<'t> {
     standard: exceptions::Standard,
     /// The `close` methods that try-with-resources statements call (see `exceptions`).
     closes: std::cell::RefCell<Vec<(usize, Pos)>>,
+    /// The array types whose arrays become `Object`s or are cast back from them: each is a
+    /// runtime class beside `Object` (see `object::object_types`).
+    object_arrays: std::cell::RefCell<Vec<Type>>,
     /// Where `Object` goes, in a program that uses it (see `object`).
     object: Option<object::ObjectIndexes>,
     /// The class of the objects that `new Object()` creates, when the code has one (see `object`).
@@ -540,6 +543,9 @@ impl<'t> Lowering<'t> {
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
                 let value = self.expr(node.child("expression")?)?;
+                if Self::is_object(value.ty) {
+                    self.object_array(node, ty)?;
+                }
                 // A cast between the program's types, up, down or across: `Cast` converts as the
                 // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
                 // `Integer` and unboxes.

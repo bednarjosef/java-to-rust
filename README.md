@@ -152,9 +152,10 @@ A small subset, end to end:
   its value. A class without `toString` prints as Java's `Object.toString` does, its binary name and
   its hash code in hexadecimal (`Point@1b6d3586`). `new Object()` makes an object of a class
   without fields, `PlainObject`, equal only to itself and printed as `java.lang.Object@..`, as the
-  JDK's lock objects and placeholder values (`HashSet`'s `PRESENT`) need. An array as an
-  `Object`, and `==` between two `Object`s that may both be strings or boxes (whose identity the
-  translation does not keep, except in the shortcut `a == b || a.equals(b)`) are rejected. The
+  JDK's lock objects and placeholder values (`HashSet`'s `PRESENT`) need. An array becomes an
+  `Object` too (`Object::IntArray(..)`), shared and compared by identity, so a `Deque<int[]>` holds
+  its arrays. `==` between two `Object`s that may both be strings or boxes (whose identity the
+  translation does not keep, except in the shortcut `a == b || a.equals(b)`) is rejected. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
   and a use where javac substituted a type argument gets the checked cast back

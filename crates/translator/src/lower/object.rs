@@ -334,6 +334,32 @@ impl<'t> Lowering<'t> {
             debug_assert_eq!(types.len(), n.decl);
             types.push(decl(NUMBER, "", TypeKind::Interface, vec![at.decl]));
         }
+        // The arrays that become `Object`s, each named after its type (`int[]`).
+        for ty in self.object_arrays.borrow().iter() {
+            types.push(decl(&ty.to_string(), "", TypeKind::Runtime, vec![at.decl]));
+        }
+    }
+
+    /// Notes that arrays of type `ty`, if it is an array type, become `Object`s.
+    pub(super) fn note_object_array(&self, ty: Type) {
+        let mut arrays = self.object_arrays.borrow_mut();
+        if matches!(ty, Type::Array(_)) && !arrays.contains(&ty) {
+            arrays.push(ty);
+        }
+    }
+
+    /// Notes that an `Object` is cast to `ty`, if it is an array type: its arrays are `Object`s.
+    /// An array of a Rust generic's instantiation has no runtime class.
+    pub(super) fn object_array(&self, node: Node, ty: Type) -> Result<(), Error> {
+        let mut innermost = ty;
+        while let Type::Array(element) = innermost {
+            innermost = *element;
+        }
+        if innermost != ty && matches!(innermost, Type::Class(_, args) if !args.is_empty()) {
+            return unsupported(node, "an array of a generic class's instantiation as an `Object`");
+        }
+        self.note_object_array(ty);
+        Ok(())
     }
 
     /// Whether class `t` of the program says it implements `java.lang.Comparable`.
@@ -539,6 +565,13 @@ impl<'t> Lowering<'t> {
             }
             Some(r) => self.expr(r)?,
             None => self.this(node),
+        };
+        // An array's methods are `Object`'s: the array becomes an `Object` to call them.
+        let receiver = if matches!(receiver.ty, Type::Array(_)) {
+            self.object_array(node, receiver.ty)?;
+            self.convert(receiver, Type::class(OBJECT))
+        } else {
+            receiver
         };
         if !matches!(receiver.ty, Type::Class(..)) {
             return unsupported(node, &format!("`{}` of a value of this type", symbol.name));
