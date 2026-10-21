@@ -1351,6 +1351,12 @@ Decisions that change during the implementation are recorded here, milestone by 
   Two closure types with the same Rust type and a default method of the same name would make
   such a call ambiguous; no two of `java.util.function` do, and no corpus program has such a
   pair.
+- **A closure type that threads may share** (`Facts::thread_shared` holds it or an interface
+  above or below it, which share its closures) is `Arc<dyn Fn(..) -> R + Send + Sync>` and its
+  closures `Arc::new(..)`, the handle chosen in one place (`closure_handle`); its captures are of
+  shared types by the same walk. Others keep `Rc`, also in a threaded program
+  (`docs/multi-threading.md`). Corpus: `threads/ClosuresAcrossThreads.java`,
+  `threads/ClosureMethodsAcrossThreads.java` (default methods on shared closures).
 - **A call clones a closure out of a `RefCell`** before running it,
   `({ let f = a.borrow().op.clone(); f })(3)`, since the closure may reach the object again; a
   local, a capture or a field of a plain object is called in place (`op(x)`, `(self.op)(x)`).

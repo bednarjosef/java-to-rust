@@ -10,6 +10,10 @@
 //! ```text
 //! { let k = k; Rc::new(move |x: i32| -> i32 { x + k }) as IntOp }
 //! ```
+//!
+//! In a program with threads, a closure type that a thread can reach (`Facts::thread_shared`)
+//! is `Arc<dyn Fn(..) + Send + Sync>` instead, and its closures `Arc::new(..)`: what they capture
+//! is of types that threads share, by the same walk.
 
 use super::*;
 use crate::analysis::closures;
@@ -82,7 +86,10 @@ impl<'a> Gen<'a> {
                 self.need(Need::Enum(above));
                 self.closure_name(above)
             }
-            None => format!("Rc<dyn Fn({}){ret}>", params.join(", ")),
+            None => {
+                let (handle, bounds) = self.closure_handle(t);
+                format!("{handle}<dyn Fn({}){ret}{bounds}>", params.join(", "))
+            }
         };
         self.gap();
         self.line(&format!("{}type {name} = {ty};", self.vis()));
@@ -296,8 +303,12 @@ impl<'a> Gen<'a> {
         self.restore(saved);
         let moving = if moving { "move " } else { "" };
         let body = self.braced(&text);
-        let closure =
-            format!("Rc::new({moving}|{}|{ret} {body}) as {}", params.join(", "), self.closure_name(t));
+        let closure = format!(
+            "{}::new({moving}|{}|{ret} {body}) as {}",
+            self.closure_handle(t).0,
+            params.join(", "),
+            self.closure_name(t)
+        );
         (prelude, closure)
     }
 
@@ -372,6 +383,22 @@ impl<'a> Gen<'a> {
             return format!("{{ {} }}", lines.join(" "));
         }
         format!("{{\n{text}{}}}", "    ".repeat(self.indent))
+    }
+
+    /// The handle of the closures of closure type `t`, and the bounds of their `dyn Fn`: `Arc`
+    /// and `Send + Sync` when a thread can reach a value of `t` or of an interface above or below
+    /// it, which share the closures, else `Rc`.
+    fn closure_handle(&self, t: usize) -> (&'static str, &'static str) {
+        let h = &self.class.hierarchy;
+        let mut root = t;
+        while let Some(&above) =
+            self.class.types[root].implements.iter().find(|i| self.facts.closure_types.contains(i))
+        {
+            root = above;
+        }
+        let shared = (self.facts.closure_types.iter())
+            .any(|&u| h.is_subtype(u, root) && self.facts.thread_shared.contains(&u));
+        if shared { ("Arc", " + Send + Sync") } else { ("Rc", "") }
     }
 
     /// The Rust name of closure type `t`, which its values are written as.
