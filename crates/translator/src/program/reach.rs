@@ -137,9 +137,10 @@ pub const RUNTIME_CLASSES: &[&str] = &[
 /// reachability stops there, as at the runtime's classes, and the survey counts its use. Library
 /// code reaches these on paths that only its data rules out, such as `TreeMap.addAll` reading
 /// from a stream that is null there. Class and resource loading finds classes and data by name
-/// (`ResourceBundle` the locale data, `ServiceLoader` the providers), which is reflection in all
-/// but name: a closed-world translation knows its classes. (`java.lang.Module` is a prefix of
-/// `java.lang.ModuleLayer` too.)
+/// (`ServiceLoader` the providers), which is reflection in all but name: a closed-world
+/// translation knows its classes. `ResourceBundle` is translated: the locale data it finds by
+/// name are the classes of the program. (`java.lang.Module` is a prefix of `java.lang.ModuleLayer`
+/// too.)
 pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.io.ObjectInputStream", "serialization"),
     ("java.io.ObjectOutputStream", "serialization"),
@@ -148,7 +149,6 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.lang.invoke.", "reflection"),
     ("java.lang.reflect.", "reflection"),
     ("java.security.", "security"),
-    ("java.util.ResourceBundle", "class loading"),
     ("java.util.ServiceLoader", "class loading"),
     ("jdk.internal.loader.", "class loading"),
     ("jdk.internal.reflect.", "reflection"),
@@ -1518,7 +1518,7 @@ mod tests {
     #[test]
     fn class_loading_is_not_translated_and_reflect_array_is() {
         assert_eq!(untranslated("java.util.ServiceLoader"), Some("class loading"));
-        assert_eq!(untranslated("java.util.ResourceBundle.Control"), Some("class loading"));
+        assert_eq!(untranslated("java.util.ResourceBundle.Control"), None);
         assert_eq!(untranslated("java.lang.ModuleLayer"), Some("class loading"));
         assert_eq!(untranslated("jdk.internal.loader.BootLoader"), Some("class loading"));
         assert_eq!(untranslated("java.lang.reflect.Method"), Some("reflection"));
