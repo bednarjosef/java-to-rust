@@ -70,8 +70,6 @@ public class ReadersAndWriters {
         Writer ascii = new OutputStreamWriter(System.out, StandardCharsets.US_ASCII);
         ascii.write("ascii and é and 😀\n");
         ascii.flush();
-        // (Closing a writer is in StreamSubclasses: with System.in read through a reader, a
-        // close reaches code whose NullPointerException messages the translation cannot give.)
         OutputStreamWriter latinWriter = new OutputStreamWriter(System.out, "ISO-8859-1");
         latinWriter.write("latin and é and €\n");
         latinWriter.flush();
@@ -82,5 +80,8 @@ public class ReadersAndWriters {
         Writer w = new OutputStreamWriter(System.out);
         w.write("this is lost: the writer is never flushed\n");
         System.out.println("end");
+        // Closing the writer closes System.out under it, so nothing after it is printed.
+        latinWriter.close();
+        System.out.println("not shown: System.out is closed " + latinWriter.getEncoding());
     }
 }

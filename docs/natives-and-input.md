@@ -1053,9 +1053,7 @@ charset machinery (its provider lookup reaches `GB18030`, which reads a JVM prop
   (`analysis/npe_messages.rs`), names the method a call calls by the receiver's type and the
   method's parameter types; where a parameter is an `Object` in the translation (a type
   variable, or an interface such as `CharSequence`) the name is not certain, and the program is
-  rejected. Closing a stream in a program that reads `System.in` through a reader is one such
-  case today: the close reaches a `catch` of `Throwable`, and `FileDescriptor.attach` calls
-  `List.add(Object)`.
+  rejected.
 - `Scanner(System.in)` still does not translate: `Scanner` reaches `java.util.regex`, which needs
   `Character.UnicodeScript` (`CharPredicates.java`), not yet supported.
 
