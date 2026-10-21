@@ -499,8 +499,19 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   default or static methods is rejected with a pointer to whole-program mode. Translated whole
   with the JDK's sources, those methods are the JDK's own code, lambdas in interface methods
   included (`Comparator.comparing(Person::name).thenComparingInt(Person::age)`,
-  `f.andThen(g)`, `Predicate.not(p)`, `Iterable.forEach`; `corpus/whole-program`). Not yet: other
-  receivers, `super` in a lambda and the closure forms (`impl FnMut`, `Rc<dyn Fn>`).
+  `f.andThen(g)`, `Predicate.not(p)`, `Iterable.forEach`; `corpus/whole-program`).
+- Closure types (`analysis/closures.rs`, `codegen/closures.rs`): a functional interface whose
+  values are only lambdas and method references, which nothing sees as objects (no conversion to
+  `Object`, no `==`, no `instanceof`), with one abstract method, no default method and no
+  interface above or below it, is a type alias, `type IntOp = Rc<dyn Fn(i32, i32) -> i32>;`; a
+  generic one takes and returns the erased types (`type Function = Rc<dyn Fn(Object) ->
+  Object>;`), the lambda's body after its bridge's casts of the arguments. Each lambda is a closure written where it is created, its captures moved in
+  (`Rc::new(move |a: i32, b: i32| -> i32 { a.wrapping_add(b).wrapping_add(k) }) as IntOp`, `this`
+  as `outer`), and a call is a call of the closure (`op(acc, x)`). Every other functional
+  interface keeps the class per lambda. Not yet: other receivers, `super` in a lambda, JDK
+  interfaces with default methods and interfaces that extend another (`UnaryOperator`) as
+  closure types, typed closures for a generic interface's instantiations, and the parameter and
+  local forms (`impl FnMut`, a plain `let f = |x| ..`).
 
 ### Whole programs
 
