@@ -107,6 +107,25 @@ const RAISED: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// The operation without which the runtime never raises `InterruptedException`.
+const INTERRUPTS: &str = "java.lang.Thread#interrupt";
+
+/// More of `RAISED`, in a program that interrupts a thread (`INTERRUPTS`): `sleep`, `join` and
+/// `wait` end with an interrupt, and `sleep` has a checked form for its negative time as well.
+/// (Elsewhere `sleep` never throws `InterruptedException`, and a `catch` that sees its
+/// `IllegalArgumentException` runs it in `java::catching`.)
+const RAISED_WHEN_INTERRUPTED: &[(&str, &[&str])] = &[
+    (
+        "java.lang.InterruptedException",
+        &["java.lang.Thread#sleep", "java.lang.Thread#join", "java.lang.Object#wait"],
+    ),
+    ("java.lang.IllegalArgumentException", &["java.lang.Thread#sleep"]),
+];
+
+/// The classes of `RAISED` that the runtime may raise without a message as well, which are built
+/// with the constructor without arguments then, so that `getMessage()` is null.
+const BARE: &[&str] = &["java.lang.InterruptedException"];
+
 /// The package of the standard class with this simple name.
 fn package_of(simple: &str) -> &'static str {
     OTHER_PACKAGES.iter().find(|(s, _)| *s == simple).map_or("java.lang", |(_, p)| p)
@@ -338,12 +357,16 @@ impl Uses {
 /// Declares the classes of `RAISED` that the runtime may raise where a `catch` or a `finally`
 /// might see them, and records them in `raised`.
 fn raise_classes(uses: &mut Uses, raised: &mut HashSet<String>) {
-    for (class, operations) in RAISED {
+    let interrupted = if uses.operations.contains(INTERRUPTS) { RAISED_WHEN_INTERRUPTED } else { &[] };
+    for (class, operations) in RAISED.iter().chain(interrupted) {
         let caught =
             uses.finally || uses.catches.iter().any(|c| is_standard(c) && standard_subclass(class, c));
         if caught && operations.iter().any(|o| uses.operations.contains(*o)) {
             uses.classes.insert(class.to_string());
             uses.members.insert((class.to_string(), "<init>".into(), "(java.lang.String)void".into()));
+            if BARE.contains(class) {
+                uses.members.insert((class.to_string(), "<init>".into(), "()void".into()));
+            }
             uses.instantiated.insert(class.to_string());
             raised.insert(class.to_string());
         }
@@ -480,6 +503,16 @@ impl<'t> Lowering<'t> {
                 self.next_id.set(id + 1);
                 Expr { kind, pos: Pos::default(), ty, id }
             };
+            // Without a message first: the generator matches it when the message is null.
+            let bare = methods.iter().position(|m| m.is_ctor && m.class == t && m.params.is_empty());
+            if BARE.contains(&decl.name.as_str())
+                && let Some(bare) = bare
+            {
+                out.push(expr(
+                    ExprKind::New { class: t, args: Vec::new(), ctor: Some(bare) },
+                    Type::class(&decl.name),
+                ));
+            }
             let message = expr(ExprKind::Var("raisedMessage".to_string()), Type::String);
             out.push(expr(
                 ExprKind::New { class: t, args: vec![message], ctor: Some(ctor) },

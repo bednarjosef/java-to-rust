@@ -3,8 +3,9 @@
 // natives of the runtime (`java_runtime::thread`). `build.rs` prints its syntax tree with
 // `JavaTree`, and lowering gives it its real package and adds it, with the members a program uses,
 // to the programs that use it, as it adds the standard exception classes of `Standard.java` (see
-// `lower/exceptions.rs`). A program may extend it. Thread groups, interrupts, the thread's state
-// and stack, and virtual threads are left out.
+// `lower/exceptions.rs`). A program may extend it. Thread groups, the thread's state and stack,
+// and virtual threads are left out. The interrupt status is the runtime's, by the thread's id, so
+// that `sleep`, `join` and `wait` observe it.
 package threads;
 
 class Thread {
@@ -96,6 +97,18 @@ class Thread {
         join0(tid, millis);
     }
 
+    public void interrupt() {
+        interrupt0(tid);
+    }
+
+    public boolean isInterrupted() {
+        return isInterrupted0(tid);
+    }
+
+    public static boolean interrupted() {
+        return clearInterrupt0();
+    }
+
     public final String getName() {
         return name;
     }
@@ -163,4 +176,10 @@ class Thread {
     private static native void join0(long tid, long millis);
 
     private static native void rename0(long tid, String name);
+
+    private static native void interrupt0(long tid);
+
+    private static native boolean isInterrupted0(long tid);
+
+    private static native boolean clearInterrupt0();
 }

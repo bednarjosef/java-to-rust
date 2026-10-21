@@ -1267,22 +1267,21 @@ impl<'a> Gen<'a> {
         let hash = match self.hash_index(c) {
             Some(i) => {
                 let call = self.arm_call(t, c, i, "").0;
-                self.text_hash(i, call)
+                self.shown_hash(i, call)
             }
             None => self.value_hash(c, "o"),
         };
         self.default_text(c, hash)
     }
 
-    /// The hash code that `Object.toString` puts in an object's text, from `call`, a call of the
-    /// `hashCode` `index`: what a `hashCode` that throws raises ends the program there, as what
-    /// a `toString` that the text runs throws does.
-    pub(super) fn text_hash(&mut self, index: usize, call: String) -> String {
-        if !self.facts.throwing.contains(&index) {
+    /// The call `call` of `hashCode` method `i` for the text that `Object.toString` makes: what it
+    /// throws ends the program, as what a `toString` throws does where an object's text is made
+    /// (`analysis::exceptions`).
+    pub(super) fn shown_hash(&mut self, i: usize, call: String) -> String {
+        if !self.facts.throwing.contains(&i) {
             return call;
         }
-        let uncaught = self.uncaught("uncaught");
-        format!("{call}.unwrap_or_else({uncaught})")
+        format!("{call}.unwrap_or_else({})", self.uncaught("uncaught"))
     }
 
     /// The text that `Object.toString` makes for an object of class `c` whose hash code is `hash`.

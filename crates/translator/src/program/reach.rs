@@ -185,6 +185,52 @@ pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
     REPLACED_METHODS.contains(&(class, name, signature))
         || REPLACED_BY_NAME.contains(&(class, name))
         || unsafe_field_access(class, name, signature).is_some()
+        || unsafe_field_update(class, name, signature).is_some()
+}
+
+/// One of `Unsafe`'s atomic updates of a field at an offset (see `unsafe_field_update`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FieldUpdate {
+    /// `getAndAdd<Kind><Mode>(o, offset, delta)`: the old value, the field incremented.
+    GetAndAdd,
+    /// `getAndSet<Kind><Mode>(o, offset, x)`: the old value, the field set to `x`.
+    GetAndSet,
+    /// `compareAndSet<Kind>` and `weakCompareAndSet<Kind><Mode>(o, offset, expected, x)`: whether
+    /// the field was `expected`, and then set to `x`. The weak form never fails spuriously here.
+    CompareAndSet,
+    /// `compareAndExchange<Kind><Mode>(o, offset, expected, x)`: the old value, the field set to
+    /// `x` when it was `expected`.
+    CompareAndExchange,
+}
+
+/// Whether the method is one of `Unsafe`'s atomic updates of an `int`, `long` or reference field
+/// at an offset, in any of its memory-order modes, and which.
+pub fn unsafe_field_update(class: &str, name: &str, signature: &str) -> Option<FieldUpdate> {
+    if class != "jdk.internal.misc.Unsafe" {
+        return None;
+    }
+    let forms: [(&str, FieldUpdate, &[&str]); 5] = [
+        ("getAndAdd", FieldUpdate::GetAndAdd, &["", "Acquire", "Release"]),
+        ("getAndSet", FieldUpdate::GetAndSet, &["", "Acquire", "Release"]),
+        ("compareAndSet", FieldUpdate::CompareAndSet, &[""]),
+        ("weakCompareAndSet", FieldUpdate::CompareAndSet, &["", "Plain", "Acquire", "Release"]),
+        ("compareAndExchange", FieldUpdate::CompareAndExchange, &["", "Acquire", "Release"]),
+    ];
+    let kinds = [("Int", "int"), ("Long", "long"), ("Reference", "java.lang.Object")];
+    forms.into_iter().find_map(|(prefix, update, modes)| {
+        let rest = name.strip_prefix(prefix)?;
+        let (kind, ty) = kinds.into_iter().find(|(k, _)| rest.starts_with(k))?;
+        if !modes.contains(&&rest[kind.len()..]) || (update == FieldUpdate::GetAndAdd && kind == "Reference")
+        {
+            return None;
+        }
+        let expected = match update {
+            FieldUpdate::GetAndAdd | FieldUpdate::GetAndSet => format!("(java.lang.Object,long,{ty}){ty}"),
+            FieldUpdate::CompareAndSet => format!("(java.lang.Object,long,{ty},{ty})boolean"),
+            FieldUpdate::CompareAndExchange => format!("(java.lang.Object,long,{ty},{ty}){ty}"),
+        };
+        (signature == expected).then_some(update)
+    })
 }
 
 /// Whether the method is one of `Unsafe`'s reads or writes of a field at an offset:
@@ -1294,6 +1340,31 @@ mod tests {
             })
             .collect();
         json!({"kind": "CLASS", "symbol": {"type": name}, "members": members})
+    }
+
+    #[test]
+    fn unsafe_updates_of_int_long_and_reference_fields_are_recognized_in_every_mode() {
+        let unsafe_ = "jdk.internal.misc.Unsafe";
+        let found = |name: &str, sig: &str| unsafe_field_update(unsafe_, name, sig);
+        assert_eq!(found("getAndAddInt", "(java.lang.Object,long,int)int"), Some(FieldUpdate::GetAndAdd));
+        assert_eq!(
+            found("getAndAddLongRelease", "(java.lang.Object,long,long)long"),
+            Some(FieldUpdate::GetAndAdd)
+        );
+        assert_eq!(
+            found("getAndAddReference", "(java.lang.Object,long,java.lang.Object)java.lang.Object"),
+            None
+        );
+        let swap = "(java.lang.Object,long,java.lang.Object)java.lang.Object";
+        assert_eq!(found("getAndSetReference", swap), Some(FieldUpdate::GetAndSet));
+        let cas = "(java.lang.Object,long,int,int)boolean";
+        assert_eq!(found("compareAndSetInt", cas), Some(FieldUpdate::CompareAndSet));
+        assert_eq!(found("weakCompareAndSetIntPlain", cas), Some(FieldUpdate::CompareAndSet));
+        assert_eq!(found("compareAndSetIntPlain", cas), None);
+        let exchange = "(java.lang.Object,long,long,long)long";
+        assert_eq!(found("compareAndExchangeLongAcquire", exchange), Some(FieldUpdate::CompareAndExchange));
+        assert_eq!(found("getIntVolatile", "(java.lang.Object,long)int"), None);
+        assert!(replaced(unsafe_, "compareAndSetLong", "(java.lang.Object,long,long,long)boolean"));
     }
 
     #[test]

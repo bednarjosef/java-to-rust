@@ -517,6 +517,13 @@ impl<'a> Gen<'a> {
         else {
             return field;
         };
+        // A field of the struct's class that the expression's type does not have: `super.clone()`
+        // in a superclass copies the fields of the object's own class (`object_clone`).
+        let owner = if self.class.types[owner].fields.iter().any(|f| f.name == name) {
+            owner
+        } else {
+            self.class.hierarchy.field_owner(s, name)
+        };
         hierarchy::base_path(self.facts, self.class, s, owner) + &field
     }
 
@@ -779,7 +786,7 @@ impl<'a> Gen<'a> {
             let hash = match self.hash_index(c) {
                 Some(i) => {
                     let call = self.handle_call(handle, e, i);
-                    self.text_hash(i, call)
+                    self.shown_hash(i, call)
                 }
                 None => format!("{}({})", self.runtime("address_hash"), self.address(c, handle)),
             };
@@ -1250,7 +1257,7 @@ impl<'a> Gen<'a> {
             let hash = match self.hash_index(c) {
                 Some(i) => {
                     let call = self.method_call(e, i, &[]).text;
-                    self.text_hash(i, call)
+                    self.shown_hash(i, call)
                 }
                 None => {
                     let address = self.receiver_address(e, c);

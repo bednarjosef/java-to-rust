@@ -566,7 +566,8 @@ impl<'a> Gen<'a> {
             let index = cases.iter().position(|c| std::ptr::eq(c, case)).unwrap_or(0);
             self.line(&format!("{} => {index},", self.pattern(case, chars)));
         }
-        if !cases.iter().any(is_default) && !exhaustive {
+        let matches_all = cases.iter().any(is_default) || exhaustive;
+        if !matches_all {
             self.line(&format!("_ => {},", cases.len()));
         }
         self.indent -= 1;
@@ -598,7 +599,11 @@ impl<'a> Gen<'a> {
             self.indent -= 1;
             self.line("}");
         }
-        self.line(&format!("_ => {fallout},"));
+        // `case` is the index of a case, or one past the last where no case matched: with a
+        // `default` or every constant covered, never that, so Rust sees that every way out of the
+        // loop ran a case (and what it assigned).
+        let unmatched = if matches_all { "unreachable!()" } else { fallout };
+        self.line(&format!("_ => {unmatched},"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;

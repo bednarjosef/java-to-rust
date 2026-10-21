@@ -1067,9 +1067,8 @@ worker ends), `ExitFromWorker.java` (`System.exit(3)` from a thread), `Interrupt
 - **The wait set** is one entry per waiting thread in the lock's parking bucket: `notify` marks
   the one that has waited longest (HotSpot's order), `notifyAll` all of them, and a timed-out
   waiter removes its own entry, so a later waiter cannot take a notification meant for an
-  earlier one. No spurious wakeups are produced. Nothing interrupts a thread yet, so `wait`
-  never throws `InterruptedException`; `InterruptWait.java` waits for the interrupt step, and
-  `wait(millis, nanos)` is rejected.
+  earlier one. No spurious wakeups are produced. An interrupt ends a `wait` (see "Interrupts"
+  below), and `wait(millis, nanos)` is rejected.
 - **Class monitors** are statics of the translation, `static C__MONITOR: java::Locked<()>`,
   entered with `java::enter_class(&C__MONITOR)` by static synchronized methods and
   `synchronized (C.class)`. `synchronized (o.getClass())` is rejected where it would be kept.
@@ -1291,6 +1290,35 @@ Decisions that change during the implementation are recorded here, milestone by 
   milestone gives it `SeqCst`; a `volatile` field of a shared object is read and written under
   the object's lock.
 
+### Interrupts
+
+- **The status is the runtime's**, by thread id, not a field of the synthetic `Thread`: the
+  record of a running thread holds it, and a set of ids holds it for threads that have no record
+  (interrupted before `start`, or ended with the status set, which Java keeps in the `Thread`
+  object). Moving it between the two happens under the registry's lock, so an interrupt racing a
+  start or an end is not lost. `Thread.java`'s `interrupt`, `isInterrupted` and `interrupted` call
+  the natives `interrupt0`, `isInterrupted0` and `clearInterrupt0`.
+- **Waking**: `interrupt` sets the status under the record's park mutex and notifies its
+  condition variable (which `sleep` and `park` wait on), then the parking bucket of the monitor
+  the thread waits on in `wait` (the record holds its index), then the record of the thread it
+  joins. Each waiter checks the status under the mutex it waits on, so no wakeup is lost. `park`
+  returns on an interrupt and leaves the status set, as `LockSupport.park` does.
+- **Java's order of checks**: `sleep` checks a negative time before the interrupt; `wait` checks
+  ownership (`IllegalMonitorStateException`) before it, and takes the monitor again before it
+  throws; a waiter both notified and interrupted returns normally with the status set; `join` of
+  a thread that is not alive returns at once even when interrupted (Java's `join` waits only
+  while the thread is alive). `sleep`'s exception says `sleep interrupted`; `wait`'s and `join`'s
+  have no message, so `InterruptedException` is raised by its constructor without arguments
+  where the runtime gives no message.
+- **Only a program that interrupts pays**: `Facts::interrupts` holds when some method calls
+  `interrupt0`, and only then do `sleep`, `join` and `wait` have `InterruptedException` among
+  their failures (with the checked forms `java::try_sleep` and `java::try_join_thread`), and does
+  lowering declare it as raised. `sleep`, `join` and `wait` register where an interrupt would wake
+  them even before the program's first interrupt, since one may come while they wait.
+- **Found on the way**: the `Link` of an enum whose variants are thread-shared pushed `Arc`s with
+  the `Rc` form; it now uses `Chain::push_shared` for them (a lambda run by a thread that
+  captures a `Thread`).
+
 ### Volatile fields and the atomic natives
 
 - **Field handles came first**, ahead of monitors: `Charset.defaultCharset()` keeps its charset
@@ -1301,5 +1329,19 @@ Decisions that change during the implementation are recorded here, milestone by 
   `put<Kind><Mode>` through it to a plain read or write of `o.f`; reachability enters neither
   `objectFieldOffset` nor the accessors. The field is not made atomic yet: in a program without
   threads a plain access is exact, and in one with threads the access is under the object's lock,
-  which orders it at least as acquire, release and volatile ask. The compare-and-set and
-  get-and-add forms, `VarHandle`s and array handles come with `java.util.concurrent`.
+  which orders it at least as acquire, release and volatile ask. `VarHandle`s and array handles
+  come with `java.util.concurrent`.
+- **The atomic updates of a field handle came next**, for `AtomicInteger`, `AtomicLong` and
+  `Striped64` once classes extending `Number` translate (`ThreadLocalRandom`'s `<clinit>`, which
+  `Locale`'s statics reach through `ConcurrentHashMap`, creates an `AtomicInteger`).
+  `getAndAdd`, `getAndSet`, `compareAndSet`, `weakCompareAndSet` and `compareAndExchange` of an
+  `int`, `long` or reference field, in every memory-order mode, become a call of a method that
+  lowering adds to the field's class, one per field and form (`compareAndSetValue(expected,
+  value)`), whose body reads, compares and writes the field. A method runs with its object
+  borrowed, or in a program with threads with the object's lock held (`this.borrow_mut()` of an
+  `Arc<java::Locked<C>>`), for the whole call, so no other access of the object comes between
+  the read and the write: the update is atomic without atomic fields, and four threads
+  incrementing one `AtomicInteger` count every increment (`corpus/whole-program/AtomicNumbers.java`).
+  The weak forms never fail spuriously, which Java allows. Reachability does not enter
+  `Unsafe`'s own updates, whose loops pass the offset on as a value. Atomic fields (2.2) remain
+  the refinement for when the lock shows in a profile.
