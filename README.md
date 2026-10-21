@@ -87,8 +87,7 @@ The test programs come from:
   or `Function.andThen`, translated whole with the sources of `java.base` by a test of their own
   (`tests/whole_program.rs`). The JDK's sources cannot be in the repository, so the test runs
   only when `JAVA_BASE_SOURCES` names their root (`JAVA_BASE_SOURCES=… cargo test --test
-  whole_program`) and otherwise says it skipped; at about a minute per program, it runs at merges
-  rather than in every check;
+  whole_program`) and otherwise says it skipped; it runs at merges rather than in every check;
 - `tools/fuzz`: random programs generated from a seed (`fuzz.py`, with `fuzz_strings.py` for
   strings and builders under `--strings`, `fuzz_arrays.py` for arrays of up to three dimensions,
   their aliases, rows, loops and helper methods under `--arrays`, and `fuzz_objects.py` for
@@ -206,14 +205,19 @@ A small subset, end to end:
   Circle c`, `case Circle c when c.r() > 10`, `case null`, `case Square(double side)`, records
   nested in records, `default`) is an `if let` chain over the selector's enum, and an exhaustive
   one over a sealed hierarchy or an enum needs no `default`: a null selector throws
-  `NullPointerException` unless a `case null` takes it. `sealed`, `permits` and `non-sealed` are
-  accepted. Of `java.lang.Class`, only comparing classes and naming them translate:
-  `getClass() != o.getClass()`, `a.getClass().equals(b.getClass())` and `a.getClass() ==
-  Dog.class` (a `matches!` of the variant where the class is a variant of an enum), and
-  `Dog.class.getName()` and `getSimpleName()`. Any other use of a `Class` is rejected, as are a
-  record with an array component (its text would be the array's identity), a generic record in a
-  record pattern, and the class literal of a standard class. An accessor written in the record
-  runs at each use of a pattern variable that names a component, not once.
+  `NullPointerException` unless a `case null` takes it. `x instanceof Segment(Point(int fx, var
+  fy), Point to)` is the same test in an `if let` chain, its negated form included. `sealed`,
+  `permits` and `non-sealed` are accepted. Comparing the classes of the program's objects
+  (`getClass() != o.getClass()`, `a.getClass().equals(b.getClass())`, `a.getClass() ==
+  Dog.class`) is a `matches!` of the variant where the class is a variant of an enum, and
+  `Dog.class.getName()` a constant. Any other class is a value, a `java::Class` that is `Copy`
+  and equal by binary name: `x.getClass()` of an object, string, box, array or enum constant,
+  class literals (`int[].class`, `String.class`, `Dog.class`), and `getName`, `getSimpleName`,
+  `getSuperclass`, `getComponentType`, `isArray`, `isInterface`, `isPrimitive`, `isEnum`,
+  `toString`, `hashCode` and `equals`. Reflection (`getDeclaredFields`, `newInstance`, ...) is
+  rejected, as are a record with an array component (its text would be the array's identity) and
+  a generic record in a record pattern. An accessor written in the record runs at each use of a
+  pattern variable that names a component, not once.
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
   and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
   `super(message)`, `super(message, cause)`, fields, and overrides of `getMessage` and `toString`)
@@ -364,6 +368,23 @@ overridden method becomes a `match self` with an arm per overriding constant and
 body (if it is not abstract) for the rest. `valueOf` of a name that is no constant throws
 `IllegalArgumentException` with Java's message (`No enum constant Main.Size.HUGE`), which a
 `catch` can take (`Size::try_enum_value_of(s)?`).
+
+An enum whose constructor does more than set fields to constant values (a loop, a call, an
+argument that is another enum's constant or a static method's result, as the JDK's
+`StreamOpFlag` has) keeps its fields in tables instead: field `f` is a static array
+`fOfConstants` indexed by ordinal, the constructor is a function `init_shape_constant(ordinal, ..)` (for an enum `Shape`)
+that fills a constant's row, and the enum's static initialization builds every constant, in
+order, before its other static initializers (an exception there is Java's
+`ExceptionInInitializerError`). A read of `e.f` is `fOfConstants[e.ordinal()]`, and the enum's
+methods initialize it first. Unlike Java, using a constant (`Shape.SQUARE`, `values()`, a
+`switch`) does not initialize the enum by itself; reading its fields or calling its methods does.
+
+`java.lang.Enum` as a type (the JDK's `EnumMap` and `EnumSet`, `<E extends Enum<E>>`) is an enum
+over the program's enums, like `Object`; `ordinal()`, `name()`, `compareTo` and
+`getDeclaringClass()` on it match on the enums it can be, and the constants of an enum's class,
+which the JDK reads through `SharedSecrets`, are those of the program's enum whose class it is. A
+cast to an enum of a value that may be null (a key from a generic collection) ends the program
+if the value is null, as the translation has no null enums.
 
 ### Analyses
 
@@ -524,15 +545,16 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   `f.andThen(g)`, `Predicate.not(p)`, `Iterable.forEach`; `corpus/whole-program`).
 - Closure types (`analysis/closures.rs`, `codegen/closures.rs`): a functional interface whose
   values are only lambdas and method references, which nothing sees as objects (no conversion to
-  `Object`, no `==`, no `instanceof`), with one abstract method, no default method and no
-  interface above or below it, is a type alias, `type IntOp = Rc<dyn Fn(i32, i32) -> i32>;`; a
+  `Object`, no `==`, no `instanceof`), with one abstract method and no interface above or below
+  it, is a type alias, `type IntOp = Rc<dyn Fn(i32, i32) -> i32>;`; a
   generic one takes and returns the erased types (`type Function = Rc<dyn Fn(Object) ->
-  Object>;`), the lambda's body after its bridge's casts of the arguments. Each lambda is a closure written where it is created, its captures moved in
+  Object>;`), the lambda's body after its bridge's casts of the arguments. Its default methods
+  are an extension trait of the closure type (`trait PredicateMethods`, `impl PredicateMethods
+  for Predicate`, `self` the closure), so `empty.negate().and(longer)` reads as in Java. Each lambda is a closure written where it is created, its captures moved in
   (`Rc::new(move |a: i32, b: i32| -> i32 { a.wrapping_add(b).wrapping_add(k) }) as IntOp`, `this`
   as `outer`), and a call is a call of the closure (`op(acc, x)`). Every other functional
-  interface keeps the class per lambda. Not yet: other receivers, `super` in a lambda, JDK
-  interfaces with default methods and interfaces that extend another (`UnaryOperator`) as
-  closure types, typed closures for a generic interface's instantiations, and the parameter and
+  interface keeps the class per lambda. Not yet: other receivers, `super` in a lambda,
+  interfaces that extend another (`UnaryOperator`) as closure types, typed closures for a generic interface's instantiations, and the parameter and
   local forms (`impl FnMut`, a plain `let f = |x| ..`).
 
 ### Whole programs
@@ -542,7 +564,9 @@ them in one run, with the source roots as its source path, and a reachability pa
 (`program/reach.rs`) starts at `main` and follows every resolved call, `new`, field access and
 type, so only the classes, methods, constructors and fields that `main` can reach are lowered and
 translated. Library roots (`--library`, meant for the JDK's own sources) are only on the source
-path: javac reads a file from them when the program uses one of its classes. Packages become
+path: javac attributes a file from them only when reachability asks for one of its classes, a
+few dozen of the JDK's units where javac by itself would attribute thousands (see "Translating
+whole programs" in docs/performance.md). Packages become
 nested modules in one output file (`com.example.util` is `mod com { pub(crate) mod example
 { pub(crate) mod util { .. } } }`); a class of another package is named by its path from the crate
 root, such as `crate::com::example::util::Counter::new(..)`, and items in packages are

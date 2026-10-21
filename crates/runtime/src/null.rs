@@ -7,6 +7,16 @@ pub fn non_null<T>(value: Option<T>) -> T {
     }
 }
 
+/// A cast to an enum of a reference that may be null, such as a key that an erased collection
+/// of the JDK hands back: the enum, as a translated enum value is never null. A null ends the
+/// program, as the translation cannot go on with it.
+pub fn null_enum<T>(value: Option<T>) -> T {
+    match value {
+        Some(value) => value,
+        None => crate::exception::die("a null enum value, which the translation does not support yet"),
+    }
+}
+
 /// `non_null` where the program observes the `NullPointerException`. Java's message names what
 /// was null in terms of the bytecode, which a translation cannot reproduce; the translator
 /// rejects programs that read it.

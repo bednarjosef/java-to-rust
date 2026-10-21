@@ -93,6 +93,7 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Boolean => "false",
         Type::String => "String::new()",
         Type::StringBuilder => "java::StringBuilder::new()",
+        Type::JavaClass => "java::Class::OBJECT",
         Type::Boxed(_) | Type::Class(..) => "None",
         // A charset is never null, so its field starts as a placeholder; lowering rejects a
         // `Charset` field without an initializer, which assigns the field before it is read.
@@ -616,7 +617,25 @@ impl<'a> Gen<'a> {
     /// does not write the checked form, where its `NullPointerException` would end the program
     /// instead of reaching the `catch` or the `finally`.
     pub(super) fn check_dereferences(&mut self) {
-        let missed = self.facts.null_checked.iter().filter(|(id, _)| !self.dereferenced.contains(id));
+        // The objects in the bodies that were not written, which nothing calls or which never run.
+        let mut unwritten = HashSet::new();
+        let methods = self.class.methods.iter().enumerate().filter(|(i, _)| !self.written.contains(i));
+        for stmt in methods.flat_map(|(_, m)| &m.body) {
+            visit_stmt(
+                stmt,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        unwritten.insert(x.id);
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+        let missed = self
+            .facts
+            .null_checked
+            .iter()
+            .filter(|(id, _)| !self.dereferenced.contains(id) && !unwritten.contains(id));
         if let Some(pos) = missed.map(|(_, &pos)| pos).min_by_key(|p| (p.line, p.column)) {
             let message = "catching the `NullPointerException` of this dereference not supported yet";
             self.rejected.get_or_insert(Error { pos, message: message.to_string() });

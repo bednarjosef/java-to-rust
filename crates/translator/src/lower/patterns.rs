@@ -46,6 +46,9 @@ enum Target {
     /// The component `field` of the record bound to the variable `record`, read through the
     /// record's own accessor `accessor` if it declares one.
     Component { record: String, record_ty: Type, field: String, field_ty: Type, accessor: Option<usize> },
+    /// No value: a later pattern variable of the name hides the earlier alias (see
+    /// `forget_alias`).
+    Hidden,
 }
 
 /// One case of a pattern switch.
@@ -393,6 +396,7 @@ impl<'t> Lowering<'t> {
         if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
             return unsupported(pattern, "this pattern on a value of this type");
         }
+        self.forget_alias(&name);
         let kind = ExprKind::InstanceOf { value: Box::new(value), ty, binding: Some(name) };
         Ok(self.synth(kind, pattern.pos(), Type::Boolean))
     }
@@ -434,6 +438,7 @@ impl<'t> Lowering<'t> {
                 };
                 self.synth(kind, pos, *field_ty)
             }
+            Target::Hidden => unreachable!("a hidden alias names nothing"),
         }
     }
 
@@ -455,8 +460,47 @@ impl<'t> Lowering<'t> {
         let symbol = node.symbol().filter(|s| s.kind == "BINDING_VARIABLE")?;
         let aliases = self.aliases.borrow();
         let alias = aliases.iter().rev().find(|a| a.name == symbol.name)?;
+        if matches!(alias.target, Target::Hidden) {
+            return None;
+        }
         let value = self.read(&alias.target, node.pos());
         Some(self.convert(value, alias.ty).kind)
+    }
+
+    /// `value instanceof Segment(Point(int x, int y), Point to)`: the test of the record
+    /// pattern. Its variables are aliases until a later pattern variable of the same name hides
+    /// them: javac has checked that they are read only where they are in scope, and Java lets no
+    /// variable in scope have the name of another, so a read names the latest pattern variable of
+    /// its name in the method.
+    pub(super) fn record_instance_of(&self, node: Node<'t>, pattern: Node<'t>) -> Result<ExprKind, Error> {
+        let Some(method) = self.method_ctx.get() else {
+            return unsupported(pattern, "a record pattern outside a method");
+        };
+        // The variables of the method, and those of the records that earlier patterns bound,
+        // which the record variables of this one must not hide.
+        let mut taken = HashSet::new();
+        names(self.methods[method].node.0, &mut taken);
+        for alias in self.aliases.borrow().iter() {
+            if let Target::Component { record, .. } = &alias.target {
+                taken.insert(record.clone());
+            }
+        }
+        let fresh = Fresh(RefCell::new(taken));
+        let value = self.expr(node.child("expression")?)?;
+        let (test, aliases) = self.record_test(pattern, value, &fresh)?;
+        for alias in &aliases {
+            self.forget_alias(&alias.name);
+        }
+        self.aliases.borrow_mut().extend(aliases);
+        Ok(test.expect("a record pattern tests its value").kind)
+    }
+
+    /// Hides the alias of `name`, which a pattern variable now names.
+    pub(super) fn forget_alias(&self, name: &str) {
+        let mut aliases = self.aliases.borrow_mut();
+        if aliases.iter().any(|a| a.name == name) {
+            aliases.push(Alias { name: name.to_string(), ty: Type::Void, target: Target::Hidden });
+        }
     }
 
     /// The test of an arm with its guard, which reads the arm's aliases.

@@ -55,8 +55,11 @@ pub(super) fn retry<E>(
 ) -> Result<Class, E> {
     let mut real: Option<Real> = None;
     let mut covariant = super::covariant::Covariant::default();
+    let mut attempt = 0;
     loop {
-        let result = run(real.as_ref(), &covariant);
+        attempt += 1;
+        let result =
+            crate::timings::phase(&format!("lowering attempt {attempt}"), || run(real.as_ref(), &covariant));
         let noted: Vec<Type> =
             covariant.noted.take().into_iter().filter(|ty| !covariant.known.contains(ty)).collect();
         if !noted.is_empty() {
