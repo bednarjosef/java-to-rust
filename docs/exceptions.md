@@ -68,13 +68,15 @@ signature. Everything else is decided here.
    exception's `toString()` on standard error, a `Caused by: ...` line per cause, exit code 1.
    Stack frames are not printed (they cannot match). `printStackTrace()` prints the same lines
    without the thread prefix.
-9. **Static initializers never return `Result`**: a static block, or a static field initializer,
-   that throws is wrapped in `ExceptionInInitializerError` as Java does, at the first use of the
-   class. The uncaught case translates: the runtime prints `Exception in thread "main"
-   java.lang.ExceptionInInitializerError` and `Caused by: ...` on standard error and exits 1,
-   with the same stdout as Java. A program that could observe the error (a `catch` of it, `Error`
-   or `Throwable`, or a `finally` around the use) is rejected. A class whose initializer failed is
-   not marked as erroneous, so a later use does not raise `NoClassDefFoundError` as in Java.
+9. **Static initializers return `Result` only where a `catch` observes them**: a static block, or
+   a static field initializer, that throws is wrapped in `ExceptionInInitializerError` as Java
+   does, at the first use of the class. The uncaught case translates without a `Result`: the
+   runtime prints `Exception in thread "main" java.lang.ExceptionInInitializerError` and
+   `Caused by: ...` on standard error and exits 1, with the same stdout as Java. A program that
+   catches one of `Error`, `Throwable`, `LinkageError`, `ExceptionInInitializerError` or
+   `NoClassDefFoundError` gets the state machine of section 4, step 8: the first use throws the
+   failure, and every later use throws `NoClassDefFoundError`. A `finally` around the use is
+   rejected unless the program catches one of those classes.
 10. **Rejected for now**, each with a message naming the construct: observing the message of a
     `NullPointerException` the runtime raises (Java's helpful message names bytecode locals;
     `getMessage()` in a `catch` that such an exception reaches is rejected, while the message of
@@ -186,7 +188,8 @@ the program as Java's uncaught exception would. Without the `finally`, the handl
 `lower/exceptions.rs` holds a table of the standard classes: their qualified name, their
 superclass, which of the four `Throwable` constructor shapes they have (`()`, `(String)`,
 `(String, Throwable)`, `(Throwable)`) and any other constructor (`(int)` of the index
-exceptions, `(Object)` of `AssertionError`, taken with a `String` argument only):
+exceptions, and the `AssertionError` constructors with a detail of any type: `(Object)`, which
+takes a `Throwable` as the cause, and the primitive ones):
 
 ```
 java.lang.Throwable
@@ -201,7 +204,8 @@ java.lang.Throwable
       java.util.NoSuchElementException, java.util.ConcurrentModificationException
     java.lang.InterruptedException, java.lang.CloneNotSupportedException
   java.lang.Error
-    java.lang.AssertionError
+    java.lang.AssertionError, java.lang.LinkageError
+      java.lang.ExceptionInInitializerError, java.lang.NoClassDefFoundError
 ```
 
 Before the program's methods are lowered, lowering scans javac's tree for every symbol and type
@@ -224,7 +228,9 @@ String toString() { String m = getLocalizedMessage(); return m != null ? <class 
 void printStackTrace() { System.err.println(this); for (Throwable c = getCause(); c != null; c = c.getCause()) System.err.println("Caused by: " + c); }
 ```
 
-and every other standard constructor is `X(params) { super(params); }`. `<class name>` is a new
+and every other standard constructor is `X(params) { super(params); }`, except
+`ExceptionInInitializerError(Throwable thrown)`, which is `super(null, thrown)`, and
+`ExceptionInInitializerError(String)`, which is `super(message, null)`, as Java's are. `<class name>` is a new
 builtin, `Builtin::ClassName`: Java's binary name of the object's class (`java.lang.Exception`,
 `Bank$InsufficientFunds`), a string literal for an object of a known class and the generated
 `class_name()` of an enum otherwise. Java's `cause` field starts as the object itself, meaning
@@ -365,8 +371,11 @@ written with the checked form exactly when it is in the analysis's set.
   rejected wherever it is observed.
 - **What escapes a method**: what its points raise, minus what an enclosing `catch` of the same
   method catches, plus what the `catch` and `finally` bodies raise. A static initializer's
-  escapes are raised as `ExceptionInInitializerError` at the start of the methods that run it
-  (`Facts::entry_init`), which only matters for the rejection of section 0.9.
+  escapes are wrapped in `ExceptionInInitializerError`: the uncaught case collapses them into that
+  class (`INITIALIZER_ERROR`), and a rewritten initializer (section 0.9) raises what its state
+  machine rethrows. A method that starts by running an initializer (`Facts::entry_init`) raises
+  what that initializer raises at its start (`analysis/exceptions/entry.rs`). An instance field
+  initializer's escapes escape each constructor that runs it (`analysis/exceptions/field_inits.rs`).
 - **What is observed at a point**: the classes under the types of the enclosing `catch`
   clauses, everything when an enclosing `finally` observes (it does unless it only assigns
   variables, fields and array elements with operations that cannot fail: what it does to memory
@@ -402,7 +411,8 @@ a method must see it:
 - **Struct-literal constructors**: a constructor that throws before its leading assignments
   never builds the object; its struct literal is the `Ok` value.
 - **Statics**: an `init_x()` call and a lazy static's initializer use the exiting forms (see
-  0.9).
+  0.9). A rewritten `<clinit>` is its own guard, so it gets no `init_guard`; the call that runs it
+  is passed on like any other call that can throw.
 
 ## 3. Steps
 
@@ -428,6 +438,12 @@ Each step is mergeable on its own, with tests green and the corpus extended.
    existing variable (`try (r)`, `try (this.r)`). Corpus: `features/TryWithResources.java`,
    `features/TryWithExistingLocal.java`, `features/TryWithExistingField.java`,
    `features/TryWithExistingSuppressed.java`.
+8. **The leftovers**: instance field initializers and constructors that throw inside a `try`,
+   static initializer failures caught as `ExceptionInInitializerError` and `NoClassDefFoundError`,
+   the two checks of `addSuppressed`, and the null-string parse. Corpus:
+   `features/ThrowingConstructorsCaught.java`, `features/ThrowingInitializersInSubclasses.java`,
+   `features/StaticInitializerErrorCaught.java`, `features/AddSuppressedChecks.java`,
+   `features/ParseNullStrings.java`, `features/ParseRangeNullAndIndices.java`.
 
 The survey's "exceptions" feature stops counting `try` and `throw` once step 4 is in; a class
 extending a standard exception class stops counting as "extending classes outside the sources"
@@ -585,9 +601,8 @@ Decisions that changed during the implementation, step by step.
 - **Still rejected**: a constructor of an exception class that throws (the exception's object is
   built where it is thrown, and by the `From` impl of step 5, neither of which can fail), a
   constructor of an enum that throws (its constants are built where the enum is initialized,
-  outside any `try`), a `toString` that throws something a caller catches (`Display::fmt` cannot
-  carry the exception), and an instance field initializer that throws (it runs in a constructor
-  that does not return a `Result`). A static field initializer that throws is item 9.
+  outside any `try`), and a `toString` that throws something a caller catches (`Display::fmt`
+  cannot carry the exception). An instance field initializer that throws is step 8.
 
 ### Step 7: try-with-resources
 
@@ -614,9 +629,66 @@ Decisions that changed during the implementation, step by step.
   the class or a superclass).
   `AutoCloseable` and `Closeable` are accepted in `implements` and left out, as `Comparable` is,
   since the program calls `close` directly. `Throwable.addSuppressed` is the translator's own
-  (`crates/translator/java/Standard.java`): it does not reject adding the exception to itself or
-  adding `null`, which Java does with `IllegalArgumentException` and `NullPointerException`.
+  (`crates/translator/java/Standard.java`); its two checks are step 8.
 - **Still rejected**: an existing variable of a library type such as `AutoCloseable`, which the
   translator does not know as a type yet (a lambda of it is rejected the same way), and a
-  resource of a library class (the library's streams and scanners do not translate). The survey's "try-with-resources" feature still counts every such statement, since
+  resource of a library class (the library's streams and scanners do not translate). The survey's
+  "try-with-resources" feature still counts every such statement, since
   the library's resources are what the survey's sources use.
+
+### Step 8: the leftovers
+
+- **Instance field initializers and constructors that throw**: Java runs an instance field
+  initializer in each constructor that calls `super(...)`, outside every `try` of that
+  constructor, so what it raises escapes the constructor. `analysis/exceptions/field_inits.rs`
+  finds the classes whose field initializers raise something a caller catches; their
+  `field_inits` returns a `Result`, and each constructor that runs it passes the failure on as
+  `new` does. A `this(...)` constructor runs none of them, so it passes on only what its target
+  raises.
+- **Static initializer failures**: a `catch` of `Error`, `Throwable`, `LinkageError`,
+  `ExceptionInInitializerError` or `NoClassDefFoundError` makes `Standard::select` declare
+  `LinkageError`, `ExceptionInInitializerError` (with `(Throwable)` and `(String)` constructors)
+  and `NoClassDefFoundError` (with `(String, Throwable)`). `lower/clinit_errors.rs` then rewrites
+  the `<clinit>` of each class with a static initializer to this, with the two fields added to
+  the class:
+
+  ```java
+  static int init$state;      // 0 not started, 1 started or done, 2 failed
+  static String init$failure;
+  static void <clinit>() {
+      if (init$state == 2) throw new NoClassDefFoundError("Could not initialize class " + <binary name>, new ExceptionInInitializerError(init$failure));
+      if (init$state == 1) return;
+      init$state = 1;
+      try { <the original body> }
+      catch (Error failure) { init$state = 2; init$failure = "Exception " + failure + " [in thread \"main\"]"; throw failure; }
+      catch (Throwable failure) { init$state = 2; init$failure = "Exception " + failure + " [in thread \"main\"]"; throw new ExceptionInInitializerError(failure); }
+  }
+  ```
+
+  The state is the guard, so the rewritten `<clinit>` gets no `init_guard` (section 2.1). Its
+  callers return `Result` (`analysis/exceptions.rs` treats a rewritten `<clinit>` as throwing),
+  and so does a method that starts by running it (`analysis/exceptions/entry.rs`). Only programs
+  that declare these classes are rewritten; the others keep the uncaught translation.
+- **`addSuppressed`**: `lower/suppress.rs` puts Java's two checks at the start of the method
+  when the program has it: `IllegalArgumentException("Self-suppression not permitted")` for
+  itself and `NullPointerException("Cannot suppress a null exception.")` for `null`.
+- **Null strings in number parsing**: `Integer`, `Long`, `Short` and `Byte` `parse...` and
+  `valueOf` of `null` throw `NumberFormatException` with `Cannot parse null string`, as the JDK
+  that is installed here (26) prints it. The brief's `: null` suffix is not in that text, so this
+  follows the installed JDK. A null string given to `parseInt(s, begin, end, radix)` or
+  `parseLong` is the `NullPointerException` of the runtime's `try_parse_range`; where a `catch`
+  sees it, the analysis records it as a dereference (`Facts::null_checked`) and the generator
+  writes the checked form (`codegen/parse_range.rs`).
+- **Threads**: in a program that starts a thread, the rewritten `<clinit>`'s two fields are
+  process-wide statics like the others (`java::Atomic<i32>` and `java::Locked<Option<String>>`).
+  Corpus: `threads/StaticInitializerErrorAcrossThreads.java`.
+- **Deviations**:
+  - Java gives the `IllegalArgumentException` for a self-suppression the exception itself as its
+    cause; the translation leaves the cause `null`.
+  - A subclass's static initializer whose superclass's initializer failed: the superclass's
+    initialization runs in the prologue, before the subclass's state check, and its failure does
+    not set the subclass's state. A later use of the subclass therefore throws the superclass's
+    `NoClassDefFoundError`, where Java throws the subclass's.
+  - The analysis takes the `Error` clause of a rewritten `<clinit>` to rethrow any `Error`, so a
+    method may return a `Result` where it need not. An uncaught static initializer that is not
+    rewritten also gets an entry point, which may do the same for its callers.

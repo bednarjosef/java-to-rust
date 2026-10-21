@@ -431,6 +431,48 @@ impl<'a> Gen<'a> {
         Code::atom(self.passed_on(Code::atom(result)))
     }
 
+    /// `code`, the operation `id` of `Facts::catching`, run inside `java::catching`, whose failure
+    /// goes on from here as a thrown exception does. An operation whose own code passes a
+    /// failure on (`?`, `or_break!`) cannot be in its closure, and is rejected.
+    pub(super) fn caught(&mut self, id: ExprId, code: Code) -> Code {
+        if code.text.contains('?') || code.text.contains("or_break!") {
+            let pos = self.facts.catching[&id];
+            let message = "catching the exception of an operation that holds another one that is caught not supported yet";
+            self.rejected.get_or_insert(Error { pos, message: message.to_string() });
+            return code;
+        }
+        self.dereferenced.insert(id);
+        let call = format!("{}(|| {})", self.runtime("catching"), code.text);
+        Code::atom(self.passed_on(Code::atom(call)))
+    }
+
+    /// Rejects the program when an operation of `Facts::catching` that is written does not run
+    /// inside `java::catching`.
+    pub(super) fn check_catching(&mut self) {
+        let mut missed: Vec<Pos> = Vec::new();
+        for (_, method) in self.class.methods.iter().enumerate().filter(|(i, _)| self.written.contains(i)) {
+            for stmt in &method.body {
+                visit_stmt(
+                    stmt,
+                    &mut |e| {
+                        visit_expr(e, &mut |x| {
+                            if let Some(&pos) = self.facts.catching.get(&x.id)
+                                && !self.dereferenced.contains(&x.id)
+                            {
+                                missed.push(pos);
+                            }
+                        })
+                    },
+                    &mut |_| {},
+                );
+            }
+        }
+        if let Some(pos) = missed.into_iter().min_by_key(|p| (p.line, p.column)) {
+            let message = "catching the exception of this operation not supported yet";
+            self.rejected.get_or_insert(Error { pos, message: message.to_string() });
+        }
+    }
+
     /// Rejects the program when a cast of `Facts::raising` that is written is not in the checked
     /// form, where its `ClassCastException` would end the program instead of reaching the `catch`
     /// or the `finally`.

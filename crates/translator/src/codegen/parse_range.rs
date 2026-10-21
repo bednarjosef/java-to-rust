@@ -1,5 +1,5 @@
 //! The `CharSequence` forms of the parse methods, `parseInt(s, begin, end, radix)` and the like
-//! (see `lower/strings.rs` and `lower/unsigned.rs`), and the radix forms of `Short` and `Byte`.
+//! (see `lower/strings.rs` and `lower/unsigned.rs`).
 //! The string is an `Option`, so that null is the runtime's `NullPointerException`, as in Java.
 
 use super::*;
@@ -22,12 +22,16 @@ impl<'a> Gen<'a> {
         let end = self.int(&args[2]);
         let radix = self.int(&args[3]);
         let bits = if kind == Type::Long { 64 } else { 32 };
-        self.may_fail(
-            id,
-            "parse_range",
-            &format!("::<{}>", rust_type(kind)),
-            &format!("{text}, {begin}, {end}, {radix}, {bits}"),
-        )
+        let generics = format!("::<{}>", rust_type(kind));
+        let arguments = format!("{text}, {begin}, {end}, {radix}, {bits}");
+        // A null string that a `catch` sees is a dereference of `Facts::null_checked`: the checked
+        // form raises its `NullPointerException`, even where no `catch` sees the other failures.
+        if self.facts.null_checked.contains_key(&id) {
+            self.dereferenced.insert(id);
+            let call = format!("{}{generics}({arguments})", self.runtime("try_parse_range"));
+            return Code::atom(self.passed_on(Code::atom(call)));
+        }
+        self.may_fail(id, "parse_range", &generics, &arguments)
     }
 
     /// `Integer.parseUnsignedInt(s)`, with or without a radix, and the range form, see
@@ -49,16 +53,5 @@ impl<'a> Gen<'a> {
             self.may_fail(id, "parse_unsigned", "", &format!("{text}, {radix}, {bits}"))
         };
         Code::new(format!("{} as {}", call.cast_operand(), rust_type(kind)), AS)
-    }
-
-    /// `Short.parseShort(s)` and `Byte.parseByte(s)`: radix 10 through the small radix runtime.
-    pub(super) fn parse_small(&mut self, kind: Type, arg: &'a Expr, radix: &str, id: ExprId) -> Code {
-        let text = self.parse_text(arg);
-        self.may_fail(
-            id,
-            "parse_small_radix",
-            &format!("::<{}>", rust_type(kind)),
-            &format!("{text}, {radix}"),
-        )
     }
 }

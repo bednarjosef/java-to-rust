@@ -100,6 +100,7 @@ impl<'t> Lowering<'t> {
             class: index,
             pos: node.pos(),
             is_abstract: false,
+            is_synchronized: false,
             overrides: Vec::new(),
             type_params: Vec::new(),
         })

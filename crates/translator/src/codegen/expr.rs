@@ -248,6 +248,11 @@ impl<'a> Gen<'a> {
     }
 
     pub(super) fn expr(&mut self, e: &'a Expr) -> Code {
+        if self.facts.catching.contains_key(&e.id) && self.catching_now.insert(e.id) {
+            let code = self.expr(e);
+            self.catching_now.remove(&e.id);
+            return self.caught(e.id, code);
+        }
         if let Some(code) = self.shared_array(e) {
             return code;
         }
@@ -278,7 +283,14 @@ impl<'a> Gen<'a> {
             }
             ExprKind::This if matches!(e.ty, Type::Enum(_)) => Code::atom(self.this_name()),
             ExprKind::This => Code::atom(format!("{}.clone()", self.this_name())),
-            ExprKind::EnumConstant { class, ordinal } => Code::atom(self.constant_path(*class, *ordinal)),
+            ExprKind::EnumConstant { class, ordinal } => {
+                let path = self.constant_path(*class, *ordinal);
+                // Java initializes an enum on the first use of one of its constants.
+                match self.init_call(*class) {
+                    Some(init) => Code::atom(format!("{{ {init} {path} }}")),
+                    None => Code::atom(path),
+                }
+            }
             ExprKind::Field { object, name } => self.field_read(object, name, e.ty),
             ExprKind::Static { class, name } => self.static_read(*class, name, e.ty),
             ExprKind::New { args, ctor, .. } => {
@@ -426,8 +438,10 @@ impl<'a> Gen<'a> {
                 if let Some(code) = self.narrowed_conditional(e, cond, a, b) {
                     return code;
                 }
-                // The condition of an `if` drops its temporaries before a branch runs.
-                let outer = std::mem::replace(&mut self.guarded, false);
+                // The condition of an `if` drops its temporaries before a branch runs. With threads,
+                // two locks held at once in the condition itself could wait for each other.
+                let guarded = self.facts.threaded && self.conflicts(&[&**cond]);
+                let outer = std::mem::replace(&mut self.guarded, guarded);
                 let cond = self.condition(cond);
                 self.guarded = outer;
                 let chain = std::mem::replace(&mut self.chain, false);
@@ -619,7 +633,7 @@ impl<'a> Gen<'a> {
                 self.format(&mac, parts)
             }
             Builtin::ObjectText => self.object_to_string(&args[0]),
-            Builtin::ObjectClone => self.object_clone(&args[0]),
+            Builtin::ObjectClone => self.object_clone(&args[0], id),
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty, id)
             }
@@ -639,7 +653,7 @@ impl<'a> Gen<'a> {
                 let message = "java.lang.ClassNotFoundException: {} is not a class of the translated program";
                 Code::atom(format!("{}(format!({message:?}, {}))", self.runtime("throw_uncaught"), name.text))
             }
-            Builtin::NullCheck => self.null_check(&args[0]),
+            Builtin::MonitorEnter => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),
             Builtin::GetClass => self.get_class(&args[0]),

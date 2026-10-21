@@ -290,6 +290,7 @@ impl<'t> Lowering<'t> {
             class: at.decl,
             pos: Pos::default(),
             is_abstract: true,
+            is_synchronized: false,
             overrides: Vec::new(),
             type_params: Vec::new(),
         };
@@ -369,6 +370,7 @@ impl<'t> Lowering<'t> {
             outer: None,
             captures: Vec::new(),
             origin: Origin::Member,
+            cloneable: false,
         };
         // The program's enums are comparable, and so are its classes that implement `Comparable`.
         if let Some(c) = at.comparable {
@@ -550,6 +552,7 @@ impl<'t> Lowering<'t> {
             class: m.class,
             pos,
             is_abstract: false,
+            is_synchronized: false,
             overrides: vec![index],
             type_params: Vec::new(),
         }

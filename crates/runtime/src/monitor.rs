@@ -2,7 +2,7 @@
 //!
 //! An object that threads share is an `Arc<java::Locked<C>>`, and the reentrant lock of its
 //! `Locked` is its monitor as well as its data lock (see docs/multi-threading.md, 3.2): a
-//! `synchronized (o) { .. }` holds the lock for the block (`let _monitor = java::enter(o.clone());`),
+//! `synchronized (o) { .. }` holds the lock for the block (`let _monitor = java::enter(&o);`),
 //! and the borrows of the object's fields inside the block take it once more, which a reentrant
 //! lock allows. So the lock is taken in the order the Java program takes its monitors, and a
 //! deadlock of the translation is one the Java program has.
@@ -74,9 +74,22 @@ pub struct MonitorGuard<H: HasMonitor> {
     held: H,
 }
 
-/// Enters the monitor of `held`'s object: `synchronized (o)`, or a synchronized method.
+/// Enters the monitor of `held`'s object: `synchronized (o)`, or a synchronized method. The
+/// guard keeps its own handle, so the variable that held the object may change in the region.
 #[inline]
-pub fn enter<H: HasMonitor>(held: H) -> MonitorGuard<H> {
+pub fn enter<H: HasMonitor + Clone>(held: &H) -> MonitorGuard<H> {
+    enter_held(held.clone())
+}
+
+/// Enters the monitor of a class: a static synchronized method, or `synchronized (C.class)`.
+/// The monitor is a static of the translation, `static C_MONITOR: java::Locked<()>`.
+#[inline]
+pub fn enter_class(monitor: &'static Locked<()>) -> MonitorGuard<&'static Locked<()>> {
+    enter_held(monitor)
+}
+
+#[inline]
+fn enter_held<H: HasMonitor>(held: H) -> MonitorGuard<H> {
     match held.monitor() {
         MonitorOf::Shared(lock) => lock.enter(),
         MonitorOf::Local(address) => ENTERED.with_borrow_mut(|e| e.push(address)),
@@ -173,8 +186,8 @@ mod tests {
     fn a_monitor_is_reentrant_and_held_by_its_thread() {
         let o = Arc::new(Locked::new(0));
         assert!(!holds_lock(&o));
-        let outer = enter(o.clone());
-        let inner = enter(o.clone());
+        let outer = enter(&o);
+        let inner = enter(&o);
         *o.borrow_mut() += 1;
         assert!(holds_lock(&o));
         drop(inner);
@@ -182,7 +195,7 @@ mod tests {
         drop(outer);
         assert!(!holds_lock(&o));
         let local = Rc::new(1);
-        let guard = enter(local.clone());
+        let guard = enter(&local);
         assert!(holds_lock(&local));
         drop(guard);
         assert!(!holds_lock(&local));
@@ -194,7 +207,7 @@ mod tests {
         assert!(try_monitor_notify(&o, false).is_err());
         assert!(try_monitor_wait(&o, 1).is_err());
         assert!(try_monitor_wait(&o, -1).is_err());
-        let _guard = enter(o.clone());
+        let _guard = enter(&o);
         assert!(try_monitor_notify(&o, true).is_ok());
         assert!(try_monitor_wait(&o, 1).is_ok());
         assert!(holds_lock(&o));
@@ -208,7 +221,7 @@ mod tests {
             std::thread::spawn(move || {
                 let mut taken = Vec::new();
                 while taken.len() < 1000 {
-                    let _guard = enter(queue.clone());
+                    let _guard = enter(&queue);
                     while queue.borrow().is_empty() {
                         monitor_wait(&queue, 0);
                     }
@@ -220,7 +233,7 @@ mod tests {
             })
         };
         for i in 0..1000 {
-            let _guard = enter(queue.clone());
+            let _guard = enter(&queue);
             while queue.borrow().len() >= 4 {
                 monitor_wait(&queue, 0);
             }
@@ -241,7 +254,7 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut sum = 0i64;
                     loop {
-                        let _guard = enter(queue.clone());
+                        let _guard = enter(&queue);
                         while queue.borrow().0.is_empty() && queue.borrow().1 == 0 {
                             monitor_wait(&queue, 0);
                         }
@@ -254,12 +267,12 @@ mod tests {
             })
             .collect();
         for i in 0..3000i64 {
-            let _guard = enter(queue.clone());
+            let _guard = enter(&queue);
             queue.borrow_mut().0.push(i);
             monitor_notify(&queue, false);
         }
         {
-            let _guard = enter(queue.clone());
+            let _guard = enter(&queue);
             queue.borrow_mut().1 = 1;
             monitor_notify(&queue, true);
         }
@@ -270,7 +283,7 @@ mod tests {
     #[test]
     fn a_timed_wait_ends_without_a_notify() {
         let o = Arc::new(Locked::new(()));
-        let _guard = enter(o.clone());
+        let _guard = enter(&o);
         let started = std::time::Instant::now();
         monitor_wait(&o, 20);
         assert!(started.elapsed() >= Duration::from_millis(20));

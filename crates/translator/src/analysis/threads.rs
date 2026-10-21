@@ -134,9 +134,12 @@ fn lingers(x: &Expr) -> bool {
             Place::Index(..) => true,
             Place::Var(_) | Place::Static { .. } => false,
         },
+        // Entering a monitor waits for the thread that holds it.
+        ExprKind::Builtin(Builtin::MonitorEnter, _) => true,
         ExprKind::Builtin(Builtin::Native(native), _) => matches!(
             native,
             Native::Sleep { .. }
+                | Native::MonitorWait
                 | Native::ThreadJoin
                 | Native::ThreadStart
                 | Native::FileRead

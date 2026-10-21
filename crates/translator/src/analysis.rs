@@ -23,6 +23,7 @@ mod constants;
 mod exceptions;
 pub mod hierarchy;
 mod indexing;
+mod monitors;
 mod moves;
 mod nullness;
 mod objects;
@@ -47,8 +48,14 @@ pub struct Facts {
     /// The classes, by type index, whose objects two threads may reach: `Arc`s, with a
     /// `java::Locked` unless immutable.
     pub thread_shared: HashSet<usize>,
-    /// The methods of those classes that must not borrow their object for the whole call.
+    /// The methods of those classes that must not borrow their object for the whole call, and
+    /// the methods that use the kept monitor of `this` (see `monitors`).
     pub long_methods: HashSet<usize>,
+    /// Whether the program waits, notifies or asks `Thread.holdsLock`, so that every monitor it
+    /// uses is kept (see `monitors`).
+    pub monitors: bool,
+    /// The classes, by type index, whose class monitors are kept (see `monitors`).
+    pub class_monitors: HashSet<usize>,
     /// Integer `+`, `-`, `*`, negation, `++`, `--`, compound assignments and `Math.abs` that
     /// never overflow.
     pub no_overflow: HashSet<ExprId>,
@@ -148,6 +155,9 @@ pub struct Facts {
     /// The methods and constructors that return `Result<_, Throwable>`: some caller observes an
     /// exception that may escape them (see `exceptions`).
     pub throwing: HashSet<usize>,
+    /// The classes whose instance field initializers raise, so that their `field_inits` returns a
+    /// `Result` (see `exceptions::field_inits`).
+    pub init_throwing: HashSet<usize>,
     /// The `try` statements, by address, whose `catch` clauses catch an exception that their body
     /// may throw. The others run their body as a plain block.
     pub live_tries: HashSet<usize>,
@@ -161,11 +171,17 @@ pub struct Facts {
     /// `NullPointerException` that a `catch` or a `finally` may see: they are written with the
     /// runtime's checked `non_null`. With the position of the call or the field access.
     pub null_checked: HashMap<ExprId, Pos>,
+    /// The operations whose failure, which has no checked form of its own, a `catch` or a
+    /// `finally` may see: they run inside `java::catching`. With their positions.
+    pub catching: HashMap<ExprId, Pos>,
     /// The standard classes whose objects the runtime raises where the program may see them.
     pub raised_classes: std::collections::BTreeSet<usize>,
     /// The functional interfaces whose values are closures, `Rc<dyn Fn(A) -> R>` (see
     /// `closures`).
     pub closure_types: HashSet<usize>,
+    /// The locals, by method and name, that hold a closure only to call it: a plain Rust
+    /// closure, `let f = |x| ..;` (see `closures::closure_locals`).
+    pub closure_locals: HashSet<(usize, String)>,
 }
 
 impl Facts {
@@ -191,6 +207,7 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
         closure_types: closures::closure_types(class),
         ..Facts::default()
     };
+    facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
     ranges::analyze(class, &mut facts);
     representation(class, &mut facts);
     validate(class, &facts)?;
@@ -203,6 +220,8 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     if facts.threaded {
         threads::check(class, &facts)?;
     }
+    monitors::check(class, &facts)?;
+    facts.class_monitors = monitors::class_monitors(class, &facts);
     borrowed_params(class, &mut facts);
     facts.borrowed_objects = borrowed_objects(class, &facts);
     ascii_strings(class, &mut facts);
@@ -225,8 +244,13 @@ fn representation(class: &Class, facts: &mut Facts) {
         facts.thread_shared = threads::thread_shared(class);
         facts.long_methods = threads::long_methods(class, &facts.thread_shared);
     }
+    facts.monitors = monitors::observed(class);
+    let (monitor_classes, monitor_methods) = monitors::kept(class, facts);
+    facts.long_methods.extend(monitor_methods);
     let reach = borrowing::reach(class);
     facts.immutable = objects::immutable_classes(class);
+    // An object whose monitor is kept has a lock, or an address that stays.
+    facts.immutable.retain(|c| !monitor_classes.contains(c));
     loop {
         facts.field_level = hierarchy::field_level(
             class,
@@ -236,6 +260,7 @@ fn representation(class: &Class, facts: &mut Facts) {
             &facts.long_methods,
         );
         facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
+        facts.owned.retain(|c| !monitor_classes.contains(c));
         facts.flows = hierarchy::flows(class, &facts.field_level, &Default::default());
         let handled = objects::calls_needing_handles(class, facts);
         if handled.is_empty() {
