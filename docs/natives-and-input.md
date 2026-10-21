@@ -523,8 +523,11 @@ are instance methods of exceptions, trivial once `Throwable` objects exist. In o
      were compiled in; the translator could pass that text at the throw site later, but a program
      that prints the message of an implicit NPE is rare.
 
-7 and 8 are not done: they are instance methods of exception objects, which arrive with the
-object model and exceptions. What each needs then:
+7 and 8 are not done, and since exceptions landed they are not reached either: the translator
+provides `Throwable`, `NullPointerException` and the other standard exception classes from its own
+source (`java/Standard.java`, without stack traces), and reachability stops at them as at the
+runtime's classes. They are needed only if the translation takes the JDK's `Throwable` instead,
+for stack traces. What each needs then:
 
 - **`fillInStackTrace(int)`** is called on `this` inside `Throwable.fillInStackTrace()`, a
   `synchronized` instance method that every `Throwable` constructor calls when `stackTrace` is not
@@ -731,6 +734,12 @@ natives to the class loading boundary; of their 54 natives left that the runtime
 `Unsafe` (atomics, memory, `writeback`), and the rest the stack walker and stack traces, mapped
 memory, continuations and virtual threads, `TimeZone`, `FileCleanable`, `UnixFileSystem` and
 `Array.newArray`.
+
+Merged with the standard exception classes, which take the exception natives away: `ListOperations`
+and `ComparatorSorting` reach 4 natives, all in the runtime, and `GenericContainers` none;
+`StreamPipeline` reaches 372 classes and 28 natives (5 in the runtime); `ScannerGrades` and
+`TextAdventure` reach 1,163 and 1,169 classes and 73 natives each (22 in the runtime), having lost
+`StackTraceElement.initStackTraceElements` too.
 
 ## Reproducing
 
