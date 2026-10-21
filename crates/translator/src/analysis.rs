@@ -155,6 +155,9 @@ pub struct Facts {
     /// The methods and constructors that return `Result<_, Throwable>`: some caller observes an
     /// exception that may escape them (see `exceptions`).
     pub throwing: HashSet<usize>,
+    /// The classes whose instance field initializers raise, so that their `field_inits` returns a
+    /// `Result` (see `exceptions::field_inits`).
+    pub init_throwing: HashSet<usize>,
     /// The `try` statements, by address, whose `catch` clauses catch an exception that their body
     /// may throw. The others run their body as a plain block.
     pub live_tries: HashSet<usize>,
