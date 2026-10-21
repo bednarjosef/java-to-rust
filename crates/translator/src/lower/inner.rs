@@ -220,6 +220,9 @@ impl<'t> Lowering<'t> {
 
     /// Where class `t` is declared.
     pub(super) fn origin(&self, t: usize) -> Origin {
+        if self.plain_object == Some(t) {
+            return Origin::Object;
+        }
         let binary = self.types[t].javac.clone();
         match self.nesting(t) {
             Some(n) if n.kind == NestKind::Local => Origin::Local { method: n.method, binary },

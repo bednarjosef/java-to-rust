@@ -150,7 +150,9 @@ A small subset, end to end:
   to the program's types, `String` and the boxes. The program's `equals(Object)` and `hashCode()`
   override `Object`'s; a class without them compares and hashes its identity, and a string or a box
   its value. A class without `toString` prints as Java's `Object.toString` does, its binary name and
-  its hash code in hexadecimal (`Point@1b6d3586`). `getClass()` (reflection), an array as an
+  its hash code in hexadecimal (`Point@1b6d3586`). `new Object()` makes an object of a class
+  without fields, `PlainObject`, equal only to itself and printed as `java.lang.Object@..`, as the
+  JDK's lock objects and placeholder values (`HashSet`'s `PRESENT`) need. `getClass()` (reflection), an array as an
   `Object`, and `==` between two `Object`s that may both be strings or boxes (whose identity the
   translation does not keep, except in the shortcut `a == b || a.equals(b)`) are rejected. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
@@ -410,6 +412,12 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   `getName` is javac's (`Main$1`) and its `getSimpleName` empty. Not yet: local interfaces, enums and records, member classes of local
   classes, `Outer.super.m()`, `outer.super()`, and an inner class extending one nested in
   another class.
+- For-each over an `Iterable` (`lower/foreach.rs`) is the loop Java runs: `let it =
+  Names::iterator(&names); while it.borrow().has_next() { let s = it.borrow_mut().next(); .. }`,
+  with the program's or the JDK's `iterator`, `hasNext` and `next`, so a translated iterator
+  throws `ConcurrentModificationException` and ends early where Java's does. The element is cast
+  from the erased type of `next` to the loop variable's. In a file, `Iterable` and `Iterator`
+  are the interfaces lowering provides (`java/Functional.java`), without the default `remove`.
 - Lambdas and method references (`lower/lambdas.rs`), lowered as javac desugars them: each is a
   class that implements its functional interface (`IntOpLambdaInMain`), a variant of the
   interface's enum like any other implementor, whose one method is the lambda's body with
@@ -520,8 +528,7 @@ Each construct below is rejected at translation with an error that names it:
   (`T extends A & B`);
 - records, local interfaces, enums and records, and record patterns;
 - method references on a receiver other than a local, `this` or a final field, `super` in a
-  lambda, the default and static methods of the JDK's functional interfaces, and for-each over
-  an `Iterable`;
+  lambda, the default and static methods of the JDK's functional interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
 - threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls

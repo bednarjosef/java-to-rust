@@ -94,7 +94,12 @@ impl<'t> Lowering<'t> {
 
     /// `label: statement`, which `break label` and `continue label` name.
     pub(super) fn labeled(&self, node: Node<'t>) -> Result<Stmt, Error> {
-        let body = self.single_stmt(node.child("statement")?)?;
+        let statement = node.child("statement")?;
+        // A for-each over an iterable is a block around the loop, which takes the label itself.
+        if statement.kind() == "ENHANCED_FOR_LOOP" {
+            return self.for_each(statement, Some(node.str("label")));
+        }
+        let body = self.single_stmt(statement)?;
         Ok(Stmt::Labeled { label: node.str("label").to_string(), body: Box::new(body) })
     }
 

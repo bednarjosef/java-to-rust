@@ -55,6 +55,7 @@ impl<'t> Lowering<'t> {
             standard: exceptions::Standard::default(),
             closes: Default::default(),
             object: None,
+            plain_object: None,
             real: Default::default(),
             failed: Default::default(),
             aliases: Default::default(),
@@ -275,6 +276,9 @@ impl<'t> Lowering<'t> {
     /// `new C(args)`.
     pub(super) fn new_object(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let Some(symbol) = node.symbol() else { return unsupported(node, "this `new`") };
+        if let Some(object) = self.new_plain_object(node) {
+            return Ok(object);
+        }
         // An anonymous class's `new` creates an object of the class its body declares.
         let class = match node.get("classBody") {
             Some(body) => self.type_index(&crate::program::class_name(body.0)),
