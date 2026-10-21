@@ -490,9 +490,10 @@ impl<'a> Gen<'a> {
         }
         params.extend(self.typed_params(index, true));
         let ret = self.ret_text(index);
-        // The body of a method that never runs may call what was never emitted, such as the
-        // default methods of an interface on a class that implements it without objects.
-        let never_runs = !m.is_static && !m.is_ctor && !self.runs[m.class];
+        // The body of a method or constructor that never runs may call what was never emitted,
+        // such as the default methods of an interface on a class that implements it without
+        // objects, or the methods of a superclass whose values are all of another subclass.
+        let never_runs = !m.is_static && m.name != "<clinit>" && !self.runs[m.class];
         if never_runs {
             self.line("#[allow(unused_variables)]");
         }
