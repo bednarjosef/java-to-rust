@@ -19,11 +19,13 @@ mod arrays;
 mod borrowing;
 mod boxing;
 mod constants;
+pub mod hierarchy;
 mod indexing;
 mod moves;
 mod nullness;
 mod objects;
 mod owned;
+mod patterns;
 mod ranges;
 mod statics;
 
@@ -98,6 +100,9 @@ pub struct Facts {
     pub immutable: HashSet<String>,
     /// The classes whose objects are never shared, so they are plain values, by qualified name.
     pub owned: HashSet<String>,
+    /// For each type (index into `Class::types`), the concrete classes and enums whose values
+    /// become values of that type (see `hierarchy::flows`).
+    pub flows: Vec<HashSet<usize>>,
     /// The instance methods (indexes into `Class::methods`) that change their object.
     pub mutating: HashSet<usize>,
     /// The instance methods that borrow their object for the call: `&self` or `&mut self`.
@@ -116,22 +121,57 @@ pub struct Facts {
     /// The boxed kinds (`Type::Boxed` of the primitive) whose identity `==` observes: their boxes
     /// are shared objects. Every other boxed kind is its primitive value.
     pub faithful_boxes: HashSet<Type>,
+    /// The classes with subclasses (indexes into `Class::types`) whose fields are a struct of
+    /// their own, `<Name>Fields`, that the structs of their subclasses embed as `base`.
+    pub fields_structs: HashSet<usize>,
+    /// The methods of classes with subclasses that live on the class's fields struct.
+    pub field_level: HashSet<usize>,
+    /// The class that declares each field visible in each class: (class, field) to class, by
+    /// qualified name.
+    pub field_owners: HashMap<(String, String), String>,
 }
 
-pub fn analyze(class: &Class) -> Facts {
-    let mut facts = Facts::default();
+impl Facts {
+    /// The class whose `init` function initializing class `t` runs: `t` when its initialization
+    /// is eager, else its nearest superclass whose initialization is, which Java initializes
+    /// first (its `init` starts by initializing its own superclass).
+    pub fn init_class(&self, class: &Class, t: usize) -> Option<usize> {
+        std::iter::once(t).chain(class.hierarchy.ancestors(t)).find(|c| self.eager_init.contains(c))
+    }
+
+    /// Whether the field `name` of an object of type `ty` can hold null.
+    pub fn field_nullable(&self, ty: Type, name: &str) -> bool {
+        let Type::Class(c, _) = ty else { return false };
+        let owner = self.field_owners.get(&(c.to_string(), name.to_string())).map_or(c, String::as_str);
+        self.nullable_fields.contains(&(owner.to_string(), name.to_string()))
+    }
+}
+
+pub fn analyze(class: &Class) -> Result<Facts, Error> {
+    let mut facts = Facts {
+        fields_structs: hierarchy::fields_structs(class),
+        field_owners: hierarchy::field_owners(class),
+        ..Facts::default()
+    };
     ranges::analyze(class, &mut facts);
+    let reach = borrowing::reach(class);
     facts.immutable = objects::immutable_classes(class);
-    facts.owned = owned::owned_classes(class, &facts.immutable);
-    let borrowing = borrowing::borrowing(class, &facts.immutable, &facts.owned);
+    facts.field_level = hierarchy::field_level(class, &reach.reach, &facts.immutable, &facts.fields_structs);
+    facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
+    facts.flows = hierarchy::flows(class, &facts.field_level);
+    let borrowing = borrowing::borrowing(class, &facts, &reach);
     facts.mutating = borrowing.mutating;
     facts.self_methods = borrowing.methods;
     facts.plain_constructors = borrowing.plain_constructors;
     facts.isolated = borrowing.isolated;
     facts.writers = borrowing.writers;
+    validate(class, &facts)?;
+    patterns::check(class)?;
     facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
     nullness::analyze(class, &mut facts);
+    patterns::check_enum_casts(class, &facts)?;
+    patterns::check_object_values(class, &facts)?;
     boxing::analyze(class, &mut facts);
     borrowed_params(class, &mut facts);
     facts.borrowed_objects = borrowed_objects(class, &facts);
@@ -139,7 +179,64 @@ pub fn analyze(class: &Class) -> Facts {
     arrays::analyze(class, &mut facts);
     indexing::analyze(class, &mut facts);
     moves::analyze(class, &mut facts);
-    facts
+    Ok(facts)
+}
+
+/// Rejects what the analyses show the translation cannot do: a superclass's constructor runs
+/// before its subclass's object exists, building the fields struct as a plain value, so it may
+/// use `this` only for that struct.
+fn validate(class: &Class, facts: &Facts) -> Result<(), Error> {
+    for &t in &facts.fields_structs {
+        if facts.plain_constructors.contains(&class.types[t].name) {
+            continue;
+        }
+        let pos = class.methods.iter().find(|m| m.is_ctor && m.class == t).map(|m| m.pos).unwrap_or_default();
+        return Err(Error {
+            pos,
+            message:
+                "constructors of a class with subclasses that use `this` as a value or call overridable \
+                      methods not supported yet"
+                    .to_string(),
+        });
+    }
+    // A dispatcher returns what the method it dispatches returns; an override that returns a
+    // value of another representation would need its result converted.
+    let rep = |ty: Type| class.class_index(ty).map(|t| hierarchy::rep(class, facts, t));
+    for m in &class.methods {
+        for &o in &m.overrides {
+            if m.ret != class.methods[o].ret && rep(m.ret) != rep(class.methods[o].ret) {
+                return Err(Error {
+                    pos: m.pos,
+                    message: "covariant return types not supported yet".to_string(),
+                });
+            }
+        }
+    }
+    // An enum may implement an interface's method with one that every enum has; the dispatcher
+    // knows `name()`, `ordinal()` and `toString()`, and `Object`'s methods.
+    for e in (0..class.types.len()).filter(|&e| class.types[e].kind == TypeKind::Enum) {
+        for (m, method) in class.methods.iter().enumerate() {
+            // `Object`'s `equals` and `hashCode` are the constant's identity, and `Comparable`'s
+            // `compareTo` compares the ordinals.
+            let builtin = matches!(method.name.as_str(), "name" | "ordinal" | "toString")
+                && method.params.is_empty()
+                || matches!(class.types[method.class].name.as_str(), OBJECT | COMPARABLE);
+            if method.is_abstract
+                && class.hierarchy.is_subtype(e, method.class)
+                && class.hierarchy.implementation(m, e).is_none()
+                && !builtin
+            {
+                return Err(Error {
+                    pos: method.pos,
+                    message: format!(
+                        "an enum's own `{}` implementing `{}.{}` not supported yet",
+                        method.name, class.types[method.class].name, method.name
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether the field initializers of class `t` are written into the struct literal of each of
@@ -186,7 +283,12 @@ pub fn leading_assignments<'c>(class: &Class, ctor: &'c Method, facts: &Facts) -
         return Vec::new();
     }
     let mut out: Vec<(usize, &Expr)> = Vec::new();
-    for stmt in &ctor.body {
+    // `super(...)` runs first, before the initializers: the struct literal's `base`.
+    let body = match ctor.body.first() {
+        Some(Stmt::Expr(Expr { kind: ExprKind::SuperInit { .. }, .. })) => &ctor.body[1..],
+        _ => &ctor.body[..],
+    };
+    for stmt in body {
         let Stmt::Expr(Expr {
             kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, value },
             ..
@@ -219,13 +321,30 @@ fn borrowed_params(class: &Class, facts: &mut Facts) {
             }
         }
     }
+    align_groups(class, &mut facts.borrowed_params);
+    align_groups(class, &mut facts.borrowed_optional_params);
+}
+
+/// Keeps a (method, parameter) pair only when every method of the method's override group has
+/// it: a call may run any of them, so they take their parameters alike. Says whether it removed
+/// any.
+fn align_groups(class: &Class, set: &mut HashSet<(usize, usize)>) -> bool {
+    let unaligned: Vec<(usize, usize)> = set
+        .iter()
+        .copied()
+        .filter(|&(m, i)| class.hierarchy.group(m).iter().any(|&g| !set.contains(&(g, i))))
+        .collect();
+    for key in &unaligned {
+        set.remove(key);
+    }
+    !unaligned.is_empty()
 }
 
 fn borrowed_objects(class: &Class, facts: &Facts) -> HashSet<(usize, usize)> {
     let mut borrowed: HashSet<(usize, usize)> = HashSet::new();
     for (m, method) in class.methods.iter().enumerate() {
         for (i, p) in method.params.iter().enumerate() {
-            if matches!(p.ty, Type::Class(_))
+            if matches!(p.ty, Type::Class(..))
                 && !nullable_var(facts, m, &p.name)
                 && !assigns_any(&method.body, &p.name)
             {
@@ -248,11 +367,11 @@ fn borrowed_objects(class: &Class, facts: &Facts) -> HashSet<(usize, usize)> {
                 value
             })
             .collect();
-        if losing.is_empty() {
-            return borrowed;
+        for p in &losing {
+            borrowed.remove(p);
         }
-        for p in losing {
-            borrowed.remove(&p);
+        if !align_groups(class, &mut borrowed) && losing.is_empty() {
+            return borrowed;
         }
     }
 }
@@ -276,6 +395,9 @@ fn used_as_value(e: &Expr, name: &str, borrowed: &HashSet<(usize, usize)>) -> bo
         ExprKind::MethodCall { receiver, .. } if is_name(receiver) => {
             allowed.insert(receiver.id);
         }
+        ExprKind::InstanceOf { value, .. } if is_name(value) => {
+            allowed.insert(value.id);
+        }
         ExprKind::Binary(BinOp::Eq | BinOp::Ne | BinOp::Add, l, r) => {
             allowed.extend([l, r].into_iter().filter(|o| is_name(o)).map(|o| o.id));
         }
@@ -288,7 +410,8 @@ fn used_as_value(e: &Expr, name: &str, borrowed: &HashSet<(usize, usize)>) -> bo
         ExprKind::Call { args, resolved: Some(callee), .. }
         | ExprKind::MethodCall { args, resolved: Some(callee), .. }
         | ExprKind::New { args, ctor: Some(callee), .. }
-        | ExprKind::ThisCall { args, resolved: Some(callee) } => {
+        | ExprKind::ThisCall { args, resolved: Some(callee) }
+        | ExprKind::SuperInit { args, resolved: Some(callee) } => {
             for (j, a) in args.iter().enumerate() {
                 if is_name(a) && borrowed.contains(&(*callee, j)) {
                     allowed.insert(a.id);
@@ -372,8 +495,11 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
             ExprKind::Call { args, resolved: Some(callee), .. }
             | ExprKind::MethodCall { args, resolved: Some(callee), .. }
             | ExprKind::ThisCall { args, resolved: Some(callee) }
+            | ExprKind::SuperInit { args, resolved: Some(callee) }
             | ExprKind::New { args, ctor: Some(callee), .. } => {
-                non_ascii.params.extend((0..args.len()).map(|i| (*callee, i)));
+                for g in class.hierarchy.group(*callee) {
+                    non_ascii.params.extend((0..args.len()).map(|i| (g, i)));
+                }
             }
             _ => {}
         });
@@ -392,13 +518,18 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
                                 vars.push((m, target.clone()));
                             }
                         }
+                        // A string that a pattern binds is any string an `Object` holds.
+                        ExprKind::InstanceOf { ty: Type::String, binding: Some(name), .. } => {
+                            vars.push((m, name.clone()));
+                        }
                         ExprKind::Call { args, resolved: Some(callee), .. }
                         | ExprKind::MethodCall { args, resolved: Some(callee), .. }
                         | ExprKind::ThisCall { args, resolved: Some(callee) }
+                        | ExprKind::SuperInit { args, resolved: Some(callee) }
                         | ExprKind::New { args, ctor: Some(callee), .. } => {
                             for (i, arg) in args.iter().enumerate() {
                                 if !non_ascii.ascii(class, m, arg) {
-                                    params.push((*callee, i));
+                                    params.extend(class.hierarchy.group(*callee).into_iter().map(|g| (g, i)));
                                 }
                             }
                         }

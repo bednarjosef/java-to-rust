@@ -97,8 +97,9 @@ impl<'a> Gen<'a> {
     }
 
     /// An `if` and its `else if` chain. In tail position every branch is a value, so the `if` is
-    /// the value of the function. Only `narrow_if`'s forms are skipped there; they would need
-    /// their branches as statements.
+    /// the value of the function. Only `narrow_if`'s null tests are skipped there; they would need
+    /// their branches as statements. A negated pattern binds its variable only in `narrow_if`'s
+    /// form, so that one is written with branches as statements, which return.
     pub(super) fn if_stmt(
         &mut self,
         cond: &'a Expr,
@@ -106,12 +107,13 @@ impl<'a> Gen<'a> {
         otherwise: Option<&'a Stmt>,
         tail: bool,
     ) {
-        if !tail && self.narrow_if(cond, then, otherwise) {
+        if (!tail || null::negated_pattern(cond).is_some()) && self.narrow_if(cond, then, otherwise) {
             return;
         }
-        let cond_text = self.condition(cond);
+        let (cond_text, narrowed) = self.guard(cond, then);
         self.line(&format!("if {cond_text} {{"));
         self.nested_in(then, tail);
+        self.unnarrow(narrowed);
         let mut otherwise = otherwise;
         while let Some(stmt) = otherwise {
             // `else { if .. }` is `else if ..`: the block holds nothing else.
@@ -122,10 +124,14 @@ impl<'a> Gen<'a> {
                 },
                 _ => stmt,
             };
-            if let Stmt::If { cond, then, otherwise: next } = stmt {
-                let cond_text = self.condition(cond);
+            // An `if` that `narrow_if` writes is nested in the `else`.
+            if let Stmt::If { cond, then, otherwise: next } = stmt
+                && !self.narrows_else(cond, next.as_deref())
+            {
+                let (cond_text, narrowed) = self.guard(cond, then);
                 self.line(&format!("}} else if {cond_text} {{"));
                 self.nested_in(then, tail);
+                self.unnarrow(narrowed);
                 otherwise = next.as_deref();
             } else {
                 self.line("} else {");

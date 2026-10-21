@@ -36,24 +36,24 @@ impl<'t> Lowering<'t> {
         Lowering {
             next_id: Cell::new(0),
             current: Cell::new(0),
+            method_ctx: Cell::new(None),
+            scope: Cell::new(None),
             in_ctor: Cell::new(false),
+            ret: Cell::new(Type::Void),
             types: Vec::new(),
             methods: Vec::new(),
             reach: None,
             entry: None,
+            object: None,
+            real: Default::default(),
+            failed: Default::default(),
         }
     }
 
     /// Declares a class, named `outer.Name` inside `outer` (a class or a package).
     pub(super) fn declare_type(&mut self, node: Node<'t>, outer: Option<&str>) -> Result<(), Error> {
-        if node.kind() != "CLASS" && node.kind() != "ENUM" {
+        if !matches!(node.kind(), "CLASS" | "ENUM" | "INTERFACE") {
             return unsupported(node, &kind_words(node.kind()));
-        }
-        if node.get("extendsClause").is_some()
-            || node.list("implementsClause").next().is_some()
-            || node.list("typeParameters").next().is_some()
-        {
-            return unsupported(node, "generic classes, inheritance and interfaces");
         }
         let simple = node.str("simpleName");
         let name = match outer {
@@ -72,12 +72,11 @@ impl<'t> Lowering<'t> {
                     sig: member.symbol().map_or("", |s| s.ty),
                 }),
                 "VARIABLE" | "EMPTY_STATEMENT" => {}
-                "ENUM" => self.declare_type(member, Some(&name))?,
+                "ENUM" | "INTERFACE" => self.declare_type(member, Some(&name))?,
                 "CLASS" if member.has_flag("STATIC") => self.declare_type(member, Some(&name))?,
                 "CLASS" => return unsupported(member, "inner classes"),
                 "BLOCK" if Self::is_static_block(member) => {}
                 "BLOCK" => self.check_initializer_block(node, member)?,
-                "INTERFACE" => return unsupported(member, "interfaces"),
                 kind => return unsupported(member, &kind_words(kind)),
             }
         }
@@ -96,25 +95,6 @@ impl<'t> Lowering<'t> {
         })
     }
 
-    /// Whether a class declares `public String toString()`, the text that printing and
-    /// concatenation use for its objects.
-    pub(super) fn has_to_string(&self, class: &str) -> bool {
-        self.methods.iter().any(|m| {
-            self.types[m.owner].name == class && m.name == "toString" && m.sig == "()java.lang.String"
-        })
-    }
-
-    /// Rejects printing or concatenating an object whose class has no `toString`: Java would print
-    /// a hash code there, which is not supported.
-    pub(super) fn check_text(&self, node: Node<'t>, ty: Type) -> Result<(), Error> {
-        match ty {
-            Type::Class(name) if !self.has_to_string(name) => {
-                unsupported(node, "printing an object without toString")
-            }
-            _ => Ok(()),
-        }
-    }
-
     /// The declaration of a class: its instance fields and static fields, in source order.
     pub(super) fn type_decl(&self, index: usize) -> Result<TypeDecl, Error> {
         self.current.set(index);
@@ -126,15 +106,32 @@ impl<'t> Lowering<'t> {
             .filter(|m| m.kind() == "VARIABLE" && !enums::is_enum_constant(*m) && self.keeps(*m, name))
         {
             let field = self.field(member)?;
+            // A subclass's struct holds its superclass's fields as `base`.
+            if !member.has_flag("STATIC")
+                && field.name.eq_ignore_ascii_case("base")
+                && self.superclass(index)?.is_some()
+            {
+                return unsupported(member, "a field named `base` in a subclass");
+            }
             if member.has_flag("STATIC") { statics.push(field) } else { fields.push(field) }
         }
         // An enum's constants need its constructors, which `lower` lowers after this.
+        let kind = match node.kind() {
+            "ENUM" => TypeKind::Enum,
+            "INTERFACE" => TypeKind::Interface,
+            _ => TypeKind::Class,
+        };
         Ok(TypeDecl {
             name: self.types[index].name.clone(),
             package: String::new(),
+            kind,
+            is_abstract: kind == TypeKind::Interface || node.has_flag("ABSTRACT"),
+            extends: self.superclass(index)?,
+            implements: self.interfaces(index)?,
             fields,
             statics,
             enum_constants: None,
+            type_params: self.class_type_params(index),
         })
     }
 
@@ -147,7 +144,7 @@ impl<'t> Lowering<'t> {
             let kind = self.constant_literal(node, ty, text)?;
             Some(self.synth(kind, node.pos(), ty))
         } else {
-            init.map(|i| self.expr(i)).transpose()?
+            init.map(|i| Ok::<_, Error>(self.convert(self.expr(i)?, ty))).transpose()?
         };
         Ok(Field { name: node.str("name").to_string(), ty, init, constant, pos: node.pos() })
     }
@@ -167,7 +164,7 @@ impl<'t> Lowering<'t> {
             // Java evaluates an object in front of a static field and ignores it, even null;
             // one without effects is simply dropped.
             if let Some(r) = receiver
-                && r.symbol().is_none_or(|s| s.kind != "CLASS")
+                && r.symbol().is_none_or(|s| !matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM"))
                 && has_effects(&self.expr(r)?)
             {
                 return unsupported(node, "static fields through an expression with effects");
@@ -220,13 +217,14 @@ impl<'t> Lowering<'t> {
         };
         let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let args = self.packed_args(node, &symbol, args)?;
-        Ok(ExprKind::New { class, args, ctor: self.method_index(&symbol) })
+        let ctor = self.method_index(&symbol);
+        let args = self.convert_args(ctor, args)?;
+        Ok(ExprKind::New { class, args, ctor })
     }
 
     /// `this` of the class whose members are being lowered.
     pub(super) fn this(&self, node: Node<'t>) -> Expr {
-        let name = &self.types[self.current.get()].name;
-        let ty = if self.enum_index(name).is_some() { Type::enum_type(name) } else { Type::class(name) };
+        let ty = self.self_type(self.current.get());
         self.synth(ExprKind::This, node.pos(), ty)
     }
 

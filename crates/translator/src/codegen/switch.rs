@@ -219,7 +219,7 @@ impl<'a> Gen<'a> {
             match self.frames[index].kind {
                 Kind::Loop(Loop::For(update)) => {
                     for u in update {
-                        self.effect(u);
+                        self.update_effect(u);
                     }
                 }
                 Kind::Loop(Loop::DoWhile(cond)) => {
@@ -328,6 +328,10 @@ impl<'a> Gen<'a> {
         self.chars = char_cases(selector, cases);
         self.exhaustive = exhaustive(self.class, selector, cases);
         let falls = cases.split_last().is_some_and(|(_, init)| init.iter().any(|c| !leaves(&c.body)));
+        // A `Ref` made by the selector would live through the whole `match`, while the cases may
+        // borrow the same object mutably: end each borrow inside the selector.
+        let outer = self.guarded;
+        self.guarded |= self.reads_through_borrow(selector);
         let text = if self.chars {
             let c = self.value(selector, Type::Char).text;
             format!("char::from_u32(u32::from({c}))")
@@ -345,6 +349,7 @@ impl<'a> Gen<'a> {
         } else {
             format!("&*{}", self.expr(selector).at(UNARY))
         };
+        self.guarded = outer;
         let yields_last = cases.iter().all(|c| matches!(c.body.last(), Some(Stmt::Yield(_))));
         if falls {
             self.machine(&text, cases, value);

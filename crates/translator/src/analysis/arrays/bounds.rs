@@ -64,7 +64,8 @@ pub(super) fn in_bounds(
                     ExprKind::Call { args, .. }
                     | ExprKind::MethodCall { args, .. }
                     | ExprKind::New { args, .. }
-                    | ExprKind::ThisCall { args, .. } => {
+                    | ExprKind::ThisCall { args, .. }
+                    | ExprKind::SuperInit { args, .. } => {
                         let arrays = args.iter().filter(|a| matches!(a.ty, Type::Array(_)));
                         lent.extend(arrays.filter_map(root_of).map(str::to_string));
                     }
@@ -573,6 +574,7 @@ fn children(e: &Expr) -> Vec<&Expr> {
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }
         | ExprKind::ThisCall { args, .. }
+        | ExprKind::SuperInit { args, .. }
         | ExprKind::NewArray(args)
         | ExprKind::ArrayLit(args) => args.iter().collect(),
         _ => Vec::new(),

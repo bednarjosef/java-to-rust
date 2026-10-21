@@ -590,6 +590,7 @@ fn writes_root(e: &Expr, root: &str) -> bool {
         | ExprKind::MethodCall { args, .. }
         | ExprKind::New { args, .. }
         | ExprKind::ThisCall { args, .. }
+        | ExprKind::SuperInit { args, .. }
         | ExprKind::Builtin(_, args) => found |= args.iter().any(|a| mentions(a, root)),
         _ => {}
     });

@@ -41,7 +41,7 @@ use scan::{Call, Owned, Scan};
 use std::collections::{HashMap, HashSet};
 
 pub(super) fn analyze(class: &Class, facts: &mut Facts) {
-    let scans: Vec<Scan> = class
+    let mut scans: Vec<Scan> = class
         .methods
         .iter()
         .enumerate()
@@ -58,6 +58,15 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
             scan::scan(m, method, facts, &live_after)
         })
         .collect();
+    // A call may run any method of its override group, which all take their arrays alike.
+    for s in &mut scans {
+        let calls = std::mem::take(&mut s.calls);
+        for call in calls {
+            for g in class.hierarchy.group(call.callee) {
+                s.calls.push(Call { callee: g, args: call.args.clone() });
+            }
+        }
+    }
     // A shared array lent to a call is borrowed from its cell until the call returns; a field
     // holding an array would be another way to reach that cell meanwhile.
     let lend_shared = class
@@ -93,7 +102,10 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
         }
         for (i, p) in method.params.iter().enumerate() {
             if solution.borrowed.contains(&(m, i)) {
-                facts.borrowed_arrays.insert((m, i), written[m].contains(&p.name));
+                let group = class.hierarchy.group(m);
+                let any_written = written[m].contains(&p.name)
+                    || group.iter().any(|&g| written[g].contains(&class.methods[g].params[i].name));
+                facts.borrowed_arrays.insert((m, i), any_written);
             }
         }
     }
@@ -203,6 +215,7 @@ fn collect_switches<'e>(e: &'e Expr, out: &mut Vec<&'e [Case]>) {
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }
         | ExprKind::ThisCall { args, .. }
+        | ExprKind::SuperInit { args, .. }
         | ExprKind::NewArray(args)
         | ExprKind::ArrayLit(args) => args.iter().for_each(|a| collect_switches(a, out)),
         _ => {}
@@ -302,6 +315,15 @@ fn solve(class: &Class, scans: &[Scan], lend_shared: bool, facts: &Facts) -> Sol
                     }
                 }
             }
+        }
+        // The methods of an override group borrow a parameter together or not at all.
+        let unaligned: Vec<(usize, usize)> = borrowed
+            .iter()
+            .copied()
+            .filter(|&(m, i)| class.hierarchy.group(m).iter().any(|&g| !borrowed.contains(&(g, i))))
+            .collect();
+        for key in unaligned {
+            changed |= borrowed.remove(&key);
         }
         for (m, scan) in scans.iter().enumerate() {
             for (i, name) in &scan.params {

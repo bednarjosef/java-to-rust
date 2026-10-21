@@ -63,7 +63,7 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
     let class = lower::lower_program(&trees, &reach, &program.main).map_err(|(unit, error)| {
         ProgramError { file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string), error }
     })?;
-    let facts = analysis::analyze(&class);
+    let facts = analysis::analyze(&class).map_err(|error| ProgramError { file: None, error })?;
     Ok(codegen::generate(&class, &facts))
 }
 

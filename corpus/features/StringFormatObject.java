@@ -1,6 +1,6 @@
 import java.util.Arrays;
 
-public class Prog {
+public class StringFormatObject {
     static String sStr = "😀x";
     static int[] aInt = new int[1];
     static char[] aChar = new char[2];

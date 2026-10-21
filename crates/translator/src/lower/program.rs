@@ -21,6 +21,16 @@ pub fn lower_program<'t>(
     reach: &'t Reach,
     main: &str,
 ) -> Result<Class, (Option<usize>, Error)> {
+    super::real_generics::retry(|real| lower_with(units, reach, main, real))
+}
+
+/// `lower_program` with the Rust generics `real`, or with the candidates when it is `None`.
+fn lower_with<'t>(
+    units: &[&'t Value],
+    reach: &'t Reach,
+    main: &str,
+    real: Option<&super::real_generics::Real>,
+) -> Result<(Class, super::real_generics::Real, super::real_generics::Real), (Option<usize>, Error)> {
     let mut lowering = Lowering::empty();
     lowering.reach = Some(reach);
     // The unit and the package of each class, in `Class::types` order.
@@ -39,16 +49,31 @@ pub fn lower_program<'t>(
         packages.resize(lowering.types.len(), package);
     }
     lowering.entry = lowering.type_index(main);
+    let decls: Vec<Node> = units
+        .iter()
+        .flat_map(|u| Node(u).list("typeDecls"))
+        .filter(|d| reach.classes.contains(&crate::program::class_name(d.0)))
+        .collect();
+    lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
+    lowering.plan_object(&decls);
     let mut types = Vec::new();
     for (t, package) in packages.into_iter().enumerate() {
         let mut decl = lowering.type_decl(t).map_err(|e| (Some(unit_of[t]), e))?;
         decl.package = package;
         types.push(decl);
     }
-    let methods = (0..lowering.methods.len())
+    let mut methods: Vec<Method> = (0..lowering.methods.len())
         .map(|m| lowering.method(m).map_err(|e| (Some(unit_of[lowering.methods[m].owner]), e)))
         .collect::<Result<_, _>>()?;
-    Ok(Class { name: main.to_string(), types, methods })
+    lowering.object_methods(&mut methods).map_err(|e| (None, e))?;
+    lowering.finish_types(&mut types, &mut methods).map_err(|(t, e)| (Some(unit_of[t]), e))?;
+    lowering.object_types(&mut types);
+    lowering.param_decls(&mut types);
+    let failed = lowering.verify(&types, &methods);
+    let hierarchy = Hierarchy::new(&types, &methods);
+    let class = Class { name: main.to_string(), types, methods, hierarchy };
+    enums::check_nulls(&class).map_err(|e| (None, e))?;
+    Ok((class, lowering.real.clone(), failed))
 }
 
 /// A package name such as `com.example` from its tree, a chain of selects.

@@ -65,6 +65,7 @@ impl<'t> Lowering<'t> {
             name: symbol.name.to_string(),
             args: std::mem::take(args),
             resolved: Some(resolved),
+            is_super: false,
         }))
     }
 

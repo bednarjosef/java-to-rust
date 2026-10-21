@@ -52,7 +52,7 @@ impl<'t> Lowering<'t> {
             ("java.lang.Float", "floatToRawIntBits") => Native::FloatToRawIntBits,
             ("java.lang.Float", "intBitsToFloat") => Native::IntBitsToFloat,
             ("java.lang.System", "identityHashCode") => {
-                if !matches!(args[0].ty, Type::Class(_)) {
+                if !matches!(args[0].ty, Type::Class(..)) {
                     return unsupported(node, "`System.identityHashCode` of anything but an object");
                 }
                 Native::IdentityHash
@@ -62,7 +62,7 @@ impl<'t> Lowering<'t> {
                     Some(r) => self.expr(r)?,
                     None => self.this(node),
                 };
-                if !matches!(object.ty, Type::Class(_)) {
+                if !matches!(object.ty, Type::Class(..)) {
                     return unsupported(node, "`hashCode` of anything but an object");
                 }
                 args.insert(0, object);
@@ -117,11 +117,10 @@ impl<'t> Lowering<'t> {
                 self.stream_native(node, receiver, args, Native::FileWriteBytes)?
             }
             ("java.io.PrintStream", name @ ("print" | "println")) if stream == Some("err") => {
-                if let Some(arg) = args.first() {
-                    if matches!(arg.ty, Type::Array(_)) {
-                        return unsupported(node, "printing an array to `System.err`");
-                    }
-                    self.check_text(node, arg.ty)?;
+                if let Some(arg) = args.first()
+                    && matches!(arg.ty, Type::Array(_))
+                {
+                    return unsupported(node, "printing an array to `System.err`");
                 }
                 Native::ErrPrint { newline: name == "println" }
             }

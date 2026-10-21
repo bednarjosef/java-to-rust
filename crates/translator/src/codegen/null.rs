@@ -1,5 +1,9 @@
 //! Strings that may be null, which are `Option<String>` in Rust. Which values are optional comes
 //! from `analysis::maybe_null` and `analysis::nullable_var`; here is how each use is written.
+//!
+//! Narrowing conditions are here too: a null test that binds a string as a `&str`, and a pattern
+//! `x instanceof T name`, which binds `name` with `if let Some(name) = <x as a T>`, in a let
+//! chain, a `let .. else` or `is_some_and`.
 
 use super::*;
 use crate::analysis::{conjuncts, maybe_null, nullable_type, nullable_var};
@@ -21,6 +25,12 @@ impl<'a> Gen<'a> {
             && self.borrowed.contains(name)
         {
             return false;
+        }
+        // A cast of a narrowed variable is not null either.
+        if let ExprKind::Cast(_, value) = &e.kind
+            && nullable_type(e.ty)
+        {
+            return self.nullable(value);
         }
         maybe_null(self.facts, self.method, e)
     }
@@ -83,7 +93,7 @@ impl<'a> Gen<'a> {
     /// for an object.
     fn option_source(&self, name: &str, ty: Type) -> String {
         let rust = self.local(name);
-        if matches!(ty, Type::Class(_) | Type::StringBuilder | Type::Enum(_)) {
+        if matches!(ty, Type::Class(..) | Type::StringBuilder | Type::Enum(_)) {
             return format!("{rust}.as_ref()");
         }
         // An `Option<i32>` is `Copy` and matches as it is; a faithful box is `as_deref`'d.
@@ -98,7 +108,7 @@ impl<'a> Gen<'a> {
             _ if e.ty == Type::StringBuilder => self.builder_option(e),
             ExprKind::Null => "None::<&str>".to_string(),
             ExprKind::Var(name) => self.option_source(name, e.ty),
-            ExprKind::Cast(_, inner) => self.option_ref(inner),
+            ExprKind::Cast(_, inner) if !matches!(inner.ty, Type::Class(..)) => self.option_ref(inner),
             // In a format, a field is borrowed until the text is formatted, after every operand,
             // so it is borrowed only when no operand has effects.
             ExprKind::Field { .. } | ExprKind::Index(..) if !self.formatting || self.lazy_text => {
@@ -131,7 +141,7 @@ impl<'a> Gen<'a> {
                     let cell = cell_name(&self.class.types[*class].name, name);
                     format!("{cell}.with_borrow(Option::{test})")
                 }
-                _ if matches!(other.ty, Type::Class(_) | Type::Array(_)) => {
+                _ if matches!(other.ty, Type::Class(..) | Type::Array(_)) => {
                     format!("{}.{test}()", self.expr(other).at(ATOM))
                 }
                 _ => format!("{}.{test}()", self.option_ref(other)),
@@ -217,7 +227,7 @@ impl<'a> Gen<'a> {
                 format!("{text}.to_string()")
             })));
         }
-        if matches!(e.ty, Type::Class(_)) {
+        if matches!(e.ty, Type::Class(..)) {
             // `java::or_null` shows `null`, or the object as it shows when it is not null.
             let option = format!("{}.as_ref()", self.object_place(e));
             let text = self.handle_text("o", e);
@@ -246,8 +256,24 @@ fn mentions_stmt(stmt: &Stmt, name: &str) -> bool {
     found
 }
 
+/// `value instanceof T name`: its parts, when `e` is a pattern.
+pub(super) fn pattern(e: &Expr) -> Option<(&Expr, Type, &str)> {
+    match &e.kind {
+        ExprKind::InstanceOf { value, ty, binding: Some(name) } => Some((value, *ty, name)),
+        _ => None,
+    }
+}
+
+/// `!(value instanceof T name)`: the pattern, when `e` is a negated one.
+pub(super) fn negated_pattern(e: &Expr) -> Option<(&Expr, Type, &str)> {
+    match &e.kind {
+        ExprKind::Unary(UnOp::Not, inner) => pattern(inner),
+        _ => None,
+    }
+}
+
 /// Whether `stmt` always leaves the block it is in.
-fn exits(stmt: &Stmt) -> bool {
+pub(super) fn exits(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Return(..) | Stmt::Break | Stmt::Continue => true,
         Stmt::Block(stmts) => stmts.last().is_some_and(exits),
@@ -276,36 +302,49 @@ impl<'a> Gen<'a> {
         Some((name.as_str(), matches!(op, BinOp::Ne), var.ty))
     }
 
-    /// `if (s != null && ..) { .. }`: see `let_chain`. And `if (s == null) .. else { .. }`: the
-    /// else branch binds `s` as `if let Some(s) = s.as_deref()`, so `s` is a `&str` there. Returns
-    /// false, emitting nothing, when the `if` is of neither form, or the branch where `s` is not
-    /// null does not use it (a binding that is never read would only warn), or assigns it.
+    /// `if (s == null) .. else { .. }`: the else branch binds `s` as
+    /// `if let Some(s) = s.as_deref()`, so `s` is a `&str` there; and `if (!(x instanceof T name))
+    /// .. else { .. }`, whose else branch binds `name`. Returns false, emitting nothing, when the
+    /// `if` is of neither form, or the else branch does not use the name (a binding that is never
+    /// read would only warn), or assigns it. (`if (s != null && ..)` is a let chain, `let_chain`.)
     pub(super) fn narrow_if(&mut self, cond: &'a Expr, then: &'a Stmt, otherwise: Option<&'a Stmt>) -> bool {
-        if let Some((name, false, ty)) = self.null_test_var(cond)
-            && let Some(non_null) = otherwise
-        {
-            if assigns_stmt(non_null, name) || !mentions_stmt(non_null, name) {
-                return false;
+        if !self.narrows_else(cond, otherwise) {
+            return false;
+        }
+        let passed = otherwise.expect("an else branch");
+        let narrowed = match negated_pattern(cond) {
+            // `if (!(x instanceof T name)) .. else { .. }`
+            Some((value, ty, name)) => {
+                let source = self.pattern_source(value, ty);
+                self.line(&format!("if let Some({}) = {source} {{", self.local(name)));
+                None
             }
-            self.line(&format!("if let Some({}) = {} {{", self.local(name), self.option_source(name, ty)));
-            let narrowed = self.narrow(name);
-            self.nested(non_null);
-            self.unnarrow(narrowed);
-            self.line("} else {");
-            self.nested(then);
-            self.line("}");
-            return true;
-        }
-        let Some((cond_text, narrowed)) = self.let_chain(cond, &[then], &[]) else { return false };
-        self.line(&format!("if {cond_text} {{"));
-        self.nested(then);
+            None => {
+                let (name, _, ty) = self.null_test_var(cond).expect("a null test");
+                self.line(&format!(
+                    "if let Some({}) = {} {{",
+                    self.local(name),
+                    self.option_source(name, ty)
+                ));
+                self.narrow(name)
+            }
+        };
+        self.nested(passed);
         self.unnarrow(narrowed);
-        if let Some(otherwise) = otherwise {
-            self.line("} else {");
-            self.nested(otherwise);
-        }
+        self.line("} else {");
+        self.nested(then);
         self.line("}");
         true
+    }
+
+    /// Whether `narrow_if` writes an `if` with this condition and else branch.
+    pub(super) fn narrows_else(&self, cond: &'a Expr, otherwise: Option<&'a Stmt>) -> bool {
+        let Some(passed) = otherwise else { return false };
+        if let Some((_, _, name)) = negated_pattern(cond) {
+            return mentions_stmt(passed, name);
+        }
+        matches!(self.null_test_var(cond), Some((name, false, _))
+            if !assigns_stmt(passed, name) && mentions_stmt(passed, name))
     }
 
     /// `cond` as a let chain that binds, as a `&str`, each possibly-null string tested with
@@ -322,6 +361,10 @@ impl<'a> Gen<'a> {
     ) -> Option<(String, Vec<String>)> {
         let mut parts = Vec::new();
         conjuncts(cond, &mut parts);
+        let used = |k: usize, name: &str| {
+            parts[k + 1..].iter().chain(exprs).any(|e| mentions(e, name))
+                || stmts.iter().any(|s| mentions_stmt(s, name))
+        };
         let binds: Vec<Option<(&str, Type)>> = parts
             .iter()
             .enumerate()
@@ -330,18 +373,26 @@ impl<'a> Gen<'a> {
                 let later = parts[k + 1..].iter().chain(exprs);
                 let assigned =
                     later.clone().any(|e| assigns(e, name)) || stmts.iter().any(|s| assigns_stmt(s, name));
-                let used =
-                    later.clone().any(|e| mentions(e, name)) || stmts.iter().any(|s| mentions_stmt(s, name));
-                (used && !assigned).then_some((name, ty))
+                (used(k, name) && !assigned).then_some((name, ty))
             })
             .collect();
-        if binds.iter().all(Option::is_none) {
+        let patterns: Vec<bool> = parts
+            .iter()
+            .enumerate()
+            .map(|(k, part)| pattern(part).is_some_and(|(_, _, name)| used(k, name)))
+            .collect();
+        if binds.iter().all(Option::is_none) && !patterns.contains(&true) {
             return None;
         }
         let mut texts = Vec::new();
         let mut narrowed = Vec::new();
-        for (part, bind) in parts.iter().zip(binds) {
+        for ((part, bind), bound) in parts.iter().zip(binds).zip(patterns) {
             match bind {
+                _ if bound => {
+                    let (value, ty, name) = pattern(part).expect("a pattern");
+                    let source = self.pattern_source(value, ty);
+                    texts.push(format!("let Some({}) = {source}", self.local(name)));
+                }
                 Some((name, ty)) => {
                     texts.push(format!("let Some({}) = {}", self.local(name), self.option_source(name, ty)));
                     narrowed.extend(self.narrow(name));
@@ -411,6 +462,52 @@ impl<'a> Gen<'a> {
         let mut code = Code::new(text, LOWEST);
         code.untyped = non_null.untyped && other.untyped;
         Some(code)
+    }
+
+    /// `a && x instanceof T name && b`, where a later operand reads `name`, as an expression:
+    /// `a && <x as a T>.is_some_and(|name| b)`. `None` when no pattern of the chain binds.
+    pub(super) fn bound_and(&mut self, e: &'a Expr) -> Option<Code> {
+        let mut parts = Vec::new();
+        conjuncts(e, &mut parts);
+        let binds = |k: usize| {
+            pattern(parts[k]).is_some_and(|(_, _, name)| parts[k + 1..].iter().any(|l| mentions(l, name)))
+        };
+        if !(0..parts.len()).any(binds) {
+            return None;
+        }
+        Some(Code::new(self.and_chain(&parts), AND))
+    }
+
+    fn and_chain(&mut self, parts: &[&'a Expr]) -> String {
+        let mut texts = Vec::new();
+        for (k, part) in parts.iter().enumerate() {
+            if let Some((value, ty, name)) = pattern(part)
+                && parts[k + 1..].iter().any(|l| mentions(l, name))
+            {
+                let source = self.pattern_source(value, ty);
+                let rest = self.and_chain(&parts[k + 1..]);
+                texts.push(format!("{source}.is_some_and(|{}| {rest})", self.local(name)));
+                break;
+            }
+            texts.push(self.expr(part).at(AND + 1));
+        }
+        texts.join(" && ")
+    }
+
+    /// `if (!(x instanceof T name)) return ..;` (or `break`, `continue`): the rest of the block
+    /// sees `name`, bound with `let Some(name) = <x as a T> else { .. };`. Returns false, emitting
+    /// nothing, when `stmt` is not of that form or the rest does not read `name`.
+    pub(super) fn early_pattern_exit(&mut self, stmt: &'a Stmt, rest: &[Stmt]) -> bool {
+        let Stmt::If { cond, then, otherwise: None } = stmt else { return false };
+        let Some((value, ty, name)) = negated_pattern(cond) else { return false };
+        if !exits(then) || !rest.iter().any(|s| mentions_stmt(s, name)) {
+            return false;
+        }
+        let source = self.pattern_source(value, ty);
+        self.line(&format!("let Some({}) = {source} else {{", self.local(name)));
+        self.nested(then);
+        self.line("};");
+        true
     }
 
     /// `if (s == null) return ..;` (or `break`, `continue`): the rest of the block sees `s` as

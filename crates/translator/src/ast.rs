@@ -6,6 +6,7 @@ use std::fmt;
 mod charsets;
 mod code_point;
 mod counting;
+mod hierarchy;
 mod java_arrays;
 mod natives;
 mod strings;
@@ -13,6 +14,7 @@ mod unsigned;
 pub use charsets::*;
 pub use code_point::*;
 pub use counting::*;
+pub use hierarchy::*;
 pub use java_arrays::*;
 pub use natives::*;
 pub use strings::*;
@@ -33,8 +35,10 @@ pub enum Type {
     Void,
     /// An array type such as `int[]` or `String[][]`.
     Array(&'static Type),
-    /// A class declared in the translated program, by name.
-    Class(&'static str),
+    /// A class declared in the translated program, by name, with the type arguments of a generic
+    /// class that is a Rust generic (see `lower::generics`): `Box<Integer>` is
+    /// `Class("Box", [Integer])`. An erased generic class has none.
+    Class(&'static str, &'static [Type]),
     /// An enum declared in the translated program, by name. Its values are plain Rust enums.
     Enum(&'static str),
     /// The type of `null`.
@@ -74,7 +78,20 @@ impl Type {
     }
 
     pub fn class(name: &str) -> Type {
-        Type::Class(interned_name(name))
+        Type::Class(interned_name(name), &[])
+    }
+
+    /// A generic class with its type arguments: `Box<Integer>`.
+    pub fn generic(name: &str, args: &[Type]) -> Type {
+        Type::Class(interned_name(name), intern_types(args))
+    }
+
+    /// The type arguments of a generic class's type; none for any other type.
+    pub fn args(self) -> &'static [Type] {
+        match self {
+            Type::Class(_, args) => args,
+            _ => &[],
+        }
     }
 
     /// The type of an enum declared in the file.
@@ -115,7 +132,7 @@ impl Type {
             self,
             Type::String
                 | Type::Array(_)
-                | Type::Class(_)
+                | Type::Class(..)
                 | Type::Null
                 | Type::Boxed(_)
                 | Type::StringBuilder
@@ -148,6 +165,22 @@ fn interned_name(name: &str) -> &'static str {
     }
 }
 
+fn intern_types(types: &[Type]) -> &'static [Type] {
+    if types.is_empty() {
+        return &[];
+    }
+    static LISTS: std::sync::Mutex<Vec<&'static [Type]>> = std::sync::Mutex::new(Vec::new());
+    let mut lists = LISTS.lock().unwrap();
+    match lists.iter().find(|l| **l == types) {
+        Some(l) => l,
+        None => {
+            let l: &'static [Type] = Box::leak(types.to_vec().into_boxed_slice());
+            lists.push(l);
+            l
+        }
+    }
+}
+
 fn intern(ty: Type) -> &'static Type {
     static TYPES: std::sync::Mutex<Vec<&'static Type>> = std::sync::Mutex::new(Vec::new());
     let mut types = TYPES.lock().unwrap();
@@ -175,7 +208,11 @@ impl fmt::Display for Type {
             Type::String => f.write_str("String"),
             Type::Void => f.write_str("void"),
             Type::Array(element) => write!(f, "{element}[]"),
-            Type::Class(name) | Type::Enum(name) => f.write_str(name),
+            Type::Class(name, []) | Type::Enum(name) => f.write_str(name),
+            Type::Class(name, args) => {
+                let args: Vec<String> = args.iter().map(Type::to_string).collect();
+                write!(f, "{name}<{}>", args.join(", "))
+            }
             Type::Null => f.write_str("null"),
             Type::StringBuilder => f.write_str("StringBuilder"),
             Type::Charset => f.write_str("Charset"),
@@ -207,6 +244,57 @@ pub struct Class {
     pub name: String,
     pub types: Vec<TypeDecl>,
     pub methods: Vec<Method>,
+    /// Subtypes and overriders, computed from the types and methods (see `hierarchy`).
+    pub hierarchy: Hierarchy,
+}
+
+/// What kind of type a declaration is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeKind {
+    Class,
+    Interface,
+    Enum,
+    /// A class of the runtime whose values can be `Object`s: `String` and the boxed classes. The
+    /// program never declares one: lowering adds them with `Object` (see `OBJECT`).
+    Runtime,
+    /// A type variable of a generic class or method that is a Rust generic (see
+    /// `lower::generics`). Its values are of the Rust type parameter, which nothing implements.
+    Param,
+}
+
+/// The name of the type of `java.lang.Object`'s values. Lowering adds it to a program that uses
+/// `Object`, as an interface that every other type implements, with an abstract `equals` and
+/// `hashCode` that the program's own override, and the `Runtime` types beside it.
+pub const OBJECT: &str = "Object";
+
+/// The name of the type of `java.lang.Comparable`'s values, which lowering adds to a program that
+/// uses it as a type, beside `OBJECT`.
+pub const COMPARABLE: &str = "Comparable";
+
+/// The runtime classes whose values an `Object` can hold, with the Java type of those values.
+pub fn runtime_values() -> [(&'static str, Type); 9] {
+    [
+        ("java.lang.String", Type::String),
+        ("java.lang.Integer", Type::boxed(Type::Int)),
+        ("java.lang.Long", Type::boxed(Type::Long)),
+        ("java.lang.Double", Type::boxed(Type::Double)),
+        ("java.lang.Float", Type::boxed(Type::Float)),
+        ("java.lang.Short", Type::boxed(Type::Short)),
+        ("java.lang.Byte", Type::boxed(Type::Byte)),
+        ("java.lang.Character", Type::boxed(Type::Char)),
+        ("java.lang.Boolean", Type::boxed(Type::Boolean)),
+    ]
+}
+
+/// The runtime class whose values are of type `ty`, a primitive standing for its box.
+pub fn runtime_name(ty: Type) -> Option<&'static str> {
+    let ty = if ty.is_numeric() || ty == Type::Boolean { Type::boxed(ty) } else { ty };
+    runtime_values().into_iter().find(|(_, t)| *t == ty).map(|(name, _)| name)
+}
+
+/// The Java type of the values of runtime class `name`.
+pub fn runtime_type(name: &str) -> Option<Type> {
+    runtime_values().into_iter().find(|(n, _)| *n == name).map(|(_, t)| t)
 }
 
 /// A class of the file: its fields. Methods and constructors are in `Class::methods`.
@@ -214,12 +302,22 @@ pub struct TypeDecl {
     pub name: String,
     /// The class's package, such as `com.example`; empty for the unnamed package.
     pub package: String,
+    pub kind: TypeKind,
+    /// An abstract class or an interface, which has no objects of its own.
+    pub is_abstract: bool,
+    /// The superclass, an index into `Class::types`; `None` for a class that extends `Object`,
+    /// interfaces and enums.
+    pub extends: Option<usize>,
+    /// The interfaces a class implements or an interface extends, indexes into `Class::types`.
+    pub implements: Vec<usize>,
     /// Instance fields, in declaration order.
     pub fields: Vec<Field>,
     /// Static fields, in declaration order.
     pub statics: Vec<Field>,
     /// The constants of an enum, in declaration order; `None` for a class.
     pub enum_constants: Option<Vec<EnumConstant>>,
+    /// The type parameters of a generic class that is a Rust generic, as types of kind `Param`.
+    pub type_params: Vec<Type>,
 }
 
 /// One constant of an enum: `PLANET(3.0, 4.0)`.
@@ -252,6 +350,13 @@ pub struct Method {
     /// The index of the declaring class in `Class::types`.
     pub class: usize,
     pub pos: Pos,
+    /// A method without a body: abstract, or an interface method that is not a default method.
+    pub is_abstract: bool,
+    /// The methods of the program that this one overrides, as javac lists them (indexes into
+    /// `Class::methods`).
+    pub overrides: Vec<usize>,
+    /// The type parameters of a generic method that is a Rust generic, as types of kind `Param`.
+    pub type_params: Vec<Type>,
 }
 
 pub struct Param {
@@ -368,6 +473,13 @@ pub enum ExprKind {
         prefix: bool,
     },
     Cast(Type, Box<Expr>),
+    /// `value instanceof T`, or with a pattern, `value instanceof T binding`, which binds the
+    /// variable `binding` where the test is true.
+    InstanceOf {
+        value: Box<Expr>,
+        ty: Type,
+        binding: Option<String>,
+    },
     /// `new T[d1][d2]...` with the given sizes; `ty` is the full array type.
     NewArray(Vec<Expr>),
     /// `{a, b, c}` or `new T[] {a, b, c}`; `ty` is the array type.
@@ -404,15 +516,24 @@ pub enum ExprKind {
         args: Vec<Expr>,
         ctor: Option<usize>,
     },
-    /// `receiver.name(args)`, a call of an instance method; `resolved` as for `Call`.
+    /// `receiver.name(args)`, a call of an instance method; `resolved` as for `Call`. A call
+    /// runs the implementation of the receiver's class (see `Hierarchy::targets`), except
+    /// `super.name(args)` (`is_super`), whose receiver is `this` and which runs `resolved`.
     MethodCall {
         receiver: Box<Expr>,
         name: String,
         args: Vec<Expr>,
         resolved: Option<usize>,
+        is_super: bool,
     },
     /// `this(args)`, a constructor calling another constructor of its class.
     ThisCall {
+        args: Vec<Expr>,
+        resolved: Option<usize>,
+    },
+    /// `super(args)`, the first statement of a constructor of a class whose superclass is in
+    /// the program: it builds the superclass's part of the object.
+    SuperInit {
         args: Vec<Expr>,
         resolved: Option<usize>,
     },
@@ -487,6 +608,9 @@ pub enum Builtin {
     CharForDigit,
     /// A method of the native layer: `System.arraycopy`, `Math.sin` and the like.
     Native(Native),
+    /// `x.toString()` of `Object` on an object (the receiver is the argument): the text that
+    /// printing it shows, its class's `toString` or `Object`'s `Name@hash`.
+    ObjectText,
     /// `e.ordinal()`; the receiver is the first argument.
     EnumOrdinal,
     /// `e.name()` and `e.toString()`, which the enum's default `toString` returns as `name()`.
@@ -683,6 +807,7 @@ pub fn has_effects(e: &Expr) -> bool {
                 | ExprKind::MethodCall { .. }
                 | ExprKind::New { .. }
                 | ExprKind::ThisCall { .. }
+                | ExprKind::SuperInit { .. }
                 | ExprKind::Assign { .. }
                 | ExprKind::IncDec { .. }
                 | ExprKind::Builtin(
@@ -775,6 +900,7 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     match &e.kind {
         ExprKind::Unary(_, x)
         | ExprKind::Cast(_, x)
+        | ExprKind::InstanceOf { value: x, .. }
         | ExprKind::Length(x)
         | ExprKind::Field { object: x, .. } => visit_expr(x, f),
         ExprKind::Assign { target, value, .. } => {
@@ -799,7 +925,8 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         ExprKind::Call { args, .. }
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }
-        | ExprKind::ThisCall { args, .. } => args.iter().for_each(|a| visit_expr(a, f)),
+        | ExprKind::ThisCall { args, .. }
+        | ExprKind::SuperInit { args, .. } => args.iter().for_each(|a| visit_expr(a, f)),
         ExprKind::Switch { selector, cases } => {
             visit_expr(selector, f);
             for case in cases {

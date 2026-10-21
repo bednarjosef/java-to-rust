@@ -63,11 +63,13 @@ pub(super) struct Scan {
 }
 
 /// A call and what each argument is.
+#[derive(Clone)]
 pub(super) struct Call {
     pub callee: usize,
     pub args: Vec<Arg>,
 }
 
+#[derive(Clone)]
 pub(super) struct Arg {
     /// The array variable the argument is, or whose row it is.
     pub name: Option<String>,
@@ -497,7 +499,8 @@ impl<'m> Walk<'m> {
             }
             ExprKind::Call { args, resolved: Some(callee), .. }
             | ExprKind::New { args, ctor: Some(callee), .. }
-            | ExprKind::ThisCall { args, resolved: Some(callee) } => self.call(*callee, args),
+            | ExprKind::ThisCall { args, resolved: Some(callee) }
+            | ExprKind::SuperInit { args, resolved: Some(callee) } => self.call(*callee, args),
             ExprKind::MethodCall { receiver, args, resolved: Some(callee), .. } => {
                 self.expr(receiver);
                 self.call(*callee, args);
@@ -509,11 +512,13 @@ impl<'m> Walk<'m> {
             ExprKind::Call { args, resolved: None, .. }
             | ExprKind::New { args, ctor: None, .. }
             | ExprKind::ThisCall { args, resolved: None }
+            | ExprKind::SuperInit { args, resolved: None }
             | ExprKind::Builtin(_, args)
             | ExprKind::NewArray(args)
             | ExprKind::ArrayLit(args) => args.iter().for_each(|a| self.expr(a)),
             ExprKind::Unary(_, x) | ExprKind::Cast(_, x) => self.expr(x),
             ExprKind::Field { object, .. } => self.expr(object),
+            ExprKind::InstanceOf { value, .. } => self.expr(value),
             ExprKind::Binary(_, l, r) => {
                 self.expr(l);
                 self.expr(r);
@@ -613,6 +618,7 @@ fn calls_with(e: &Expr, name: &str) -> bool {
         ExprKind::Call { args, .. }
         | ExprKind::New { args, .. }
         | ExprKind::ThisCall { args, .. }
+        | ExprKind::SuperInit { args, .. }
         | ExprKind::MethodCall { args, .. }
         | ExprKind::Builtin(_, args) => found |= args.iter().any(|a| mentions(a, name)),
         _ => {}
@@ -632,6 +638,7 @@ impl Arg {
             | ExprKind::MethodCall { .. }
             | ExprKind::New { .. }
             | ExprKind::ThisCall { .. }
+            | ExprKind::SuperInit { .. }
             | ExprKind::Assign { .. }
             | ExprKind::IncDec { .. }
             | ExprKind::Builtin(Builtin::ArraysFill | Builtin::ArraysSort | Builtin::Arrays(_), _) => {

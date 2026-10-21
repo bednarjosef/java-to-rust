@@ -25,6 +25,9 @@ impl<'a> Gen<'a> {
                 }
                 continue;
             }
+            if self.early_pattern_exit(stmt, rest) {
+                continue;
+            }
             match stmt {
                 _ if tail && rest.is_empty() && self.tail_value(stmt) => self.tail_stmt(stmt),
                 _ => self.stmt(stmt, rest),
@@ -152,10 +155,18 @@ impl<'a> Gen<'a> {
         self.nested(body);
         self.indent += 1;
         for u in update {
-            self.effect(u);
+            self.update_effect(u);
         }
         self.indent -= 1;
         self.close();
+    }
+
+    /// An update expression of a `for` loop, a statement of its own.
+    pub(super) fn update_effect(&mut self, u: &'a Expr) {
+        let conflicts = self.conflicts(&[u]) || self.reassigns_through_borrow(u);
+        let outer = std::mem::replace(&mut self.guarded, conflicts);
+        self.effect(u);
+        self.guarded = outer;
     }
 
     pub(super) fn for_loop(
@@ -262,6 +273,15 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The condition of an `if` that guards `then`: a let chain where it binds (see `let_chain`),
+    /// and the names it narrows for `then`, which the caller unnarrows after it.
+    pub(super) fn guard(&mut self, cond: &'a Expr, then: &'a Stmt) -> (String, Vec<String>) {
+        match self.let_chain(cond, &[then], &[]) {
+            Some(chain) => chain,
+            None => (self.condition(cond), Vec::new()),
+        }
+    }
+
     /// The condition of an `if` or `while`, which may not start with a block in Rust.
     pub(super) fn condition(&mut self, cond: &'a Expr) -> String {
         let code = self.expr(cond);
@@ -276,7 +296,7 @@ impl<'a> Gen<'a> {
                 if op.is_comparison()
                     && !l.ty.is_floating()
                     && !r.ty.is_floating()
-                    && !matches!(l.ty, Type::Class(_))
+                    && !matches!(l.ty, Type::Class(..))
                     && !is_null_test(*op, l, r) =>
             {
                 let flipped = match op {

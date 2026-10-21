@@ -8,7 +8,7 @@
 
 use super::Facts;
 use crate::ast::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub(super) fn analyze(class: &Class, facts: &mut Facts) {
     for method in &class.methods {
@@ -17,9 +17,17 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) {
             walk.declare(&p.name);
         }
         walk.block(&method.body);
+        // A variable mentioned twice in one statement is not moved there: Rust keeps temporaries
+        // such as a `Ref` from a field read, or the references `format_args!` takes, alive to the
+        // end of the statement, so a move next to another mention would not compile.
+        let mut per_statement: HashMap<(usize, usize), usize> = HashMap::new();
+        for use_ in &walk.uses {
+            *per_statement.entry((use_.var, use_.statement)).or_default() += 1;
+        }
         let mut later = HashSet::new();
         for use_ in walk.uses.iter().rev() {
             if later.insert(use_.var)
+                && per_statement[&(use_.var, use_.statement)] == 1
                 && use_.loops == walk.declared_in[use_.var]
                 && let Some(id) = use_.id
             {
@@ -35,6 +43,8 @@ struct Use {
     var: usize,
     /// How many loops enclose the mention.
     loops: usize,
+    /// The statement (or condition) the mention is in.
+    statement: usize,
 }
 
 /// The mentions of variables in evaluation order. Each declaration is a variable of its own, so
@@ -46,6 +56,8 @@ struct Walk {
     /// How many loops enclose each variable's declaration.
     declared_in: Vec<usize>,
     loops: usize,
+    /// The number of the statement being walked.
+    statement: usize,
     uses: Vec<Use>,
 }
 
@@ -57,7 +69,7 @@ impl Walk {
 
     fn mention(&mut self, name: &str, id: Option<ExprId>) {
         if let Some(&(_, var)) = self.scope.iter().rev().find(|(n, _)| n == name) {
-            self.uses.push(Use { id, var, loops: self.loops });
+            self.uses.push(Use { id, var, loops: self.loops, statement: self.statement });
         }
     }
 
@@ -75,17 +87,23 @@ impl Walk {
         self.scope.truncate(mark);
     }
 
+    /// An expression a statement holds directly: a statement of its own for Rust's temporaries.
+    fn top(&mut self, e: &Expr) {
+        self.statement += 1;
+        self.expr(e);
+    }
+
     fn stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Local { name, init, .. } => {
                 if let Some(e) = init {
-                    self.expr(e);
+                    self.top(e);
                 }
                 self.declare(name);
             }
-            Stmt::Expr(e) | Stmt::Return(Some(e), _) => self.expr(e),
+            Stmt::Expr(e) | Stmt::Return(Some(e), _) => self.top(e),
             Stmt::If { cond, then, otherwise } => {
-                self.expr(cond);
+                self.top(cond);
                 self.scoped(then);
                 if let Some(o) = otherwise {
                     self.scoped(o);
@@ -93,14 +111,14 @@ impl Walk {
             }
             Stmt::While { cond, body } => {
                 self.loops += 1;
-                self.expr(cond);
+                self.top(cond);
                 self.scoped(body);
                 self.loops -= 1;
             }
             Stmt::DoWhile { body, cond } => {
                 self.loops += 1;
                 self.scoped(body);
-                self.expr(cond);
+                self.top(cond);
                 self.loops -= 1;
             }
             Stmt::For { init, cond, update, body } => {
@@ -110,17 +128,17 @@ impl Walk {
                 }
                 self.loops += 1;
                 if let Some(c) = cond {
-                    self.expr(c);
+                    self.top(c);
                 }
                 self.scoped(body);
                 for u in update {
-                    self.expr(u);
+                    self.top(u);
                 }
                 self.loops -= 1;
                 self.scope.truncate(mark);
             }
             Stmt::ForEach { name, array, body, .. } => {
-                self.expr(array);
+                self.top(array);
                 self.loops += 1;
                 let mark = self.scope.len();
                 self.declare(name);
@@ -129,7 +147,7 @@ impl Walk {
                 self.loops -= 1;
             }
             Stmt::Switch { selector, cases } => {
-                self.expr(selector);
+                self.top(selector);
                 // The cases share one scope. A switch with fall-through is a `loop` in Rust, which
                 // would not let a value move inside it, so the cases count as a loop.
                 self.loops += 1;
@@ -143,7 +161,7 @@ impl Walk {
                 self.loops -= 1;
             }
             Stmt::Labeled { body, .. } => self.scoped(body),
-            Stmt::Yield(e) => self.expr(e),
+            Stmt::Yield(e) => self.top(e),
             Stmt::Return(None, _)
             | Stmt::Break
             | Stmt::Continue
@@ -169,8 +187,14 @@ impl Walk {
                 self.expr(value);
             }
             ExprKind::IncDec { target, .. } => self.place(target),
+            // A pattern's variable is in scope where the test has passed, after it.
+            ExprKind::InstanceOf { value, binding: Some(name), .. } => {
+                self.expr(value);
+                self.declare(name);
+            }
             ExprKind::Unary(_, x)
             | ExprKind::Cast(_, x)
+            | ExprKind::InstanceOf { value: x, .. }
             | ExprKind::Length(x)
             | ExprKind::Field { object: x, .. } => self.expr(x),
             ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) => {
@@ -178,7 +202,15 @@ impl Walk {
                 self.expr(r);
             }
             ExprKind::Conditional(c, a, b) => {
+                // An `if` drops the temporaries of its condition before a branch runs, so a
+                // branch may move what the condition reads; a null test narrows the variable
+                // instead, which keeps it borrowed.
+                let outer = self.statement;
+                if !mentions_null(c) {
+                    self.statement = usize::MAX - self.uses.len();
+                }
                 self.expr(c);
+                self.statement = outer;
                 self.expr(a);
                 self.expr(b);
             }
@@ -190,6 +222,7 @@ impl Walk {
             | ExprKind::Builtin(_, args)
             | ExprKind::New { args, .. }
             | ExprKind::ThisCall { args, .. }
+            | ExprKind::SuperInit { args, .. }
             | ExprKind::NewArray(args)
             | ExprKind::ArrayLit(args) => args.iter().for_each(|a| self.expr(a)),
             // Anything else: its variables count as mentioned, none of them as a last use.
@@ -212,4 +245,11 @@ impl Walk {
             Place::Static { .. } => {}
         }
     }
+}
+
+/// Whether an expression compares something with `null`.
+fn mentions_null(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| found |= matches!(x.kind, ExprKind::Null));
+    found
 }
