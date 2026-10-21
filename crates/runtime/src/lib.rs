@@ -80,7 +80,10 @@ pub use math::*;
 pub use monitor::*;
 pub use natives::*;
 pub use null::{Handle, OrNull, non_null, null_enum, or_null, same, try_non_null, try_non_null_message};
-pub use out::{Out, eprint_chars, eprintln_chars, flush, out, print_chars, println_chars, write_byte};
+pub use out::{
+    Out, drain_stdout, eprint_chars, eprintln_chars, err, err_flush, flush, out, print_chars, println_chars,
+    standard_close, standard_flush, standard_write, standard_write_bytes, write_byte,
+};
 pub use parse_range::{parse_range, parse_unsigned_range, try_parse_range, try_parse_unsigned_range};
 pub use regex::{matches_all, replace_all, replace_first, split};
 pub use statics::*;
@@ -262,7 +265,8 @@ pub fn string_length(s: &str) -> i32 {
 
 /// Java's `System.exit`.
 pub fn exit(code: i32) -> ! {
-    flush();
+    // What `System.out` still buffers is lost, as Java loses it.
+    drain_stdout();
     std::process::exit(code)
 }
 

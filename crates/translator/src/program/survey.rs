@@ -20,7 +20,8 @@
 use super::Program;
 use super::reach::{
     CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, component_array, created_by_name, has_flag,
-    live_branch, members, outside, provided, replaced, runtime_arrays_call, symbol_type, text, untranslated,
+    live_branch, members, outside, provided, replaced, runtime_arrays_call, runtime_stream_call,
+    strip_arguments, symbol_type, text, untranslated,
 };
 use crate::ast::{Pos, runtime_native};
 use serde_json::{Value, json};
@@ -163,6 +164,9 @@ struct Scan<'a> {
     features: BTreeMap<&'static str, String>,
     calls: BTreeSet<String>,
     refs: BTreeSet<String>,
+    /// The calls that the runtime makes itself on `System.out` and `System.err`
+    /// (`runtime_stream_call`), which reachability does not follow.
+    stream_calls: BTreeSet<MethodKey>,
     /// Whether the program's streams stay sequential (`Reach::sequential`).
     sequential: bool,
 }
@@ -188,6 +192,9 @@ pub(super) struct Census {
     /// Methods of the runtime's classes that reachable code calls, by part, with the number of
     /// pieces of code that call each.
     runtime: BTreeMap<(Part, String), usize>,
+    /// The calls that the runtime makes on `System.out` and `System.err`: methods of the
+    /// runtime, as those of `Reach::external` are.
+    stream_calls: BTreeSet<MethodKey>,
     /// Reachable methods that have no body in Java: the JVM implements them. With each, its
     /// node in the call graph and whether the runtime implements it (`ast::runtime_native`).
     pub(super) natives: Vec<(Part, String, String, bool)>,
@@ -267,9 +274,11 @@ impl Census {
                 features: header.clone(),
                 calls: BTreeSet::new(),
                 refs: BTreeSet::new(),
+                stream_calls: BTreeSet::new(),
                 sequential: reach.sequential,
             };
             self.body(member, &mut scan);
+            self.stream_calls.append(&mut scan.stream_calls);
             for call in scan.calls {
                 *self.runtime.entry((origin.part, call)).or_default() += 1;
             }
@@ -352,6 +361,12 @@ impl Census {
                     } else if let Some(feature) = untranslated(owner) {
                         scan.feature(feature, node);
                         scan.calls.insert(format!("({feature}) {owner}.{name}"));
+                    } else if runtime_stream_call(node) {
+                        let simple = owner.rsplit('.').next().unwrap_or(owner);
+                        scan.calls.insert(format!("{simple}.{name}"));
+                        let key =
+                            (strip_arguments(owner), name.to_string(), text(symbol, "type").to_string());
+                        scan.stream_calls.insert(key);
                     } else if provided(owner)
                         || replaced(owner, name, text(symbol, "type"))
                         || runtime_arrays_call(node)
@@ -647,8 +662,12 @@ impl Census {
 
     fn json(&self, reach: &Reach, main: &str) -> Value {
         // The methods of `Object` that a translated class does not override are `Object`'s.
-        let external: BTreeSet<&MethodKey> =
-            reach.external.iter().filter(|key| outside(&key.0) || !self.declared.contains(&key.0)).collect();
+        let external: BTreeSet<&MethodKey> = reach
+            .external
+            .iter()
+            .filter(|key| outside(&key.0) || !self.declared.contains(&key.0))
+            .chain(&self.stream_calls)
+            .collect();
         json!({
             "main": main,
             "reachable": {

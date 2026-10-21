@@ -504,12 +504,17 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         .map(|&(id, ..)| id)
         .collect();
 
-    // A static initializer's exception reaches the program as `ExceptionInInitializerError`,
-    // which ends it here: one that a `catch` (of `Error`, `LinkageError`, `Throwable`) or a
-    // `finally` around a use of the class would see is not translated.
-    let initializer_error = Kind::Runtime(INITIALIZER_ERROR);
+    // A static initializer's exception reaches the program as `ExceptionInInitializerError`, and
+    // a later use of the class as `NoClassDefFoundError`: a `try` that may see either (a `catch`
+    // of one of them or of an `Error` above them, or a `finally`) is not translated. A `catch`
+    // of other classes, such as `ClassCastException`, never sees them.
+    let linkage = [Kind::Runtime(INITIALIZER_ERROR), Kind::Runtime("java.lang.NoClassDefFoundError")];
     for (m, method) in class.methods.iter().enumerate() {
-        if initializer[m] && !guarded[m] && !escapes[m].is_empty() && observed(&initializer_error, &seen[m]) {
+        if initializer[m]
+            && !guarded[m]
+            && !escapes[m].is_empty()
+            && linkage.iter().any(|k| observed(k, &seen[m]))
+        {
             reject(method.pos, "a static initializer that throws inside a `try` not supported yet");
         }
     }
@@ -748,8 +753,11 @@ fn stmt_points(
                 ExprKind::Cast(_, inner) => inner,
                 _ => e,
             };
-            // A value that may be null throws a `NullPointerException` instead, by `throw` itself.
-            if matches!(thrown.kind, ExprKind::Null) || maybe_null(facts, m, thrown) {
+            // A value that may be null throws a `NullPointerException` instead, by `throw` itself,
+            // unless an enclosing condition tested it.
+            if matches!(thrown.kind, ExprKind::Null)
+                || (maybe_null(facts, m, thrown) && !is_tested(thrown, safe))
+            {
                 let raise =
                     Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: thrown.id };
                 out.push(Point {
@@ -775,9 +783,8 @@ fn stmt_points(
                 catches: catches.iter().flat_map(|c| c.types.iter().copied()).collect(),
                 finally: finally.is_some(),
             });
-            for b in body {
-                stmt_points(class, facts, m, b, frames, safe, out);
-            }
+            // Each block narrows as it goes, as any block does (`block_points`).
+            block_points(class, facts, m, body, frames, safe, out);
             frames.pop();
             // What a `catch` clause throws leaves the `try`, through its `finally`.
             frames.push(Frame {
@@ -786,13 +793,11 @@ fn stmt_points(
                 finally: finally.is_some(),
             });
             for catch in catches {
-                for b in &catch.body {
-                    stmt_points(class, facts, m, b, frames, safe, out);
-                }
+                block_points(class, facts, m, &catch.body, frames, safe, out);
             }
             frames.pop();
-            for b in finally.iter().flatten() {
-                stmt_points(class, facts, m, b, frames, safe, out);
+            if let Some(finally) = finally {
+                block_points(class, facts, m, finally, frames, safe, out);
             }
         }
         Stmt::Block(stmts) => block_points(class, facts, m, stmts, frames, safe, out),
@@ -1015,9 +1020,11 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
     let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..));
     match &x.kind {
         ExprKind::Builtin(Builtin::ClassName { .. } | Builtin::ClassLiteralName { .. }, _) => Vec::new(),
-        // The class, identity or ordinal of an object, which no `toString` gives.
+        // The class, identity or ordinal of an object, which no `toString` gives, and its monitor.
         ExprKind::Builtin(
-            Builtin::GetClass
+            Builtin::MonitorEnter
+            | Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. } | Native::HoldsLock)
+            | Builtin::GetClass
             | Builtin::SameClass { .. }
             | Builtin::ClassMethod(_)
             | Builtin::ComparableClassFor

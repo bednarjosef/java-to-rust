@@ -8,14 +8,15 @@
 //! just the programs whose translation changed. Java's results are kept the same way, in
 //! `java_cache`, so a program runs on Java again only when its sources or the Java version change.
 //! `CORPUS_JAVA_FRESH=1` runs every program on Java. `CORPUS_FILTER=text` runs only the programs
-//! whose name contains `text`.
+//! whose name contains `text`. A single file gets the lines of `Name.args` next to it as its
+//! arguments and reads `Name.input` next to it on standard input, which is empty without one.
 
 #[path = "corpus/java_cache.rs"]
 mod java_cache;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -35,6 +36,17 @@ struct Program {
     main: Option<String>,
     /// The command-line arguments both runs get: the lines of `Name.args` next to a single file.
     args: Vec<String>,
+    /// What both runs read on standard input: the file `Name.input` next to a single file. Without
+    /// one, standard input is empty.
+    input: Option<PathBuf>,
+}
+
+/// Standard input of a run: the program's input file, or nothing.
+fn stdin_of(p: &Program) -> Stdio {
+    match &p.input {
+        Some(path) => Stdio::from(std::fs::File::open(path).expect("the input file is readable")),
+        None => Stdio::null(),
+    }
 }
 
 #[derive(PartialEq)]
@@ -114,7 +126,8 @@ fn programs(root: &Path) -> Vec<Program> {
             let stem = java.file_stem().unwrap().to_string_lossy().to_lowercase();
             let group = dir.file_name().unwrap().to_string_lossy().to_string();
             let args = read_args(&java);
-            out.push(Program { name: format!("{group}-{stem}"), java, main: None, args });
+            let input = Some(java.with_extension("input")).filter(|i| i.is_file());
+            out.push(Program { name: format!("{group}-{stem}"), java, main: None, args, input });
         }
     }
     out
@@ -137,7 +150,7 @@ fn projects(root: &Path) -> Vec<Program> {
         .map(|dir| {
             let main = std::fs::read_to_string(dir.join("main")).unwrap().trim().to_string();
             let name = format!("projects-{}", dir.file_name().unwrap().to_string_lossy());
-            Program { name, java: dir.join("src"), main: Some(main), args: Vec::new() }
+            Program { name, java: dir.join("src"), main: Some(main), args: Vec::new(), input: None }
         })
         .collect()
 }
@@ -154,6 +167,7 @@ fn run_java(p: &Program, classes: &Path) -> Output {
         return java()
             .arg(&p.java)
             .args(&p.args)
+            .stdin(stdin_of(p))
             .output()
             .expect("running `java` failed; the corpus test needs a JDK on PATH");
     };
@@ -294,7 +308,7 @@ fn check(
         };
         return Err(Failure { summary: "does not compile".to_string(), details });
     };
-    let actual = run(Command::new(binary).args(&p.args).output().unwrap());
+    let actual = run(Command::new(binary).args(&p.args).stdin(stdin_of(p)).output().unwrap());
     if actual == *expected {
         return Ok(());
     }

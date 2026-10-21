@@ -235,6 +235,14 @@ impl<'t> Lowering<'t> {
     /// `Class.name`. `None` for anything else, including fields of library classes.
     pub(super) fn field_place(&self, node: Node<'t>) -> Result<Option<Place>, Error> {
         let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD") else { return Ok(None) };
+        // `System.in`, `System.out` and `System.err` as values: the translator's objects, which
+        // a translation with the JDK's sources has (`program::standard_stream_field`).
+        if symbol.owner == "java.lang.System"
+            && let Some((holder, field)) = crate::program::standard_stream_field(symbol.name)
+            && let Some(class) = self.type_index(holder)
+        {
+            return Ok(Some(Place::Static { class, name: field.to_string() }));
+        }
         let Some(class) = self.type_index(symbol.owner).or_else(|| self.body_field_owner(&symbol)) else {
             return Ok(None);
         };
@@ -294,6 +302,17 @@ impl<'t> Lowering<'t> {
         }
         match self.field_place(node)? {
             Some(place) => Ok(read(place)),
+            None if node.symbol().is_some_and(|s| {
+                s.owner == "java.lang.System" && crate::program::standard_stream_field(s.name).is_some()
+            }) =>
+            {
+                let name = node.str("identifier");
+                let message = format!(
+                    "`System.{name}` as a value needs the JDK's sources: translate the program with \
+                     `--main` and `--library`"
+                );
+                error(node.pos(), message)
+            }
             None => unsupported(node, "fields"),
         }
     }

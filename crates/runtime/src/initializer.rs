@@ -5,9 +5,10 @@ use std::fmt;
 
 /// `throw e` in a static initializer that nothing catches: the program ends as Java's does.
 pub fn throw_initializer(e: impl fmt::Display) -> ! {
-    crate::flush();
-    eprintln!("Exception in thread \"main\" java.lang.ExceptionInInitializerError");
-    eprintln!("Caused by: {e}");
+    crate::out::eprint_text(&format!(
+        "Exception in thread \"main\" java.lang.ExceptionInInitializerError\nCaused by: {e}\n"
+    ));
+    crate::drain_stdout();
     std::process::exit(1)
 }
 

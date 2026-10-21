@@ -190,6 +190,12 @@ impl<'a> Gen<'a> {
                 let units = call(self, "units", vec![s]).text;
                 Code::atom(format!("{}({units})", self.array_maker("from_vec")))
             }
+            StringOp::GetChars => {
+                let s = self.text_ref(&args[0]);
+                let [begin, end, dst_begin] = self.hoisted_ints(args, [1, 2, 4]);
+                let dst = self.array_arg(&args[3], true);
+                self.may_fail(id, "get_chars", "", &format!("{s}, {begin}, {end}, {dst}, {dst_begin}"))
+            }
             StringOp::CharCodes => {
                 let s = self.text_ref(&args[0]);
                 let units = call(self, "units", vec![s]).text;
@@ -249,9 +255,13 @@ impl<'a> Gen<'a> {
             StringOp::FromBytes => {
                 let bytes = self.slice_of(&args[0]);
                 match args.get(1..) {
-                    Some([offset, length, charset]) => {
+                    Some([offset, length, rest @ ..]) if rest.len() <= 1 => {
                         let (offset, length) = (self.int_arg(offset), self.int_arg(length));
-                        let charset = self.charset_arg(charset);
+                        // Without a charset, the default one, which is UTF-8.
+                        let charset = match rest {
+                            [charset] => self.charset_arg(charset),
+                            _ => format!("{}::Utf8", self.runtime("Charset")),
+                        };
                         call(self, "new_string_range", vec![bytes, offset, length, charset])
                     }
                     Some([charset]) => {

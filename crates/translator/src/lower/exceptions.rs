@@ -107,11 +107,26 @@ const RAISED: &[(&str, &[&str])] = &[
         "java.lang.StringIndexOutOfBoundsException",
         &[
             "java.lang.String#charAt",
+            "java.lang.String#getChars",
             "java.lang.String#substring",
             "java.lang.String#valueOf",
             "java.lang.String#copyValueOf",
         ],
     ),
+    // The natives of the descriptor streams (`fd.rs`): reading or writing a closed or failing
+    // descriptor, and opening a file that cannot be opened.
+    (
+        "java.io.IOException",
+        &[
+            "java.io.FileInputStream#read0",
+            "java.io.FileInputStream#readBytes",
+            "java.io.FileInputStream#available0",
+            "java.io.FileInputStream#skip0",
+            "java.io.FileOutputStream#write",
+            "java.io.FileOutputStream#writeBytes",
+        ],
+    ),
+    ("java.io.FileNotFoundException", &["java.io.FileInputStream#open0", "java.io.FileOutputStream#open0"]),
     (
         "java.lang.NumberFormatException",
         &[

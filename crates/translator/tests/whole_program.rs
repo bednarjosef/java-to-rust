@@ -6,10 +6,12 @@
 //! variable the test says it skipped and passes. A program is one `.java` file, or a directory
 //! with a source root `src/` and a file `main` that names the main class, as in
 //! `corpus/projects/`. Translating with the JDK takes a few seconds per program, and the programs
-//! run one at a time; `CORPUS_FILTER=text` runs only those whose name contains `text`.
+//! run one at a time; `CORPUS_FILTER=text` runs only those whose name contains `text`. A program
+//! reads the file `Name.input` next to it (`input` in a directory) on standard input, and nothing
+//! without one.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 struct Program {
     /// The binary name, such as `functionchains`.
@@ -18,6 +20,16 @@ struct Program {
     sources: PathBuf,
     /// The qualified name of the main class.
     main: String,
+    /// The file the runs read on standard input, if there is one.
+    input: Option<PathBuf>,
+}
+
+/// Standard input of a run: the program's input file, or nothing.
+fn stdin_of(p: &Program) -> Stdio {
+    match &p.input {
+        Some(path) => Stdio::from(std::fs::File::open(path).expect("the input file is readable")),
+        None => Stdio::null(),
+    }
 }
 
 /// What a run printed and how it exited.
@@ -41,13 +53,15 @@ fn programs(root: &Path, work: &Path) -> Vec<Program> {
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
         if path.is_dir() {
             let main = std::fs::read_to_string(path.join("main")).unwrap().trim().to_string();
-            out.push(Program { name: stem.to_lowercase(), sources: path.join("src"), main });
+            let input = Some(path.join("input")).filter(|i| i.is_file());
+            out.push(Program { name: stem.to_lowercase(), sources: path.join("src"), main, input });
         } else if path.extension().is_some_and(|e| e == "java") {
             let sources = work.join(stem.to_lowercase()).join("src");
             let _ = std::fs::remove_dir_all(&sources);
             std::fs::create_dir_all(&sources).unwrap();
             std::fs::copy(&path, sources.join(path.file_name().unwrap())).unwrap();
-            out.push(Program { name: stem.to_lowercase(), sources, main: stem });
+            let input = Some(path.with_extension("input")).filter(|i| i.is_file());
+            out.push(Program { name: stem.to_lowercase(), sources, main: stem, input });
         }
     }
     out
@@ -76,7 +90,8 @@ fn run_java(p: &Program, classes: &Path) -> Run {
         .output()
         .expect("running `javac` failed; the test needs a JDK on PATH");
     assert!(javac.status.success(), "javac failed on {}: {}", p.name, String::from_utf8_lossy(&javac.stderr));
-    run(Command::new("java").arg("-cp").arg(classes).arg(&p.main).output().expect("running `java` failed"))
+    let java = Command::new("java").arg("-cp").arg(classes).arg(&p.main).stdin(stdin_of(p)).output();
+    run(java.expect("running `java` failed"))
 }
 
 /// The program's run translated with the JDK's sources, or why it does not get that far.
@@ -109,7 +124,7 @@ fn run_rust(p: &Program, library: &Path, work: &Path) -> Result<Run, String> {
     // The translator names the crate after the main class.
     let crate_name = p.main.rsplit('.').next().unwrap_or_default().to_lowercase();
     let binary = target.join("debug").join(crate_name);
-    Ok(run(Command::new(binary).output().unwrap()))
+    Ok(run(Command::new(binary).stdin(stdin_of(p)).output().unwrap()))
 }
 
 #[test]

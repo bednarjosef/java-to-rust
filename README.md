@@ -316,6 +316,15 @@ A small subset, end to end:
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`), and so are
   `System.out.println(char[])` and `System.err.print`/`println`, which also print a `char[]`.
   `System.err` is written as it is, after `System.out` is flushed, so the two stay in order.
+  The runtime keeps the 128-byte buffer of Java's `System.out` and `System.err`, so a
+  `System.out.write(b)` without a newline waits for a flush and is lost at exit, as in Java.
+- **Standard streams as values** (with the JDK's sources): `System.out`, `System.err` and
+  `System.in` in variables, fields and parameters, wrapped in the JDK's streams, readers and
+  writers, and the program's own subclasses of `OutputStream`, `InputStream` and `PrintStream`.
+  The `java.io` byte streams are translated from the JDK; `PrintStream`, `InputStreamReader` and
+  `OutputStreamWriter` are stand-ins that encode and decode with the runtime's charsets, since
+  the JDK's encoder classes do not translate yet. Design and deviations:
+  [docs/natives-and-input.md](docs/natives-and-input.md), section 5.
 - **Library**: a set of `Math`, `StrictMath`, `Double`, `Float`, `Boolean`, `Integer`, `Long`,
   `Byte`, `Short` and `Character` methods, `String`, `StringBuilder` and `StringBuffer`, and
   `String.format`, all hand-written in the runtime with Java's exact results:
@@ -704,7 +713,9 @@ held as `Object`s it copies when both are arrays of one type and throws `ArraySt
 otherwise), the `Double` and `Float` bit conversions, `Math` and
 `StrictMath`, `System.identityHashCode` and an inherited `hashCode()` (derived from the object's
 address: stable for the object's life, but like Java's different on every run), the clocks,
-`availableProcessors`, the line separator, `System.err` and `System.out.write`/`flush`.
+`availableProcessors`, the line separator, `System.err` and `System.out.write`/`flush`, and
+the four natives under `System.out` and `System.err` as values (`out.rs`, `standard_write` and the
+like).
 `StrictMath` is a port of fdlibm 5.3 and matches Java bit for bit; so does `Math` where HotSpot
 delegates to fdlibm. HotSpot replaces `Math.sin`, `cos`, `tan`, `exp`, `log`, `pow`, `cbrt`,
 `sinh` and `tanh` with its own code, which cannot be ported; they become Rust's methods (the
@@ -720,10 +731,12 @@ JVM's, and `gc()` does nothing. `Runtime.halt` flushes the output and exits with
 hooks. `onSpinWait` and `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
 thread's record, which an interrupt wakes. The runtime's
 descriptor table (`fd.rs`) backs the `FileInputStream`, `FileOutputStream` and `FileDescriptor`
-natives: stdin has its own buffered reader, stdout writes through the buffered `System.out` so
-its order is kept with `println`, stderr is written as it is (unbuffered, like Java's), and files
-are opened by path. Translated programs cannot reach these natives yet: the JDK classes that call
-them need the object model to give each stream its descriptor.
+natives (`open0`, `read0`, `readBytes`, `available0`, `skip0`, `length0`, `position0`,
+`isRegularFile0`, `writeBytes`, `close0`): stdin is the process's descriptor 0, read after
+standard output is written out so that a prompt shows, stdout writes through the buffered
+`System.out` so its order is kept with `println`, stderr is written as it is, and files are opened
+by path. Their failures are the JDK's `IOException` and `FileNotFoundException`, which a `catch`
+sees.
 
 A native method of a translated JDK class is never lowered itself (javac marks it `native`); a
 call of one becomes the runtime function that `ast/natives.rs` names for its class, name and
@@ -755,7 +768,10 @@ Each construct below is rejected at translation with an error that names it:
   identity, that threads may share; `synchronized` on a string, a box, an array, an enum
   constant or a `Class` other than a class literal, where the monitor would be kept.
 
-Also rejected: `Charset.aliases()`, `null` as a `Charset` (and a `Charset` field or array element
+Also rejected: `Scanner` (it reaches `java.util.regex`, which needs
+`Character.UnicodeScript`), `System.out`, `System.err` or `System.in` as a value without the
+JDK's sources, readers and writers in charsets other than UTF-8, US-ASCII, ISO-8859-1, UTF-16BE
+and UTF-16LE (an `UnsupportedOperationException` when one is created), `Charset.aliases()`, `null` as a `Charset` (and a `Charset` field or array element
 that starts out null), catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and
 charsets beyond the six above.
 

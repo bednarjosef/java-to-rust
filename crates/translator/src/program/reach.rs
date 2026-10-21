@@ -110,7 +110,6 @@ pub(super) const OBJECT_METHODS: &[(&str, &str)] =
 /// `System`: their sources are never read, even when a library root has them, as their code
 /// reaches deep into the JVM.
 pub const RUNTIME_CLASSES: &[&str] = &[
-    "java.io.PrintStream",
     // The builders' base class, whose methods are the builders' (see `lower::strings`).
     "java.lang.AbstractStringBuilder",
     "java.lang.Boolean",
@@ -138,6 +137,10 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.StringBuilder",
     "java.lang.System",
     "java.lang.Thread",
+    // A charset is the runtime's value (`lower::charsets`), and so are the standard ones; the
+    // JDK's code of `Charset` looks charsets up among all of them.
+    "java.nio.charset.Charset",
+    "java.nio.charset.StandardCharsets",
     "sun.util.logging.PlatformLogger",
 ];
 
@@ -185,9 +188,70 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
 ];
 
 /// The methods that lowering replaces whatever their signature, as `REPLACED_METHODS`: the
-/// constants of an enum class, which the JDK reads through `SharedSecrets` and reflection.
-const REPLACED_BY_NAME: &[(&str, &str)] =
-    &[("java.util.EnumMap", "getKeyUniverse"), ("java.util.EnumSet", "getUniverse")];
+/// constants of an enum class, which the JDK reads through `SharedSecrets` and reflection, and
+/// `PrintStream`'s `printf` and `format`, which are formatted where they are called and printed
+/// with `PRINT_FORMATTED`.
+const REPLACED_BY_NAME: &[(&str, &str)] = &[
+    ("java.util.EnumMap", "getKeyUniverse"),
+    ("java.util.EnumSet", "getUniverse"),
+    ("java.io.PrintStream", "printf"),
+    ("java.io.PrintStream", "format"),
+];
+
+/// The method of the translator's `PrintStream` (`java/overlay/java/io/PrintStream.java`) that
+/// prints what a call of `printf` or `format` formatted.
+pub const PRINT_FORMATTED: (&str, &str, &str) =
+    ("java.io.PrintStream", "formattedText", "(java.lang.String)java.io.PrintStream");
+
+/// The field of the translator's classes that `System.in`, `System.out` or `System.err` reads as
+/// a value (`java/overlay/java/io/StandardInput.java` and `StandardOutput.java`), by the name of
+/// the field of `System`.
+pub fn standard_stream_field(name: &str) -> Option<(&'static str, &'static str)> {
+    match name {
+        "in" => Some(("java.io.StandardInput", "in")),
+        "out" => Some(("java.io.StandardOutput", "out")),
+        "err" => Some(("java.io.StandardOutput", "err")),
+        _ => None,
+    }
+}
+
+/// Whether the runtime makes the call of `PrintStream`'s method `name` on `System.out` or
+/// `System.err` (`stream`, the field's name) itself (`lower::natives` and `lower`'s `call`), so
+/// that it needs no object: printing and flushing, and `System.out.write(int)`. Any other call
+/// on them goes to the translator's `PrintStream` object (`standard_stream_field`).
+pub fn direct_stream_call(stream: &str, name: &str, signature: &str) -> bool {
+    match stream {
+        "out" => {
+            matches!(name, "print" | "println" | "printf" | "format" | "flush")
+                || (name == "write" && signature == "(int)void")
+        }
+        "err" => matches!(name, "print" | "println" | "flush"),
+        _ => false,
+    }
+}
+
+/// The name of the field of `System` that `node`, a call, is made on: `out` of
+/// `System.out.println(x)`.
+pub fn stream_of_call(node: &Value) -> Option<&str> {
+    let select = &node["methodSelect"];
+    let receiver = &select["expression"];
+    let symbol = &receiver["symbol"];
+    (text(node, "kind") == "METHOD_INVOCATION"
+        && text(select, "kind") == "MEMBER_SELECT"
+        && text(symbol, "kind") == "FIELD"
+        && text(symbol, "owner") == "java.lang.System")
+        .then(|| text(symbol, "name"))
+}
+
+/// Whether `node` is a call that the runtime makes itself on `System.out` or `System.err`
+/// (`direct_stream_call`), which reaches only what its arguments do.
+pub fn runtime_stream_call(node: &Value) -> bool {
+    stream_of_call(node).is_some_and(|stream| {
+        let symbol = &node["symbol"];
+        text(symbol, "owner") == "java.io.PrintStream"
+            && direct_stream_call(stream, text(symbol, "name"), text(symbol, "type"))
+    })
+}
 
 /// Whether the method is one of the `REPLACED_METHODS`, or an access of `Unsafe` through a
 /// field's offset, which the lowering replaces with the field.
@@ -1125,6 +1189,9 @@ impl<'t> Walk<'t> {
             {
                 self.scan(&value["arguments"])
             }
+            // So does a call that the runtime makes on `System.out` or `System.err`
+            // (`direct_stream_call`).
+            Value::Object(_) if runtime_stream_call(value) => self.scan(&value["arguments"]),
             // An object created from a class name (`by_name`) reaches the constructors of the
             // classes that the name can be, not reflection.
             Value::Object(_) if let Some(name) = created_by_name(value) => {
@@ -1219,9 +1286,21 @@ impl<'t> Walk<'t> {
                     self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
                 }
             }
+            // Formatted where it is called, and printed by `PRINT_FORMATTED`.
+            "METHOD" if owner == "java.io.PrintStream" && matches!(name.as_str(), "printf" | "format") => {
+                let (class, method, signature) = PRINT_FORMATTED;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
             "METHOD" | "CONSTRUCTOR" => {
                 self.stub_method(symbol);
                 self.work.push(Item::Method((owner, name, text(symbol, "type").to_string())));
+            }
+            // `System.in`, `System.out` or `System.err` as a value: the translator's object.
+            "FIELD"
+                if owner == "java.lang.System"
+                    && let Some((class, field)) = standard_stream_field(&name) =>
+            {
+                self.work.push(Item::Field((class.into(), field.into())));
             }
             "FIELD" | "ENUM_CONSTANT" => self.work.push(Item::Field((owner, name))),
             kind if CLASS_KINDS.contains(&kind) => {
@@ -1273,7 +1352,7 @@ fn supertype(ty: &Value) -> Option<String> {
 }
 
 /// A type without its type arguments: `java.util.ArrayList<E>.Itr` is `java.util.ArrayList.Itr`.
-fn strip_arguments(ty: &str) -> String {
+pub(super) fn strip_arguments(ty: &str) -> String {
     let mut depth = 0;
     ty.chars()
         .filter(|&c| {

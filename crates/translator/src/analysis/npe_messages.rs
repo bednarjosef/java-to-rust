@@ -146,7 +146,8 @@ impl Messages<'_> {
             ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super: false, .. }
                 if !self.class.methods[*r].is_static =>
             {
-                add(receiver, self.call(x.pos, name).map(|m| format!("Cannot invoke \"{m}\"")))
+                let call = self.call(x.pos, name).or_else(|| self.jdk_call(x));
+                add(receiver, call.map(|m| format!("Cannot invoke \"{m}\"")))
             }
             ExprKind::Field { object, name } => add(object, Some(format!("Cannot read field \"{name}\""))),
             ExprKind::Index(array, _) => {
@@ -183,6 +184,14 @@ impl Messages<'_> {
                             _ => "Cannot read the array length",
                         };
                         out.insert(args[0].id, Some(format!("{failure} because \"original\" is null")));
+                        return;
+                    }
+                    // `System.arraycopy` of a null, which the JVM's native code throws without
+                    // a message.
+                    Builtin::Native(Native::ArrayCopy) => {
+                        for array in [&args[0], &args[2]] {
+                            out.insert(array.id, None);
+                        }
                         return;
                     }
                     // `synchronized` on a null.
@@ -309,9 +318,62 @@ impl Messages<'_> {
     /// The method that `e` calls, as the class file names it, if it is a call.
     fn called(&self, e: &Expr) -> Option<String> {
         match &e.kind {
-            ExprKind::MethodCall { name, .. } | ExprKind::Call { name, .. } => self.call(e.pos, name),
+            ExprKind::MethodCall { name, .. } => self.call(e.pos, name).or_else(|| self.jdk_call(e)),
+            ExprKind::Call { name, .. } => self.call(e.pos, name),
             _ => None,
         }
+    }
+
+    /// The method that the call `x` in the JDK's code calls, as the class file refers to it,
+    /// which `BytecodeNames` does not compile: javac names an instance method by the static type
+    /// of the receiver and the erased types of the method's parameters, and the JVM shows
+    /// `java.lang.Object` and `java.lang.String` by their simple names. `None` where the
+    /// translation's types may not be the declared ones: a receiver or a parameter of `Object`,
+    /// whose type may have been an interface or a type variable, a string, which may have been a
+    /// `CharSequence`, or another value type of the runtime.
+    fn jdk_call(&self, x: &Expr) -> Option<String> {
+        let ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super: false, .. } = &x.kind else {
+            return None;
+        };
+        if !self.jdk || self.class.methods[*r].is_static {
+            return None;
+        }
+        let owner = self.java_class(receiver.ty)?;
+        let params: Option<Vec<String>> =
+            self.class.methods[*r].params.iter().map(|p| self.java_param(p.ty)).collect();
+        Some(format!("{owner}.{name}({})", params?.join(", ")))
+    }
+
+    /// The binary name of a class of the JDK that `ty` is, when it is certain.
+    fn java_class(&self, ty: Type) -> Option<String> {
+        let t = self.class.class_index(ty)?;
+        let decl = &self.class.types[t];
+        if !matches!(decl.origin, Origin::Member)
+            || decl.package.is_empty()
+            || !super::exceptions::from_jdk(decl)
+        {
+            return None;
+        }
+        let rest = decl.name.strip_prefix(&decl.package)?.strip_prefix('.')?;
+        let name = format!("{}.{}", decl.package, rest.replace('.', "$"));
+        (name != "java.lang.Object" && name != "java.lang.String").then_some(name)
+    }
+
+    /// A parameter's type as the JVM shows it in a method, when it is certain.
+    fn java_param(&self, ty: Type) -> Option<String> {
+        Some(match ty {
+            Type::Int => "int".to_string(),
+            Type::Long => "long".to_string(),
+            Type::Double => "double".to_string(),
+            Type::Byte => "byte".to_string(),
+            Type::Short => "short".to_string(),
+            Type::Char => "char".to_string(),
+            Type::Float => "float".to_string(),
+            Type::Boolean => "boolean".to_string(),
+            Type::Array(element) => format!("{}[]", self.java_param(*element)?),
+            Type::Class(..) => self.java_class(ty)?,
+            _ => return None,
+        })
     }
 
     /// The method `name` of the call at `pos`, as the class file names it: `Main$Box.size()`.

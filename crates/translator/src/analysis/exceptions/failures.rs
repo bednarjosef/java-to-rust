@@ -74,6 +74,14 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             // `valueOf(chars)` copies the whole array; only an offset and a count can be out of range.
             StringOp::FromChars if args.len() == 3 => Some("java.lang.StringIndexOutOfBoundsException"),
             StringOp::Repeat => Some("java.lang.IllegalArgumentException"),
+            StringOp::GetChars => Some("java.lang.StringIndexOutOfBoundsException"),
+            // Encoding or decoding the whole text with a `Charset` (or the default one) never
+            // fails; a charset's name may be unknown, and a range out of bounds.
+            StringOp::GetBytes | StringOp::FromBytes
+                if args.len() == 1 || args.len() == 2 && args[1].ty == Type::Charset =>
+            {
+                None
+            }
             // A range outside the array, an invalid code point.
             StringOp::FromCodePoints | StringOp::FromHighByte => Some("?"),
             // A malformed pattern, a bad group in a replacement, an unknown charset.
@@ -177,7 +185,34 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::NanoTimeAdjustment
             | Native::ArrayBaseOffset
             | Native::ArrayIndexScale(_)
+            | Native::DescriptorHandle
+            | Native::DescriptorAppend
             | Native::Crc32Update,
+        ) => None,
+        // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
+        // of a closed descriptor does nothing.
+        Builtin::Native(Native::FileOpenRead | Native::FileOpenWrite) => {
+            Some("java.io.FileNotFoundException")
+        }
+        Builtin::Native(
+            Native::FileRead
+            | Native::FileReadBytes
+            | Native::FileAvailable
+            | Native::FileSkip
+            | Native::FileWrite
+            | Native::FileWriteBytes,
+        ) => Some("java.io.IOException"),
+        Builtin::Native(Native::FileLength | Native::FilePosition) => Some("java.io.IOException"),
+        Builtin::Native(Native::FileClose | Native::FileIsRegular) => None,
+        // The standard streams drop what they cannot write, as `PrintStream` does.
+        Builtin::Native(
+            Native::StandardWrite
+            | Native::StandardWriteBytes
+            | Native::StandardFlush
+            | Native::StandardClose
+            | Native::OutWrite
+            | Native::OutFlush
+            | Native::ErrFlush,
         ) => None,
         Builtin::CodePoint(CodePointOp::ToCharsInto) => Some("java.lang.IllegalArgumentException"),
         Builtin::CodePoint(
@@ -388,6 +423,16 @@ pub(super) fn runtime_failures(
                     out.push(("java.lang.ArithmeticException", "this division", true, x.id));
                 }
             }
+            // Each array that may be null is dereferenced with the checked form, then the
+            // positions are checked, with the checked form of the copy.
+            Builtin::Native(Native::ArrayCopy) => {
+                for array in [&args[0], &args[2]] {
+                    if null(array) {
+                        out.push((NPE, "this call", true, array.id));
+                    }
+                }
+                out.push(("java.lang.ArrayIndexOutOfBoundsException", "this call of the library", true, x.id));
+            }
             // The string is dereferenced first (a null one is the checked `NullPointerException`),
             // then the indices, the radix and the digits are read.
             Builtin::Bits(BitsOp::ParseRange, _) => {
@@ -449,13 +494,26 @@ pub(super) fn runtime_failures(
                 {
                     let checked = matches!(
                         builtin,
-                        Builtin::String(StringOp::Substring | StringOp::FromChars)
+                        Builtin::String(StringOp::Substring | StringOp::FromChars | StringOp::GetChars)
                             | Builtin::ArraysCopyOf
                             | Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _)
                             | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
                             | Builtin::CodePoint(CodePointOp::ToCharsInto)
                             | Builtin::EnumValueOf
+                            | Builtin::Native(Native::ArrayCopy)
                             | Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. })
+                            | Builtin::Native(
+                                Native::FileOpenRead
+                                    | Native::FileOpenWrite
+                                    | Native::FileRead
+                                    | Native::FileReadBytes
+                                    | Native::FileAvailable
+                                    | Native::FileSkip
+                                    | Native::FileWrite
+                                    | Native::FileWriteBytes
+                                    | Native::FileLength
+                                    | Native::FilePosition
+                            )
                     ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })));
                     out.push((failure, "this call of the library", checked, x.id));
                 }
