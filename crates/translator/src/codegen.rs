@@ -671,9 +671,10 @@ fn no_object(name: &str) -> String {
     format!("unreachable!(\"no object of {name} is created\")")
 }
 
-/// A borrow scoped with braces, `{ x.borrow().f }`, is a function argument of its own in a
-/// guarded statement, where rustc's unused_braces lint would ask to drop braces that end the
-/// borrow; there it is written `{ let value = x.borrow().f; value }`. The lint leaves the
+/// A borrow scoped with braces, `{ x.borrow().f }`, is a function argument of its own, an
+/// assigned value or the whole value of a block in a guarded statement, where rustc's
+/// unused_braces lint would ask to drop braces that end the borrow; there it is written
+/// `{ let value = x.borrow().f; value }`. The lint leaves the
 /// arguments of a macro alone, and so does this. Text in string literals is left alone, and so
 /// is a block with statements (`{ a = 1; a }`, `{ init_prog(); X.get() }`), which the lint
 /// accepts and which would not be an expression after `let value =`.
@@ -698,17 +699,26 @@ fn scoped_arguments(text: &str) -> String {
             parens.push(text[..i].ends_with('!'));
         } else if c == b')' {
             parens.pop();
-        } else if parens.last() == Some(&false)
-            && (text[..i].ends_with('(') || text[..i].ends_with(", "))
-            && text[i..].starts_with("{ ")
-        {
-            // A block with no braces or quotes inside, followed by the end of the argument.
+        } else if text[i..].starts_with("{ ") {
+            let before = &text[..i];
+            // A function's argument, an assigned value (`e = { .. };`, not a comparison), or the
+            // value of a block that holds nothing else (`if c { { .. } } else`).
+            let argument = parens.last() == Some(&false) && (before.ends_with('(') || before.ends_with(", "));
+            let assigned =
+                before.ends_with("= ") && !["== ", "!= ", "<= ", ">= "].iter().any(|op| before.ends_with(op));
+            let returned = before.ends_with("{ ");
+            // A block with no braces or quotes inside, followed by the end of what it is.
             if let Some(len) = text[i + 2..].find(['{', '}', '"'])
                 && text[i + 2 + len..].starts_with('}')
                 && text[i + 2..i + 2 + len].ends_with(' ')
                 && !text[i + 2..i + 2 + len].contains("let ")
                 && !text[i + 2..i + 2 + len].contains(';')
-                && matches!(bytes.get(i + 3 + len), Some(b')' | b','))
+                && match bytes.get(i + 3 + len) {
+                    Some(b')' | b',') => argument,
+                    Some(b';') => assigned,
+                    Some(b' ') => returned && text[i + 3 + len..].starts_with(" }"),
+                    _ => false,
+                }
             {
                 let inner = text[i + 2..i + 1 + len].trim_end();
                 out.push_str(&format!("{{ let value = {inner}; value }}"));
@@ -747,5 +757,29 @@ fn collect_locals(stmts: &[Stmt], out: &mut Vec<String>) {
             },
             &mut |_| {},
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scoped_arguments;
+
+    #[test]
+    fn scoped_borrows_keep_their_scope_without_unused_braces() {
+        // An argument, an assigned value and the whole value of a block.
+        assert_eq!(scoped_arguments("f({ a.borrow().x }, 1);"), "f({ let value = a.borrow().x; value }, 1);");
+        assert_eq!(
+            scoped_arguments("e = { e.borrow().next.clone() };"),
+            "e = { let value = e.borrow().next.clone(); value };"
+        );
+        assert_eq!(
+            scoped_arguments("return if c { { p.borrow().val } } else { None };"),
+            "return if c { { let value = p.borrow().val; value } } else { None };"
+        );
+        // A comparison, a block with statements and a macro's argument stay as they are.
+        for text in ["if a == { b.borrow().x } {", "e = { init(); X.get() };", "println!({ a.borrow().x });"]
+        {
+            assert_eq!(scoped_arguments(text), text);
+        }
     }
 }
