@@ -37,10 +37,7 @@ pub(super) fn complete(units: &mut [&mut Value]) {
 /// interfaces, records and enums. Where a local type is declared does not change it.
 pub(super) fn survey(units: &[&Value]) -> Survey {
     let mut survey = Survey::default();
-    for unit in units {
-        survey.scan(unit);
-    }
-    survey.hashed_closure();
+    survey.add(units);
     survey
 }
 
@@ -48,6 +45,30 @@ pub(super) fn survey(units: &[&Value]) -> Survey {
 pub(super) fn complete_unit(unit: &mut Value, survey: &Survey) {
     hoist_local_types(unit);
     visit_records(unit, &mut |record| complete_record(record, survey));
+}
+
+/// The records of a compilation unit that no other record holds, with their members as
+/// `complete_unit` writes them with this survey: all of the unit that the survey decides, as
+/// moving local types out of the code does not depend on it.
+pub(super) fn completed_records(unit: &Value, survey: &Survey) -> Vec<Value> {
+    fn outermost<'v>(v: &'v Value, out: &mut Vec<&'v Value>) {
+        match v {
+            Value::Object(fields) if fields.get("kind").and_then(Value::as_str) == Some("RECORD") => {
+                out.push(v)
+            }
+            Value::Object(fields) => fields.values().for_each(|x| outermost(x, out)),
+            Value::Array(items) => items.iter().for_each(|x| outermost(x, out)),
+            _ => {}
+        }
+    }
+    let mut records = Vec::new();
+    outermost(unit, &mut records);
+    let complete = |record: &Value| {
+        let mut record = record.clone();
+        visit_records(&mut record, &mut |r| complete_record(r, survey));
+        record
+    };
+    records.into_iter().map(complete).collect()
 }
 
 /// Whether `complete_unit` may change the compilation unit: it has no package (and so may have
@@ -89,6 +110,14 @@ pub(super) struct Survey {
 }
 
 impl Survey {
+    /// Adds these compilation units to those surveyed.
+    pub(super) fn add(&mut self, units: &[&Value]) {
+        for unit in units {
+            self.scan(unit);
+        }
+        self.hashed_closure();
+    }
+
     fn scan(&mut self, v: &Value) {
         match v {
             Value::Object(fields) => {
@@ -140,6 +169,9 @@ impl Survey {
     /// The records whose `hashCode` runs: those it is called on, every record when `Object`'s may
     /// run, and the records held by those.
     fn hashed_closure(&mut self) {
+        // A record that is hashed hashes the records among its components, of which more may
+        // have been surveyed since the last closure.
+        self.hashed.clear();
         let mut work: Vec<String> = self
             .records
             .keys()

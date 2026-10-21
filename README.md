@@ -176,7 +176,8 @@ A small subset, end to end:
   array on both sides, but without its element class: storing an object of another class in it
   does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s. Arrays of strings
   are not converted this way yet. `==` between two `Object`s that may both be strings or boxes (whose identity the
-  translation does not keep, except in the shortcut `a == b || a.equals(b)`) is rejected. The
+  translation does not keep, except in the shortcut `a == b || a.equals(b)` and in `TreeMap`'s own
+  comparisons of the keys of its entries, which are distinct values) is rejected. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
   and a use where javac substituted a type argument gets the checked cast back
@@ -728,11 +729,14 @@ the Rust programs are one Cargo project under `target/tmp/corpus`, kept between 
 is rebuilt only when its translation changes: a warm run takes about as long as translating the
 corpus. Java's results are cached the same way, in `target/tmp/corpus/java-cache`, one file per
 program: a program runs on `java` again only when its Java sources (for a project, all its files
-and their paths), its main class, the JVM arguments or the `java -version` output change, so a
+and their paths), its main class, its command-line arguments, the JVM arguments or the
+`java -version` output change, so a
 warm run starts no JVM. `CORPUS_JAVA_FRESH=1` runs every program on Java and stores the results
 anew, for when the cache is doubted. Only a run that Java finished is stored. The report prints a
 table with one row per program and lists each failing program with the first differing lines of
-output. `CORPUS_FILTER=text cargo test --test corpus` runs only the programs whose name contains
+output. A single-file program with a `Name.args` file next to it runs with the lines of that file
+as its command-line arguments, on `java` and as the translated binary alike.
+`CORPUS_FILTER=text cargo test --test corpus` runs only the programs whose name contains
 `text`, and `CORPUS_THREADS=n` limits it to n threads (one per CPU by default). `crates/translator/tests/translation.rs` pins down what the output looks like.
 
 ## Plans

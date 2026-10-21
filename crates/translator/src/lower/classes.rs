@@ -47,6 +47,11 @@ impl<'t> Lowering<'t> {
             let x = self.expr(node.list("arguments").next().expect("comparableClassFor has an argument"))?;
             return Ok(Some(ExprKind::Builtin(Builtin::ComparableClassFor, vec![x])));
         }
+        if (symbol.owner, symbol.name) == ("java.lang.Class", "forName")
+            && let Some(kind) = self.class_for_name(node)?
+        {
+            return Ok(Some(kind));
+        }
         let Some(receiver) = receiver else { return Ok(None) };
         // `equals`, `hashCode` and `toString` of a class are `Object`'s.
         let of_class = |ty: &str| ty == "java.lang.Class" || ty.starts_with("java.lang.Class<");

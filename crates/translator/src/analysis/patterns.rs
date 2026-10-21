@@ -124,8 +124,11 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
             visit_stmt(s, &mut |e| visit_expr(e, &mut |x| shortcuts.extend(shortcut(x))), &mut |_| {});
         }
     }
+    let sentinel = |e: &Expr| matches!(&e.kind, ExprKind::Static { class, name } if sentinels.contains(&(*class, name.as_str())));
+    let fences = fence_keys(class, &sentinel);
     let mut found = None;
     for method in &class.methods {
+        let in_sorted_map = in_sorted_map(class, method.class);
         for s in &method.body {
             visit_stmt(
                 s,
@@ -144,7 +147,8 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                             if holds_values
                                 && may_be_value(l)
                                 && may_be_value(r)
-                                && !shortcuts.contains(&x.id) =>
+                                && !shortcuts.contains(&x.id)
+                                && !(in_sorted_map && sorted_key(l, &fences) && sorted_key(r, &fences)) =>
                         {
                             found.get_or_insert((
                                 x.pos,
@@ -162,6 +166,79 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
         Some((pos, what)) => Err(Error { pos, message: format!("{what} not supported yet") }),
         None => Ok(()),
     }
+}
+
+/// `TreeMap`'s entries, whose keys `TreeMap`'s own code compares by identity.
+const SORTED_ENTRY: &str = "java.util.TreeMap.Entry";
+
+/// Whether type `t` is `TreeMap` or a class nested in it.
+fn in_sorted_map(class: &Class, t: usize) -> bool {
+    let name = &class.types[t].name;
+    name.strip_prefix("java.util.TreeMap").is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+}
+
+/// The `Object` fields of `TreeMap`'s classes that only ever hold the key of an entry, `null` or
+/// a sentinel, as the iterators of a sub-map hold its end in `fenceKey = fence == null ?
+/// UNBOUNDED : fence.key`, by the class's name and the field's.
+fn fence_keys<'c>(class: &'c Class, sentinel: &dyn Fn(&Expr) -> bool) -> HashSet<(&'c str, &'c str)> {
+    fn key_or_end(e: &Expr, sentinel: &dyn Fn(&Expr) -> bool) -> bool {
+        match &peel(e).kind {
+            ExprKind::Null => true,
+            ExprKind::Conditional(_, a, b) => key_or_end(a, sentinel) && key_or_end(b, sentinel),
+            _ => sentinel(peel(e)) || entry_key(e),
+        }
+    }
+    let mut fences: HashSet<(&str, &str)> = HashSet::new();
+    for (t, decl) in class.types.iter().enumerate() {
+        if !in_sorted_map(class, t) {
+            continue;
+        }
+        for f in &decl.fields {
+            if matches!(f.ty, Type::Class(name, _) if name == OBJECT)
+                && f.init.as_ref().is_none_or(|e| key_or_end(e, sentinel))
+            {
+                fences.insert((decl.name.as_str(), f.name.as_str()));
+            }
+        }
+    }
+    // Any assignment of something else, anywhere in the program, disqualifies the field.
+    for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::Assign { op, target: Place::Field { object, name }, value } = &x.kind
+                            && let Type::Class(owner, _) = object.ty
+                            && (op.is_some() || !key_or_end(value, sentinel))
+                        {
+                            fences.retain(|&(t, f)| (t, f) != (owner, name.as_str()));
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    fences
+}
+
+/// Whether `e` reads the key of an entry of a `TreeMap`.
+fn entry_key(e: &Expr) -> bool {
+    matches!(&peel(e).kind, ExprKind::Field { object, name }
+        if name == "key" && matches!(object.ty, Type::Class(entry, _) if entry == SORTED_ENTRY))
+}
+
+/// Whether `e`, in `TreeMap`'s code, is the key of one of the map's entries, or a field of
+/// `fence_keys`, the key of one or an end that is not a string or a box. Compared by value, such
+/// keys give what Java's identity gives: the keys of a sorted map are distinct under its
+/// comparator, which, in the translation, sees strings and boxes only by value, so two keys that
+/// are equal values compare as equal and cannot both be in the map. (`TreeMap`'s code compares
+/// only keys of one map with each other.)
+fn sorted_key(e: &Expr, fences: &HashSet<(&str, &str)>) -> bool {
+    entry_key(e)
+        || matches!(&peel(e).kind, ExprKind::Field { object, name }
+            if matches!(object.ty, Type::Class(owner, _) if fences.contains(&(owner, name.as_str()))))
 }
 
 /// The `a == b` of `a == b || .. a.equals(b) ..`, the shortcut before an `equals` that `Objects.equals`

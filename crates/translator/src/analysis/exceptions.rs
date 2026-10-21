@@ -658,6 +658,7 @@ fn static_inits(class: &Class, facts: &Facts, m: usize, x: &Expr) -> Vec<usize> 
         ExprKind::Assign { target: Place::Static { class: t, .. }, .. } => classes.push(*t),
         // The first use of an enum's constant initializes the enum.
         ExprKind::EnumConstant { class: t, .. } => classes.push(*t),
+        ExprKind::Builtin(Builtin::InitializeClass { class: t }, _) => classes.push(*t),
         ExprKind::Builtin(Builtin::EnumValueOf, _) => {
             if let Type::Enum(name) = x.ty
                 && let Some(t) = class.type_index(name)

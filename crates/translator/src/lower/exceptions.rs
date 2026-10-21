@@ -26,8 +26,14 @@ use std::sync::OnceLock;
 const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("NoSuchElementException", "java.util"),
     ("ConcurrentModificationException", "java.util"),
+    ("InputMismatchException", "java.util"),
+    ("EmptyStackException", "java.util"),
+    ("MissingResourceException", "java.util"),
     ("IOException", "java.io"),
     ("FileNotFoundException", "java.io"),
+    ("EOFException", "java.io"),
+    ("UnsupportedEncodingException", "java.io"),
+    ("UncheckedIOException", "java.io"),
 ];
 
 /// The standard classes that the runtime raises and a translation can catch, each with the
