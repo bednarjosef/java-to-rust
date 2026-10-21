@@ -60,6 +60,101 @@ impl<'t> Lowering<'t> {
         Ok(Stmt::Block(vec![start, looped]))
     }
 
+    /// `String.join(delimiter, elements)` over an `Iterable` of strings of the program (`node`
+    /// is the call, `elements` the lowered collection): the iteration is the collection's own,
+    /// written out as a for-each is, in a block that yields the joined text.
+    ///
+    /// ```text
+    /// switch (0) { default -> { String d = delimiter; Iterator it = elements.iterator();
+    ///     String joined = ""; boolean first = true;
+    ///     while (it.hasNext()) {
+    ///         if (first) { first = false; joined = "" + (String) it.next(); }
+    ///         else { joined = joined + d + (String) it.next(); } }
+    ///     yield joined; } }
+    /// ```
+    ///
+    /// A delimiter without effects is written where it is used instead of in `d`. (The locals of
+    /// a switch expression's block are not seen by the nullness analysis, so none of them may
+    /// hold null: the element is used where it is read.)
+    pub(super) fn join_iterable(
+        &self,
+        node: Node<'t>,
+        delimiter: Expr,
+        elements: Expr,
+    ) -> Result<ExprKind, Error> {
+        let pos = node.pos();
+        let rejected = || unsupported(node, "`String.join` of this collection");
+        let Some(iterator) = self.no_arg_method(elements.ty, "iterator") else { return rejected() };
+        let start = self.call_of(elements, iterator, pos)?;
+        let it_ty = start.ty;
+        let (Some(has_next), Some(next)) =
+            (self.no_arg_method(it_ty, "hasNext"), self.no_arg_method(it_ty, "next"))
+        else {
+            return rejected();
+        };
+        let [d, it, joined, first] = ["delimiter", "it", "joined", "first"].map(|n| self.fresh_name(n));
+        let var = |name: &str, ty: Type| self.synth(ExprKind::Var(name.to_string()), pos, ty);
+        let local = |name: &str, ty: Type, init: Expr| Stmt::Local {
+            ty,
+            name: name.to_string(),
+            init: Some(init),
+            pos,
+        };
+        let assign = |name: &str, ty: Type, value: Expr| {
+            let kind =
+                ExprKind::Assign { op: None, target: Place::Var(name.to_string()), value: Box::new(value) };
+            Stmt::Expr(self.synth(kind, pos, ty))
+        };
+        let concat = |l: Expr, r: Expr| {
+            self.synth(ExprKind::Binary(BinOp::Add, Box::new(l), Box::new(r)), pos, Type::String)
+        };
+        let boolean = |b: bool| self.synth(ExprKind::Bool(b), pos, Type::Boolean);
+        // The elements are `CharSequence`s, and the only ones that can be `Object` values are
+        // strings, so the erased element is cast to a string.
+        let element = || -> Result<Expr, Error> {
+            let element = self.call_of(var(&it, it_ty), next, pos)?;
+            Ok(match element.ty {
+                Type::String => element,
+                _ => self.synth(ExprKind::Cast(Type::String, Box::new(element)), pos, Type::String),
+            })
+        };
+        let mut block = Vec::new();
+        let delimiter = if has_effects(&delimiter) {
+            block.push(local(&d, Type::String, delimiter));
+            var(&d, Type::String)
+        } else {
+            delimiter
+        };
+        let first_text = assign(
+            &joined,
+            Type::String,
+            concat(self.synth(ExprKind::Str(String::new()), pos, Type::String), element()?),
+        );
+        let later_text =
+            assign(&joined, Type::String, concat(concat(var(&joined, Type::String), delimiter), element()?));
+        let body = Stmt::If {
+            cond: var(&first, Type::Boolean),
+            then: Box::new(Stmt::Block(vec![assign(&first, Type::Boolean, boolean(false)), first_text])),
+            otherwise: Some(Box::new(Stmt::Block(vec![later_text]))),
+        };
+        let looped = Stmt::While {
+            cond: self.call_of(var(&it, it_ty), has_next, pos)?,
+            body: Box::new(Stmt::Block(vec![body])),
+        };
+        block.extend([
+            local(&it, it_ty, start),
+            local(&joined, Type::String, self.synth(ExprKind::Str(String::new()), pos, Type::String)),
+            local(&first, Type::Boolean, boolean(true)),
+            looped,
+            Stmt::Yield(var(&joined, Type::String)),
+        ]);
+        let selector = self.synth(ExprKind::Int(0), pos, Type::Int);
+        Ok(ExprKind::Switch {
+            selector: Box::new(selector),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        })
+    }
+
     /// The method without parameters named `name` that a call on a value of type `ty` runs, as
     /// javac resolves it: declared by its class or the nearest supertype.
     fn no_arg_method(&self, ty: Type, name: &str) -> Option<usize> {

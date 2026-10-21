@@ -512,7 +512,7 @@ impl<'a> Gen<'a> {
         match place {
             // The field may be declared by a superclass of the object's type.
             Place::Field { object, name } => self.facts.field_nullable(object.ty, name),
-            Place::Static { class, name } => self.facts.nullable_statics.contains(&(*class, name.clone())),
+            Place::Static { class, name } => self.static_optional(*class, name),
             Place::Var(_) | Place::Index(..) => false,
         }
     }
@@ -933,12 +933,18 @@ impl<'a> Gen<'a> {
     }
 
     /// A value read from a static field.
-    pub(super) fn static_read(&self, class: usize, name: &str, ty: Type) -> Code {
+    pub(super) fn static_read(&mut self, class: usize, name: &str, ty: Type) -> Code {
         if let Some(constant) = self.constant_read(class, name, ty) {
             return constant;
         }
         let cell = cell_name(&self.class.types[class].name, name);
         let read = Slot::Static { cell, plain: is_cell(ty) }.read(self.clones(ty));
+        // A static that starts empty holds its value once its class is initialized.
+        let read = if self.facts.placeholder_statics.contains(&(class, name.to_string())) {
+            format!("{}({read})", self.runtime("non_null"))
+        } else {
+            read
+        };
         match self.init_call(class) {
             Some(init) => Code::atom(format!("{{ {init} {read} }}")),
             None => Code::atom(read),
