@@ -91,7 +91,7 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
 }
 
 /// An analysis or the generator, run for its errors.
-type Pass = fn(&mut Class) -> Result<(), Vec<Error>>;
+type Pass<'a> = &'a dyn Fn(&mut Class) -> Result<(), Vec<Error>>;
 
 /// Runs the analyses and the generator over the lowered program until they pass, stubbing the
 /// code of each error; the error that ends it early, if one does.
@@ -99,20 +99,27 @@ fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Reje
     let mut stubs = Stubs { next_id: next_id(class) + 1, stubbed: HashSet::new() };
     // The check for null enums changes nothing, and `whole_objects` changes the program only when
     // it passes: an error of theirs that no stub takes away is recorded, and the census goes on
-    // without them. One of the analyses or the generator that no stub takes away ends it. The
-    // generator reports every error it finds, which are stubbed together.
+    // without them. An error of a check of the analyses that only rejects (as of a field's type)
+    // that no stub takes away is recorded too, and the analyses go on past it
+    // (`analysis::analyze_tolerating`). Any other error of the analyses or the generator that no
+    // stub takes away ends it. The generator reports every error it finds, which are stubbed
+    // together.
+    let tolerated: std::cell::RefCell<Vec<Error>> = Default::default();
     let passes: [Pass; 4] = [
-        |class| {
+        &|class| {
             crate::timings::phase("census: enum nulls", || lower::check_enum_nulls(class))
                 .map_err(|e| vec![e])
         },
-        |class| {
+        &|class| {
             crate::timings::phase("census: whole objects", || analysis::whole_objects(class))
                 .map_err(|e| vec![e])
         },
-        unresolved_calls,
-        |class| {
-            let facts = crate::timings::phase("census: analyses", || analysis::analyze_all(class))?;
+        &unresolved_calls,
+        &|class| {
+            let tolerated = tolerated.borrow();
+            let facts = crate::timings::phase("census: analyses", || {
+                analysis::analyze_tolerating(class, &tolerated)
+            })?;
             crate::timings::phase("census: generator", || codegen::generate_all(class, &facts)).map(drop)
         },
     ];
@@ -129,30 +136,58 @@ fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Reje
                     vec![Error { pos: codegen::panicked_in().unwrap_or_default(), message }]
                 }
             };
-            let mut stuck = None;
+            let mut stuck = Vec::new();
             let mut stubbed = false;
             for error in errors {
                 let rejection = stubs.stub(class, units, error);
                 if rejection.anchor.is_some() {
                     stubbed = true;
                     rejections.push(rejection);
-                } else if stuck.is_none() {
-                    stuck = Some(rejection);
+                } else {
+                    stuck.push(rejection);
                 }
             }
             // An error that no stub took away comes back, unless the stubs took away its cause.
             if stubbed {
                 continue;
             }
-            let stuck = stuck.expect("a pass that fails has an error");
-            if index == passes.len() - 1 {
-                return Some(stuck);
+            if index < passes.len() - 1 {
+                rejections.push(stuck.into_iter().next().expect("a pass that fails has an error"));
+                break;
             }
-            rejections.push(stuck);
-            break;
+            // The analyses go on past an error they met before only if it is one they tolerate.
+            let same = |a: &Error, b: &Error| a.pos == b.pos && a.message == b.message;
+            let new: Vec<Rejection> = stuck
+                .iter()
+                .filter(|r| !tolerated.borrow().iter().any(|t| same(t, &r.error)))
+                .map(copy)
+                .collect();
+            if new.is_empty() {
+                // It ends the census: it is that error, no longer one recorded and gone past.
+                let first = stuck.into_iter().next()?;
+                if let Some(at) = rejections.iter().rposition(|r| same(&r.error, &first.error)) {
+                    rejections.remove(at);
+                }
+                return Some(first);
+            }
+            for rejection in new {
+                tolerated
+                    .borrow_mut()
+                    .push(Error { pos: rejection.error.pos, message: rejection.error.message.clone() });
+                rejections.push(rejection);
+            }
         }
     }
     None
+}
+
+/// A copy of a rejection.
+fn copy(r: &Rejection) -> Rejection {
+    Rejection {
+        unit: r.unit,
+        anchor: r.anchor,
+        error: Error { pos: r.error.pos, message: r.error.message.clone() },
+    }
 }
 
 /// The stubs that the census puts in place of code that an analysis or the generator rejected.

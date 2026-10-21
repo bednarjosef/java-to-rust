@@ -172,8 +172,9 @@ fn lingers(x: &Expr) -> bool {
 
 /// Rejects a value that threads may share and that has no shared form yet: a `StringBuilder`, or
 /// a box whose identity the program observes, in a static or in a field of a shared class. Both
-/// are `Rc`s, which rustc would reject in a value another thread may hold.
-pub(super) fn check(class: &Class, facts: &Facts) -> Result<(), Error> {
+/// are `Rc`s, which rustc would reject in a value another thread may hold. Every such field is
+/// reported.
+pub(super) fn check(class: &Class, facts: &Facts) -> Result<(), Vec<Error>> {
     let unshareable = |ty: Type| {
         let mut ty = ty;
         while let Type::Array(element) = ty {
@@ -185,18 +186,19 @@ pub(super) fn check(class: &Class, facts: &Facts) -> Result<(), Error> {
             _ => None,
         }
     };
+    let mut errors = Vec::new();
     for (t, decl) in class.types.iter().enumerate() {
         let fields = if facts.thread_shared.contains(&t) { &decl.fields[..] } else { &[] };
         for f in decl.statics.iter().chain(fields) {
             if let Some(what) = unshareable(f.ty) {
-                return Err(Error {
+                errors.push(Error {
                     pos: f.pos,
                     message: format!("{what} that threads may share not supported yet"),
                 });
             }
         }
     }
-    Ok(())
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
 /// Whether `f` holds for some expression in `body`.
