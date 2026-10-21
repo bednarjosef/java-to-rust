@@ -325,6 +325,16 @@ impl<'a> Gen<'a> {
                 let (l, r) = (self.operand(l), self.operand(r));
                 self.binary(*op, l, r, e.ty, e.id)
             }
+            // A variable that may be null takes a value that is not: the assignment's value is
+            // that value, not the variable's `Option`.
+            ExprKind::Assign { op: None, target: Place::Var(target), value }
+                if self.optional_var(self.method, e.ty, target) && !self.nullable(value) =>
+            {
+                let bound = self.fresh_name(&["value", "item", "new"]);
+                let v = self.value(value, e.ty).text;
+                let name = self.local(target);
+                Code::new(format!("{{ let {bound} = {v}; {name} = Some({bound}.clone()); {bound} }}"), LOWEST)
+            }
             ExprKind::Assign { op, target: Place::Var(target), value } => {
                 let text = self.assignment(*op, target, e.ty, value, e.id);
                 Code::new(format!("{{ {text}; {} }}", self.read(target, e.ty)), LOWEST)
