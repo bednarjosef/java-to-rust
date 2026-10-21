@@ -336,3 +336,23 @@ fn the_default_methods_of_a_closure_type_are_its_extension_trait() {
         ],
     );
 }
+
+#[test]
+fn an_interface_that_extends_a_closure_type_names_its_closures() {
+    let rust = translate(
+        "import java.util.function.Function;
+        import java.util.function.UnaryOperator;
+        class A {
+            static String run(Function<String, String> f) { return f.apply(\"x\"); }
+            public static void main(String[] args) {
+                UnaryOperator<String> twice = s -> s + s;
+                System.out.println(run(twice) + run(s -> s));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["type Function = Rc<dyn Fn(Object) -> Object>;", "type UnaryOperator = Function;", "run(&twice)"],
+    );
+    assert_lacks(&rust, &["enum Function", "struct UnaryOperatorLambdaInMain"]);
+}

@@ -6,12 +6,14 @@
 //! to it, and nothing does with a value of it anything but call its method, store it and pass it
 //! on: no conversion to another type (to `Object`, for printing, `equals` or a collection), no
 //! `==`, no `instanceof`, no call but of its method and its default methods. The interface
-//! declares one abstract method besides `Object`'s, and extends no other interface, nor does any interface extend it; each lambda class implements it
-//! alone, and its method reads its object only through the fields that hold its captures. A
-//! generic interface's closure takes and returns the erased types: the lambda's method, which
-//! javac typed with the substituted ones, is behind a bridge, and the closure's body is the
-//! bridge's conversions around it. Its default methods are those of an extension trait of the
-//! closure type, whose `self` is the closure (`codegen::closures`). Everything else keeps the object model's form, an enum with a
+//! declares one abstract method besides `Object`'s, or extends one interface and declares none,
+//! and the interfaces above and below it are closure types too, which share its closures; each
+//! lambda class implements one interface, and its method reads its object only through the
+//! fields that hold its captures. A generic interface's closure takes and returns the erased
+//! types: the lambda's method, which javac typed with the substituted ones, is behind a bridge,
+//! and the closure's body is the bridge's conversions around it. Its default methods are those
+//! of an extension trait of the closure type, whose `self` is the closure (`codegen::closures`).
+//! Everything else keeps the object model's form, an enum with a
 //! variant per lambda class.
 
 use crate::ast::*;
@@ -22,30 +24,51 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
     let h = &class.hierarchy;
     let object = class.type_index(OBJECT);
     let mut candidates: HashSet<usize> = HashSet::new();
+    let supers = |t: usize| -> Vec<usize> {
+        class.types[t].implements.iter().copied().filter(|&i| Some(i) != object).collect()
+    };
     for (t, decl) in class.types.iter().enumerate() {
-        if decl.kind != TypeKind::Interface
-            || decl.name == OBJECT
-            || decl.name == COMPARABLE
-            || decl.implements.iter().any(|&i| Some(i) != object)
-        {
+        if decl.kind != TypeKind::Interface || decl.name == OBJECT || decl.name == COMPARABLE {
             continue;
         }
-        // One abstract method besides `Object`'s, which `Comparator` declares again.
+        // One abstract method besides `Object`'s, which `Comparator` declares again, its own or
+        // that of the one interface it extends (`UnaryOperator<T> extends Function<T, T>`).
         let abstracts = class.methods.iter().filter(|m| m.class == t && is_functional_method(m)).count();
-        if abstracts != 1 {
-            continue;
-        }
-        // No interface extends it, and every class below it is a lambda's that implements it alone.
+        let functional = match supers(t)[..] {
+            [] => abstracts == 1,
+            [_] => abstracts == 0,
+            _ => false,
+        };
+        // Every class below it is a lambda's that implements one interface.
         let below: Vec<usize> = (0..class.types.len()).filter(|&s| s != t && h.is_subtype(s, t)).collect();
-        let lambdas = !below.is_empty()
-            && below.iter().all(|&s| {
-                let d = &class.types[s];
-                matches!(d.origin, Origin::Lambda { .. })
-                    && d.extends.is_none()
-                    && d.implements.iter().all(|&i| i == t || Some(i) == object)
-            });
-        if lambdas {
+        let lambdas = below.iter().all(|&s| {
+            let d = &class.types[s];
+            d.kind == TypeKind::Interface
+                || (matches!(d.origin, Origin::Lambda { .. }) && d.extends.is_none() && supers(s).len() == 1)
+        });
+        if functional && lambdas && below.iter().any(|&s| class.types[s].kind != TypeKind::Interface) {
             candidates.insert(t);
+        }
+    }
+    // The interfaces above and below a closure type are closure types too: their values are the
+    // same closures.
+    loop {
+        let family = |t: usize, u: usize| h.is_subtype(t, u) || h.is_subtype(u, t);
+        let out: Vec<usize> = (candidates.iter().copied())
+            .filter(|&t| {
+                (0..class.types.len()).any(|u| {
+                    class.types[u].kind == TypeKind::Interface
+                        && Some(u) != object
+                        && family(t, u)
+                        && !candidates.contains(&u)
+                })
+            })
+            .collect();
+        if out.is_empty() {
+            break;
+        }
+        for t in out {
+            candidates.remove(&t);
         }
     }
     if candidates.is_empty() {
@@ -55,7 +78,7 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
     // A default method of the interface takes the closure as `this`.
     let callable = |t: usize, m: usize| {
         let method = &class.methods[m];
-        m == abstract_method(t) || (method.class == t && !method.is_static && !method.is_abstract)
+        m == abstract_method(t) || (h.is_subtype(t, method.class) && !method.is_static && !method.is_abstract)
     };
     let of = |ty: Type| class.class_index(ty).filter(|t| candidates.contains(t));
     let lambda_of = |c: usize| candidates.iter().copied().find(|&t| h.is_subtype(c, t));
@@ -66,12 +89,14 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
     let mut on_expr = |x: &Expr| match &x.kind {
         ExprKind::Cast(to, value) => {
             if let ExprKind::New { class: c, .. } = value.kind
-                && let Some(t) = lambda_of(c)
-                && of(*to) == Some(t)
+                && lambda_of(c).is_some()
+                && of(*to).is_some_and(|t| h.is_subtype(c, t))
             {
                 news.entry(c).or_default().0 += 1;
             } else if let Some(t) = of(value.ty)
                 && value.ty != *to
+                // An interface's closure is one of the interface it extends.
+                && !of(*to).is_some_and(|u| h.is_subtype(t, u))
             {
                 ruled_out.insert(t);
             }
@@ -152,17 +177,24 @@ pub fn closure_types(class: &Class) -> HashSet<usize> {
             }
         }
     }
+    // What rules out an interface rules out those above and below it.
+    let ruled_out: HashSet<usize> = (candidates.iter().copied())
+        .filter(|&t| ruled_out.iter().any(|&r| h.is_subtype(t, r) || h.is_subtype(r, t)))
+        .collect();
     candidates.retain(|t| !ruled_out.contains(t));
     candidates
 }
 
 /// The abstract method of closure type `t`, which its closures run.
 pub fn closure_method(class: &Class, t: usize) -> usize {
-    class
-        .methods
-        .iter()
-        .position(|m| m.class == t && is_functional_method(m))
-        .expect("a functional interface's method")
+    match class.methods.iter().position(|m| m.class == t && is_functional_method(m)) {
+        Some(m) => m,
+        None => {
+            let object = class.type_index(OBJECT);
+            let above = class.types[t].implements.iter().copied().find(|&i| Some(i) != object);
+            closure_method(class, above.expect("a functional interface's method"))
+        }
+    }
 }
 
 /// Whether `m` is abstract and not one of `Object`'s public methods declared again.

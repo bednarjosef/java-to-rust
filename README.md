@@ -524,12 +524,14 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   generic one takes and returns the erased types (`type Function = Rc<dyn Fn(Object) ->
   Object>;`), the lambda's body after its bridge's casts of the arguments. Its default methods
   are an extension trait of the closure type (`trait PredicateMethods`, `impl PredicateMethods
-  for Predicate`, `self` the closure), so `empty.negate().and(longer)` reads as in Java. Each lambda is a closure written where it is created, its captures moved in
-  (`Rc::new(move |a: i32, b: i32| -> i32 { a.wrapping_add(b).wrapping_add(k) }) as IntOp`, `this`
-  as `outer`), and a call is a call of the closure (`op(acc, x)`). Every other functional
-  interface keeps the class per lambda. Not yet: other receivers, `super` in a lambda,
-  interfaces that extend another (`UnaryOperator`) as closure types, typed closures for a generic interface's instantiations, and the parameter and
-  local forms (`impl FnMut`, a plain `let f = |x| ..`).
+  for Predicate`, `self` the closure), so `empty.negate().and(longer)` reads as in Java, and an
+  interface that extends another names its closures (`type UnaryOperator = Function;`). Each
+  lambda is a closure written where it is created, its captures moved in (`Rc::new(move |a:
+  i32, b: i32| -> i32 { a.wrapping_add(b).wrapping_add(k) }) as IntOp`, `this` as `outer`), and
+  a call is a call of the closure (`op(acc, x)`). Every other functional interface keeps the
+  class per lambda. Not yet: other receivers, `super` in a lambda, typed closures for a generic
+  interface's instantiations, and the parameter and local forms (`impl FnMut`, a plain `let f =
+  |x| ..`).
 
 ### Whole programs
 

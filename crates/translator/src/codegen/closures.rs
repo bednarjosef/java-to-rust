@@ -74,8 +74,18 @@ impl<'a> Gen<'a> {
             .collect();
         let ret = self.ret_text(m);
         let name = struct_name(&self.class.types[t].name);
+        // An interface that extends another has its closures: `type UnaryOperator = Function;`.
+        let above =
+            self.class.types[t].implements.iter().copied().find(|i| self.facts.closure_types.contains(i));
+        let ty = match above {
+            Some(above) => {
+                self.need(Need::Enum(above));
+                self.closure_name(above)
+            }
+            None => format!("Rc<dyn Fn({}){ret}>", params.join(", ")),
+        };
         self.gap();
-        self.line(&format!("{}type {name} = Rc<dyn Fn({}){ret}>;", self.vis(), params.join(", ")));
+        self.line(&format!("{}type {name} = {ty};", self.vis()));
         self.closure_trait(t, &name);
     }
 
@@ -153,8 +163,11 @@ impl<'a> Gen<'a> {
         let args = self.call_args(index, args).join(", ");
         if index != self.closure_method(t) {
             // A default method, of the extension trait.
+            // The trait of the interface that declares it, which `t` may extend.
+            let declaring = self.class.methods[index].class;
             self.need(Need::Body(index));
-            let path = format!("{}Methods", self.closure_name(t));
+            self.need(Need::Enum(declaring));
+            let path = format!("{}Methods", self.closure_name(declaring));
             if path.contains("::") {
                 self.traits.insert(path);
             }

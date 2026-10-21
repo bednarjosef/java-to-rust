@@ -395,6 +395,12 @@ impl<'a> Gen<'a> {
             {
                 self.closure(t, *ctor, args)
             }
+            // A closure is one of the closure type its interface extends too.
+            ExprKind::Cast(to @ Type::Class(..), value)
+                if self.closure_type(*to).is_some() && self.closure_type(value.ty).is_some() =>
+            {
+                self.expr(value)
+            }
             ExprKind::Cast(to @ Type::Class(..), value) => self.class_cast(*to, value),
             // A downcast from an interface to an enum that implements it, or from `Object` to a
             // string, a box or an array.
