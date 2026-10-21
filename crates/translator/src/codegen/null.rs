@@ -32,6 +32,15 @@ impl<'a> Gen<'a> {
         {
             return self.nullable(value);
         }
+        // The value of an assignment to a field that may be null is the assigned value, an
+        // `Option` only where that may be null (see `update`), so a narrowed variable
+        // assigned there is not null either.
+        if let ExprKind::Assign { op: None, target: Place::Field { .. } | Place::Static { .. }, value } =
+            &e.kind
+            && !matches!(e.ty, Type::Boxed(_))
+        {
+            return self.nullable(value);
+        }
         maybe_null(self.facts, self.method, e)
     }
 
@@ -513,7 +522,13 @@ impl<'a> Gen<'a> {
             {
                 let source = self.pattern_source(value, ty);
                 let rest = self.and_chain(&parts[k + 1..]);
-                texts.push(format!("{source}.is_some_and(|{}| {rest})", self.local(name)));
+                let name = self.local(name);
+                // A failure that goes on from the rest (`?`, `or_break!`) cannot leave a closure.
+                texts.push(if rest.contains('?') || rest.contains("or_break!") {
+                    format!("match {source} {{ Some({name}) => {rest}, None => false }}")
+                } else {
+                    format!("{source}.is_some_and(|{name}| {rest})")
+                });
                 break;
             }
             texts.push(self.expr(part).at(AND + 1));

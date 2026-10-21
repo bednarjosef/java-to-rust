@@ -83,8 +83,6 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         // An index out of the builder's bounds.
         Builtin::Builder(_) => Some("?"),
         Builtin::ArraysSort | Builtin::ArraysToString => None,
-        // A negative length (a null array is the caller's `NullPointerException`).
-        Builtin::ArraysCopyOf => Some("java.lang.NegativeArraySizeException"),
         Builtin::Arrays(
             ArraysOp::Equals | ArraysOp::HashCode | ArraysOp::SortAll | ArraysOp::BinarySearch,
         ) => None,
@@ -155,6 +153,10 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         // or, for null, `IllegalArgumentException`. Not checked, so a catch of it is rejected.
         Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported) => Some("?"),
         Builtin::Charset(_) => None,
+        // What an object's `toString` throws is a point of its own (`text_objects`).
+        Builtin::ObjectText => None,
+        Builtin::ArraysCopyOf => Some("java.lang.NegativeArraySizeException"),
+        Builtin::Native(Native::ArrayCopy) => Some("java.lang.ArrayIndexOutOfBoundsException"),
         // A literal format that fits its arguments' types never throws.
         Builtin::Format => match &args[0].kind {
             ExprKind::Str(format)
@@ -406,7 +408,7 @@ pub(super) fn runtime_failures(
     | ExprKind::IncDec { target: Place::Field { object, .. }, .. } = &x.kind
         && null(object)
     {
-        out.push((NPE, "this field access", false, x.id));
+        out.push((NPE, "this field access", object_checked(object), object.id));
     }
     // A cast to a class that the value's type is not under may fail, unless an `instanceof`
     // tested the variable.

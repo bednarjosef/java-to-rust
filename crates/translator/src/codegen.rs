@@ -141,6 +141,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         try_assigned: HashSet::new(),
         dereferenced: HashSet::new(),
         checked_cast: None,
+        catching_now: HashSet::new(),
         written: HashSet::new(),
         rejected: None,
         chains: chains::Chains::default(),
@@ -150,6 +151,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         let text = g.program(&live);
         g.check_dereferences();
         g.check_casts();
+        g.check_catching();
         return (text, g.needs.take(), g.rejected);
     }
     for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
@@ -174,6 +176,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
     }
     g.check_dereferences();
     g.check_casts();
+    g.check_catching();
     let mut header = format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name);
     let uses = modules::use_lines(&g.out);
     if !uses.is_empty() {
@@ -323,6 +326,8 @@ struct Gen<'a> {
     dereferenced: HashSet<ExprId>,
     /// The cast of `Facts::raising` that `class_cast` is writing, in the checked form.
     checked_cast: Option<ExprId>,
+    /// The operations of `Facts::catching` being written inside `java::catching`.
+    catching_now: HashSet<ExprId>,
     /// The methods whose bodies have been written. A body that is not, as no call needs it or
     /// it never runs, dereferences nothing.
     written: HashSet<usize>,

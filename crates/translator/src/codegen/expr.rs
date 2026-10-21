@@ -248,6 +248,11 @@ impl<'a> Gen<'a> {
     }
 
     pub(super) fn expr(&mut self, e: &'a Expr) -> Code {
+        if self.facts.catching.contains_key(&e.id) && self.catching_now.insert(e.id) {
+            let code = self.expr(e);
+            self.catching_now.remove(&e.id);
+            return self.caught(e.id, code);
+        }
         if let Some(code) = self.shared_array(e) {
             return code;
         }
@@ -278,7 +283,14 @@ impl<'a> Gen<'a> {
             }
             ExprKind::This if matches!(e.ty, Type::Enum(_)) => Code::atom(self.this_name()),
             ExprKind::This => Code::atom(format!("{}.clone()", self.this_name())),
-            ExprKind::EnumConstant { class, ordinal } => Code::atom(self.constant_path(*class, *ordinal)),
+            ExprKind::EnumConstant { class, ordinal } => {
+                let path = self.constant_path(*class, *ordinal);
+                // Java initializes an enum on the first use of one of its constants.
+                match self.init_call(*class) {
+                    Some(init) => Code::atom(format!("{{ {init} {path} }}")),
+                    None => Code::atom(path),
+                }
+            }
             ExprKind::Field { object, name } => self.field_read(object, name, e.ty),
             ExprKind::Static { class, name } => self.static_read(*class, name, e.ty),
             ExprKind::New { args, ctor, .. } => {
@@ -455,8 +467,7 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Call { args, resolved, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
-                let args = self.call_args(index, args).join(", ");
-                let code = Code::atom(format!("{}({args})", self.static_fn(index)));
+                let code = self.static_call(index, args);
                 self.raising(code, index)
             }
             ExprKind::MethodCall { receiver, args, resolved, is_super, .. } => {
@@ -466,8 +477,7 @@ impl<'a> Gen<'a> {
                 } else if self.inlined(receiver, index) {
                     self.inline_call(index, args)
                 } else if self.class.methods[index].is_static {
-                    let args = self.call_args(index, args).join(", ");
-                    Code::atom(format!("{}({args})", self.static_fn(index)))
+                    self.static_call(index, args)
                 } else if !*is_super && let Some(t) = self.enum_of(receiver) {
                     self.enum_call(t, receiver, index, args)
                 } else {

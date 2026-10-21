@@ -171,6 +171,9 @@ pub struct Facts {
     /// `NullPointerException` that a `catch` or a `finally` may see: they are written with the
     /// runtime's checked `non_null`. With the position of the call or the field access.
     pub null_checked: HashMap<ExprId, Pos>,
+    /// The operations whose failure, which has no checked form of its own, a `catch` or a
+    /// `finally` may see: they run inside `java::catching`. With their positions.
+    pub catching: HashMap<ExprId, Pos>,
     /// The standard classes whose objects the runtime raises where the program may see them.
     pub raised_classes: std::collections::BTreeSet<usize>,
     /// The functional interfaces whose values are closures, `Rc<dyn Fn(A) -> R>` (see
