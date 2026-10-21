@@ -941,6 +941,29 @@ mod tests {
     }
 
     #[test]
+    fn a_new_array_of_another_arrays_class_does_not_reach_reflection() {
+        let select = |expression: Value, owner: &str, name: &str| {
+            json!({"kind": "METHOD_INVOCATION",
+                "symbol": {"kind": "METHOD", "owner": owner, "name": name, "type": "()void"},
+                "methodSelect": {"kind": "MEMBER_SELECT", "expression": expression}, "arguments": []})
+        };
+        let array = json!({"kind": "IDENTIFIER", "javaType": "java.lang.Object[]"});
+        let component =
+            select(select(array, "java.lang.Object", "getClass"), "java.lang.Class", "getComponentType");
+        let mut make = select(json!({"kind": "IDENTIFIER"}), "java.lang.reflect.Array", "newInstance");
+        make["arguments"] = json!([component, call("Size", "run")["expression"]]);
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![json!({"kind": "EXPRESSION_STATEMENT", "expression": make})])]),
+            class("java.lang.reflect.Array", &[("newInstance", vec![call("Native", "run")])]),
+            class("Native", &[("run", vec![])]),
+            class("Size", &[("run", vec![])]),
+        ]});
+        let reach = reach(&[&unit], "Main").unwrap();
+        assert!(!reach.classes.contains("Native"), "{reach:?}");
+        assert!(reach.classes.contains("Size"), "{reach:?}");
+    }
+
+    #[test]
     fn a_call_of_arrays_that_the_runtime_does_is_not_followed_into_the_jdk() {
         let sort = |arg: &str| {
             json!({"kind": "EXPRESSION_STATEMENT", "expression": {"kind": "METHOD_INVOCATION",

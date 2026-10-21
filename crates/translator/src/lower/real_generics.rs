@@ -13,7 +13,8 @@
 //! or element of the same type variable, return it, pass it to a parameter of a type variable,
 //! and compare it with `null`. Anything else (a cast, a call on it, a conversion to `Object` or
 //! to text, an array of it) erases the generic. A class qualifies when it extends and implements
-//! nothing, nothing extends it, and its type parameters have no bounds; its uses must all give it
+//! nothing, nothing extends it, and its type parameters have no bounds and each occurs in the type
+//! of one of its instance fields, as a Rust struct must use them; its uses must all give it
 //! type arguments, and its objects must not become `Object`s. A method qualifies when its type
 //! parameters have no bounds and each occurs in a parameter's type, so that Rust can infer it.
 

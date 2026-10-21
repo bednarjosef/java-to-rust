@@ -1770,7 +1770,9 @@ per-instantiation variants are not done, and a generic that needs them stays era
   representation (`Rc<RefCell<Box<String>>>`).
 - Realness is decided in lowering, not by a separate analysis over the erased program, since the
   erased program has lost what the decision needs. The candidates are classes with type
-  parameters that have no bounds, no supertypes, no subclasses and are not abstract, and methods
+  parameters that have no bounds and each occur in the type of an instance field (a Rust struct
+  must use its type parameters: `Ring<E>` holding an `Object[]` stays erased), no supertypes, no
+  subclasses and are not abstract, and methods
   whose type parameters have no bounds. Lowering translates them as real; afterwards
   `real_generics::verify` checks the lowered program and fails every candidate whose type
   variables' values are used for anything but a store, a return, an argument to a parameter of a
