@@ -207,6 +207,19 @@ pub fn try_store<T: Clone>(a: &Array<T>, i: i32, v: T) -> Result<T, Exception> {
     Ok(v)
 }
 
+/// `a[i] = v` as an expression, where the elements may be null and `v` is not: the value of the
+/// assignment is `v` itself, not an `Option`.
+pub fn store_some<T: Clone>(a: &Array<Option<T>>, i: i32, v: T) -> T {
+    set(a, i, Some(v.clone()));
+    v
+}
+
+/// `store_some`, where the program observes the exception.
+pub fn try_store_some<T: Clone>(a: &Array<Option<T>>, i: i32, v: T) -> Result<T, Exception> {
+    try_set(a, i, Some(v.clone()))?;
+    Ok(v)
+}
+
 /// The elements of `a` in order, read one at a time as a for-each loop reads them. The length
 /// is fixed when the loop starts, and the loop holds its own handle, as Java's does.
 pub fn each<T: Clone>(a: Array<T>) -> impl Iterator<Item = T> {

@@ -1751,7 +1751,7 @@ fn an_enum_is_a_copy_rust_enum_with_its_name_and_value_of() {
             "fn enum_name(self) -> String {",
             "AColor::VeryBig => \"VERY_BIG\",",
             "fn enum_value_of(name: &str) -> AColor {",
-            "_ => java::throw(\"IllegalArgumentException\", &format!(\"No enum constant A.Color.{name}\")),",
+            "_ => java::throw(\"java.lang.IllegalArgumentException\", &format!(\"No enum constant A.Color.{name}\")),",
             "impl fmt::Display for AColor {",
             "write!(f, \"{}\", self.enum_name())",
         ],
@@ -2338,8 +2338,9 @@ fn local_and_anonymous_classes_are_declared_so_their_calls_are_not_outside() {
     let dir = write_sources(
         "survey_local",
         &[(
-            "Main.java",
-            "public class Main {
+            "app/Main.java",
+            "package app;
+            public class Main {
                 public static void main(String[] args) {
                     enum Local { A; int n() { return 2; } }
                     Object anon = new Object() { };
@@ -2348,9 +2349,10 @@ fn local_and_anonymous_classes_are_declared_so_their_calls_are_not_outside() {
             }",
         )],
     );
-    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
     let report = survey(&program).report;
-    // The local enum is a feature of the method that declares it; its calls are not calls to
+    // The local enum of a file with a package is a feature of the method that declares it; its
+    // calls are not calls to classes outside the sources.
     // classes outside the sources.
     let table = feature_table(&report, "Program code: features");
     assert!(feature_row(table, "local interfaces, enums and records").contains("Main.java:"), "{table}");
@@ -2386,8 +2388,9 @@ fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
     let dir = write_sources(
         "survey_split",
         &[(
-            "Main.java",
-            "public class Main {
+            "app/Main.java",
+            "package app;
+            public class Main {
                 public static void main(String[] args) {
                     enum Local { A; int n() { return 1; } }
                     System.out.println(Helper.run() + Local.A.n());
@@ -2398,12 +2401,12 @@ fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
     let lib = write_sources(
         "survey_split_lib",
         &[(
-            "Helper.java",
-            "public class Helper { static int run() { Runnable r = new StringBuilder()::reverse; r.run(); return 1; } }",
+            "app/Helper.java",
+            "package app; public class Helper { static int run() { Runnable r = new StringBuilder()::reverse; r.run(); return 1; } }",
         )],
     );
     let program = java_to_rust::Program {
-        main: "Main".into(),
+        main: "app.Main".into(),
         sources: vec![dir],
         libraries: vec![lib.clone()],
         ..Default::default()

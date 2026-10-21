@@ -354,6 +354,12 @@ impl<'a> Gen<'a> {
         value: Option<Type>,
         tail: bool,
     ) {
+        if let [case] = cases
+            && is_default(case)
+            && matches!(selector.kind, ExprKind::Int(_))
+        {
+            return self.default_only(&case.body, value);
+        }
         let labeled = self.pending.is_some();
         self.chars = char_cases(selector, cases);
         self.exhaustive = exhaustive(self.class, selector, cases);
@@ -393,6 +399,22 @@ impl<'a> Gen<'a> {
         } else {
             self.matched(&text, cases, tail);
         }
+    }
+
+    /// A switch on a constant with only a `default`, which holds the `if` chain of a pattern
+    /// switch (see `lower::patterns`): a block, which a `break` (or, for a switch expression, a
+    /// `yield`) leaves by its label.
+    fn default_only(&mut self, body: &'a [Stmt], value: Option<Type>) {
+        self.line("{");
+        self.open(match value {
+            Some(ty) => Kind::Value { machine: false, ty },
+            None => Kind::Switch { machine: false },
+        });
+        self.indent += 1;
+        self.stmts(body, false);
+        self.indent -= 1;
+        self.line("}");
+        self.close();
     }
 
     /// A switch expression, as a block that ends with its value.

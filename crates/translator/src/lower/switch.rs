@@ -30,15 +30,66 @@ fn ends_by_leaving(stmt: &Stmt) -> bool {
 
 impl<'t> Lowering<'t> {
     pub(super) fn switch_stmt(&self, node: Node<'t>) -> Result<Stmt, Error> {
+        if patterns::is_pattern_switch(node) {
+            return self.pattern_switch_stmt(node);
+        }
         let selector = self.selector(node)?;
         let cases = self.cases(node, selector.ty, false)?;
         Ok(Stmt::Switch { selector, cases })
     }
 
     pub(super) fn switch_expr(&self, node: Node<'t>) -> Result<ExprKind, Error> {
-        let selector = self.selector(node)?;
-        let cases = self.cases(node, selector.ty, true)?;
-        Ok(ExprKind::Switch { selector: Box::new(selector), cases })
+        let ty = self.ty(node, node.java_type())?;
+        let mut kind = if patterns::is_pattern_switch(node) {
+            self.pattern_switch_expr(node)?
+        } else {
+            let selector = self.selector(node)?;
+            let cases = self.cases(node, selector.ty, true)?;
+            ExprKind::Switch { selector: Box::new(selector), cases }
+        };
+        if let ExprKind::Switch { cases, .. } = &mut kind {
+            for case in cases {
+                self.convert_yields(&mut case.body, ty);
+            }
+        }
+        Ok(kind)
+    }
+
+    /// Converts the values that these statements of a switch expression yield to its type `ty`
+    /// (a subclass's object to its superclass, an `int` to a `long`).
+    fn convert_yields(&self, stmts: &mut [Stmt], ty: Type) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Yield(value) => {
+                    let placeholder = self.synth(ExprKind::Null, value.pos, Type::Null);
+                    let old = std::mem::replace(value, placeholder);
+                    *value = self.convert(old, ty);
+                }
+                Stmt::Block(body) => self.convert_yields(body, ty),
+                Stmt::If { then, otherwise, .. } => {
+                    self.convert_yields(std::slice::from_mut(then.as_mut()), ty);
+                    if let Some(o) = otherwise {
+                        self.convert_yields(std::slice::from_mut(o.as_mut()), ty);
+                    }
+                }
+                Stmt::While { body, .. }
+                | Stmt::DoWhile { body, .. }
+                | Stmt::For { body, .. }
+                | Stmt::ForEach { body, .. }
+                | Stmt::Labeled { body, .. } => self.convert_yields(std::slice::from_mut(body.as_mut()), ty),
+                Stmt::Switch { cases, .. } => {
+                    cases.iter_mut().for_each(|c| self.convert_yields(&mut c.body, ty))
+                }
+                Stmt::Try { body, catches, finally } => {
+                    self.convert_yields(body, ty);
+                    catches.iter_mut().for_each(|c| self.convert_yields(&mut c.body, ty));
+                    if let Some(f) = finally {
+                        self.convert_yields(f, ty);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// `label: statement`, which `break label` and `continue label` name.
@@ -96,7 +147,7 @@ impl<'t> Lowering<'t> {
 
     /// The statements of an arrow case. A block is flattened into the case, which is a scope of
     /// its own; an expression is a statement, or the value of a switch expression.
-    fn arrow_body(&self, node: Node<'t>, value: bool) -> Result<Vec<Stmt>, Error> {
+    pub(super) fn arrow_body(&self, node: Node<'t>, value: bool) -> Result<Vec<Stmt>, Error> {
         match node.kind() {
             "BLOCK" => self.block(node),
             "EXPRESSION_STATEMENT" | "THROW" => {
@@ -111,7 +162,7 @@ impl<'t> Lowering<'t> {
 
     /// A case label, as a literal of the selector's type `ty`: a constant expression (`case
     /// MAX - 1`, `case 'a' + 1`, `case PREFIX + "x"`) is folded as javac folds it.
-    fn case_label(&self, node: Node<'t>, ty: Type) -> Result<CaseLabel, Error> {
+    pub(super) fn case_label(&self, node: Node<'t>, ty: Type) -> Result<CaseLabel, Error> {
         match node.kind() {
             "DEFAULT_CASE_LABEL" => Ok(CaseLabel::Default),
             "CONSTANT_CASE_LABEL" => {
