@@ -878,7 +878,7 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
             | Builtin::EnumOrdinal
             | Builtin::EnumName
             | Builtin::EnumCompareTo
-            | Builtin::Native(Native::IdentityHash),
+            | Builtin::Native(Native::IdentityHash | Native::SystemIdentityHash),
             _,
         ) => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
