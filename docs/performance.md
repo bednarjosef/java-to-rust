@@ -141,12 +141,13 @@ with an unlimited stack), the two binaries run alternately, median of the runs i
 | heap stack for every drop                        |    7 |                6769 / 5739 |  1.18 |               471 / 480 |  0.98 |
 | recursion counter, heap stack below 200 levels   |    9 |                6413 / 6059 |  1.06 |               470 / 500 |  0.94 |
 | stack address test, heap stack below 128 KB      |   10 |                6745 / 6255 |  1.08 |               471 / 474 |  0.99 |
+| the same, committed (deep path out of line)      |   10 |                6773 / 6539 |  1.04 |               495 / 544 |  0.91 |
 
 BinaryTrees frees about 300 million nodes, so it is the worst case: every node runs the `Drop`.
 In the last version that is eight instructions and one call more than Rust's own drop of a
 node (a thread-local load, a compare, and a call into the node's drop glue that is no longer
-inlined into `Rc::drop_slow`), about 1.5 ns per node, 6 to 8 percent of its run time across
-three runs at loads 5 to 15. NodeList is unchanged within the noise: its chain is freed on the
+inlined into `Rc::drop_slow`), about 1 to 1.5 ns per node, 4 to 8 percent of its run time
+across the A/B runs at loads 5 to 15. NodeList is unchanged within the noise: its chain is freed on the
 heap stack, which costs no more than recursion. Programs without a cycle of field types are
 not touched.
 
