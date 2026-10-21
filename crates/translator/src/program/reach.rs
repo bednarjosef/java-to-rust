@@ -353,6 +353,11 @@ pub fn runtime_arrays_call(node: &Value) -> bool {
     }
 }
 
+/// The JDK method that `String.chars()` runs (see `lower::strings`): it streams the string's
+/// UTF-16 code units, as an `int[]`.
+pub const STRING_CHARS: (&str, &str, &str) =
+    ("java.util.Arrays", "stream", "(int[])java.util.stream.IntStream");
+
 /// The methods that a for-each over an `Iterable` calls.
 pub const ITERATION: &[(&str, &str, &str)] = &[
     ("java.lang.Iterable", "iterator", "()java.util.Iterator<T>"),
@@ -459,6 +464,18 @@ impl<'t> Walk<'t> {
                     self.fields.insert((class.clone(), name), member);
                 }
                 _ => self.declare(member, Some(&class)),
+            }
+        }
+        // A method inherited from a superclass that implements a method of this class's interfaces.
+        for inherited in decl["symbol"]["inherits"].as_array().into_iter().flatten() {
+            let name = text(inherited, "name").to_string();
+            let implemented = &inherited["implements"];
+            let overridden =
+                (text(implemented, "owner").to_string(), name.clone(), text(implemented, "type").to_string());
+            let key = (text(inherited, "owner").to_string(), name, text(inherited, "type").to_string());
+            let overriders = self.overriders.entry(overridden).or_default();
+            if !overriders.contains(&key) {
+                overriders.push(key);
             }
         }
         let mut supertypes: Vec<String> = ["extendsClause", "implementsClause"]
@@ -737,6 +754,10 @@ impl<'t> Walk<'t> {
     fn symbol(&mut self, symbol: &Value) {
         let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
         match text(symbol, "kind") {
+            "METHOD" if owner == "java.lang.String" && name == "chars" => {
+                let (class, method, signature) = STRING_CHARS;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
             "METHOD" | "CONSTRUCTOR" => {
                 self.work.push(Item::Method((owner, name, text(symbol, "type").to_string())));
             }

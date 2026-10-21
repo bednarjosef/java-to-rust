@@ -1299,14 +1299,18 @@ Decisions that change during the implementation are recorded here, milestone by 
 ### Closure forms
 
 - **The first closure types are a subset of 4.2**: an interface is one when it has one abstract
-  method (besides `Object`'s, which `Comparator` declares again), no interface above or below it, every class
-  below it is a lambda's that implements it alone, every `new` of such a class is converted to
-  the interface right away, and no value of it is converted to another type (`Object`,
-  printing, a collection), compared with `==`, tested with `instanceof`, passed to a builtin or
-  called with anything but its method and its default methods; and each lambda's method uses
-  `this` only to read its capture fields. Interfaces that extend another (`UnaryOperator<T> extends Function<T, T>`, condition 4 of 4.2, which makes both
-  enums) and interfaces seen as objects (condition 3 of 4.2 as written, and identity) stay enums
-  for now.
+  method (besides `Object`'s, which `Comparator` declares again), or extends exactly one
+  interface and declares none, every class below it is a lambda's that implements one
+  interface, every interface above and below it is a closure type too, every `new` of such a
+  class is converted to the interface right away, and no value of it is converted to another
+  type than an interface above it (`Object`, printing, a collection), compared with `==`,
+  tested with `instanceof`, passed to a builtin or called with anything but its method and its
+  default methods; and each lambda's method uses `this` only to read its capture fields.
+  Whatever rules out one interface rules out those above and below it. Interfaces seen as
+  objects (condition 3 of 4.2 as written, and identity) stay enums for now.
+- **An interface that extends another names its closures**: `type UnaryOperator = Function;`, so
+  a `UnaryOperator` is passed where a `Function` is taken as it is, and calls the default
+  methods of `FunctionMethods`.
 - **A generic interface's closure is erased, per interface, not per instantiation** (4.4 asks
   for the substituted types at each declaration site): `Function<Integer, Integer>` is the
   alias `type Function = Rc<dyn Fn(Object) -> Object>;`, and a call boxes the arguments and
@@ -1350,9 +1354,10 @@ Decisions that change during the implementation are recorded here, milestone by 
 - **Corpus**: `features/ClosureDefaultMethods.java` (default methods that create lambdas over
   `this`, call each other and call the closure, and a static method);
   `whole-program/FunctionChains.java` (`Predicate`, `IntPredicate` and `BiFunction` from the
-  JDK's sources with their default methods); `features/GenericClosures.java` (the generic interfaces of `java.util.function`
-  and the program's own: an early return, a lambda that throws behind a bridge, a single
-  lambda of an interface passed as an argument, a generic method calling its closure, and
-  `UnaryOperator` keeping `Function` an enum); `features/ClosureForms.java` (captures, `this` through `outer`, a field and a
-  final field of closures, an array of them, a closure returned from a method, a constructor
+  JDK's sources with their default methods, `Function` with `UnaryOperator`);
+  `features/GenericClosures.java` (the generic interfaces of `java.util.function` and the
+  program's own: an early return, a lambda that throws behind a bridge, a single lambda of an
+  interface passed as an argument, a generic method calling its closure, a `UnaryOperator`
+  passed as a `Function`); `features/ClosureForms.java` (captures, `this` through `outer`, a
+  field and a final field of closures, an array of them, a closure returned from a method, a constructor
   reference, a closure that throws a checked exception, a closure in a closure).

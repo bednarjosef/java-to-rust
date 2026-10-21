@@ -236,12 +236,14 @@ A small subset, end to end:
   sees (a division by zero, an array index out of bounds, `charAt` or `substring` out of range, a
   malformed number) is the standard exception Java throws, with Java's message; elsewhere it ends
   the program as before. try-with-resources closes the program's own resources (a new object of
-  the program's class) in the reverse order, before its `catch` clauses and `finally`; a `close`
+  the program's class, or an existing variable of it, `try (r)`; a null one is not closed) in the
+  reverse order, before its `catch` clauses and `finally`; a `close`
   that throws after the body threw is added to that exception as suppressed, and `getSuppressed`
   returns it. A `throw` of a value that may be null throws `NullPointerException`, and a `yield` or
   a constructor's `return` through a `finally` runs the `finally` first. A static initializer or a
   static field initializer that throws ends an uncaught program with
-  `ExceptionInInitializerError`. Rejected for now, by name: other try-with-resources, catching or
+  `ExceptionInInitializerError`. Rejected for now, by name: try-with-resources over a library type
+  (an `AutoCloseable` variable or lambda), catching or
   letting a `finally` see a null dereference, a negative array size, a failed cast or a failure of
   the library other than these, a `toString`, an instance field initializer or a constructor of an
   exception or an enum that throws something a caller catches, and a `try` or `catch` that observes
@@ -552,12 +554,14 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   generic one takes and returns the erased types (`type Function = Rc<dyn Fn(Object) ->
   Object>;`), the lambda's body after its bridge's casts of the arguments. Its default methods
   are an extension trait of the closure type (`trait PredicateMethods`, `impl PredicateMethods
-  for Predicate`, `self` the closure), so `empty.negate().and(longer)` reads as in Java. Each lambda is a closure written where it is created, its captures moved in
-  (`Rc::new(move |a: i32, b: i32| -> i32 { a.wrapping_add(b).wrapping_add(k) }) as IntOp`, `this`
-  as `outer`), and a call is a call of the closure (`op(acc, x)`). Every other functional
-  interface keeps the class per lambda. Not yet: other receivers, `super` in a lambda,
-  interfaces that extend another (`UnaryOperator`) as closure types, typed closures for a generic interface's instantiations, and the parameter and
-  local forms (`impl FnMut`, a plain `let f = |x| ..`).
+  for Predicate`, `self` the closure), so `empty.negate().and(longer)` reads as in Java, and an
+  interface that extends another names its closures (`type UnaryOperator = Function;`). Each
+  lambda is a closure written where it is created, its captures moved in (`Rc::new(move |a:
+  i32, b: i32| -> i32 { a.wrapping_add(b).wrapping_add(k) }) as IntOp`, `this` as `outer`), and
+  a call is a call of the closure (`op(acc, x)`). Every other functional interface keeps the
+  class per lambda. Not yet: other receivers, `super` in a lambda, typed closures for a generic
+  interface's instantiations, and the parameter and local forms (`impl FnMut`, a plain `let f =
+  |x| ..`).
 
 ### Whole programs
 
