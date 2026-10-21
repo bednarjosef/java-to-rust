@@ -1086,7 +1086,7 @@ fn runtime_failures(
                         | Builtin::Boxed(BoxedOp::Equals, _)
                         | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
                 );
-                let checked = if takes_null || matches!(builtin, Builtin::String(StringOp::Join)) {
+                let checked = if takes_null || matches!(builtin, Builtin::String(StringOp::Join) | Builtin::Format) {
                     &args[..args.len().min(1)]
                 } else {
                     &args[..]
