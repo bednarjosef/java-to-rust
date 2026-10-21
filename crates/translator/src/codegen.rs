@@ -15,6 +15,7 @@ mod charsets;
 mod classes;
 mod code;
 mod code_point;
+mod covariant;
 mod dispatch;
 mod enums;
 mod exceptions;
