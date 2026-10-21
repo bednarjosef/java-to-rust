@@ -333,6 +333,44 @@ impl<'a> Gen<'a> {
         matches!(self.class.types[c].kind, TypeKind::Enum | TypeKind::Runtime)
     }
 
+    /// The string `s` (a `String`) as an `Object`.
+    pub(super) fn string_as_object(&mut self, s: &str) -> String {
+        let object = self.object_index().expect("an `Object[]` in a program that uses `Object`");
+        let string = self.type_of(Type::String).expect("strings among `Object`'s runtime classes");
+        format!("{}({s})", self.variant(object, string))
+    }
+
+    /// `StringArrayOf` and `ObjectArrayOf`: a copy of array `e` (an `Object[]` or a `String[]`) as
+    /// an array of type `ty` (the other), each string cast back from its `Object` or put in one.
+    pub(super) fn array_conversion(&mut self, builtin: Builtin, e: &'a Expr, ty: Type) -> Code {
+        let from_nullable = self.nullable_element(crate::codegen::arrays::element(e.ty));
+        let to_nullable = self.nullable_element(crate::codegen::arrays::element(ty));
+        // Each element of the new array: from a plain element `s` (`plain`), or from an `Option`
+        // (`optional`, an `Option` of the new element).
+        let (plain, optional) = if builtin == Builtin::ObjectArrayOf {
+            (self.string_as_object("s.clone()"), format!("s.clone().map(|s| {})", self.string_as_object("s")))
+        } else {
+            let object = self.object_index().expect("an `Object[]` in a program that uses `Object`");
+            let string = self.type_of(Type::String).expect("strings among `Object`'s runtime classes");
+            self.need(Need::Narrow(object, string));
+            let (cast, name) = (self.runtime("cast"), self.as_name(string));
+            let target = rust_string("java.lang.String");
+            (
+                format!("{cast}(s.{name}(), {target})"),
+                format!("s.as_ref().map(|o| {cast}(o.{name}(), {target}))"),
+            )
+        };
+        let each = match (from_nullable, to_nullable) {
+            (false, false) => plain,
+            (false, true) => format!("Some({plain})"),
+            (true, true) => optional,
+            (true, false) => format!("{}({optional})", self.runtime("non_null")),
+        };
+        let slice = self.slice_of(e);
+        let maker = self.array_maker("from_vec");
+        Code::atom(format!("{maker}(({slice}).iter().map(|s| {each}).collect::<Vec<_>>())"))
+    }
+
     /// `System.arraycopy(src, srcPos, dest, destPos, length)` where `src` and `dest` are
     /// `Object`s: the copy between their arrays when both are arrays of one type, else Java's
     /// `ArrayStoreException`. The positions are computed first; a null `src` or `dest` throws
