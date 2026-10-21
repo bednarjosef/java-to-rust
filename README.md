@@ -236,12 +236,14 @@ A small subset, end to end:
   sees (a division by zero, an array index out of bounds, `charAt` or `substring` out of range, a
   malformed number) is the standard exception Java throws, with Java's message; elsewhere it ends
   the program as before. try-with-resources closes the program's own resources (a new object of
-  the program's class) in the reverse order, before its `catch` clauses and `finally`; a `close`
+  the program's class, or an existing variable of it, `try (r)`; a null one is not closed) in the
+  reverse order, before its `catch` clauses and `finally`; a `close`
   that throws after the body threw is added to that exception as suppressed, and `getSuppressed`
   returns it. A `throw` of a value that may be null throws `NullPointerException`, and a `yield` or
   a constructor's `return` through a `finally` runs the `finally` first. A static initializer or a
   static field initializer that throws ends an uncaught program with
-  `ExceptionInInitializerError`. Rejected for now, by name: other try-with-resources, catching or
+  `ExceptionInInitializerError`. Rejected for now, by name: try-with-resources over a library type
+  (an `AutoCloseable` variable or lambda), catching or
   letting a `finally` see a null dereference, a negative array size, a failed cast or a failure of
   the library other than these, a `toString`, an instance field initializer or a constructor of an
   exception or an enum that throws something a caller catches, and a `try` or `catch` that observes
