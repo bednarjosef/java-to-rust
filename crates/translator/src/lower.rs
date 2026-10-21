@@ -4,6 +4,7 @@
 //! outside it is reported as an error naming the construct.
 
 mod code_point;
+mod covariant;
 mod enum_nulls;
 mod enum_tables;
 mod enums;
@@ -64,8 +65,9 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         .filter(|n| !matches!(n.kind(), "EMPTY_STATEMENT" | "ANNOTATION_TYPE"))
         .collect();
     let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
-    real_generics::retry(|real| {
+    real_generics::retry(|real, covariant| {
         let mut lowering = Lowering::declare(&decls)?;
+        lowering.covariant = covariant.clone();
         lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
         lowering.declare_standard()?;
         let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
@@ -213,6 +215,8 @@ struct Lowering<'t> {
     /// The array types whose arrays become `Object`s or are cast back from them: each is a
     /// runtime class beside `Object` (see `object::object_types`).
     object_arrays: std::cell::RefCell<Vec<Type>>,
+    /// The arrays of references that are `Object[]`s (see `covariant`).
+    covariant: covariant::Covariant,
     /// Where `Object` goes, in a program that uses it (see `object`).
     object: Option<object::ObjectIndexes>,
     /// The class of the objects that `new Object()` creates, when the code has one (see `object`).
@@ -400,7 +404,9 @@ impl<'t> Lowering<'t> {
             _ if name.starts_with("<anonymous ") && self.enum_index(&name[11..name.len() - 1]).is_some() => {
                 Ok(Type::enum_type(&name[11..name.len() - 1]))
             }
-            _ if name.ends_with("[]") => Ok(Type::array(self.ty(node, &name[..name.len() - 2])?)),
+            _ if name.ends_with("[]") => {
+                Ok(self.covariant_array(Type::array(self.ty(node, &name[..name.len() - 2])?)))
+            }
             "java.lang.Object" if self.object.is_some() => Ok(Type::class(OBJECT)),
             "java.lang.Comparable" if self.object.is_some_and(|at| at.comparable.is_some()) => {
                 Ok(Type::class(COMPARABLE))
@@ -561,9 +567,18 @@ impl<'t> Lowering<'t> {
                     Some(declared) => declared,
                     None => self.ty(node, node.java_type())?,
                 };
+                let target = self.target(variable)?;
+                // An element of a covariant array is an `Object` (see `covariant`).
+                let to = match &target {
+                    Place::Index(array, _) => match array.ty {
+                        Type::Array(element) if Self::is_object(*element) => *element,
+                        _ => to,
+                    },
+                    _ => to,
+                };
                 ExprKind::Assign {
                     op: None,
-                    target: self.target(variable)?,
+                    target,
                     value: Box::new(self.convert(self.expr(node.child("expression")?)?, to)),
                 }
             }
@@ -584,6 +599,10 @@ impl<'t> Lowering<'t> {
                 let value = self.expr(node.child("expression")?)?;
                 if Self::is_object(value.ty) {
                     self.object_array(node, ty)?;
+                }
+                // `(T[]) objects` or `(Object[]) versions`.
+                if value.ty != ty {
+                    self.meets_object_array(value.ty, ty);
                 }
                 // A cast between the program's types, up, down or across: `Cast` converts as the
                 // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
