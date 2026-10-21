@@ -16,9 +16,10 @@ impl<'t> Lowering<'t> {
         let name = name.as_str();
         match self.type_index(name) {
             Some(s) if self.types[s].node.kind() == "CLASS" => Ok(Some(s)),
-            Some(_) => unsupported(clause, &format!("extending `{name}`")),
             None if name == "java.lang.Object" || name == "java.lang.Number" => Ok(None),
-            None => unsupported(clause, &format!("extending `{name}`")),
+            // A census's stub of the class extends nothing.
+            _ if self.stubbing.get() => Ok(None),
+            _ => unsupported(clause, &format!("extending `{name}`")),
         }
     }
 
@@ -32,8 +33,7 @@ impl<'t> Lowering<'t> {
         // javac lists the interfaces that an interface extends as its `implementsClause` too.
         let mut out = Vec::new();
         for clause in node.list("implementsClause") {
-            let name = clause.java_type();
-            let raw = name.split('<').next().unwrap_or(name);
+            let raw = &super::captures::raw(clause.java_type());
             if functional::is_marker(raw) {
                 continue;
             }
@@ -41,12 +41,13 @@ impl<'t> Lowering<'t> {
                 Some(i) if self.types[i].node.kind() == "INTERFACE" => out.push(i),
                 // `CharSequence` is the object model's (see `object_types`).
                 None if matches!(
-                    raw,
+                    raw.as_str(),
                     "java.lang.Comparable"
                         | "java.lang.AutoCloseable"
                         | "java.io.Closeable"
                         | "java.lang.CharSequence"
                 ) => {}
+                _ if self.stubbing.get() => {}
                 _ => return unsupported(clause, &format!("implementing `{raw}`")),
             }
         }

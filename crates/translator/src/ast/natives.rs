@@ -88,6 +88,12 @@ pub enum Native {
     ThreadInterrupt,
     ThreadIsInterrupted,
     ThreadClearInterrupt,
+    /// `installUncaught0()`, to which lowering adds the call `Thread.dispatchUncaught()` that the
+    /// runtime makes on a thread that an exception nothing catches ends; `uncaught0()`, that
+    /// exception there; and `printUncaught0(name, e)`, how the runtime prints it without a handler.
+    InstallUncaught,
+    UncaughtException,
+    PrintUncaught,
     /// `o.wait()` and `o.wait(millis)`: the object, and the timeout in milliseconds (0 for none).
     MonitorWait,
     /// `o.notify()`, or with `all` `o.notifyAll()`: the object.
@@ -178,6 +184,11 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.lang.Thread", "interrupt0", "(long)void") => Native::ThreadInterrupt,
         ("java.lang.Thread", "isInterrupted0", "(long)boolean") => Native::ThreadIsInterrupted,
         ("java.lang.Thread", "clearInterrupt0", "()boolean") => Native::ThreadClearInterrupt,
+        ("java.lang.Thread", "installUncaught0", "()void") => Native::InstallUncaught,
+        ("java.lang.Thread", "uncaught0", "()java.lang.Throwable") => Native::UncaughtException,
+        ("java.lang.Thread", "printUncaught0", "(java.lang.String,java.lang.Throwable)void") => {
+            Native::PrintUncaught
+        }
         _ => return None,
     })
 }

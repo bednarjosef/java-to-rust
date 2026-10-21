@@ -37,6 +37,7 @@ mod arrays;
 mod boxing;
 mod by_name;
 mod captures;
+mod census;
 mod charsets;
 mod classes;
 mod clinit_errors;
@@ -57,11 +58,19 @@ mod system;
 mod varargs;
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
+pub use captures::raw as raw_type;
+pub use census::panic_message;
 pub(crate) use clinit_errors::rewritten_clinit;
-pub use exceptions::{is_standard, standard_names, standard_subclass};
+pub use exceptions::{is_standard, standard_local_name, standard_names, standard_subclass};
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
-pub use program::lower_program;
+pub use primitives::runtime_character_method;
+pub use program::{Lowered, census_lower_program, lower_program};
+
+/// Checks that no enum of the program can be null: the translation has no null enums.
+pub fn check_enum_nulls(class: &Class) -> Result<(), Error> {
+    enums::check_nulls(class)
+}
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
@@ -290,7 +299,19 @@ struct Lowering<'t> {
     /// In a whole program, whether each class, by index, is the library's (the JDK's) rather than
     /// the program's own; a class without an entry is the program's.
     library: Vec<bool>,
+    /// In a census (see `census`), the code that lowering rejected, each error with the index of
+    /// the type whose code it is in and the position of the method being lowered, and lowering
+    /// goes on past it; `None` otherwise, when the first error ends lowering.
+    census: Option<RefCell<Vec<CensusError>>>,
+    /// Whether the method being lowered is a census's stub of one that lowering rejected.
+    stubbing: Cell<bool>,
+    /// The methods that are a census's stubs.
+    stubbed: RefCell<std::collections::BTreeSet<usize>>,
 }
+
+/// An error that lowering for a census records: the index of the type whose code it is in, the
+/// position of the method being lowered, and the error.
+type CensusError = (usize, Option<Pos>, Error);
 
 impl<'t> Lowering<'t> {
     /// What lowering adds once every declared method is lowered, for a file and a whole program
@@ -303,29 +324,45 @@ impl<'t> Lowering<'t> {
             methods.push(clinit);
         }
         for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
-            let in_type = |e| (index, e);
-            self.constant_bodies(index, methods).map_err(in_type)?;
-            let bodies = self.constant_body_fields(index).map_err(in_type)?;
-            let own_fields = types[index].fields.len();
-            let pure = self.check_enum(index, methods).and_then(|()| {
-                self.add_body_fields(&bodies, &mut types[index].fields)?;
-                self.enum_constants(index, &types[index].fields, methods, &bodies)
-            });
-            // An enum whose constructors do more than the pure form allows has tables instead,
-            // when its constants' bodies declare no fields.
-            let constants = match pure {
-                Ok(constants) => constants,
-                Err(e) if bodies.iter().any(|b| !b.is_empty()) => return Err(in_type(e)),
-                Err(_) => {
-                    types[index].fields.truncate(own_fields);
-                    self.enum_tables(index, types, methods).map_err(in_type)?;
-                    let names = self.enum_constant_names(index);
-                    names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() }).collect()
-                }
-            };
-            types[index].enum_constants = Some(constants);
+            if let Err(e) = self.finish_enum(index, types, methods) {
+                // In a census, an enum that lowering rejects keeps its constants without values.
+                self.reject_at(index, Some(self.types[index].node.pos()), e).map_err(|e| (index, e))?;
+                let names = self.enum_constant_names(index);
+                let constants = names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() });
+                types[index].enum_constants = Some(constants.collect());
+            }
         }
         self.field_update_methods(methods);
+        Ok(())
+    }
+
+    /// The constant bodies and the constants of enum `index`.
+    fn finish_enum(
+        &self,
+        index: usize,
+        types: &mut [TypeDecl],
+        methods: &mut Vec<Method>,
+    ) -> Result<(), Error> {
+        self.constant_bodies(index, methods)?;
+        let bodies = self.constant_body_fields(index)?;
+        let own_fields = types[index].fields.len();
+        let pure = self.check_enum(index, methods).and_then(|()| {
+            self.add_body_fields(&bodies, &mut types[index].fields)?;
+            self.enum_constants(index, &types[index].fields, methods, &bodies)
+        });
+        // An enum whose constructors do more than the pure form allows has tables instead,
+        // when its constants' bodies declare no fields.
+        let constants = match pure {
+            Ok(constants) => constants,
+            Err(e) if bodies.iter().any(|b| !b.is_empty()) => return Err(e),
+            Err(_) => {
+                types[index].fields.truncate(own_fields);
+                self.enum_tables(index, types, methods)?;
+                let names = self.enum_constant_names(index);
+                names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() }).collect()
+            }
+        };
+        types[index].enum_constants = Some(constants);
         Ok(())
     }
 
@@ -353,7 +390,7 @@ impl<'t> Lowering<'t> {
             Type::Void
         } else {
             let ret_node = node.child("returnType")?;
-            self.ty(ret_node, ret_node.java_type())?
+            self.signature_type(ret_node, ret_node.java_type())?
         };
         self.ret.set(ret);
         let params: Vec<Node> = node.list("parameters").collect();
@@ -370,7 +407,9 @@ impl<'t> Lowering<'t> {
         } else {
             params
                 .into_iter()
-                .map(|p| Ok(Param { name: p.str("name").to_string(), ty: self.ty(p, param_type(p))? }))
+                .map(|p| {
+                    Ok(Param { name: p.str("name").to_string(), ty: self.signature_type(p, param_type(p))? })
+                })
                 .collect::<Result<_, Error>>()?
         };
         // An abstract method of an enum is implemented by the constants' bodies, which
@@ -383,15 +422,15 @@ impl<'t> Lowering<'t> {
             && !abstract_in_enum;
         let dormant = self.reach.is_some_and(|r| r.dormant(&self.types[info.owner].javac, node.0));
         let mut body = match node.get("body") {
-            Some(_) if dormant => {
-                let never = ExprKind::Builtin(Builtin::NoObject { class: info.owner }, Vec::new());
-                vec![Stmt::Expr(self.synth(never, node.pos(), Type::Void))]
-            }
+            Some(_) if dormant || self.stubbing.get() => self.never(info.owner, node.pos()),
             Some(body) => self.block(body)?,
             None if abstract_in_enum || is_abstract => Vec::new(),
             None => return unsupported(node, "methods without a body"),
         };
-        let params = if is_ctor {
+        let params = if is_ctor && self.stubbing.get() {
+            let (first, last) = self.synthetic_params(info.owner)?;
+            first.into_iter().chain(params).chain(last).collect()
+        } else if is_ctor {
             self.constructor_prologue(node, info.owner, &mut body)?;
             self.run_initializer_blocks(info.owner, &mut body)?;
             self.start_constructor(info.owner, &mut body)?;
@@ -962,7 +1001,10 @@ impl<'t> Lowering<'t> {
             (owner, name) if boxing::boxed_type(owner).is_some() && boxing::is_boxed_method(name) => {
                 self.boxed_call(node, &symbol, &mut args, receiver)?
             }
-            ("java.lang.Character", name) => {
+            // The rest of `Character` is the JDK's, where a whole program has it.
+            ("java.lang.Character", name)
+                if runtime_character_method(name, symbol.ty) || self.type_index(symbol.owner).is_none() =>
+            {
                 let char_arg = args.first().is_some_and(|a| a.ty == Type::Char);
                 self.character_method(node, name, symbol.ty, char_arg)?
             }

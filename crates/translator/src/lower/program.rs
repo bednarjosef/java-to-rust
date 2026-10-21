@@ -41,9 +41,46 @@ pub fn lower_program<'t>(
     main: &str,
 ) -> Result<Class, (Option<usize>, Error)> {
     super::real_generics::retry(|real, covariant| {
-        lower_with(units, program_units, reach, main, real, covariant)
+        lower_with(units, program_units, reach, main, real, covariant, None)
     })
 }
+
+/// A program lowered for a census: the lowered program, or the error that ended lowering all the
+/// same; and every piece of code that lowering rejected, each error with the unit it is in and
+/// the position of the method, initializer or lambda that it is in.
+pub struct Lowered {
+    pub class: Result<Class, (Option<usize>, Error)>,
+    pub rejected: Vec<Rejected>,
+    /// The unit of each type of the lowered program, `None` for those that lowering provides.
+    pub units: Vec<Option<usize>>,
+}
+
+/// An error in a piece of code that lowering rejected and went on past: the unit of the code,
+/// the position of the method or lambda that it is in (none in an initializer), and the error.
+pub struct Rejected {
+    pub unit: Option<usize>,
+    pub anchor: Option<Pos>,
+    pub error: Error,
+}
+
+/// `lower_program` for a census (see `census`): a piece of code that lowering rejects is recorded
+/// and replaced by a stub, and lowering goes on.
+pub fn census_lower_program<'t>(
+    units: &[&'t Value],
+    program_units: usize,
+    reach: &'t Reach,
+    main: &str,
+) -> Lowered {
+    let census = RefCell::new((Vec::new(), Vec::new()));
+    let class = super::real_generics::retry(|real, covariant| {
+        lower_with(units, program_units, reach, main, real, covariant, Some(&census))
+    });
+    let (rejected, units) = census.into_inner();
+    Lowered { class, rejected, units }
+}
+
+/// What a census's lowering hands back on each attempt: the rejections, and the unit of each type.
+type CensusSink = RefCell<(Vec<Rejected>, Vec<Option<usize>>)>;
 
 /// `lower_program` with the Rust generics `real`, or with the candidates when it is `None`, and
 /// the arrays `covariant`.
@@ -54,12 +91,42 @@ fn lower_with<'t>(
     main: &str,
     real: Option<&super::real_generics::Real>,
     covariant: &super::covariant::Covariant,
+    census: Option<&CensusSink>,
 ) -> Result<(Class, super::real_generics::Real, super::real_generics::Real), (Option<usize>, Error)> {
     let mut lowering = Lowering::empty();
     lowering.covariant = covariant.clone();
     lowering.reach = Some(reach);
-    // The unit and the package of each class, in `Class::types` order.
+    lowering.census = census.map(|_| RefCell::default());
     let mut unit_of = Vec::new();
+    let lowered = lower_into(&mut lowering, &mut unit_of, units, program_units, reach, main, real);
+    let Some(census) = census else { return lowered };
+    // Each attempt's rejections replace the last's.
+    let unit = |t: usize| unit_of.get(t).copied().filter(|&u| u != usize::MAX);
+    let rejected = lowering.census.take().unwrap_or_default().into_inner();
+    let rejected: Vec<Rejected> =
+        rejected.into_iter().map(|(t, anchor, error)| Rejected { unit: unit(t), anchor, error }).collect();
+    // As without a census, an error with Rust generics is retried with all of them erased.
+    let first = rejected.first().map(|r| Error { pos: r.error.pos, message: r.error.message.clone() });
+    let retried = lowered.is_ok() && !lowering.real.is_empty();
+    *census.borrow_mut() = (rejected, (0..lowering.types.len()).map(unit).collect());
+    match first {
+        Some(error) if retried => Err((None, error)),
+        _ => lowered,
+    }
+}
+
+/// `lower_with` on `lowering`, which fills `unit_of` with the unit of each type (`usize::MAX` for
+/// those that belong to none).
+fn lower_into<'t>(
+    lowering: &mut Lowering<'t>,
+    unit_of: &mut Vec<usize>,
+    units: &[&'t Value],
+    program_units: usize,
+    reach: &'t Reach,
+    main: &str,
+    real: Option<&super::real_generics::Real>,
+) -> Result<(Class, super::real_generics::Real, super::real_generics::Real), (Option<usize>, Error)> {
+    // The unit and the package of each class, in `Class::types` order.
     let mut packages = Vec::new();
     for (index, unit) in units.iter().enumerate() {
         let unit = Node(unit);
@@ -113,12 +180,12 @@ fn lower_with<'t>(
     lowering.plan_object(&planned);
     let mut types = Vec::new();
     for (t, package) in packages.into_iter().enumerate() {
-        let mut decl = lowering.type_decl(t).map_err(|e| (unit(t), e))?;
+        let mut decl = lowering.type_decl_or_stub(t).map_err(|e| (unit(t), e))?;
         decl.package = package;
         types.push(decl);
     }
     let mut methods: Vec<Method> = (0..lowering.methods.len())
-        .map(|m| lowering.method(m).map_err(|e| (unit(lowering.methods[m].owner), e)))
+        .map(|m| lowering.method_or_stub(m).map_err(|e| (unit(lowering.methods[m].owner), e)))
         .collect::<Result<_, _>>()?;
     lowering.suppress_checks(&mut methods);
     lowering.object_methods(&mut methods).map_err(|e| (None, e))?;
@@ -129,7 +196,10 @@ fn lower_with<'t>(
     let hierarchy = Hierarchy::new(&types, &methods);
     let raised = lowering.raised_objects(&types, &methods);
     let class = Class { name: main.to_string(), types, methods, hierarchy, raised };
-    enums::check_nulls(&class).map_err(|e| (None, e))?;
+    // A census checks the program for null enums itself, as it checks the analyses' errors.
+    if lowering.census.is_none() {
+        enums::check_nulls(&class).map_err(|e| (None, e))?;
+    }
     Ok((class, lowering.real.clone(), failed))
 }
 

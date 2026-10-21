@@ -74,6 +74,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             // `valueOf(chars)` copies the whole array; only an offset and a count can be out of range.
             StringOp::FromChars if args.len() == 3 => Some("java.lang.StringIndexOutOfBoundsException"),
             StringOp::Repeat => Some("java.lang.IllegalArgumentException"),
+            // A range outside the array, an invalid code point.
+            StringOp::FromCodePoints | StringOp::FromHighByte => Some("?"),
             // A malformed pattern, a bad group in a replacement, an unknown charset.
             StringOp::ReplaceAll
             | StringOp::ReplaceFirst
@@ -138,7 +140,10 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::ThreadRename
             | Native::ThreadInterrupt
             | Native::ThreadIsInterrupted
-            | Native::ThreadClearInterrupt,
+            | Native::ThreadClearInterrupt
+            | Native::InstallUncaught
+            | Native::UncaughtException
+            | Native::PrintUncaught,
         ) => None,
         // A monitor that the thread does not hold (and for `wait` a negative timeout, and an
         // interrupt, which `runtime_failures` adds).
@@ -319,6 +324,7 @@ pub(super) fn runtime_failures(
             | Builtin::MainArgs
             | Builtin::NoObject { .. }
             | Builtin::UnknownClass
+            | Builtin::MissingResource
             | Builtin::InitializeClass { .. }
             | Builtin::ClassName { .. }
             | Builtin::ClassLiteralName { .. }

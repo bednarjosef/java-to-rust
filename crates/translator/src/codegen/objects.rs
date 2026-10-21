@@ -667,7 +667,7 @@ impl<'a> Gen<'a> {
             .filter(|(id, _)| !self.dereferenced.contains(id) && !unwritten.contains(id));
         if let Some(pos) = missed.map(|(_, &pos)| pos).min_by_key(|p| (p.line, p.column)) {
             let message = "catching the `NullPointerException` of this dereference not supported yet";
-            self.rejected.get_or_insert(Error { pos, message: message.to_string() });
+            self.rejected.push(Error { pos, message: message.to_string() });
         }
     }
 
@@ -805,7 +805,7 @@ impl<'a> Gen<'a> {
 
     /// The text that `call`, a call of `toString` method `index`, gives: `"null"` where it
     /// returns null, as `String.valueOf` shows it.
-    pub(super) fn null_text(&self, index: usize, call: String) -> String {
+    fn null_text(&self, index: usize, call: String) -> String {
         if self.facts.nullable_returns.contains(&index) {
             format!("{call}.unwrap_or_else(|| String::from(\"null\"))")
         } else {

@@ -104,7 +104,10 @@ impl<'t> Lowering<'t> {
         let mut order = nested.clone();
         order.sort_by_key(|&t| self.depth(t));
         for t in order {
-            self.name_captures(t).map_err(|e| (t, e))?;
+            // In a census, the class goes on with the names it has.
+            if let Err(error) = self.name_captures(t) {
+                self.reject_at(t, Some(self.types[t].node.pos()), error).map_err(|e| (t, e))?;
+            }
         }
         Ok(())
     }
@@ -332,7 +335,7 @@ impl<'t> Lowering<'t> {
 
 /// A class's name without its type arguments, wherever they are: javac writes an inner class of a
 /// generic class as `java.util.AbstractList<E>.Itr`, which is `java.util.AbstractList.Itr`.
-pub(super) fn raw(name: &str) -> String {
+pub fn raw(name: &str) -> String {
     if name.starts_with('<') {
         return name.to_string();
     }

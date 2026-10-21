@@ -18,6 +18,12 @@
 //! `Object[]` (`Builtin::ObjectArrayOf`), and the runtime's `Arrays.sort` and `fill` of strings,
 //! which change the array in place, are rejected on it.
 //!
+//! So is an array of an enum (`Day[]` passed for `E[]` of `<E extends Enum<E>>`, or as an
+//! `Enum<?>[]`): the translation holds its constants as values, Java as objects, so where it is
+//! an `Object[]` its constants are `Object`s (`values()` makes them so), and a read casts each back
+//! to the enum. A null element read as the enum ends the program (`java::null_enum`), but a test
+//! of one against `null` tests the checked cast.
+//!
 //! Such an array does not remember its element class: storing an object of another class in it
 //! does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s.
 
@@ -43,7 +49,7 @@ impl<'t> Lowering<'t> {
             (Type::Array(x), Type::Array(y)) if matches!((x, y), (Type::Array(_), Type::Array(_))) => {
                 self.meets_object_array(*x, *y)
             }
-            (Type::Array(x), Type::Array(y)) if x != y && x.is_reference() && y.is_reference() => {
+            (Type::Array(x), Type::Array(y)) if x != y && Self::of_objects(*x) && Self::of_objects(*y) => {
                 let a = !Self::is_object(*x) && self.note_covariant(a);
                 let b = !Self::is_object(*y) && self.note_covariant(b);
                 a | b
@@ -52,13 +58,16 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// An array of strings stays a `java::Array<String>`: the runtime's string methods make and
-    /// take those (`split`, `String.join`, `main`'s arguments).
+    /// Whether an array of `element`s is an array of references, which Java converts to an
+    /// array of a supertype: also an array of an enum, whose constants the translation holds as
+    /// values but Java as objects (`Day[]` as `Enum<?>[]` or `Object[]`).
+    pub(super) fn of_objects(element: Type) -> bool {
+        element.is_reference() || matches!(element, Type::Enum(_))
+    }
+
+    /// Notes that array type `ty` is an `Object[]`, unless it already is or holds a Rust generic's
+    /// type variable.
     fn note_covariant(&self, ty: Type) -> bool {
-        let mut innermost = ty;
-        while let Type::Array(element) = innermost {
-            innermost = *element;
-        }
         if self.object.is_none() || self.has_param(ty) || self.covariant.known.contains(&ty) {
             return false;
         }

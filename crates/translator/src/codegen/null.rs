@@ -26,9 +26,11 @@ impl<'a> Gen<'a> {
         {
             return false;
         }
-        // A cast of a narrowed variable is not null either.
+        // A cast of a narrowed variable is not null either. (A cast to an enum never is: a null
+        // there ends the program, see `java::null_enum`.)
         if let ExprKind::Cast(_, value) = &e.kind
             && nullable_type(e.ty)
+            && !matches!(e.ty, Type::Enum(_))
         {
             return self.nullable(value);
         }
@@ -151,6 +153,16 @@ impl<'a> Gen<'a> {
         let other = if matches!(l.kind, ExprKind::Null) { r } else { l };
         let is_null = if matches!(other.kind, ExprKind::Null) {
             Code::atom("true")
+        } else if let ExprKind::Cast(to @ Type::Enum(_), value) = &other.kind
+            && matches!(value.ty, Type::Class(..))
+            && self.nullable(value)
+        {
+            // A cast to an enum of a value that may be null, such as an element of an enum's
+            // array that is an `Object[]` (`lower::covariant`): the checked cast as an `Option`,
+            // which is `None` for null rather than ending the program (`java::null_enum`).
+            let test = if matches!(op, BinOp::Ne) { "is_some" } else { "is_none" };
+            let option = self.checked_class_cast(other.id, *to, value);
+            return Code::atom(format!("{}.{test}()", option.at(ATOM)));
         } else if self.nullable(other) {
             let test = if matches!(op, BinOp::Ne) { "is_some" } else { "is_none" };
             let text = match &other.kind {

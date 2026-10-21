@@ -51,6 +51,10 @@ pub enum StringOp {
     /// `new String(chars)`, `String.valueOf(chars)` and `String.copyValueOf(chars)`, with an
     /// offset and count or without.
     FromChars,
+    /// `new String(codePoints, offset, count)`.
+    FromCodePoints,
+    /// `new String(ascii, hibyte, offset, count)`: each `char` is `hibyte` over a byte.
+    FromHighByte,
     HashCode,
     /// `s.toString()`, `s.intern()` and `new String(s)`: the string itself (or an equal copy),
     /// which throws when `s` is null.

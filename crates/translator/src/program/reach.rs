@@ -107,7 +107,6 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.AbstractStringBuilder",
     "java.lang.Boolean",
     "java.lang.Byte",
-    "java.lang.Character",
     "java.lang.Class",
     "java.lang.ClassLoader",
     // `CharSequence` and `Comparable` are the object model's (see `lower::object`), which strings
@@ -184,6 +183,7 @@ const REPLACED_BY_NAME: &[(&str, &str)] =
 pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
     REPLACED_METHODS.contains(&(class, name, signature))
         || REPLACED_BY_NAME.contains(&(class, name))
+        || (class == "java.lang.Character" && crate::lower::runtime_character_method(name, signature))
         || unsafe_field_access(class, name, signature).is_some()
         || unsafe_field_update(class, name, signature).is_some()
 }

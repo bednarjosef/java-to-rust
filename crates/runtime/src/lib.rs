@@ -261,7 +261,9 @@ pub fn exit(code: i32) -> ! {
 /// Ends the program the way an uncaught Java exception of the standard class `class` does.
 pub fn throw(class: &str, message: &str) -> ! {
     catching::raise(class, message);
-    exception::die(format_args!("{class}: {message}"))
+    // The class's name lives on for an uncaught-exception handler, while the program ends.
+    let class: &'static str = Box::leak(class.to_string().into_boxed_str());
+    exception::die(Exception::new(class, message))
 }
 
 /// Java's checked cast `(T) x` on a non-null object: the object as a `T` if it is one, which

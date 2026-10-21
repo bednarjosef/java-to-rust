@@ -11,16 +11,23 @@ pub(super) fn is_code_point_method(owner: &str, name: &str, args: &[Expr]) -> bo
     }
     match name {
         "toString" => args.len() == 1 && args[0].ty != Type::Char,
-        "toChars"
-        | "charCount"
-        | "toCodePoint"
-        | "highSurrogate"
-        | "lowSurrogate"
-        | "isValidCodePoint"
-        | "isBmpCodePoint"
-        | "isSupplementaryCodePoint" => true,
-        _ => false,
+        _ => is_code_point_name(name),
     }
+}
+
+/// The code point methods of `Character` that the runtime does whatever their arguments.
+pub(super) fn is_code_point_name(name: &str) -> bool {
+    matches!(
+        name,
+        "toChars"
+            | "charCount"
+            | "toCodePoint"
+            | "highSurrogate"
+            | "lowSurrogate"
+            | "isValidCodePoint"
+            | "isBmpCodePoint"
+            | "isSupplementaryCodePoint"
+    )
 }
 
 /// The op of the `int` overload of the `Character` method `name` that has a `char` form too (for
