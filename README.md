@@ -116,9 +116,9 @@ measured.
 `docs/performance.md` has the benchmark tables, the causes of the slow cases, and what was
 measured on whole third-party programs (Are We Fast Yet, binary trees, n-body). A translated
 program uses the runtime's memory allocator, which keeps freed blocks of up to 136 bytes per
-thread for the next allocation of that size: a thread holds on to at most 64 MB of them per size,
-a thread started by `Thread.start` gives them back when it ends, and other threads keep them until
-the process exits. Freeing a long chain of objects, such as `NodeList`'s list, does not
+thread for the next allocation of that size: a thread holds on to at most 64 MB of them in all,
+and all threads together at most 256 MB; a thread started by `Thread.start` gives them back when
+it ends, and other threads keep them until the process exits. Freeing a long chain of objects, such as `NodeList`'s list, does not
 overflow the stack: classes on a cycle of field types get an iterative `Drop`
 (docs/object-model.md, "1.13 Dropping long chains").
 
