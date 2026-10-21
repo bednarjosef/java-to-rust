@@ -26,7 +26,9 @@
 //! nothing catches does. Where a `toString` that the program wrote may throw what a `catch`
 //! around the text, or around a call on the way to it, would catch, the program is rejected. The
 //! JDK's own `toString`s throw only for bugs (a collection changed while it is shown) and are not
-//! looked at. An explicit `o.toString()` is an ordinary call.
+//! looked at. An explicit `o.toString()` is an ordinary call, except that one of the JDK's own
+//! `toString`s lets out only what the program's code that it runs throws, and the `catch` clauses
+//! around the call are not looked for in its own code.
 
 mod entry;
 mod failures;
@@ -122,20 +124,49 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         }
     };
 
-    // What escapes each method.
+    // The JDK's own `toString`s throw only for bugs, as for an object's text (see the module's
+    // comment): an explicit call of one lets out only what the program's code that it runs
+    // throws, and what the caller's `catch` clauses catch is not looked for in its own code.
+    let jdk: Vec<bool> = class.methods.iter().map(|m| from_jdk(&class.types[m.class])).collect();
+    let jdk_to_string: Vec<bool> = class
+        .methods
+        .iter()
+        .enumerate()
+        .map(|(i, m)| jdk[i] && m.name == "toString" && m.params.is_empty() && !m.is_static)
+        .collect();
+
+    // What escapes each method, and of that, what the program's code throws: all of it for a
+    // method of the program, and for one of the JDK what escapes the program's methods it calls.
     let mut escapes: Vec<BTreeSet<Kind>> = vec![BTreeSet::new(); class.methods.len()];
+    let mut from_program: Vec<BTreeSet<Kind>> = vec![BTreeSet::new(); class.methods.len()];
     loop {
         let mut changed = false;
         for m in 0..class.methods.len() {
             let mut out = BTreeSet::new();
+            let mut program = BTreeSet::new();
             for p in &points[m] {
                 out.extend(raised(p, &escapes).into_iter().filter(|k| !caught(k, &p.frames)));
+                if let Raise::Call(callees) = &p.raise {
+                    let through = callees.iter().flat_map(|&c| from_program[c].iter().cloned());
+                    program.extend(through.filter(|k| !caught(k, &p.frames)));
+                }
             }
-            if initializer[m] && !guarded[m] && !out.is_empty() {
-                out = BTreeSet::from([Kind::Runtime(INITIALIZER_ERROR)]);
+            if !jdk[m] {
+                program = out.clone();
             }
-            if out != escapes[m] {
+            if jdk_to_string[m] {
+                out = program.clone();
+            }
+            if initializer[m] && !guarded[m] {
+                for set in [&mut out, &mut program] {
+                    if !set.is_empty() {
+                        *set = BTreeSet::from([Kind::Runtime(INITIALIZER_ERROR)]);
+                    }
+                }
+            }
+            if out != escapes[m] || program != from_program[m] {
                 escapes[m] = out;
+                from_program[m] = program;
                 changed = true;
             }
         }
@@ -151,7 +182,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         for m in 0..class.methods.len() {
             for p in &points[m] {
                 let Raise::Call(callees) = &p.raise else { continue };
-                let mut here = seen[m].clone();
+                let mut here = if jdk_to_string[m] { Seen::default() } else { seen[m].clone() };
                 for f in &p.frames {
                     here.types.extend(f.catches.iter().copied());
                     here.all |= f.finally;
@@ -227,7 +258,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
                 let Raise::Runtime { checked, id, .. } = p.raise else { continue };
                 let seen_here = catcher.is_some()
                     || p.frames.iter().any(|f| f.finally)
-                    || observed(&Kind::Runtime(name), &seen[m]);
+                    || (!jdk_to_string[m] && observed(&Kind::Runtime(name), &seen[m]));
                 let raised_class = class.type_index(name).filter(|&c| class.hierarchy.is_concrete(c));
                 if seen_here
                     && checked

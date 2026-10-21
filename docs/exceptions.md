@@ -53,7 +53,10 @@ signature. Everything else is decided here.
    program even where a `catch` would see them. (Before, the JDK's collections' `toString`s were
    all taken as observed: `AbstractList.Itr.next` catches the `IndexOutOfBoundsException` of
    `get`, whose message formats a `List` with `%s`.) An explicit `o.toString()` is an ordinary
-   call.
+   call, except that one of the JDK's own `toString`s, by the same rule, lets out only what the
+   program's code that it runs throws (an iterator or an element of the program), and the
+   `catch` clauses around the call are not looked for in its own code: `sj.toString()` of a
+   `StringJoiner` inside a `try` that catches `RuntimeException` is translated.
 6. **Failures of the runtime become values only where they are observed.** Division by zero,
    array indexes and sizes, null dereferences, parsing and the string indexes raise exceptions in
    the runtime today by printing them and exiting (`java::throw`). That stays the translation
@@ -85,7 +88,8 @@ signature. Everything else is decided here.
     `getMessage()` in a `catch` that such an exception reaches is rejected, while the message of
     one that code creates, as `Objects.requireNonNull(x, "msg")` does, is its own),
     catching `StackOverflowError`, `OutOfMemoryError` or `VirtualMachineError` (the translation
-    cannot raise them), a `toString` that throws an exception that a call of it observes, or a
+    cannot raise them), a `toString` that throws an exception that a call of it observes (for one
+    of the JDK's, an exception of the program's code that it runs), or a
     `toString` of the program that throws what a `catch` around an object's text, or around a
     call on the way to it, would catch (it is `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace` and `initCause`.
 
