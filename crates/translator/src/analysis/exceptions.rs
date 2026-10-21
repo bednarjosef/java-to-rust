@@ -382,7 +382,31 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // form only.
     let npe = Kind::Runtime("java.lang.NullPointerException");
     let mut reading_tries = HashSet::new();
+    // A suppressed exception is read only through `getSuppressed` (the runtime's stack traces do
+    // not show it), so adding one to the exception that is thrown on (a try-with-resources'
+    // `closing` catch) reads neither, unless the program gets them back.
+    let mut suppressed_read = false;
     for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        suppressed_read |=
+                            matches!(&x.kind, ExprKind::MethodCall { name, .. } if name == "getSuppressed")
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    for (m, method) in class.methods.iter().enumerate() {
+        // A static initializer of the JDK throws only for bugs (see `bugs_only`): the `catch`
+        // that a rewritten one has (section 0.9), which gives what it catches as the cause of
+        // its `ExceptionInInitializerError`, sees no `NullPointerException`.
+        if jdk[m] && initializer[m] {
+            continue;
+        }
         let mut found = None;
         for s in &method.body {
             visit_stmt(s, &mut |_| {}, &mut |s| {
@@ -397,16 +421,34 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 }
                 for catch in catches.iter().filter(|c| c.types.iter().any(|&t| matches(&npe, t))) {
                     // Any use of the exception may read its message (`getMessage`, its text, a
-                    // method it is passed to), except throwing it on.
+                    // method it is passed to), except throwing it on and suppressing (above).
                     let mut rethrown = HashSet::new();
+                    let mut suppressing = HashSet::new();
                     for b in &catch.body {
-                        visit_stmt(b, &mut |_| {}, &mut |s| {
-                            if let Stmt::Throw(e) = s {
-                                let thrown = if let ExprKind::Cast(_, inner) = &e.kind { inner } else { e };
-                                rethrown.insert(thrown.id);
-                            }
-                        });
+                        visit_stmt(
+                            b,
+                            &mut |e| {
+                                visit_expr(e, &mut |x| {
+                                    if let ExprKind::MethodCall { name, receiver, args, .. } = &x.kind
+                                        && name == "addSuppressed"
+                                    {
+                                        suppressing.insert(receiver.id);
+                                        if !suppressed_read {
+                                            suppressing.extend(args.iter().map(|a| a.id));
+                                        }
+                                    }
+                                })
+                            },
+                            &mut |s| {
+                                if let Stmt::Throw(e) = s {
+                                    let thrown =
+                                        if let ExprKind::Cast(_, inner) = &e.kind { inner } else { e };
+                                    rethrown.insert(thrown.id);
+                                }
+                            },
+                        );
                     }
+                    rethrown.extend(suppressing);
                     for b in &catch.body {
                         visit_stmt(
                             b,

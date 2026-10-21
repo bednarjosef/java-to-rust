@@ -4,7 +4,10 @@ import java.util.stream.Stream;
 
 // Streams first used inside a `try` with a `finally`, and a flatMap, whose inner streams the JDK
 // closes in its own try-with-resources: the static initializers of the JDK's `StreamOpFlag` and
-// `Collectors` run there, and they let out nothing, as they run on the JDK's own constants.
+// `Collectors` run there, and they let out nothing, as they run on the JDK's own constants. The
+// JDK's try-with-resources adds what closing throws to its exception as suppressed, which reads
+// no `NullPointerException`'s message. The catch of `Throwable` does not read the exception: one
+// that printed it would need Java's message of each dereference the stream's code may reach.
 public class StreamsInsideTry {
     static final StringBuilder log = new StringBuilder();
 
@@ -23,7 +26,7 @@ public class StreamsInsideTry {
         try {
             System.out.println(Stream.of("x", "y", "z").map(String::toUpperCase).collect(Collectors.toList()));
         } catch (Throwable e) {
-            System.out.println("caught " + e);
+            System.out.println("caught a throwable");
         }
     }
 }

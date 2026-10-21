@@ -749,7 +749,13 @@ Decisions that changed during the implementation, step by step.
   `Facts::npe_message_read`) makes the checked dereferences (`Facts::null_checked`) whose
   exception it may get carry Java's text (`java::try_non_null_message`): those that its `try`
   catches, and those whose exception leaves a method that a call in the `try` may run
-  (`Facts::npe_message_needed`). The others stay bare. Only then does the translation compile
+  (`Facts::npe_message_needed`). The others stay bare. Adding a suppressed exception to it
+  (`addSuppressed`, as each try-with-resources does when closing throws too) does not read
+  either one, since only `getSuppressed` gets a suppressed exception back (the runtime's stack
+  traces do not show it): in a program that calls `getSuppressed`, the suppressed one is read.
+  The `catch` of a rewritten static initializer of the JDK (section 0.9), which makes what it
+  catches the cause of its `ExceptionInInitializerError`, reads nothing either: the JDK's
+  initializers throw only for bugs (see the rule for them under static initializers). Only then does the translation compile
   the program a second time, with javac's code generator (`java/BytecodeNames.java`,
   `javac::BytecodeNames`), which tells how the class file names each method
   (`Gen.binaryQualifier`, and the erased descriptor), each static field and each local: the
