@@ -411,6 +411,8 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
                     {
                         declared.push((m, name.clone()))
                     }
+                    // The elements of a string array are not followed: each may be non-ASCII.
+                    Stmt::ForEach { ty: Type::String, name, .. } => declared.push((m, name.clone())),
                     Stmt::Return(Some(value), _) if !non_ascii.ascii(class, m, value) => returns.push(m),
                     _ => {}
                 };
