@@ -34,6 +34,19 @@ impl<'t> Lowering<'t> {
             "NEGATIVE_INFINITY" => Some(f64::NEG_INFINITY),
             _ => None,
         };
+        // `Integer.SIZE` and `Integer.BYTES`: the width in bits and bytes, an `int` for each class.
+        let bits = match symbol.owner {
+            "java.lang.Byte" => Some(8),
+            "java.lang.Short" | "java.lang.Character" => Some(16),
+            "java.lang.Integer" | "java.lang.Float" => Some(32),
+            "java.lang.Long" | "java.lang.Double" => Some(64),
+            _ => None,
+        };
+        match (bits, symbol.name) {
+            (Some(bits), "SIZE") => return Some(ExprKind::Int(bits)),
+            (Some(bits), "BYTES") => return Some(ExprKind::Int(bits / 8)),
+            _ => {}
+        }
         Some(match symbol.owner {
             "java.lang.Integer" => ExprKind::Int(integer(i32::MIN as i64, i32::MAX as i64)? as i32),
             "java.lang.Long" => ExprKind::Long(integer(i64::MIN, i64::MAX)?),
