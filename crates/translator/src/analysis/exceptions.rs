@@ -91,10 +91,13 @@ struct Seen {
     all: bool,
 }
 
-pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
+/// Every error found, in the order of the code; the first is the one a translation reports.
+pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>> {
     if class.type_index("java.lang.Throwable").is_none() {
         return Ok(());
     }
+    let mut errors = Vec::new();
+    let mut reject = |pos: Pos, message: &str| errors.push(Error { pos, message: message.to_string() });
     let h = &class.hierarchy;
     let points: Vec<Vec<Point>> = (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
     let matches = |k: &Kind, t: usize| match k {
@@ -186,10 +189,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         let Raise::Text(shown) = &p.raise else { continue };
         let program = shown.iter().filter(|&&c| !from_jdk(&class.types[class.methods[c].class]));
         if program.flat_map(|&c| &escapes[c]).any(|k| caught(k, &p.frames) || observed(k, &seen[m])) {
-            return error(
-                p.pos,
-                "catching an exception that this toString may throw not supported yet".to_string(),
-            );
+            reject(p.pos, "catching an exception that this toString may throw not supported yet");
         }
     }
 
@@ -257,9 +257,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
                     let simple = name.rsplit('.').next().unwrap_or_default();
                     let exception =
                         if name == "?" { "an exception".to_string() } else { format!("the `{simple}`") };
-                    return error(
+                    reject(
                         p.pos,
-                        format!("catching {exception} that {} may throw not supported yet", p.what),
+                        &format!("catching {exception} that {} may throw not supported yet", p.what),
                     );
                 }
             }
@@ -268,23 +268,23 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             continue;
         }
         if method.is_main {
-            return error(method.pos, "a call of `main` that is caught not supported yet");
+            reject(method.pos, "a call of `main` that is caught not supported yet");
+            continue;
         }
         // An exception object is built where it is thrown, and an enum constant where the enum
         // is initialized, outside any `try` of the program.
         let throwable = class.type_index("java.lang.Throwable");
         let decl = &class.types[method.class];
         if method.is_ctor && throwable.is_some_and(|t| class.hierarchy.is_subtype(method.class, t)) {
-            return error(method.pos, "a constructor of an exception that throws not supported yet");
-        }
-        if method.is_ctor && decl.enum_constants.is_some() {
-            return error(method.pos, "a constructor of an enum that throws not supported yet");
+            reject(method.pos, "a constructor of an exception that throws not supported yet");
+        } else if method.is_ctor && decl.enum_constants.is_some() {
+            reject(method.pos, "a constructor of an enum that throws not supported yet");
         }
         if method.name == "toString" && method.params.is_empty() {
             // At the override that throws, which may not be the first of its group.
             let thrower = h.group(m).into_iter().find(|g| own.contains(g)).unwrap_or(m);
             let pos = class.methods[thrower].pos;
-            return error(pos, "a toString that throws an exception that is caught not supported yet");
+            reject(pos, "a toString that throws an exception that is caught not supported yet");
         }
     }
 
@@ -321,10 +321,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             });
         }
         if let Some(pos) = found {
-            return error(
-                pos,
-                "the message of a `NullPointerException` that the runtime raises not supported yet",
-            );
+            reject(pos, "the message of a `NullPointerException` that the runtime raises not supported yet");
         }
     }
 
@@ -336,7 +333,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             && !escapes[m].is_empty()
             && (seen[m].all || !seen[m].types.is_empty())
         {
-            return error(method.pos, "a static initializer that throws inside a `try` not supported yet");
+            reject(method.pos, "a static initializer that throws inside a `try` not supported yet");
         }
     }
     // The initializers of instance fields run in each constructor, outside its `try`s: what they
@@ -355,11 +352,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     for decl in &class.types {
         for constant in decl.enum_constants.iter().flatten() {
             if let Some(pos) = constant.values.iter().find_map(|e| initializer_raises(e, usize::MAX)) {
-                return error(pos, "an enum constant whose arguments throw not supported yet");
+                reject(pos, "an enum constant whose arguments throw not supported yet");
             }
         }
     }
 
+    if !errors.is_empty() {
+        return Err(errors);
+    }
     facts.throwing = throwing;
     facts.init_throwing = init_throwing;
     facts.live_tries = live_tries;

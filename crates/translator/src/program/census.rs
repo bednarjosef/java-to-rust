@@ -7,9 +7,10 @@
 //! initializer block leaves that initializer out (`lower::census_lower_program`). An error of an
 //! analysis or of the generator, which only has a line and column, stubs the methods whose code
 //! is at that position, in any file (or drops the field initializer there), and the analyses and
-//! the generator run again; the generator reports every error it finds, which are stubbed
-//! together, and a panic while it writes a method stubs the method. So every error recorded is
-//! one that a translation without the code rejected before it would report. An error that no
+//! the generator run again. The generator and the analysis of exceptions report every error they
+//! find, which are stubbed together; the other analyses report their first. A panic while the
+//! generator writes a method stubs the method. So every error recorded is one that a translation
+//! of the program would report once the code before it translated. An error that no
 //! stub can take away (a class's declaration, say) ends the census there: the pieces it did not
 //! get to are counted as they stand.
 //!
@@ -94,11 +95,13 @@ fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Reje
     // generator reports every error it finds, which are stubbed together.
     let passes: [Pass; 4] = [
         |class| lower::check_enum_nulls(class).map_err(|e| vec![e]),
-        |class| analysis::whole_objects(class).map_err(|e| vec![e]),
+        |class| {
+            crate::timings::phase("census: whole objects", || analysis::whole_objects(class))
+                .map_err(|e| vec![e])
+        },
         unresolved_calls,
         |class| {
-            let facts = crate::timings::phase("census: analyses", || analysis::analyze(class))
-                .map_err(|e| vec![e])?;
+            let facts = crate::timings::phase("census: analyses", || analysis::analyze_all(class))?;
             crate::timings::phase("census: generator", || codegen::generate_all(class, &facts)).map(drop)
         },
     ];

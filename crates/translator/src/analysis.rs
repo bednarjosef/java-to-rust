@@ -201,6 +201,13 @@ impl Facts {
 }
 
 pub fn analyze(class: &Class) -> Result<Facts, Error> {
+    analyze_all(class).map_err(|mut errors| errors.remove(0))
+}
+
+/// The facts, or the errors of the first analysis that rejects the program: all of them, where
+/// that analysis finds more than one (a census stubs them together, `program/census.rs`).
+pub fn analyze_all(class: &Class) -> Result<Facts, Vec<Error>> {
+    let one = |e: Error| vec![e];
     let mut facts = Facts {
         fields_structs: hierarchy::fields_structs(class),
         field_owners: hierarchy::field_owners(class),
@@ -210,17 +217,17 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
     ranges::analyze(class, &mut facts);
     representation(class, &mut facts);
-    validate(class, &facts)?;
-    patterns::check(class)?;
+    validate(class, &facts).map_err(one)?;
+    patterns::check(class).map_err(one)?;
     facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
     nullness::analyze(class, &mut facts);
-    patterns::check_object_values(class, &facts)?;
+    patterns::check_object_values(class, &facts).map_err(one)?;
     boxing::analyze(class, &mut facts);
     if facts.threaded {
-        threads::check(class, &facts)?;
+        threads::check(class, &facts).map_err(one)?;
     }
-    monitors::check(class, &facts)?;
+    monitors::check(class, &facts).map_err(one)?;
     facts.class_monitors = monitors::class_monitors(class, &facts);
     borrowed_params(class, &mut facts);
     facts.borrowed_objects = borrowed_objects(class, &facts);
