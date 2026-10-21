@@ -18,8 +18,8 @@
 
 use super::Program;
 use super::reach::{
-    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, created_by_name, has_flag, live_branch,
-    members, outside, provided, replaced, runtime_arrays_call, symbol_type, text, untranslated,
+    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, component_array, created_by_name, has_flag,
+    live_branch, members, outside, provided, replaced, runtime_arrays_call, symbol_type, text, untranslated,
 };
 use crate::ast::runtime_native;
 use serde_json::{Value, json};
@@ -284,6 +284,12 @@ impl Census {
             // An object created from a class name translates (`reach::by_name`): only the name is
             // code.
             Value::Object(_) if let Some(name) = created_by_name(node) => self.body(name, scan),
+            // A new array of another array's class is a new array of its type.
+            Value::Object(_) if let Some((array, length)) = component_array(node) => {
+                scan.calls.insert("Array.newInstance".to_string());
+                self.body(array, scan);
+                self.body(length, scan);
+            }
             Value::Object(fields) => {
                 let kind = text(node, "kind");
                 let ty = text(node, "javaType");

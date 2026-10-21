@@ -162,31 +162,59 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
 
 /// The `a == b` of `a == b || .. a.equals(b) ..`, the shortcut before an `equals` that `Objects.equals`
 /// takes: whether the identities compare equal or not, the result is what `equals` says when the
-/// values are strings or boxes.
-fn shortcut(e: &Expr) -> Option<ExprId> {
+/// values are strings or boxes. The `==` may be any operand of a chain of `||` with the `equals`
+/// in a later one, as `HashMap.removeNode` writes `!matchValue || (v = node.value) == value ||
+/// (value != null && value.equals(v))`.
+fn shortcut(e: &Expr) -> Vec<ExprId> {
     // Its negation too, `a != b && .. !a.equals(b) ..`, as `EnumMap.equals` writes it.
-    let (ExprKind::Binary(BinOp::Or, l, r) | ExprKind::Binary(BinOp::And, l, r)) = &e.kind else {
-        return None;
+    let (op, test) = match &e.kind {
+        ExprKind::Binary(BinOp::Or, ..) => (BinOp::Or, BinOp::Eq),
+        ExprKind::Binary(BinOp::And, ..) => (BinOp::And, BinOp::Ne),
+        _ => return Vec::new(),
     };
-    let negated = matches!(e.kind, ExprKind::Binary(BinOp::And, ..));
-    let (ExprKind::Binary(BinOp::Eq, a, b) | ExprKind::Binary(BinOp::Ne, a, b)) = &l.kind else {
-        return None;
-    };
-    if negated != matches!(l.kind, ExprKind::Binary(BinOp::Ne, ..)) {
-        return None;
-    }
-    let (ExprKind::Var(a), ExprKind::Var(b)) = (&a.kind, &b.kind) else { return None };
-    let mut equals = false;
-    visit_expr(r, &mut |x| {
-        if let ExprKind::MethodCall { receiver, name, args, .. } = &x.kind
-            && name == "equals"
-            && let (ExprKind::Var(x), [arg]) = (&receiver.kind, &args[..])
-            && let ExprKind::Var(y) = &peel(arg).kind
-        {
-            equals |= (x == a && y == b) || (x == b && y == a);
+    let mut operands = Vec::new();
+    chain(e, op, &mut operands);
+    let mut found = Vec::new();
+    for (i, l) in operands.iter().enumerate() {
+        let ExprKind::Binary(o, a, b) = &l.kind else { continue };
+        // An operand may assign its variable first, as `HashMap.getNode` writes `(k = first.key) == key`.
+        let (true, Some(a), Some(b)) = (*o == test, compared(a), compared(b)) else { continue };
+        let mut equals = false;
+        for r in &operands[i + 1..] {
+            visit_expr(r, &mut |x| {
+                if let ExprKind::MethodCall { receiver, name, args, .. } = &x.kind
+                    && name == "equals"
+                    && let (ExprKind::Var(x), [arg]) = (&receiver.kind, &args[..])
+                    && let ExprKind::Var(y) = &peel(arg).kind
+                {
+                    equals |= (x == a && y == b) || (x == b && y == a);
+                }
+            });
         }
-    });
-    equals.then_some(l.id)
+        if equals {
+            found.push(l.id);
+        }
+    }
+    found
+}
+
+/// The operands of the chain of `op` that `e` is, left to right.
+fn chain<'e>(e: &'e Expr, op: BinOp, operands: &mut Vec<&'e Expr>) {
+    match &e.kind {
+        ExprKind::Binary(o, l, r) if *o == op => {
+            chain(l, op, operands);
+            chain(r, op, operands);
+        }
+        _ => operands.push(e),
+    }
+}
+
+/// The variable that an operand of the shortcut's `==` is: a variable, or an assignment to one.
+fn compared(e: &Expr) -> Option<&String> {
+    match &peel(e).kind {
+        ExprKind::Var(name) | ExprKind::Assign { op: None, target: Place::Var(name), .. } => Some(name),
+        _ => None,
+    }
 }
 
 /// `e` without the conversions to `Object` that lowering adds.

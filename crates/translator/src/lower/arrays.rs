@@ -84,8 +84,9 @@ impl<'t> Lowering<'t> {
 
     /// `Arrays.copyOf(a, n, type)` and `copyOfRange(a, from, to, type)` as the runtime's
     /// `copyOf(a, n)` and `copyOfRange(a, from, to)`: an array's elements do not depend on the
-    /// class it is made of, which is a class literal (`Object[].class`) or the `getClass()` of a
-    /// variable (cast or not), dropped unlowered. The copy must be of the array's own type.
+    /// class it is made of, which is a class literal (`Object[].class`), the `getClass()` of a
+    /// variable, or a variable that holds a class (cast or not), dropped unlowered. The copy must
+    /// be of the array's own type.
     pub(super) fn copy_of_with_class(
         &self,
         node: Node<'t>,
@@ -110,7 +111,9 @@ impl<'t> Lowering<'t> {
                 .get("methodSelect")
                 .and_then(|s| s.get("expression"))
                 .is_some_and(|e| e.kind() == "IDENTIFIER");
-        if !literal && !of_variable {
+        // A variable that holds a class (`Class<T[]> klazz`, as `ArrayDeque.toArray` passes on).
+        let held = class.kind() == "IDENTIFIER" && class.java_type().starts_with("java.lang.Class");
+        if !literal && !of_variable && !held {
             return unsupported(node, &format!("`Arrays.{}` into a class that is computed", symbol.name));
         }
         let args: Vec<Expr> = nodes.into_iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
@@ -118,6 +121,31 @@ impl<'t> Lowering<'t> {
             return unsupported(node, &format!("`Arrays.{}` into an array of another type", symbol.name));
         }
         self.arrays_call(node, symbol.name, args).map(Some)
+    }
+
+    /// `(T[]) Array.newInstance(a.getClass().getComponentType(), n)` (`node`, the cast), the new
+    /// array of `a`'s own class that the JDK's `toArray(T[])` and sorts make: `n` nulls of `a`'s
+    /// type, which is the cast's, an `Object[]` when it is covariant (see `covariant`), whose
+    /// arrays keep no class of their own. `a` is a variable or a field, not read: a null `a`
+    /// does not throw `NullPointerException` here.
+    pub(super) fn component_array(&self, node: Node<'t>) -> Result<ExprKind, Error> {
+        let ty = self.ty(node, node.java_type())?;
+        let mut call = node.child("expression")?;
+        while call.kind() == "PARENTHESIZED" {
+            call = call.child("expression")?;
+        }
+        let Some((array, length)) = crate::program::component_array(call.0) else {
+            unreachable!("only a cast of a component array comes here")
+        };
+        let (array, length) = (Node(array), Node(length));
+        if !matches!(array.kind(), "IDENTIFIER" | "MEMBER_SELECT") {
+            return unsupported(node, "`Array.newInstance` of the class of a computed array");
+        }
+        let source = self.expr(array)?;
+        if source.ty != ty && !self.meets_object_array(source.ty, ty) {
+            return unsupported(node, "`Array.newInstance` into an array of another type");
+        }
+        Ok(ExprKind::NewArray(vec![self.expr(length)?]))
     }
 
     /// `String[] args` of `main`, which the program never gets from the command line: an empty
@@ -149,6 +177,16 @@ pub fn runtime_arrays_call(name: &str, args: &[&str]) -> bool {
         ("deepToString", 1) => elem.strip_suffix("[]").is_some_and(printable),
         _ => false,
     }
+}
+
+/// Whether `node` is a cast of `Array.newInstance(a.getClass().getComponentType(), n)` (see
+/// `Lowering::component_array`).
+pub(super) fn casts_component_array(node: Node) -> bool {
+    let mut call = &node.0["expression"];
+    while call["kind"] == "PARENTHESIZED" {
+        call = &call["expression"];
+    }
+    node.kind() == "TYPE_CAST" && crate::program::component_array(call).is_some()
 }
 
 /// `a.length`, recognised by the symbol javac gives an array's `length` field.

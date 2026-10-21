@@ -280,6 +280,9 @@ impl<'a> Gen<'a> {
         let [src, src_pos, dest, dest_pos, length] = args else {
             unreachable!("arraycopy has five arguments")
         };
+        if matches!(src.ty, Type::Class(name, _) if name == OBJECT) {
+            return self.object_array_copy(args);
+        }
         let plain_name = |g: &Self, e: &Expr| match &e.kind {
             ExprKind::Var(name) if g.plain(name).is_some() => Some(name.clone()),
             _ => None,
