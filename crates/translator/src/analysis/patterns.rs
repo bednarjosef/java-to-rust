@@ -9,6 +9,8 @@
 //!   then branch that always leaves the block (`return`, `break`, `continue`), the rest of the
 //!   block.
 //!
+//! The statements of a switch expression are checked as a block of their own.
+//!
 //! A program that reads a pattern variable anywhere else is rejected. Java has already checked
 //! that each read is in the variable's scope, which lets this check be simple: a read of `name`
 //! in code that does not declare a `name` of its own is a read of the pattern's variable.
@@ -38,6 +40,20 @@ pub(super) fn check(class: &Class) -> Result<(), Error> {
                     if found.is_ok() {
                         found = expression(e, &m.body, &declared, &negated);
                     }
+                    // The statements of a switch expression, which `visit_stmt` does not reach.
+                    switch_bodies(e, &mut |body| {
+                        for inner in body {
+                            visit_stmt(
+                                inner,
+                                &mut |x| {
+                                    if found.is_ok() {
+                                        found = expression(x, &m.body, &declared, &negated);
+                                    }
+                                },
+                                &mut |_| {},
+                            );
+                        }
+                    });
                 },
                 &mut |_| {},
             );
@@ -183,15 +199,32 @@ struct Pattern {
     name: String,
 }
 
-/// The patterns in `e`.
+/// The patterns in `e`, but those in the statements of a switch expression in it.
 fn patterns(e: &Expr) -> Vec<Pattern> {
+    let mut inner = HashSet::new();
+    switch_bodies(e, &mut |body| {
+        for s in body {
+            visit_stmt(s, &mut |x| visit_expr(x, &mut |y| _ = inner.insert(y.id)), &mut |_| {});
+        }
+    });
     let mut out = Vec::new();
     visit_expr(e, &mut |x| {
-        if let ExprKind::InstanceOf { binding: Some(name), .. } = &x.kind {
+        if let ExprKind::InstanceOf { binding: Some(name), .. } = &x.kind
+            && !inner.contains(&x.id)
+        {
             out.push(Pattern { id: x.id, pos: x.pos, name: name.clone() });
         }
     });
     out
+}
+
+/// Calls `f` on the statements of each case of the switch expressions in `e`.
+fn switch_bodies(e: &Expr, f: &mut dyn FnMut(&[Stmt])) {
+    visit_expr(e, &mut |x| {
+        if let ExprKind::Switch { cases, .. } = &x.kind {
+            cases.iter().for_each(|c| f(&c.body));
+        }
+    });
 }
 
 /// The ids of the patterns that are operands of an `&&` chain in `e` (or all of `e`, or of the
@@ -361,6 +394,13 @@ fn statement(s: &Stmt, rest: &[&Stmt]) -> Result<(), Error> {
         | Stmt::Yield(e)
         | Stmt::Throw(e) => {
             check(e, &rest)?;
+            let mut found = Ok(());
+            switch_bodies(e, &mut |body| {
+                if found.is_ok() {
+                    found = block(body);
+                }
+            });
+            found?;
         }
         Stmt::Try { body, catches, finally } => {
             block(body)?;

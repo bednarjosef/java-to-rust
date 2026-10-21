@@ -1,5 +1,8 @@
 //! Runs javac on the Java source, through the `JavaTree` program compiled by `build.rs`, and
-//! returns the typed syntax tree it prints as JSON.
+//! returns the typed syntax tree it prints as JSON, with the members that javac adds to records
+//! later (`records`).
+
+mod records;
 
 use crate::ast::{Error, Pos};
 use serde_json::Value;
@@ -51,7 +54,9 @@ pub fn tree(source: &str) -> Result<Value, Error> {
             },
         );
     }
-    parse(&output.stdout).map_err(|e| fail(format!("unreadable javac tree: {e}")))
+    let mut tree = parse(&output.stdout).map_err(|e| fail(format!("unreadable javac tree: {e}")))?;
+    records::complete(&mut [&mut tree]);
+    Ok(tree)
 }
 
 /// Runs javac once on all the files of a program, with `sourcepath` (the roots that classes are
@@ -86,7 +91,12 @@ pub fn program_tree(files: &[PathBuf], sourcepath: &[PathBuf]) -> Result<Value, 
         }
         return Err(fail(stderr.trim().to_string()));
     }
-    parse(&output.stdout).map_err(|e| fail(format!("unreadable javac tree: {e}")))
+    let mut tree = parse(&output.stdout).map_err(|e| fail(format!("unreadable javac tree: {e}")))?;
+    if let Some(units) = tree["units"].as_array_mut() {
+        let mut trees: Vec<&mut Value> = units.iter_mut().map(|u| &mut u["tree"]).collect();
+        records::complete(&mut trees);
+    }
+    Ok(tree)
 }
 
 /// Reads javac's JSON without serde_json's nesting limit: real code nests deeper than it allows,

@@ -80,6 +80,7 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "java.lang.Long",
     "java.lang.Math",
     "java.lang.Number",
+    "java.lang.Record",
     "java.lang.Object",
     "java.lang.Runtime",
     "java.lang.Short",

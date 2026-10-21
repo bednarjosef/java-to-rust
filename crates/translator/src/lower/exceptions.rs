@@ -30,7 +30,8 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
 
 /// The standard classes that the runtime raises and a translation can catch, each with the
 /// kinds of javac's tree of the operations that may raise it (a method call by its owner and
-/// name: `owner#name`, or `owner#` for any method of the owner).
+/// name: `owner#name`, or `owner#` for any method of the owner; `enum#valueOf` for the `valueOf`
+/// of any enum of the program).
 const RAISED: &[(&str, &[&str])] = &[
     (
         "java.lang.ArithmeticException",
@@ -46,6 +47,7 @@ const RAISED: &[(&str, &[&str])] = &[
         ],
     ),
     ("java.lang.ArrayIndexOutOfBoundsException", &["ARRAY_ACCESS"]),
+    ("java.lang.IllegalArgumentException", &["enum#valueOf"]),
     ("java.lang.StringIndexOutOfBoundsException", &["java.lang.String#charAt", "java.lang.String#substring"]),
     (
         "java.lang.NumberFormatException",
@@ -199,6 +201,13 @@ impl Uses {
                     "METHOD_INVOCATION" => {
                         self.operations.insert(format!("{owner}#{}", text(symbol, "name")));
                         self.operations.insert(format!("{owner}#"));
+                        // `E.valueOf(String)` of an enum `E` of the program.
+                        if text(symbol, "name") == "valueOf"
+                            && text(symbol, "type") == format!("(java.lang.String){owner}")
+                            && !owner.starts_with("java.")
+                        {
+                            self.operations.insert("enum#valueOf".to_string());
+                        }
                     }
                     _ => _ = self.operations.insert(kind),
                 }

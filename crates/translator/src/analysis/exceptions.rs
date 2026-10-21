@@ -646,6 +646,7 @@ fn library_failure(builtin: &Builtin) -> Option<&'static str> {
         ) => None,
         Builtin::Arrays(ArraysOp::DeepToString | ArraysOp::Clone) => None,
         Builtin::Bits(BitsOp::ParseRadix, _) => Some("java.lang.NumberFormatException"),
+        Builtin::EnumValueOf => Some("java.lang.IllegalArgumentException"),
         Builtin::Bits(..) => None,
         Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => None,
         Builtin::Unsigned(UnsignedOp::Compare | UnsignedOp::ToString | UnsignedOp::Widen, _) => None,
@@ -757,7 +758,10 @@ fn runtime_failures(
             | Builtin::EnumName
             | Builtin::EnumCompareTo
             | Builtin::Exit
-            | Builtin::ClassName { .. } => {}
+            | Builtin::ClassName { .. }
+            // A null is a value to them, and an object's own method is a call of its own.
+            | Builtin::ObjectsEquals
+            | Builtin::ObjectsHashCode => {}
             Builtin::StringLength | Builtin::StringEquals => {
                 if args.first().is_some_and(null) {
                     out.push((NPE, "this call", false));
@@ -785,6 +789,11 @@ fn runtime_failures(
                 _,
             ) => {}
             Builtin::NullCheck => out.push((NPE, "this synchronized", false)),
+            Builtin::NullChecked | Builtin::Unmatched => {
+                if null(&args[0]) {
+                    out.push((NPE, "this null check", false));
+                }
+            }
             // A zero divisor throws, as in a division.
             Builtin::Native(Native::Math { name: "floorDiv" | "floorMod", .. }) => {
                 let constant = matches!(args[1].kind, ExprKind::Int(v) if v != 0)
@@ -816,7 +825,9 @@ fn runtime_failures(
                 {
                     let checked = matches!(
                         builtin,
-                        Builtin::String(StringOp::Substring) | Builtin::Bits(BitsOp::ParseRadix, _)
+                        Builtin::String(StringOp::Substring)
+                            | Builtin::Bits(BitsOp::ParseRadix, _)
+                            | Builtin::EnumValueOf
                     );
                     out.push((failure, "this call of the library", checked));
                 }

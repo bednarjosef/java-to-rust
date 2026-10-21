@@ -332,6 +332,8 @@ impl<'a> Gen<'a> {
     /// An expression evaluated for its effect, as a statement.
     pub(super) fn effect(&mut self, e: &'a Expr) {
         match &e.kind {
+            // A pattern switch's null check of a selector that is never null does nothing.
+            ExprKind::Builtin(Builtin::NullChecked, args) if args.len() == 1 && !self.nullable(&args[0]) => {}
             // A plain array takes over the array it is given.
             ExprKind::Assign { op: None, target: Place::Var(target), value }
                 if self.plain(target).is_some() =>

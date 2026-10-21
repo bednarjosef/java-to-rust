@@ -131,13 +131,16 @@ impl<'a> Gen<'a> {
         }
         let throw = self.runtime("throw");
         self.line(&format!(
-            "_ => {throw}(\"IllegalArgumentException\", &format!(\"No enum constant {}.{{name}}\")),",
+            "_ => {throw}(\"java.lang.IllegalArgumentException\", &format!(\"No enum constant {}.{{name}}\")),",
             decl.name
         ));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
         self.line("}");
+        if self.checked_value_of(index) {
+            self.try_value_of(index);
+        }
         for i in 0..class.methods.len() {
             let m = &class.methods[i];
             // Its own methods, and the default methods of its interfaces that live here.
@@ -165,8 +168,57 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
+    /// Whether a `valueOf` of the enum `index` is somewhere a `catch` or `finally` sees its failure.
+    fn checked_value_of(&self, index: usize) -> bool {
+        let mut found = false;
+        for m in &self.class.methods {
+            for s in &m.body {
+                visit_stmt(
+                    s,
+                    &mut |e| {
+                        visit_expr(e, &mut |x| {
+                            found |= matches!(x.kind, ExprKind::Builtin(Builtin::EnumValueOf, _))
+                                && matches!(x.ty, Type::Enum(n) if *n == self.class.types[index].name)
+                                && self.facts.raising.contains(&x.id)
+                        })
+                    },
+                    &mut |_| {},
+                );
+            }
+        }
+        found
+    }
+
+    /// `try_enum_value_of`, the checked form of `enum_value_of`, whose failure is an exception the
+    /// program sees.
+    fn try_value_of(&mut self, index: usize) {
+        let decl = &self.class.types[index];
+        let Some(constants) = &decl.enum_constants else { return };
+        let name = struct_name(&decl.name);
+        let exception = self.runtime("Exception");
+        self.gap();
+        self.line(&format!(
+            "{}fn try_enum_value_of(name: &str) -> Result<{name}, {exception}> {{",
+            self.vis()
+        ));
+        self.indent += 1;
+        self.line("Ok(match name {");
+        self.indent += 1;
+        for c in constants {
+            self.line(&format!("{} => {name}::{},", rust_string(&c.name), variant_name(&c.name)));
+        }
+        self.line(&format!(
+            "_ => return Err({exception}::new(\"java.lang.IllegalArgumentException\", format!(\"No enum constant {}.{{name}}\"))),",
+            decl.name
+        ));
+        self.indent -= 1;
+        self.line("})");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     /// The builtins of enums: `ordinal()`, `name()`, `compareTo` and `valueOf`.
-    pub(super) fn enum_builtin(&mut self, builtin: Builtin, args: &'a [Expr], ty: Type) -> Code {
+    pub(super) fn enum_builtin(&mut self, builtin: Builtin, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
         match builtin {
             Builtin::EnumOrdinal => {
                 let obj = self.expr(&args[0]);
@@ -183,6 +235,10 @@ impl<'a> Gen<'a> {
             Builtin::EnumValueOf => {
                 let Type::Enum(name) = ty else { unreachable!("valueOf returns an enum") };
                 let text = self.str_ref(&args[0]);
+                if self.facts.raising.contains(&id) {
+                    let call = Code::atom(format!("{}::try_enum_value_of({text})", struct_name(name)));
+                    return Code::atom(self.passed_on(call));
+                }
                 Code::atom(format!("{}::enum_value_of({text})", struct_name(name)))
             }
             _ => unreachable!("not an enum builtin: {builtin:?}"),
