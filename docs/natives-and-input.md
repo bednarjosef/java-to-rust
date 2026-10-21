@@ -9,6 +9,11 @@ lists:
 3. the unsupported language features, ranked by how much reachable JDK code they block;
 4. the natives to hand-write first, and changes to the reachability boundary.
 
+**Status.** The natives of section 4.1 that need neither the object model nor exceptions are
+implemented, with the others of the census that need no objects (4.4), and so are boundary
+changes 2, 4 and 7 of section 4.2 (4.5). The tables of section 1 and the numbers of sections 2
+and 3 are the census as it was made, before those changes; section 4.5 has the numbers after.
+
 The hand-writing policy is unchanged: only (1) what bottoms out in the JVM, (2) the core types the
 runtime maps to Rust types (`String`, `StringBuilder`, the boxes, arrays, the `Object`, `Enum` and
 `Throwable` bases) and (3) calls with a direct Rust std equivalent are hand-written; everything
@@ -73,7 +78,7 @@ Two layers bottom out in the JVM:
 | `Class.getSuperclass`, `isAssignableFrom`, `isInstance` | 2 to 4 | not yet: class model |
 | `Object.clone()` | 3 | done for arrays (`Array.clone`); objects need the object model |
 | `Runtime.availableProcessors`, `System.currentTimeMillis` | 3 | done |
-| `String.intern()` | 3 | not yet: return the string itself (a value type in the runtime), see 4.1 |
+| `String.intern()` | 3 | done: the string itself (`StringOp::Identity`); `==` on two strings stays rejected, see 4.1 |
 | `Thread.currentThread`, `holdsLock`, `Object.notifyAll` and the scoped-value natives of `Thread` | 2 to 3 | threads design |
 | `Double.doubleToRawLongBits`, `longBitsToDouble` | 2 | done |
 
@@ -439,6 +444,8 @@ are instance methods of exceptions, trivial once `Throwable` objects exist. In o
      `runtimeSetup()`.
    - Behaviour: registers the JNI functions of `Unsafe`; no result, no exception, nothing visible.
    - Rust: nothing. The lowering drops the call (`Native::Nothing`, or no builtin at all).
+   - **Done**: every `static native void registerNatives()` and `initIDs()` is `Native::Nothing`,
+     whose statement the lowering drops.
 2. **`Unsafe.arrayBaseOffset0(Class<?> arrayClass)`** (22 programs)
    - Java: `private native int arrayBaseOffset0(Class<?> arrayClass);`, called by
      `public long arrayBaseOffset(Class<?>)`, which throws `NullPointerException` for null first.
@@ -460,6 +467,15 @@ are instance methods of exceptions, trivial once `Throwable` objects exist. In o
    - Rust: `java::unsafe_array_index_scale(element: ElementKind) -> i32` with those values. Like
      the base offset, it only feeds `Unsafe` address arithmetic, which the runtime interprets
      itself (4.3), so these are the safest consistent values rather than anything observable.
+   - **Done** for 2 and 3, one level up: the class literal is at the call of the public
+     `arrayBaseOffset(Class)` and `arrayIndexScale(Class)` (`theUnsafe.arrayBaseOffset(int[].class)`),
+     and those methods take a `Class`, which the translation has no type for. So reachability does
+     not enter them (`REPLACED_METHODS` in `reach.rs`; the two natives are then not reached at all),
+     and the lowering turns such a call into `java::array_base_offset()` (16, a `long`) or
+     `java::array_index_scale("int")` (`runtime/src/vm.rs`) before it lowers the argument. The null
+     check cannot fail for a literal, and `Unsafe` has no state, so a receiver that is a name or
+     `Unsafe.getUnsafe()` is not evaluated. Any other argument, such as the local
+     `ForkJoinPool.<clinit>` passes, and a class that is not an array are rejected by name.
 4. **`jdk.internal.misc.CDS.getCDSConfigStatus()`** (21 programs)
    - Java: `private static native int getCDSConfigStatus();`, read once into
      `CDS.configStatus` by `CDS.<clinit>`.
@@ -480,6 +496,9 @@ are instance methods of exceptions, trivial once `Throwable` objects exist. In o
      `ImmutableCollections.archivedObjects`); without one, does nothing, and the caller builds the
      values itself (`if (archivedObjects == null) { ... }`).
    - Rust: nothing. The argument is a class literal, so the call can be dropped.
+   - **Done** for 4 to 6: `java::cds_config_status()` and `java::cds_random_seed_for_dumping()`
+     (both 0), and `initializeFromArchive(C.class)` is dropped before its argument is lowered;
+     another argument than a class literal is rejected.
 7. **`java.lang.Throwable.fillInStackTrace(int dummy)`** (28 programs)
    - Java: `private native Throwable fillInStackTrace(int dummy);`, called by the public
      `fillInStackTrace()` when the stack trace is writable (`stackTrace != null`), which every
@@ -503,6 +522,25 @@ are instance methods of exceptions, trivial once `Throwable` objects exist. In o
      (`java::non_null`), Java's text depends on the bytecode and on whether local variable names
      were compiled in; the translator could pass that text at the throw site later, but a program
      that prints the message of an implicit NPE is rare.
+
+7 and 8 are not done: they are instance methods of exception objects, which arrive with the
+object model and exceptions. What each needs then:
+
+- **`fillInStackTrace(int)`** is called on `this` inside `Throwable.fillInStackTrace()`, a
+  `synchronized` instance method that every `Throwable` constructor calls when `stackTrace` is not
+  null. The lowering needs the receiver as a `Throwable` object (the translated `Throwable` class,
+  or the runtime's base if `Throwable` becomes a runtime class) and the call's type, `Throwable`,
+  as a reference to it: the native is the receiver itself, unchanged, so it becomes the receiver
+  expression (as `Identity` does for strings), with `backtrace` and `depth` left at null and 0.
+  `synchronized` on the receiver must lower (as monitors do on one thread), and the constructors
+  must run `fillInStackTrace()` through dynamic dispatch, since `NullPointerException` overrides
+  it. Nothing in the runtime: no function is needed.
+- **`getExtendedNPEMessage()`** is called on `this` in `NullPointerException.getMessage()` and
+  `fillInStackTrace()`. It needs the receiver as a `NullPointerException` and a `String` result
+  that may be null (the translation's `Option<String>`), and it is `None` for every receiver: the
+  lowering can make it a null literal of type `String` once the receiver, which has no effects,
+  need not be evaluated. If NPEs raised by the translation itself (`java::non_null`) should later
+  carry Java's helpful message, the message would come from the throw site, not from this native.
 
 Next, for the programs beyond the typical ones, still independent of threads:
 
@@ -529,6 +567,9 @@ Next, for the programs beyond the typical ones, still independent of threads:
     `length` nulls (or zeros) of that component type; `NegativeArraySizeException` for a negative
     length, `IllegalArgumentException` for `void`. Needs arrays of objects; reachable once
     `java.lang.reflect.Array` is let through the reflection boundary (4.2).
+
+9 to 14 are **done** (4.4 has the details), and 15 is reached now that `java.lang.reflect.Array`
+is translated, but stays a rejection until arrays of objects and `Class` values exist.
 
 Everything else in section 1 is either the threads design (the `Unsafe` atomics, `park`,
 `VirtualThread`, `Continuation`, `NativeThread`), the class model (`Object.getClass`, `Class`), or
@@ -558,7 +599,8 @@ Recommended, in order of payoff:
    `java.lang.ModuleLayer`, `java.util.ServiceLoader`, the loading half of `ResourceBundle`,
    `jdk.internal.loader.`), with the locale data of the runtime's locale given directly. Measured:
    `Scanner` goes from 1,647 to 1,199 classes and from 191 to 77 natives. Class loading by name is
-   reflection in all but name: a closed-world translation knows its classes.
+   reflection in all but name: a closed-world translation knows its classes. **Made** (4.5):
+   1,649 to 1,193 classes and 191 to 76 natives.
 3. **Anonymous and local classes are reached by dispatch, not scanned with the code that declares
    them.** Today an anonymous class's methods are reachable as soon as the method or initializer
    that creates it is. 27 files of java.base register a `SharedSecrets` accessor as an anonymous
@@ -571,7 +613,9 @@ Recommended, in order of payoff:
    call of `BaseStream.parallel()`, `Collection.parallelStream()` or a parallel
    `StreamSupport.stream`. When none is reachable, the parallel branches are dead, as with the JFR
    flags. This removes `ForkJoinPool`, the parallel `ConcurrentHashMap` of `distinct()` and with
-   them up to 23 of `StreamPipeline`'s 31 natives (all but the eight of 4.1).
+   them up to 23 of `StreamPipeline`'s 31 natives (all but the eight of 4.1). **Made** (4.5),
+   with a check that the assumption holds; the natives stay until 3 is made, since the parallel
+   paths are also reached through anonymous classes.
 5. **JVM-injected constants.** `jdk.internal.misc.UnsafeConstants` has static finals that its own
    initializer sets to 0 and false and the JVM then overwrites (`ADDRESS_SIZE0` 8, `PAGE_SIZE`,
    `BIG_ENDIAN`, `UNALIGNED_ACCESS`, `DATA_CACHE_LINE_FLUSH_SIZE`). Translated as written they
@@ -582,6 +626,7 @@ Recommended, in order of payoff:
    runtime's, and the 43 `Unsafe` natives are runtime functions.
 7. **`java.lang.reflect.Array` through the reflection boundary**: `Array.newInstance` and
    `getLength` are what `Arrays.copyOf` and `toArray` need; they are array natives, not reflection.
+   **Made** (4.5).
 
 ### 4.3 Surprises
 
@@ -609,6 +654,83 @@ Recommended, in order of payoff:
   (`jdk.internal.lang.LazyConstantImpl`), whose `get` is `Unsafe.getReferenceAcquire` and
   `putReferenceRelease`; standard input therefore needs the `Unsafe` reference operations even
   in a single-threaded program.
+
+### 4.4 What is implemented
+
+A native method's declaration is never lowered (it has no body). javac's symbols now say whether
+a method is `native`, and a call of a native of a translated class becomes the runtime function
+that `ast::declared_native` names for its class, name and signature, or is rejected with
+`native method `Class.name(signature)` not supported yet`. The survey marks the natives the
+runtime implements (`(in the runtime)`, and `runtime` in the JSON) and counts them in its first
+line. Tests: the runtime functions in `runtime/src/vm.rs` and `fd.rs`; the mapping in
+`ast/natives.rs`; whole programs over stand-ins for `CDS`, `Unsafe`, `VM` and
+`ContinuationSupport` in `tests/translation.rs` (`natives_of_jdk_classes_become_runtime_calls`,
+`natives_the_runtime_lacks_are_rejected_by_name`). The classes of `java.io` and `java.util.zip`
+cannot be stood in for there, since javac reads an exported package of java.base from the JDK.
+
+| Java | Rust | Behaviour |
+|---|---|---|
+| `static native void registerNatives()`, `initIDs()` of any class | nothing (statement dropped) | JNI registration and field lookups |
+| `VM.initialize()` | nothing | registers `getNanoTimeAdjustment` |
+| `CDS.getCDSConfigStatus()int` | `java::cds_config_status()` | 0: no archive, as with `-Xshare:off` |
+| `CDS.getRandomSeedForDumping()long` | `java::cds_random_seed_for_dumping()` | 0: not dumping |
+| `CDS.initializeFromArchive(Class)` | nothing, for a class literal | no archive to restore from |
+| `Unsafe.arrayBaseOffset(Class)long` of `T[].class` | `java::array_base_offset()` | 16 |
+| `Unsafe.arrayIndexScale(Class)int` of `T[].class` | `java::array_index_scale("T")` | 1, 2, 4, 8 by element; 4 for references |
+| `ContinuationSupport.isSupported0()boolean` | `java::continuations_supported()` | `false`, as with `-XX:-VMContinuations` (HotSpot's default is `true`; without continuations, virtual threads are bound to a platform thread each) |
+| `VM.getNanoTimeAdjustment(long)long` | `java::nano_time_adjustment(offset)` | `(now - offset) * 10^9 + nanos`; -1 when `now - offset` is 2^32 seconds or more either way (HotSpot's `JVM_GetNanoTimeAdjustment`) |
+| `FileDescriptor.getHandle(int)long` | `java::fd_handle(fd)` | -1 (Windows handles only) |
+| `FileDescriptor.getAppend(int)boolean` | `java::fd_append(fd)` | the descriptor's `O_APPEND`, as `fcntl(fd, F_GETFL)` tells (from `/proc/self/fdinfo`; `false` where that is missing); `true` for a descriptor that is not open, since Java reads `fcntl`'s -1 as all flags |
+| `CRC32.update(int,int)int`, `updateBytes0(int,byte[],int,int)int` | `java::crc32_update`, `crc32_update_bytes` | zlib's CRC-32 |
+| `String.intern()` | the string itself (`StringOp::Identity`, there before) | strings are values; `==` and `!=` on two strings stay rejected at translation (`== on strings compares references`), so no program can see that copies are not canonical |
+
+Not done, because they need objects, exceptions or threads: everything else of section 1, in
+particular `Throwable.fillInStackTrace(int)` and `NullPointerException.getExtendedNPEMessage()`
+(above), the `Unsafe` memory and atomic operations, `Array.newArray` and the `FileInputStream`
+natives of a stream's object (`length0`, `position0`, `isRegularFile0`). The `TimeZone` natives
+need no objects but read the system's zone configuration (`TZ`, `/etc/localtime`), which is left
+for when a program needs time zones.
+
+### 4.5 Boundary changes made, and their numbers
+
+- **Class and resource loading untranslated** (4.2, 2): `java.lang.Module` (and so
+  `ModuleLayer`), `java.util.ResourceBundle`, `java.util.ServiceLoader` and `jdk.internal.loader.`
+  are `UNTRANSLATED` as "class loading". All of `ResourceBundle` is cut, not only its loading
+  half, so a translated `Scanner` still needs the locale data of the runtime's locale given
+  directly before it can run.
+- **`java.lang.reflect.Array` translated** (4.2, 7): `TRANSLATED_ANYWAY` exempts it from the
+  reflection prefix; its natives (`newArray`) now show among the natives reached.
+- **Sequential streams** (4.2, 4): reachability assumes first that no stream is parallel and skips
+  what `AbstractPipeline.isParallel()` guards, in `if` statements and `?:` expressions, then checks
+  the assumption on the code so reached (`program/reach/sequential.rs`): every assignment of
+  `AbstractPipeline.parallel` must assign a value that cannot be true, following `boolean`
+  parameters of constructors and static or private methods through every reachable call.
+  `BaseStream.parallel()` and `Collection.parallelStream()` fail the check, and then the walk is
+  made again without the assumption. On `StreamPipeline` the check holds, but the gain is small
+  (392 to 388 classes, 1,990 to 1,969 methods, no native): the parallel paths are still reached
+  through anonymous classes, such as the `StatefulOp` of `SliceOps.makeRef` and the `ReduceOp` of
+  `ReduceOps.makeRefCounting`, whose `opEvaluateParallel` and `evaluateParallel` overrides are
+  scanned with the method that creates them. The 23 natives come off once anonymous classes are
+  reached by dispatch (4.2, 3).
+
+Survey numbers on main before this work and after it (natives, then those in the runtime):
+
+| Program | Classes | Methods | Natives before | Natives after (in the runtime) |
+|---|---|---|---|---|
+| `GenericContainers` | 40 to 40 | 136 to 136 | 1 | 1 (0) |
+| `ListOperations` | 87 to 87 | 470 to 466 | 8 | 6 (4) |
+| `ComparatorSorting` | 90 to 90 | 408 to 404 | 8 | 6 (4) |
+| `StreamPipeline` | 390 to 388 | 1,992 to 1,969 | 31 | 30 (5) |
+| `ScannerGrades` | 1,649 to 1,193 | 10,704 to 7,441 | 191 | 76 (22) |
+| `TextAdventure` | 1,654 to 1,199 | 10,716 to 7,466 | 191 | 76 (22) |
+
+The typical targets lose `arrayBaseOffset0` and `arrayIndexScale0`, and of the six natives left
+four are in the runtime; the other two are the exception natives of 7 and 8. `StreamPipeline`
+gains `Array.newArray` (through `toArray`). The `Scanner` programs lose 456 classes and 115
+natives to the class loading boundary; of their 54 natives left that the runtime lacks, 35 are
+`Unsafe` (atomics, memory, `writeback`), and the rest the stack walker and stack traces, mapped
+memory, continuations and virtual threads, `TimeZone`, `FileCleanable`, `UnixFileSystem` and
+`Array.newArray`.
 
 ## Reproducing
 
