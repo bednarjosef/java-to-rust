@@ -91,9 +91,13 @@ fn breaks_out_of(stmt: &Stmt, label: Option<&str>) -> bool {
 }
 
 /// The locals that a live `try` block assigns: Rust cannot tell that one declared without a value
-/// is assigned on every path to a read after the `try`, as Java can, so it is given one.
+/// is assigned on every path to a read after the `try`, as Java can, so it is given one. A local
+/// declared inside the block (`for (Object e; ..)` in `ArrayList.batchRemove`) is read only there,
+/// where Rust follows its assignments as Java does.
 pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
     fn assigned(stmts: &[Stmt], out: &mut HashSet<String>) {
+        let mut found = HashSet::new();
+        let mut declared = HashSet::new();
         for s in stmts {
             visit_stmt(
                 s,
@@ -102,13 +106,18 @@ pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
                         if let ExprKind::Assign { target: Place::Var(name), .. }
                         | ExprKind::IncDec { target: Place::Var(name), .. } = &x.kind
                         {
-                            out.insert(name.clone());
+                            found.insert(name.clone());
                         }
                     })
                 },
-                &mut |_| {},
+                &mut |s| {
+                    if let Stmt::Local { name, .. } | Stmt::ForEach { name, .. } = s {
+                        declared.insert(name.clone());
+                    }
+                },
             );
         }
+        out.extend(found.into_iter().filter(|name| !declared.contains(name)));
     }
     // Finds the `try` statements of `stmts`, including those in the cases of a switch expression,
     // which `visit_stmt` reaches only through an expression.
@@ -338,7 +347,7 @@ impl<'a> Gen<'a> {
 
     /// The runtime's function `name` that ends the program with an uncaught exception, which
     /// shows the exception through its `Display`.
-    fn uncaught(&mut self, name: &str) -> String {
+    pub(super) fn uncaught(&mut self, name: &str) -> String {
         let t = self.class.type_index("java.lang.Throwable").expect("a program that throws has `Throwable`");
         if let Some(t) = self.enum_for(t) {
             self.need(Need::Display(t));

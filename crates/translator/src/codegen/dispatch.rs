@@ -1265,10 +1265,23 @@ impl<'a> Gen<'a> {
     /// the enum of `t`: the class's binary name and its hash code in hexadecimal.
     fn default_arm_text(&mut self, t: usize, c: usize) -> String {
         let hash = match self.hash_index(c) {
-            Some(i) => self.arm_call(t, c, i, "").0,
+            Some(i) => {
+                let call = self.arm_call(t, c, i, "").0;
+                self.shown_hash(i, call)
+            }
             None => self.value_hash(c, "o"),
         };
         self.default_text(c, hash)
+    }
+
+    /// The call `call` of `hashCode` method `i` for the text that `Object.toString` makes: what it
+    /// throws ends the program, as what a `toString` throws does where an object's text is made
+    /// (`analysis::exceptions`).
+    pub(super) fn shown_hash(&mut self, i: usize, call: String) -> String {
+        if !self.facts.throwing.contains(&i) {
+            return call;
+        }
+        format!("{call}.unwrap_or_else({})", self.uncaught("uncaught"))
     }
 
     /// The text that `Object.toString` makes for an object of class `c` whose hash code is `hash`.

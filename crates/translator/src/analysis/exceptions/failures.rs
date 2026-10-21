@@ -156,6 +156,7 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::FloatToRawIntBits
             | Native::IntBitsToFloat
             | Native::IdentityHash
+            | Native::SystemIdentityHash
             | Native::CurrentTimeMillis
             | Native::NanoTime
             | Native::AvailableProcessors
@@ -408,6 +409,7 @@ pub(super) fn runtime_failures(
                         // A null string is the `NumberFormatException` of `parse_radix`.
                         | Builtin::Bits(BitsOp::ParseRadix, _)
                         | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
+                        | Builtin::Native(Native::SystemIdentityHash)
                 );
                 let checked = if takes_null || matches!(builtin, Builtin::String(StringOp::Join) | Builtin::Format) {
                     &args[..args.len().min(1)]

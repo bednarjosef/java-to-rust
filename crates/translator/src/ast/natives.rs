@@ -19,8 +19,10 @@ pub enum Native {
     FloatToIntBits,
     FloatToRawIntBits,
     IntBitsToFloat,
-    /// `System.identityHashCode(o)` or an `o.hashCode()` that resolves to `Object`'s.
+    /// An `o.hashCode()` that resolves to `Object`'s.
     IdentityHash,
+    /// `System.identityHashCode(o)`, which is 0 for a null `o`.
+    SystemIdentityHash,
     CurrentTimeMillis,
     NanoTime,
     /// `Runtime.getRuntime().availableProcessors()`.

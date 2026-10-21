@@ -69,7 +69,7 @@ impl<'t> Lowering<'t> {
                 if !matches!(args[0].ty, Type::Class(..)) {
                     return unsupported(node, "`System.identityHashCode` of anything but an object");
                 }
-                Native::IdentityHash
+                Native::SystemIdentityHash
             }
             ("java.lang.Object", "hashCode") => {
                 let object = match receiver {

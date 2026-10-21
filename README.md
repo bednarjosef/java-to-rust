@@ -773,6 +773,13 @@ as its command-line arguments, on `java` and as the translated binary alike.
   streams as Rust iterators, after the object model, lambdas and for-each over `Iterable` land.
 - [docs/thorough-mode.md](docs/thorough-mode.md): a slower whole-program mode with points-to
   analysis, ownership checked by rustc, enums for class trees, and typed errors.
+- [docs/natural-rust.md](docs/natural-rust.md): making the output read like hand-written Rust
+  (names, layout, a separate JDK crate, non-null values, `Vec` and `for`), how to measure it, and
+  a later port mode that writes natural Rust everywhere and lists each change in behaviour.
+- [docs/translator-speed-and-memory.md](docs/translator-speed-and-memory.md): how fast the
+  translator runs and how much memory it needs, the steps to cut both, an estimate at the scale of
+  the Minecraft server, and the goal of translating javac so that it uses less memory than on the
+  JVM.
 - [docs/closures-and-nested-classes.md](docs/closures-and-nested-classes.md): captures, inner,
   local and anonymous classes, lambdas, method references and for-each over `Iterable`, after
   the object model.
