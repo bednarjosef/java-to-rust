@@ -28,6 +28,7 @@ use std::cell::{Cell, RefCell};
 
 mod arrays;
 mod boxing;
+mod by_name;
 mod captures;
 mod charsets;
 mod classes;
@@ -550,6 +551,9 @@ impl<'t> Lowering<'t> {
                     target: self.target(node.child("variable")?)?,
                     value: Box::new(value),
                 }
+            }
+            "TYPE_CAST" if let Some(name) = crate::program::created_by_name(node.0) => {
+                self.created_by_name(node, Node(name))?
             }
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;

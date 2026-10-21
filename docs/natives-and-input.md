@@ -769,6 +769,25 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   `LazyConstant` in which
   `Charset` keeps its default: `Unsafe.objectFieldOffset` and the acquire and release accesses of
   its `constant` field, which wait for the threads design's symbolic field offsets.
+- **Objects created from a class name** (`program/reach/by_name.rs`, `lower/by_name.rs`):
+  `(T) Class.forName(name).getDeclaredConstructor().newInstance()`, and the older
+  `(T) Class.forName(name).newInstance()`, is how `LocaleProviderAdapter.forType` creates the
+  adapter of each `LocaleProviderAdapter.Type`. A translated program is closed, so the lowering
+  makes it a `switch` over the name with a case for each of the program's top-level classes that
+  is neither abstract nor generic, is a `T` and has a constructor without parameters; any other
+  name ends the program with `java.lang.ClassNotFoundException: NAME is not a class of the
+  translated program` (`Builtin::UnknownClass`), never with an object of another class.
+  Reachability makes that constructor reachable for each such class whose binary name reachable
+  code writes as a string literal, as `LocaleProviderAdapter.Type`'s constants do; a name that
+  code computes (`SPILocaleProviderAdapter`'s `getCanonicalName() + "$" + ...`) finds nothing.
+  A `catch` alternative of a class that a whole program does not translate, such as
+  `InvocationTargetException`, is left out: translated code cannot throw one. Test: the corpus
+  program `corpus/whole-program/ClassesByName.java` and
+  `objects_created_from_a_class_name_are_of_the_classes_that_code_names`. `ScannerGrades` now
+  reaches the five adapters, which reflection cut before: 1,179 classes and 62 natives (21 in the
+  runtime) instead of 1,027 and 60; the new natives are `UnixFileSystem.getBooleanAttributes0`,
+  through the data file that `Currency` reads, and `VM.getNanoTimeAdjustment`, which the runtime
+  has. It still stops at `Bundles`, which extends the untranslated `ResourceBundle`.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 
