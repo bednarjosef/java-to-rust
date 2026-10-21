@@ -421,6 +421,12 @@ fn is_tested(e: &Expr, safe: &[String]) -> bool {
         ExprKind::Var(v) => safe.contains(v),
         // A cast of a reference keeps its null.
         ExprKind::Cast(to, value) if to.is_reference() => is_tested(value, safe),
+        // So does an assignment to a field, whose value is the assigned one (`(current = e).next`).
+        ExprKind::Assign { op: None, target: Place::Field { .. } | Place::Static { .. }, value }
+            if !matches!(e.ty, Type::Boxed(_)) =>
+        {
+            is_tested(value, safe)
+        }
         _ => false,
     }
 }

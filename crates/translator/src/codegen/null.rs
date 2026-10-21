@@ -32,6 +32,15 @@ impl<'a> Gen<'a> {
         {
             return self.nullable(value);
         }
+        // The value of an assignment to a field that may be null is the assigned value, an
+        // `Option` only where that may be null (see `update`), so a narrowed variable
+        // assigned there is not null either.
+        if let ExprKind::Assign { op: None, target: Place::Field { .. } | Place::Static { .. }, value } =
+            &e.kind
+            && !matches!(e.ty, Type::Boxed(_))
+        {
+            return self.nullable(value);
+        }
         maybe_null(self.facts, self.method, e)
     }
 

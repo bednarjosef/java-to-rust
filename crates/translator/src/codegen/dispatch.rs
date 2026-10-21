@@ -945,6 +945,9 @@ impl<'a> Gen<'a> {
                 let (text, uses) = g.arm_call(t, c, i, &args);
                 (g.covariant_ret(i, r, text), uses)
             }
+            // What runs no method of the program cannot throw, but the group may (a `hashCode`
+            // that iterates a map), and then every arm gives a `Result`.
+            None if g.facts.throwing.contains(&r) => (format!("Ok({})", g.builtin_arm(r, c)), true),
             None => (g.builtin_arm(r, c), true),
         });
         self.indent -= 1;
