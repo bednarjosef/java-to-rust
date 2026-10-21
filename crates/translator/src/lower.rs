@@ -11,6 +11,7 @@ mod foreach;
 mod functional;
 mod generic_args;
 mod generics;
+mod handles;
 mod hierarchy;
 mod lambdas;
 mod object;
@@ -66,7 +67,9 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
         lowering.declare_standard()?;
         let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
-        lowering.functional = functional::Functional::select(decls.iter().map(|d| d.0), &declared);
+        // The standard classes may name interfaces too (`Thread` holds a `Runnable`).
+        let trees = decls.iter().map(|d| d.0).chain(lowering.standard.classes.iter().map(|(_, d)| *d));
+        lowering.functional = functional::Functional::select(trees, &declared);
         lowering.declare_functional()?;
         lowering.declare_plain_object(decls.iter().map(|d| d.0))?;
         lowering.name_nested();
@@ -701,6 +704,9 @@ impl<'t> Lowering<'t> {
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
+        if let Some(kind) = self.handle_access(node, &symbol)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);
         }

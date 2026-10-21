@@ -140,9 +140,19 @@ impl<'t> Lowering<'t> {
                 Native::OutWrite
             }
             ("java.io.PrintStream", "flush") if stream.is_some() => Native::OutFlush,
-            // A native of a translated class: the runtime's, or a rejection that names it.
-            (owner, name) if symbol.native && self.type_index(owner).is_some() => {
+            // A native of a translated class: the runtime's, or a rejection that names it. (A
+            // native of the JDK that the translator's own class has in Java, as `Thread` has
+            // `currentThread`, is a method like another.)
+            (owner, name)
+                if symbol.native
+                    && self.type_index(owner).is_some()
+                    && self.method_index(symbol).is_none() =>
+            {
                 match declared_native(owner, name, symbol.ty) {
+                    Some(Native::ThreadStart) => {
+                        self.thread_body(node, args);
+                        Native::ThreadStart
+                    }
                     Some(native) => native,
                     None => {
                         return unsupported(node, &format!("native method `{owner}.{name}{}`", symbol.ty));
@@ -206,6 +216,26 @@ impl<'t> Lowering<'t> {
             )
         };
         Ok(Some(ExprKind::Builtin(Builtin::Native(native), Vec::new())))
+    }
+
+    /// What the thread that `Thread.start0(t, ..)` starts runs: `t.run()`, added to the arguments
+    /// as the last, for the code that starts the thread to run on it (`ThreadStart`). Calling it
+    /// here, in the program's terms, lets every analysis see the call of `run` and the overrides
+    /// it may run.
+    fn thread_body(&self, node: Node<'t>, args: &mut Vec<Expr>) {
+        let ExprKind::Var(name) = &args[0].kind else { unreachable!("`startThread` passes its parameter") };
+        let run = self.methods.iter().position(|m| {
+            self.types[m.owner].javac == "java.lang.Thread" && m.name == "run" && m.sig == "()void"
+        });
+        let receiver = Box::new(self.synth(ExprKind::Var(name.clone()), args[0].pos, args[0].ty));
+        let call = ExprKind::MethodCall {
+            receiver,
+            name: "run".to_string(),
+            args: Vec::new(),
+            resolved: run,
+            is_super: false,
+        };
+        args.push(self.synth(call, node.pos(), Type::Void));
     }
 
     /// A native of a stream or descriptor: the receiver goes first, as the descriptor the object

@@ -14,8 +14,10 @@
 //! the drops above it use less than `RECURSION_BYTES` of stack, measured from the shallowest
 //! `drop_links` this thread has run; only deeper than that does it start a chain.
 
+use crate::Locked;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// How much stack the nested drops of a structure may use, recursively, before a `Drop` moves
 /// its links onto a chain. A level of a list or a tree takes a few hundred bytes.
@@ -28,7 +30,7 @@ thread_local! {
 }
 
 /// An object whose fields may lead to a long chain of objects: a translated class's struct (or
-/// its `RefCell`, or a `Vec` of an array).
+/// its `RefCell` or `java::Locked`, or a `Vec` of an array).
 pub trait Unlink<'a> {
     /// Moves out every field that may lead further down a chain, onto `chain`. Called only on
     /// an object that is dying: in its `Drop`, or when the chain holds its last reference.
@@ -46,9 +48,11 @@ pub trait Link<'a> {
     fn into_chain(self, chain: &mut Chain<'a>);
 }
 
-/// The objects waiting to be freed, each one held by its last reference.
+/// The objects waiting to be freed, each one held by its last reference: those of one thread,
+/// and those that threads share.
 pub struct Chain<'a> {
     objects: Vec<Rc<dyn Unlink<'a> + 'a>>,
+    shared: Vec<Arc<dyn Unlink<'a> + 'a>>,
 }
 
 impl<'a> Chain<'a> {
@@ -61,14 +65,34 @@ impl<'a> Chain<'a> {
         }
     }
 
+    /// `push` of an object that threads share.
+    #[inline]
+    pub fn push_shared<T: Unlink<'a> + 'a>(&mut self, object: Arc<T>) {
+        if Arc::strong_count(&object) == 1 && Arc::weak_count(&object) == 0 {
+            self.shared.push(object);
+        }
+    }
+
     /// Frees the objects on the chain, unlinking each one first, so that freeing it drops no
     /// further object of the chain.
     fn release(&mut self) {
-        while let Some(mut object) = self.objects.pop() {
-            if let Some(o) = Rc::get_mut(&mut object) {
-                o.unlink(self);
+        loop {
+            if let Some(mut object) = self.objects.pop() {
+                if let Some(o) = Rc::get_mut(&mut object) {
+                    o.unlink(self);
+                }
+            } else if let Some(mut object) = self.shared.pop() {
+                if let Some(o) = Arc::get_mut(&mut object) {
+                    o.unlink(self);
+                }
+            } else {
+                return;
             }
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.objects.is_empty() && self.shared.is_empty()
     }
 }
 
@@ -95,14 +119,21 @@ pub fn drop_links<'a, T: Unlink<'a>>(object: &mut T) {
 #[cold]
 #[inline(never)]
 fn unlink_deep<'a, T: Unlink<'a>>(object: &mut T) {
-    let mut chain = Chain { objects: Vec::new() };
+    let mut chain = Chain { objects: Vec::new(), shared: Vec::new() };
     object.unlink(&mut chain);
-    if !chain.objects.is_empty() {
+    if !chain.is_empty() {
         chain.release();
     }
 }
 
 impl<'a, T: Unlink<'a> + ?Sized> Unlink<'a> for RefCell<T> {
+    #[inline]
+    fn unlink(&mut self, chain: &mut Chain<'a>) {
+        self.get_mut().unlink(chain);
+    }
+}
+
+impl<'a, T: Unlink<'a> + ?Sized> Unlink<'a> for Locked<T> {
     #[inline]
     fn unlink(&mut self, chain: &mut Chain<'a>) {
         self.get_mut().unlink(chain);
@@ -129,6 +160,20 @@ impl<'a, T: Unlink<'a> + 'a> Link<'a> for Rc<T> {
     #[inline]
     fn into_chain(self, chain: &mut Chain<'a>) {
         chain.push(self);
+    }
+}
+
+impl<'a, T: Unlink<'a> + 'a> Link<'a> for Arc<T> {
+    #[inline]
+    fn unlink_in(&mut self, chain: &mut Chain<'a>) {
+        if let Some(o) = Arc::get_mut(self) {
+            o.unlink(chain);
+        }
+    }
+
+    #[inline]
+    fn into_chain(self, chain: &mut Chain<'a>) {
+        chain.push_shared(self);
     }
 }
 
@@ -214,6 +259,35 @@ mod tests {
             drop(head);
             // The rest of the list is still alive through `kept`.
             assert_eq!(kept.as_ref().map(|n| n.borrow().value), Some(999_998));
+        });
+    }
+
+    struct SharedNode {
+        next: Option<Arc<Locked<SharedNode>>>,
+        items: crate::SharedArray<Option<Arc<Locked<SharedNode>>>>,
+    }
+
+    impl<'a> Unlink<'a> for SharedNode {
+        fn unlink(&mut self, chain: &mut Chain<'a>) {
+            Link::unlink_in(&mut self.next, chain);
+            Link::unlink_in(&mut self.items, chain);
+        }
+    }
+
+    impl Drop for SharedNode {
+        fn drop(&mut self) {
+            drop_links(self);
+        }
+    }
+
+    #[test]
+    fn a_long_chain_that_threads_share_drops() {
+        on_small_stack(|| {
+            let mut head = None;
+            for i in 0..1_000_000 {
+                let (next, items) = if i % 2 == 0 { (head, vec![]) } else { (None, vec![head]) };
+                head = Some(Arc::new(Locked::new(SharedNode { next, items: crate::shared_from_vec(items) })));
+            }
         });
     }
 

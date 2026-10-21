@@ -678,6 +678,9 @@ fn expr_points(
             children.push(receiver);
             children.extend(args);
         }
+        // What a started thread runs raises nothing where the thread is started: an exception
+        // that escapes it ends that thread (the runtime prints it), whatever catches the start.
+        ExprKind::Builtin(Builtin::Native(Native::ThreadStart), args) => children.extend(&args[..4]),
         ExprKind::Call { args, .. }
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }
@@ -805,6 +808,24 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         Builtin::Native(Native::Math { name: "clamp", .. }) => Some("java.lang.IllegalArgumentException"),
         // The others are functions on numbers, which never throw.
         Builtin::Native(Native::Math { .. }) => None,
+        // A negative time. Nothing interrupts a thread of a translated program, so `sleep` never
+        // throws `InterruptedException`.
+        Builtin::Native(Native::Sleep { .. }) => Some("java.lang.IllegalArgumentException"),
+        // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail.
+        Builtin::Native(
+            Native::OnSpinWait
+            | Native::ThreadYield
+            | Native::ThreadNumber
+            | Native::ThreadId
+            | Native::MainThreadId
+            | Native::HasCurrentThread
+            | Native::SetCurrentThread
+            | Native::CurrentThread
+            | Native::ThreadStart
+            | Native::ThreadAlive
+            | Native::ThreadJoin
+            | Native::ThreadRename,
+        ) => None,
         Builtin::CodePoint(CodePointOp::ToCharsInto) => Some("java.lang.IllegalArgumentException"),
         Builtin::CodePoint(
             CodePointOp::CharCount

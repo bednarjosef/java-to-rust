@@ -32,14 +32,17 @@ mod initializer;
 mod integer;
 mod integer_parse;
 mod java_arrays;
+mod locked;
 mod math;
 mod natives;
 mod null;
 mod out;
 mod parse_range;
 pub mod regex;
+mod statics;
 pub mod string;
 mod system;
+mod thread;
 mod unsigned;
 mod vm;
 pub use boxed::*;
@@ -63,14 +66,17 @@ pub use initializer::*;
 pub use integer::*;
 pub use integer_parse::{parse_radix, parse_small_radix, try_parse_radix, try_parse_small_radix};
 pub use java_arrays::*;
+pub use locked::{Locked, Ref, RefMut};
 pub use math::*;
 pub use natives::*;
-pub use null::{OrNull, non_null, or_null, same, try_non_null};
+pub use null::{Handle, OrNull, non_null, or_null, same, try_non_null};
 pub use out::{Out, eprint_chars, eprintln_chars, flush, out, print_chars, println_chars, write_byte};
 pub use parse_range::{parse_range, parse_unsigned_range, try_parse_range, try_parse_unsigned_range};
 pub use regex::{matches_all, replace_all, replace_first, split};
+pub use statics::*;
 pub use string::*;
 pub use system::*;
+pub use thread::*;
 pub use unsigned::{
     compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,
     try_parse_unsigned,

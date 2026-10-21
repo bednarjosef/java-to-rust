@@ -28,8 +28,8 @@ shared and mutable, and a reference that may be null is an `Option` of it. An ar
 counting, not by a garbage collector, so a cycle of objects is never freed. The runtime crate
 (`crates/runtime`) supplies what Rust lacks: Java's exact number semantics (wrapping integer
 overflow, Java's float rules and printing), strings, `StringBuilder`, `String.format`, regular
-expressions and charsets with Java's results. Collections and threads are not translated yet (see
-"Not yet" below).
+expressions and charsets with Java's results. Threads are real threads, and the objects they share
+are `Arc`s with a lock; collections are not translated yet (see "Not yet" below).
 
 ### Level 2: analysis-driven Rust
 
@@ -140,8 +140,8 @@ A small subset, end to end:
 - **Classes**: static and instance methods, overloading, varargs, fields with initializers,
   instance initializer blocks, static fields, constructors (including `this(...)`), `new`,
   object-typed fields and `null` objects, and a user `toString` in `println` and concatenation.
-  `synchronized (x)` checks `x` for null and runs the block: a program has one thread, so the lock
-  does nothing. An override may return a subtype of the overridden method's return type (a
+  `synchronized (x)` checks `x` for null and runs the block; it does not lock yet (see "Threads").
+  An override may return a subtype of the overridden method's return type (a
   covariant return): the override's value is converted to the overridden method's representation,
   so a caller that goes through the supertype sees the same value as Java's. In a class that
   implements `Cloneable` with no superclass and no subclasses, `super.clone()` (or `clone()` with no
@@ -239,6 +239,23 @@ A small subset, end to end:
   exception or an enum that throws something a caller catches, and a `try` or `catch` that observes
   an `ExceptionInInitializerError`. A constructor that throws returns a `Result`, as a method does. The design is in
   [docs/exceptions.md](docs/exceptions.md).
+- **Threads** are the platform's: a class that extends `Thread` and overrides `run`, or a
+  `Thread` given a `Runnable` (a class or a lambda), with `start`, `join` (with and without a
+  timeout), `isAlive`, `currentThread`, `getName`/`setName`, `setDaemon`/`isDaemon`, `getId`,
+  `threadId`, `getPriority`/`setPriority`, `toString` and `sleep`, as Java names and numbers them
+  (`Thread-0`, `Thread[#3,main,5,main]`). `java.lang.Thread` is `crates/translator/java/Threads.java`,
+  written in Java over the runtime's natives (`thread.rs`) and given to the program as
+  `Standard.java` is. The program ends when its last thread that is not a daemon ends; an exception
+  that ends a thread prints `Exception in thread "<name>" ...` and the other threads go on. In a
+  program that starts a thread, the classes that threads may share (`Thread` and its subclasses,
+  the classes of statics, and what their fields reach) are `Arc<java::Locked<C>>`, or `Arc<C>` when
+  immutable, and every other class keeps `Rc<RefCell<C>>`; arrays are `java::SharedArray<T>`; and
+  statics are process-wide (`java::Atomic<T>` for primitives, `java::Locked<T>` otherwise, and a
+  `java::ClassInit` that runs a class's initializer once). A program without threads translates
+  exactly as before. `synchronized` does not lock yet, and a `volatile` static is read with
+  acquire and written with release, as every static is. Monitors, interrupts, sequentially
+  consistent `volatile`, the atomics and `java.util.concurrent` are next; the design is in
+  [docs/multi-threading.md](docs/multi-threading.md).
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`), and so are
   `System.out.println(char[])` and `System.err.print`/`println`, which also print a `char[]`.
   `System.err` is written as it is, after `System.out` is flushed, so the two stay in order.
@@ -614,8 +631,9 @@ Each construct below is rejected at translation with an error that names it:
   interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
-- threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls
-  above.
+- of threads: `wait`/`notify`, `interrupt`, thread groups, uncaught exception handlers,
+  `ThreadLocal` and the `java.util.concurrent` classes; a `StringBuilder`, or a box compared by
+  identity, that threads may share.
 
 Also rejected: `Charset.aliases()`, `null` as a `Charset` (and a `Charset` field or array element
 that starts out null), catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and
