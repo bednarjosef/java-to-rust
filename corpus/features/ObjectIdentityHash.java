@@ -1,5 +1,5 @@
 // System.identityHashCode of an Object or interface value hashes the object its variant holds:
-// the same object gives the same hash, and null gives 0.
+// the same object gives the same hash, null gives 0, and a plain `new Object()` hashes as hashCode does.
 public class ObjectIdentityHash {
     interface Named {
         String name();
@@ -39,5 +39,11 @@ public class ObjectIdentityHash {
         Named nobody = null;
         System.out.println(System.identityHashCode(none) + " " + System.identityHashCode(nobody));
         System.out.println(((Named) point).name() + " " + named.name());
+        Object plain = new Object();
+        Object alias = plain;
+        Object another = new Object();
+        int p = System.identityHashCode(plain);
+        System.out.println((p == System.identityHashCode(alias)) + " " + (p == plain.hashCode()));
+        System.out.println(System.identityHashCode(another) == another.hashCode());
     }
 }
