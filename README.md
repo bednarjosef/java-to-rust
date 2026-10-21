@@ -83,6 +83,12 @@ The test programs come from:
 - `corpus/projects`: 3 multi-file programs (`imports`, `pruning`, `statics`), each with a source
   root `src/` and a file `main` that names the main class. The corpus has no open-source projects
   yet;
+- `corpus/whole-program`: programs that use the JDK's own code, such as `Comparator.comparing`
+  or `Function.andThen`, translated whole with the sources of `java.base` by a test of their own
+  (`tests/whole_program.rs`). The JDK's sources cannot be in the repository, so the test runs
+  only when `JAVA_BASE_SOURCES` names their root (`JAVA_BASE_SOURCES=… cargo test --test
+  whole_program`) and otherwise says it skipped; at about a minute per program, it runs at merges
+  rather than in every check;
 - `tools/fuzz`: random programs generated from a seed (`fuzz.py`, with `fuzz_strings.py` for
   strings and builders under `--strings`, `fuzz_arrays.py` for arrays of up to three dimensions,
   their aliases, rows, loops and helper methods under `--arrays`, and `fuzz_objects.py` for
@@ -133,7 +139,13 @@ A small subset, end to end:
   instance initializer blocks, static fields, constructors (including `this(...)`), `new`,
   object-typed fields and `null` objects, and a user `toString` in `println` and concatenation.
   `synchronized (x)` checks `x` for null and runs the block: a program has one thread, so the lock
-  does nothing.
+  does nothing. An override may return a subtype of the overridden method's return type (a
+  covariant return): the override's value is converted to the overridden method's representation,
+  so a caller that goes through the supertype sees the same value as Java's. In a class that
+  implements `Cloneable` with no superclass and no subclasses, `super.clone()` (or `clone()` with no
+  receiver) is a shallow copy of the fields: primitives and strings by value, arrays and object
+  references shared, as Java shares them. `clone` of another object, or in a class with a superclass
+  or a subclass, is rejected.
 - **Class trees, interfaces and generics**: class trees of the program's own classes translate,
   abstract or not and of any depth: `extends`, abstract methods, overriding and virtual calls,
   `super(...)` and `super.m(...)`, upcasts, `==` on objects of a class tree, and printing through
@@ -152,14 +164,17 @@ A small subset, end to end:
   its value. A class without `toString` prints as Java's `Object.toString` does, its binary name and
   its hash code in hexadecimal (`Point@1b6d3586`). `new Object()` makes an object of a class
   without fields, `PlainObject`, equal only to itself and printed as `java.lang.Object@..`, as the
-  JDK's lock objects and placeholder values (`HashSet`'s `PRESENT`) need. An array as an
-  `Object`, and `==` between two `Object`s that may both be strings or boxes (whose identity the
-  translation does not keep, except in the shortcut `a == b || a.equals(b)`) are rejected. The
+  JDK's lock objects and placeholder values (`HashSet`'s `PRESENT`) need. An array becomes an
+  `Object` too (`Object::IntArray(..)`), shared and compared by identity, so a `Deque<int[]>` holds
+  its arrays. `==` between two `Object`s that may both be strings or boxes (whose identity the
+  translation does not keep, except in the shortcut `a == b || a.equals(b)`) is rejected. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
   and a use where javac substituted a type argument gets the checked cast back
   (`java::cast(b.get().as_integer(), ..)`). `Comparable` as a type (a bound, mostly) is an enum like
-  `Object`, over strings, boxes, the program's enums and its classes that implement it. A method
+  `Object`, over strings, boxes, the program's enums and its classes that implement it, and so is
+  `Number` (`T extends Number`, `List<? extends Number>`), over the numeric boxes, whose
+  `intValue()` and the others convert as Java does. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &
@@ -187,13 +202,17 @@ A small subset, end to end:
   one over a sealed hierarchy or an enum needs no `default`: a null selector throws
   `NullPointerException` unless a `case null` takes it. `x instanceof Segment(Point(int fx, var
   fy), Point to)` is the same test in an `if let` chain, its negated form included. `sealed`,
-  `permits` and `non-sealed` are accepted. Of `java.lang.Class`, only comparing classes and naming them translate:
-  `getClass() != o.getClass()`, `a.getClass().equals(b.getClass())` and `a.getClass() ==
-  Dog.class` (a `matches!` of the variant where the class is a variant of an enum), and
-  `Dog.class.getName()` and `getSimpleName()`. Any other use of a `Class` is rejected, as are a
-  record with an array component (its text would be the array's identity), a generic record in a
-  record pattern, and the class literal of a standard class. An accessor written in the record
-  runs at each use of a pattern variable that names a component, not once.
+  `permits` and `non-sealed` are accepted. Comparing the classes of the program's objects
+  (`getClass() != o.getClass()`, `a.getClass().equals(b.getClass())`, `a.getClass() ==
+  Dog.class`) is a `matches!` of the variant where the class is a variant of an enum, and
+  `Dog.class.getName()` a constant. Any other class is a value, a `java::Class` that is `Copy`
+  and equal by binary name: `x.getClass()` of an object, string, box, array or enum constant,
+  class literals (`int[].class`, `String.class`, `Dog.class`), and `getName`, `getSimpleName`,
+  `getSuperclass`, `getComponentType`, `isArray`, `isInterface`, `isPrimitive`, `isEnum`,
+  `toString`, `hashCode` and `equals`. Reflection (`getDeclaredFields`, `newInstance`, ...) is
+  rejected, as are a record with an array component (its text would be the array's identity) and
+  a generic record in a record pattern. An accessor written in the record runs at each use of a
+  pattern variable that names a component, not once.
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
   and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
   `super(message)`, `super(message, cause)`, fields, and overrides of `getMessage` and `toString`)
@@ -211,15 +230,21 @@ A small subset, end to end:
   `finally` replaces how the `try` ended. A failure of the runtime that a `catch` or a `finally`
   sees (a division by zero, an array index out of bounds, `charAt` or `substring` out of range, a
   malformed number) is the standard exception Java throws, with Java's message; elsewhere it ends
-  the program as before. try-with-resources closes the program's own resources (a new object whose
-  `close` cannot fail) in the reverse order, before its `catch` clauses and `finally`. Rejected for
-  now, by name: other try-with-resources, catching or letting a `finally` see a null dereference, a
-  negative array size, a failed cast or a failure of the library other than these, a `toString`, a
-  field initializer or a constructor of an exception or an enum that throws something a caller
-  catches, throwing a value that may be null, and a `yield` or a constructor's `return` through a
-  `finally`. A constructor that throws returns a `Result`, as a method does. The design is in
+  the program as before. try-with-resources closes the program's own resources (a new object of
+  the program's class) in the reverse order, before its `catch` clauses and `finally`; a `close`
+  that throws after the body threw is added to that exception as suppressed, and `getSuppressed`
+  returns it. A `throw` of a value that may be null throws `NullPointerException`, and a `yield` or
+  a constructor's `return` through a `finally` runs the `finally` first. A static initializer or a
+  static field initializer that throws ends an uncaught program with
+  `ExceptionInInitializerError`. Rejected for now, by name: other try-with-resources, catching or
+  letting a `finally` see a null dereference, a negative array size, a failed cast or a failure of
+  the library other than these, a `toString`, an instance field initializer or a constructor of an
+  exception or an enum that throws something a caller catches, and a `try` or `catch` that observes
+  an `ExceptionInInitializerError`. A constructor that throws returns a `Result`, as a method does. The design is in
   [docs/exceptions.md](docs/exceptions.md).
-- **Output**: `System.out.print` and `println` are buffered (`java::println!`).
+- **Output**: `System.out.print` and `println` are buffered (`java::println!`), and so are
+  `System.out.println(char[])` and `System.err.print`/`println`, which also print a `char[]`.
+  `System.err` is written as it is, after `System.out` is flushed, so the two stay in order.
 - **Library**: a set of `Math`, `StrictMath`, `Double`, `Float`, `Boolean`, `Integer`, `Long`,
   `Byte`, `Short` and `Character` methods, `String`, `StringBuilder` and `StringBuffer`, and
   `String.format`, all hand-written in the runtime with Java's exact results:
@@ -230,17 +255,24 @@ A small subset, end to end:
     `max`/`min`, `parseDouble`, `parseFloat`, `parseBoolean`, `logicalAnd`/`logicalOr`/
     `logicalXor`, and the `valueOf` of both with Java's grammar and rounding (whitespace,
     suffixes, hexadecimal floats).
-  - `Integer` and `Long`: parsing with a radix, the bit and radix methods (`toHexString`,
-    `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), and the unsigned methods
-    (`divideUnsigned`, `remainderUnsigned`, `compareUnsigned`, `toUnsignedString`,
-    `parseUnsignedInt`, `toUnsignedLong`, `toUnsignedInt`), which `Byte` and `Short` share.
-  - `Character`: the code point methods (`toChars`, `toString(int)`, `charCount`,
-    `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint`, ...), the tests
+  - `Integer` and `Long`: parsing with a radix and over a `begin`/`end` range of a `String`
+    (`parseInt(s, begin, end, radix)`, `valueOf(s, radix)`), the bit and radix methods
+    (`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), and the unsigned
+    methods (`divideUnsigned`, `remainderUnsigned`, `compareUnsigned`, `toUnsignedString`,
+    `parseUnsignedInt` with a radix or a range, `toUnsignedLong`, `toUnsignedInt`), which `Byte` and
+    `Short` share. Their `NumberFormatException` and `IndexOutOfBoundsException` messages are Java's.
+  - `Short` and `Byte`: `parseShort`/`parseByte` and `valueOf`, with or without a radix.
+  - `Character`: the code point methods (`toChars`, `toChars(int, char[], int)`, `toString(int)`,
+    `charCount`, `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint`, ...), the tests
     `isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`, `digit`,
-    `forDigit` and `getNumericValue`, case conversion, and the `MIN_VALUE`, `MAX_VALUE` and
-    `MIN_NORMAL` constants of the wrapper classes.
+    `forDigit` and `getNumericValue`, with their `int` code point overloads (`isLetter(int)`,
+    `toUpperCase(int)`, `digit(int, int)`, ...), case conversion, and the `MIN_VALUE`, `MAX_VALUE`
+    and `MIN_NORMAL` constants of the wrapper classes.
   - `String`: searching, slicing, case, trimming, replacing, comparing, `split`, `replaceAll`,
-    `matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf` and `new String(char[])`.
+    `matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf` and `new String(char[])`,
+    and `String.valueOf(char[])` and `valueOf(char[], offset, count)` (which throw as Java does
+    for a bad offset or count; a null array throws `NullPointerException`, which a `catch` cannot
+    see yet).
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
@@ -261,10 +293,11 @@ keeps the same bits, so they become `b = b.wrapping_add(x as i8)` and `b = b.wra
 Strings are Rust strings, so a lone surrogate `char` turns into `?` when it is printed or
 concatenated (as Java's UTF-8 output prints it), even where Java would later pair it up. The
 `Character` methods are exact on Latin-1, ASCII and fullwidth letters and digits, and
-`isWhitespace` excludes no-break spaces as Java does. Beyond Latin-1, `isLetter`, `isAlphabetic`
-and `isDigit` use Rust's Unicode tables, which are not Java's general categories, so they can
-differ from Java there; `Character.digit` recognises only ASCII and fullwidth letters and digits,
-so it can differ from Java on other decimal digits.
+`isWhitespace` excludes no-break spaces as Java does. The letter, digit, numeric value and case
+tables are generated from the JDK's own data, so the `Character` tests and conversions, including
+the `int` overloads for supplementary code points, follow Java's. Case conversion uses Rust's
+Unicode tables with Java's exceptions added, and `isAlphabetic` uses Rust's `is_alphabetic`; both
+can differ from Java on code points the corpus does not test.
 
 The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`, `charAt` agree on
 `"né😀e"`), and throw what Java throws (`StringIndexOutOfBoundsException` with Java's message).
@@ -307,6 +340,23 @@ overridden method becomes a `match self` with an arm per overriding constant and
 body (if it is not abstract) for the rest. `valueOf` of a name that is no constant throws
 `IllegalArgumentException` with Java's message (`No enum constant Main.Size.HUGE`), which a
 `catch` can take (`Size::try_enum_value_of(s)?`).
+
+An enum whose constructor does more than set fields to constant values (a loop, a call, an
+argument that is another enum's constant or a static method's result, as the JDK's
+`StreamOpFlag` has) keeps its fields in tables instead: field `f` is a static array
+`fOfConstants` indexed by ordinal, the constructor is a function `init_constant(ordinal, ..)`
+that fills a constant's row, and the enum's static initialization builds every constant, in
+order, before its other static initializers (an exception there is Java's
+`ExceptionInInitializerError`). A read of `e.f` is `fOfConstants[e.ordinal()]`, and the enum's
+methods initialize it first. Unlike Java, using a constant (`Shape.SQUARE`, `values()`, a
+`switch`) does not initialize the enum by itself; reading its fields or calling its methods does.
+
+`java.lang.Enum` as a type (the JDK's `EnumMap` and `EnumSet`, `<E extends Enum<E>>`) is an enum
+over the program's enums, like `Object`; `ordinal()`, `name()`, `compareTo` and
+`getDeclaringClass()` on it match on the enums it can be, and the constants of an enum's class,
+which the JDK reads through `SharedSecrets`, are those of the program's enum whose class it is. A
+cast to an enum of a value that may be null (a key from a generic collection) ends the program
+if the value is null, as the translation has no null enums.
 
 ### Analyses
 
@@ -365,9 +415,12 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   or by range with Java's range checks, `fill` by range, `copyOfRange` on primitives,
   `binarySearch` in both forms (`-(insertion point) - 1` when absent), and `deepToString` on
   arrays of primitive or `String` rows. `a.clone()` is a shallow copy; rows of a 2-D array are
-  shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`. Not
-  yet: `copyOf` and `copyOfRange` on `String` arrays (the padding would need nulls that the
-  nullness analysis does not see), `equals(null, b)`, `asList` and `stream`.
+  shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`.
+  `copyOf` works on any array, and `copyOf(a, n, type)` is the same copy (its class is dropped).
+  Translated with the JDK's sources, every other call of `Arrays` (a sort with a `Comparator`, a
+  sort of objects, `asList`) is a call of the translated `java/util/Arrays.java`, and
+  reachability follows only those (`lower::runtime_arrays_call`). Not yet without the JDK:
+  `copyOfRange` on `String` arrays, `equals(null, b)`, `asList` and `stream`.
 - Objects (`analysis/objects.rs`, `analysis/owned.rs`, `analysis/borrowing.rs`). The faithful form
   of an object is `Rc<RefCell<C>>`, because Java references are shared and mutable. A class whose
   objects never change after construction is shared as `Rc<C>`: its fields are written only by its
@@ -388,7 +441,11 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
 - Class hierarchies (`ast/hierarchy.rs`, `analysis/hierarchy.rs`). A class with subclasses keeps
   its fields in a struct of its own, `ShapeFields`, which the struct of each subclass embeds as
   `base` (`Circle { base: ShapeFields::new("circle"), radius }`), and its constructors build that
-  struct. Its methods that use the object only for its fields and for calls of such methods that
+  struct. When a constructor of such a class uses `this` as a value or calls a method that a
+  subclass overrides, its class tree builds objects as Java does instead (`analysis/whole_objects.rs`):
+  the object is allocated with every field zero, null or false, then each class's constructor body
+  runs on it, the superclass's first, as a method (`construct_stage(&self, ..)`), so an override
+  that the superclass's constructor calls sees the subclass's fields unset. Its methods that use the object only for its fields and for calls of such methods that
   nothing overrides live on that struct (`c.borrow_mut().base.move_()`); the others are emitted for
   the concrete class, where `this` is the whole object, a superclass's method that the subclass
   overrides under a name of its own for `super` calls (`withdraw_in_account`). Where every value of
@@ -431,9 +488,9 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   and its place (`OrderInMain`, `ReportInMain2`, `TaskInInit` in a field initializer): a variant
   of its interface's enum, or a subclass whose constructor passes the arguments of its `new` to
   the superclass's and its captures after them (`ReportInMain::new("squares", &sep)`); its
-  `getName` is javac's (`Main$1`) and its `getSimpleName` empty. Not yet: local interfaces, enums and records, member classes of local
-  classes, `Outer.super.m()`, `outer.super()`, and an inner class extending one nested in
-  another class.
+  `getName` is javac's (`Main$1`) and its `getSimpleName` empty. Local interfaces, enums and
+  records and member classes of local and anonymous classes translate, as do `Outer.super.m()`
+  and `outer.super()`. Not yet: an inner class extending one nested in another class.
 - For-each over an `Iterable` (`lower/foreach.rs`) is the loop Java runs: `let it =
   Names::iterator(&names); while it.borrow().has_next() { let s = it.borrow_mut().next(); .. }`,
   with the program's or the JDK's `iterator`, `hasNext` and `next`, so a translated iterator
@@ -452,9 +509,12 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   through `outer` (`self.outer.borrow().base`), also from a lambda in a lambda or in a local or
   anonymous class. A bound method reference takes a local, `this` or a final field as its
   receiver. In single-file mode the JDK's functional interfaces come from
-  `crates/translator/java/Functional.java` (abstract methods only). Not yet: other receivers,
-  `super` in a lambda, the closure forms (`impl FnMut`, `Rc<dyn Fn>`) and the JDK interfaces'
-  default and static methods.
+  `crates/translator/java/Functional.java` (abstract methods only), and a call of one of their
+  default or static methods is rejected with a pointer to whole-program mode. Translated whole
+  with the JDK's sources, those methods are the JDK's own code, lambdas in interface methods
+  included (`Comparator.comparing(Person::name).thenComparingInt(Person::age)`,
+  `f.andThen(g)`, `Predicate.not(p)`, `Iterable.forEach`; `corpus/whole-program`). Not yet: other
+  receivers, `super` in a lambda and the closure forms (`impl FnMut`, `Rc<dyn Fn>`).
 
 ### Whole programs
 
@@ -481,7 +541,8 @@ reaches those on paths that only its data rules out, as `HashMap` reaches reflec
 `comparableClassFor` and parallel streams reach threads, so the boundary is needed. A program that
 puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints the count).
 Annotations reach nothing, and neither does the code that Java Flight Recorder's flags guard
-(`jfrTracing` in `Throwable` and the file streams, which only JFR sets, by reflection): it is not
+(`jfrTracing` in `Throwable` and the file streams, which only JFR sets, by reflection), or the
+streams' `Tripwire.ENABLED` (a system property that only the JVM's `-D` option sets): it is not
 translated. Nor is what `AbstractPipeline.isParallel()` guards, when a check over the code reached
 shows that no stream can become parallel (`program/reach/sequential.rs`); otherwise reachability
 runs again without that assumption.
@@ -505,8 +566,10 @@ what reading standard input pulls in.
 
 The native layer, the JDK methods that bottom out in the JVM, is hand-written in the runtime
 (`natives.rs`, `math.rs`, `fdlibm/`, `out.rs`) and recognised by owner and name
-(`lower/natives.rs`): `System.arraycopy` (between shared or plain arrays, overlap as through a
-temporary, bounds checked first), the `Double` and `Float` bit conversions, `Math` and
+(`lower/natives.rs`): `System.arraycopy` (between shared or plain arrays of the same element type,
+overlap as through a temporary, bounds checked first; between arrays of different reference types,
+such as a `String[]` and an `Object[]`, it is rejected, because the two are different Rust types and
+the copy would need the element type at run time to throw `ArrayStoreException`), the `Double` and `Float` bit conversions, `Math` and
 `StrictMath`, `System.identityHashCode` and an inherited `hashCode()` (derived from the object's
 address: stable for the object's life, but like Java's different on every run), the clocks,
 `availableProcessors`, the line separator, `System.err` and `System.out.write`/`flush`.
@@ -547,17 +610,17 @@ for references) and are answered at the call, so their `Class`-taking natives ar
 Each construct below is rejected at translation with an error that names it:
 
 - the exceptions and try-with-resources listed under "Exceptions" above;
-- records, local interfaces, enums and records, and record patterns;
+- record patterns in `instanceof` (those in `switch` translate), and blocks, member classes,
+  static fields and non-constant initializers in an enum constant's body;
 - method references on a receiver other than a local, `this` or a final field, `super` in a
-  lambda, the default and static methods of the JDK's functional interfaces;
+  lambda, and without the JDK's sources the default and static methods of its functional
+  interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
 - threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls
   above.
 
-Also rejected: the `int` code-point overloads of the other `Character` tests (`isLetter(int)` and
-the like), `Character.toChars(int, char[], int)`, `Charset` values kept in variables, and the
-unsigned and parse methods with other argument counts.
+Also rejected: `Charset` values kept in variables.
 
 Checked by `--survey` on the JDK's sources: the library code that `HashMap` reaches uses
 interfaces, generic classes, inheritance, exceptions, inner classes and reflection, so none of it

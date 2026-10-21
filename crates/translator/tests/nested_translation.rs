@@ -293,7 +293,7 @@ fn a_default_method_of_a_provided_interface_is_rejected() {
     )
     .expect_err("Iterator.remove is a default method of the JDK's");
     assert!(
-        error.to_string().contains("the default method java.util.Iterator.remove not supported yet"),
+        error.to_string().contains("the default method `java.util.Iterator.remove` is the JDK's code"),
         "{error}"
     );
 }

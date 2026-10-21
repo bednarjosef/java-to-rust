@@ -613,7 +613,8 @@ class ObjectGen(ObjectDeclGen, ObjectStmtGen):
             options += [f'{n}.first()' for n, vt in objs
                         if vt.startswith('GPair<Integer,')]
             if options:
-                return self.pick(options)
+                # Unboxed explicitly: an `Integer` cannot be cast to `char` or `short`.
+                return f'((int) {self.pick(options)})'
         return None
 
     def call_text(self, key, d, receiver_type=None):

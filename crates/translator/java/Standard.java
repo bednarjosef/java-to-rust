@@ -2,14 +2,16 @@
 // methods of `Throwable` that a translation can reproduce, in the subset of Java the translator
 // supports. `build.rs` prints their syntax tree with `JavaTree`, and lowering gives each class
 // its real package (`java.lang`, `java.util` or `java.io`) and adds the classes a program uses to it (see
-// `lower/exceptions.rs`). Stack traces, suppressed exceptions and serialization are left out;
-// `cause` is null where Java's field holds the object itself to mean "not set yet", which only
-// `initCause` tells apart.
+// `lower/exceptions.rs`). Stack traces and serialization are left out; `cause` is null where
+// Java's field holds the object itself to mean "not set yet", which only `initCause` tells apart.
+// `addSuppressed` does not reject itself or null: this file cannot `throw`, since javac sees its
+// `Throwable` as unrelated to `java.lang.Throwable`.
 package standard;
 
 class Throwable {
     private String message;
     private Throwable cause;
+    private Throwable[] suppressed = new Throwable[0];
 
     public Throwable() {
     }
@@ -38,6 +40,24 @@ class Throwable {
 
     public Throwable getCause() {
         return cause;
+    }
+
+    public void addSuppressed(Throwable exception) {
+        Throwable[] own = suppressed;
+        Throwable[] more = new Throwable[own.length + 1];
+        for (int i = 0; i < more.length; i++) {
+            more[i] = i < own.length ? own[i] : exception;
+        }
+        suppressed = more;
+    }
+
+    public Throwable[] getSuppressed() {
+        Throwable[] own = suppressed;
+        Throwable[] copy = new Throwable[own.length];
+        for (int i = 0; i < own.length; i++) {
+            copy[i] = own[i];
+        }
+        return copy;
     }
 
     public String toString() {
@@ -259,6 +279,12 @@ class NullPointerException extends RuntimeException {
 
     public NullPointerException(String s) {
         super(s);
+    }
+
+    // Java's override describes a dereference that the runtime raises the exception for; the
+    // analysis rejects reading that message, so this is the message the code gave.
+    public String getMessage() {
+        return super.getMessage();
     }
 }
 

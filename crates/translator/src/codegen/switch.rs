@@ -10,6 +10,7 @@
 //! `break` leaves it early; a labeled block when a `break` leaves it early; a state machine when a
 //! case falls into the next one.
 
+use super::exceptions::completes_all;
 use super::*;
 
 /// What a frame is in Java, and how Rust runs it.
@@ -152,7 +153,7 @@ fn yield_count(cases: &[Case]) -> usize {
     let mut n = 0;
     for case in cases {
         for stmt in &case.body {
-            visit_stmt(stmt, &mut |_| {}, &mut |s| n += usize::from(matches!(s, Stmt::Yield(_))));
+            visit_stmt_outside_switches(stmt, &mut |s| n += usize::from(matches!(s, Stmt::Yield(_))));
         }
     }
     n
@@ -298,16 +299,27 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Whether the frame at `index` is a switch expression, which a `yield` leaves with a value.
+    pub(super) fn is_value_frame(&self, index: usize) -> bool {
+        matches!(self.frames[index].kind, Kind::Value { .. })
+    }
+
     /// A `yield`: leaves the innermost switch expression with the value.
     pub(super) fn yield_value(&mut self, value: &'a Expr) {
         let target = self.frames.iter().rposition(|f| matches!(f.kind, Kind::Value { .. }));
         let Some(index) = target else { return self.line("break;") };
         let Kind::Value { ty, .. } = self.frames[index].kind else { unreachable!() };
-        if self.leaves_finally(index) {
-            let message = "a `yield` through a `finally` not supported yet".to_string();
-            self.rejected.get_or_insert(Error { pos: value.pos, message });
-        }
         let code = self.value(value, ty);
+        if self.leaves_finally(index) {
+            // The `finally` runs before the switch expression ends, so the value waits in a local
+            // that `switch_expr` declares; the `try` passes it on when it reaches the switch.
+            if !self.yield_slots.contains(&index) {
+                self.yield_slots.push(index);
+            }
+            self.line(&format!("yielded{index} = Some({});", code.text));
+            self.jump(index, false, None);
+            return;
+        }
         self.jump(index, false, Some(code.text));
     }
 
@@ -422,11 +434,21 @@ impl<'a> Gen<'a> {
         let mark = self.out.len();
         let indent = self.indent;
         let pending = self.pending.take();
+        // The switch's own frame is the first one that `switch_form` opens.
+        let index = self.frames.len();
         self.indent += 1;
         self.switch_form(selector, cases, Some(ty), false);
         self.indent = indent;
         self.pending = pending;
-        let body = self.out.split_off(mark);
+        let mut body = self.out.split_off(mark);
+        if let Some(slot) = self.yield_slots.iter().position(|&i| i == index) {
+            self.yield_slots.swap_remove(slot);
+            // The initial `None` is overwritten before any read on every path that reads the slot.
+            let pad = "    ".repeat(indent + 1);
+            let declare =
+                format!("#[allow(unused_assignments)]\n{pad}let mut yielded{index}: Option<_> = None;");
+            body = format!("{pad}{declare}\n{body}");
+        }
         Code::atom(format!("{{\n{body}{}}}", "    ".repeat(indent)))
     }
 
@@ -522,7 +544,10 @@ impl<'a> Gen<'a> {
         let exhaustive = std::mem::take(&mut self.exhaustive);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("let mut case: usize = match {text} {{"));
+        // `case` is assigned only by a case that falls on; without one it need not be `mut`.
+        let falls = cases.iter().enumerate().any(|(i, c)| i + 1 < cases.len() && completes_all(&c.body));
+        let mutable = if falls { "mut " } else { "" };
+        self.line(&format!("let {mutable}case: usize = match {text} {{"));
         self.indent += 1;
         for case in arms(cases) {
             let index = cases.iter().position(|c| std::ptr::eq(c, case)).unwrap_or(0);
@@ -549,7 +574,8 @@ impl<'a> Gen<'a> {
             self.line(&format!("{i} => {{"));
             self.indent += 1;
             self.stmts(&case.body, false);
-            if !leaves(&case.body) {
+            // A case that cannot complete, such as a `try` whose every path yields, does not fall on.
+            if completes_all(&case.body) {
                 if i + 1 < cases.len() {
                     self.line(&format!("case = {};", i + 1));
                 } else {

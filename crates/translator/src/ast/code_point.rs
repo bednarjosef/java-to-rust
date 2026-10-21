@@ -17,4 +17,20 @@ pub enum CodePointOp {
     IsValid,
     IsBmp,
     IsSupplementary,
+    /// `Character.toChars(cp, dst, index)`: writes the units into `dst` and returns their number.
+    ToCharsInto,
+    /// The `int` overloads of the `Character` tests and conversions that have a `char` form
+    /// (`isLetter(int)`, `toUpperCase(int)`, `digit(int, int)` and the like).
+    IsLetter,
+    IsDigit,
+    IsLetterOrDigit,
+    IsWhitespace,
+    IsSpaceChar,
+    IsUpperCase,
+    IsLowerCase,
+    IsAlphabetic,
+    ToUpperCase,
+    ToLowerCase,
+    NumericValue,
+    Digit,
 }

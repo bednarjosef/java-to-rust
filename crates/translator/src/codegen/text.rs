@@ -185,7 +185,7 @@ impl<'a> Gen<'a> {
                 match args.get(1..) {
                     Some([offset, count]) => {
                         let (offset, count) = (self.int_arg(offset), self.int_arg(count));
-                        call(self, "from_chars_range", vec![chars, offset, count])
+                        self.may_fail(id, "from_chars_range", "", &format!("{chars}, {offset}, {count}"))
                     }
                     _ => call(self, "from_units", vec![chars]),
                 }
@@ -513,6 +513,9 @@ impl<'a> Gen<'a> {
             let radix = self.int_arg(&args[1]);
             return self.may_fail(id, "parse_radix", &format!("::<{rust}>"), &format!("Some({s}), {radix}"));
         }
+        if op == BitsOp::ParseRange {
+            return self.parse_range_builtin(kind, args, id);
+        }
         let v = self.value(&args[0], kind);
         let recv = self.recv(&v, kind);
         let format = |spec: &str| {
@@ -558,7 +561,7 @@ impl<'a> Gen<'a> {
                 let f = self.runtime("to_string_radix");
                 Code::atom(format!("{f}({wide}, {radix})"))
             }
-            BitsOp::ParseRadix => unreachable!("handled above"),
+            BitsOp::ParseRadix | BitsOp::ParseRange => unreachable!("handled above"),
         }
     }
 }

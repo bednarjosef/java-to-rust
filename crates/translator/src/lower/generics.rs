@@ -242,11 +242,16 @@ impl<'t> Lowering<'t> {
         if declared == ty || ty == Type::Void || self.has_param(declared) {
             return Ok(kind);
         }
-        if matches!(declared, Type::Array(_)) || matches!(ty, Type::Array(_)) {
+        if matches!(declared, Type::Array(_)) {
+            return unsupported(node, "an array of a type variable used as an array of its argument");
+        }
+        // An array held as an `Object` (`Deque<int[]>`) is cast back to its type.
+        if Self::is_object(declared) {
+            self.object_array(node, ty)?;
+        } else if matches!(ty, Type::Array(_)) {
             return unsupported(node, "an array of a type variable used as an array of its argument");
         }
         let inner = self.synth(kind, node.pos(), declared);
-        self.erasure_casts.borrow_mut().insert(inner.id);
         Ok(ExprKind::Cast(ty, Box::new(inner)))
     }
 }

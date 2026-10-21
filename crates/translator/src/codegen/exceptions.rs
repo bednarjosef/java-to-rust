@@ -34,7 +34,9 @@ pub(super) fn completes(stmt: &Stmt) -> bool {
         | Stmt::BreakLabel(_)
         | Stmt::ContinueLabel(_)
         | Stmt::Yield(_) => false,
-        Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::Exit, _), .. }) => false,
+        Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::Exit | Builtin::NoObject { .. }, _), .. }) => {
+            false
+        }
         Stmt::Block(stmts) => completes_all(stmts),
         Stmt::If { then, otherwise: Some(otherwise), .. } => completes(then) || completes(otherwise),
         Stmt::While { cond, body } if matches!(cond.kind, ExprKind::Bool(true)) => breaks_out_of(body, None),
@@ -107,31 +109,48 @@ pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
             );
         }
     }
-    let mut out = HashSet::new();
-    for s in body {
-        visit_stmt(s, &mut |_| {}, &mut |s| {
-            match s {
-                Stmt::Try { body, finally: None, .. }
-                    if facts.live_tries.contains(&(s as *const Stmt as usize)) =>
-                {
-                    assigned(body, &mut out)
-                }
-                // The body and the `catch` clauses of a `try` with a `finally` are blocks whose
-                // ends Rust does not follow into the code after the `finally`, unless nothing
-                // leaves them early.
-                Stmt::Try { body, catches, finally: Some(_) }
-                    if facts.raising_tries.contains(&(s as *const Stmt as usize))
-                        || leaves_early(body, catches) != (false, false) =>
-                {
-                    assigned(body, &mut out);
-                    for catch in catches {
-                        assigned(&catch.body, &mut out);
+    // Finds the `try` statements of `stmts`, including those in the cases of a switch expression,
+    // which `visit_stmt` reaches only through an expression.
+    fn scan(facts: &Facts, stmts: &[Stmt], out: &mut HashSet<String>) {
+        for s in stmts {
+            let mut nested = HashSet::new();
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::Switch { cases, .. } = &x.kind {
+                            for case in cases {
+                                scan(facts, &case.body, &mut nested);
+                            }
+                        }
+                    })
+                },
+                &mut |s| match s {
+                    Stmt::Try { body, finally: None, .. }
+                        if facts.live_tries.contains(&(s as *const Stmt as usize)) =>
+                    {
+                        assigned(body, out)
                     }
-                }
-                _ => {}
-            }
-        });
+                    // The body and the `catch` clauses of a `try` with a `finally` are blocks whose
+                    // ends Rust does not follow into the code after the `finally`, unless nothing
+                    // leaves them early.
+                    Stmt::Try { body, catches, finally: Some(_) }
+                        if facts.raising_tries.contains(&(s as *const Stmt as usize))
+                            || leaves_early(body, catches) != (false, false) =>
+                    {
+                        assigned(body, out);
+                        for catch in catches {
+                            assigned(&catch.body, out);
+                        }
+                    }
+                    _ => {}
+                },
+            );
+            out.extend(nested);
+        }
     }
+    let mut out = HashSet::new();
+    scan(facts, body, &mut out);
     out
 }
 
@@ -319,6 +338,12 @@ impl<'a> Gen<'a> {
         if let Some(t) = self.enum_for(t) {
             self.need(Need::Display(t));
         }
+        // A static initializer's exception ends the program as `ExceptionInInitializerError`.
+        if self.class.is_initializer(self.method) {
+            let initializer =
+                if name == "throw_uncaught" { "throw_initializer" } else { "initializer_uncaught" };
+            return self.runtime(initializer);
+        }
         self.runtime(name)
     }
 
@@ -426,8 +451,28 @@ impl<'a> Gen<'a> {
 
     /// `throw value;`.
     pub(super) fn throw_stmt(&mut self, value: &'a Expr) {
-        let text = self.expr(value).text;
+        let text = self.thrown_text(value);
         self.throw_text(&text);
+    }
+
+    /// The `Throwable` that `throw value` throws. A value that may be null throws a
+    /// `NullPointerException` instead (`Facts::null_checked` for the checked form, see
+    /// `dereference`).
+    pub(super) fn thrown_text(&mut self, value: &'a Expr) -> String {
+        // The value is converted to `Throwable`; what it is comes from below the conversion.
+        let thrown = match &value.kind {
+            ExprKind::Cast(_, inner) => inner,
+            _ => value,
+        };
+        if matches!(thrown.kind, ExprKind::Null) {
+            let none = format!("None::<{}>", self.throwable_type());
+            return self.dereference(&[value.id, thrown.id], &none);
+        }
+        if self.nullable(value) {
+            let option = self.expr(value).text;
+            return self.dereference(&[value.id, thrown.id], &option);
+        }
+        self.expr(value).text
     }
 
     /// A statement that throws the exception `text`: it leaves the enclosing `try` block or the
@@ -461,14 +506,10 @@ impl<'a> Gen<'a> {
         self.finallies.last().is_some_and(|f| f.frame > index)
     }
 
-    /// `return value;` at `pos` (`text` is the value, `None` for a `return` without one), which
-    /// first runs the `finally` of every `try` that it leaves.
-    pub(super) fn return_stmt(&mut self, text: Option<String>, pos: Pos) {
+    /// `return value;` (`text` is the value, `None` for a `return` without one), which first runs
+    /// the `finally` of every `try` that it leaves.
+    pub(super) fn return_stmt(&mut self, text: Option<String>) {
         if !self.finallies.is_empty() {
-            if self.ctor_result.is_some() {
-                let message = "a `return` of a constructor through a `finally` not supported yet".to_string();
-                self.rejected.get_or_insert(Error { pos, message });
-            }
             let label = self.completion_attempt();
             let value = text.unwrap_or_else(|| "()".to_string());
             let completion = self.runtime("Completion::Return");
@@ -760,7 +801,7 @@ impl<'a> Gen<'a> {
             let void = self.ret == Type::Void && !self.display;
             self.line(&format!("{ret}({}) => {{", if void { "_" } else { "value" }));
             self.indent += 1;
-            self.return_stmt((!void).then(|| "value".to_string()), Pos::default());
+            self.return_stmt((!void).then(|| "value".to_string()));
             self.indent -= 1;
             self.line("}");
         }
@@ -774,7 +815,11 @@ impl<'a> Gen<'a> {
             let pattern = if n + 1 == count { "_".to_string() } else { n.to_string() };
             self.line(&format!("{jump}({pattern}) => {{"));
             self.indent += 1;
-            self.jump(index, cont, None);
+            // A `yield` that reaches its switch expression takes the value that waits for it
+            // (see `yield_value`); through another `finally`, the value stays where it is.
+            let value = (self.is_value_frame(index) && !self.leaves_finally(index))
+                .then(|| format!("yielded{index}.take().unwrap()"));
+            self.jump(index, cont, value);
             self.indent -= 1;
             self.line("}");
         }
@@ -791,6 +836,10 @@ impl<'a> Gen<'a> {
     fn completion_value(&mut self) -> String {
         if self.display {
             return "fmt::Result".to_string();
+        }
+        // A constructor's `return` carries nothing: the object is returned after the `finally`.
+        if self.ctor_result.is_some() {
+            return "()".to_string();
         }
         let ret = self.plain_ret_text(self.method);
         ret.strip_prefix(" -> ").unwrap_or("()").to_string()

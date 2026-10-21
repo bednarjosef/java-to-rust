@@ -148,6 +148,10 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             break;
         }
     }
+    // A static that the program may set to null holds null like any other, whatever its
+    // initializer: its cell is an `Option` that is read as it is.
+    let nullable = facts.nullable_statics.clone();
+    facts.placeholder_statics.retain(|key| !nullable.contains(key));
 }
 
 /// The fields whose nullness is analyzed: strings, arrays and objects. A boxed field is always an

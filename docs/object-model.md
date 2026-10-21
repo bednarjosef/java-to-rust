@@ -451,12 +451,61 @@ fn new(r: f64) -> Circle {
   rule (`analysis::leading_assignments`) skips the `super(...)` statement, which lowering
   represents as `ExprKind::SuperInit { args, resolved }` as the first statement (like
   `ThisCall`).
-- The superclass's constructor must build a plain value (`plain_constructors`): a constructor
-  of a class with subclasses that uses `this` as a value, calls a method with overriders or an
-  abstract one on `this`, or whose class has field initializers that do so, is rejected:
-  "constructors of a class with subclasses that use `this` as a value or call overridable
-  methods". (Java runs the subclass's override on a half-built object; nothing idiomatic
-  expresses that.)
+- The superclass's constructor builds a plain value (`plain_constructors`) wherever it can: it
+  uses `this` only for the struct being built, calls on `this` only methods that borrow that
+  struct, and so do its class's field initializers. A constructor of a class with subclasses
+  that uses `this` as a value or calls a method with overriders or an abstract one on `this`
+  cannot: Java runs the subclass's override on the object while it is being built, and the
+  object does not exist yet when its fields struct is a value of its own. Such a class tree
+  gets the second constructor form below.
+- The second constructor form (`analysis/whole_objects.rs`, before the analyses): the object is
+  allocated first, with every field zero, null or false, then the superclass's constructor body
+  runs on the whole object, then the subclass's, as Java runs them. It applies to the classes
+  with subclasses (with fields structs) of the class trees where a constructor needs it, and to
+  their direct subclasses without subclasses; every other class keeps the form above, so code
+  that translated before translates the same. In those trees:
+  - each constructor of a class with subclasses becomes an instance method
+    `construct_<class>`, whose `super(..)` or `this(..)` is a call of the matching
+    `construct_<class>` on `this`, followed (unless it calls `this(..)`) by the class's field
+    initializers, then its body; the class gets one constructor without parameters that builds
+    the zero fields struct;
+  - a constructor of a class without subclasses builds its struct with the zero `base`, sets its
+    enclosing instance and captured locals (javac sets them before `super(..)` too), calls the
+    superclass's `construct_<class>` with the arguments of its `super(..)`, runs its own field
+    initializers, then its body;
+  - `new C(..)` of a class with subclasses that has objects of its own calls a function
+    `new_<class>` that builds the zero object and calls its `construct_<class>`.
+
+  The field initializers of these classes run as statements after the superclass's part (in a
+  method `initialize_fields` when several constructors run them), so a method that a superclass's
+  constructor calls sees the subclass's fields zero, null or false, as in Java; an object field
+  is then an `Option`. The rewrite is plain Java (constructors split into an allocation and
+  methods), so the analyses and the generator need nothing new:
+
+  ```rust
+  impl Sorted {
+      fn new(previous: Stage) -> Rc<RefCell<Sorted>> {
+          let obj = Rc::new(RefCell::new(Sorted { base: StageFields::new(), limit: 0 }));
+          let this = &obj;
+          Stage::Sorted(this.clone()).construct_stage(Some(previous));
+          this.borrow_mut().limit = 7;
+          obj
+      }
+  }
+
+  impl Stage {
+      fn construct_stage(&self, previous: Option<Stage>) {
+          self.base_mut().previous = previous.clone();
+          if let Some(previous) = previous.as_ref() {
+              previous.base_mut().next = Some(self.clone());
+          }
+          self.base_mut().stateful = self.is_stateful();
+      }
+  }
+  ```
+
+  A class with subclasses that has an enclosing instance or captured locals and needs this form
+  is still rejected: its synthetic fields would have to be set before the superclass's part.
 - A class whose own constructors use `this` as a value keeps today's non-plain form
   (`codegen/objects.rs::constructor`): `let obj = Rc::new(RefCell::new(Circle { base:
   BaseFields::new("circle"), r: 0.0 }));` then `field_inits`, then the body on `this`.
@@ -839,8 +888,8 @@ any overrider".
   union over its targets (the dispatcher takes `&self` of the enum and borrows inside, so the
   generator treats a dispatcher call like a call of a non-`self` method: `borrows_here` counts
   `(1, writes)`); `writers`/`isolated` propagate through `callees`.
-- `plain_constructors` must hold for every class with subclasses (else the rejection of 1.4,
-  raised in `analysis::validate`).
+- `plain_constructors` must hold for every class with subclasses once the class trees that need
+  it have the second constructor form of 1.4 (`analysis::validate` checks it).
 - `self_methods` for a field-level method of `DFields`: the same test as for a leaf class's
   method, with `touches` compared against the family's concretes. An object-level method on an
   enum is never a `self_method` in today's sense (its `self` is the enum, `ThisForm::Enum`).
@@ -1270,9 +1319,11 @@ numbers written into the commit message.
 
 ## 4. Risks and fallbacks
 
-- **Superclass constructors that leak `this` or call overridable methods**: rejected (1.4),
-  not translated wrongly. JDK: `AbstractList`, `AbstractMap`, `ArrayList`, `HashMap`
-  constructors only set fields, so this does not block the collections.
+- **Superclass constructors that leak `this` or call overridable methods**: their class tree gets
+  the second constructor form (1.4), which runs each constructor body on the whole object; such
+  a class with an enclosing instance or captured locals is still rejected. JDK: the stream
+  pipeline's `AbstractPipeline` constructor links the previous stage to `this` and calls the
+  overridable `opIsStateful()`, so the stream classes use that form.
 - **Field-level versus object-level misclassification**: an object-level body is always
   correct (it has the whole object); field-level is an optimization. If in doubt classify as
   object-level. A field-level body must never call a method that has overriders: the
@@ -1571,6 +1622,13 @@ Generics are erased in lowering, and nothing after it knows they existed:
   `java::double_compare`, `java::bool_compare`, a difference of `char`s or ordinals), which throws
   `ClassCastException` when the argument is of another class. A program that only calls a class's
   `compareTo` directly translates as before.
+- `java.lang.Number` is a third synthetic interface of the same kind, `NUMBER`, planned when the
+  program uses it as the type of a value (a variable, a bound such as `T extends Number`, the
+  elements of a `List<? extends Number>`). The six numeric boxes implement it, and its abstract
+  `byteValue()` to `doubleValue()` have an arm per box in `codegen::dispatch::number_arm`: the
+  value converted with `as`, which converts as Java's primitive conversions do (a floating-point
+  value becomes a `byte` or a `short` through an `int`). A program class that extends `Number` is
+  still rejected, as is any extension of a runtime class.
 - Bridges are methods, not conversions in dispatcher arms: when a method overrides one whose erased
   parameter or return types differ (`Integer next()` implementing `T next()` of `Source<Integer>`,
   `compareTo(Point)` implementing `Comparable`'s), lowering adds a method to its class with the
@@ -1580,12 +1638,24 @@ Generics are erased in lowering, and nothing after it knows they existed:
   parameter or return type (`next_integer`, `compare_to_point`); the group names are now unique in
   every class tree the group reaches (`codegen::names`). This also lifts "covariant return types"
   for these overrides.
+- A varargs parameter of a type variable (`T... items`) is an array of its erasure, read where the
+  method declares it, not at the call; an array of references passed for it is passed on, as
+  javac infers `T` from it (and is then rejected below unless it is an `Object[]`).
 - Arrays do not convert: `String[]` is `java::Array<String>` and `Object[]` is
   `java::Array<Option<Object>>`, so an array passed as an array of a type variable
   (`<T> T first(T[] xs)` called with a `String[]`) is rejected ("an array passed as an array of a
-  type variable"), and so is an array of a type variable read as an array of its argument. An
-  array as an `Object` value stays rejected; the plan's `Variant::Array` is not done. A generic
-  array built as `(T[]) new Object[n]` is an `Object[]` and translates.
+  type variable"), and so is an array of a type variable read as an array of its argument. A
+  generic array built as `(T[]) new Object[n]` is an `Object[]` and translates.
+- An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the
+  plan's `Variant::Array`, done as a runtime class beside the strings and the boxes rather than a
+  variant kind of its own: each array type that is converted to `Object` or cast back from it gets
+  a `TypeKind::Runtime` declaration named after the type (`int[]`, `String[][]`), collected while
+  lowering (`lower::object::note_object_array`) and added after `Object`'s other runtime types.
+  Its variant holds the shared `java::Array` (`Object::IntArray(java::Array<i32>)`, with
+  `as_int_array` and `to_int_array`), so the array keeps its identity: `==` and `equals` compare
+  with `Rc::ptr_eq`, `hashCode` is `java::identity_hash`, and it prints as Java's default
+  `toString`, its JVM name and hash (`[I@1b6d3586`). Arrays of a Rust generic's instantiation
+  (`Box<String>[]` under real generics) have no runtime class and are rejected.
 - A value read back out of a generic container is a cast from `Object` that may be null (the
   container's array has null elements), so reading an enum back (`Suit s = list.get(0)`) is
   rejected by the existing "casting a value that may be null to an enum"; strings, boxes and

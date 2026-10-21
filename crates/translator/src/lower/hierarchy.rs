@@ -64,12 +64,13 @@ impl<'t> Lowering<'t> {
         if let Some(name) = &binding {
             self.forget_alias(name);
         }
-        // `Object` may also hold a string or a box.
+        // `Object` may also hold a string, a box or an array.
         let target = matches!(ty, Type::Class(..) | Type::Enum(_))
-            || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_)));
+            || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_) | Type::Array(_)));
         if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
             return unsupported(node, "instanceof on these types");
         }
+        self.object_array(node, ty)?;
         Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
     }
 
@@ -103,18 +104,52 @@ impl<'t> Lowering<'t> {
     pub(super) fn super_init(&self, stmt: Node<'t>) -> Result<Option<Stmt>, Error> {
         let call = stmt.child("expression")?;
         let Some(superclass) = self.superclass(self.current.get())? else { return Ok(None) };
-        if let Some(qualifier) = call.child("methodSelect")?.get("expression") {
-            return unsupported(qualifier, "a qualified `super(..)`");
-        }
         let Some(symbol) = call.symbol() else { return unsupported(call, "this `super` call") };
         self.check_standard_member(call, &symbol)?;
+        // `outer.super(..)` gives the enclosing instance of the superclass, which is otherwise
+        // found from the current class.
+        let outer = match call.child("methodSelect")?.get("expression") {
+            Some(qualifier) => {
+                let Some(nested) = self.nesting(superclass).filter(|n| n.outer) else {
+                    return unsupported(
+                        qualifier,
+                        "a qualified `super(..)` of a class without an enclosing instance",
+                    );
+                };
+                let value = self.expr(qualifier)?;
+                Some(self.convert(value, self.self_type(nested.enclosing)))
+            }
+            None => None,
+        };
+        let (first, last) = self.passed_on_from(superclass, call.pos(), outer)?;
         let args: Vec<Expr> = call.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let args = self.packed_args(call, &symbol, args)?;
         let resolved = self.method_index(&symbol);
         let args = self.convert_args(resolved, args)?;
-        let args = self.with_synthetic(self.passed_on(superclass, call.pos())?, args);
+        let args = self.with_synthetic((first, last), args);
         let kind = ExprKind::SuperInit { args, resolved };
         Ok(Some(Stmt::Expr(self.synth(kind, call.pos(), Type::Void))))
+    }
+
+    /// The enclosing class that `Outer` names in `Outer.super` (`node`), when it is a class other
+    /// than the current one.
+    pub(super) fn outer_super(&self, node: Node<'t>) -> Option<usize> {
+        if node.str("identifier") != "super" {
+            return None;
+        }
+        let class =
+            node.get("expression")?.symbol().and_then(|s| self.type_index(super::captures::raw(s.ty)))?;
+        (class != self.current.get() && self.types[class].node.kind() != "INTERFACE").then_some(class)
+    }
+
+    /// The receiver of a `super` method call (`receiver`): `this`, or for `Outer.super` the
+    /// enclosing instance of `Outer`, whose superclass's method the call runs.
+    pub(super) fn super_receiver(&self, receiver: Node<'t>) -> Result<Expr, Error> {
+        if let Some(outer) = self.outer_super(receiver) {
+            return self.enclosing_instance(outer, receiver.pos());
+        }
+        let ty = self.ty(receiver, receiver.java_type())?;
+        Ok(self.synth(ExprKind::This, receiver.pos(), ty))
     }
 
     /// The types of the parameters of method `index`.
@@ -158,7 +193,7 @@ impl<'t> Lowering<'t> {
             return e;
         }
         let differs = match (e.ty, to) {
-            (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE => {
+            (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE || b == NUMBER => {
                 !matches!(e.ty, Type::Null | Type::Void) && e.ty != to
             }
             (Type::Class(a, _) | Type::Enum(a), Type::Class(b, _)) => a != b,
@@ -166,6 +201,9 @@ impl<'t> Lowering<'t> {
         };
         if !differs {
             return e;
+        }
+        if Self::is_object(to) {
+            self.note_object_array(e.ty);
         }
         let pos = e.pos;
         self.synth(ExprKind::Cast(to, Box::new(e)), pos, to)

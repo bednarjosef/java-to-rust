@@ -55,10 +55,6 @@ fn unit_index(s: &str, offset: usize) -> i32 {
     if s.is_ascii() { offset as i32 } else { s[..offset].encode_utf16().count() as i32 }
 }
 
-fn index_out_of_bounds(message: String) -> ! {
-    throw("java.lang.StringIndexOutOfBoundsException", &message)
-}
-
 /// Java's check of a range `[begin, end)` of a string of `length` units.
 fn check_begin_end(begin: i32, end: i32, length: usize) -> Result<(), crate::Exception> {
     if begin < 0 || begin > end || end as i64 > length as i64 {
@@ -417,11 +413,17 @@ pub fn string_hash(s: &str) -> i32 {
 
 /// `new String(chars, offset, count)` and `String.valueOf(chars, offset, count)`.
 pub fn from_chars_range(chars: &[u16], offset: i32, count: i32) -> String {
+    try_from_chars_range(chars, offset, count).unwrap_or_else(crate::uncaught)
+}
+
+/// `from_chars_range` where the program observes the `StringIndexOutOfBoundsException`.
+pub fn try_from_chars_range(chars: &[u16], offset: i32, count: i32) -> Result<String, crate::Exception> {
     let len = chars.len();
     if offset < 0 || count < 0 || offset as i64 + count as i64 > len as i64 {
-        index_out_of_bounds(format!("offset {offset}, count {count}, length {len}"));
+        let message = format!("offset {offset}, count {count}, length {len}");
+        return Err(crate::Exception::new("java.lang.StringIndexOutOfBoundsException", message));
     }
-    from_units(&chars[offset as usize..(offset + count) as usize])
+    Ok(from_units(&chars[offset as usize..(offset + count) as usize]))
 }
 
 /// The text of each element of a `String.join`: a string, or `null`.

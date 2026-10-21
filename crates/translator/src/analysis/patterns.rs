@@ -16,7 +16,7 @@
 //! in code that does not declare a `name` of its own is a read of the pattern's variable.
 
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 pub(super) fn check(class: &Class) -> Result<(), Error> {
     for m in &class.methods {
@@ -40,7 +40,8 @@ pub(super) fn check(class: &Class) -> Result<(), Error> {
                     if found.is_ok() {
                         found = expression(e, &m.body, &declared, &negated);
                     }
-                    // The statements of a switch expression, which `visit_stmt` does not reach.
+                    // The expressions of the statements of a switch expression: `visit_stmt` reports
+                    // those statements to `on_stmt`, not their expressions to `on_expr`.
                     switch_bodies(e, &mut |body| {
                         for inner in body {
                             visit_stmt(
@@ -72,46 +73,48 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
     else {
         return Ok(());
     };
+    // An array in an `Object` keeps its identity: it is shared.
     let holds_values = super::hierarchy::variants(class, facts, object)
         .into_iter()
-        .any(|c| class.types[c].kind == TypeKind::Runtime);
-    // The assignments of each static, and whether the one there is creates an object. A static
-    // that only ever holds the object that its initializer creates, such as the `NULL` sentinel
-    // of `EnumMap` (`static final Object NULL = new Object() { .. }`), is no string or box.
-    let mut assignments: HashMap<(usize, String), (usize, bool)> = HashMap::new();
+        .any(|c| class.types[c].kind == TypeKind::Runtime && class.array_of(c).is_none());
+    // A static `Object` field that is only ever set to objects of the program's classes, such as
+    // the sentinel `ImmutableCollections.EMPTY = new Object()`, is never a string or a box.
+    let object_of_class = |e: &Expr| {
+        matches!(&e.kind, ExprKind::Cast(Type::Class(name, _), inner)
+            if *name == OBJECT && matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_)))
+    };
+    let mut sentinels: HashSet<(usize, &str)> = HashSet::new();
+    for (t, decl) in class.types.iter().enumerate() {
+        for f in &decl.statics {
+            if matches!(f.ty, Type::Class(name, _) if name == OBJECT)
+                && f.init.as_ref().is_none_or(object_of_class)
+            {
+                sentinels.insert((t, f.name.as_str()));
+            }
+        }
+    }
     for method in &class.methods {
         for s in &method.body {
             visit_stmt(
                 s,
                 &mut |e| {
-                    visit_expr(e, &mut |x| match &x.kind {
-                        ExprKind::Assign { target: Place::Static { class, name }, value, op } => {
-                            let mut value = value.as_ref();
-                            while let ExprKind::Cast(_, inner) = &value.kind {
-                                value = inner;
-                            }
-                            let creates = op.is_none()
-                                && method.name == "<clinit>"
-                                && matches!(value.kind, ExprKind::New { .. });
-                            let entry = assignments.entry((*class, name.clone())).or_default();
-                            *entry = (entry.0 + 1, creates);
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::Assign { op, target: Place::Static { class, name }, value } = &x.kind
+                            && (op.is_some() || !object_of_class(value))
+                        {
+                            sentinels.retain(|&(t, f)| (t, f) != (*class, name.as_str()));
                         }
-                        ExprKind::IncDec { target: Place::Static { class, name }, .. } => {
-                            assignments.entry((*class, name.clone())).or_default().0 += 2;
-                        }
-                        _ => {}
                     })
                 },
                 &mut |_| {},
             );
         }
     }
-    let sentinel = |class: usize, name: &str| assignments.get(&(class, name.to_string())) == Some(&(1, true));
     let may_be_value = |e: &Expr| match &e.kind {
         ExprKind::Null => false,
-        ExprKind::Static { class, name } if sentinel(*class, name) => false,
+        ExprKind::Static { class, name } if sentinels.contains(&(*class, name.as_str())) => false,
         ExprKind::Cast(Type::Class(name, _), inner) if *name == OBJECT => {
-            !matches!(inner.ty, Type::Class(..) | Type::Enum(_))
+            !matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_))
         }
         _ => matches!(e.ty, Type::Class(name, _) if name == OBJECT),
     };
@@ -128,11 +131,6 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                 s,
                 &mut |e| {
                     visit_expr(e, &mut |x| match &x.kind {
-                        ExprKind::Cast(Type::Class(name, _), inner)
-                            if *name == OBJECT && matches!(inner.ty, Type::Array(_)) =>
-                        {
-                            found.get_or_insert((x.pos, "an array as an `Object` value"));
-                        }
                         ExprKind::Cast(Type::Class(name, _), inner)
                             if *name == OBJECT && inner.ty == Type::StringBuilder =>
                         {

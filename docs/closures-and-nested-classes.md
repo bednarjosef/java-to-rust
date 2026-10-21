@@ -86,7 +86,7 @@ hand-made structs, wherever that is correct.
     every identity hash does.
 11. **Rejected for now**, each with a message naming the construct: `this` captured inside a
     constructor or field initializer (the struct-literal constructor has no handle yet), lambdas
-    and inner classes in an enum constant's body, an intersection cast with two non-marker
+    and blocks or classes in an enum constant's body, an intersection cast with two non-marker
     interfaces (`(Runnable & Callable)`; `(Comparator<T> & Serializable)` keeps `Comparator`),
     and inner classes of generic classes under real generics (they stay erased).
 
@@ -411,8 +411,9 @@ is written as a closure (4.4 shows it). The general rules:
   `instanceof`/casts see it. It is never named by the program, so no `Cast` to it exists and it
   is only ever reached through its supertype.
 - An anonymous class that extends a class and overrides a method called from that class's
-  constructor is rejected by the object model's existing rule (a constructor calling an
-  overridable method).
+  constructor gets the object model's second constructor form (`docs/object-model.md` 1.4): the
+  superclass's constructor body runs on the whole object, so it calls the anonymous class's
+  override.
 
 ### 3.3 Anonymous classes with state as closures
 
@@ -1123,12 +1124,29 @@ Decisions that change during the implementation are recorded here, milestone by 
   implementer owns the file and is told.
 - **Reachability declares local and anonymous classes** (with the class whose member declares
   them as their outer class), so that their members are in `Reach::methods` and are lowered in
-  whole-program mode; their code is still scanned whole with the code that declares them.
-- **Still rejected:** local interfaces, enums and records (the records work); member classes of
-  local and anonymous classes; a nested class extending one nested in another class (the two
-  `outer` fields would differ); a field named `outer` in a nested class with an enclosing
-  instance; `Outer.super.m()`; a qualified `super(..)` (`outer.super()`); an enclosing
-  instance needed in static code (which javac rejects as well).
+  whole-program mode. Their code is not scanned with the code that declares them: a constructor
+  is reached by its `new`, an instance method by a call or by dispatch once the class is
+  instantiated, as for any other class (the streams work; a stream operation's anonymous `Sink`
+  and `StatefulOp` no longer reach their parallel overrides).
+- **Local interfaces, enums and records in a file with a package** are hoisted like the others
+  (`lower/local_types.rs`), named by javac's binary name (`Main$1Color`); they capture nothing.
+  **Member classes of local and anonymous classes** are named after their outer class and their
+  own name (`Main$1Counter.Tally`, from javac's `Main$1Counter$Tally`), and capture what they read, like local classes
+  (`Lowering::member_outers`). **`outer.super(..)`** passes the qualifier as the superclass's
+  enclosing object (`hierarchy.rs` `super_init`), and **`Outer.super.m()`** calls the superclass's
+  method on the enclosing object (`hierarchy.rs` `super_receiver`).
+- **Enum constant bodies may declare fields** (`lower/constant_bodies.rs`): each becomes a field
+  of the enum, whose value for a constant is its body's initializer, or the zero of its type for
+  the constants whose body does not declare it. Enum values are recomputed on each read, so the
+  initializer must be pure as the enum's are (a constant), and the fields are of the types
+  `int`, `long`, `double`, `float`, `char`, `boolean` and `String`. Still rejected in a body:
+  blocks, member classes, static fields, fields of other types, and initializers that are not
+  pure, since a side effect would repeat on each read.
+- **Still rejected:** a nested class extending one nested in another class (the two `outer`
+  fields would differ); a field named `outer` in a nested class with an enclosing instance; an
+  enclosing instance needed in static code (which javac rejects as well); and `Outer.this` or
+  `Outer.super` from an inner class that itself extends `Outer` (`enclosing_instance` stops at
+  the first subclass of `Outer`, which is then `this`, not the enclosing object).
 
 ### Inner classes
 
@@ -1235,8 +1253,35 @@ Decisions that change during the implementation are recorded here, milestone by 
   (`crates/translator/java/Functional.java`, compiled by `build.rs` like `Standard.java`): the
   abstract methods of `Runnable`, `Callable`, `Comparator`, `Iterable`, `Iterator` and the
   `java.util.function` interfaces, declared for the program when it mentions them. Their default
-  and static methods are not in it (the JDK functional interfaces milestone takes them from the
-  JDK's sources).
+  and static methods are not in it: written by hand they would be a second copy of the JDK's
+  code, so a call of one in single-file mode is rejected with a message that points to
+  whole-program mode (`--main` and `--library`).
+- **The JDK functional interfaces milestone is whole-program only**, and came before the closure
+  forms. With the JDK's sources the interfaces are the JDK's, and their default and static
+  methods, with the lambdas in them that capture `this` or parameters
+  (`ComparatorLambdaInThenComparing { outer, other }`), are translated like the program's.
+  What it took was outside the lambda code:
+  - `new Object()` as an object of a class of its own (`PlainObject`, its own commit);
+  - the methods of `java.util.Objects` other than the hand-written `equals`, `hashCode`, `hash`,
+    `isNull` and `nonNull` go to the translated `Objects.java` (`requireNonNull`,
+    `requireNonNullElseGet`, ...);
+  - `java.lang.Comparable` is one of the runtime's classes in whole-program mode. Its source made
+    a second `Comparable` enum that strings and boxes were not in, so `Comparator.comparing` on a
+    string key failed its cast;
+  - an enum may implement an interface's own `equals` or `hashCode` (`Comparator.equals`) with
+    the one every enum has;
+  - the analysis of failures that a `catch` sees (`analysis/exceptions.rs`) knows more values not
+    null: an `instanceof` test proves its variable not null and its cast safe, `!` is followed,
+    `if (c) return;` (or `throw`, `break`, `continue`) narrows the statements after it, and a
+    local initialized from such a value is not null (`corpus/features/GuardedCasts.java`). The
+    `catch (ClassCastException | NullPointerException unused)` of `AbstractMap.equals` sees every
+    `equals` that a map's values may run.
+
+  The programs are in `corpus/whole-program/`, run by `tests/whole_program.rs` when
+  `JAVA_BASE_SOURCES` names the JDK's sources. Still blocked: `Comparator.reversed()` and
+  `reverseOrder()` reach `java.util.Collections`, whose empty collections' iterators are eagerly
+  initialized statics that the nullness analysis takes as possibly null, so `AbstractList.equals`
+  may fail where `AbstractMap.equals` catches it; `NullPointerException.getMessage()`.
 - **Marker interfaces are dropped** where they are named as supertypes and from intersection
   casts (`(Op & Serializable) a -> ..`), in `JavaTree` (`javaType` of the cast) and in
   `hierarchy::interfaces`.

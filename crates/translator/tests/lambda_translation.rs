@@ -197,3 +197,34 @@ fn a_method_reference_on_a_computed_receiver_is_rejected() {
     );
     assert!(message.contains("a method reference on a receiver that is not a local"), "{message}");
 }
+
+#[test]
+fn a_default_or_static_method_of_a_jdk_interface_needs_the_jdks_sources() {
+    let message = rejected(
+        "import java.util.function.Function;
+        class A {
+            public static void main(String[] args) {
+                Function<Integer, Integer> f = x -> x + 1;
+                System.out.println(f.andThen(x -> x * 2).apply(3));
+            }
+        }",
+    );
+    assert!(
+        message.contains("the default method `java.util.function.Function.andThen` is the JDK's code"),
+        "{message}"
+    );
+    assert!(message.contains("`--library`"), "{message}");
+    let message = rejected(
+        "import java.util.Comparator;
+        class A {
+            public static void main(String[] args) {
+                Comparator<String> c = Comparator.naturalOrder();
+                System.out.println(c.compare(\"a\", \"b\"));
+            }
+        }",
+    );
+    assert!(
+        message.contains("the static method `java.util.Comparator.naturalOrder` is the JDK's code"),
+        "{message}"
+    );
+}

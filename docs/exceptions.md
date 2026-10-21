@@ -61,16 +61,20 @@ signature. Everything else is decided here.
    exception's `toString()` on standard error, a `Caused by: ...` line per cause, exit code 1.
    Stack frames are not printed (they cannot match). `printStackTrace()` prints the same lines
    without the thread prefix.
-9. **Static initializers never return `Result`**: what they throw ends the program. Java would
-   throw `ExceptionInInitializerError` at the first use instead; a program that could observe
-   that (a `catch` of it, `Error` or `Throwable`, or a `finally`) is rejected.
-10. **Rejected for now**, each with a message naming the construct: try-with-resources (needs
-    `AutoCloseable`, an interface: object model milestone 3), observing the message of a
-    `NullPointerException` the runtime raises (Java's helpful message names bytecode locals),
+9. **Static initializers never return `Result`**: a static block, or a static field initializer,
+   that throws is wrapped in `ExceptionInInitializerError` as Java does, at the first use of the
+   class. The uncaught case translates: the runtime prints `Exception in thread "main"
+   java.lang.ExceptionInInitializerError` and `Caused by: ...` on standard error and exits 1,
+   with the same stdout as Java. A program that could observe the error (a `catch` of it, `Error`
+   or `Throwable`, or a `finally` around the use) is rejected. A class whose initializer failed is
+   not marked as erroneous, so a later use does not raise `NoClassDefFoundError` as in Java.
+10. **Rejected for now**, each with a message naming the construct: observing the message of a
+    `NullPointerException` the runtime raises (Java's helpful message names bytecode locals;
+    `getMessage()` in a `catch` that such an exception reaches is rejected, while the message of
+    one that code creates, as `Objects.requireNonNull(x, "msg")` does, is its own),
     catching `StackOverflowError`, `OutOfMemoryError` or `VirtualMachineError` (the translation
     cannot raise them), a `toString` that throws an exception someone observes (it is
-    `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace`, `initCause`,
-    `addSuppressed` and `getSuppressed`.
+    `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace` and `initCause`.
 
 ## 1. The representation
 
@@ -459,10 +463,11 @@ Decisions that changed during the implementation, step by step.
   default value here (an object, an array) is rejected.
 - **Still rejected** (each with a message naming it): `finally` (step 4, now done),
   try-with-resources (step 7), constructors and `toString` methods that throw something a caller catches (step 6),
-  `throw` of a value that may be null (Java throws `NullPointerException` instead), a call of
-  `main` that is caught, a static, field or enum constant initializer that throws an exception of
-  the program, a program class named like a standard class it uses, and a call that throws inside
+  a call of `main` that is caught, an enum constant initializer that throws an exception of
+  the program, a static or field initializer that a `catch` or `finally` could observe (item 9),
+  a program class named like a standard class it uses, and a call that throws inside
   an expression the translation writes as a closure (checked on the generated text).
+  A `throw` of a value that may be null throws `NullPointerException`, as Java does.
 
 ### Step 4: `finally`
 
@@ -498,10 +503,10 @@ Decisions that changed during the implementation, step by step.
 - **`java.io.IOException` and `java.io.FileNotFoundException`** are standard classes now, and
   `getClass().getSimpleName()` is `Builtin::ClassName { simple: true }`, for the target program
   `CheckedExceptions`, which step 5 (catching a malformed number) still blocks.
-- **Still rejected**: a `yield` that leaves a `try` with a `finally` (the switch expression's
-  value would have to wait for the `finally`), and a `return` of a constructor through a
-  `finally` (a constructor returns its object, which the `Completion` would have to carry).
-  A failure of the runtime under a `finally` stays rejected until step 5, as under a `catch`.
+- **`yield` and a constructor's `return` through a `finally`**: the value is kept in a slot
+  outside the `try`, the `finally` body runs, and then the switch expression yields it or the
+  constructor returns its object, as Java does. A failure of the runtime under a `finally` stays
+  rejected until step 5, as under a `catch`.
 
 ### Step 5: failures of the runtime as values
 
@@ -557,28 +562,42 @@ Decisions that changed during the implementation, step by step.
   null there, so a `catch` around it does not see a `NullPointerException` from it
   (`next != null && next.value == value`). The nullness facts themselves hold for the whole
   method.
+- **So do `instanceof` tests and early returns** (for the JDK's `equals` methods, which a
+  `catch (ClassCastException | NullPointerException unused)` in `AbstractMap.equals` and
+  `AbstractSet.equals` observes): `o instanceof T` proves `o` not null and a cast of it to `T`
+  or a class above `T` safe, `!` is followed, `if (c) return;` (or `throw`, `break`,
+  `continue`) narrows the statements after it in its block, and a local initialized from a
+  value so known (`Point p = (Point) o;`) is not null (`features/GuardedCasts.java`).
+- **The casts that lowering inserts do not fail**: javac's conversion of an erased type
+  variable's value (`Entry<K, V> e = i.next()`) is a `Cast` at its value's position, which the
+  analysis does not count as a `ClassCastException`. A deviation: with heap pollution (a raw or
+  unchecked use that puts a value of another class in a generic place) Java's cast fails, and
+  the translation's then ends the program instead of reaching a `catch`.
 - **Still rejected**: a constructor of an exception class that throws (the exception's object is
   built where it is thrown, and by the `From` impl of step 5, neither of which can fail), a
   constructor of an enum that throws (its constants are built where the enum is initialized,
   outside any `try`), a `toString` that throws something a caller catches (`Display::fmt` cannot
-  carry the exception), and a field initializer that throws.
+  carry the exception), and an instance field initializer that throws (it runs in a constructor
+  that does not return a `Result`). A static field initializer that throws is item 9.
 
 ### Step 7: try-with-resources
 
-- **Lowered to `finally`**: `try (R r = new R(..)) body` is `{ R r = new R(..); try body finally
-  { r.close(); } }`, one nested `try` per resource so that they close in the reverse order and a
-  resource whose creation fails closes the ones before it; the statement's own `catch` clauses
-  and `finally` go around all of that, as Java runs them after the resources are closed. This is
-  Java's behaviour when the resource is not null and its `close` cannot fail: Java skips the
-  `close` of a null resource, and an exception of `close` while the body's exception is on its
-  way is added to that one as suppressed (`addSuppressed`), which the plain `finally` would
-  replace instead.
+- **Lowered to `try` and `finally`**: `try (R r = new R(..)) body` is `{ R r = new R(..);
+  boolean r$failed = false; try { try body catch (Throwable r$thrown) { r$failed = true;
+  try { r.close(); } catch (Throwable r$suppressed) { r$thrown.addSuppressed(r$suppressed); }
+  throw r$thrown; } } finally { if (!r$failed) { r.close(); } } }`. When the body throws, a
+  `close` that throws too is added to the body's exception as suppressed (`getSuppressed()`
+  returns it), and the body's exception is rethrown. When the body completes, returns, breaks or
+  yields, the `finally` closes the resource, and a `close` that throws propagates. One nested
+  `try` per resource closes them in the reverse order, and a resource whose creation fails closes
+  the ones before it; the statement's own `catch` clauses and `finally` go around all of that, as
+  Java runs them after the resources are closed.
 - **So only those are accepted**: a resource declared with a `new` object of the program's
-  class, whose `close()` is the program's (declared in the class or a superclass), and the
-  analysis rejects a `close` of any override that may fail at all (a `throw`, a failure of the
-  runtime, or a call of a method that may fail): "a resource whose `close` may fail not
-  supported yet". `AutoCloseable` and `Closeable` are accepted in `implements` and left out, as
-  `Comparable` is, since the program calls `close` directly.
+  class, whose `close()` is the program's (declared in the class or a superclass).
+  `AutoCloseable` and `Closeable` are accepted in `implements` and left out, as `Comparable` is,
+  since the program calls `close` directly. `Throwable.addSuppressed` is the translator's own
+  (`crates/translator/java/Standard.java`): it does not reject adding the exception to itself or
+  adding `null`, which Java does with `IllegalArgumentException` and `NullPointerException`.
 - **Still rejected**: a resource that is an existing variable (`try (r)`), one that is not a new
   object, and a resource of a library class (the library's streams and scanners do not
   translate). The survey's "try-with-resources" feature still counts every such statement, since

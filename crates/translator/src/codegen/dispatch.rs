@@ -112,8 +112,7 @@ impl<'a> Gen<'a> {
     /// named after its class, with the class's outer classes when two variants share a name.
     pub(super) fn variant(&self, t: usize, c: usize) -> String {
         self.need(Need::Enum(t));
-        let simple =
-            |c: usize| self.class.types[c].name.rsplit(['.', '$']).next().unwrap_or_default().to_string();
+        let simple = |c: usize| self.simple_name(c);
         let name = simple(c);
         let shared =
             hierarchy::variants(self.class, self.facts, t).into_iter().filter(|&o| simple(o) == name).count()
@@ -130,20 +129,34 @@ impl<'a> Gen<'a> {
     }
 
     /// The name of the conversion to the enum of `t`: `to_shape`.
-    fn to_name(&self, t: usize) -> String {
-        let simple = self.class.types[t].name.rsplit(['.', '$']).next().unwrap_or_default();
-        format!("to_{}", snake_case(simple).trim_end_matches('_'))
+    pub(super) fn to_name(&self, t: usize) -> String {
+        format!("to_{}", snake_case(&self.simple_name(t)).trim_end_matches('_'))
+    }
+
+    /// The simple name of type `t`, which names its variants and conversions: `Circle` for
+    /// `shapes.Circle`, `IntArray` for the arrays `int[]` that become `Object`s.
+    fn simple_name(&self, t: usize) -> String {
+        if self.class.array_of(t).is_some() {
+            let name = &self.class.types[t].name;
+            let element = name.trim_end_matches("[]");
+            let simple = element.rsplit(['.', '$']).next().unwrap_or_default();
+            let dimensions = (name.len() - element.len()) / 2;
+            return capitalized(simple) + &"Array".repeat(dimensions);
+        }
+        self.class.types[t].name.rsplit(['.', '$']).next().unwrap_or_default().to_string()
     }
 
     /// The name of the checked conversion to type `t`: `as_circle`.
     fn as_name(&self, t: usize) -> String {
-        let simple = self.class.types[t].name.rsplit(['.', '$']).next().unwrap_or_default();
-        format!("as_{}", snake_case(simple).trim_end_matches('_'))
+        format!("as_{}", snake_case(&self.simple_name(t)).trim_end_matches('_'))
     }
 
     /// The binary name of type `t`, as the JVM shows it: `shapes.Outer$Inner`.
     fn binary_name(&self, t: usize) -> String {
         let decl = &self.class.types[t];
+        if let Some(array) = self.class.array_of(t) {
+            return self.descriptor(array);
+        }
         if decl.kind == TypeKind::Runtime {
             return decl.name.clone();
         }
@@ -166,7 +179,7 @@ impl<'a> Gen<'a> {
         let decl = &self.class.types[t];
         match decl.kind {
             TypeKind::Enum => Type::enum_type(&decl.name),
-            TypeKind::Runtime => runtime_type(&decl.name).expect("a runtime class"),
+            TypeKind::Runtime => self.runtime_of(t).expect("a runtime class"),
             _ => Type::class(&decl.name),
         }
     }
@@ -228,8 +241,10 @@ impl<'a> Gen<'a> {
             let ty = self.ty_name(to);
             return Code::atom(format!("{option}.as_ref().map(|_| -> {ty} {{ {failed} }})"));
         }
+        // The value is typed, as `cast_failed` returns `!` and a local it initializes may be used.
         let v = self.expr(value).text;
-        Code::new(format!("{{ let _ = {v}; {failed} }}"), LOWEST)
+        let ty = self.ty_name(to);
+        Code::atom(format!("{{ let _ = {v}; None::<{ty}>.unwrap_or_else(|| {failed}) }}"))
     }
 
     /// `value instanceof T`.
@@ -299,8 +314,37 @@ impl<'a> Gen<'a> {
         matches!(self.class.types[c].kind, TypeKind::Enum | TypeKind::Runtime)
     }
 
-    /// The Java type of the values of runtime class `c`, if it is one.
+    /// The JVM's name of an array class, as `getClass().getName()` gives it: `[I`,
+    /// `[Ljava.lang.String;`, `[[Lshapes.Point;`.
+    fn descriptor(&self, ty: Type) -> String {
+        match ty {
+            Type::Array(element) => format!("[{}", self.descriptor(*element)),
+            Type::Int => "I".to_string(),
+            Type::Long => "J".to_string(),
+            Type::Double => "D".to_string(),
+            Type::Float => "F".to_string(),
+            Type::Byte => "B".to_string(),
+            Type::Short => "S".to_string(),
+            Type::Char => "C".to_string(),
+            Type::Boolean => "Z".to_string(),
+            Type::String => "Ljava.lang.String;".to_string(),
+            Type::StringBuilder => "Ljava.lang.StringBuilder;".to_string(),
+            Type::Boxed(_) => format!("Ljava.lang.{ty};"),
+            Type::Class(name, _) if name == OBJECT => "Ljava.lang.Object;".to_string(),
+            Type::Class(name, _) | Type::Enum(name) => match self.class.type_index(name) {
+                Some(t) => format!("L{};", self.binary_name(t)),
+                None => format!("L{name};"),
+            },
+            _ => ty.to_string(),
+        }
+    }
+
+    /// The Java type of the values of runtime class `c`, if it is one: a string, a box, or the
+    /// arrays of an array class.
     pub(super) fn runtime_of(&self, c: usize) -> Option<Type> {
+        if let Some(array) = self.class.array_of(c) {
+            return Some(array);
+        }
         (self.class.types[c].kind == TypeKind::Runtime)
             .then(|| runtime_type(&self.class.types[c].name))
             .flatten()
@@ -310,7 +354,7 @@ impl<'a> Gen<'a> {
     /// enum's constant or a plain box, `o.clone()` for an object or a string.
     fn held(&self, c: usize) -> &'static str {
         let copied = match self.runtime_of(c) {
-            Some(ty) => ty != Type::String && !self.faithful_box(ty),
+            Some(ty) => ty != Type::String && !matches!(ty, Type::Array(_)) && !self.faithful_box(ty),
             None => self.holds_value(c),
         };
         if copied { "*o" } else { "o.clone()" }
@@ -405,7 +449,7 @@ impl<'a> Gen<'a> {
                     Some(variant) => format!("{variant}({handle})"),
                     None => {
                         let ty = struct_name(&self.class.types[t].name);
-                        format!("{{ let value: {ty} = {}; value }}", absent(self, c))
+                        format!("None::<{ty}>.unwrap_or_else(|| {})", absent(self, c))
                     }
                 }
             }
@@ -423,7 +467,23 @@ impl<'a> Gen<'a> {
             Narrowing::Known(false) => return self.failing_cast(to, value),
             Narrowing::Up | Narrowing::Known(true) => {}
         }
-        let Some(t) = self.enum_type(to) else { return self.expr(value) };
+        let Some(t) = self.enum_type(to) else {
+            // The values of `to` are the objects of one class: a value of another class is one
+            // whose objects never reach `to`, so it is null.
+            let target = self.class.class_index(to).map(|t| self.rep_class(t));
+            if let (Some(target), Some(c)) = (target, self.struct_class(value))
+                && target != c
+            {
+                let ty = self.ty_name(to);
+                let text = self.expr(value).text;
+                return Code::atom(if self.nullable(value) {
+                    format!("{{ let _ = {text}; None::<{ty}> }}")
+                } else {
+                    format!("{{ let _ = {text}; None::<{ty}>.unwrap_or_else(|| {}) }}", absent(self, c))
+                });
+            }
+            return self.expr(value);
+        };
         // A new object becomes a value of the target's enum directly.
         if let ExprKind::New { ctor: Some(ctor), args, .. } = &value.kind {
             return self.new_object_as(*ctor, args, Some(t));
@@ -464,7 +524,7 @@ impl<'a> Gen<'a> {
                 // An object's last use moves its handle in.
                 let Some(variant) = self.variant_of(t, c) else {
                     let ty = self.ty_name(to);
-                    return Code::atom(format!("{{ let value: {ty} = {}; value }}", absent(self, c)));
+                    return Code::atom(format!("None::<{ty}>.unwrap_or_else(|| {})", absent(self, c)));
                 };
                 let v = match self.runtime_of(c) {
                     Some(_) => self.variant_value(value).1,
@@ -536,6 +596,7 @@ impl<'a> Gen<'a> {
         let h = &self.class.hierarchy;
         if let [only] = self.enum_targets(t, resolved)[..]
             && self.homes[only] == Home::Enum(t)
+            && self.same_ret(only, resolved)
             && self.enum_variants(t).into_iter().all(|c| h.implementation(resolved, c).is_some())
         {
             self.need(Need::Body(only));
@@ -567,6 +628,35 @@ impl<'a> Gen<'a> {
                 let root = self.fields_root(t).expect("a fields struct is at or above its subclasses");
                 let path = hierarchy::base_path(self.facts, self.class, root, d);
                 let borrow = self.enum_borrow(t, self.facts.mutating.contains(&index));
+                let name = self.fn_names[index].clone();
+                // The object is borrowed before the arguments run, so arguments that may reach an
+                // object of the class run first, as `bound_call` runs them.
+                let Type::Class(class, _) = receiver.ty else { unreachable!("a receiver has a class type") };
+                if args.iter().any(|a| has_effects(a) || reads_class(self.class, a, class)) {
+                    let outer = std::mem::replace(&mut self.guarded, false);
+                    let mut lines = Vec::new();
+                    let obj = match &receiver.kind {
+                        ExprKind::This | ExprKind::Var(_) => self.object(receiver),
+                        _ => {
+                            let temp = self.temp("object");
+                            lines.push(format!("let {temp} = {};", self.object(receiver)));
+                            temp
+                        }
+                    };
+                    let texts = self.call_args(index, args);
+                    let mut bound = Vec::new();
+                    for (text, p) in texts.into_iter().zip(&self.class.methods[index].params) {
+                        let mut temp = self.temp(&snake_case(&p.name));
+                        while bound.contains(&temp) || temp == obj {
+                            temp.push('_');
+                        }
+                        lines.push(format!("let {temp} = {text};"));
+                        bound.push(temp);
+                    }
+                    self.guarded = outer;
+                    lines.push(format!("{obj}{borrow}.{path}{name}({})", bound.join(", ")));
+                    return Some(Code::atom(format!("{{ {} }}", lines.join(" "))));
+                }
                 let obj = self.object(receiver);
                 let args = self.call_args(index, args).join(", ");
                 Some(Code::atom(format!("{obj}{borrow}.{path}{}({args})", self.fn_names[index])))
@@ -785,7 +875,10 @@ impl<'a> Gen<'a> {
         self.line(&format!("{}fn {name}(&self{all}){ret} {{", self.vis()));
         self.indent += 1;
         self.match_arms(t, &variants, &|g: &mut Self, c| match g.class.hierarchy.implementation(r, c) {
-            Some(i) => g.arm_call(t, c, i, &args),
+            Some(i) => {
+                let (text, uses) = g.arm_call(t, c, i, &args);
+                (g.covariant_ret(i, r, text), uses)
+            }
             None => (g.builtin_arm(r, c), true),
         });
         self.indent -= 1;
@@ -801,6 +894,9 @@ impl<'a> Gen<'a> {
         }
         if self.is_comparable_method(r) {
             return self.compare_arm(r, c);
+        }
+        if self.is_number_method(r) {
+            return self.number_arm(r, c);
         }
         match self.class.methods[r].name.as_str() {
             "ordinal" => "*o as i32".to_string(),
@@ -829,6 +925,30 @@ impl<'a> Gen<'a> {
     fn is_comparable_method(&self, r: usize) -> bool {
         let t = &self.class.types[self.class.methods[r].class];
         t.kind == TypeKind::Interface && t.name == COMPARABLE
+    }
+
+    /// Whether method `r` is one of `Number`'s own abstract `byteValue()` to `doubleValue()`.
+    fn is_number_method(&self, r: usize) -> bool {
+        let t = &self.class.types[self.class.methods[r].class];
+        t.kind == TypeKind::Interface && t.name == NUMBER
+    }
+
+    /// `Number`'s `intValue()` and the others (method `r`) for a box of class `c` bound to `o`:
+    /// its value converted as Java's primitive conversions convert it, which Rust's `as` does
+    /// (wrapping to narrower integers, saturating from floating point, NaN to 0). Floating point
+    /// becomes a `byte` or a `short` through an `int`, as in Java.
+    fn number_arm(&self, r: usize, c: usize) -> String {
+        let ret = self.class.methods[r].ret;
+        let Some(ty) = self.runtime_of(c) else { return "unreachable!()".to_string() };
+        let value = if self.faithful_box(ty) { "**o" } else { "*o" };
+        let from = ty.unboxed();
+        if from == ret {
+            return value.to_string();
+        }
+        if matches!(from, Type::Float | Type::Double) && matches!(ret, Type::Byte | Type::Short) {
+            return format!("(({value}) as i32) as {}", rust_type(ret));
+        }
+        format!("({value}) as {}", rust_type(ret))
     }
 
     /// `Comparable`'s `compareTo` (method `r`) for a value of class `c` bound to `o`, a string,
@@ -883,6 +1003,7 @@ impl<'a> Gen<'a> {
         let place = if self.facts.borrowed_objects.contains(&(r, 0)) { other } else { format!("&{other}") };
         let same = match self.runtime_of(c).map(Type::unboxed) {
             Some(Type::Double | Type::Float) => "o.to_bits() == b.to_bits()",
+            Some(Type::Array(_)) => "Rc::ptr_eq(o, b)",
             _ if self.holds_value(c) => "o == b",
             _ => "Rc::ptr_eq(o, b)",
         };
@@ -983,6 +1104,9 @@ impl<'a> Gen<'a> {
     /// The hash code of a value of class `c`, reached through `handle`, a reference to what the
     /// variant holds, whose class does not override `hashCode`.
     pub(super) fn value_hash(&mut self, c: usize, handle: &str) -> String {
+        if self.class.array_of(c).is_some() {
+            return format!("{}({handle})", self.runtime("identity_hash"));
+        }
         let Some(ty) = self.runtime_of(c) else {
             if self.holds_value(c) {
                 // An enum's constant hashes by its identity in Java, which nothing can depend on.
@@ -1078,7 +1202,9 @@ impl<'a> Gen<'a> {
             self.indent += 1;
             for &c in variants {
                 let v = self.variant(t, c);
-                let same = if self.holds_value(c) { "a == b" } else { "Rc::ptr_eq(a, b)" };
+                // An array is a shared handle, the same array only when it is the same handle.
+                let value = self.holds_value(c) && self.class.array_of(c).is_none();
+                let same = if value { "a == b" } else { "Rc::ptr_eq(a, b)" };
                 self.line(&format!("({v}(a), {v}(b)) => {same},"));
             }
             if variants.len() > 1 {
@@ -1104,6 +1230,11 @@ impl<'a> Gen<'a> {
         self.match_arms(t, variants, &|g: &mut Self, c| {
             match g.runtime_of(c) {
                 Some(Type::String) => return ("f.write_str(o)".to_string(), true),
+                // An array shows as `[I@` and its identity hash.
+                Some(Type::Array(_)) => {
+                    let text = g.default_arm_text(t, c);
+                    return (format!("f.write_str(&{text})"), true);
+                }
                 Some(ty) => {
                     let value = if g.faithful_box(ty) { "**o" } else { "*o" };
                     let shown = g.shown(ty.unboxed(), value.to_string());
@@ -1158,4 +1289,10 @@ pub(super) type Needs = BTreeSet<Need>;
 /// The value of an object of class `c` where the program creates none, so the code never runs.
 fn absent(g: &Gen, c: usize) -> String {
     format!("unreachable!(\"no object of {} is created\")", g.class.types[c].name)
+}
+
+/// `name` with its first letter in upper case: `Int` for `int`.
+fn capitalized(name: &str) -> String {
+    let mut chars = name.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }

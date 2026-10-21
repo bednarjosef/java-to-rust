@@ -40,7 +40,7 @@ pub(super) fn pure(e: &Expr, params: bool) -> bool {
 /// A copy of a pure expression with each parameter replaced by its argument. An argument whose
 /// type differs from the parameter's (javac does not show the widening) gets a cast to it. The
 /// copies keep the ids of the originals, which only makes the facts about them weaker.
-fn subst(e: &Expr, args: &[(&str, &Expr)]) -> Expr {
+pub(super) fn subst(e: &Expr, args: &[(&str, &Expr)]) -> Expr {
     let kind = match &e.kind {
         ExprKind::Var(name) => match args.iter().find(|(p, _)| *p == name.as_str()) {
             Some((_, arg)) if arg.ty == e.ty => return subst(arg, &[]),
@@ -104,11 +104,14 @@ impl<'t> Lowering<'t> {
         class: usize,
         fields: &[Field],
         methods: &[Method],
+        bodies: &[Vec<Field>],
     ) -> Result<Vec<EnumConstant>, Error> {
         self.current.set(class);
         self.in_ctor.set(false);
         let mut constants = Vec::new();
-        for member in self.types[class].node.list("members").filter(|m| is_enum_constant(*m)) {
+        for (ordinal, member) in
+            self.types[class].node.list("members").filter(|m| is_enum_constant(*m)).enumerate()
+        {
             let init = member.child("initializer")?;
             let args: Vec<Expr> = init.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
             if let Some(arg) = args.iter().find(|a| !pure(a, false)) {
@@ -119,6 +122,10 @@ impl<'t> Lowering<'t> {
             let bound: Vec<(&str, &Expr)> = params.into_iter().zip(&args).collect();
             let mut values = Vec::new();
             for field in fields {
+                if let Some(value) = self.body_field_value(bodies, ordinal, field) {
+                    values.push(value?);
+                    continue;
+                }
                 let assigned = ctor.and_then(|c| {
                     c.body.iter().find_map(|stmt| match stmt {
                         Stmt::Expr(Expr {
