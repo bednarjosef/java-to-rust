@@ -297,3 +297,117 @@ fn a_default_method_of_a_provided_interface_is_rejected() {
         "{error}"
     );
 }
+
+#[test]
+fn an_inner_subclass_in_a_generic_class_embeds_its_superclass() {
+    // javac names the superclass `A.Seq<E>.Itr`, an inner class of a parameterized type, as in
+    // the JDK's `AbstractList.ListItr extends Itr`.
+    let rust = translate(
+        "class A {
+            static class Seq<E> {
+                Object[] items = { \"x\", \"y\" };
+                class Itr {
+                    int cursor;
+                    boolean hasNext() { return cursor < items.length; }
+                }
+                class ListItr extends Itr {
+                    ListItr(int index) { cursor = index; }
+                    boolean hasPrevious() { return cursor > 0; }
+                }
+            }
+            public static void main(String[] a) {
+                Seq<String> s = new Seq<>();
+                Seq<String>.ListItr it = s.new ListItr(1);
+                System.out.println(it.hasNext() + \" \" + it.hasPrevious());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "struct ASeqListItr {\n    base: ASeqItrFields,\n}",
+            "ASeqListItr { base: ASeqItrFields::new(outer) }",
+        ],
+    );
+}
+
+#[test]
+fn an_inner_subclass_of_another_outers_inner_class_holds_both_outers() {
+    let rust = translate(
+        "class A {
+            int total;
+            class Step {
+                final int by;
+                Step(int by) { this.by = by; }
+                int apply() { total += by; return total; }
+            }
+            class Batch {
+                final int times = 3;
+                class Repeated extends Step {
+                    Repeated(int by) { super(by * times); }
+                }
+            }
+            public static void main(String[] a) {
+                A m = new A();
+                A.Batch b = m.new Batch();
+                System.out.println(b.new Repeated(2).apply());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "struct ABatchRepeated {\n    base: AStepFields,\n    outer_: Rc<ABatch>,\n}",
+            "ABatchRepeated { base: AStepFields::new(outer.outer.clone(), by.wrapping_mul(outer.times)), outer_: outer }",
+        ],
+    );
+}
+
+#[test]
+fn an_anonymous_subclass_takes_its_superclasses_explicit_enclosing_instance() {
+    let rust = translate(
+        "class A {
+            int total;
+            class Step {
+                final int by;
+                Step(int by) { this.by = by; }
+                int apply() { total += by; return total; }
+            }
+            public static void main(String[] a) {
+                A m = new A();
+                Step s = m.new Step(2) {
+                    int apply() { return super.apply() * 10; }
+                };
+                System.out.println(s.apply());
+            }
+        }",
+    );
+    assert_contains(&rust, &["StepInMain { base: AStepFields::new(x0, by) }", "StepInMain::new(m, 2)"]);
+}
+
+#[test]
+fn an_inner_superclass_whose_constructor_calls_an_override_is_rejected() {
+    // The object would have to exist before its enclosing instance is set (the second
+    // constructor form of `analysis/whole_objects.rs`), and `outer` has no zero value.
+    let error = java_to_rust::translate(
+        "class A {
+            int total = 5;
+            class Base {
+                final String label;
+                Base() { label = describe(); }
+                String describe() { return \"base \" + total; }
+            }
+            class Derived extends Base {
+                String describe() { return \"derived \" + total; }
+            }
+            public static void main(String[] args) {
+                System.out.println(new A().new Derived().label);
+            }
+        }",
+    )
+    .expect_err("the superclass's constructor runs the subclass's method");
+    assert!(
+        error.to_string().contains("in a class with an enclosing instance or captured locals"),
+        "{error}"
+    );
+}
