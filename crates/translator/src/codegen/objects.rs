@@ -121,6 +121,32 @@ pub(super) fn live_types(class: &Class, facts: &Facts) -> Vec<bool> {
     live
 }
 
+/// Which classes' instance methods can run: those of a class that the program creates objects of,
+/// or that the runtime raises, and of its superclasses. A class of the program that is neither
+/// still has its methods emitted, as its type may be named, but nothing calls them.
+pub(super) fn running_types(class: &Class, facts: &Facts) -> Vec<bool> {
+    let mut created = instantiated(class);
+    for &c in &facts.raised_classes {
+        created[c] = true;
+    }
+    let mut runs: Vec<bool> = class
+        .types
+        .iter()
+        .map(|t| {
+            t.kind != TypeKind::Class
+                || t.enum_constants.is_some()
+                || !matches!(t.origin, Origin::Member | Origin::Local { .. })
+        })
+        .collect();
+    for t in (0..created.len()).filter(|&t| created[t]) {
+        runs[t] = true;
+        for a in class.hierarchy.ancestors(t) {
+            runs[a] = true;
+        }
+    }
+    runs
+}
+
 /// The methods that a `super.m(...)` call names.
 pub(super) fn super_targets(class: &Class) -> HashSet<usize> {
     let mut out = HashSet::new();
