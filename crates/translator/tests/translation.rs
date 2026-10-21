@@ -2354,7 +2354,7 @@ fn local_and_anonymous_classes_are_declared_so_their_calls_are_not_outside() {
     // classes outside the sources.
     let table = feature_table(&report, "Program code: features");
     assert!(feature_row(table, "local interfaces, enums and records").contains("Main.java:"), "{table}");
-    assert!(feature_row(table, "anonymous classes").contains("Main.java:"), "{table}");
+    assert!(!table.contains("anonymous classes"), "{table}");
     assert!(!table.contains("classes outside"), "{table}");
     assert_lacks(&report, &["(outside)"]);
 }

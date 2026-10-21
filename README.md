@@ -387,8 +387,8 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   only ever used through an interface stays a plain struct. The methods of an override group share what the analyses decide about their parameters and
   results, as a call may run any of them. A superclass's static initialization runs before its
   subclass's.
-- Inner and local classes (`lower/captures.rs`, `lower/inner.rs`), lowered as javac desugars
-  them. An object of an inner class holds its enclosing object in the field `outer`
+- Inner, local and anonymous classes (`lower/captures.rs`, `lower/inner.rs`), lowered as javac
+  desugars them. An object of an inner class holds its enclosing object in the field `outer`
   (`outer: Rc<RefCell<Names>>`), which every constructor takes first and each `new` passes:
   `this`, or the object of `names.new Cursor()`. An unqualified field or method of the enclosing
   class, and `Names.this`, read through it (`self.outer.borrow().size`), two levels up through
@@ -400,7 +400,11 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   such a class run in its constructors, after `outer` and the captures are set. A local class
   is named after the enclosing class (`MainLabeler`), with the method appended where two local
   classes of a class share a name (`MainBoxInSecond`), and `getName` gives javac's binary name
-  (`Main$1Labeler`). Not yet: local interfaces, enums and records, member classes of local
+  (`Main$1Labeler`). An anonymous class is a class like the others, named after its supertype
+  and its place (`OrderInMain`, `ReportInMain2`, `TaskInInit` in a field initializer): a variant
+  of its interface's enum, or a subclass whose constructor passes the arguments of its `new` to
+  the superclass's and its captures after them (`ReportInMain::new("squares", &sep)`); its
+  `getName` is javac's (`Main$1`) and its `getSimpleName` empty. Not yet: local interfaces, enums and records, member classes of local
   classes, `Outer.super.m()`, `outer.super()`, and an inner class extending one nested in
   another class.
 
@@ -496,7 +500,7 @@ Each construct below is rejected at translation with an error that names it:
 
 - the exceptions and try-with-resources listed under "Exceptions" above, and intersection bounds
   (`T extends A & B`);
-- records, anonymous classes, local interfaces, enums and records, and record patterns;
+- records, local interfaces, enums and records, and record patterns;
 - lambdas and method references, and for-each over an `Iterable`;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;

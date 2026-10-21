@@ -175,3 +175,66 @@ fn inner_subclasses_share_one_outer_field() {
         ],
     );
 }
+
+#[test]
+fn an_anonymous_class_is_a_variant_of_its_interface() {
+    let rust = translate(
+        "class A {
+            interface Order { int compare(String a, String b); }
+            static int count(String[] items, Order order) {
+                int n = 0;
+                for (int i = 1; i < items.length; i++) if (order.compare(items[i - 1], items[i]) > 0) n++;
+                return n;
+            }
+            public static void main(String[] a) {
+                String[] words = { \"b\", \"a\", \"c\" };
+                System.out.println(count(words, new Order() {
+                    public int compare(String x, String y) { return x.compareTo(y); }
+                }));
+                Order byLength = new Order() {
+                    public int compare(String x, String y) { return y.length() - x.length(); }
+                };
+                System.out.println(count(words, byLength) + byLength.getClass().getName());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "struct OrderInMain {\n}",
+            "struct OrderInMain2 {\n}",
+            "enum AOrder {\n    OrderInMain(Rc<OrderInMain>),\n    OrderInMain2(Rc<OrderInMain2>),\n}",
+            "AOrder::OrderInMain(Rc::new(OrderInMain::new()))",
+        ],
+    );
+}
+
+#[test]
+fn an_anonymous_subclass_passes_constructor_arguments_to_super() {
+    let rust = translate(
+        "class A {
+            static abstract class Report {
+                final String title;
+                Report(String title) { this.title = title; }
+                abstract String line();
+                String render() { return title + \": \" + line(); }
+            }
+            public static void main(String[] a) {
+                String sep = \"-\";
+                Report r = new Report(\"squares\") {
+                    String line() { return sep + sep; }
+                };
+                System.out.println(r.render() + r.getClass().getSimpleName().isEmpty());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "struct ReportInMain {\n    base: AReportFields,\n    sep: String,\n}",
+            "fn new(title: &str, sep: &str) -> ReportInMain {",
+            "ReportInMain { base: AReportFields::new(title), sep: sep.to_string() }",
+            "ReportInMain::new(\"squares\", &sep)",
+        ],
+    );
+}
