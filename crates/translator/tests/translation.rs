@@ -1648,6 +1648,85 @@ fn library_roots_are_read_only_where_used() {
     assert_lacks(&rust, &["unused", "Broken"]);
 }
 
+/// A program whose source root is a module that requires a library's module, both with a
+/// `module-info.java` (without the JDK's sources, so both are compiled in the unnamed module).
+fn module_sources(dir: &str) -> std::path::PathBuf {
+    write_sources(
+        dir,
+        &[
+            (
+                "app/module-info.java",
+                "/** The application. */\nmodule com.example.app {\n    requires org.lib;\n}\n",
+            ),
+            (
+                "app/com/example/app/Main.java",
+                "package com.example.app;\nimport org.lib.text.Shout;\npublic class Main {\n    public static void main(String[] a) { System.out.println(Shout.shout(\"hi\")); }\n}\n",
+            ),
+            ("lib/module-info.java", "module org.lib {\n    exports org.lib.text;\n}\n"),
+            (
+                "lib/org/lib/text/Shout.java",
+                "package org.lib.text;\npublic class Shout {\n    public static String shout(String s) { return s + \"!\"; }\n}\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn library_roots_that_are_modules_are_read_as_sources() {
+    let dir = module_sources("module-roots");
+    let program = java_to_rust::Program {
+        main: "com.example.app.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &["crate::org::lib::text::shout(\"hi\")", "pub(crate) fn shout(s: &str) -> String"],
+    );
+    let report = survey(&program).report;
+    assert_contains(&report, &["  Library: 1 pieces; 1 (100.0%) reach nothing outside the sources."]);
+}
+
+#[test]
+fn a_required_module_that_is_not_given_is_named() {
+    let dir = module_sources("module-missing");
+    let program = java_to_rust::Program {
+        main: "com.example.app.Main".into(),
+        sources: vec![dir.join("app")],
+        ..Default::default()
+    };
+    let error = java_to_rust::translate_program(&program).expect_err("org.lib is not given");
+    assert!(
+        error.to_string().ends_with(
+            "Main.java:2:20: package org.lib.text does not exist; module com.example.app requires module org.lib, \
+             whose sources are not given: pass the root of its sources as --library"
+        ),
+        "{error}"
+    );
+    // A package of a module that javac has only as class files, here the JDK's `java.base`, whose
+    // `jdk.internal.misc` is not exported.
+    let dir = write_sources(
+        "module-not-visible",
+        &[(
+            "app/p/Main.java",
+            "package p;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(jdk.internal.misc.VM.isBooted());\n    }\n}\n",
+        )],
+    );
+    let program =
+        java_to_rust::Program { main: "p.Main".into(), sources: vec![dir.join("app")], ..Default::default() };
+    let error = java_to_rust::translate_program(&program).expect_err("java.base is not given");
+    assert!(
+        error.to_string().ends_with(
+            "Main.java:4:40: package jdk.internal.misc is in module java.base, whose sources are not given: \
+             pass the root of its sources as --library"
+        ),
+        "{error}"
+    );
+}
+
 #[test]
 fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
     let library = (

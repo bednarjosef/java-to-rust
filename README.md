@@ -646,7 +646,12 @@ type, so only the classes, methods, constructors and fields that `main` can reac
 translated. Library roots (`--library`, meant for the JDK's own sources) are only on the source
 path: javac attributes a file from them only when reachability asks for one of its classes, a
 few dozen of the JDK's units where javac by itself would attribute thousands (see "Translating
-whole programs" in docs/performance.md). Packages become
+whole programs" in docs/performance.md). A source or library root may be a module's, with a
+`module-info.java` (the JDK's are): the translation is of one closed program, so javac compiles
+every root as part of one module, `java.base` when the JDK's sources are a library and the
+unnamed module otherwise, and reads each class from its source (`program/modules.rs`). A
+package of a module whose sources are not given is an error that names the module to pass as
+`--library`. Packages become
 nested modules in one output file (`com.example.util` is `mod com { pub(crate) mod example
 { pub(crate) mod util { .. } } }`); a class of another package is named by its path from the crate
 root, such as `crate::com::example::util::Counter::new(..)`, and items in packages are

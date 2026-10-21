@@ -251,3 +251,60 @@ fn reading_a_resource_ends_the_program() {
         assert!(rust.contains(wanted), "no {wanted} in the translation");
     }
 }
+
+/// A program whose source root and libraries are modules, with a `module-info.java` each, as the
+/// JDK's own are: the libraries' sources are read and translated as those of a program without
+/// modules are, and a module that the program uses but that is not given is named in the error.
+#[test]
+fn programs_and_libraries_that_are_modules() {
+    let Some(java_base) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-modules");
+    let _ = std::fs::remove_dir_all(&work);
+    let files = [
+        ("app/module-info.java", "module com.example.app {\n    requires org.lib;\n}\n"),
+        (
+            "app/com/example/app/Main.java",
+            "package com.example.app;\nimport java.util.ArrayList;\nimport org.lib.text.Shout;\npublic class Main {\n    public static void main(String[] a) {\n        ArrayList<String> words = new ArrayList<>();\n        words.add(Shout.shout(\"hi\"));\n        System.out.println(words.get(0));\n    }\n}\n",
+        ),
+        ("lib/module-info.java", "module org.lib {\n    exports org.lib.text;\n}\n"),
+        (
+            "lib/org/lib/text/Shout.java",
+            "package org.lib.text;\npublic class Shout {\n    public static String shout(String s) { return s + \"!\"; }\n}\n",
+        ),
+        (
+            "logging/p/Main.java",
+            "package p;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(java.util.logging.Logger.getGlobal());\n    }\n}\n",
+        ),
+    ];
+    for (path, java) in files {
+        let path = work.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, java).unwrap();
+    }
+    let translate = |main: &str, source: &str, libraries: &[&Path]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_java-to-rust"));
+        command.args(["--main", main, "--source"]).arg(work.join(source));
+        for library in libraries {
+            command.arg("--library").arg(library);
+        }
+        command.arg("-o").arg(work.join("main.rs")).output().unwrap()
+    };
+    let translated = translate("com.example.app.Main", "app", &[&work.join("lib"), &java_base]);
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
+    // The JDK's `ArrayList` and the library's class, translated from their sources.
+    for wanted in ["pub(crate) struct ArrayList", "pub(crate) fn shout(s: &str) -> String"] {
+        assert!(rust.contains(wanted), "no {wanted} in the translation");
+    }
+    let translated = translate("p.Main", "logging", &[&java_base]);
+    let stderr = String::from_utf8_lossy(&translated.stderr);
+    assert!(
+        stderr.contains(
+            "package java.util.logging is in module java.logging, whose sources are not given: pass the root of its sources as --library"
+        ),
+        "{stderr}"
+    );
+}

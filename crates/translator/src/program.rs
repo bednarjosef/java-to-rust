@@ -4,6 +4,7 @@
 //! and only what is reachable from `main` is lowered and translated.
 
 mod census;
+mod modules;
 mod reach;
 mod survey;
 
@@ -113,10 +114,12 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Str
 /// unit changes those of a unit walked before, the round walks all of them again.
 fn load(program: &Program, string_array_writes: bool) -> Result<(Vec<Value>, Reach), ProgramError> {
     let files = source_files(program)?;
-    let javac_error = |(file, error)| ProgramError { file, error };
+    let modules = modules::modules(program.sources.iter().chain(&program.libraries));
+    let javac_error = |(file, error)| modules::explain(ProgramError { file, error }, &modules);
     let (mut javac, mut reaching) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     let start = std::time::Instant::now();
-    let (mut session, mut new) = javac::Session::start(&files, &sourcepath(program)).map_err(javac_error)?;
+    let (mut session, mut new) =
+        javac::Session::start(&files, &sourcepath(program), modules::kept(&modules)).map_err(javac_error)?;
     javac += start.elapsed();
     // The units as javac gave them, and the copies of those whose records were completed.
     let (given, completed) = (Store::default(), Store::default());
@@ -281,7 +284,9 @@ pub fn survey_program(program: &Program) -> Result<Survey, ProgramError> {
 
 /// javac's trees of the program, with those of every library unit that javac loads for it.
 fn javac_tree(program: &Program, files: &[PathBuf]) -> Result<Value, ProgramError> {
-    javac::program_tree(files, &sourcepath(program)).map_err(|(file, error)| ProgramError { file, error })
+    let modules = modules::modules(program.sources.iter().chain(&program.libraries));
+    javac::program_tree(files, &sourcepath(program), modules::kept(&modules))
+        .map_err(|(file, error)| modules::explain(ProgramError { file, error }, &modules))
 }
 
 /// The roots that javac loads classes from: the program's, then with libraries the translator's
@@ -297,11 +302,13 @@ fn sourcepath(program: &Program) -> Vec<PathBuf> {
 const OVERLAY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/java/overlay");
 
 /// The program's own files: the given files and every `.java` file under the source roots, sorted
-/// and without duplicates.
+/// and without duplicates. A root's `module-info.java` is not one: javac compiles every root as
+/// part of one module (see `modules`).
 fn source_files(program: &Program) -> Result<Vec<PathBuf>, ProgramError> {
     let mut files = program.files.clone();
     for root in &program.sources {
         java_files(root, &mut files).map_err(|e| fail(format!("{}: {e}", root.display())))?;
+        files.retain(|f| f != &root.join("module-info.java"));
     }
     files.sort();
     files.dedup();

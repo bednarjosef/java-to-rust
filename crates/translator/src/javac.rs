@@ -11,7 +11,7 @@ use crate::ast::{Error, Pos};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::thread::JoinHandle;
 
@@ -73,11 +73,16 @@ pub fn tree(source: &str) -> Result<Value, Error> {
 }
 
 /// Runs javac once on all the files of a program, with `sourcepath` (the roots that classes are
-/// loaded from by package) as its source path, and returns
+/// loaded from by package) as its source path, and `module_info` the only `module-info.java` on
+/// it that javac sees (see `JavaTree`'s `oneModule`), and returns
 /// `{"units": [{"file": ..., "tree": ...}]}`: the files given, then the units javac loaded from
 /// the source path. A compile error is returned with the file it is in.
-pub fn program_tree(files: &[PathBuf], sourcepath: &[PathBuf]) -> Result<Value, (Option<String>, Error)> {
-    let output = program_command(files, sourcepath)?
+pub fn program_tree(
+    files: &[PathBuf],
+    sourcepath: &[PathBuf],
+    module_info: Option<&Path>,
+) -> Result<Value, (Option<String>, Error)> {
+    let output = program_command(files, sourcepath, module_info)?
         .output()
         .map_err(|e| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")))?;
     if !output.status.success() {
@@ -96,12 +101,19 @@ fn fail(message: String) -> (Option<String>, Error) {
 }
 
 /// The command that runs `JavaTree` on the files of a program.
-fn program_command(files: &[PathBuf], sourcepath: &[PathBuf]) -> Result<Command, (Option<String>, Error)> {
+fn program_command(
+    files: &[PathBuf],
+    sourcepath: &[PathBuf],
+    module_info: Option<&Path>,
+) -> Result<Command, (Option<String>, Error)> {
     let mut command = java_tree();
     command.arg("--program");
     if !sourcepath.is_empty() {
         let joined = std::env::join_paths(sourcepath).map_err(|e| fail(format!("bad source path: {e}")))?;
         command.arg("--sourcepath").arg(joined);
+    }
+    if let Some(module_info) = module_info {
+        command.arg("--module-info").arg(module_info);
     }
     command.args(files);
     Ok(command)
@@ -110,18 +122,36 @@ fn program_command(files: &[PathBuf], sourcepath: &[PathBuf]) -> Result<Command,
 /// The first compile error that `JavaTree` printed, as `FILE:LINE:COLUMN: message`, with its file.
 fn compile_error(stderr: &[u8]) -> (Option<String>, Error) {
     let stderr = String::from_utf8_lossy(stderr);
-    let first = stderr.lines().next().unwrap_or("javac failed");
+    let mut lines = stderr.lines();
+    let first = lines.next().unwrap_or("javac failed");
     if let Some((place, message)) = first.split_once(": ") {
         let mut parts = place.rsplitn(3, ':');
         let (column, line, file) = (parts.next(), parts.next(), parts.next());
         if let (Some(column), Some(line), Some(file)) =
             (column.and_then(|c| c.parse().ok()), line.and_then(|l| l.parse().ok()), file)
         {
-            let error = Error { pos: Pos { line, column }, message: message.trim().to_string() };
-            return (Some(file.to_string()), error);
+            // The lines of the same message, indented, below its first.
+            let details = lines.take_while(|l| l.starts_with(char::is_whitespace));
+            let message = missing_module(message, details).unwrap_or_else(|| message.trim().to_string());
+            return (Some(file.to_string()), Error { pos: Pos { line, column }, message });
         }
     }
     fail(stderr.trim().to_string())
+}
+
+/// The error of a package that javac cannot see because it is in a module whose sources are not
+/// given: javac compiles all the sources as one module (see `program_tree`), which reads no other,
+/// so the package's module is one of the JDK's that javac has only as class files. javac says
+/// `package P is not visible` and, below, `(package P is declared in module M, but ...)`.
+fn missing_module<'a>(message: &str, details: impl Iterator<Item = &'a str>) -> Option<String> {
+    let package = message.trim().strip_prefix("package ")?.strip_suffix(" is not visible")?;
+    let module = details.into_iter().find_map(|l| {
+        let (_, rest) = l.split_once(" is declared in module ")?;
+        rest.split([',', ')', ' ']).next()
+    })?;
+    Some(format!(
+        "package {package} is in module {module}, whose sources are not given: pass the root of its sources as --library"
+    ))
 }
 
 /// A javac run over a program that attributes the units of the source path only as they are
@@ -139,13 +169,15 @@ pub struct Session {
 }
 
 impl Session {
-    /// Starts javac on the program's files, with `sourcepath` as its source path, and returns
-    /// their units, in the order given. A compile error is returned with the file it is in.
+    /// Starts javac on the program's files, with `sourcepath` as its source path and
+    /// `module_info` as in `program_tree`, and returns their units, in the order given. A compile
+    /// error is returned with the file it is in.
     pub fn start(
         files: &[PathBuf],
         sourcepath: &[PathBuf],
+        module_info: Option<&Path>,
     ) -> Result<(Session, Vec<Value>), (Option<String>, Error)> {
-        let mut child = program_command(files, sourcepath)?
+        let mut child = program_command(files, sourcepath, module_info)?
             .arg("--serve")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
