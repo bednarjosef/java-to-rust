@@ -307,6 +307,30 @@ pub fn provided(class: &str) -> bool {
     RUNTIME_CLASSES.contains(&class) || crate::lower::is_standard(class)
 }
 
+/// The array `a` and the length `n` of `Array.newInstance(a.getClass().getComponentType(), n)`,
+/// the new array of `a`'s own class that the JDK's collections make in `toArray(T[])` and its
+/// sorts make for their work (see `lower::arrays::component_array`): it reaches what `a` and `n`
+/// do, and not `java.lang.reflect.Array` or `Class`.
+pub fn component_array(node: &Value) -> Option<(&Value, &Value)> {
+    let call = |v: &Value, owner: &str, name: &str| {
+        text(v, "kind") == "METHOD_INVOCATION"
+            && text(&v["symbol"], "owner") == owner
+            && text(&v["symbol"], "name") == name
+            && v["methodSelect"]["kind"] == "MEMBER_SELECT"
+    };
+    if !call(node, "java.lang.reflect.Array", "newInstance") {
+        return None;
+    }
+    let [component, length] = &node["arguments"].as_array()?[..] else { return None };
+    let class = &component["methodSelect"]["expression"];
+    if !call(component, "java.lang.Class", "getComponentType") || !call(class, "java.lang.Object", "getClass")
+    {
+        return None;
+    }
+    let array = &class["methodSelect"]["expression"];
+    text(array, "javaType").ends_with("[]").then_some((array, length))
+}
+
 /// Whether the node is a call of `java.util.Arrays` that the runtime does rather than the JDK's
 /// source, such as `Arrays.sort` of an `int[]`.
 pub fn runtime_arrays_call(node: &Value) -> bool {
@@ -635,6 +659,10 @@ impl<'t> Walk<'t> {
             // lowering drops: a flag's class need not exist.
             Value::Object(_) if let Some(branch) = live_branch(value, self.sequential) => {
                 self.scan(branch);
+            }
+            Value::Object(_) if let Some((array, length)) = component_array(value) => {
+                self.scan(array);
+                self.scan(length);
             }
             // A call of `java.util.Arrays` that the runtime does (`lower::runtime_arrays_call`)
             // reaches only what its arguments do.

@@ -72,6 +72,17 @@ pub(super) fn retry<E>(
     }
 }
 
+/// Whether every type variable of class `node` occurs in the type of one of its instance fields:
+/// a Rust struct uses each of its type parameters.
+fn held(node: Node) -> bool {
+    let fields: Vec<&str> = node
+        .list("members")
+        .filter(|m| m.kind() == "VARIABLE" && m.symbol().is_some_and(|s| !s.is_static))
+        .map(|m| m.symbol().map_or("", |s| s.ty))
+        .collect();
+    node.list("typeParameters").all(|v| fields.iter().any(|ty| mentions_var(ty, v.str("name"))))
+}
+
 fn has_bounds(node: Node) -> bool {
     node.list("typeParameters").any(|p| p.list("bounds").next().is_some())
 }
@@ -96,6 +107,7 @@ impl<'t> Lowering<'t> {
                     && node.get("extendsClause").is_none()
                     && node.list("implementsClause").next().is_none()
                     && !extended.contains(self.types[t].name.as_str())
+                    && held(node)
             })
             .collect();
         let methods = (0..self.methods.len())
@@ -108,6 +120,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// Whether every type variable of method `m` occurs in the type of one of its parameters.
+    /// (A class's must occur in one of its fields: see `held`.)
     fn inferable(&self, m: usize) -> bool {
         let node = self.methods[m].node;
         let params: Vec<&str> = node.list("parameters").map(|p| p.symbol().map_or("", |s| s.ty)).collect();

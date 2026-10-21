@@ -18,8 +18,8 @@
 
 use super::Program;
 use super::reach::{
-    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, has_flag, live_branch, members, outside,
-    provided, replaced, runtime_arrays_call, symbol_type, text, untranslated,
+    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, component_array, has_flag, live_branch,
+    members, outside, provided, replaced, runtime_arrays_call, symbol_type, text, untranslated,
 };
 use crate::ast::runtime_native;
 use serde_json::{Value, json};
@@ -280,6 +280,12 @@ impl Census {
             Value::Object(_) if let Some(branch) = live_branch(node, scan.sequential) => {
                 self.body(&node["condition"], scan);
                 self.body(branch, scan);
+            }
+            // A new array of another array's class is a new array of its type.
+            Value::Object(_) if let Some((array, length)) = component_array(node) => {
+                scan.calls.insert("Array.newInstance".to_string());
+                self.body(array, scan);
+                self.body(length, scan);
             }
             Value::Object(fields) => {
                 let kind = text(node, "kind");

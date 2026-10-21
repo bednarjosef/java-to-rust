@@ -569,6 +569,7 @@ impl<'t> Lowering<'t> {
                     value: Box::new(value),
                 }
             }
+            "TYPE_CAST" if arrays::casts_component_array(node) => self.component_array(node)?,
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
                 let value = self.expr(node.child("expression")?)?;
