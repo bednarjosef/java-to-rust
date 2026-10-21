@@ -385,17 +385,13 @@ pub fn reads_earlier_fields(decl: &TypeDecl, i: usize, e: &Expr) -> bool {
 /// the initializer must run.
 pub fn leading_assignments<'c>(class: &Class, ctor: &'c Method, facts: &Facts) -> Vec<(usize, &'c Expr)> {
     let decl = &class.types[ctor.class];
-    let delegates =
-        matches!(ctor.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })));
-    if delegates || !inline_initializers(class, ctor.class, facts) {
+    if delegates(&ctor.body) || !inline_initializers(class, ctor.class, facts) {
         return Vec::new();
     }
     let mut out: Vec<(usize, &Expr)> = Vec::new();
-    // `super(...)` runs first, before the initializers: the struct literal's `base`.
-    let body = match ctor.body.first() {
-        Some(Stmt::Expr(Expr { kind: ExprKind::SuperInit { .. }, .. })) => &ctor.body[1..],
-        _ => &ctor.body[..],
-    };
+    // `super(...)` runs first, before the initializers: the struct literal's `base`. The
+    // statements before it run before the literal is built.
+    let (_, _, body) = split_explicit_call(&ctor.body);
     for stmt in body {
         let Stmt::Expr(Expr {
             kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, value },

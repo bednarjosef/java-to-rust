@@ -14,7 +14,8 @@ impl<'a> Gen<'a> {
         let class = self.class;
         let decl = &class.types[m.class];
         self.this_form = ThisForm::Local;
-        let (start, rest, initialize) = match m.body.split_first() {
+        let body = self.prologue(&m.body);
+        let (start, rest, initialize) = match body.split_first() {
             Some((Stmt::Expr(Expr { kind: ExprKind::ThisCall { args, resolved }, .. }), rest)) => {
                 let index = resolved.expect("calls are resolved by the checker");
                 let args = self.call_args(index, args).join(", ");
@@ -23,7 +24,7 @@ impl<'a> Gen<'a> {
             }
             _ => {
                 let initialize = !self.inline_inits(m.class) && decl.fields.iter().any(|f| f.init.is_some());
-                let (base, body) = self.super_init(m.class, &m.body);
+                let (base, body) = self.super_init(m.class, body);
                 let (literal, rest) = self.struct_literal(m, initialize, base, body);
                 (literal, rest, initialize)
             }
