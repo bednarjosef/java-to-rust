@@ -892,12 +892,13 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
     }
 }
 
-/// The `toString` methods that showing a value of type `ty` may run.
+/// The `toString` methods that showing a value of type `ty` may run, and the `hashCode`s that
+/// `Object`'s `toString` shows.
 fn to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
     let Some(t) = class.class_index(ty) else { return Vec::new() };
     let mut out = Vec::new();
     for c in class.hierarchy.concretes(t) {
-        if let Some(i) = hierarchy::to_string_impl(class, c)
+        if let Some(i) = hierarchy::text_impl(class, c)
             && !out.contains(&i)
         {
             out.push(i);

@@ -121,6 +121,11 @@ impl<'t> Lowering<'t> {
     /// The erasure of a type that javac writes with type arguments, a wildcard, a capture or a
     /// type variable; `None` for any other type.
     pub(super) fn erased(&self, node: Node, name: &str) -> Option<Result<Type, Error>> {
+        let without_outer = without_outer_args(name);
+        if !without_outer.contains('<') && without_outer != name {
+            return Some(self.ty(node, &without_outer));
+        }
+        let name = without_outer.as_str();
         if name.contains(" & ") {
             return Some(unsupported(node, "intersection types"));
         }
@@ -261,4 +266,31 @@ impl<'t> Lowering<'t> {
         let inner = self.synth(kind, node.pos(), declared);
         Ok(ExprKind::Cast(ty, Box::new(inner)))
     }
+}
+
+/// javac's type `name` without the type arguments of the classes that an inner class's type
+/// names it through: `Outer<E>.Inner<F>` is `Outer.Inner<F>`, whose arguments are the inner
+/// class's own. (Taken whole, it read as `Outer` with the arguments `E>.Inner<F`.)
+fn without_outer_args(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut rest = name;
+    while let Some(open) = rest.find('<') {
+        let mut depth = 0;
+        let close = rest[open..]
+            .char_indices()
+            .find_map(|(i, c)| {
+                match c {
+                    '<' => depth += 1,
+                    '>' => depth -= 1,
+                    _ => {}
+                }
+                (depth == 0).then_some(open + i)
+            })
+            .unwrap_or(rest.len() - 1);
+        let outer = rest[close + 1..].starts_with('.');
+        out.push_str(if outer { &rest[..open] } else { &rest[..=close] });
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }

@@ -338,7 +338,7 @@ impl<'a> Gen<'a> {
 
     /// The runtime's function `name` that ends the program with an uncaught exception, which
     /// shows the exception through its `Display`.
-    fn uncaught(&mut self, name: &str) -> String {
+    pub(super) fn uncaught(&mut self, name: &str) -> String {
         let t = self.class.type_index("java.lang.Throwable").expect("a program that throws has `Throwable`");
         if let Some(t) = self.enum_for(t) {
             self.need(Need::Display(t));
