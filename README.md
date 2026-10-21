@@ -235,8 +235,11 @@ A small subset, end to end:
   and equal by binary name: `x.getClass()` of an object, string, box, array or enum constant,
   class literals (`int[].class`, `String.class`, `Dog.class`), and `getName`, `getSimpleName`,
   `getSuperclass`, `getComponentType`, `isArray`, `isInterface`, `isPrimitive`, `isEnum`,
-  `toString`, `hashCode` and `equals`. Reflection (`getDeclaredFields`, `newInstance`, ...) is
-  rejected, as are a record with an array component (its text would be the array's identity) and
+  `toString`, `hashCode` and `equals`. `isInstance(x)` and `cast(x)` of any class value compare
+  its binary name with those of `x`'s class and of every class and interface above it, which the
+  generator writes out for each class `x` may be of; a failed `cast` throws Java's
+  `ClassCastException` (`Cannot cast java.lang.String to Main$Dog`), which a `catch` sees.
+  Reflection (`getDeclaredFields`, `newInstance`, ...) is rejected, as are a record with an array component (its text would be the array's identity) and
   a generic record in a record pattern. An accessor written in the record runs at each use of a
   pattern variable that names a component, not once.
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching

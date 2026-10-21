@@ -1027,6 +1027,8 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
             | Builtin::GetClass
             | Builtin::SameClass { .. }
             | Builtin::ClassMethod(_)
+            | Builtin::ClassIsInstance
+            | Builtin::ClassCheck
             | Builtin::ComparableClassFor
             | Builtin::EnumOrdinal
             | Builtin::EnumName

@@ -369,6 +369,7 @@ pub(super) fn runtime_failures(
             | Builtin::GetClass
             | Builtin::ClassLiteral(_)
             | Builtin::ClassMethod(_)
+            | Builtin::ClassIsInstance
             | Builtin::ComparableClassFor
             // A null is a value to them, and an object's own method is a call of its own.
             | Builtin::ObjectsEquals
@@ -401,6 +402,8 @@ pub(super) fn runtime_failures(
                 _,
             ) => {}
             Builtin::MonitorEnter => out.push((NPE, "this synchronized", true, args[0].id)),
+            // A class that is not the object's; a `catch` sees it through `java::catching`.
+            Builtin::ClassCheck => out.push(("java.lang.ClassCastException", "this cast", false, x.id)),
             // An object of a class that is not `Cloneable` refuses to be copied.
             Builtin::ObjectClone => {
                 let refused = class

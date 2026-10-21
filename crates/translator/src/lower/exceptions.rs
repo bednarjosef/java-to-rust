@@ -84,7 +84,7 @@ const RAISED: &[(&str, &[&str])] = &[
         "java.lang.NullPointerException",
         &["METHOD_INVOCATION", "MEMBER_SELECT", "ARRAY_ACCESS", "SWITCH", "SWITCH_EXPRESSION"],
     ),
-    ("java.lang.ClassCastException", &["TYPE_CAST"]),
+    ("java.lang.ClassCastException", &["TYPE_CAST", "java.lang.Class#cast"]),
     (
         "java.lang.IllegalArgumentException",
         &[
