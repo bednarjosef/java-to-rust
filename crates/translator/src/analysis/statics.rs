@@ -1,8 +1,9 @@
 //! Whether a class's static initialization must run eagerly. Java runs it once, on first use of the
 //! class, and anything observable in it (a static block, a call, a `new` of an object, a throw)
 //! must happen at that point. When the initializers only compute values, or new arrays, from
-//! literals and from statics of the same class that were assigned earlier, nothing is observable: each static can be computed on
-//! its first access, as a lazily initialized cell, and no `init` function is needed.
+//! literals and from statics of the same class that were assigned earlier and that no other code
+//! assigns, nothing is observable: each static can be computed on its first access, as a lazily
+//! initialized cell, and no `init` function is needed.
 
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
@@ -13,6 +14,7 @@ pub fn eager(class: &Class, index: usize) -> bool {
         return false;
     };
     let decl = &class.types[index];
+    let changed = changed_later(class, index);
     let mut assigned: HashSet<&str> = HashSet::new();
     !clinit.body.iter().all(|stmt| {
         let Stmt::Expr(Expr {
@@ -23,9 +25,38 @@ pub fn eager(class: &Class, index: usize) -> bool {
             return false;
         };
         let ok = *c == index && pure(value, index, &assigned, decl);
-        assigned.insert(name.as_str());
+        if !changed.contains(name) {
+            assigned.insert(name.as_str());
+        }
         ok
     })
+}
+
+/// The statics of class `index` that code outside its static initialization assigns. A lazy cell
+/// computed from one of them would see its value at the cell's first access, not the value Java's
+/// initialization saw.
+fn changed_later(class: &Class, index: usize) -> HashSet<String> {
+    let mut changed = HashSet::new();
+    for m in class.methods.iter().filter(|m| !(m.class == index && m.name == "<clinit>")) {
+        for stmt in &m.body {
+            visit_stmt(
+                stmt,
+                &mut |e| {
+                    visit_expr(e, &mut |x| match &x.kind {
+                        ExprKind::Assign { target: Place::Static { class: c, name }, .. }
+                        | ExprKind::IncDec { target: Place::Static { class: c, name }, .. }
+                            if *c == index =>
+                        {
+                            changed.insert(name.clone());
+                        }
+                        _ => {}
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    changed
 }
 
 /// Whether evaluating `e` has no effect and cannot throw. A static of class `index` may be read
