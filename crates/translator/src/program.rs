@@ -7,7 +7,7 @@ mod reach;
 mod survey;
 
 pub use reach::{
-    CLASS_KINDS, Reach, STRING_CHARS, class_name, component_array, created_by_name, live_branch,
+    CLASS_KINDS, Reach, STRING_STREAMS, class_name, component_array, created_by_name, live_branch,
     unsafe_field_access, untranslated,
 };
 pub use survey::Survey;
