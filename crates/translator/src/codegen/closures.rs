@@ -391,9 +391,20 @@ impl<'a> Gen<'a> {
     fn bind_params(&mut self, index: usize, values: &[String]) {
         for (param, value) in self.typed_params(index, true).iter().zip(values) {
             let name = param.split_once(": ").map_or(param.as_str(), |(name, _)| name);
-            if name != value {
-                self.line(&format!("let {param} = {value};"));
+            if name == value {
+                continue;
             }
+            // `x.as_deref()` borrows `x`, which must outlive the statement when it is a value.
+            if let Some(owned) = value.strip_suffix(".as_deref()")
+                && captured_local(owned).is_none()
+            {
+                let base = name.trim_start_matches("mut ").trim_start_matches('_');
+                let temp = self.temp(&format!("{base}_value"));
+                self.line(&format!("let {temp} = {owned};"));
+                self.line(&format!("let {param} = {temp}.as_deref();"));
+                continue;
+            }
+            self.line(&format!("let {param} = {value};"));
         }
     }
 
