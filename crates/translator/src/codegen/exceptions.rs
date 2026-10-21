@@ -338,7 +338,8 @@ impl<'a> Gen<'a> {
         }
         // A static initializer's exception ends the program as `ExceptionInInitializerError`.
         if self.class.methods[self.method].name == "<clinit>" {
-            let initializer = if name == "throw_uncaught" { "throw_initializer" } else { "initializer_uncaught" };
+            let initializer =
+                if name == "throw_uncaught" { "throw_initializer" } else { "initializer_uncaught" };
             return self.runtime(initializer);
         }
         self.runtime(name)

@@ -10,8 +10,8 @@
 //! `break` leaves it early; a labeled block when a `break` leaves it early; a state machine when a
 //! case falls into the next one.
 
-use super::*;
 use super::exceptions::completes_all;
+use super::*;
 
 /// What a frame is in Java, and how Rust runs it.
 #[derive(Clone, Copy)]
@@ -445,7 +445,8 @@ impl<'a> Gen<'a> {
             self.yield_slots.swap_remove(slot);
             // The initial `None` is overwritten before any read on every path that reads the slot.
             let pad = "    ".repeat(indent + 1);
-            let declare = format!("#[allow(unused_assignments)]\n{pad}let mut yielded{index}: Option<_> = None;");
+            let declare =
+                format!("#[allow(unused_assignments)]\n{pad}let mut yielded{index}: Option<_> = None;");
             body = format!("{pad}{declare}\n{body}");
         }
         Code::atom(format!("{{\n{body}{}}}", "    ".repeat(indent)))

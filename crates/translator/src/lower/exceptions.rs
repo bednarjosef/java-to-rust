@@ -261,7 +261,8 @@ impl Uses {
 /// might see them, and records them in `raised`.
 fn raise_classes(uses: &mut Uses, raised: &mut HashSet<String>) {
     for (class, operations) in RAISED {
-        let caught = uses.finally || uses.catches.iter().any(|c| is_standard(c) && standard_subclass(class, c));
+        let caught =
+            uses.finally || uses.catches.iter().any(|c| is_standard(c) && standard_subclass(class, c));
         if caught && operations.iter().any(|o| uses.operations.contains(*o)) {
             uses.classes.insert(class.to_string());
             uses.members.insert((class.to_string(), "<init>".into(), "(java.lang.String)void".into()));
@@ -507,7 +508,13 @@ impl<'t> Lowering<'t> {
         ];
         let inner = Stmt::Try {
             body,
-            catches: vec![Catch { types: vec![throwable], name: thrown, ty: throwable_ty, body: on_throw, pos }],
+            catches: vec![Catch {
+                types: vec![throwable],
+                name: thrown,
+                ty: throwable_ty,
+                body: on_throw,
+                pos,
+            }],
             finally: None,
         };
         let not_failed = ExprKind::Unary(

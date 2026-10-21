@@ -352,7 +352,8 @@ fn stmt_points(
             };
             // A value that may be null throws a `NullPointerException` instead, by `throw` itself.
             if matches!(thrown.kind, ExprKind::Null) || maybe_null(facts, m, thrown) {
-                let raise = Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: thrown.id };
+                let raise =
+                    Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: thrown.id };
                 out.push(Point { raise, pos: e.pos, what: "this throw", frames: frames.clone() });
             } else if let Some(t) = class.class_index(thrown.ty) {
                 out.push(Point {
@@ -461,7 +462,8 @@ fn static_inits(class: &Class, facts: &Facts, m: usize, x: &Expr) -> Vec<usize> 
         .into_iter()
         .filter_map(|t| {
             let init = facts.init_class(class, t)?;
-            let initialized = current.is_some_and(|c| c == init || class.hierarchy.ancestors(c).contains(&init));
+            let initialized =
+                current.is_some_and(|c| c == init || class.hierarchy.ancestors(c).contains(&init));
             if initialized {
                 return None;
             }
