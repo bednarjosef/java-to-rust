@@ -117,16 +117,83 @@ fn a_marker_interface_is_dropped_from_an_intersection_cast() {
 }
 
 #[test]
-fn a_capturing_lambda_is_rejected_until_captures_exist() {
-    let message = rejected(
+fn a_lambda_holds_the_locals_it_captures_in_fields() {
+    let rust = translate(
         "class A {
             interface Op { int apply(int a); }
             public static void main(String[] args) {
                 int k = 3;
-                Op op = a -> a + k;
+                String name = \"n\";
+                Op op = a -> a + k + name.length();
                 System.out.println(op.apply(1));
             }
         }",
     );
-    assert!(message.contains("lambda captures not supported yet"), "{message}");
+    assert_contains(
+        &rust,
+        &[
+            "struct OpLambdaInMain {\n    k: i32,\n    name: String,\n}",
+            "fn new(k: i32, name: &str) -> OpLambdaInMain {",
+            "OpLambdaInMain::new(k, &name)",
+            "self.k",
+        ],
+    );
+}
+
+#[test]
+fn a_lambda_reaches_the_enclosing_object_through_outer() {
+    let rust = translate(
+        "class A {
+            interface Op { int apply(int a); }
+            int base = 10;
+            int scaled(int x) { return x * base; }
+            Op adder() { return a -> a + base; }
+            Op scaler() { return this::scaled; }
+            public static void main(String[] args) {
+                A o = new A();
+                System.out.println(o.adder().apply(1) + o.scaler().apply(2));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "struct OpLambdaInAdder {\n    outer: Rc<RefCell<A>>,\n}",
+            "AOp::OpLambdaInAdder(Rc::new(OpLambdaInAdder::new(this.clone())))",
+            "self.outer.borrow().base",
+            "self.outer.borrow().scaled(a)",
+        ],
+    );
+}
+
+#[test]
+fn a_lambda_in_a_lambda_takes_its_captures_from_the_outer_one() {
+    let rust = translate(
+        "import java.util.function.IntUnaryOperator;
+        class A {
+            public static void main(String[] args) {
+                int k = 3;
+                IntUnaryOperator outer = x -> {
+                    IntUnaryOperator inner = z -> z + x + k;
+                    return inner.applyAsInt(1);
+                };
+                System.out.println(outer.applyAsInt(5));
+            }
+        }",
+    );
+    assert_contains(&rust, &["IntUnaryOperatorLambdaInMain2::new(x, self.k)"]);
+}
+
+#[test]
+fn a_method_reference_on_a_computed_receiver_is_rejected() {
+    let message = rejected(
+        "import java.util.function.Supplier;
+        class A {
+            public static void main(String[] args) {
+                Supplier<String> s = new StringBuilder(\"ab\")::toString;
+                System.out.println(s.get());
+            }
+        }",
+    );
+    assert!(message.contains("a method reference on a receiver that is not a local"), "{message}");
 }

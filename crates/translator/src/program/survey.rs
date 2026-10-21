@@ -18,9 +18,10 @@
 
 use super::Program;
 use super::reach::{
-    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, has_flag, members, never_true, outside,
-    provided, symbol_type, text, untranslated,
+    CLASS_KINDS, MethodKey, OBJECT_METHODS, Reach, class_name, else_branch, has_flag, members, never_true,
+    outside, provided, replaced, symbol_type, text, untranslated,
 };
+use crate::ast::runtime_native;
 use serde_json::{Value, json};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -144,6 +145,8 @@ struct Scan<'a> {
     features: BTreeMap<&'static str, String>,
     calls: BTreeSet<String>,
     refs: BTreeSet<String>,
+    /// Whether the program's streams stay sequential (`Reach::sequential`).
+    sequential: bool,
 }
 
 impl Scan<'_> {
@@ -168,8 +171,8 @@ struct Census {
     /// pieces of code that call each.
     runtime: BTreeMap<(Part, String), usize>,
     /// Reachable methods that have no body in Java: the JVM implements them. With each, its
-    /// node in the call graph.
-    natives: Vec<(Part, String, String)>,
+    /// node in the call graph and whether the runtime implements it (`ast::runtime_native`).
+    natives: Vec<(Part, String, String, bool)>,
     /// The call graph of the reachable code: from each node (a method, or a class's static or
     /// instance initialization, see `method_node`) to the nodes its code may run.
     edges: HashMap<String, BTreeSet<String>>,
@@ -224,6 +227,7 @@ impl Census {
                             origin.part,
                             format!("{class}.{}{}", key.1, key.2),
                             method_node(&key),
+                            runtime_native(&class, &key.1, &key.2),
                         ));
                     }
                     reach.methods.contains(&key)
@@ -247,6 +251,7 @@ impl Census {
                 features: header.clone(),
                 calls: BTreeSet::new(),
                 refs: BTreeSet::new(),
+                sequential: reach.sequential,
             };
             if kind == "METHOD" && intersects(member) {
                 scan.feature("intersection types", member);
@@ -275,28 +280,29 @@ impl Census {
     fn body(&self, node: &Value, scan: &mut Scan<'_>) {
         match node {
             // Reachability skips the branch, and so does the translation.
-            Value::Object(_) if text(node, "kind") == "IF" && never_true(&node["condition"]) => {
+            Value::Object(_)
+                if matches!(text(node, "kind"), "IF" | "CONDITIONAL_EXPRESSION")
+                    && never_true(&node["condition"], scan.sequential) =>
+            {
                 self.body(&node["condition"], scan);
-                self.body(&node["elseStatement"], scan);
+                self.body(else_branch(node), scan);
             }
             Value::Object(fields) => {
                 let kind = text(node, "kind");
                 let ty = text(node, "javaType");
                 match kind {
-                    // A lambda or method reference translates unless it captures something (a
-                    // `static final` receiver is taken for a capture here).
-                    "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE"
-                        if crate::lower::captured(node, &|_, _| false).is_some() =>
-                    {
-                        scan.feature("lambda captures", node)
+                    // A method reference translates unless its receiver is computed (any field is
+                    // taken for a final one here).
+                    "MEMBER_REFERENCE" if crate::lower::computed_receiver(node, &|_, _| true).is_some() => {
+                        scan.feature("computed method receivers", node)
                     }
                     "NEW_CLASS" if !node["classBody"].is_null() => scan.feature("anonymous classes", node),
                     "NEW_CLASS" if !node["enclosingExpression"].is_null() => {
                         scan.feature("inner classes", node)
                     }
                     // An anonymous class body is a class node too: it is counted above.
-                    "CLASS" | "INTERFACE" | "ENUM" | "RECORD" if !symbol_type(node).starts_with('<') => {
-                        scan.feature("local classes", node)
+                    "INTERFACE" | "ENUM" | "RECORD" if !is_anonymous(symbol_type(node)) => {
+                        scan.feature("local interfaces, enums and records", node)
                     }
                     "TRY" if node["resources"].as_array().is_some_and(|r| !r.is_empty()) => {
                         scan.feature("try-with-resources", node)
@@ -354,7 +360,7 @@ impl Census {
                     } else if let Some(feature) = untranslated(owner) {
                         scan.feature(feature, node);
                         scan.calls.insert(format!("({feature}) {owner}.{name}"));
-                    } else if provided(owner) {
+                    } else if provided(owner) || replaced(owner, name, text(symbol, "type")) {
                         let simple = owner.rsplit('.').next().unwrap_or(owner);
                         scan.calls.insert(format!("{simple}.{name}"));
                     } else if !owner.is_empty() && !self.declared.contains(owner) {
@@ -477,12 +483,14 @@ impl Census {
         let free = self.pieces.iter().filter(|p| p.features.is_empty()).count();
         _ = writeln!(
             out,
-            "Reachable from {main}: {} classes ({} instantiated), {} methods, {} fields, {} native methods.",
+            "Reachable from {main}: {} classes ({} instantiated), {} methods, {} fields, {} native methods \
+             ({} in the runtime).",
             reach.classes.len(),
             reach.instantiated.len(),
             reach.methods.len(),
             reach.fields.len(),
-            self.natives.len()
+            self.natives.len(),
+            self.natives.iter().filter(|n| n.3).count()
         );
         _ = writeln!(out, "{total} pieces of code (methods, field initializers, initializer blocks):");
         for part in Part::ALL {
@@ -537,15 +545,15 @@ impl Census {
         _ = writeln!(out, "\nNative methods reached:");
         for part in Part::ALL {
             _ = writeln!(out, "{}:", part.title());
-            let mut natives: Vec<(&str, &str)> = self
+            let mut natives: Vec<(&str, &str, bool)> = self
                 .natives
                 .iter()
-                .filter(|(p, _, _)| *p == part)
-                .map(|(_, name, node)| (name.as_str(), node.as_str()))
+                .filter(|(p, ..)| *p == part)
+                .map(|(_, name, node, runtime)| (name.as_str(), node.as_str(), *runtime))
                 .collect();
             natives.sort();
-            for (native, node) in natives {
-                _ = writeln!(out, "  {native}");
+            for (native, node, runtime) in natives {
+                _ = writeln!(out, "  {native}{}", if runtime { "  (in the runtime)" } else { "" });
                 let chain = self.chain(node);
                 if !chain.is_empty() {
                     _ = writeln!(out, "      via {}", chain.join(" -> "));
@@ -656,9 +664,10 @@ impl Census {
                 "method": method,
                 "pieces": n,
             })).collect::<Vec<_>>(),
-            "natives": self.natives.iter().map(|(part, method, node)| json!({
+            "natives": self.natives.iter().map(|(part, method, node, runtime)| json!({
                 "source": part.name(),
                 "method": method,
+                "runtime": runtime,
                 "chain": self.chain(node),
             })).collect::<Vec<_>>(),
             "external": external.iter().map(|key| json!({
@@ -767,6 +776,13 @@ fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String
         features.insert("enum constants with bodies");
     }
     features
+}
+
+/// Whether javac's name for a class is that of an anonymous class: its binary name `Main$1`, or
+/// `<anonymous Planet>` for the body of an enum constant.
+fn is_anonymous(name: &str) -> bool {
+    name.starts_with('<')
+        || name.rsplit_once('$').is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Whether a declaration has a type variable with more than one bound (`T extends A & B`).

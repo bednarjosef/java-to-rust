@@ -6,10 +6,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import javax.lang.model.element.*;
-import javax.lang.model.type.DeclaredType;
-import javax.lang.model.type.ExecutableType;
-import javax.lang.model.type.IntersectionType;
-import javax.lang.model.type.TypeMirror;
+import javax.lang.model.type.*;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
 import javax.tools.*;
@@ -273,15 +270,19 @@ public class JavaTree {
         Element owner = e.getEnclosingElement();
         if (owner != null) {
             out.append(",\"owner\":");
-            string(owner instanceof TypeElement t ? t.getQualifiedName().toString() : owner.toString(), out);
+            string(owner instanceof TypeElement t ? className(t) : owner.toString(), out);
         }
         out.append(",\"static\":").append(e.getModifiers().contains(Modifier.STATIC));
         // javac prints a varargs parameter's type as an array, so only this says it is varargs.
         if (e instanceof ExecutableElement m && m.isVarArgs()) {
             out.append(",\"varargs\":true");
         }
+        // A native method has no body: the JVM implements it, and so must the runtime.
+        if (e.getModifiers().contains(Modifier.NATIVE)) {
+            out.append(",\"native\":true");
+        }
         out.append(",\"type\":");
-        string(e.asType().toString(), out);
+        string(typeText(e.asType()), out);
         if (declaration && e.getKind() == ElementKind.METHOD && owner instanceof TypeElement t) {
             overrides((ExecutableElement) e, t, out);
         }
@@ -298,7 +299,7 @@ public class JavaTree {
     private static final Set<String> MARKERS = Set.of("java.io.Serializable", "java.lang.Cloneable", "java.util.RandomAccess");
 
     /**
-     * A type as javac prints it, except that an intersection type ({@code (Comparator<T> &
+     * A type as {@link #typeText} prints it, except that an intersection type ({@code (Comparator<T> &
      * Serializable)}) loses {@code Object} and the marker interfaces, and is the one type left
      * when only one is.
      */
@@ -306,7 +307,7 @@ public class JavaTree {
         if (type instanceof IntersectionType intersection) {
             List<String> kept = new ArrayList<>();
             for (TypeMirror bound : intersection.getBounds()) {
-                String name = bound.toString();
+                String name = typeText(bound);
                 String raw = name.contains("<") ? name.substring(0, name.indexOf('<')) : name;
                 if (!raw.equals("java.lang.Object") && !MARKERS.contains(raw)) {
                     kept.add(name);
@@ -316,7 +317,7 @@ public class JavaTree {
                 return kept.get(0);
             }
         }
-        return type.toString();
+        return typeText(type);
     }
 
     /**
@@ -353,17 +354,17 @@ public class JavaTree {
         }
         ExecutableType substituted = (ExecutableType) types.asMemberOf(target, method);
         out.append(",\"descriptor\":{\"owner\":");
-        string(((TypeElement) method.getEnclosingElement()).getQualifiedName().toString(), out);
+        string(className((TypeElement) method.getEnclosingElement()), out);
         out.append(",\"target\":");
-        string(iface.getQualifiedName().toString(), out);
+        string(className(iface), out);
         out.append(",\"name\":");
         string(method.getSimpleName().toString(), out);
         out.append(",\"type\":");
-        string(method.asType().toString(), out);
+        string(typeText(method.asType()), out);
         out.append(",\"erased\":");
-        string(types.erasure(method.asType()).toString(), out);
+        string(typeText(types.erasure(method.asType())), out);
         out.append(",\"substituted\":");
-        string(substituted.toString(), out);
+        string(typeText(substituted), out);
         if (tree instanceof MemberReferenceTree reference
                 && trees.getElement(path) instanceof ExecutableElement referent) {
             out.append(",\"referent\":");
@@ -389,15 +390,15 @@ public class JavaTree {
             }
         }
         if (referent.getTypeParameters().isEmpty() || !(member instanceof ExecutableType executable)) {
-            return member.toString();
+            return typeText(member);
         }
         TypeMirror ret = descriptor.getReturnType().getKind() == javax.lang.model.type.TypeKind.VOID
                 ? types.erasure(executable.getReturnType()) : descriptor.getReturnType();
         StringBuilder text = new StringBuilder("(");
         for (int i = 0; i < executable.getParameterTypes().size(); i++) {
-            text.append(i == 0 ? "" : ",").append(types.erasure(executable.getParameterTypes().get(i)));
+            text.append(i == 0 ? "" : ",").append(typeText(types.erasure(executable.getParameterTypes().get(i))));
         }
-        return text.append(')').append(ret).toString();
+        return text.append(')').append(typeText(ret)).toString();
     }
 
     /** Whether an abstract method of an interface is one of {@code Object}'s public methods. */
@@ -429,9 +430,9 @@ public class JavaTree {
                     out.append(any ? "," : mark);
                     any = true;
                     out.append("{\"owner\":");
-                    string(superclass.getQualifiedName().toString(), out);
+                    string(className(superclass), out);
                     out.append(",\"type\":");
-                    string(x.asType().toString(), out);
+                    string(typeText(x.asType()), out);
                     out.append('}');
                 }
             }
@@ -439,6 +440,61 @@ public class JavaTree {
         if (any) {
             out.append(']');
         }
+    }
+
+    /**
+     * Whether a class is local or anonymous, or nested in one. javac names such a class by its
+     * simple name, or not at all, so the tree names it by its binary name: {@code Main$1Labeler},
+     * {@code Main$1}. The body of an enum constant keeps javac's names.
+     */
+    private static boolean inLocal(Element e) {
+        for (Element at = e; at instanceof TypeElement t; at = t.getEnclosingElement()) {
+            boolean constantBody = t.getSuperclass() instanceof DeclaredType d && d.asElement().getKind() == ElementKind.ENUM;
+            if (t.getNestingKind() == NestingKind.LOCAL || t.getNestingKind() == NestingKind.ANONYMOUS && !constantBody) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The qualified name of a class, or the binary name of a local or anonymous one. */
+    private static String className(TypeElement t) {
+        return inLocal(t) ? elements.getBinaryName(t).toString() : t.getQualifiedName().toString();
+    }
+
+    /** Whether a type names a local or anonymous class anywhere in it. */
+    private static boolean mentionsLocal(TypeMirror t) {
+        if (t instanceof ArrayType a) {
+            return mentionsLocal(a.getComponentType());
+        } else if (t instanceof DeclaredType d) {
+            return inLocal(d.asElement()) || d.getTypeArguments().stream().anyMatch(JavaTree::mentionsLocal);
+        } else if (t instanceof ExecutableType x) {
+            return mentionsLocal(x.getReturnType()) || x.getParameterTypes().stream().anyMatch(JavaTree::mentionsLocal);
+        } else if (t instanceof WildcardType w) {
+            return w.getExtendsBound() != null && mentionsLocal(w.getExtendsBound())
+                    || w.getSuperBound() != null && mentionsLocal(w.getSuperBound());
+        }
+        return false;
+    }
+
+    /** A type as javac prints it, with local and anonymous classes named by {@link #className}. */
+    private static String typeText(TypeMirror t) {
+        if (!mentionsLocal(t)) {
+            return t.toString();
+        } else if (t instanceof ArrayType a) {
+            return typeText(a.getComponentType()) + "[]";
+        } else if (t instanceof DeclaredType d) {
+            String name = className((TypeElement) d.asElement());
+            List<String> args = d.getTypeArguments().stream().map(JavaTree::typeText).toList();
+            return args.isEmpty() ? name : name + "<" + String.join(",", args) + ">";
+        } else if (t instanceof ExecutableType x) {
+            List<String> params = x.getParameterTypes().stream().map(JavaTree::typeText).toList();
+            return "(" + String.join(",", params) + ")" + typeText(x.getReturnType());
+        } else if (t instanceof WildcardType w) {
+            return w.getExtendsBound() != null ? "? extends " + typeText(w.getExtendsBound())
+                    : "? super " + typeText(w.getSuperBound());
+        }
+        return t.toString();
     }
 
     private static void string(String s, StringBuilder out) {

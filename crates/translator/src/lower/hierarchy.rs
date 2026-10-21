@@ -86,7 +86,7 @@ impl<'t> Lowering<'t> {
                 let sig = o["type"].as_str()?;
                 self.methods
                     .iter()
-                    .position(|m| self.types[m.owner].name == owner && m.name == name && m.sig == sig)
+                    .position(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == sig)
             })
             .collect()
     }
@@ -95,8 +95,9 @@ impl<'t> Lowering<'t> {
     /// whose constructor does nothing, else `SuperInit`.
     pub(super) fn super_init(&self, stmt: Node<'t>) -> Result<Option<Stmt>, Error> {
         let call = stmt.child("expression")?;
-        if self.superclass(self.current.get())?.is_none() {
-            return Ok(None);
+        let Some(superclass) = self.superclass(self.current.get())? else { return Ok(None) };
+        if let Some(qualifier) = call.child("methodSelect")?.get("expression") {
+            return unsupported(qualifier, "a qualified `super(..)`");
         }
         let Some(symbol) = call.symbol() else { return unsupported(call, "this `super` call") };
         self.check_standard_member(call, &symbol)?;
@@ -104,6 +105,7 @@ impl<'t> Lowering<'t> {
         let args = self.packed_args(call, &symbol, args)?;
         let resolved = self.method_index(&symbol);
         let args = self.convert_args(resolved, args)?;
+        let args = self.with_synthetic(self.passed_on(superclass, call.pos())?, args);
         let kind = ExprKind::SuperInit { args, resolved };
         Ok(Some(Stmt::Expr(self.synth(kind, call.pos(), Type::Void))))
     }

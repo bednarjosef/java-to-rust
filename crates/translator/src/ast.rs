@@ -325,6 +325,57 @@ pub struct TypeDecl {
     pub enum_constants: Option<Vec<EnumConstant>>,
     /// The type parameters of a generic class that is a Rust generic, as types of kind `Param`.
     pub type_params: Vec<Type>,
+    /// The enclosing class whose instance objects of this class hold in the field `outer`: an
+    /// inner class, or a local or anonymous class created in an instance context, whose code uses
+    /// it; else `None`. Every constructor takes it as its first parameter (see `lower/inner.rs`).
+    pub outer: Option<usize>,
+    /// The locals of the enclosing code that the class's code reads, each held in a field and
+    /// passed to every constructor as a parameter after the declared ones. Empty for a member
+    /// class.
+    pub captures: Vec<Capture>,
+    pub origin: Origin,
+}
+
+/// A local variable that a local or anonymous class captures.
+pub struct Capture {
+    /// The local's name in the enclosing code.
+    pub name: String,
+    /// The field that holds it, declared by the class or by a superclass that captures it too.
+    pub field: String,
+    pub ty: Type,
+}
+
+/// Where a class is declared.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// A class of a package, or a member of a class.
+    Member,
+    /// A local class, declared in a block of `method` (`None`: of an initializer); `binary` is
+    /// javac's binary name, such as `Main$1Labeler`.
+    Local { method: Option<usize>, binary: String },
+    /// An anonymous class, `new T(..) { .. }`, in `method` (`None`: in an initializer), which
+    /// implements or extends `T`; `binary` is javac's binary name, such as `Main$1`.
+    Anonymous { method: Option<usize>, binary: String },
+    /// The class of a lambda or method reference in `method` (`None`: in an initializer);
+    /// `binary` is the name the JVM gives such a class, up to the part that varies between runs
+    /// (`Main$$Lambda`).
+    Lambda { method: Option<usize>, binary: String },
+}
+
+impl Origin {
+    /// The names that `Class.getName` and `Class.getSimpleName` give a local or anonymous class
+    /// or a lambda's: its binary name, and its simple name (empty for an anonymous class).
+    pub fn java_names(&self) -> Option<(&str, &str)> {
+        match self {
+            Origin::Member => None,
+            Origin::Local { binary, .. } => {
+                let last = binary.rsplit('$').next().unwrap_or_default();
+                Some((binary, last.trim_start_matches(|c: char| c.is_ascii_digit())))
+            }
+            Origin::Anonymous { binary, .. } => Some((binary, "")),
+            Origin::Lambda { binary, .. } => Some((binary, binary.rsplit('.').next().unwrap_or_default())),
+        }
+    }
 }
 
 /// One constant of an enum: `PLANET(3.0, 4.0)`.
