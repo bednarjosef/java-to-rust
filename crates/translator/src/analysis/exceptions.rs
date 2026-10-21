@@ -905,6 +905,7 @@ fn runtime_failures(
             | Builtin::EnumName
             | Builtin::EnumCompareTo
             | Builtin::Exit
+            | Builtin::NoObject { .. }
             | Builtin::ClassName { .. }
             | Builtin::ClassLiteralName { .. }
             | Builtin::SameClass { .. }

@@ -31,6 +31,12 @@ pub struct Reach {
     /// whose instance methods can run.
     pub live: HashSet<String>,
     pub methods: HashSet<MethodKey>,
+    /// Instance methods of classes that are not live, among `methods`: reachable code calls them,
+    /// but no object of their class exists, so the receiver of every call is null and their
+    /// bodies never run. They are declared with a body that says so (`Builtin::NoObject`), and
+    /// what their bodies use is not reached. Interfaces are left out, as the runtime's strings
+    /// and boxes are objects of `CharSequence` and `Comparable` that no constructor shows.
+    pub dormant: HashSet<MethodKey>,
     pub fields: HashSet<FieldKey>,
     /// Methods that reachable code calls but that are not among the sources: those of the
     /// classes the runtime provides (see `RUNTIME_CLASSES`), and any that are missing; and the
@@ -55,6 +61,13 @@ impl Reach {
             kind if CLASS_KINDS.contains(&kind) => self.classes.contains(&class_name(member)),
             _ => true,
         }
+    }
+
+    /// Whether a method of the class with qualified name `class` (a node of its `members`) is
+    /// one of the `dormant` ones, whose body never runs.
+    pub fn dormant(&self, class: &str, member: &Value) -> bool {
+        let key = (class.to_string(), text(member, "name").to_string(), symbol_type(member).to_string());
+        self.dormant.contains(&key)
     }
 }
 
@@ -398,12 +411,24 @@ impl<'t> Walk<'t> {
             }
             return;
         };
-        if !self.reach.methods.insert(key.clone()) {
-            return;
-        }
         let class = key.0.clone();
         let is_ctor = key.1 == "<init>";
         let is_static = node["symbol"]["static"].as_bool() == Some(true);
+        if !self.reach.methods.insert(key.clone()) {
+            // A dormant method runs once its class is live.
+            if !self.reach.live.contains(&class) || !self.reach.dormant.remove(&key) {
+                return;
+            }
+        } else if !is_static && !is_ctor && !self.reach.live.contains(&class) && self.has_objects(&class) {
+            // Until an object of its class is created, only its signature is used.
+            self.reach.dormant.insert(key.clone());
+            self.waiting.entry(class.clone()).or_default().push(key);
+            self.work.push(Item::Class(class));
+            for part in ["typeParameters", "returnType", "parameters", "thrown"] {
+                self.scan(&node[part]);
+            }
+            return;
+        }
         self.work.push(Item::Class(class.clone()));
         if is_static || is_ctor {
             self.work.push(Item::Init(class.clone()));
@@ -417,6 +442,14 @@ impl<'t> Walk<'t> {
             }
         }
         self.scan(node);
+    }
+
+    /// Whether `class` is a class whose objects come from its constructors, which reachability
+    /// sees: not an interface, which the runtime's classes and lambdas implement too.
+    fn has_objects(&self, class: &str) -> bool {
+        self.classes
+            .get(class)
+            .is_some_and(|(decl, _)| matches!(text(decl, "kind"), "CLASS" | "ENUM" | "RECORD"))
     }
 
     /// A class whose objects are created: it is live, and its instance initializers run.

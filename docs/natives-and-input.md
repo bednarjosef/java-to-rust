@@ -734,6 +734,26 @@ for when a program needs time zones.
   `park`/`unpark` of `ConcurrentHashMap` (which `Properties` and `CoderResult`'s cache are) and
   `ThreadLocalRandom`, and the plain gets and puts of `ArraysSupport.vectorizedMismatch` and
   `ThreadLocalRandom`'s probe.
+- **`serialPersistentFields` not initialized**: serialization reads it by reflection, and its
+  initializer only creates `ObjectStreamField`s; some thirty classes of java.base have one
+  (`String`, `Random`, `ThreadLocalRandom`, `ConcurrentHashMap`), with `Long.TYPE` and
+  `String.class` arguments that are `Class` values. Reading standard input stopped at `Random`'s.
+  Test: `serial_persistent_fields_are_not_initialized_unless_read` in `reach.rs` and the project
+  `corpus/projects/serialization`.
+- **The instance methods of classes without objects are dormant** (`Reach::dormant`): a call of
+  an instance method of a class that no reachable constructor creates objects of, nor of a
+  subclass, can only throw `NullPointerException` on its null receiver, so the method is declared
+  with its signature and a body that never runs (`Builtin::NoObject`, `unreachable!()` as the
+  codegen writes for classes without objects), and what its body uses is not reached. It wakes up
+  when its class becomes live. Interfaces are left out: the runtime's strings and boxes are
+  `CharSequence`s and `Comparable`s that no constructor shows. `ByteBuffer.equals` reached
+  `MemorySessionImpl.checkValidStateRaw` through `ScopedMemoryAccess`, and with it the
+  `VarHandle` of `MemorySessionImpl`'s initializer, though only foreign memory creates sessions.
+  Test: the project `corpus/projects/uncreated`. `ReaderLines` goes from 263 to 254 classes,
+  `ScannerGrades` from 1,129 to 1,035 classes and 64 to 60 natives, `StreamPipeline` from 343 to
+  334 classes. `ReaderLines` then stops at `LazyConstantImpl`, the `LazyConstant` in which
+  `Charset` keeps its default: `Unsafe.objectFieldOffset` and the acquire and release accesses of
+  its `constant` field, which wait for the threads design's symbolic field offsets.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

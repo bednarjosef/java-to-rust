@@ -34,7 +34,9 @@ pub(super) fn completes(stmt: &Stmt) -> bool {
         | Stmt::BreakLabel(_)
         | Stmt::ContinueLabel(_)
         | Stmt::Yield(_) => false,
-        Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::Exit, _), .. }) => false,
+        Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::Exit | Builtin::NoObject { .. }, _), .. }) => {
+            false
+        }
         Stmt::Block(stmts) => completes_all(stmts),
         Stmt::If { then, otherwise: Some(otherwise), .. } => completes(then) || completes(otherwise),
         Stmt::While { cond, body } if matches!(cond.kind, ExprKind::Bool(true)) => breaks_out_of(body, None),
