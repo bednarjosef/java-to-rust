@@ -31,7 +31,7 @@ impl<'a> Gen<'a> {
             match stmt {
                 // A `throw` that ends a method that throws is its `Err` result.
                 Stmt::Throw(value) if tail && rest.is_empty() && self.throwing => {
-                    let text = self.expr(value).text;
+                    let text = self.thrown_text(value);
                     self.line(&format!("Err({text})"));
                 }
                 _ if tail && rest.is_empty() && self.tail_value(stmt) => self.tail_stmt(stmt),
@@ -94,10 +94,10 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
             Stmt::For { init, cond, update, body } => self.for_loop(init, cond.as_ref(), update, body),
-            Stmt::Return(None, pos) => self.return_stmt(None, *pos),
-            Stmt::Return(Some(value), pos) => {
+            Stmt::Return(None, _) => self.return_stmt(None),
+            Stmt::Return(Some(value), _) => {
                 let code = self.returned(value);
-                self.return_stmt(Some(code.text), *pos);
+                self.return_stmt(Some(code.text));
             }
             Stmt::Throw(value) => self.throw_stmt(value),
             Stmt::Try { body, catches, finally } => self.try_stmt(stmt, body, catches, finally.as_deref()),

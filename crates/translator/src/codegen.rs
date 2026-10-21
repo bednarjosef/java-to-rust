@@ -126,6 +126,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         throwing: false,
         attempts: Vec::new(),
         finallies: Vec::new(),
+        yield_slots: Vec::new(),
         attempt_count: 0,
         try_assigned: HashSet::new(),
         dereferenced: HashSet::new(),
@@ -282,6 +283,9 @@ struct Gen<'a> {
     /// The `try` statements with a `finally` whose body or `catch` clauses are being written,
     /// innermost last.
     finallies: Vec<exceptions::Finally>,
+    /// The switch expressions (by frame index) that a `yield` leaves through a `finally`: their
+    /// value waits in a `yielded{index}` local (see `switch.rs`).
+    yield_slots: Vec<usize>,
     /// How many `try` blocks of the current method have a label.
     attempt_count: usize,
     /// The current method's locals declared without a value that a `try` block assigns (see

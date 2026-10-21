@@ -3316,31 +3316,6 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
         "{err}"
     );
     let err = reject(
-        "class A { public static void main(String[] a) {
-            RuntimeException e = a.length > 0 ? new RuntimeException() : null;
-            throw e;
-        } }",
-    );
-    assert!(err.contains("throwing a value that may be null not supported yet"), "{err}");
-    let err = reject(
-        "class A { public static void main(String[] a) {
-            int n = switch (a.length) {
-                case 0 -> { try { yield 1; } finally { System.out.println(2); } }
-                default -> 3;
-            };
-            System.out.println(n);
-        } }",
-    );
-    assert!(err.contains("a `yield` through a `finally` not supported yet"), "{err}");
-    let err = reject(
-        "class P {
-            int x;
-            P(int x) { try { if (x < 0) return; this.x = x; } finally { System.out.println(\"built\"); } }
-        }
-        class A { public static void main(String[] a) { System.out.println(new P(1).x); } }",
-    );
-    assert!(err.contains("a `return` of a constructor through a `finally` not supported yet"), "{err}");
-    let err = reject(
         "class Bad extends RuntimeException {
             Bad(int x) { super(\"bad\"); if (x < 0) throw new IllegalStateException(\"negative\"); }
         }

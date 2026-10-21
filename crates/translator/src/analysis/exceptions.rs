@@ -258,27 +258,6 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         }
     }
 
-    // `throw null` throws a `NullPointerException` instead.
-    for (m, method) in class.methods.iter().enumerate() {
-        let mut found = None;
-        for s in &method.body {
-            visit_stmt(s, &mut |_| {}, &mut |s| {
-                if let Stmt::Throw(e) = s {
-                    let thrown = match &e.kind {
-                        ExprKind::Cast(_, inner) => inner,
-                        _ => e,
-                    };
-                    if matches!(thrown.kind, ExprKind::Null) || maybe_null(facts, m, thrown) {
-                        found.get_or_insert(e.pos);
-                    }
-                }
-            });
-        }
-        if let Some(pos) = found {
-            return error(pos, "throwing a value that may be null not supported yet");
-        }
-    }
-
     facts.throwing = throwing;
     facts.live_tries = live_tries;
     facts.raising_tries = raising_tries;
@@ -391,7 +370,11 @@ fn stmt_points(
                 ExprKind::Cast(_, inner) => inner,
                 _ => e,
             };
-            if let Some(t) = class.class_index(thrown.ty) {
+            // A value that may be null throws a `NullPointerException` instead, by `throw` itself.
+            if matches!(thrown.kind, ExprKind::Null) || maybe_null(facts, m, thrown) {
+                let raise = Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: thrown.id };
+                out.push(Point { raise, pos: e.pos, what: "this throw", frames: frames.clone() });
+            } else if let Some(t) = class.class_index(thrown.ty) {
                 out.push(Point {
                     raise: Raise::Throw(t),
                     pos: e.pos,
