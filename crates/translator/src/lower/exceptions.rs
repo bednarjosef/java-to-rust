@@ -175,6 +175,32 @@ fn suppress_member() -> (String, String, String) {
     ("java.lang.Throwable".into(), "addSuppressed".into(), "(java.lang.Throwable)void".into())
 }
 
+/// The classes that a static initializer's failure is seen as (see `lower/clinit_errors.rs`): a
+/// program that catches one of these, or a supertype of them, declares them, with the constructors
+/// that the rewritten `<clinit>` calls.
+fn linkage_classes(uses: &mut Uses) {
+    const CAUGHT: [&str; 5] = [
+        "java.lang.Throwable",
+        "java.lang.Error",
+        "java.lang.LinkageError",
+        "java.lang.ExceptionInInitializerError",
+        "java.lang.NoClassDefFoundError",
+    ];
+    if !uses.catches.iter().any(|c| CAUGHT.contains(&c.as_str())) {
+        return;
+    }
+    let members = [
+        ("java.lang.ExceptionInInitializerError", "(java.lang.Throwable)void"),
+        ("java.lang.ExceptionInInitializerError", "(java.lang.String)void"),
+        ("java.lang.NoClassDefFoundError", "(java.lang.String,java.lang.Throwable)void"),
+    ];
+    for (class, signature) in members {
+        uses.classes.insert(class.into());
+        uses.members.insert((class.into(), "<init>".into(), signature.into()));
+        uses.instantiated.insert(class.into());
+    }
+}
+
 /// The uses of the standard classes found in a tree.
 #[derive(Default)]
 struct Uses {
@@ -291,6 +317,7 @@ impl Standard {
         }
         let mut raised = HashSet::new();
         raise_classes(&mut uses, &mut raised);
+        linkage_classes(&mut uses);
         if uses.classes.is_empty() && uses.members.is_empty() {
             return Standard::default();
         }

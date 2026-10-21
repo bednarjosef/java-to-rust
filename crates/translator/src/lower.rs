@@ -32,6 +32,7 @@ mod boxing;
 mod captures;
 mod charsets;
 mod classes;
+mod clinit_errors;
 mod constant_bodies;
 mod initializers;
 mod inner;
@@ -47,6 +48,7 @@ mod sync;
 mod system;
 mod varargs;
 use arrays::{is_array_length, reads_name};
+pub(crate) use clinit_errors::rewritten_clinit;
 pub use exceptions::{is_standard, standard_names, standard_subclass};
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
@@ -236,7 +238,9 @@ impl<'t> Lowering<'t> {
     /// bodies and constants. An error comes with the index of the type it is in.
     fn finish_types(&self, types: &mut [TypeDecl], methods: &mut Vec<Method>) -> Result<(), (usize, Error)> {
         for index in (0..types.len()).filter(|&t| self.has_static_init(t)) {
-            methods.push(self.clinit(index).map_err(|e| (index, e))?);
+            let mut clinit = self.clinit(index).map_err(|e| (index, e))?;
+            self.guard_clinit(index, &mut clinit, &mut types[index], methods.as_slice());
+            methods.push(clinit);
         }
         for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
             let in_type = |e| (index, e);

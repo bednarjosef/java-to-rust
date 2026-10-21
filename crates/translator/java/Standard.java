@@ -107,6 +107,28 @@ class Error extends Throwable {
     }
 }
 
+class LinkageError extends Error {
+    public LinkageError(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+
+class ExceptionInInitializerError extends LinkageError {
+    public ExceptionInInitializerError(Throwable thrown) {
+        super(null, thrown);
+    }
+
+    public ExceptionInInitializerError(String message) {
+        super(message, null);
+    }
+}
+
+class NoClassDefFoundError extends LinkageError {
+    public NoClassDefFoundError(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+
 class AssertionError extends Error {
     public AssertionError() {
     }

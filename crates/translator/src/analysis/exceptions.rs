@@ -20,6 +20,7 @@
 //! yet (a null dereference, an array creation, a cast, ...) is rejected where its failure would
 //! be seen.
 
+mod entry;
 mod field_inits;
 
 use super::Facts;
@@ -92,6 +93,13 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     };
     let caught = |k: &Kind, frames: &[Frame]| frames.iter().any(|f| f.catches.iter().any(|&t| matches(k, t)));
     let initializer: Vec<bool> = class.methods.iter().map(|m| m.name == "<clinit>").collect();
+    // A static initializer that the lowering rewrote keeps its failures as exceptions (see
+    // `lower/clinit_errors.rs`): it is translated like a method, not collapsed.
+    let guarded: Vec<bool> = class
+        .methods
+        .iter()
+        .map(|m| m.name == "<clinit>" && crate::lower::rewritten_clinit(&class.types[m.class]))
+        .collect();
     let raised = |p: &Point, escapes: &[BTreeSet<Kind>]| -> BTreeSet<Kind> {
         match &p.raise {
             Raise::Throw(t) => h.concretes(*t).into_iter().map(Kind::Class).collect(),
@@ -109,7 +117,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             for p in &points[m] {
                 out.extend(raised(p, &escapes).into_iter().filter(|k| !caught(k, &p.frames)));
             }
-            if initializer[m] && !out.is_empty() {
+            if initializer[m] && !guarded[m] && !out.is_empty() {
                 out = BTreeSet::from([Kind::Runtime(INITIALIZER_ERROR)]);
             }
             if out != escapes[m] {
@@ -159,7 +167,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
 
     // A static initializer never returns a `Result`: what it raises ends the program (see `seen`).
     let mut throwing: HashSet<usize> = (0..class.methods.len())
-        .filter(|&m| !initializer[m] && escapes[m].iter().any(|k| observed(k, &seen[m])))
+        .filter(|&m| guarded[m] || (!initializer[m] && escapes[m].iter().any(|k| observed(k, &seen[m]))))
         .collect();
     let groups: Vec<usize> = throwing.iter().flat_map(|&m| h.group(m)).collect();
     throwing.extend(groups);
@@ -280,7 +288,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     // A static initializer's exception reaches the program as `ExceptionInInitializerError`, an
     // `Error` that a `try` here is not known to match, so one that observes it is not translated.
     for (m, method) in class.methods.iter().enumerate() {
-        if initializer[m] && !escapes[m].is_empty() && (seen[m].all || !seen[m].types.is_empty()) {
+        if initializer[m]
+            && !guarded[m]
+            && !escapes[m].is_empty()
+            && (seen[m].all || !seen[m].types.is_empty())
+        {
             return error(method.pos, "a static initializer that throws inside a `try` not supported yet");
         }
     }
@@ -320,7 +332,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
 /// The points of method `m` that may raise an exception, with the `try`s around each.
 fn method_points(class: &Class, facts: &Facts, m: usize) -> Vec<Point> {
     let method = &class.methods[m];
-    let mut out = Vec::new();
+    let mut out: Vec<Point> = entry::entry_point(class, facts, m).into_iter().collect();
     let mut frames = Vec::new();
     block_points(class, facts, m, &method.body, &mut frames, &[], &mut out);
     // A constructor runs the initializers of its class's fields, unless it starts with `this(..)`.

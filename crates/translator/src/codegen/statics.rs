@@ -120,11 +120,23 @@ impl<'a> Gen<'a> {
     /// The call that initializes the class of a static field or method before it is used, or
     /// `None` when neither the class nor a superclass is eager, or the code is in that class or
     /// a subclass of it, which is already initialized by then.
-    pub(super) fn init_call(&self, class: usize) -> Option<String> {
+    pub(super) fn init_call(&mut self, class: usize) -> Option<String> {
         let current = self.class.methods[self.method].class;
         let init = self.facts.init_class(self.class, class)?;
         let initialized = current == init || self.class.hierarchy.ancestors(current).contains(&init);
-        (!initialized).then(|| format!("{}();", init_name(&self.class.types[init].name)))
+        (!initialized).then(|| format!("{};", self.init_run(init)))
+    }
+
+    /// The call that runs the initialization of the class `init` (its `init` function), without
+    /// the `;`. A class whose `<clinit>` can throw returns a `Result`, which is passed on from here
+    /// (see `passed_on`).
+    pub(super) fn init_run(&mut self, init: usize) -> String {
+        let call = format!("{}()", init_name(&self.class.types[init].name));
+        if crate::lower::rewritten_clinit(&self.class.types[init]) {
+            self.passed_on(Code::atom(call))
+        } else {
+            call
+        }
     }
 
     /// Whether the cell of static `name` of class `class` holds an `Option`: the static may be
