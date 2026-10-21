@@ -3155,6 +3155,24 @@ fn natives_of_jdk_classes_become_runtime_calls() {
 }
 
 #[test]
+fn natives_that_only_answer_a_value_cannot_fail_in_a_try() {
+    // A `catch` around them sees nothing they raise, as in `ImmutableCollections`'s static
+    // initializer, which reads the seed of CDS.
+    let rust = translate_with_natives(
+        "jdk-natives-caught",
+        "try {
+            System.out.println(CDS.getRandomSeedForDumping() + VM.getNanoTimeAdjustment(0));
+            System.out.println(System.nanoTime() > 0);
+        } catch (Throwable t) {
+            System.out.println(\"caught\");
+        }",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["java::cds_random_seed_for_dumping()"]);
+    assert_lacks(&rust, &["java::catching("]);
+}
+
+#[test]
 fn an_access_through_a_field_offset_is_the_field() {
     let rust = translate_with_natives(
         "jdk-field-handles",
@@ -3926,6 +3944,22 @@ fn equals_takes_the_object_enum() {
             "Object::Plain(o) => f.write_str(&java::default_text(\"Plain\", java::address_hash(Rc::as_ptr(o)))),",
         ],
     );
+}
+
+#[test]
+fn a_class_extending_number_implements_it_and_byte_value_narrows_int_value() {
+    let class = |extra: &str| {
+        format!(
+            "class M {{ static class Cell extends Number {{ int v = 300;
+                public int intValue() {{ return v; }} public long longValue() {{ return v; }}
+                public float floatValue() {{ return v; }} public double doubleValue() {{ return v; }} {extra} }}
+                public static void main(String[] x) {{ Number n = new Cell(); System.out.println(n.byteValue() + n.intValue()); }} }}"
+        )
+    };
+    let rust = translate(&class(""));
+    assert_contains(&rust, &["(n.int_value() as i8 as i32)"]);
+    let err = java_to_rust::translate(&class("public byte byteValue() { return 1; }")).unwrap_err();
+    assert!(err.to_string().contains("overriding `Number.byteValue` not supported yet"), "{err}");
 }
 
 #[test]

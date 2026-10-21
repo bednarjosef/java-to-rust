@@ -47,6 +47,9 @@ impl<'t> Lowering<'t> {
             let x = self.expr(node.list("arguments").next().expect("comparableClassFor has an argument"))?;
             return Ok(Some(ExprKind::Builtin(Builtin::ComparableClassFor, vec![x])));
         }
+        if crate::program::is_ensure_initialized(node.0) {
+            return Ok(Some(self.ensure_initialized(node)?));
+        }
         if (symbol.owner, symbol.name) == ("java.lang.Class", "forName")
             && let Some(kind) = self.class_for_name(node)?
         {

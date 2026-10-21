@@ -98,7 +98,7 @@ impl<'a> Gen<'a> {
             return;
         }
         self.stmts(init, false);
-        let code = self.value(value, ty);
+        let code = if self.optional_yield { self.optional(value) } else { self.value(value, ty) };
         self.line(&code.text);
     }
 

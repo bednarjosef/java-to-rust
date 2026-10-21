@@ -162,7 +162,8 @@ pub fn flows(
     }
     // Every exception may be thrown, which makes it a `Throwable`, and a `catch` clause makes the
     // `Throwable`s under the classes it names values of those classes.
-    if let Some(throwable) = class.type_index("java.lang.Throwable") {
+    let throwable = class.type_index("java.lang.Throwable");
+    if let Some(throwable) = throwable {
         for t in (0..n).filter(|&t| t != throwable && h.is_subtype(t, throwable)) {
             edges.insert((t, throwable));
         }
@@ -188,6 +189,14 @@ pub fn flows(
         ExprKind::Cast(to, value) | ExprKind::InstanceOf { value, ty: to, binding: Some(_) } => {
             if let (Some(t), Some(s)) = (index(*to), index(value.ty)) {
                 edges.insert((s, t));
+                // An exception class's value may be held as a `Throwable` (see `rep`), and then
+                // converts as one, with every variant of `Throwable`.
+                if let Some(throwable) = throwable
+                    && s != throwable
+                    && h.is_subtype(s, throwable)
+                {
+                    edges.insert((throwable, t));
+                }
             }
             // The rows of `new int[n][m]` as an `Object[]` are `Object`s (`lower::arrays`).
             if let (ExprKind::NewArray(_), Type::Array(element), Type::Array(row)) =
