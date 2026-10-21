@@ -172,6 +172,31 @@ A table that is kept up to date: javac on the JVM against the translated javac, 
 inputs (the corpus, then a large real project), with peak memory and time for each. The first row
 is "does not translate yet".
 
+#### javac
+
+Measured on 2026-10-21 with a release build, on the JDK 26 sources (`jdk.compiler` as the program,
+`java.compiler`, `jdk.internal.opt` and `java.base` as libraries, all with their `module-info.java`),
+running `--census`:
+
+- **Getting the code**: javac attributes 1599 units in 14 to 17 s; reachability takes 14 to 19 s
+  over 15 rounds and reaches 3405 classes and 21,539 methods (the quicker `--survey` counts
+  26,102 pieces of code: 11,358 of javac's own and 14,744 of the libraries').
+- **Lowering**: five attempts (the Rust generics are narrowed down between them) of 16 s each, 81 s
+  in all on a quiet machine (148 s while other builds ran).
+- **The analyses: not finished.** After lowering, the census's first run of the whole-program
+  object analysis (`analysis::whole_objects`) did not end within 55 minutes of CPU, so there are
+  no overall percentages yet. The check for null enums before it takes 0.17 s a round. The
+  translator's largest process peaked at 4.4 GB by then. This analysis is the next thing to make
+  fast before javac can be measured further.
+- **What lowering alone rejects** (a census that stopped after lowering, before the census could
+  go past rejected classes): 99.1% of javac's own 11,358 pieces of code and 97.3% of the libraries'
+  15,253 lower. javac's own code is held up most by method references on a computed receiver
+  (29 pieces), reflection (16), `Throwable.printStackTrace` and its relatives (13) and
+  `ClassLoader` as a type (12); the libraries' by methods of the runtime's classes that are not
+  there yet (102, such as `CharSequence.subSequence` and `String.codePointAt`), native methods
+  (95, `Unsafe.park` and `unpark` first), `Unsafe` accesses whose offset is not a field's (60) and
+  `ClassLoader` as a type (28).
+
 ## Choosing what comes next
 
 After the target programs pass, the two candidate tracks are this one and

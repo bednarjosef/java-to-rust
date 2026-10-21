@@ -102,7 +102,10 @@ fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Reje
     // without them. One of the analyses or the generator that no stub takes away ends it. The
     // generator reports every error it finds, which are stubbed together.
     let passes: [Pass; 4] = [
-        |class| lower::check_enum_nulls(class).map_err(|e| vec![e]),
+        |class| {
+            crate::timings::phase("census: enum nulls", || lower::check_enum_nulls(class))
+                .map_err(|e| vec![e])
+        },
         |class| {
             crate::timings::phase("census: whole objects", || analysis::whole_objects(class))
                 .map_err(|e| vec![e])
