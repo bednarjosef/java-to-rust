@@ -935,6 +935,43 @@ natives above. `ForkJoinPool`, `ConcurrentHashMap`, `Thread` and the `Unsafe` at
   ICU normalizer data of `ICUBinary`. `ScannerGrades` now stops first at `BigDecimal` extending
   `Number`. Tests: `corpus/whole-program/CharacterFromJdk.java` and
   `reading_a_resource_ends_the_program`.
+- **The locale path: resource bundles and the locale data they are created from**: the locale
+  layer that `Scanner` reaches (`LocaleResources`, `LocaleServiceProviderPool`, `Bundles`)
+  needed five things. `Throwable.initCause` is `Standard.java`'s, with Java's two checks (a
+  cause set before, by `initCause` or a constructor, and a throwable that would be its own
+  cause; `lower/suppress.rs` adds the throws). An `Object[]` passed on as the arguments of
+  `String.format` (`LocaleResources.trace`) is formatted element by element through
+  `java::format_objects`, by each element's `toString`, so a conversion other than `%s`, `%S`,
+  `%n` and `%%` of such an array fails loudly. `System.getLogger(name).log(level, message)`
+  (`LocaleServiceProviderPool`) prints `LEVEL: message` on `System.err` from `INFO` up, as the
+  JDK's default logger does without its first line of time and caller. `ResourceBundle` is no
+  longer one of the `UNTRANSLATED`: `LocaleData` uses `ResourceBundle.Control` to find the
+  candidate locales and the bundle names. And `ResourceBundle` creates the bundles by reflection,
+  which `program/reach/by_name.rs` and `lower/by_name.rs` now close over the program:
+  `Class.forName(Bundles.class.getModule(), name)` with a computed name finds one of the locale
+  data classes of the libraries (`sun.text.resources[.cldr]`, `sun.util.resources[.cldr]`) for
+  the root locale, `en` and `en_US`, which reachability takes as found by name
+  (`Reach::found_by_name`), and any other name gives `null`, as a bundle the JDK does not have
+  would; `X.class.isAssignableFrom(c)` compares `c` with the program's classes that are or
+  extend `X`; `c.getConstructor()` and `getDeclaredConstructor()` are `c` itself (a
+  `Constructor` without parameters is a `Type::JavaClass`), and `newInstance()` of either, and
+  the deprecated `Class.newInstance()` (`CalendarSystem.forName`), create an object of whichever
+  of the classes named in reachable code and bounded by `c`'s type `c` is, with
+  `getModifiers()` the bits of that constructor's modifiers and `setAccessible` nothing; and
+  `Class.forName(name)` with a computed name is one of the classes that names in reachable code
+  find (`Reach::named`), initialized. Three deviations: a class without a constructor without
+  parameters ends the program where Java throws `NoSuchMethodException`, `getConstructor()`
+  finds such a constructor that is not public too (`ResourceBundle` checks `getModifiers()`
+  itself), and an exception that the constructor throws is not wrapped in an
+  `InvocationTargetException`. `Modifier` and `InvocationTargetException` are translated
+  (`TRANSLATED_ANYWAY`). `ScannerGrades` went from 250 distinct rejections to 242; it still stops
+  first at `ForkJoinPool`'s `Thread.UncaughtExceptionHandler`, and the locale path now reaches
+  `HostLocaleProviderAdapter` and `SPILocaleProviderAdapter.findInstalledProvider` (both
+  reflection or `ServiceLoader`, for adapters a default configuration never creates, created
+  because every adapter named in `LocaleProviderAdapter.Type` is a candidate) and
+  `BreakIteratorResourceBundle`'s `getPackageName` and module resources. Tests:
+  `corpus/features/InitCause.java`, `FormatObjectArray.java`, `SystemLogger.java` and
+  `corpus/whole-program/ObjectsFromClassValues.java`.
 
 Survey numbers on main before this work and after it (natives, then those in the runtime):
 

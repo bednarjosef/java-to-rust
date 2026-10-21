@@ -9,10 +9,10 @@ mod survey;
 
 pub use census::{Census, census_program};
 pub use reach::{
-    CLASS_KINDS, FieldUpdate, LOCALE_LANGUAGE, PRINT_FORMATTED, Reach, STRING_STREAMS, class_for_name,
-    class_name, component_array, created_by_name, direct_stream_call, is_ensure_initialized, literal_class,
-    live_branch, standard_stream_field, stream_of_call, unsafe_field_access, unsafe_field_update,
-    untranslated, writes_string_array,
+    CLASS_KINDS, FieldUpdate, LOCALE_LANGUAGE, PRINT_FORMATTED, Reach, STRING_STREAMS, class_bound,
+    class_for_name, class_name, component_array, computed_for_name, created_by_name, direct_stream_call,
+    is_ensure_initialized, literal_class, live_branch, module_for_name, standard_stream_field,
+    stream_of_call, unsafe_field_access, unsafe_field_update, untranslated, writes_string_array,
 };
 pub use survey::Survey;
 
@@ -125,8 +125,9 @@ fn load(program: &Program, string_array_writes: bool) -> Result<(Vec<Value>, Rea
     // changes, by index, with their records as completed.
     let mut trees: Vec<&Value> = Vec::new();
     let mut changing: Vec<(usize, &Value, Vec<Value>)> = Vec::new();
+    let locale_data = reach::locale_data_classes(&program.libraries);
     let new_rounds = || {
-        let rounds = reach::Rounds::new(&program.main);
+        let rounds = reach::Rounds::new(&program.main).with_locale_data(locale_data.clone());
         if string_array_writes { rounds.with_string_array_writes() } else { rounds }
     };
     let mut rounds = new_rounds();
@@ -271,7 +272,10 @@ pub fn survey_program(program: &Program) -> Result<Survey, ProgramError> {
     let tree = javac_tree(program, &files)?;
     let units: Vec<&Value> = tree["units"].as_array().into_iter().flatten().collect();
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
-    let reach = reach::reach(&trees, &program.main).map_err(fail)?;
+    let mut rounds =
+        reach::Rounds::new(&program.main).with_locale_data(reach::locale_data_classes(&program.libraries));
+    rounds.add(&trees).map_err(fail)?;
+    let reach = rounds.finish();
     Ok(survey::survey(&units, &reach, program, &files))
 }
 

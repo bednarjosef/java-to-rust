@@ -164,7 +164,7 @@ fn a_lambda_moves_the_locals_it_captures_into_its_closure() {
         &rust,
         &[
             "type AOp = Rc<dyn Fn(i32) -> i32>;",
-            "let op = Rc::new(move |a: i32| -> i32 { a.wrapping_add(k).wrapping_add(java::string_length(&name)) }) as AOp;",
+            "let op = Rc::new(move |a: i32| -> i32 { a.wrapping_add(k).wrapping_add(name.len() as i32) }) as AOp;",
             "op(1)",
         ],
     );
@@ -188,7 +188,7 @@ fn a_local_that_only_calls_its_lambda_is_a_closure_that_borrows_its_captures() {
         &rust,
         &[
             "let scaled = |a: i32| -> i32 { a.wrapping_mul(this.borrow().base) };",
-            "let op = |a: i32| -> i32 { a.wrapping_add(java::string_length(&name)) };",
+            "let op = |a: i32| -> i32 { a.wrapping_add(name.len() as i32) };",
             "op(1)",
         ],
     );

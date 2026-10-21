@@ -25,7 +25,7 @@ impl<'a> Gen<'a> {
             _ if self.nullable(e) => self.deref(e),
             ExprKind::Str(s) => rust_string(s),
             ExprKind::Var(name) => self.local(name),
-            ExprKind::Field { object, .. } if self.field_in_place(object) => self.object_place(e),
+            ExprKind::Field { object, name } if self.field_in_place(object, name) => self.object_place(e),
             _ => self.expr(e).at(ATOM),
         }
     }
@@ -48,11 +48,15 @@ impl<'a> Gen<'a> {
             StringOp::Substring => {
                 let s = self.text_ref(&args[0]);
                 let begin = self.int_arg(&args[1]);
+                // Of an ASCII string, a range of units is the same range of bytes.
+                let ascii = if self.facts.ascii_length.contains(&id) { "ascii_" } else { "" };
                 match args.get(2) {
-                    None => self.may_fail(id, "substring_from", "", &format!("{s}, {begin}")),
+                    None => {
+                        self.may_fail(id, &format!("{ascii}substring_from"), "", &format!("{s}, {begin}"))
+                    }
                     Some(end) => {
                         let end = self.int_arg(end);
-                        self.may_fail(id, "substring", "", &format!("{s}, {begin}, {end}"))
+                        self.may_fail(id, &format!("{ascii}substring"), "", &format!("{s}, {begin}, {end}"))
                     }
                 }
             }
@@ -505,6 +509,23 @@ impl<'a> Gen<'a> {
     /// `String.format(format, args...)` as `java::format`, each argument as a `java::Arg`.
     pub(super) fn format_builtin(&mut self, args: &'a [Expr]) -> Code {
         let format = self.text_ref(&args[0]);
+        // The arguments in an `Object[]`, by their text (see `java::format_objects`).
+        if let [_, array] = args
+            && let Type::Array(element) = array.ty
+        {
+            // A string is its text, and an object of an enum shows through the enum's `Display`.
+            if let Some(t) = self.enum_type(*element) {
+                self.need(Need::Display(t));
+            } else if *element != Type::String {
+                let message = "this array as the arguments of `String.format` not supported yet";
+                self.rejected.push(Error { pos: array.pos, message: message.to_string() });
+            }
+            let slice = self.slice_of(array);
+            let f = self.runtime("format_objects");
+            let texts =
+                format!("{slice}.iter().map(|o| o.as_ref().map(|o| o.to_string())).collect::<Vec<_>>()");
+            return Code::atom(format!("{f}({format}, &{texts})"));
+        }
         let values: Vec<String> = args[1..].iter().map(|a| self.format_arg(a)).collect();
         let f = self.runtime("format");
         Code::atom(format!("{f}({format}, &[{}])", values.join(", ")))

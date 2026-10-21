@@ -5,6 +5,7 @@
 
 mod code_point;
 mod covariant;
+mod element_reads;
 mod enum_nulls;
 mod enum_tables;
 mod enums;
@@ -102,6 +103,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let mut methods: Vec<Method> =
             (0..lowering.methods.len()).map(|m| lowering.method(m)).collect::<Result<_, _>>()?;
         lowering.suppress_checks(&mut methods);
+        lowering.init_cause_checks(&mut methods);
         lowering.object_methods(&mut methods)?;
         lowering.finish_types(&mut types, &mut methods).map_err(|(_, e)| e)?;
         lowering.object_types(&mut types);
@@ -372,6 +374,7 @@ impl<'t> Lowering<'t> {
         self.method_ctx.set(outer);
         let mut method = method?;
         local_names::distinct_locals(&mut method);
+        self.share_element_reads(&mut method);
         Ok(method)
     }
 
@@ -474,6 +477,13 @@ impl<'t> Lowering<'t> {
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
             // An array of these (`Class<?>[]`, `Enum<?>[]`) is an array type, below.
             _ if name == "java.lang.Class" || generic_of(name, "java.lang.Class") => Ok(Type::JavaClass),
+            // A constructor without parameters, the only one that a translation creates objects
+            // with from a `Class` value, is its class (`by_name.rs`).
+            _ if name == "java.lang.reflect.Constructor"
+                || generic_of(name, "java.lang.reflect.Constructor") =>
+            {
+                Ok(Type::JavaClass)
+            }
             // A value of one of the program's enums (see `enums::enum_call`).
             _ if (name == "java.lang.Enum" || generic_of(name, "java.lang.Enum"))
                 && self.object.is_some_and(|at| at.enumeration.is_some()) =>
@@ -859,6 +869,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.system_log(node, &symbol, select)? {
             return Ok(kind);
         }
         if let Some(kind) = self.class_call(node, &symbol, select)? {

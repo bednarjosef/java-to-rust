@@ -153,6 +153,7 @@ pub fn start_thread(tid: i64, name: String, daemon: bool, body: impl FnOnce() + 
         RECORD.with_borrow_mut(|r| *r = Some(record.clone()));
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(body));
         CURRENT.with_borrow_mut(|c| *c = None);
+        crate::release_thread_cache();
         if let Err(payload) = outcome
             && !payload.is::<Uncaught>()
         {

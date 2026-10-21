@@ -14,7 +14,9 @@ mod initialize;
 mod sequential;
 mod stubs;
 
-pub use by_name::{class_for_name, created_by_name};
+pub use by_name::{
+    class_bound, class_for_name, computed_for_name, created_by_name, locale_data_classes, module_for_name,
+};
 pub use initialize::{is_ensure_initialized, literal_class};
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
@@ -67,6 +69,12 @@ pub struct Reach {
     /// Classes that reachable code initializes through a `Class` value, which it gives
     /// `MethodHandles.Lookup.ensureInitialized` (`initialize.rs`).
     pub ensured: BTreeSet<String>,
+    /// The classes that a name in reachable code can find: those whose names its string
+    /// literals spell out, and the locale data that a computed `Class.forName(module, name)`
+    /// finds (`by_name.rs`).
+    pub named: BTreeSet<String>,
+    /// The locale data classes that a computed `Class.forName(module, name)` finds.
+    pub found_by_name: BTreeSet<String>,
 }
 
 impl Reach {
@@ -140,9 +148,10 @@ pub const RUNTIME_CLASSES: &[&str] = &[
 /// reachability stops there, as at the runtime's classes, and the survey counts its use. Library
 /// code reaches these on paths that only its data rules out, such as `TreeMap.addAll` reading
 /// from a stream that is null there. Class and resource loading finds classes and data by name
-/// (`ResourceBundle` the locale data, `ServiceLoader` the providers), which is reflection in all
-/// but name: a closed-world translation knows its classes. (`java.lang.Module` is a prefix of
-/// `java.lang.ModuleLayer` too.)
+/// (`ServiceLoader` the providers), which is reflection in all but name: a closed-world
+/// translation knows its classes. `ResourceBundle` is translated: the locale data it finds by
+/// name are the classes of the program. (`java.lang.Module` is a prefix of `java.lang.ModuleLayer`
+/// too.)
 pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.io.ObjectInputStream", "serialization"),
     ("java.io.ObjectOutputStream", "serialization"),
@@ -151,7 +160,6 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.lang.invoke.", "reflection"),
     ("java.lang.reflect.", "reflection"),
     ("java.security.", "security"),
-    ("java.util.ResourceBundle", "class loading"),
     ("java.util.ServiceLoader", "class loading"),
     ("jdk.internal.loader.", "class loading"),
     ("jdk.internal.reflect.", "reflection"),
@@ -160,8 +168,11 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
 
 /// Classes under a prefix of `UNTRANSLATED` that are translated all the same:
 /// `java.lang.reflect.Array` creates arrays of a component type and measures them, which is what
-/// `Arrays.copyOf` and `Collection.toArray` need of it, not reflection.
-pub const TRANSLATED_ANYWAY: &[&str] = &["java.lang.reflect.Array"];
+/// `Arrays.copyOf` and `Collection.toArray` need of it, not reflection. `Modifier` tests the bits
+/// of a member's modifiers, and `InvocationTargetException` is an exception like any other,
+/// which code that creates an object from a `Class` value catches (`by_name.rs`).
+pub const TRANSLATED_ANYWAY: &[&str] =
+    &["java.lang.reflect.Array", "java.lang.reflect.InvocationTargetException", "java.lang.reflect.Modifier"];
 
 /// Methods of translated classes whose calls the lowering replaces with the runtime's code
 /// (`lower/natives.rs`), so that reachability does not enter them, as with the runtime's classes.
@@ -558,6 +569,7 @@ pub const CLASS_KINDS: &[&str] = &["CLASS", "INTERFACE", "ENUM", "RECORD", "ANNO
 /// What reachable code uses in the program made of these compilation units, starting from the
 /// `main` method of the class with qualified name `main`. Streams are first assumed to stay
 /// sequential; when the code so reached can make one parallel, the walk is made again without.
+#[cfg(test)]
 pub fn reach(units: &[&Value], main: &str) -> Result<Reach, String> {
     let mut rounds = Rounds::new(main);
     rounds.add(units)?;
@@ -581,6 +593,8 @@ pub struct Rounds<'t> {
     check: sequential::Index<'t>,
     /// Whether the assumption holds over the units so far.
     stays_sequential: bool,
+    /// The locale data classes of the libraries (`Walk::locale_data`).
+    locale_data: Vec<String>,
     /// The walk without the assumption, made once it fails, and then kept up too.
     parallel: Option<Walk<'t>>,
     /// How many times a walk started again (`Walk::stale`).
@@ -597,6 +611,7 @@ impl<'t> Rounds<'t> {
             sequential: None,
             check: sequential::Index::default(),
             stays_sequential: true,
+            locale_data: Vec::new(),
             parallel: None,
             restarts: 0,
             string_array_writes: false,
@@ -607,6 +622,13 @@ impl<'t> Rounds<'t> {
     /// methods (`Reach::string_array_writes`).
     pub fn with_string_array_writes(mut self) -> Rounds<'t> {
         self.string_array_writes = true;
+        self
+    }
+
+    /// Reachability in which a computed `Class.forName(module, name)` finds these locale data
+    /// classes of the libraries (`by_name::locale_data_classes`).
+    pub fn with_locale_data(mut self, classes: Vec<String>) -> Rounds<'t> {
+        self.locale_data = classes;
         self
     }
 
@@ -631,7 +653,9 @@ impl<'t> Rounds<'t> {
                 walk
             }
             None => {
-                self.sequential.insert(Walk::start(&self.units, &self.main, true, self.string_array_writes)?)
+                let walk =
+                    Walk::start(&self.units, &self.main, true, self.string_array_writes, &self.locale_data)?;
+                self.sequential.insert(walk)
             }
         };
         self.stays_sequential = self.check.streams_stay_sequential(sequential);
@@ -644,7 +668,9 @@ impl<'t> Rounds<'t> {
                 }
             }
             None if !self.stays_sequential => {
-                self.parallel = Some(Walk::start(&self.units, &self.main, false, self.string_array_writes)?);
+                let walk =
+                    Walk::start(&self.units, &self.main, false, self.string_array_writes, &self.locale_data)?;
+                self.parallel = Some(walk);
             }
             None => {}
         }
@@ -729,6 +755,13 @@ struct Walk<'t> {
     literals: HashSet<String>,
     /// The method whose code is being scanned.
     scanning: Option<MethodKey>,
+    /// The locale data classes of the libraries, which a computed `Class.forName(module, name)`
+    /// can find (`by_name::locale_data_classes`), and whether reachable code has one.
+    locale_data: Vec<String>,
+    finds_locale_data: bool,
+    /// Whether reachable code finds a class by a name it computes, `Class.forName(name)`, which
+    /// initializes every class that it can find (`by_name.rs`).
+    finds_named: bool,
     /// The parameters, by method and position, that a method gives `ensureInitialized`, and the
     /// class literals that reachable code passes to each parameter (`initialize.rs`).
     initializing: HashSet<(MethodKey, usize)>,
@@ -743,8 +776,9 @@ impl<'t> Walk<'t> {
         main: &str,
         sequential: bool,
         string_array_writes: bool,
+        locale_data: &[String],
     ) -> Result<Walk<'t>, String> {
-        let mut walk = Walk { sequential, ..Walk::default() };
+        let mut walk = Walk { sequential, locale_data: locale_data.to_vec(), ..Walk::default() };
         walk.reach.sequential = sequential;
         walk.reach.string_array_writes = string_array_writes;
         walk.declare_units(units);
@@ -780,6 +814,7 @@ impl<'t> Walk<'t> {
             supertypes: std::mem::take(&mut self.supertypes),
             overriders: std::mem::take(&mut self.overriders),
             sequential,
+            locale_data: std::mem::take(&mut self.locale_data),
             ..Walk::default()
         };
         self.reach.sequential = sequential;
@@ -1197,6 +1232,7 @@ impl<'t> Walk<'t> {
                 if let Some((class, initialize)) = class_for_name(value) {
                     self.work.push(if initialize { Item::Init(class) } else { Item::Class(class) });
                 }
+                self.reflective(value);
                 if text(value, "kind") == "STRING_LITERAL"
                     && let Some(literal) = value["value"].as_str()
                 {
@@ -1597,11 +1633,12 @@ mod tests {
     #[test]
     fn class_loading_is_not_translated_and_reflect_array_is() {
         assert_eq!(untranslated("java.util.ServiceLoader"), Some("class loading"));
-        assert_eq!(untranslated("java.util.ResourceBundle.Control"), Some("class loading"));
+        assert_eq!(untranslated("java.util.ResourceBundle.Control"), None);
         assert_eq!(untranslated("java.lang.ModuleLayer"), Some("class loading"));
         assert_eq!(untranslated("jdk.internal.loader.BootLoader"), Some("class loading"));
         assert_eq!(untranslated("java.lang.reflect.Method"), Some("reflection"));
         assert_eq!(untranslated("java.lang.reflect.Array"), None);
+        assert_eq!(untranslated("java.lang.reflect.Modifier"), None);
         assert_eq!(untranslated("java.util.ArrayList"), None);
         // Reachability stops at the loader, and goes into `Array`.
         let unit = json!({"typeDecls": [

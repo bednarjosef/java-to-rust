@@ -727,6 +727,9 @@ impl<'a> Gen<'a> {
                 let s = match &args[0].kind {
                     _ if self.nullable(&args[0]) => self.deref(&args[0]),
                     ExprKind::Str(_) | ExprKind::Var(_) => self.str_value(&args[0]),
+                    ExprKind::Field { object, name } if self.field_in_place(object, name) => {
+                        self.object_place(&args[0])
+                    }
                     _ => self.expr(&args[0]).at(ATOM),
                 };
                 Code::new(format!("{s}.len() as i32"), AS)

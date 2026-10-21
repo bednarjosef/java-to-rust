@@ -3031,7 +3031,7 @@ fn string_methods_call_the_runtime_with_borrowed_text() {
         &[
             "text.is_empty() || !text.contains(part)",
             "java::split(text, part, 0)",
-            "java::substring_from(&s, 1)",
+            "java::ascii_substring_from(&s, 1)",
             "java::index_of_char(&s, ',' as i32, 0)",
             "java::uppercase(&s)",
         ],
