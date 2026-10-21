@@ -27,6 +27,7 @@ mod math;
 mod names;
 mod null;
 mod object_clone;
+mod parse_range;
 mod primitives;
 mod statics;
 mod stmt;
@@ -131,6 +132,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         throwing: false,
         attempts: Vec::new(),
         finallies: Vec::new(),
+        yield_slots: Vec::new(),
         attempt_count: 0,
         try_assigned: HashSet::new(),
         dereferenced: HashSet::new(),
@@ -292,6 +294,9 @@ struct Gen<'a> {
     /// The `try` statements with a `finally` whose body or `catch` clauses are being written,
     /// innermost last.
     finallies: Vec<exceptions::Finally>,
+    /// The switch expressions (by frame index) that a `yield` leaves through a `finally`: their
+    /// value waits in a `yielded{index}` local (see `switch.rs`).
+    yield_slots: Vec<usize>,
     /// How many `try` blocks of the current method have a label.
     attempt_count: usize,
     /// The current method's locals declared without a value that a `try` block assigns (see
@@ -495,9 +500,15 @@ impl<'a> Gen<'a> {
         }
         params.extend(self.typed_params(index, true));
         let ret = self.ret_text(index);
-        // The body of a method that never runs may call what was never emitted, such as the
-        // default methods of an interface on a class that implements it without objects.
-        let never_runs = !m.is_static && !m.is_ctor && !self.runs[m.class];
+        // The body of a method or constructor that never runs may call what was never emitted,
+        // such as the default methods of an interface on a class that implements it without
+        // objects, or the methods of a superclass whose values are all of another subclass.
+        // Reach marks a method of a class without objects with a `NoObject` body.
+        let never_runs = !m.is_static && m.name != "<clinit>" && !self.runs[m.class]
+            || matches!(
+                &m.body[..],
+                [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, _), .. })]
+            );
         if never_runs {
             self.line("#[allow(unused_variables)]");
         }
@@ -523,8 +534,7 @@ impl<'a> Gen<'a> {
             self.line(&format!("{}();", statics::init_name(&self.class.types[t].name)));
         }
         if never_runs {
-            let name = &self.class.types[m.class].name;
-            self.line(&format!("unreachable!(\"no object of {name} is created\")"));
+            self.line(&no_object(&self.class.types[m.class].name));
         } else if m.is_ctor {
             self.constructor(m);
         } else {
@@ -564,6 +574,11 @@ impl<'a> Gen<'a> {
         }
         self.boxed = boxed_locals(m);
     }
+}
+
+/// The body of a method that never runs, as no object of the class named `name` is created.
+fn no_object(name: &str) -> String {
+    format!("unreachable!(\"no object of {name} is created\")")
 }
 
 /// A borrow scoped with braces, `{ x.borrow().f }`, is a function argument of its own in a

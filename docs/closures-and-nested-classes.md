@@ -411,8 +411,9 @@ is written as a closure (4.4 shows it). The general rules:
   `instanceof`/casts see it. It is never named by the program, so no `Cast` to it exists and it
   is only ever reached through its supertype.
 - An anonymous class that extends a class and overrides a method called from that class's
-  constructor is rejected by the object model's existing rule (a constructor calling an
-  overridable method).
+  constructor gets the object model's second constructor form (`docs/object-model.md` 1.4): the
+  superclass's constructor body runs on the whole object, so it calls the anonymous class's
+  override.
 
 ### 3.3 Anonymous classes with state as closures
 

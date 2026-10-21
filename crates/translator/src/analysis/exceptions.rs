@@ -27,6 +27,9 @@ use crate::ast::*;
 use crate::lower::standard_subclass;
 use std::collections::{BTreeSet, HashSet};
 
+/// What a static initializer that throws raises: Java wraps the exception in this `Error`.
+const INITIALIZER_ERROR: &str = "java.lang.ExceptionInInitializerError";
+
 /// An exception that may be raised: an object of a concrete class of the program (or a standard
 /// class it creates), or a failure of the runtime, by its standard class's name (`"?"` when the
 /// operation's failures are not known exactly).
@@ -86,6 +89,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         }
     };
     let caught = |k: &Kind, frames: &[Frame]| frames.iter().any(|f| f.catches.iter().any(|&t| matches(k, t)));
+    let initializer: Vec<bool> = class.methods.iter().map(|m| m.name == "<clinit>").collect();
     let raised = |p: &Point, escapes: &[BTreeSet<Kind>]| -> BTreeSet<Kind> {
         match &p.raise {
             Raise::Throw(t) => h.concretes(*t).into_iter().map(Kind::Class).collect(),
@@ -102,6 +106,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             let mut out = BTreeSet::new();
             for p in &points[m] {
                 out.extend(raised(p, &escapes).into_iter().filter(|k| !caught(k, &p.frames)));
+            }
+            if initializer[m] && !out.is_empty() {
+                out = BTreeSet::from([Kind::Runtime(INITIALIZER_ERROR)]);
             }
             if out != escapes[m] {
                 escapes[m] = out;
@@ -148,8 +155,10 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     }
     let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|&t| matches(k, t));
 
-    let mut throwing: HashSet<usize> =
-        (0..class.methods.len()).filter(|&m| escapes[m].iter().any(|k| observed(k, &seen[m]))).collect();
+    // A static initializer never returns a `Result`: what it raises ends the program (see `seen`).
+    let mut throwing: HashSet<usize> = (0..class.methods.len())
+        .filter(|&m| !initializer[m] && escapes[m].iter().any(|k| observed(k, &seen[m])))
+        .collect();
     let groups: Vec<usize> = throwing.iter().flat_map(|&m| h.group(m)).collect();
     throwing.extend(groups);
 
@@ -266,17 +275,15 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         }
     }
 
-    // A try-with-resources closes its resources in a `finally`, which is Java's behaviour only
-    // when `close` cannot fail (see `lower/exceptions.rs`).
-    let fails = may_fail(class, facts);
-    for &(close, pos) in &class.closes {
-        if class.hierarchy.group(close).iter().any(|&g| fails[g]) {
-            return error(pos, "a resource whose `close` may fail not supported yet");
+    // A static initializer's exception reaches the program as `ExceptionInInitializerError`, an
+    // `Error` that a `try` here is not known to match, so one that observes it is not translated.
+    for (m, method) in class.methods.iter().enumerate() {
+        if initializer[m] && !escapes[m].is_empty() && (seen[m].all || !seen[m].types.is_empty()) {
+            return error(method.pos, "a static initializer that throws inside a `try` not supported yet");
         }
     }
-
-    // Static initializers, and the initializers of fields and enum constants, run outside any
-    // `try` of the program: Java would wrap what they throw in `ExceptionInInitializerError`.
+    // The initializers of instance fields and of enum constants run outside any `try` of the
+    // program: Java would wrap what they throw in `ExceptionInInitializerError`.
     let escapes_ref = &escapes;
     let initializer_raises = |e: &Expr, m: usize| {
         let mut out = Vec::new();
@@ -285,13 +292,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             .any(|p| raised(p, escapes_ref).iter().any(|k| matches!(k, Kind::Class(_))))
             .then_some(e.pos)
     };
-    for (m, method) in class.methods.iter().enumerate() {
-        if method.name == "<clinit>" && escapes[m].iter().any(|k| matches!(k, Kind::Class(_))) {
-            return error(method.pos, "a static initializer that throws not supported yet");
-        }
-    }
     for decl in &class.types {
-        for f in decl.fields.iter().chain(&decl.statics) {
+        for f in &decl.fields {
             if let Some(pos) = f.init.as_ref().and_then(|e| initializer_raises(e, usize::MAX)) {
                 return error(pos, "a field initializer that throws not supported yet");
             }
@@ -300,27 +302,6 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
             if let Some(pos) = constant.values.iter().find_map(|e| initializer_raises(e, usize::MAX)) {
                 return error(pos, "an enum constant whose arguments throw not supported yet");
             }
-        }
-    }
-
-    // `throw null` throws a `NullPointerException` instead.
-    for (m, method) in class.methods.iter().enumerate() {
-        let mut found = None;
-        for s in &method.body {
-            visit_stmt(s, &mut |_| {}, &mut |s| {
-                if let Stmt::Throw(e) = s {
-                    let thrown = match &e.kind {
-                        ExprKind::Cast(_, inner) => inner,
-                        _ => e,
-                    };
-                    if matches!(thrown.kind, ExprKind::Null) || maybe_null(facts, m, thrown) {
-                        found.get_or_insert(e.pos);
-                    }
-                }
-            });
-        }
-        if let Some(pos) = found {
-            return error(pos, "throwing a value that may be null not supported yet");
         }
     }
 
@@ -335,28 +316,6 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
 
 /// Which methods may fail at all: throw, fail in the runtime (whether or not a handler would see
 /// it), or call a method that may fail.
-fn may_fail(class: &Class, facts: &Facts) -> Vec<bool> {
-    let points: Vec<Vec<Point>> = (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
-    let mut fails = vec![false; class.methods.len()];
-    loop {
-        let mut changed = false;
-        for m in 0..class.methods.len() {
-            if !fails[m]
-                && points[m].iter().any(|p| match &p.raise {
-                    Raise::Call(callees) => callees.iter().any(|&c| fails[c]),
-                    Raise::Throw(_) | Raise::Runtime { .. } => true,
-                })
-            {
-                fails[m] = true;
-                changed = true;
-            }
-        }
-        if !changed {
-            return fails;
-        }
-    }
-}
-
 /// The points of method `m` that may raise an exception, with the `try`s around each.
 fn method_points(class: &Class, facts: &Facts, m: usize) -> Vec<Point> {
     let method = &class.methods[m];
@@ -519,7 +478,12 @@ fn stmt_points(
                 ExprKind::Cast(_, inner) => inner,
                 _ => e,
             };
-            if let Some(t) = class.class_index(thrown.ty) {
+            // A value that may be null throws a `NullPointerException` instead, by `throw` itself.
+            if matches!(thrown.kind, ExprKind::Null) || maybe_null(facts, m, thrown) {
+                let raise =
+                    Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: thrown.id };
+                out.push(Point { raise, pos: e.pos, what: "this throw", frames: frames.clone() });
+            } else if let Some(t) = class.class_index(thrown.ty) {
                 out.push(Point {
                     raise: Raise::Throw(t),
                     pos: e.pos,
@@ -602,6 +566,41 @@ fn children(s: &Stmt) -> Vec<&Stmt> {
     }
 }
 
+/// The `<clinit>`s that evaluating `x` runs: those of the classes whose static field it reads or
+/// writes, or whose static method or constructor it calls, unless the method `m` is in such a class
+/// or in a subclass of it (as `Gen::init_call` decides). A constant is inlined and runs nothing.
+fn static_inits(class: &Class, facts: &Facts, m: usize, x: &Expr) -> Vec<usize> {
+    let mut classes = Vec::new();
+    match &x.kind {
+        ExprKind::Static { class: t, name } => {
+            if !class.types[*t].statics.iter().any(|f| f.name == *name && f.constant) {
+                classes.push(*t);
+            }
+        }
+        ExprKind::Assign { target: Place::Static { class: t, .. }, .. } => classes.push(*t),
+        _ => {}
+    }
+    for c in class.callees(x) {
+        let callee = &class.methods[c];
+        if callee.is_static || callee.is_ctor {
+            classes.push(callee.class);
+        }
+    }
+    let current = class.methods.get(m).map(|c| c.class);
+    classes
+        .into_iter()
+        .filter_map(|t| {
+            let init = facts.init_class(class, t)?;
+            let initialized =
+                current.is_some_and(|c| c == init || class.hierarchy.ancestors(c).contains(&init));
+            if initialized {
+                return None;
+            }
+            class.methods.iter().position(|c| c.class == init && c.name == "<clinit>")
+        })
+        .collect()
+}
+
 /// The points inside an expression: its calls, the `toString`s it runs, and the failures of the
 /// runtime it may raise, in the order Java evaluates them.
 fn expr_points(
@@ -619,6 +618,9 @@ fn expr_points(
     let callees = class.callees(x);
     if !callees.is_empty() {
         push(Raise::Call(callees), x.pos, "this call");
+    }
+    for init in static_inits(class, facts, m, x) {
+        push(Raise::Call(vec![init]), x.pos, "this static use");
     }
     for object in text_objects(x) {
         let shown = to_string_impls(class, object.ty);
@@ -788,7 +790,10 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             ArraysOp::Equals | ArraysOp::HashCode | ArraysOp::SortAll | ArraysOp::BinarySearch,
         ) => None,
         Builtin::Arrays(ArraysOp::DeepToString | ArraysOp::Clone) => None,
-        Builtin::Bits(BitsOp::ParseRadix, _) => Some("java.lang.NumberFormatException"),
+        Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _) => Some("java.lang.NumberFormatException"),
+        Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _) => {
+            Some("java.lang.NumberFormatException")
+        }
         Builtin::EnumValueOf => Some("java.lang.IllegalArgumentException"),
         Builtin::Bits(..) => None,
         Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => None,
@@ -800,6 +805,7 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         Builtin::Native(Native::Math { name: "clamp", .. }) => Some("java.lang.IllegalArgumentException"),
         // The others are functions on numbers, which never throw.
         Builtin::Native(Native::Math { .. }) => None,
+        Builtin::CodePoint(CodePointOp::ToCharsInto) => Some("java.lang.IllegalArgumentException"),
         Builtin::CodePoint(
             CodePointOp::CharCount
             | CodePointOp::ToCodePoint
@@ -807,7 +813,19 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | CodePointOp::LowSurrogate
             | CodePointOp::IsValid
             | CodePointOp::IsBmp
-            | CodePointOp::IsSupplementary,
+            | CodePointOp::IsSupplementary
+            | CodePointOp::IsLetter
+            | CodePointOp::IsDigit
+            | CodePointOp::IsLetterOrDigit
+            | CodePointOp::IsWhitespace
+            | CodePointOp::IsSpaceChar
+            | CodePointOp::IsUpperCase
+            | CodePointOp::IsLowerCase
+            | CodePointOp::IsAlphabetic
+            | CodePointOp::ToUpperCase
+            | CodePointOp::ToLowerCase
+            | CodePointOp::NumericValue
+            | CodePointOp::Digit,
         ) => None,
         _ => Some("?"),
     }
@@ -868,7 +886,9 @@ fn runtime_failures(
             out.push((NPE, "this call", object_checked(receiver), receiver.id))
         }
         ExprKind::NewArray(sizes) => {
-            if sizes.iter().any(|s| !matches!(s.kind, ExprKind::Int(v) if v >= 0)) {
+            // A size the range analysis keeps non-negative cannot throw.
+            let nonnegative = |s: &Expr| facts.index_ranges.get(&s.id).is_some_and(|&(lo, _)| lo >= 0);
+            if sizes.iter().any(|s| !matches!(s.kind, ExprKind::Int(v) if v >= 0) && !nonnegative(s)) {
                 out.push(("java.lang.NegativeArraySizeException", "this array creation", false, x.id));
             }
         }
@@ -905,6 +925,7 @@ fn runtime_failures(
             | Builtin::EnumName
             | Builtin::EnumCompareTo
             | Builtin::Exit
+            | Builtin::NoObject { .. }
             | Builtin::ClassName { .. }
             | Builtin::ClassLiteralName { .. }
             | Builtin::SameClass { .. }
@@ -952,6 +973,14 @@ fn runtime_failures(
                 }
             }
             _ => {
+                // Writing past the end of the array throws, as `Character.toChars` does.
+                if matches!(builtin, Builtin::CodePoint(CodePointOp::ToCharsInto)) {
+                    out.push(("java.lang.ArrayIndexOutOfBoundsException", "this call of the library", true, x.id));
+                }
+                // A begin or end outside the string throws, as `parseInt(s, begin, end, radix)` does.
+                if matches!(builtin, Builtin::Bits(BitsOp::ParseRange, _) | Builtin::Unsigned(UnsignedOp::ParseRange, _)) {
+                    out.push(("java.lang.IndexOutOfBoundsException", "this call of the library", true, x.id));
+                }
                 // A null argument throws, except where the method takes null (an `equals`, the
                 // elements of `join`, the text of `Arrays.toString`).
                 let takes_null = matches!(
@@ -975,7 +1004,9 @@ fn runtime_failures(
                     let checked = matches!(
                         builtin,
                         Builtin::String(StringOp::Substring | StringOp::FromChars)
-                            | Builtin::Bits(BitsOp::ParseRadix, _)
+                            | Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _)
+                            | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
+                            | Builtin::CodePoint(CodePointOp::ToCharsInto)
                             | Builtin::EnumValueOf
                     );
                     out.push((failure, "this call of the library", checked, x.id));

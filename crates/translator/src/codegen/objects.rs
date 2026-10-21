@@ -258,6 +258,8 @@ fn converted_objects(x: &Expr) -> Vec<&Expr> {
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
             [&**l, &**r].into_iter().filter(is_object).collect()
         }
+        // `x.toString()` of a type that declares none, such as an interface, is `Object`'s.
+        ExprKind::Builtin(Builtin::ObjectText, args) => args.iter().filter(is_object).collect(),
         _ => Vec::new(),
     }
 }

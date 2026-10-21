@@ -30,12 +30,14 @@ mod owned;
 mod patterns;
 mod ranges;
 mod statics;
+mod whole_objects;
 
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
 pub use arrays::{RowIndex, Slice, SlicedLoop};
 pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
+pub use whole_objects::whole_objects;
 
 #[derive(Default)]
 pub struct Facts {
@@ -182,21 +184,7 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
         ..Facts::default()
     };
     ranges::analyze(class, &mut facts);
-    let reach = borrowing::reach(class);
-    facts.immutable = objects::immutable_classes(class);
-    facts.field_level = hierarchy::field_level(class, &reach.reach, &facts.immutable, &facts.fields_structs);
-    facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
-    facts.flows = hierarchy::flows(class, &facts.field_level, &Default::default());
-    // An exception is converted to `Throwable` when it is thrown, so it is never a plain value.
-    if let Some(throwable) = class.type_index("java.lang.Throwable") {
-        facts.owned.retain(|c| class.type_index(c).is_none_or(|t| !class.hierarchy.is_subtype(t, throwable)));
-    }
-    let borrowing = borrowing::borrowing(class, &facts, &reach);
-    facts.mutating = borrowing.mutating;
-    facts.self_methods = borrowing.methods;
-    facts.plain_constructors = borrowing.plain_constructors;
-    facts.isolated = borrowing.isolated;
-    facts.writers = borrowing.writers;
+    representation(class, &mut facts);
     validate(class, &facts)?;
     patterns::check(class)?;
     facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
@@ -217,6 +205,40 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
         facts.flows = hierarchy::flows(class, &facts.field_level, &facts.raised_classes);
     }
     Ok(facts)
+}
+
+/// How the objects of each class are represented and which methods borrow them: the facts from
+/// `immutable` to `writers`, given `fields_structs`.
+fn representation(class: &Class, facts: &mut Facts) {
+    let reach = borrowing::reach(class);
+    facts.immutable = objects::immutable_classes(class);
+    facts.field_level = hierarchy::field_level(class, &reach.reach, &facts.immutable, &facts.fields_structs);
+    facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
+    facts.flows = hierarchy::flows(class, &facts.field_level, &Default::default());
+    // An exception is converted to `Throwable` when it is thrown, so it is never a plain value.
+    if let Some(throwable) = class.type_index("java.lang.Throwable") {
+        facts.owned.retain(|c| class.type_index(c).is_none_or(|t| !class.hierarchy.is_subtype(t, throwable)));
+    }
+    let borrowing = borrowing::borrowing(class, facts, &reach);
+    facts.mutating = borrowing.mutating;
+    facts.self_methods = borrowing.methods;
+    facts.plain_constructors = borrowing.plain_constructors;
+    facts.isolated = borrowing.isolated;
+    facts.writers = borrowing.writers;
+}
+
+/// The classes with subclasses whose constructors cannot build their fields struct as a plain
+/// value: they use `this` as a value or call an overridable method. `whole_objects` gives them
+/// the second constructor form.
+fn whole_object_classes(class: &Class) -> HashSet<usize> {
+    let mut facts = Facts { fields_structs: hierarchy::fields_structs(class), ..Facts::default() };
+    representation(class, &mut facts);
+    facts
+        .fields_structs
+        .iter()
+        .copied()
+        .filter(|&t| !facts.plain_constructors.contains(&class.types[t].name))
+        .collect()
 }
 
 /// Rejects what the analyses show the translation cannot do: a superclass's constructor runs
