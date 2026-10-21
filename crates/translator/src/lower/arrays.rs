@@ -236,7 +236,7 @@ impl<'t> Lowering<'t> {
     /// `String[] args` of `main`: the program's command-line arguments, declared in the body in
     /// place of the parameter.
     pub(super) fn args_decl(&self, param: Node<'t>) -> Stmt {
-        let ty = Type::array(Type::String);
+        let ty = self.covariant_array(Type::array(Type::String));
         let id = self.next_id.get();
         self.next_id.set(id + 1);
         let init = Expr { kind: ExprKind::Builtin(Builtin::MainArgs, Vec::new()), pos: param.pos(), ty, id };
