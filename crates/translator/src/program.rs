@@ -87,14 +87,17 @@ fn load(program: &Program) -> Result<(Vec<Value>, Reach), ProgramError> {
     javac += start.elapsed();
     for round in 1.. {
         let start = std::time::Instant::now();
-        let units = session.units();
-        let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
-        let reach = reach::reach(&trees, &program.main).map_err(fail)?;
+        let reach = {
+            let units = session.units();
+            let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
+            reach::reach(&trees, &program.main).map_err(fail)?
+        };
         reaching += start.elapsed();
         let start = std::time::Instant::now();
         let loaded = session.load(&reach.missing.iter().cloned().collect::<Vec<_>>()).map_err(javac_error)?;
         javac += start.elapsed();
         if loaded == 0 {
+            let units = session.finish();
             if crate::timings::enabled() {
                 let (javac, reaching) = (javac.as_secs_f64(), reaching.as_secs_f64());
                 let (classes, methods) = (reach.classes.len(), reach.methods.len());

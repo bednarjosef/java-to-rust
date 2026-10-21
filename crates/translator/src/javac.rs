@@ -6,6 +6,7 @@ mod records;
 
 use crate::ast::{Error, Pos};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -128,6 +129,8 @@ pub struct Session {
     /// The units so far as javac printed them, `{"file": ..., "tree": ...}`: the program's files
     /// in the order given, then the others in the order they came.
     units: Vec<Value>,
+    /// Whether completing the records changes each of `units` (`records::changes`).
+    changes: Vec<bool>,
     /// The classes asked for so far.
     asked: HashSet<String>,
 }
@@ -151,9 +154,17 @@ impl Session {
             let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
             bytes
         });
-        let mut session =
-            Session { child, input, output, errors: Some(errors), units: Vec::new(), asked: HashSet::new() };
-        session.units = session.read()?;
+        let mut session = Session {
+            child,
+            input,
+            output,
+            errors: Some(errors),
+            units: Vec::new(),
+            changes: Vec::new(),
+            asked: HashSet::new(),
+        };
+        let units = session.read()?;
+        session.add(units);
         Ok(session)
     }
 
@@ -171,17 +182,40 @@ impl Session {
         }
         let units = self.read()?;
         let count = units.len();
-        self.units.extend(units);
+        self.add(units);
         Ok(count)
     }
 
     /// The units so far, with the members that javac adds to records written (see `records`):
-    /// those that the units' code may use.
-    pub fn units(&self) -> Vec<Value> {
-        let mut units = self.units.clone();
-        let mut trees: Vec<&mut Value> = units.iter_mut().map(|u| &mut u["tree"]).collect();
-        records::complete(&mut trees);
+    /// those that the units' code may use. Only the units that this changes are copies.
+    pub fn units(&self) -> Vec<Cow<'_, Value>> {
+        let survey = records::survey(&self.units.iter().map(|u| &u["tree"]).collect::<Vec<_>>());
+        let complete = |unit: &Value| {
+            let mut unit = unit.clone();
+            records::complete_unit(&mut unit["tree"], &survey);
+            unit
+        };
+        let changes = self.units.iter().zip(&self.changes);
+        changes
+            .map(|(u, &changes)| if changes { Cow::Owned(complete(u)) } else { Cow::Borrowed(u) })
+            .collect()
+    }
+
+    /// The units, as `units` gives them, when no more are to come.
+    pub fn finish(mut self) -> Vec<Value> {
+        let mut units = std::mem::take(&mut self.units);
+        let survey = records::survey(&units.iter().map(|u| &u["tree"]).collect::<Vec<_>>());
+        for (unit, &changes) in units.iter_mut().zip(&self.changes) {
+            if changes {
+                records::complete_unit(&mut unit["tree"], &survey);
+            }
+        }
         units
+    }
+
+    fn add(&mut self, units: Vec<Value>) {
+        self.changes.extend(units.iter().map(|u| records::changes(&u["tree"])));
+        self.units.extend(units);
     }
 
     /// The units of one line of `JavaTree`'s output.
