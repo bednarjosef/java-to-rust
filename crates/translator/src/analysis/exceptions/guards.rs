@@ -51,10 +51,34 @@ fn known(class: &Class, e: &Expr) -> Option<Vec<Value>> {
     if let ExprKind::Static { class: owner, name } = &e.kind
         && static_value(class, *owner, name).is_none()
     {
-        let value = assigned_once(class, *owner, name)?;
-        return Some(vec![Value::Int(jvm_value(value)?), Value::Int(0)]);
+        return static_values(class, *owner, name).map(|v| v.into_iter().map(Value::Int).collect());
     }
     eval(class, e, &HashMap::new()).map(|v| vec![v])
+}
+
+/// The values that the static `name` of class `owner` may have when read: what its class's
+/// initializer assigns it once, and its default 0, which a read during a circular initialization
+/// sees.
+fn static_values(class: &Class, owner: usize, name: &str) -> Option<Vec<i128>> {
+    let value = assigned_once(class, owner, name)?;
+    let value = match jvm_value(value) {
+        Some(v) => v,
+        None => match eval(class, value, &HashMap::new())? {
+            Value::Int(v) => v,
+            Value::Array(_) => return None,
+        },
+    };
+    Some(if value == 0 { vec![0] } else { vec![value, 0] })
+}
+
+/// Whether condition `cond` is always true or always false, from literals, constants and the
+/// statics that `static_values` knows: the JDK's `if (LegacyMergeSort.userRequested)`, whose
+/// flag is `Boolean.getBoolean` of a property that a translated program never sets.
+pub(super) fn known_condition(class: &Class, cond: &Expr) -> Option<bool> {
+    match eval(class, cond, &HashMap::new())? {
+        Value::Int(v) => Some(v != 0),
+        Value::Array(_) => None,
+    }
 }
 
 /// The value that class `owner` gives its static `name` when it is initialized: the one
@@ -304,7 +328,15 @@ fn eval(class: &Class, e: &Expr, env: &HashMap<&str, Value>) -> Option<Value> {
         ExprKind::Long(v) => i128::from(*v),
         ExprKind::Bool(b) => i128::from(*b),
         ExprKind::Var(name) => return env.get(name.as_str()).copied(),
-        ExprKind::Static { class: owner, name } => static_value(class, *owner, name)?,
+        ExprKind::Static { class: owner, name } => match static_value(class, *owner, name) {
+            Some(v) => v,
+            // A static read before its class is initialized is its default, so its value is
+            // known only when that is the value it is given.
+            None => match static_values(class, *owner, name)?[..] {
+                [v] => v,
+                _ => return None,
+            },
+        },
         ExprKind::NewArray(dims) => {
             let [d] = &dims[..] else { return None };
             return Some(Value::Array(int(d).filter(|&n| n >= 0)?));
