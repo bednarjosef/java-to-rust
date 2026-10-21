@@ -236,7 +236,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// The real generics that a type mentions: its own class and the type variables in it.
-    fn owners_in(&self, ty: Type, out: &mut Vec<Owner>) {
+    pub(super) fn owners_in(&self, ty: Type, out: &mut Vec<Owner>) {
         match ty {
             Type::Array(element) => self.owners_in(*element, out),
             Type::Class(name, args) => {

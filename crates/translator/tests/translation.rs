@@ -3982,6 +3982,32 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
 }
 
 #[test]
+fn a_type_variables_array_passed_for_an_erased_array_erases_only_its_generic() {
+    let rust = translate(
+        "public class Main {
+            static class Fixed<E> {
+                final E[] items;
+                Fixed(E[] items) { this.items = items; }
+            }
+            @SafeVarargs
+            static <T> Fixed<T> fixed(T... a) { return new Fixed<>(a); }
+            static <T> T either(boolean first, T a, T b) { return first ? a : b; }
+            public static void main(String[] args) {
+                System.out.println(fixed(1, 2).items.length + either(true, \"x\", \"y\"));
+            }
+        }",
+    );
+    // `fixed`'s `T[]` is `Fixed`'s erased `Object[]`, so `fixed` is erased; `either` stays generic.
+    assert_contains(
+        &rust,
+        &[
+            "fn fixed(a: java::Array<Object>) -> Rc<MainFixed> {",
+            "fn either<T: Clone>(first: bool, a: T, b: T) -> T {",
+        ],
+    );
+}
+
+#[test]
 fn a_string_builder_as_an_object_is_a_shared_variant_compared_by_identity() {
     let rust = translate(
         "public class Main {
