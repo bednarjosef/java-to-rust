@@ -11,6 +11,8 @@ impl<'a> Gen<'a> {
             let option = self.option_ref(lock);
             return Code::atom(self.dereference(&[lock.id], &option));
         }
+        // A lock that cannot be null throws nothing, wherever a `catch` or a `finally` would see it.
+        self.dereferenced.insert(lock.id);
         let value = self.expr(lock).text;
         Code::atom(format!("{{ let _ = {value}; }}"))
     }
