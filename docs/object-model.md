@@ -1656,6 +1656,14 @@ Decisions that changed during the implementation, milestone by milestone.
   Later, an operand may also assign its variable on the way, as `HashMap.getNode` writes
   `(k = first.key) == key || (key != null && key.equals(k))`; the assignment's value is then a
   clone of the variable's handle, which the `equals` reads again.
+- `TreeMap`'s sub-map iterators stop at the end of the view with `next.key != fenceKey`, where
+  `fenceKey` is `fence == null ? UNBOUNDED : fence.key`. In `TreeMap`'s own code, a comparison of
+  two keys of its entries (or of a field that only ever holds one, `null` or a sentinel) is
+  accepted and compares by value. That gives Java's result: the keys of a sorted map are distinct
+  under its comparator, and in the translation a comparator sees strings and boxes only by
+  value, so two keys that are equal values compare as 0 and cannot both be in the map. The rule
+  is that narrow because the argument rests on that invariant: in general, two equal strings
+  held by different nodes are different objects in Java.
 - Two analyses had to learn about the new sources of values: a string bound by a pattern
   (`o instanceof String s`) is not known to be ASCII, and the generator's nullness of a cast
   follows its operand, which a null check may have narrowed.

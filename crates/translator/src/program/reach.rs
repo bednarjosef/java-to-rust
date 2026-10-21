@@ -13,7 +13,7 @@ mod by_name;
 mod sequential;
 mod stubs;
 
-pub use by_name::created_by_name;
+pub use by_name::{class_for_name, created_by_name};
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
 /// constructor) and javac's signature, such as `(int)void`.
@@ -422,37 +422,114 @@ pub const CLASS_KINDS: &[&str] = &["CLASS", "INTERFACE", "ENUM", "RECORD", "ANNO
 /// `main` method of the class with qualified name `main`. Streams are first assumed to stay
 /// sequential; when the code so reached can make one parallel, the walk is made again without.
 pub fn reach(units: &[&Value], main: &str) -> Result<Reach, String> {
-    let walk = |sequential: bool| -> Result<Walk, String> {
-        let mut walk = Walk { sequential, ..Walk::default() };
-        for unit in units {
-            for decl in unit["typeDecls"].as_array().into_iter().flatten() {
-                walk.declare(decl, None);
-            }
+    let mut rounds = Rounds::new(main);
+    rounds.add(units)?;
+    Ok(rounds.finish())
+}
+
+/// Reachability over units that come in rounds, as javac gives them when they are asked for
+/// (`Reach::missing`): what `reach` gives over the units so far, where each round walks only
+/// what the new units add. A walk keeps what it reached; the items that it could not visit
+/// because no unit declared their class wait for that class, and a new unit's methods that
+/// override a method whose overriders may run become reachable as they would have had the unit
+/// been there from the start. A walk that reached what it would not have with the new units from
+/// the start walks again from `main` (`Walk::stale`). The units walked must not change: when
+/// they do, a new `Rounds` walks them all again.
+pub struct Rounds<'t> {
+    main: String,
+    units: Vec<&'t Value>,
+    /// The walk that assumes sequential streams, once there are units.
+    sequential: Option<Walk<'t>>,
+    /// The code of that walk that the check of the assumption has indexed (`sequential.rs`).
+    check: sequential::Index<'t>,
+    /// Whether the assumption holds over the units so far.
+    stays_sequential: bool,
+    /// The walk without the assumption, made once it fails, and then kept up too.
+    parallel: Option<Walk<'t>>,
+    /// How many times a walk started again (`Walk::stale`).
+    restarts: usize,
+}
+
+impl<'t> Rounds<'t> {
+    pub fn new(main: &str) -> Rounds<'t> {
+        Rounds {
+            main: main.to_string(),
+            units: Vec::new(),
+            sequential: None,
+            check: sequential::Index::default(),
+            stays_sequential: true,
+            parallel: None,
+            restarts: 0,
         }
-        if !walk.classes.contains_key(main) {
-            return Err(format!("the main class `{main}` is not among the sources"));
-        }
-        let entry = (main.to_string(), "main".to_string(), "(java.lang.String[])void".to_string());
-        if !walk.methods.contains_key(&entry) {
-            return Err(format!("`{main}` has no `public static void main(String[])`"));
-        }
-        walk.work.push(Item::Init(main.to_string()));
-        walk.work.push(Item::Method(entry));
-        walk.run();
-        walk.note_named();
-        walk.reach.sequential = sequential;
-        Ok(walk)
-    };
-    let sequential = walk(true)?;
-    if sequential::streams_stay_sequential(&sequential) {
-        return Ok(sequential.reach);
     }
-    let mut parallel = walk(false)?.reach;
-    parallel.missing.extend(sequential.reach.missing);
-    Ok(parallel)
+
+    /// How many times a walk started again from `main` over all the units so far, because
+    /// what it reached before a unit came differs from what it would have reached with it
+    /// (`Walk::stale`).
+    pub fn restarts(&self) -> usize {
+        self.restarts
+    }
+
+    /// Adds units to the program, and reaches what they add.
+    pub fn add(&mut self, units: &[&'t Value]) -> Result<(), String> {
+        self.units.extend(units);
+        let sequential = match &mut self.sequential {
+            Some(walk) => {
+                walk.add(units);
+                if walk.stale {
+                    self.restarts += 1;
+                    self.check = sequential::Index::default();
+                    walk.restart(&self.main);
+                }
+                walk
+            }
+            None => self.sequential.insert(Walk::start(&self.units, &self.main, true)?),
+        };
+        self.stays_sequential = self.check.streams_stay_sequential(sequential);
+        match &mut self.parallel {
+            Some(walk) => {
+                walk.add(units);
+                if walk.stale {
+                    self.restarts += 1;
+                    walk.restart(&self.main);
+                }
+            }
+            None if !self.stays_sequential => {
+                self.parallel = Some(Walk::start(&self.units, &self.main, false)?);
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// The classes that reachable code needs and no unit so far declares (`Reach::missing`).
+    pub fn missing(&self) -> Vec<String> {
+        let mut missing = BTreeSet::new();
+        if let Some(walk) = &self.sequential {
+            missing.extend(&walk.reach.missing);
+        }
+        if let Some(walk) = self.parallel.as_ref().filter(|_| !self.stays_sequential) {
+            missing.extend(&walk.reach.missing);
+        }
+        missing.into_iter().cloned().collect()
+    }
+
+    /// What reachable code uses, over the units so far.
+    pub fn finish(self) -> Reach {
+        let sequential = self.sequential.map(|walk| walk.reach).unwrap_or_default();
+        match self.parallel {
+            Some(walk) if !self.stays_sequential => {
+                let mut parallel = walk.reach;
+                parallel.missing.extend(sequential.missing);
+                parallel
+            }
+            _ => sequential,
+        }
+    }
 }
 
 /// A declaration that has become reachable and is still to be visited.
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum Item {
     Class(String),
     Init(String),
@@ -474,6 +551,22 @@ struct Walk<'t> {
     /// Overriders of reached methods whose class is not live yet, by that class: they become
     /// reachable when it is.
     waiting: HashMap<String, Vec<MethodKey>>,
+    /// The methods whose overriders reachable code may run (`overriders`), and those of them
+    /// that were `external` when one of their overriders was found.
+    dispatched: HashSet<MethodKey>,
+    dispatched_external: HashSet<MethodKey>,
+    /// Whether the walk reached what it would not have reached with all its units from the
+    /// start: a method that it took for an external one, as no unit declared its class, made
+    /// its overriders reachable, and once a unit did, the method is one of the `dormant` ones,
+    /// which make none reachable. The walk is then made again (`Rounds`).
+    stale: bool,
+    /// Items that could not be visited because no unit declares their class, by that class:
+    /// they are visited when a unit added later does (`block`).
+    blocked: HashMap<String, HashSet<Item>>,
+    /// The classes declared, and the overriders found as (overridden, overrider), since the walk
+    /// last took them up (`add`).
+    declared: Vec<String>,
+    found_overriders: Vec<(MethodKey, MethodKey)>,
     work: Vec<Item>,
     reach: Reach,
     /// Whether streams are assumed to stay sequential (`Reach::sequential`).
@@ -488,6 +581,89 @@ struct Walk<'t> {
 }
 
 impl<'t> Walk<'t> {
+    /// Walks from `main` over these units, with streams assumed to stay sequential or not.
+    fn start(units: &[&'t Value], main: &str, sequential: bool) -> Result<Walk<'t>, String> {
+        let mut walk = Walk { sequential, ..Walk::default() };
+        walk.reach.sequential = sequential;
+        walk.declare_units(units);
+        walk.declared.clear();
+        walk.found_overriders.clear();
+        if !walk.classes.contains_key(main) {
+            return Err(format!("the main class `{main}` is not among the sources"));
+        }
+        let entry = (main.to_string(), "main".to_string(), "(java.lang.String[])void".to_string());
+        if !walk.methods.contains_key(&entry) {
+            return Err(format!("`{main}` has no `public static void main(String[])`"));
+        }
+        walk.enter(main);
+        Ok(walk)
+    }
+
+    /// Walks from `main`, the class's static initialization and its `main` method.
+    fn enter(&mut self, main: &str) {
+        let entry = (main.to_string(), "main".to_string(), "(java.lang.String[])void".to_string());
+        self.work.push(Item::Init(main.to_string()));
+        self.work.push(Item::Method(entry));
+        self.run();
+        self.note_named();
+    }
+
+    /// Walks again from `main`, as `start` would over the units declared, which it keeps.
+    fn restart(&mut self, main: &str) {
+        let sequential = self.sequential;
+        *self = Walk {
+            classes: std::mem::take(&mut self.classes),
+            methods: std::mem::take(&mut self.methods),
+            fields: std::mem::take(&mut self.fields),
+            supertypes: std::mem::take(&mut self.supertypes),
+            overriders: std::mem::take(&mut self.overriders),
+            sequential,
+            ..Walk::default()
+        };
+        self.reach.sequential = sequential;
+        self.enter(main);
+    }
+
+    /// Adds units, and walks on to what they add: the items that waited for a class they
+    /// declare, the supertypes of their classes that are live, and their methods that override
+    /// a method whose overriders may run.
+    fn add(&mut self, units: &[&'t Value]) {
+        self.declare_units(units);
+        for class in std::mem::take(&mut self.declared) {
+            self.reach.missing.remove(&class);
+            self.work.extend(self.blocked.remove(&class).into_iter().flatten());
+            if self.reach.live.contains(&class) {
+                for supertype in self.supertypes[&class].clone() {
+                    self.live(supertype);
+                }
+            }
+        }
+        for (overridden, overrider) in std::mem::take(&mut self.found_overriders) {
+            if !self.dispatched.contains(&overridden) {
+                continue;
+            }
+            if self.reach.external.contains(&overridden) {
+                self.dispatched_external.insert(overridden.clone());
+            }
+            if self.reach.live.contains(&overrider.0) {
+                self.work.push(Item::Method(overrider));
+            } else {
+                self.waiting.entry(overrider.0.clone()).or_default().push(overrider);
+            }
+        }
+        self.add_named();
+        self.run();
+        self.note_named();
+    }
+
+    fn declare_units(&mut self, units: &[&'t Value]) {
+        for unit in units {
+            for decl in unit["typeDecls"].as_array().into_iter().flatten() {
+                self.declare(decl, None);
+            }
+        }
+    }
+
     fn declare(&mut self, decl: &'t Value, outer: Option<&str>) {
         if !CLASS_KINDS.contains(&text(decl, "kind")) {
             return;
@@ -514,7 +690,8 @@ impl<'t> Walk<'t> {
                             key.1.clone(),
                             text(overridden, "type").to_string(),
                         );
-                        self.overriders.entry(overridden).or_default().push(key.clone());
+                        self.overriders.entry(overridden.clone()).or_default().push(key.clone());
+                        self.found_overriders.push((overridden, key.clone()));
                     }
                     self.methods.insert(key, member);
                 }
@@ -531,9 +708,10 @@ impl<'t> Walk<'t> {
             let overridden =
                 (text(implemented, "owner").to_string(), name.clone(), text(implemented, "type").to_string());
             let key = (text(inherited, "owner").to_string(), name, text(inherited, "type").to_string());
-            let overriders = self.overriders.entry(overridden).or_default();
+            let overriders = self.overriders.entry(overridden.clone()).or_default();
             if !overriders.contains(&key) {
-                overriders.push(key);
+                overriders.push(key.clone());
+                self.found_overriders.push((overridden, key));
             }
         }
         let mut supertypes: Vec<String> = ["extendsClause", "implementsClause"]
@@ -554,7 +732,8 @@ impl<'t> Walk<'t> {
         };
         supertypes.extend(implicit.map(str::to_string));
         self.supertypes.insert(class.clone(), supertypes);
-        self.classes.insert(class, (decl, outer.map(str::to_string)));
+        self.classes.insert(class.clone(), (decl, outer.map(str::to_string)));
+        self.declared.push(class);
     }
 
     fn run(&mut self) {
@@ -572,7 +751,7 @@ impl<'t> Walk<'t> {
     /// its header.
     fn class(&mut self, class: String) {
         let Some((decl, outer)) = self.classes.get(&class).map(|(d, o)| (*d, o.clone())) else {
-            return self.missing(&class);
+            return self.block(&class.clone(), Item::Class(class));
         };
         if !self.reach.classes.insert(class) {
             return;
@@ -589,7 +768,9 @@ impl<'t> Walk<'t> {
     /// fields with initializers that may do something besides computing a value are kept even if
     /// nothing reads them. (When classes can extend others, the superclass is initialized first.)
     fn init(&mut self, class: String) {
-        let Some(&(decl, _)) = self.classes.get(&class) else { return self.missing(&class) };
+        let Some(&(decl, _)) = self.classes.get(&class) else {
+            return self.block(&class.clone(), Item::Init(class));
+        };
         if !self.reach.initialized.insert(class.clone()) {
             return;
         }
@@ -621,7 +802,14 @@ impl<'t> Walk<'t> {
     fn method(&mut self, key: MethodKey) {
         let node = self.methods.get(&key).filter(|_| !replaced(&key.0, &key.1, &key.2));
         let Some(&node) = node else {
-            self.missing(&key.0);
+            self.block(&key.0, Item::Method(key.clone()));
+            // An enum's `values()` and `valueOf()`, which javac declares without code, initialize
+            // the enum: its constants are built with what their arguments call.
+            if matches!(key.1.as_str(), "values" | "valueOf")
+                && self.classes.get(&key.0).is_some_and(|(decl, _)| text(decl, "kind") == "ENUM")
+            {
+                self.work.push(Item::Init(key.0.clone()));
+            }
             // What overrides a method of the runtime, such as `Object.toString`, can still run.
             if self.reach.external.insert(key.clone()) {
                 for overrider in self.overriders(&key) {
@@ -637,6 +825,8 @@ impl<'t> Walk<'t> {
             }
             return;
         };
+        // A method called before a unit declared its class was taken for one of the runtime's.
+        let was_external = self.reach.external.remove(&key);
         let class = key.0.clone();
         let is_ctor = key.1 == "<init>";
         let is_static = node["symbol"]["static"].as_bool() == Some(true);
@@ -647,6 +837,9 @@ impl<'t> Walk<'t> {
             }
         } else if !is_static && !is_ctor && !self.reach.live.contains(&class) && self.has_objects(&class) {
             // Until an object of its class is created, only its signature is used.
+            if was_external && self.dispatched.remove(&key) && self.dispatched_external.contains(&key) {
+                self.stale = true;
+            }
             self.reach.dormant.insert(key.clone());
             self.waiting.entry(class.clone()).or_default().push(key);
             self.work.push(Item::Class(class));
@@ -654,6 +847,13 @@ impl<'t> Walk<'t> {
                 self.scan(&node[part]);
             }
             return;
+        }
+        if (is_static || is_ctor)
+            && was_external
+            && self.dispatched.remove(&key)
+            && self.dispatched_external.contains(&key)
+        {
+            self.stale = true;
         }
         self.work.push(Item::Class(class.clone()));
         if is_static || is_ctor {
@@ -695,8 +895,13 @@ impl<'t> Walk<'t> {
     /// The methods that a call of the instance method `method` may run instead of it: those that
     /// override it in live classes. Those in classes that are not live yet wait until they are.
     fn overriders(&mut self, method: &MethodKey) -> Vec<MethodKey> {
+        self.dispatched.insert(method.clone());
         let mut now = Vec::new();
-        for overrider in self.overriders.get(method).cloned().unwrap_or_default() {
+        let overriders = self.overriders.get(method).cloned().unwrap_or_default();
+        if !overriders.is_empty() && self.reach.external.contains(method) {
+            self.dispatched_external.insert(method.clone());
+        }
+        for overrider in overriders {
             if self.reach.live.contains(&overrider.0) {
                 now.push(overrider);
             } else {
@@ -723,7 +928,9 @@ impl<'t> Walk<'t> {
     }
 
     fn field(&mut self, key: FieldKey) {
-        let Some(&node) = self.fields.get(&key) else { return self.missing(&key.0) };
+        let Some(&node) = self.fields.get(&key) else {
+            return self.block(&key.0.clone(), Item::Field(key));
+        };
         if !self.reach.fields.insert(key.clone()) {
             return;
         }
@@ -732,6 +939,15 @@ impl<'t> Walk<'t> {
             self.work.push(Item::Init(key.0));
         }
         self.scan(node);
+    }
+
+    /// An item that needs a class: when no unit declares it, the class is missing, and the item
+    /// waits for it.
+    fn block(&mut self, class: &str, item: Item) {
+        if !self.classes.contains_key(class) && !outside(class) {
+            self.missing(class);
+            self.blocked.entry(class.to_string()).or_default().insert(item);
+        }
     }
 
     /// Notes a class that reachable code needs, if no unit declares it (`Reach::missing`).
@@ -799,6 +1015,11 @@ impl<'t> Walk<'t> {
                 }
                 if text(value, "kind") == "VARIABLE" {
                     self.stub_type(text(&value["symbol"], "type"));
+                }
+                // A class that `Class.forName` names exists, and is initialized if the call says
+                // so (`lower::by_name`).
+                if let Some((class, initialize)) = class_for_name(value) {
+                    self.work.push(if initialize { Item::Init(class) } else { Item::Class(class) });
                 }
                 if text(value, "kind") == "STRING_LITERAL"
                     && let Some(literal) = value["value"].as_str()
@@ -1002,6 +1223,31 @@ mod tests {
             })
             .collect();
         json!({"kind": "CLASS", "symbol": {"type": name}, "members": members})
+    }
+
+    #[test]
+    fn rounds_reach_what_a_walk_over_all_the_units_does() {
+        let units = [
+            json!({"typeDecls": [class("Main", &[("main", vec![call("Library", "run")])])]}),
+            json!({"typeDecls": [class("Library", &[("run", vec![call("Deeper", "go")]), ("unused", vec![])])]}),
+            json!({"typeDecls": [class("Deeper", &[("go", vec![call("Library", "run")])])]}),
+        ];
+        let mut rounds = Rounds::new("Main");
+        let mut asked = Vec::new();
+        for unit in &units {
+            rounds.add(&[unit]).unwrap();
+            asked.push(rounds.missing());
+        }
+        assert_eq!(asked, [vec!["Library".to_string()], vec!["Deeper".to_string()], vec![]]);
+        let (rounds, all) = (rounds.finish(), reach(&units.iter().collect::<Vec<_>>(), "Main").unwrap());
+        assert_eq!(rounds.methods, all.methods);
+        assert_eq!(rounds.classes, all.classes);
+        assert_eq!(rounds.initialized, all.initialized);
+        assert_eq!(rounds.external, all.external);
+        assert!(rounds.external.is_empty() && rounds.missing.is_empty(), "{rounds:?}");
+        let method = |class: &str, name: &str| (class.to_string(), name.to_string(), "()void".to_string());
+        assert!(rounds.methods.contains(&method("Deeper", "go")), "{rounds:?}");
+        assert!(!rounds.methods.contains(&method("Library", "unused")), "{rounds:?}");
     }
 
     #[test]

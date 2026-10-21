@@ -19,6 +19,18 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ArrayLit(items));
         }
         let sizes = node.list("dimensions").map(|d| self.expr(d)).collect::<Result<Vec<_>, _>>()?;
+        // An array of arrays that is an `Object[]` (see `covariant`), `new int[n][m]` where
+        // `int[][]` is: the rows are made as `int[]`s and become `Object`s.
+        let java = node.java_type();
+        if sizes.len() > 1
+            && let Some(row) = java.strip_suffix("[]")
+            && let exact = Type::array(self.ty(node, row)?)
+            && exact != self.ty(node, java)?
+        {
+            self.note_object_array(exact.element());
+            let rows = self.synth(ExprKind::NewArray(sizes), node.pos(), exact);
+            return Ok(ExprKind::Cast(self.ty(node, java)?, Box::new(rows)));
+        }
         Ok(ExprKind::NewArray(sizes))
     }
 
@@ -148,13 +160,13 @@ impl<'t> Lowering<'t> {
         Ok(ExprKind::NewArray(vec![self.expr(length)?]))
     }
 
-    /// `String[] args` of `main`, which the program never gets from the command line: an empty
-    /// array, declared in the body in place of the parameter.
+    /// `String[] args` of `main`: the program's command-line arguments, declared in the body in
+    /// place of the parameter.
     pub(super) fn args_decl(&self, param: Node<'t>) -> Stmt {
         let ty = Type::array(Type::String);
         let id = self.next_id.get();
         self.next_id.set(id + 1);
-        let init = Expr { kind: ExprKind::ArrayLit(Vec::new()), pos: param.pos(), ty, id };
+        let init = Expr { kind: ExprKind::Builtin(Builtin::MainArgs, Vec::new()), pos: param.pos(), ty, id };
         Stmt::Local { ty, name: param.str("name").to_string(), init: Some(init), pos: param.pos() }
     }
 }

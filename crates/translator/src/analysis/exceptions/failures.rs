@@ -267,8 +267,10 @@ pub(super) fn runtime_failures(
             | Builtin::EnumName
             | Builtin::EnumCompareTo
             | Builtin::Exit
+            | Builtin::MainArgs
             | Builtin::NoObject { .. }
             | Builtin::UnknownClass
+            | Builtin::InitializeClass { .. }
             | Builtin::ClassName { .. }
             | Builtin::ClassLiteralName { .. }
             | Builtin::SameClass { .. }
