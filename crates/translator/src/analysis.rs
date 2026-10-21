@@ -26,6 +26,7 @@ mod indexing;
 mod monitors;
 mod moves;
 mod nullness;
+mod object_values;
 mod objects;
 mod owned;
 mod patterns;
@@ -45,6 +46,9 @@ pub use whole_objects::whole_objects;
 pub struct Facts {
     /// Whether the program starts a thread (see `threads`).
     pub threaded: bool,
+    /// Whether the program interrupts a thread, so that `sleep`, `join` and `wait` may throw
+    /// `InterruptedException` (see `threads`).
+    pub interrupts: bool,
     /// The classes, by type index, whose objects two threads may reach: `Arc`s, with a
     /// `java::Locked` unless immutable.
     pub thread_shared: HashSet<usize>,
@@ -247,6 +251,7 @@ pub fn analyze_all(class: &Class) -> Result<Facts, Vec<Error>> {
 /// `immutable` to `writers`, given `fields_structs`.
 fn representation(class: &Class, facts: &mut Facts) {
     facts.threaded = threads::threaded(class);
+    facts.interrupts = threads::interrupts(class);
     if facts.threaded {
         facts.thread_shared = threads::thread_shared(class);
         facts.long_methods = threads::long_methods(class, &facts.thread_shared);
@@ -391,17 +396,13 @@ pub fn reads_earlier_fields(decl: &TypeDecl, i: usize, e: &Expr) -> bool {
 /// the initializer must run.
 pub fn leading_assignments<'c>(class: &Class, ctor: &'c Method, facts: &Facts) -> Vec<(usize, &'c Expr)> {
     let decl = &class.types[ctor.class];
-    let delegates =
-        matches!(ctor.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })));
-    if delegates || !inline_initializers(class, ctor.class, facts) {
+    if delegates(&ctor.body) || !inline_initializers(class, ctor.class, facts) {
         return Vec::new();
     }
     let mut out: Vec<(usize, &Expr)> = Vec::new();
-    // `super(...)` runs first, before the initializers: the struct literal's `base`.
-    let body = match ctor.body.first() {
-        Some(Stmt::Expr(Expr { kind: ExprKind::SuperInit { .. }, .. })) => &ctor.body[1..],
-        _ => &ctor.body[..],
-    };
+    // `super(...)` runs first, before the initializers: the struct literal's `base`. The
+    // statements before it run before the literal is built.
+    let (_, _, body) = split_explicit_call(&ctor.body);
     for stmt in body {
         let Stmt::Expr(Expr {
             kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, value },

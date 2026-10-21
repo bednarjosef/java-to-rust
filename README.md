@@ -177,20 +177,31 @@ A small subset, end to end:
   does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s. Arrays of strings
   are not converted this way yet. `==` between two `Object`s that may both be strings or boxes (whose identity the
   translation does not keep, except in the shortcut `a == b || a.equals(b)` and in `TreeMap`'s own
-  comparisons of the keys of its entries, which are distinct values) is rejected. The
+  comparisons of the keys of its entries, which are distinct values) is rejected. Whether a side
+  may be one is a points-to analysis of the program (`analysis/object_values.rs`): it follows
+  strings, boxes and the classes of objects through variables, parameters, returns, fields and
+  array elements, each inherited method once for every class that runs it, so an identity map or
+  set whose keys are only ever the program's objects compares them by identity. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
   and a use where javac substituted a type argument gets the checked cast back
   (`java::cast(b.get().as_integer(), ..)`). `Comparable` as a type (a bound, mostly) is an enum like
   `Object`, over strings, boxes, the program's enums and its classes that implement it, and so is
   `Number` (`T extends Number`, `List<? extends Number>`), over the numeric boxes, whose
-  `intValue()` and the others convert as Java does. A method
+  `intValue()` and the others convert as Java does, and over the program's classes that extend
+  `Number` (the JDK's `AtomicInteger` and `BigInteger`), whose own `intValue()` to
+  `doubleValue()` run; `Number`'s `byteValue()` and `shortValue()` narrow `intValue()`, and a
+  class that overrides them is rejected. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &
   Comparable<? super T>`) erases to the first, and a call of a later bound's method casts to that
-  bound first, as javac's erased code does. An array passed as an array of a type variable
-  (`first(String[])` for `<T> T first(T[])`) is rejected. A generic class or method that only stores, returns and passes on the values of its type
+  bound first, as javac's erased code does. An array of references passed as an array of a type
+  variable (`first(String[])` for `<T> T first(T[])`) makes its type an `Object[]` throughout the
+  program when another array type meets it there (see `docs/object-model.md`); a `String[]` that
+  is an `Object[]` is copied where the runtime's string methods take or give one, and sorting or
+  filling one in place with `java.util.Arrays` runs the JDK's methods for an `Object[]` (rejected
+  without the JDK's sources). A generic class or method that only stores, returns and passes on the values of its type
   variables (a stack, a pair, a node, `<T> T choose(boolean, T, T)`) is a Rust generic instead
   (`struct Stack<T>`, `impl<T: Clone> Stack<T>`, `fn choose<T: Clone>(..)`), and its uses keep the
   substituted types with no casts. One that needs more of them (their text, `equals`, a bound, a
@@ -280,8 +291,11 @@ A small subset, end to end:
   program that waits, notifies or asks `holdsLock`, the monitor of an object of one thread is a
   record of the objects the thread holds; elsewhere `synchronized` is the null check it was. A
   `volatile` static is read with acquire and written with release, as every static is.
-  Interrupts, sequentially consistent `volatile`, the atomics and `java.util.concurrent` are
-  next; the design is in [docs/multi-threading.md](docs/multi-threading.md).
+  `interrupt`, `isInterrupted` and `Thread.interrupted()` are Java's: an interrupt ends a
+  `sleep`, `join` or `wait` with `InterruptedException` and clears the status, and a thread keeps
+  its status before it starts and after it ends. In a program that never calls `interrupt`,
+  `sleep`, `join` and `wait` are translated as never throwing it. Sequentially consistent
+  `volatile`, the atomics and `java.util.concurrent` are next; the design is in [docs/multi-threading.md](docs/multi-threading.md).
 - **Output**: `System.out.print` and `println` are buffered (`java::println!`), and so are
   `System.out.println(char[])` and `System.err.print`/`println`, which also print a `char[]`.
   `System.err` is written as it is, after `System.out` is flushed, so the two stay in order.
@@ -341,7 +355,8 @@ can differ from Java on code points the corpus does not test.
 
 The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`, `charAt` agree on
 `"né😀e"`), and throw what Java throws (`StringIndexOutOfBoundsException` with Java's message).
-`toUpperCase` and `toLowerCase` are the root-locale mappings. A `StringBuilder` is a
+`toUpperCase` and `toLowerCase` are the root-locale mappings; with a `Locale` (in a whole
+program) they are too, but for Turkish, Azeri and Lithuanian, which end the program. A `StringBuilder` is a
 `java::StringBuilder`, a shared handle to UTF-16 units like an array: every variable, field and
 parameter that holds the builder sees it change, `reverse` keeps surrogate pairs in order, and a
 chain is Rust's chain (`sb.append_str("a").append(1)`), the handle cloned only where the builder
@@ -681,7 +696,8 @@ platform libm), which agree with it on all but about 0.1 percent of arguments, a
 the JVM sets itself (`java.version`, `java.vendor`, ...) is rejected at translation. The memory
 figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
 JVM's, and `gc()` does nothing. `Runtime.halt` flushes the output and exits without shutdown
-hooks. `Thread.sleep` (both forms), `onSpinWait` and `yield` are the platform's. The runtime's
+hooks. `onSpinWait` and `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
+thread's record, which an interrupt wakes. The runtime's
 descriptor table (`fd.rs`) backs the `FileInputStream`, `FileOutputStream` and `FileDescriptor`
 natives: stdin has its own buffered reader, stdout writes through the buffered `System.out` so
 its order is kept with `println`, stderr is written as it is (unbuffered, like Java's), and files
@@ -713,7 +729,7 @@ Each construct below is rejected at translation with an error that names it:
   interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
-- of threads: `interrupt`, `wait(millis, nanos)`, thread groups, uncaught exception handlers,
+- of threads: `wait(millis, nanos)`, thread groups, uncaught exception handlers,
   `ThreadLocal` and the `java.util.concurrent` classes; a `StringBuilder`, or a box compared by
   identity, that threads may share; `synchronized` on a string, a box, an array, an enum
   constant or a `Class` other than a class literal, where the monitor would be kept.
@@ -762,6 +778,9 @@ as its command-line arguments, on `java` and as the translated binary alike.
   streams as Rust iterators, after the object model, lambdas and for-each over `Iterable` land.
 - [docs/thorough-mode.md](docs/thorough-mode.md): a slower whole-program mode with points-to
   analysis, ownership checked by rustc, enums for class trees, and typed errors.
+- [docs/natural-rust.md](docs/natural-rust.md): making the output read like hand-written Rust
+  (names, layout, a separate JDK crate, non-null values, `Vec` and `for`), how to measure it, and
+  a later port mode that writes natural Rust everywhere and lists each change in behaviour.
 - [docs/closures-and-nested-classes.md](docs/closures-and-nested-classes.md): captures, inner,
   local and anonymous classes, lambdas, method references and for-each over `Iterable`, after
   the object model.

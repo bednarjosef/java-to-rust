@@ -36,10 +36,13 @@ impl<'t> Lowering<'t> {
 /// it is in.
 pub fn lower_program<'t>(
     units: &[&'t Value],
+    program_units: usize,
     reach: &'t Reach,
     main: &str,
 ) -> Result<Class, (Option<usize>, Error)> {
-    super::real_generics::retry(|real, covariant| lower_with(units, reach, main, real, covariant, None))
+    super::real_generics::retry(|real, covariant| {
+        lower_with(units, program_units, reach, main, real, covariant, None)
+    })
 }
 
 /// A program lowered for a census: the lowered program, or the error that ended lowering all the
@@ -62,10 +65,15 @@ pub struct Rejected {
 
 /// `lower_program` for a census (see `census`): a piece of code that lowering rejects is recorded
 /// and replaced by a stub, and lowering goes on.
-pub fn census_lower_program<'t>(units: &[&'t Value], reach: &'t Reach, main: &str) -> Lowered {
+pub fn census_lower_program<'t>(
+    units: &[&'t Value],
+    program_units: usize,
+    reach: &'t Reach,
+    main: &str,
+) -> Lowered {
     let census = RefCell::new((Vec::new(), Vec::new()));
     let class = super::real_generics::retry(|real, covariant| {
-        lower_with(units, reach, main, real, covariant, Some(&census))
+        lower_with(units, program_units, reach, main, real, covariant, Some(&census))
     });
     let (rejected, units) = census.into_inner();
     Lowered { class, rejected, units }
@@ -78,6 +86,7 @@ type CensusSink = RefCell<(Vec<Rejected>, Vec<Option<usize>>)>;
 /// the arrays `covariant`.
 fn lower_with<'t>(
     units: &[&'t Value],
+    program_units: usize,
     reach: &'t Reach,
     main: &str,
     real: Option<&super::real_generics::Real>,
@@ -89,7 +98,7 @@ fn lower_with<'t>(
     lowering.reach = Some(reach);
     lowering.census = census.map(|_| RefCell::default());
     let mut unit_of = Vec::new();
-    let lowered = lower_into(&mut lowering, &mut unit_of, units, reach, main, real);
+    let lowered = lower_into(&mut lowering, &mut unit_of, units, program_units, reach, main, real);
     let Some(census) = census else { return lowered };
     // Each attempt's rejections replace the last's.
     let unit = |t: usize| unit_of.get(t).copied().filter(|&u| u != usize::MAX);
@@ -112,6 +121,7 @@ fn lower_into<'t>(
     lowering: &mut Lowering<'t>,
     unit_of: &mut Vec<usize>,
     units: &[&'t Value],
+    program_units: usize,
     reach: &'t Reach,
     main: &str,
     real: Option<&super::real_generics::Real>,
@@ -157,6 +167,8 @@ fn lower_into<'t>(
     lowering.plan_captures().map_err(|(t, e)| ((unit_of[t] != usize::MAX).then_some(unit_of[t]), e))?;
     packages.resize(lowering.types.len(), String::new());
     lowering.entry = lowering.type_index(main);
+    // The units after the program's are the library's; a stub's class is the library's too.
+    lowering.library = unit_of.iter().map(|&unit| unit >= program_units).collect();
     let unit = |t: usize| (unit_of[t] != usize::MAX).then_some(unit_of[t]);
     let decls: Vec<Node> = units
         .iter()

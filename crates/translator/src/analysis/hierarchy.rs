@@ -162,7 +162,8 @@ pub fn flows(
     }
     // Every exception may be thrown, which makes it a `Throwable`, and a `catch` clause makes the
     // `Throwable`s under the classes it names values of those classes.
-    if let Some(throwable) = class.type_index("java.lang.Throwable") {
+    let throwable = class.type_index("java.lang.Throwable");
+    if let Some(throwable) = throwable {
         for t in (0..n).filter(|&t| t != throwable && h.is_subtype(t, throwable)) {
             edges.insert((t, throwable));
         }
@@ -188,12 +189,32 @@ pub fn flows(
         ExprKind::Cast(to, value) | ExprKind::InstanceOf { value, ty: to, binding: Some(_) } => {
             if let (Some(t), Some(s)) = (index(*to), index(value.ty)) {
                 edges.insert((s, t));
+                // An exception class's value may be held as a `Throwable` (see `rep`), and then
+                // converts as one, with every variant of `Throwable`.
+                if let Some(throwable) = throwable
+                    && s != throwable
+                    && h.is_subtype(s, throwable)
+                {
+                    edges.insert((throwable, t));
+                }
             }
             // The rows of `new int[n][m]` as an `Object[]` are `Object`s (`lower::arrays`).
             if let (ExprKind::NewArray(_), Type::Array(element), Type::Array(row)) =
                 (&value.kind, *to, value.ty)
                 && let (Some(t), Some(s)) = (index(*element), index(*row))
             {
+                edges.insert((s, t));
+            }
+        }
+        // A `String[]` that is an `Object[]` (`lower::covariant`), and `main`'s arguments as one:
+        // its strings are `Object`s.
+        ExprKind::Builtin(Builtin::StringArrayOf | Builtin::ObjectArrayOf, args) => {
+            if let (Some(s), Some(t)) = (index(args[0].ty.element()), index(e.ty.element())) {
+                edges.insert((s, t));
+            }
+        }
+        ExprKind::Builtin(Builtin::MainArgs, _) => {
+            if let (Some(s), Some(t)) = (index(Type::String), index(e.ty.element())) {
                 edges.insert((s, t));
             }
         }
@@ -295,11 +316,23 @@ pub fn home(class: &Class, facts: &Facts, m: usize) -> Home {
 
 /// The `toString` that an object of concrete class `c` runs, if the program declares one.
 pub fn to_string_impl(class: &Class, c: usize) -> Option<usize> {
+    declared_impl(class, c, "toString")
+}
+
+/// The method that making the text of an object of concrete class `c` runs: its `toString`, or
+/// where it has `Object`'s, the `hashCode` that one shows, if the program declares one.
+pub fn text_impl(class: &Class, c: usize) -> Option<usize> {
+    to_string_impl(class, c).or_else(|| declared_impl(class, c, "hashCode"))
+}
+
+/// The method without parameters named `name` that an object of concrete class `c` runs, if the
+/// program declares one.
+fn declared_impl(class: &Class, c: usize, name: &str) -> Option<usize> {
     let mut chain = vec![c];
     chain.extend(class.hierarchy.ancestors(c));
     chain.into_iter().find_map(|t| {
         class.methods.iter().position(|m| {
-            m.class == t && m.name == "toString" && m.params.is_empty() && !m.is_static && !m.is_abstract
+            m.class == t && m.name == name && m.params.is_empty() && !m.is_static && !m.is_abstract
         })
     })
 }

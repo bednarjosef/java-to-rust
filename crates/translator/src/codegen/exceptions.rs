@@ -91,9 +91,13 @@ fn breaks_out_of(stmt: &Stmt, label: Option<&str>) -> bool {
 }
 
 /// The locals that a live `try` block assigns: Rust cannot tell that one declared without a value
-/// is assigned on every path to a read after the `try`, as Java can, so it is given one.
+/// is assigned on every path to a read after the `try`, as Java can, so it is given one. A local
+/// declared inside the block (`for (Object e; ..)` in `ArrayList.batchRemove`) is read only there,
+/// where Rust follows its assignments as Java does.
 pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
     fn assigned(stmts: &[Stmt], out: &mut HashSet<String>) {
+        let mut found = HashSet::new();
+        let mut declared = HashSet::new();
         for s in stmts {
             visit_stmt(
                 s,
@@ -102,13 +106,18 @@ pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
                         if let ExprKind::Assign { target: Place::Var(name), .. }
                         | ExprKind::IncDec { target: Place::Var(name), .. } = &x.kind
                         {
-                            out.insert(name.clone());
+                            found.insert(name.clone());
                         }
                     })
                 },
-                &mut |_| {},
+                &mut |s| {
+                    if let Stmt::Local { name, .. } | Stmt::ForEach { name, .. } = s {
+                        declared.insert(name.clone());
+                    }
+                },
             );
         }
+        out.extend(found.into_iter().filter(|name| !declared.contains(name)));
     }
     // Finds the `try` statements of `stmts`, including those in the cases of a switch expression,
     // which `visit_stmt` reaches only through an expression.
@@ -230,6 +239,10 @@ pub(super) fn check_closures(code: &str) -> Result<(), Error> {
                 let head = before.ends_with(['(', ',', '=', '{']) || before.ends_with(" move");
                 if head && let Some(end) = code[i + 1..].find('|') {
                     i += end + 2;
+                    // A closure that returns a `Result` (as `caught` writes) is left by its `?`.
+                    if code[i..].trim_start().starts_with("-> Result<") {
+                        continue;
+                    }
                     let block = code[i..].trim_start().starts_with('{');
                     closures.push((if block { depth + 1 } else { depth }, block));
                     continue;
@@ -334,7 +347,7 @@ impl<'a> Gen<'a> {
 
     /// The runtime's function `name` that ends the program with an uncaught exception, which
     /// shows the exception through its `Display`.
-    fn uncaught(&mut self, name: &str) -> String {
+    pub(super) fn uncaught(&mut self, name: &str) -> String {
         let t = self.class.type_index("java.lang.Throwable").expect("a program that throws has `Throwable`");
         if let Some(t) = self.enum_for(t) {
             self.need(Need::Display(t));
@@ -392,6 +405,10 @@ impl<'a> Gen<'a> {
     /// A `Result` whose error is a `Throwable` (`code`), whose `Ok` value is used and whose error
     /// goes on from here: it leaves the enclosing `try` block or the method, or ends the program.
     pub(super) fn passed_on(&mut self, code: Code) -> String {
+        // Inside `java::catching` (see `caught`), the closure returns it.
+        if !self.catching_now.is_empty() {
+            return format!("{}?", code.at(ATOM));
+        }
         match self.innermost_attempt() {
             Some((label, _)) => format!("{}({}, '{label})", self.runtime("or_break!"), code.text),
             None if self.throwing => format!("{}?", code.at(ATOM)),
@@ -434,15 +451,28 @@ impl<'a> Gen<'a> {
     /// `code`, the operation `id` of `Facts::catching`, run inside `java::catching`, whose failure
     /// goes on from here as a thrown exception does. An operation whose own code passes a
     /// failure on (`?`, `or_break!`) cannot be in its closure, and is rejected.
-    pub(super) fn caught(&mut self, id: ExprId, code: Code) -> Code {
-        if code.text.contains('?') || code.text.contains("or_break!") {
+    pub(super) fn caught(&mut self, id: ExprId, code: Code, mark: usize) -> Code {
+        // Lines written before the operation (from `mark`) run outside the closure.
+        let before = &self.out[mark..];
+        if code.text.contains("or_break!") || before.contains('?') || before.contains("or_break!") {
             let pos = self.facts.catching[&id];
             let message = "catching the exception of an operation that holds another one that is caught not supported yet";
             self.rejected.push(Error { pos, message: message.to_string() });
             return code;
         }
         self.dereferenced.insert(id);
-        let call = format!("{}(|| {})", self.runtime("catching"), code.text);
+        let call = if code.text.contains('?') {
+            // An operand that throws (`passed_on` writes `?` inside) leaves the closure with its
+            // exception, which goes on as the operation's own would.
+            let throwable = self.throwable_type();
+            format!(
+                "{}(|| -> Result<_, {throwable}> {{ Ok({}) }}).map_err({throwable}::from).and_then(|r| r)",
+                self.runtime("catching"),
+                code.text
+            )
+        } else {
+            format!("{}(|| {})", self.runtime("catching"), code.text)
+        };
         Code::atom(self.passed_on(Code::atom(call)))
     }
 
@@ -528,7 +558,9 @@ impl<'a> Gen<'a> {
             }
             self.method = *ctor;
             let object = self.new_object_as(*ctor, args, Some(throwable)).text;
-            self.line(&format!("{} => {object},", rust_string(&self.class.types[*c].name)));
+            // The form without a message comes first (`Lowering::raised_objects`).
+            let bare = if args.is_empty() { " if e.message.is_none()" } else { "" };
+            self.line(&format!("{}{bare} => {object},", rust_string(&self.class.types[*c].name)));
         }
         self.method = outer;
         let uncaught = self.uncaught("uncaught");

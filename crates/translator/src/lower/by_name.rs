@@ -7,6 +7,10 @@
 //! `Class.forName` with a name that the code spells out (`program::class_for_name`) finds that
 //! class of the program: the call is its class literal, after its static initialization
 //! (`Builtin::InitializeClass`) when the call initializes it.
+//!
+//! `MethodHandles.lookup().ensureInitialized(c)` initializes the class of the `Class` value `c`
+//! and gives it back: a class literal's class directly, and any other value's by its name, among
+//! the classes that reachability found code gives it (`program::reach::initialize`).
 
 use super::*;
 
@@ -52,15 +56,16 @@ impl<'t> Lowering<'t> {
     }
 
     /// The call `node`, `Class.forName("a.B", initialize, loader)` or `Class.forName("a.B")`,
-    /// as `{ loader; init a.B; a.B.class }`; `None` when the name is not a string literal. The
+    /// as `{ loader; init a.B; a.B.class }`, and an end of the program for a name of no class of the
+    /// program; `None` when the name is not a string literal. The
     /// loader is evaluated for its effects only: the program's classes are all one loader's.
     pub(super) fn class_for_name(&self, node: Node<'t>) -> Result<Option<ExprKind>, Error> {
         let Some((name, initialize)) = crate::program::class_for_name(node.0) else { return Ok(None) };
         let Some(class) = self.type_index(&name) else {
-            return unsupported(
-                node,
-                &format!("`Class.forName` of `{name}`, which is not a class of the program"),
-            );
+            // A class that the program does not have, such as `java.lang.invoke`'s, which is not
+            // translated: the call ends the program when it runs (`Builtin::UnknownClass`).
+            let name = self.expr(node.list("arguments").next().expect("forName has a name"))?;
+            return Ok(Some(ExprKind::Builtin(Builtin::UnknownClass, vec![name])));
         };
         let pos = node.pos();
         let mut block = Vec::new();
@@ -84,6 +89,68 @@ impl<'t> Lowering<'t> {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
             cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
         }))
+    }
+
+    /// `MethodHandles.lookup().ensureInitialized(c)` (see the module's comment): `{ init X;
+    /// X.class }` for a literal `X.class`, and for any other `c`, `{ Class c_ = c; switch
+    /// (c_.getName()) { case "X" -> init X; .. default -> {} } c_ }`.
+    pub(super) fn ensure_initialized(&self, node: Node<'t>) -> Result<ExprKind, Error> {
+        let select = node.child("methodSelect")?;
+        let lookup = select.child("expression")?;
+        let is_lookup = lookup.kind() == "METHOD_INVOCATION"
+            && lookup
+                .symbol()
+                .is_some_and(|s| (s.owner, s.name) == ("java.lang.invoke.MethodHandles", "lookup"));
+        if !is_lookup {
+            return unsupported(node, "`ensureInitialized` of a lookup other than `MethodHandles.lookup()`");
+        }
+        let pos = node.pos();
+        let argument = node.list("arguments").next().expect("ensureInitialized has an argument");
+        let init = |class: usize| {
+            let init = ExprKind::Builtin(Builtin::InitializeClass { class }, Vec::new());
+            Stmt::Expr(self.synth(init, pos, Type::Void))
+        };
+        let block = |body: Vec<Stmt>| ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        };
+        if let Some(name) = crate::program::literal_class(argument.0) {
+            let Some(class) = self.type_index(&name) else {
+                return unsupported(
+                    node,
+                    &format!("`ensureInitialized` of `{name}`, which is not a class of the program"),
+                );
+            };
+            let literal = self.expr(argument)?;
+            return Ok(block(vec![init(class), Stmt::Yield(literal)]));
+        }
+        let value = self.expr(argument)?;
+        if value.ty != Type::JavaClass {
+            return unsupported(node, "`ensureInitialized` of this value");
+        }
+        let local = self.fresh_name("class");
+        let var = || self.synth(ExprKind::Var(local.clone()), pos, Type::JavaClass);
+        // `if (c_.equals(X.class)) init X; else if ..`, over the classes it can be.
+        let mut chain: Option<Box<Stmt>> = None;
+        for t in (0..self.types.len()).rev() {
+            let ensured = match self.reach {
+                Some(reach) => reach.ensured.contains(&self.types[t].javac),
+                None => self.types[t].nested.is_none(),
+            };
+            if !ensured {
+                continue;
+            }
+            let ty = self.ty(node, &self.types[t].javac)?;
+            let literal =
+                self.synth(ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new()), pos, Type::JavaClass);
+            let equals = ExprKind::Builtin(Builtin::ClassMethod(ClassOp::Equals), vec![var(), literal]);
+            let cond = self.synth(equals, pos, Type::Boolean);
+            chain = Some(Box::new(Stmt::If { cond, then: Box::new(init(t)), otherwise: chain }));
+        }
+        let mut body = vec![Stmt::Local { ty: Type::JavaClass, name: local.clone(), init: Some(value), pos }];
+        body.extend(chain.map(|c| *c));
+        body.push(Stmt::Yield(var()));
+        Ok(block(body))
     }
 
     /// Whether a creation of a `target` from a class name can create an object of the class `t`:

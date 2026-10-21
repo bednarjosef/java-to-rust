@@ -341,14 +341,10 @@ impl<'t> Lowering<'t> {
     /// constructor, which sets them. javac sets the synthetic fields before `super(..)`; here the
     /// superclass's constructor runs first, as it builds the `base` of the struct.
     pub(super) fn start_constructor(&self, owner: usize, body: &mut Vec<Stmt>) -> Result<(), Error> {
-        let first = body.first().and_then(|s| match s {
-            Stmt::Expr(e) => Some(&e.kind),
-            _ => None,
-        });
-        if matches!(first, Some(ExprKind::ThisCall { .. })) {
+        if delegates(body) {
             return Ok(());
         }
-        let at = usize::from(matches!(first, Some(ExprKind::SuperInit { .. })));
+        let at = explicit_call(body).map_or(0, |i| i + 1);
         let statements = self.synthetic_statements(owner)?;
         body.splice(at..at, statements);
         Ok(())

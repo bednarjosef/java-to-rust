@@ -10,6 +10,12 @@ impl<'a> Gen<'a> {
     /// string, wrapped in `Some` where the elements of arrays of that type may be null.
     pub(super) fn main_args_vec(&mut self, ty: Type) -> String {
         let args = format!("{}()", self.runtime("main_args"));
+        // A `String[]` that is an `Object[]` (see `lower::covariant`).
+        if element(ty) != Type::String {
+            let each = self.string_as_object("s");
+            let each = if self.nullable_element(element(ty)) { format!("Some({each})") } else { each };
+            return format!("{args}.into_iter().map(|s| {each}).collect::<Vec<_>>()");
+        }
         if self.nullable_element(element(ty)) {
             format!("{args}.into_iter().map(Some).collect::<Vec<_>>()")
         } else {

@@ -258,6 +258,30 @@ pub fn lowercase(s: &str) -> String {
     if s.is_ascii() { s.to_ascii_lowercase() } else { s.to_lowercase() }
 }
 
+/// `s.toUpperCase(locale)`, given the locale's language: the root locale's mapping, which is
+/// every language's but Turkish, Azeri and Lithuanian (`special_casing`).
+pub fn uppercase_in(s: &str, language: &str) -> String {
+    special_casing(language);
+    uppercase(s)
+}
+
+/// `s.toLowerCase(locale)`, given the locale's language (see `uppercase_in`).
+pub fn lowercase_in(s: &str, language: &str) -> String {
+    special_casing(language);
+    lowercase(s)
+}
+
+/// Ends the program for a language whose case mapping is not the root locale's: Java maps the
+/// dotted and dotless `i` of Turkish and Azeri, and the dot above of Lithuanian, its own way,
+/// which the runtime does not have.
+fn special_casing(language: &str) {
+    if matches!(language, "tr" | "az" | "lt") {
+        crate::throw_uncaught(format!(
+            "the case mapping of the language \"{language}\" is not supported by the translation"
+        ));
+    }
+}
+
 /// `s.replace(old, new)` on `char`s, which replaces code units, even halves of a pair.
 pub fn replace_char(s: &str, old: u16, new: u16) -> String {
     let surrogate = |c: u16| (0xD800..0xE000).contains(&c);
@@ -490,6 +514,14 @@ pub fn join<T: JoinItem>(delimiter: &str, elements: &[T]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn case_mapping_in_a_locale_is_the_root_locales_for_most_languages() {
+        assert_eq!(uppercase_in("straße", "en"), "STRASSE");
+        assert_eq!(uppercase_in("title", ""), "TITLE");
+        assert_eq!(lowercase_in("\u{39f}\u{394}\u{39f}\u{3a3}", "de"), "\u{3bf}\u{3b4}\u{3bf}\u{3c2}");
+        assert_eq!(lowercase_in("ISTANBUL", "fr"), "istanbul");
+    }
 
     #[test]
     fn substrings_count_code_units() {

@@ -51,13 +51,15 @@ struct Rejection {
 pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     use crate::timings::phase;
     let files = source_files(program)?;
-    let (units, reach) = load(program)?;
+    // As a translation first does: without the writes of `String` arrays as `Object` arrays.
+    let (units, reach) = load(program, false)?;
     let units: Vec<&Value> = units.iter().collect();
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     // Panics are rejections in a census: they are reported with the rest, not printed.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let lower = || lower::census_lower_program(&trees, &reach, &program.main);
+    // The program's files are the first units (`load`).
+    let lower = || lower::census_lower_program(&trees, files.len(), &reach, &program.main);
     let lowered = phase("lower", || std::panic::catch_unwind(lower));
     let lowered = lowered.unwrap_or_else(|panic| {
         let message = format!("the translator panicked: {}", lower::panic_message(&*panic));
