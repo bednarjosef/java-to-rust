@@ -811,6 +811,10 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | CodePointOp::IsBmp
             | CodePointOp::IsSupplementary,
         ) => None,
+        // A name that is not a charset: `UnsupportedCharsetException`, `IllegalCharsetNameException`
+        // or, for null, `IllegalArgumentException`. Not checked, so a catch of it is rejected.
+        Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported) => Some("?"),
+        Builtin::Charset(_) => None,
         _ => Some("?"),
     }
 }
@@ -965,6 +969,7 @@ fn runtime_failures(
                         | Builtin::ArraysToString
                         | Builtin::Arrays(ArraysOp::Equals | ArraysOp::HashCode | ArraysOp::DeepToString)
                         | Builtin::Boxed(BoxedOp::Equals, _)
+                        | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
                 );
                 let checked = if takes_null || matches!(builtin, Builtin::String(StringOp::Join)) {
                     &args[..args.len().min(1)]

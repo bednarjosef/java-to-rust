@@ -53,6 +53,7 @@ pub use program::lower_program;
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
+    charsets::check(unit)?;
     // A `;` at top level and an annotation type (`@interface`) do nothing when the program runs.
     let decls: Vec<Node> = unit
         .list("typeDecls")
@@ -349,9 +350,7 @@ impl<'t> Lowering<'t> {
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
-            "java.nio.charset.Charset" => {
-                error(node.pos(), "a `Charset` outside `getBytes` or `new String` not supported yet")
-            }
+            "java.nio.charset.Charset" => Ok(Type::Charset),
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
@@ -483,6 +482,7 @@ impl<'t> Lowering<'t> {
 
     fn expr(&self, node: Node<'t>) -> Result<Expr, Error> {
         let kind = match node.kind() {
+            _ if charsets::is_charset_op(node) => self.charset_op(node)?,
             "PARENTHESIZED" => return self.expr(node.child("expression")?),
             "INT_LITERAL" => ExprKind::Int(self.number(node)?),
             "LONG_LITERAL" => ExprKind::Long(self.number(node)?),
@@ -603,6 +603,7 @@ impl<'t> Lowering<'t> {
             "INSTANCE_OF" => self.instance_of(node)?,
             "SWITCH_EXPRESSION" => self.switch_expr(node)?,
             "EQUAL_TO" | "NOT_EQUAL_TO" if classes::compares_classes(node) => self.class_comparison(node)?,
+            "EQUAL_TO" | "NOT_EQUAL_TO" if charsets::compares_charsets(node) => self.charset_comparison(node)?,
             kind => {
                 let left = node.child("leftOperand");
                 let op = binary_op(node, kind);
@@ -694,7 +695,7 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.class_call(node, &symbol, select)? {
             return Ok(kind);
         }
-        let args: Vec<Expr> = node.list("arguments").map(|a| self.call_arg(a)).collect::<Result<_, _>>()?;
+        let args: Vec<Expr> = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let mut args = self.packed_args(node, &symbol, args)?;
         if select.kind() == "IDENTIFIER" && select.str("name") == "this" {
             let resolved = self.method_index(&symbol);

@@ -1,6 +1,6 @@
-//! The charsets of `StandardCharsets` and `Charset.forName`. A charset is never stored in a
-//! variable or passed around: lowering accepts one only as the charset argument of `getBytes` and
-//! `new String`, and makes it an expression of `Type::Charset` (see `lower/charsets.rs`).
+//! The operations on charsets: the `StandardCharsets` constants, `Charset.forName` and the methods
+//! of a `Charset` value. A charset is a value of `Type::Charset`, which the runtime's enum holds;
+//! lowering makes each operation a `Builtin::Charset` expression (see `lower/charsets.rs`).
 
 /// A charset, by the constant that names it, or the lookup of a name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,4 +19,18 @@ pub enum CharsetOp {
     Utf16Le,
     /// `Charset.forName(name)`; the name is the argument.
     ForName,
+    /// `Charset.isSupported(name)`; the name is the argument.
+    IsSupported,
+    /// `Charset.defaultCharset()`, which is UTF-8.
+    DefaultCharset,
+    /// `charset.name()`; the charset is the first argument.
+    Name,
+    /// `charset.displayName()`; the charset is the first argument.
+    DisplayName,
+    /// `charset.toString()`; the charset is the first argument.
+    ToString,
+    /// `charset.hashCode()`; the charset is the first argument.
+    HashCode,
+    /// `charset.equals(other)`, which is `==` on the two charsets; they are the arguments.
+    Equals,
 }
