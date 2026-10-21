@@ -482,8 +482,9 @@ impl<'a> Gen<'a> {
     /// Reads a variable after assigning it, for an assignment used as a value.
     pub(super) fn read(&self, target: &str, ty: Type) -> String {
         let name = self.local(target);
-        // An array assigned inside an expression is shared, and its handle is cloned.
-        if ty == Type::String || matches!(ty, Type::Array(_)) { format!("{name}.clone()") } else { name }
+        // The variable keeps its value: a string is copied, and an array's or an object's handle
+        // is cloned (`(k = first.key) == key || key.equals(k)` reads `k` again).
+        if self.clones(ty) { format!("{name}.clone()") } else { name }
     }
 
     pub(super) fn binary(&mut self, op: BinOp, l: Operand, r: Operand, result: Type, id: ExprId) -> Code {

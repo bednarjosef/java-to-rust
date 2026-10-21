@@ -175,7 +175,8 @@ fn shortcut(e: &Expr) -> Option<ExprId> {
     if negated != matches!(l.kind, ExprKind::Binary(BinOp::Ne, ..)) {
         return None;
     }
-    let (ExprKind::Var(a), ExprKind::Var(b)) = (&a.kind, &b.kind) else { return None };
+    // An operand may assign its variable first, as `HashMap.getNode` writes `(k = first.key) == key`.
+    let (Some(a), Some(b)) = (compared(a), compared(b)) else { return None };
     let mut equals = false;
     visit_expr(r, &mut |x| {
         if let ExprKind::MethodCall { receiver, name, args, .. } = &x.kind
@@ -187,6 +188,14 @@ fn shortcut(e: &Expr) -> Option<ExprId> {
         }
     });
     equals.then_some(l.id)
+}
+
+/// The variable that an operand of the shortcut's `==` is: a variable, or an assignment to one.
+fn compared(e: &Expr) -> Option<&String> {
+    match &peel(e).kind {
+        ExprKind::Var(name) | ExprKind::Assign { op: None, target: Place::Var(name), .. } => Some(name),
+        _ => None,
+    }
 }
 
 /// `e` without the conversions to `Object` that lowering adds.

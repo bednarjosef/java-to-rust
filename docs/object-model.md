@@ -1639,6 +1639,9 @@ Decisions that changed during the implementation, milestone by milestone.
   variants include a runtime type and neither side is a conversion from the program's own type),
   because a string or a box in an `Object` is a value whose identity is not kept. The shortcut
   `a == b || a.equals(b)` (`Objects.equals`) is accepted: its result is `equals`'s either way.
+  Later, an operand may also assign its variable on the way, as `HashMap.getNode` writes
+  `(k = first.key) == key || (key != null && key.equals(k))`; the assignment's value is then a
+  clone of the variable's handle, which the `equals` reads again.
 - Two analyses had to learn about the new sources of values: a string bound by a pattern
   (`o instanceof String s`) is not known to be ASCII, and the generator's nullness of a cast
   follows its operand, which a null check may have narrowed.
