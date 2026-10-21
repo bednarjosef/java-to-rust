@@ -1356,7 +1356,9 @@ Decisions that change during the implementation are recorded here, milestone by 
   closures `Arc::new(..)`, the handle chosen in one place (`closure_handle`); its captures are of
   shared types by the same walk. Others keep `Rc`, also in a threaded program
   (`docs/multi-threading.md`). Corpus: `threads/ClosuresAcrossThreads.java`,
-  `threads/ClosureMethodsAcrossThreads.java` (default methods on shared closures).
+  `threads/ClosureMethodsAcrossThreads.java` (default methods on shared closures),
+  `threads/OperatorsAcrossThreads.java` (a `UnaryOperator` that a thread runs makes `Function`
+  an `Arc` too).
 - **A call clones a closure out of a `RefCell`** before running it,
   `({ let f = a.borrow().op.clone(); f })(3)`, since the closure may reach the object again; a
   local, a capture or a field of a plain object is called in place (`op(x)`, `(self.op)(x)`).
