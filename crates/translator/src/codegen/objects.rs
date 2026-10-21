@@ -956,6 +956,9 @@ impl<'a> Gen<'a> {
     }
 
     fn build_object(&mut self, ctor: usize, args: &'a [Expr], rep: Option<usize>, turbofish: &str) -> Code {
+        // Java initializes the class when `new` runs, before the arguments, which may see what
+        // the initialization does; the constructor initializes it again, which does nothing.
+        let init = self.init_call(self.class.methods[ctor].class).filter(|_| args.iter().any(sees_statics));
         let args = self.call_args(ctor, args).join(", ");
         let path = self.qualified_fn(ctor);
         let path = match path.rsplit_once("::") {
@@ -964,6 +967,10 @@ impl<'a> Gen<'a> {
         };
         let call = format!("{path}({args})");
         let call = self.raising(Code::atom(call), ctor).text;
+        let call = match init {
+            Some(init) => format!("{{ {init} {call} }}"),
+            None => call,
+        };
         let c = self.class.methods[ctor].class;
         let name = &self.class.types[c].name;
         let object = if self.facts.owned.contains(name) || !self.builds_plain(name) {
@@ -1710,6 +1717,24 @@ impl<'a> Gen<'a> {
             self.out.push('\n');
         }
     }
+}
+
+/// Whether evaluating `e` may see the static state of a class: it reads or writes a static
+/// field, or calls or creates something that may.
+fn sees_statics(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| {
+        found |= matches!(
+            x.kind,
+            ExprKind::Static { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::MethodCall { .. }
+                | ExprKind::New { .. }
+                | ExprKind::Assign { target: Place::Static { .. }, .. }
+                | ExprKind::IncDec { target: Place::Static { .. }, .. }
+        )
+    });
+    found
 }
 
 /// Whether `e` is `null`, converted or not.
