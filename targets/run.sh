@@ -40,7 +40,7 @@ mkdir -p "$work"
 cargo build -q -p java-to-rust || exit 1
 # A copy, so that rebuilding the translator during a run does not change the programs after it.
 translator="$work/java-to-rust"
-cp "$root/target/debug/java-to-rust" "$translator" || exit 1
+cp "${CARGO_TARGET_DIR:-$root/target}/debug/java-to-rust" "$translator" || exit 1
 results="$work/results.txt"
 : > "$results"
 
