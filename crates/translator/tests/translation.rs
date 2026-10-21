@@ -1923,18 +1923,25 @@ fn an_enum_field_set_first_by_every_constructor_needs_no_initializer() {
 }
 
 #[test]
-fn an_enum_field_that_a_constructor_reads_before_setting_it_is_rejected() {
-    let error = java_to_rust::translate(
-        "public class A {
-            enum Color { RED, BLUE }
-            static class Paint {
-                private Color color;
-                Paint(Color color) { System.out.println(this.color); this.color = color; }
-            }
-            public static void main(String[] args) { new Paint(Color.BLUE); }
-        }",
-    )
-    .expect_err("a field read before it is set is null");
+fn an_enum_field_that_a_constructor_reads_before_setting_it_is_an_option() {
+    let program = |extra: &str| {
+        format!(
+            "public class A {{
+                enum Color {{ RED, BLUE }}
+                static class Paint {{
+                    private Color color;
+                    Paint(Color color) {{ System.out.println(this.color); this.color = color; }}
+                    {extra}
+                }}
+                public static void main(String[] args) {{ new Paint(Color.BLUE); }}
+            }}"
+        )
+    };
+    let rust = translate(&program(""));
+    assert_contains(&rust, &["color: Option<AColor>", "APaint { color: None }", "this.color = Some(color);"]);
+    // Used as an enum value, the field could be null there.
+    let error = java_to_rust::translate(&program("int order() { return color.ordinal(); }"))
+        .expect_err("a field that may be null used as an enum value");
     assert!(error.to_string().contains("null enums not supported yet"), "{error}");
 }
 

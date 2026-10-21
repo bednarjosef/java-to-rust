@@ -531,10 +531,10 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   concatenating it gives `null` (`java::or_null`). `==` on objects compares identity:
   `Rc::ptr_eq(&a, &b)`, or `java::same(a.as_ref(), b.as_ref())` where either may be null.
   An enum local, field, array element or return value that the program sets to null (or the
-  elements of `new E[n]`, which start null) is an `Option` of the enum, compared with
-  `kinds[i] == Some(Kind::Dead)`; such a value may only be stored, returned, tested against
-  null, compared, printed or dropped, and any other use of it is rejected
-  (`lower/enum_nulls.rs`).
+  elements of `new E[n]`, and a field that no constructor sets first, which start null) is an
+  `Option` of the enum, compared with `kinds[i] == Some(Kind::Dead)`; such a value may only be
+  stored (in a local too), returned, tested against null, compared, printed or dropped, and any
+  other use of it is rejected (`lower/enum_nulls.rs`).
 - Arrays (`int[]`, `long[]`, `double[]`, `boolean[]`, `String[]`, and arrays of arrays) are shared
   references in the faithful form, `java::Array<T>`: a shared cell whose clones see each other's
   writes. The aliasing analysis (`analysis/arrays.rs`) finds local arrays that no other name can
