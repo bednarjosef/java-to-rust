@@ -1,6 +1,7 @@
 //! Functional interfaces that are closure types (`analysis::closures`): the interface is a type
-//! alias, `type Op = Rc<dyn Fn(i32, i32) -> i32>;`, a lambda or method reference converted to it
-//! is a closure, and a call of the interface's method calls the closure.
+//! alias, `type Op = Rc<dyn Fn(i32, i32) -> i32>;` (`Arc<dyn Fn(i32, i32) -> i32 + Send + Sync>`
+//! when threads may share its values), a lambda or method reference converted to it is a closure,
+//! and a call of the interface's method calls the closure.
 //!
 //! The closure's body is the lambda class's method, written where the lambda is created with the
 //! method's own names and facts, and its captures are bound before it: the fields that held them

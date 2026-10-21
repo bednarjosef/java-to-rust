@@ -40,6 +40,13 @@ impl<'a> Gen<'a> {
         self.facts.nullable_elements.contains(&elem)
     }
 
+    /// Whether the loop variable `name` over elements of type `elem` is an `Option` while the
+    /// elements are not: the name is nullable elsewhere in the method, so the elements are wrapped
+    /// in `Some` as the loop binds them.
+    pub(super) fn wrap_each(&self, name: &str, elem: Type) -> bool {
+        self.optional_var(self.method, elem, name) && !self.nullable_element(elem)
+    }
+
     /// Whether `a = value` computes the value from `a` itself where `a` is a shared array: a
     /// borrow of its cell lent to a call (`&a.borrow()`) lives to the end of the statement, so the
     /// value is bound before the assignment.
@@ -88,7 +95,7 @@ impl<'a> Gen<'a> {
         if self.nullable(e) {
             // Using a null array throws `NullPointerException`.
             let place = self.object_place(e);
-            return format!("{}({place}.as_ref())", self.runtime("non_null"));
+            return self.dereference(&[e.id], &format!("{place}.as_ref()"));
         }
         match &e.kind {
             ExprKind::Var(name) => format!("&{}", self.local(name)),
@@ -370,7 +377,8 @@ impl<'a> Gen<'a> {
             self.expr(array).text
         };
         let each = self.runtime("each");
-        self.line(&format!("for {mutable}{var} in {each}({source}) {{"));
+        let wrap = if self.wrap_each(name, element(array.ty)) { ".map(Some)" } else { "" };
+        self.line(&format!("for {mutable}{var} in {each}({source}){wrap} {{"));
         self.loop_body(Loop::Plain, body, &[]);
         self.line("}");
     }

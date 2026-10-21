@@ -34,9 +34,10 @@ pub(super) fn completes(stmt: &Stmt) -> bool {
         | Stmt::BreakLabel(_)
         | Stmt::ContinueLabel(_)
         | Stmt::Yield(_) => false,
-        Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::Exit | Builtin::NoObject { .. }, _), .. }) => {
-            false
-        }
+        Stmt::Expr(Expr {
+            kind: ExprKind::Builtin(Builtin::Exit | Builtin::NoObject { .. } | Builtin::UnknownClass, _),
+            ..
+        }) => false,
         Stmt::Block(stmts) => completes_all(stmts),
         Stmt::If { then, otherwise: Some(otherwise), .. } => completes(then) || completes(otherwise),
         Stmt::While { cond, body } if matches!(cond.kind, ExprKind::Bool(true)) => breaks_out_of(body, None),
@@ -408,6 +409,55 @@ impl<'a> Gen<'a> {
             return Code::atom(self.passed_on(Code::atom(call)));
         }
         Code::atom(format!("{}{generics}({args})", self.runtime(name)))
+    }
+
+    /// `class_cast` of the cast `id`: where a `catch` or a `finally` may see its
+    /// `ClassCastException` (`Facts::raising`), in the checked form, whose failure goes on from
+    /// here as a thrown exception does.
+    pub(super) fn checked_class_cast(&mut self, id: ExprId, to: Type, value: &'a Expr) -> Code {
+        let outer = self.checked_cast;
+        self.checked_cast = self.facts.raising.contains(&id).then_some(id);
+        let code = self.class_cast(to, value);
+        self.checked_cast = outer;
+        code
+    }
+
+    /// The checked form of a cast whose text is `text`, a `Result` (an `Option` of one when the
+    /// value may be null), when `checked` is the cast; else `text` as it is.
+    pub(super) fn cast_result(&mut self, text: String, checked: Option<ExprId>, optional: bool) -> Code {
+        let Some(id) = checked else { return Code::atom(text) };
+        self.dereferenced.insert(id);
+        let result = if optional { format!("{text}.transpose()") } else { text };
+        Code::atom(self.passed_on(Code::atom(result)))
+    }
+
+    /// Rejects the program when a cast of `Facts::raising` that is written is not in the checked
+    /// form, where its `ClassCastException` would end the program instead of reaching the `catch`
+    /// or the `finally`.
+    pub(super) fn check_casts(&mut self) {
+        let mut missed: Vec<Pos> = Vec::new();
+        for (_, method) in self.class.methods.iter().enumerate().filter(|(i, _)| self.written.contains(i)) {
+            for stmt in &method.body {
+                visit_stmt(
+                    stmt,
+                    &mut |e| {
+                        visit_expr(e, &mut |x| {
+                            if matches!(x.kind, ExprKind::Cast(..))
+                                && self.facts.raising.contains(&x.id)
+                                && !self.dereferenced.contains(&x.id)
+                            {
+                                missed.push(x.pos);
+                            }
+                        })
+                    },
+                    &mut |_| {},
+                );
+            }
+        }
+        if let Some(pos) = missed.into_iter().min_by_key(|p| (p.line, p.column)) {
+            let message = "catching the `ClassCastException` of this cast not supported yet";
+            self.rejected.get_or_insert(Error { pos, message: message.to_string() });
+        }
     }
 
     /// `impl From<java::Exception> for Throwable`, for the enum of `Throwable` (`t`) of a program

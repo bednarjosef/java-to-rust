@@ -49,6 +49,9 @@ pub(super) struct Nested<'t> {
     /// Whether the class declares the field `outer` itself, rather than inheriting it from a
     /// superclass nested in the same class.
     pub own_outer: bool,
+    /// The field that holds the enclosing instance: `outer`, or `outer_` (and so on) where a
+    /// superclass nested in another class already holds its own enclosing instance as `outer`.
+    pub outer_field: String,
 }
 
 /// A local variable that a class captures.
@@ -96,6 +99,7 @@ impl<'t> Lowering<'t> {
             needs: Vec::new(),
             outer: false,
             own_outer: false,
+            outer_field: OUTER.to_string(),
         }
     }
 
@@ -151,7 +155,7 @@ impl<'t> Lowering<'t> {
                 NestKind::Anonymous => {
                     let new = nested.new.expect("an anonymous class has its `new`");
                     let supertype = new.get("identifier").map_or("", |i| i.java_type());
-                    let supertype = supertype.split('<').next().unwrap_or_default();
+                    let supertype = super::captures::raw(supertype);
                     // A local class's binary name has its number before its simple name.
                     let simple = supertype.rsplit(['.', '$']).next().unwrap_or_default();
                     let simple = simple.trim_start_matches(|c: char| c.is_ascii_digit());
@@ -255,7 +259,7 @@ impl<'t> Lowering<'t> {
         let mut out = Vec::new();
         if nested.own_outer {
             let ty = self.self_type(nested.enclosing);
-            out.push(Field { name: OUTER.to_string(), ty, init: None, constant: false, pos });
+            out.push(Field { name: nested.outer_field.clone(), ty, init: None, constant: false, pos });
         }
         for c in nested.captures.iter().filter(|c| !c.inherited) {
             let ty = self.capture_type(c)?;
@@ -309,7 +313,7 @@ impl<'t> Lowering<'t> {
         let mut out = Vec::new();
         if nested.own_outer {
             let ty = self.self_type(nested.enclosing);
-            out.push(assign(OUTER, self.synth(ExprKind::Var(OUTER.to_string()), pos, ty)));
+            out.push(assign(&nested.outer_field, self.synth(ExprKind::Var(OUTER.to_string()), pos, ty)));
         }
         for c in nested.captures.iter().filter(|c| !c.inherited) {
             let ty = self.capture_type(c)?;
@@ -373,7 +377,7 @@ impl<'t> Lowering<'t> {
         let Some(nested) = self.nesting(t) else { return Ok((Vec::new(), Vec::new())) };
         let first = match outer {
             Some(value) => vec![value],
-            None if nested.outer => vec![self.enclosing_instance(nested.enclosing, pos)?],
+            None if nested.outer => vec![self.enclosing_instance_of(nested.enclosing, pos)?],
             None => Vec::new(),
         };
         let current = self.current.get();
@@ -401,10 +405,9 @@ impl<'t> Lowering<'t> {
             };
         };
         let pos = node.pos();
-        let first = match explicit {
-            Some(e) if nested.kind == NestKind::Anonymous => {
-                return unsupported(e, "an enclosing instance of an anonymous class");
-            }
+        // In `o.new Inner() { .. }`, `o` is the superclass's enclosing instance, a declared
+        // argument (see `anonymous_enclosing`).
+        let first = match explicit.filter(|_| nested.kind != NestKind::Anonymous) {
             Some(e) => {
                 let value = self.expr(e)?;
                 if !nested.outer {
@@ -416,7 +419,7 @@ impl<'t> Lowering<'t> {
                     vec![self.convert(value, self.self_type(nested.enclosing))]
                 }
             }
-            None if nested.outer => vec![self.enclosing_instance(nested.enclosing, pos)?],
+            None if nested.outer => vec![self.enclosing_instance_of(nested.enclosing, pos)?],
             None => Vec::new(),
         };
         let mut last = Vec::new();
@@ -425,6 +428,22 @@ impl<'t> Lowering<'t> {
             last.push(self.captured_at(node, c.name, ty)?);
         }
         Ok((first, last))
+    }
+
+    /// The explicit enclosing instance of `o.new Inner() { .. }` (`node`), which creates an object
+    /// of the anonymous class `t`: javac declares it as the first parameter of the anonymous
+    /// class's constructor, which passes it on as `o.super(..)`, so it comes before the declared
+    /// arguments. `None` for any other `new`.
+    pub(super) fn anonymous_enclosing(&self, node: Node<'t>, t: usize) -> Result<Option<Expr>, Error> {
+        let Some(e) = node.get("enclosingExpression") else { return Ok(None) };
+        if self.nesting(t).is_none_or(|n| n.kind != NestKind::Anonymous) {
+            return Ok(None);
+        }
+        let value = self.expr(e)?;
+        match self.superclass(t)?.and_then(|s| self.nesting(s)) {
+            Some(s) => Ok(Some(self.convert(value, self.self_type(s.enclosing)))),
+            None => unsupported(e, "an enclosing instance for this class"),
+        }
     }
 
     /// `args` with the synthetic arguments around them.
