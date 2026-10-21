@@ -339,7 +339,7 @@ class ObjectGen(ObjectDeclGen, ObjectStmtGen):
         return 'Integer'
 
     def generic_type(self):
-        heads = [g for g in self.generics if g != 'GNode']
+        heads = [g for g in GENERICS if g in self.generics and g != 'GNode']
         head = self.pick(heads)
         if head == 'GPair':
             return f'GPair<{self.type_arg()}, {self.type_arg()}>'
