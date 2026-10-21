@@ -128,10 +128,12 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         finallies: Vec::new(),
         attempt_count: 0,
         try_assigned: HashSet::new(),
+        dereferenced: HashSet::new(),
         rejected: None,
     };
     if modules.is_some() {
         let text = g.program(&live);
+        g.check_dereferences();
         return (text, g.needs.take(), g.rejected);
     }
     for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
@@ -153,6 +155,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
             g.method(i);
         }
     }
+    g.check_dereferences();
     let mut header = format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name);
     let uses = modules::use_lines(&g.out);
     if !uses.is_empty() {
@@ -284,6 +287,8 @@ struct Gen<'a> {
     /// The current method's locals declared without a value that a `try` block assigns (see
     /// `exceptions::try_assigned`).
     try_assigned: HashSet<String>,
+    /// The objects of `Facts::null_checked` whose checked dereference has been written.
+    dereferenced: HashSet<ExprId>,
     /// The first construct found that cannot be translated, which `generate` reports.
     rejected: Option<Error>,
 }
