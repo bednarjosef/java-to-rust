@@ -1157,6 +1157,37 @@ Decisions that change during the implementation are recorded here, milestone by 
   lambdas work's runtime interfaces in single-file mode, the JDK's sources in whole-program
   mode. Without them it is rejected as "implementing `java.lang.Runnable`".
 
+### For-each over `Iterable`
+
+- **Lowered to the loop Java runs, in one form.** `for (T x : c) body` on an object of the
+  program becomes `{ it = c.iterator(); while (it.hasNext()) { T x = (T) it.next(); body } }`
+  in lowering (`lower/foreach.rs`), with ordinary calls of the program's (or the JDK's)
+  methods, resolved as javac would (the receiver's class, then its supertypes). The generator
+  then writes `while it.has_next() { let x = it.next(); .. }`, propagating what the calls throw
+  like any other call. The idiomatic `for x in java::iterate(..)` form of section 5, with
+  `impl java::Iterating` items and `crates/runtime/src/iterate.rs`, is not written:
+  the `while` form has Java's call sequence by construction, including after `break` and when
+  the body changes the collection, and needs no new statement kind in the analyses. It can be
+  added later as a generator pattern over this shape where neither call throws.
+- **Reachability adds `Iterable.iterator`, `Iterator.hasNext` and `Iterator.next`** at every
+  for-each over a non-array, since javac's tree does not show those calls; their overriders in
+  live classes follow as for any call.
+- **A label on the loop goes on the `while`**, inside the block that declares the iterator.
+- **The JDK's packages as modules:** a whole program with JDK classes wrote `mod java`, which
+  clashed with the runtime's alias `java`; package segments `java`, `std`, `core`, `alloc` and
+  the path keywords now take a `_` (`crate::java_::util::Iterator`).
+- **Single-file mode takes `Iterable` and `Iterator` from the lambdas work's
+  `java/Functional.java`**, which declares their abstract methods only. So a call of
+  `Iterator.remove` (a default method of the JDK's) on an `Iterator` is rejected in a file as
+  "the default method java.util.Iterator.remove", where before the merge it reached the
+  analyses unresolved; `corpus/features/IteratorRemove.java` declares its own
+  `RemovingIterator` for it. With the JDK's sources the JDK's `Iterator` is translated, default
+  methods included.
+- **No corpus project over the JDK's collections**: the corpus test runs without the JDK's
+  sources, so the two for-each programs were also checked by hand in whole-program mode with
+  `--library` and the JDK's `Iterator` (same output as Java). A for-each over the JDK's own
+  collections still stops before it, at what those classes use (`ArraysSupport`'s fields,
+  `new Object()` in `TreeMap`).
 ### Lambdas and method references
 
 - **Captures came before the closure forms.** The captures landed while the object form of

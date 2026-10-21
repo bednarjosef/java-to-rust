@@ -306,7 +306,7 @@ fn raw(name: &str) -> &str {
 }
 
 /// Adds the names that the code declares (locals, parameters, catch and pattern variables).
-fn declared_names(node: Node, out: &mut HashSet<String>) {
+pub(super) fn declared_names(node: Node, out: &mut HashSet<String>) {
     match node.0 {
         Value::Object(fields) => {
             if matches!(node.kind(), "VARIABLE") {
