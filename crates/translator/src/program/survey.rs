@@ -298,8 +298,8 @@ impl Census {
                         scan.feature("inner classes", node)
                     }
                     // An anonymous class body is a class node too: it is counted above.
-                    "CLASS" | "INTERFACE" | "ENUM" | "RECORD" if !symbol_type(node).starts_with('<') => {
-                        scan.feature("local classes", node)
+                    "INTERFACE" | "ENUM" | "RECORD" if !is_anonymous(symbol_type(node)) => {
+                        scan.feature("local interfaces, enums and records", node)
                     }
                     "TRY" if node["resources"].as_array().is_some_and(|r| !r.is_empty()) => {
                         scan.feature("try-with-resources", node)
@@ -773,6 +773,13 @@ fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String
         features.insert("enum constants with bodies");
     }
     features
+}
+
+/// Whether javac's name for a class is that of an anonymous class: its binary name `Main$1`, or
+/// `<anonymous Planet>` for the body of an enum constant.
+fn is_anonymous(name: &str) -> bool {
+    name.starts_with('<')
+        || name.rsplit_once('$').is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Whether a declaration has a type variable with more than one bound (`T extends A & B`).

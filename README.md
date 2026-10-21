@@ -387,6 +387,16 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   only ever used through an interface stays a plain struct. The methods of an override group share what the analyses decide about their parameters and
   results, as a call may run any of them. A superclass's static initialization runs before its
   subclass's.
+- Local classes (`lower/captures.rs`, `lower/inner.rs`), lowered as javac desugars them: the
+  locals that a local class reads from its method are fields of its struct, set by every
+  constructor from trailing parameters that each `new` passes (`MainLabeler::new(scale, &unit)`),
+  and the enclosing object, when its code uses it, is the field `outer`, which an unqualified
+  field or method of the enclosing class reads (`self.outer.borrow().factor`). A local class that
+  creates another of the same method passes on its own captures of it. The struct is named after
+  the enclosing class (`MainLabeler`), with the method appended where two local classes of a
+  class share a name (`MainBoxInSecond`), and `getName` gives javac's binary name
+  (`Main$1Labeler`). A captured array is shared with the method. Not yet: local interfaces,
+  enums and records, and member classes of local classes.
 
 ### Whole programs
 
@@ -480,7 +490,8 @@ Each construct below is rejected at translation with an error that names it:
 
 - the exceptions and try-with-resources listed under "Exceptions" above, and intersection bounds
   (`T extends A & B`);
-- records, inner, local and anonymous classes, and record patterns;
+- records, inner and anonymous classes, local interfaces, enums and records, and record
+  patterns;
 - lambdas and method references, and for-each over an `Iterable`;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;

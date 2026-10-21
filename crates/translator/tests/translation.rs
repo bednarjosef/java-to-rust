@@ -2344,19 +2344,19 @@ fn local_and_anonymous_classes_are_declared_so_their_calls_are_not_outside() {
             "Main.java",
             "public class Main {
                 public static void main(String[] args) {
-                    class Local { int n() { return 2; } }
+                    enum Local { A; int n() { return 2; } }
                     Object anon = new Object() { };
-                    System.out.println(new Local().n());
+                    System.out.println(Local.A.n());
                 }
             }",
         )],
     );
     let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
     let report = survey(&program).report;
-    // The local class is a feature of the method that declares it; its calls are not calls to
+    // The local enum is a feature of the method that declares it; its calls are not calls to
     // classes outside the sources.
     let table = feature_table(&report, "Program code: features");
-    assert!(feature_row(table, "local classes").contains("Main.java:"), "{table}");
+    assert!(feature_row(table, "local interfaces, enums and records").contains("Main.java:"), "{table}");
     assert!(feature_row(table, "anonymous classes").contains("Main.java:"), "{table}");
     assert!(!table.contains("classes outside"), "{table}");
     assert_lacks(&report, &["(outside)"]);
@@ -2370,8 +2370,8 @@ fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
             "Main.java",
             "public class Main {
                 public static void main(String[] args) {
-                    class Local { int n() { return 1; } }
-                    System.out.println(Helper.run() + new Local().n());
+                    enum Local { A; int n() { return 1; } }
+                    System.out.println(Helper.run() + Local.A.n());
                 }
             }",
         )],
@@ -2393,13 +2393,13 @@ fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
     let program_table = feature_table(&report, "Program code: features");
     let library_table = feature_table(&report, "Library code: features");
     assert!(report.find("Program code:").unwrap() < report.find("Library code:").unwrap(), "{report}");
-    assert!(feature_row(program_table, "local classes").contains("Main.java:"), "{program_table}");
+    assert!(feature_row(program_table, "local interfaces").contains("Main.java:"), "{program_table}");
     assert!(!program_table.contains("lambdas"), "{program_table}");
     // The library's example is relative to its root, not the absolute path.
     let row = feature_row(library_table, "lambdas");
     assert!(row.contains("Helper.java:1"), "{row}");
     assert!(!row.contains(lib.to_str().unwrap()), "{row}");
-    assert!(!library_table.contains("local classes"), "{library_table}");
+    assert!(!library_table.contains("local interfaces"), "{library_table}");
 }
 
 #[test]

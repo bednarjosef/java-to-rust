@@ -271,6 +271,13 @@ impl<'t> Walk<'t> {
         }
         for member in members(decl) {
             let name = text(member, "name").to_string();
+            if !CLASS_KINDS.contains(&text(member, "kind")) {
+                let mut locals = Vec::new();
+                local_classes(member, &mut locals);
+                for local in locals {
+                    self.declare(local, Some(&class));
+                }
+            }
             match text(member, "kind") {
                 "METHOD" => {
                     let key = (class.clone(), name, symbol_type(member).to_string());
@@ -489,6 +496,31 @@ impl<'t> Walk<'t> {
             }
             _ => {}
         }
+    }
+}
+
+/// The local and anonymous class declarations in the code of a member, outside the bodies of
+/// the classes found: they are declared with the member's class as their outer class, and
+/// `Walk::scan` reaches their members when it scans the code.
+fn local_classes<'t>(value: &'t Value, out: &mut Vec<&'t Value>) {
+    match value {
+        Value::Object(fields) => {
+            if CLASS_KINDS.contains(&text(value, "kind")) {
+                // javac names the body of an enum constant `<anonymous Planet>`: it belongs to
+                // the enum (see `lower::constant_bodies`).
+                if !symbol_type(value).starts_with('<') {
+                    out.push(value);
+                }
+                return;
+            }
+            for (field, child) in fields {
+                if field != "symbol" {
+                    local_classes(child, out);
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| local_classes(item, out)),
+        _ => {}
     }
 }
 
