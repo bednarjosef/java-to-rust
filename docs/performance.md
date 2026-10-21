@@ -14,18 +14,77 @@ median of the runs, wall clock. Java runs with its default flags, so JVM start-u
 program that warms up prints `kernel-ms N` on standard error; that is the time of the timed loop
 measured inside the program, and it is reported in the two kernel columns.
 
-## Environment
+## Results of 2026-10-21
+
+Three runs of `python3 scripts/benchmark.py` on the `benchmarks-rerun` branch, which starts from
+main at `877411b`, after the object model, exceptions, nested classes and lambdas landed. Each
+run is five runs per side, medians. Each column below is the median of the three runs, and
+Rust/Java is the ratio of those two medians. Times in milliseconds.
 
 - CPU: AMD Ryzen AI 7 350 w/ Radeon 860M (16 cores)
 - JDK: OpenJDK 26.0.2.1 (`java -version`)
 - Rust: rustc 1.99.0 (b940084d7 2026-09-28), release profile
-- Load: the machine was busy during every run, from other agents' JVMs and builds: load
-  averages between 27 and 74 on 16 cores. Times of the same binary moved by a factor of two
-  between runs (the SortMillion kernel of one binary: 995 to 1337 ms in four runs in a row), and
-  the Java side moved more than the Rust side, so read small ratios as rough. The large changes
-  below are far outside that noise.
+- Load average at the start of each run: 20.8, 7.1 and 10.8 (on 16 cores); run 3 ended at 22.6.
+  Run 1 started at 20.8, just above the threshold of 20 for starting a run.
 
-## Results
+| program        | Java ms | Rust ms | Rust/Java | Java kernel | Rust kernel | kernel ratio |
+|----------------|--------:|--------:|----------:|------------:|------------:|-------------:|
+| BinaryTrees    |     774 |    7444 |      9.62 |           - |           - |            - |
+| Collatz        |    1217 |     604 |      0.50 |           - |           - |            - |
+| Interpreter    |    1121 |    1141 |      1.02 |         358 |         378 |         1.06 |
+| Mandelbrot     |    3496 |    1218 |      0.35 |        1152 |        1216 |         1.06 |
+| MatrixMultiply |     356 |     356 |      1.00 |          62 |          96 |         1.55 |
+| NBody          |    1853 |    1889 |      1.02 |         616 |         630 |         1.02 |
+| NodeList       |       - |       - |         - |           - |           - |            - |
+| Sieve          |    1219 |    1059 |      0.87 |           - |           - |            - |
+| SortMillion    |    1765 |    1799 |      1.02 |         541 |         598 |         1.11 |
+| Statics        |    1331 |    2190 |      1.65 |           - |           - |            - |
+| StringBuild    |      30 |       1 |      0.03 |           - |           - |            - |
+
+NodeList compiles and runs, but it does not finish: its Rust binary aborts with a stack overflow
+(exit -6), so no time is reported. See the NodeList section below.
+
+The spread between runs is wide, so only the large differences are meaningful. Rust times of the
+same program ranged from 5811 to 11902 ms for BinaryTrees, 1885 to 4171 ms for NBody (its kernel
+was 625 to 630 ms in two runs and 1315 ms in the third), and 1155 to 1715 ms for Mandelbrot.
+
+### Comparison with the earlier table
+
+Earlier table: the array-ownership branch (`fd9bace`), a single run at load 72, shown below.
+
+| program        | earlier Rust/Java | now Rust/Java | change  | Rust ms, earlier → now |
+|----------------|------------------:|--------------:|--------:|-----------------------:|
+| BinaryTrees    |              3.32 |          9.62 |   +190% |        5770 → 7444     |
+| Collatz        |              0.38 |          0.50 |    +32% |         601 → 604     |
+| Interpreter    |              1.04 |          1.02 |     -2% |        1321 → 1141    |
+| Mandelbrot     |              0.33 |          0.35 |     +6% |        1179 → 1218    |
+| MatrixMultiply |              1.47 |          1.00 |    -32% |         214 → 356     |
+| NBody          |              1.02 |          1.02 |      0% |        1858 → 1889    |
+| NodeList       |   does not compile |   stack overflow |       - |               - → -   |
+| Sieve          |              0.71 |          0.87 |    +23% |        1060 → 1059    |
+| SortMillion    |              0.72 |          1.02 |    +42% |        5658 → 1799    |
+| Statics        |              0.98 |          1.65 |    +68% |        1763 → 2190    |
+| StringBuild    |              0.05 |          0.03 |       - |           2 → 1        |
+
+Causes of the changes:
+
+- **Statics (+68%) is a real slowdown.** The generated Rust is the same as the earlier
+  translator's (`diff` shows no change). In back-to-back runs of the two translators, the median
+  went from 1550 to 2090 ms, so the cause is in the runtime. A copy of the runtime with the old
+  `throw` body recovers about 170 ms: `throw` now calls `exception::die`. The other 370 ms are in
+  the new `array.rs` (`post_update` and `set`), which was not isolated further.
+- **SortMillion (+42%), Collatz (+32%), Sieve (+23%), BinaryTrees (+190%) did not get slower in
+  Rust.** The generated Rust is the same as the earlier translator's, except for Collatz
+  (`n = n / 2` is now `n /= 2`, the same operation). BinaryTrees ran at 5.8 s on both translators
+  in back-to-back runs. Their Rust times are the same or lower than before: SortMillion went from
+  5658 to 1799 ms. What moved the ratio is the Java side, which was 1.5 to 4.5 times faster than in
+  the earlier run at load 72 (BinaryTrees 1736 to 774 ms, SortMillion 7860 to 1765 ms).
+- **MatrixMultiply (-32%)** is noise: the Rust side ranged from 182 to 467 ms across the three
+  runs, and the generated Rust is the same.
+- **Mandelbrot (+6%), Interpreter (-2%), NBody (0%), StringBuild** are within the noise. StringBuild
+  runs in 1 ms on Rust, below the resolution of the script's rounding.
+
+## Earlier results: array-ownership branch
 
 One run of `python3 scripts/benchmark.py` on the `array-ownership` branch (five runs per side,
 medians, load average 72 at start). Times in milliseconds.
@@ -60,7 +119,7 @@ An earlier pair of runs, at load 74 before and 27 after, gave MatrixMultiply ker
 99.15 before and 8.68 after with the plain arrays alone (before the sliced loops below), and
 Sieve 0.74 before and 0.49 after.
 
-## Causes of the slow cases
+## Causes of the slow cases (earlier run)
 
 Read from the generated Rust under `target/benchmarks/<Name>/crate/src/main.rs`.
 
@@ -109,20 +168,28 @@ Read from the generated Rust under `target/benchmarks/<Name>/crate/src/main.rs`.
 Mandelbrot (0.33x, kernel 0.99x), Collatz (0.38x) and NBody (1.02x) are at or faster than Java
 and need no change.
 
-## NodeList: does not compile (translator bug)
+## NodeList: compiles, overflows the stack (2026-10-21)
 
-`benchmarks/NodeList.java` walks a linked list with `current = current.next` inside a loop. The
-translator emits
+Earlier, `benchmarks/NodeList.java` did not compile: the translator emitted
+`current = java::non_null(current.as_ref()).borrow().next.clone();`, the `Ref` from `borrow()`
+lived until the end of the statement, and rustc rejected the assignment with E0506. The
+translator now wraps that read in a block, so the `Ref` is dropped first, and the program
+compiles.
 
-    current = java::non_null(current.as_ref()).borrow().next.clone();
+It still does not produce the right result. Java prints `checksum 8650087554848663653` and exits
+0. The Rust binary prints nothing and aborts with SIGABRT (exit -6) on the default 8 MB main
+thread stack. With the stack limit raised (`ulimit -s unlimited`) it prints the same checksum as
+Java, so the arithmetic agrees.
 
-The `Ref` temporary from `borrow()` lives until the end of the statement, so the assignment to
-`current` happens while `current` is still borrowed. rustc rejects it with E0506 ("cannot assign
-to `current` because it is borrowed"). The same shape appears in the loop of `sum`. The fix
-belongs in the codegen that emits assignments from a field read through a `RefCell`: bind the
-`clone` to a local before the assignment. Nothing in `crates/` was changed for this benchmark.
+The cause is the drop of the list. Each round ends by dropping a list of about 667k nodes, each
+an `Rc<RefCell<NodeListNode>>` whose `next` field holds the next node. Rust's automatic drop of
+`NodeListNode` drops `next` inside the drop of the node, so freeing the head recurses once per
+node and overflows the stack. Java's garbage collector has no such recursion. The fix belongs in the
+translator, not in this benchmark: either an iterative `Drop` for the node that walks the chain
+while each node is uniquely owned (`Rc::strong_count` is 1), or the same unlinking in a loop
+before the list goes out of scope. Nothing in `crates/` was changed for this benchmark.
 
-Because it does not compile, the script reports NodeList as "does not compile" and exits with
+The script reports NodeList as "output differs from Java (exit -6, Java exit 0)" and exits with
 status 1.
 
 ## Deviations from the plan
@@ -133,6 +200,7 @@ status 1.
   take many minutes per run. They are kept small on purpose.
 - The Java times are whole-process, so programs that are short on Java include JVM start-up.
   Kernel columns exist only where a program has a warm-up loop.
-- The tables are single runs on a loaded machine. Re-run them on an idle machine before drawing
+- The earlier table is a single run on a loaded machine. The 2026-10-21 table is three runs
+  whose medians are shown; the spread between them is in its section. Re-run them on an idle machine before drawing
   conclusions about small differences; the large changes (MatrixMultiply, Sieve, SortMillion)
   are far outside the noise.
