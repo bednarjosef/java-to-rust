@@ -164,6 +164,7 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::CurrentThread
             | Native::ThreadStart
             | Native::ThreadAlive
+            | Native::ThreadState
             | Native::ThreadJoin
             | Native::ThreadRename
             | Native::ThreadInterrupt

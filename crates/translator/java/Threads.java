@@ -39,6 +39,9 @@ class Thread {
     ThreadLocal.ThreadLocalMap threadLocals;
     ThreadLocal.ThreadLocalMap inheritableThreadLocals;
     ThreadLocal.ThreadLocalMap terminatingThreadLocals;
+    // The thread's context class loader: what was set, the parent's when the thread was made, and
+    // for the main thread the application's (`ClassLoader` below).
+    private ClassLoader contextClassLoader;
 
     public Thread() {
         this((Runnable) null, genName());
@@ -60,6 +63,7 @@ class Thread {
         this.daemon = parent.daemon;
         this.priority = parent.priority;
         this.group = parent.group;
+        this.contextClassLoader = parent.contextClassLoader;
     }
 
     public Thread(ThreadGroup group, Runnable task) {
@@ -93,6 +97,7 @@ class Thread {
         this.name = "main";
         this.tid = tid;
         this.priority = 5;
+        this.contextClassLoader = ClassLoader.getSystemClassLoader();
     }
 
     private static String checkName(String name) {
@@ -123,8 +128,10 @@ class Thread {
         if (started) {
             throw new IllegalThreadStateException();
         }
-        started = true;
+        // Started once the runtime has the thread's record, so that `getState` never finds a
+        // started thread without one before it ends.
         startThread(this);
+        started = true;
     }
 
     // The new thread makes `t` its current thread and runs `t.run()` (see `lower/natives.rs`).
@@ -192,6 +199,42 @@ class Thread {
     }
 
     /** A translated program's threads are all platform threads. */
+    public enum State {
+        NEW,
+        RUNNABLE,
+        BLOCKED,
+        WAITING,
+        TIMED_WAITING,
+        TERMINATED
+    }
+
+    // What the runtime's record says (see `java_runtime::thread::State`), or without a record
+    // whether the thread has started.
+    public State getState() {
+        switch (state0(tid)) {
+            case 1:
+                return State.RUNNABLE;
+            case 2:
+                return State.BLOCKED;
+            case 3:
+                return State.WAITING;
+            case 4:
+                return State.TIMED_WAITING;
+            case 5:
+                return State.TERMINATED;
+            default:
+                return started ? State.TERMINATED : State.NEW;
+        }
+    }
+
+    public ClassLoader getContextClassLoader() {
+        return contextClassLoader;
+    }
+
+    public void setContextClassLoader(ClassLoader cl) {
+        contextClassLoader = cl;
+    }
+
     public final boolean isVirtual() {
         return false;
     }
@@ -289,6 +332,8 @@ class Thread {
 
     private static native boolean alive0(long tid);
 
+    private static native int state0(long tid);
+
     private static native void join0(long tid, long millis);
 
     private static native void rename0(long tid, String name);
@@ -304,6 +349,20 @@ class Thread {
     private static native Throwable uncaught0();
 
     static native void printUncaught0(String name, Throwable e);
+}
+
+// `java.lang.ClassLoader` as no more than a value that a thread keeps as its context class loader:
+// the application's loader, which `getSystemClassLoader` returns. Loading classes and resources,
+// and loaders of the program's own, are rejected (this class has none of those members).
+class ClassLoader {
+    private static final ClassLoader SYSTEM = new ClassLoader();
+
+    private ClassLoader() {
+    }
+
+    public static ClassLoader getSystemClassLoader() {
+        return SYSTEM;
+    }
 }
 
 class ThreadGroup implements Thread.UncaughtExceptionHandler {

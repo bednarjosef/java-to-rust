@@ -144,6 +144,10 @@ impl<'a> Gen<'a> {
                 let tid = self.value(&args[0], Type::Long).text;
                 call(self, "thread_alive", vec![tid])
             }
+            Native::ThreadState => {
+                let tid = self.value(&args[0], Type::Long).text;
+                call(self, "thread_state", vec![tid])
+            }
             Native::ThreadJoin => {
                 let (tid, millis) =
                     (self.value(&args[0], Type::Long).text, self.value(&args[1], Type::Long).text);
