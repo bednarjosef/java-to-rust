@@ -2351,11 +2351,10 @@ fn local_and_anonymous_classes_are_declared_so_their_calls_are_not_outside() {
     );
     let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
     let report = survey(&program).report;
-    // The local enum of a file with a package is a feature of the method that declares it; its
-    // calls are not calls to classes outside the sources.
-    // classes outside the sources.
+    // The local enum of a file with a package is hoisted to the top level, so it is no feature of
+    // the method that declares it; its calls are not calls to classes outside the sources.
     let table = feature_table(&report, "Program code: features");
-    assert!(feature_row(table, "local interfaces, enums and records").contains("Main.java:"), "{table}");
+    assert!(!table.contains("local interfaces, enums and records"), "{table}");
     assert!(!table.contains("anonymous classes"), "{table}");
     assert!(!table.contains("classes outside"), "{table}");
     assert_lacks(&report, &["(outside)"]);
@@ -2445,7 +2444,8 @@ fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
     let program_table = feature_table(&report, "Program code: features");
     let library_table = feature_table(&report, "Library code: features");
     assert!(report.find("Program code:").unwrap() < report.find("Library code:").unwrap(), "{report}");
-    assert!(feature_row(program_table, "local interfaces").contains("Main.java:"), "{program_table}");
+    // The local enum is hoisted, so the program has no blocker of its own.
+    assert!(!program_table.contains("local interfaces"), "{program_table}");
     assert!(!program_table.contains("computed method receivers"), "{program_table}");
     // The library's example is relative to its root, not the absolute path.
     let row = feature_row(library_table, "computed method receivers");
@@ -3317,6 +3317,67 @@ fn a_null_dereference_that_a_catch_sees_is_a_checked_non_null() {
     );
     // A dereference that no handler sees keeps the plain check.
     assert_lacks(&rust, &["try_non_null(a.as_ref())"]);
+}
+
+#[test]
+fn the_message_of_a_null_dereference_is_rejected_and_a_created_ones_is_not() {
+    let program = |message: &str| {
+        format!(
+            "class A {{
+                A next;
+                int v;
+                static int second(A a) {{
+                    try {{
+                        if (a.v > 0) {{ throw new NullPointerException(\"given\"); }}
+                        return a.next.v;
+                    }} catch (NullPointerException e) {{
+                        System.out.println({message});
+                        return -1;
+                    }}
+                }}
+                public static void main(String[] args) {{
+                    System.out.println(second(new A()));
+                }}
+            }}"
+        )
+    };
+    let err = java_to_rust::translate(&program("e.getMessage()")).unwrap_err().to_string();
+    assert!(
+        err.contains("the message of a `NullPointerException` that the runtime raises not supported yet"),
+        "{err}"
+    );
+    java_to_rust::translate(&program("\"caught\"")).expect("a catch that does not read the message");
+}
+
+#[test]
+fn an_eager_static_object_starts_empty_and_is_not_null_once_initialized() {
+    let rust = translate(
+        "class A {
+            static class Empty {
+                static final Empty INSTANCE = new Empty();
+                boolean any() { return false; }
+            }
+            static int count() {
+                try {
+                    return Empty.INSTANCE.any() ? 1 : 0;
+                } catch (NullPointerException e) {
+                    return -1;
+                }
+            }
+            public static void main(String[] args) {
+                System.out.println(count());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "static A_EMPTY_INSTANCE: RefCell<Option<Rc<AEmpty>>> = const { RefCell::new(None) };",
+            "A_EMPTY_INSTANCE.set(Some(Rc::new(AEmpty::new())));",
+            "java::non_null(A_EMPTY_INSTANCE.with_borrow(|v| v.clone()))",
+        ],
+    );
+    assert_lacks(&rust, &["try_non_null"]);
 }
 
 #[test]

@@ -129,7 +129,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The name of the conversion to the enum of `t`: `to_shape`.
-    fn to_name(&self, t: usize) -> String {
+    pub(super) fn to_name(&self, t: usize) -> String {
         format!("to_{}", snake_case(&self.simple_name(t)).trim_end_matches('_'))
     }
 
@@ -241,8 +241,10 @@ impl<'a> Gen<'a> {
             let ty = self.ty_name(to);
             return Code::atom(format!("{option}.as_ref().map(|_| -> {ty} {{ {failed} }})"));
         }
+        // The value is typed, as `cast_failed` returns `!` and a local it initializes may be used.
         let v = self.expr(value).text;
-        Code::new(format!("{{ let _ = {v}; {failed} }}"), LOWEST)
+        let ty = self.ty_name(to);
+        Code::atom(format!("{{ let _ = {v}; None::<{ty}>.unwrap_or_else(|| {failed}) }}"))
     }
 
     /// `value instanceof T`.
@@ -447,7 +449,7 @@ impl<'a> Gen<'a> {
                     Some(variant) => format!("{variant}({handle})"),
                     None => {
                         let ty = struct_name(&self.class.types[t].name);
-                        format!("{{ let value: {ty} = {}; value }}", absent(self, c))
+                        format!("None::<{ty}>.unwrap_or_else(|| {})", absent(self, c))
                     }
                 }
             }
@@ -465,7 +467,23 @@ impl<'a> Gen<'a> {
             Narrowing::Known(false) => return self.failing_cast(to, value),
             Narrowing::Up | Narrowing::Known(true) => {}
         }
-        let Some(t) = self.enum_type(to) else { return self.expr(value) };
+        let Some(t) = self.enum_type(to) else {
+            // The values of `to` are the objects of one class: a value of another class is one
+            // whose objects never reach `to`, so it is null.
+            let target = self.class.class_index(to).map(|t| self.rep_class(t));
+            if let (Some(target), Some(c)) = (target, self.struct_class(value))
+                && target != c
+            {
+                let ty = self.ty_name(to);
+                let text = self.expr(value).text;
+                return Code::atom(if self.nullable(value) {
+                    format!("{{ let _ = {text}; None::<{ty}> }}")
+                } else {
+                    format!("{{ let _ = {text}; None::<{ty}>.unwrap_or_else(|| {}) }}", absent(self, c))
+                });
+            }
+            return self.expr(value);
+        };
         // A new object becomes a value of the target's enum directly.
         if let ExprKind::New { ctor: Some(ctor), args, .. } = &value.kind {
             return self.new_object_as(*ctor, args, Some(t));
@@ -506,7 +524,7 @@ impl<'a> Gen<'a> {
                 // An object's last use moves its handle in.
                 let Some(variant) = self.variant_of(t, c) else {
                     let ty = self.ty_name(to);
-                    return Code::atom(format!("{{ let value: {ty} = {}; value }}", absent(self, c)));
+                    return Code::atom(format!("None::<{ty}>.unwrap_or_else(|| {})", absent(self, c)));
                 };
                 let v = match self.runtime_of(c) {
                     Some(_) => self.variant_value(value).1,
@@ -578,6 +596,7 @@ impl<'a> Gen<'a> {
         let h = &self.class.hierarchy;
         if let [only] = self.enum_targets(t, resolved)[..]
             && self.homes[only] == Home::Enum(t)
+            && self.same_ret(only, resolved)
             && self.enum_variants(t).into_iter().all(|c| h.implementation(resolved, c).is_some())
         {
             self.need(Need::Body(only));
@@ -609,6 +628,35 @@ impl<'a> Gen<'a> {
                 let root = self.fields_root(t).expect("a fields struct is at or above its subclasses");
                 let path = hierarchy::base_path(self.facts, self.class, root, d);
                 let borrow = self.enum_borrow(t, self.facts.mutating.contains(&index));
+                let name = self.fn_names[index].clone();
+                // The object is borrowed before the arguments run, so arguments that may reach an
+                // object of the class run first, as `bound_call` runs them.
+                let Type::Class(class, _) = receiver.ty else { unreachable!("a receiver has a class type") };
+                if args.iter().any(|a| has_effects(a) || reads_class(self.class, a, class)) {
+                    let outer = std::mem::replace(&mut self.guarded, false);
+                    let mut lines = Vec::new();
+                    let obj = match &receiver.kind {
+                        ExprKind::This | ExprKind::Var(_) => self.object(receiver),
+                        _ => {
+                            let temp = self.temp("object");
+                            lines.push(format!("let {temp} = {};", self.object(receiver)));
+                            temp
+                        }
+                    };
+                    let texts = self.call_args(index, args);
+                    let mut bound = Vec::new();
+                    for (text, p) in texts.into_iter().zip(&self.class.methods[index].params) {
+                        let mut temp = self.temp(&snake_case(&p.name));
+                        while bound.contains(&temp) || temp == obj {
+                            temp.push('_');
+                        }
+                        lines.push(format!("let {temp} = {text};"));
+                        bound.push(temp);
+                    }
+                    self.guarded = outer;
+                    lines.push(format!("{obj}{borrow}.{path}{name}({})", bound.join(", ")));
+                    return Some(Code::atom(format!("{{ {} }}", lines.join(" "))));
+                }
                 let obj = self.object(receiver);
                 let args = self.call_args(index, args).join(", ");
                 Some(Code::atom(format!("{obj}{borrow}.{path}{}({args})", self.fn_names[index])))
@@ -827,7 +875,10 @@ impl<'a> Gen<'a> {
         self.line(&format!("{}fn {name}(&self{all}){ret} {{", self.vis()));
         self.indent += 1;
         self.match_arms(t, &variants, &|g: &mut Self, c| match g.class.hierarchy.implementation(r, c) {
-            Some(i) => g.arm_call(t, c, i, &args),
+            Some(i) => {
+                let (text, uses) = g.arm_call(t, c, i, &args);
+                (g.covariant_ret(i, r, text), uses)
+            }
             None => (g.builtin_arm(r, c), true),
         });
         self.indent -= 1;

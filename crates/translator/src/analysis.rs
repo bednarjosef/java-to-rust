@@ -73,6 +73,10 @@ pub struct Facts {
     pub nullable_fields: HashSet<(String, String)>,
     /// String and object static fields, as (class index, field), that can hold null.
     pub nullable_statics: HashSet<(usize, String)>,
+    /// Statics of object type, of a class initialized eagerly, that are never null once the class
+    /// is initialized: their cell starts empty, as there is no object to start it with, so it is
+    /// an `Option` that is written with `Some` and read with `java::non_null`.
+    pub placeholder_statics: HashSet<(usize, String)>,
     /// The element types (strings, objects and arrays) whose arrays can hold null: their
     /// elements are `Option`s, in every array of that element type.
     pub nullable_elements: HashSet<Type>,
@@ -227,27 +231,16 @@ fn validate(class: &Class, facts: &Facts) -> Result<(), Error> {
                     .to_string(),
         });
     }
-    // A dispatcher returns what the method it dispatches returns; an override that returns a
-    // value of another representation would need its result converted.
-    let rep = |ty: Type| class.class_index(ty).map(|t| hierarchy::rep(class, facts, t));
-    for m in &class.methods {
-        for &o in &m.overrides {
-            if m.ret != class.methods[o].ret && rep(m.ret) != rep(class.methods[o].ret) {
-                return Err(Error {
-                    pos: m.pos,
-                    message: "covariant return types not supported yet".to_string(),
-                });
-            }
-        }
-    }
     // An enum may implement an interface's method with one that every enum has; the dispatcher
     // knows `name()`, `ordinal()` and `toString()`, and `Object`'s methods.
     for e in (0..class.types.len()).filter(|&e| class.types[e].kind == TypeKind::Enum) {
         for (m, method) in class.methods.iter().enumerate() {
             // `Object`'s `equals` and `hashCode` are the constant's identity, and `Comparable`'s
             // `compareTo` compares the ordinals.
-            let builtin = matches!(method.name.as_str(), "name" | "ordinal" | "toString")
+            // An interface may declare `Object`'s `equals` again (as `Comparator` does).
+            let builtin = matches!(method.name.as_str(), "name" | "ordinal" | "toString" | "hashCode")
                 && method.params.is_empty()
+                || method.name == "equals" && method.params.len() == 1
                 || matches!(class.types[method.class].name.as_str(), OBJECT | COMPARABLE);
             if method.is_abstract
                 && class.hierarchy.is_subtype(e, method.class)

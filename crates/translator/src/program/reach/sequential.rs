@@ -17,8 +17,14 @@
 //! `true`, and for `Collection.parallelStream()`, which passes it. By induction over the run the
 //! field then stays false, so the code skipped never runs. When the check fails, reachability
 //! runs again without the assumption.
+//!
+//! The assumption also covers the nodes that hold a pipeline's elements: only parallel
+//! evaluation concatenates two nodes (`Nodes.conc`, a `ConcNode`), so in a sequential program no
+//! node has children, and `Nodes.flatten`'s `node.getChildCount() > 0`, which copies a tree of
+//! nodes into an array with a `ForkJoinTask`, is never true either. That holds when no class
+//! that overrides `Node.getChildCount()`, whose default is 0, has objects.
 
-use super::{CLASS_KINDS, MethodKey, Walk, has_flag, members, never_true, text};
+use super::{CLASS_KINDS, MethodKey, Walk, class_name, has_flag, members, never_true, text};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -35,6 +41,22 @@ const STREAMS: &[&str] = &[
     "java.util.stream.DoubleStream",
 ];
 
+/// The interface of the nodes that hold a pipeline's elements, whose `getChildCount()` is 0
+/// unless a class overrides it.
+const NODE: &str = "java.util.stream.Node";
+
+/// Whether a condition is `node.getChildCount() > 0` on a pipeline's node.
+pub(super) fn has_children_test(condition: &Value) -> bool {
+    let call = &condition["leftOperand"];
+    let symbol = &call["symbol"];
+    text(condition, "kind") == "GREATER_THAN"
+        && text(call, "kind") == "METHOD_INVOCATION"
+        && text(symbol, "owner") == NODE
+        && text(symbol, "name") == "getChildCount"
+        && text(&condition["rightOperand"], "kind") == "INT_LITERAL"
+        && text(&condition["rightOperand"], "value") == "0"
+}
+
 /// Whether a condition is the call `isParallel()` of a pipeline, `AbstractPipeline`'s own.
 pub(super) fn is_parallel_test(condition: &Value) -> bool {
     let symbol = &condition["symbol"];
@@ -47,7 +69,19 @@ pub(super) fn is_parallel_test(condition: &Value) -> bool {
 /// Whether, in the code that a walk which assumed sequential streams reached, the assumption
 /// holds.
 pub(super) fn streams_stay_sequential(walk: &Walk) -> bool {
-    let mut index = Index::default();
+    // No node can have children: no class that overrides `getChildCount()` has objects.
+    let child_count = (NODE.to_string(), "getChildCount".to_string(), "()int".to_string());
+    let overriders = walk.overriders.get(&child_count).map(Vec::as_slice).unwrap_or_default();
+    if overriders.iter().any(|(class, _, _)| walk.reach.live.contains(class)) {
+        return false;
+    }
+    let mut index = Index {
+        classes: &walk.classes,
+        calls: HashMap::new(),
+        referenced: HashSet::new(),
+        assigned: HashSet::new(),
+        writes: Vec::new(),
+    };
     for key in &walk.reach.methods {
         if let Some(node) = walk.methods.get(key) {
             index.scan(node, Some(key));
@@ -82,15 +116,17 @@ pub(super) fn streams_stay_sequential(walk: &Walk) -> bool {
 /// What the check needs from the reached code: the calls of each method with their arguments,
 /// the methods that a method reference names, the parameters that are assigned, and every write
 /// of the field with the value written (`None` for a compound assignment).
-#[derive(Default)]
-struct Index<'t> {
+struct Index<'w, 't> {
+    /// The classes of the program: a local or anonymous class among them is indexed with its own
+    /// reached members, not with the code that declares it, as reachability does.
+    classes: &'w HashMap<String, (&'t Value, Option<String>)>,
     calls: HashMap<MethodKey, Vec<(Option<MethodKey>, &'t Value)>>,
     referenced: HashSet<MethodKey>,
     assigned: HashSet<(MethodKey, String)>,
     writes: Vec<(Option<MethodKey>, Option<&'t Value>)>,
 }
 
-impl<'t> Index<'t> {
+impl<'t> Index<'_, 't> {
     /// Indexes a piece of code. `context` is the method whose parameters its names refer to;
     /// inside a lambda or a local or anonymous class it is unknown, which only makes the check
     /// fail more often. What the assumption skips is skipped, as reachability does.
@@ -101,8 +137,10 @@ impl<'t> Index<'t> {
                 if kind == "ANNOTATION" || kind == "TYPE_ANNOTATION" {
                     return;
                 }
+                if CLASS_KINDS.contains(&kind) && self.classes.contains_key(&class_name(node)) {
+                    return;
+                }
                 if matches!(kind, "IF" | "CONDITIONAL_EXPRESSION") && never_true(&node["condition"], true) {
-                    self.scan(&node["condition"], context);
                     self.scan(&node[if kind == "IF" { "elseStatement" } else { "falseExpression" }], context);
                     return;
                 }
@@ -161,15 +199,15 @@ fn key(symbol: &Value) -> MethodKey {
 /// A parameter: its method and its name.
 type Parameter = (MethodKey, String);
 
-struct Check<'i, 't> {
-    index: &'i Index<'t>,
+struct Check<'i, 'w, 't> {
+    index: &'i Index<'w, 't>,
     /// Whether `isParallel()` through a stream interface can only be the pipeline's.
     only_pipelines: bool,
     /// The `boolean` parameters that cannot be true.
     never_true: HashSet<Parameter>,
 }
 
-impl Check<'_, '_> {
+impl Check<'_, '_, '_> {
     /// The greatest set of `boolean` parameters that cannot be true: start from every one whose
     /// method can only be called directly and that is never assigned, and drop those that a call
     /// passes a value that may be true, until none is dropped.

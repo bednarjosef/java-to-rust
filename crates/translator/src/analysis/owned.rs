@@ -33,6 +33,24 @@ fn is_owned(class: &Class, t: usize) -> bool {
     if class.methods.iter().any(|m| is_class(m.ret, name) || m.params.iter().any(|p| is_class(p.ty, name))) {
         return false;
     }
+    // A generic class holds its type arguments' values as `T: Clone`, which a plain value is not.
+    let in_args = |ty: Type| in_type_args(ty, name);
+    if class.types.iter().any(|d| d.fields.iter().chain(&d.statics).any(|f| in_args(f.ty)))
+        || class.methods.iter().any(|m| in_args(m.ret) || m.params.iter().any(|p| in_args(p.ty)))
+    {
+        return false;
+    }
+    let (mut in_exprs, mut in_locals) = (false, false);
+    for m in &class.methods {
+        for s in &m.body {
+            visit_stmt(s, &mut |e| visit_expr(e, &mut |x| in_exprs |= in_args(x.ty)), &mut |st| {
+                in_locals |= matches!(st, Stmt::Local { ty, .. } if in_args(*ty))
+            });
+        }
+    }
+    if in_exprs || in_locals {
+        return false;
+    }
     let mut uses = Uses::default();
     for m in &class.methods {
         if m.is_ctor && m.class == t && has_this_call(&m.body) {
@@ -103,6 +121,15 @@ fn runs_inherited_object_code(class: &Class, t: usize, field_level: &HashSet<usi
 
 fn is_class(ty: Type, name: &str) -> bool {
     matches!(ty, Type::Class(c, _) if c == name)
+}
+
+/// Whether class `name` is a type argument in `ty`, or in one of its type arguments.
+fn in_type_args(ty: Type, name: &str) -> bool {
+    match ty {
+        Type::Class(_, args) => args.iter().any(|&a| is_class(a, name) || in_type_args(a, name)),
+        Type::Array(elem) => in_type_args(*elem, name),
+        _ => false,
+    }
 }
 
 fn has_this_call(body: &[Stmt]) -> bool {

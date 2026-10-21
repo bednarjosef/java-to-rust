@@ -14,6 +14,7 @@ mod generics;
 mod hierarchy;
 mod lambdas;
 mod object;
+mod object_clone;
 mod objects;
 mod real_generics;
 mod statics;
@@ -35,6 +36,7 @@ mod initializers;
 mod inner;
 mod java_arrays;
 mod java_objects;
+mod local_types;
 mod natives;
 mod patterns;
 mod primitives;
@@ -228,6 +230,9 @@ struct Lowering<'t> {
     /// The `new` expressions, by address, with the captures of the created class that are
     /// captures of the creating class there (see `captures`).
     capture_sites: std::collections::HashSet<(*const Value, String)>,
+    /// The member classes of local and anonymous classes, each with its outer class, by index:
+    /// they are named after that class (see `inner::name_nested`).
+    member_outers: Vec<(usize, usize)>,
 }
 
 impl<'t> Lowering<'t> {
@@ -242,7 +247,10 @@ impl<'t> Lowering<'t> {
             let in_type = |e| (index, e);
             self.constant_bodies(index, methods).map_err(in_type)?;
             self.check_enum(index, methods).map_err(in_type)?;
-            let constants = self.enum_constants(index, &types[index].fields, methods).map_err(in_type)?;
+            let bodies = self.constant_body_fields(index).map_err(in_type)?;
+            self.add_body_fields(&bodies, &mut types[index].fields).map_err(in_type)?;
+            let constants =
+                self.enum_constants(index, &types[index].fields, methods, &bodies).map_err(in_type)?;
             types[index].enum_constants = Some(constants);
         }
         Ok(())
@@ -352,7 +360,8 @@ impl<'t> Lowering<'t> {
             "float" => Ok(Type::Float),
             // A type variable hides a class of the same name.
             _ if let Some(erased) = self.type_variable(node, name) => erased,
-            _ if self.enum_index(name).is_some() => Ok(Type::enum_type(name)),
+            // The declared name, which can differ from javac's (a hoisted enum, see `local_types`).
+            _ if let Some(e) = self.enum_index(name) => Ok(Type::enum_type(&self.types[e].name)),
             _ if let Some(t) = self.type_index(name) => {
                 // A Rust generic used without type arguments.
                 if self.is_real(real_generics::Owner::Class(t)) && !self.class_type_params(t).is_empty() {
@@ -548,8 +557,11 @@ impl<'t> Lowering<'t> {
                 }
                 // A cast between the program's types, up, down or across: `Cast` converts as the
                 // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
-                // `Integer` and unboxes.
-                if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
+                // `Integer` and unboxes. `(C) super.clone()` is already a `C`: the copy has the
+                // node's type, so the cast is the copy itself.
+                if matches!(value.kind, ExprKind::Builtin(Builtin::ObjectClone, _)) {
+                    value.kind
+                } else if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
                     let boxed = self.synth(
                         ExprKind::Cast(Type::boxed(ty), Box::new(value)),
                         node.pos(),
@@ -702,6 +714,9 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ThisCall { args, resolved });
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        if symbol.owner == "java.lang.Object" && symbol.name == "clone" {
+            return self.object_clone(node, receiver);
+        }
         if symbol.owner == "java.lang.Object" && self.object.is_some() {
             return self.object_call(node, &symbol, receiver, args);
         }
@@ -812,10 +827,16 @@ impl<'t> Lowering<'t> {
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);
-                // A default method of a JDK interface that lowering provides is not declared.
+                // The default and static methods of a JDK interface that lowering declares (see
+                // `functional`) are the JDK's code, which only a translation with its sources has.
                 if resolved.is_none() && self.functional.has(symbol.owner) {
-                    let what = format!("the default method {}.{}", symbol.owner, symbol.name);
-                    return unsupported(node, &what);
+                    let kind = if symbol.is_static { "static" } else { "default" };
+                    let message = format!(
+                        "the {kind} method `{}.{}` is the JDK's code: translate the program with the \
+                         JDK's sources (`--main` and `--library`) for it",
+                        symbol.owner, symbol.name
+                    );
+                    return error(node.pos(), message);
                 }
                 let args = self.convert_generic_args(node, resolved, args)?;
                 if symbol.is_static {
@@ -829,10 +850,7 @@ impl<'t> Lowering<'t> {
                             && self.types[self.current.get()].node.kind() != "INTERFACE"
                 });
                 let receiver = match receiver {
-                    Some(r) if is_super => {
-                        let ty = self.ty(r, r.java_type())?;
-                        self.synth(ExprKind::This, r.pos(), ty)
-                    }
+                    Some(r) if is_super => self.super_receiver(r)?,
                     Some(r) => self.receiver(r, symbol.owner)?,
                     None => self.this(node),
                 };
@@ -845,11 +863,15 @@ impl<'t> Lowering<'t> {
     }
 }
 
-/// `super(...)`, which javac writes into every constructor that does not call another one.
+/// `super(...)` or `outer.super(...)`, which javac writes into every constructor that does not
+/// call another one, or a constructor that calls its superclass's with an enclosing instance.
 fn is_super_call(stmt: Node) -> bool {
     stmt.get("expression").is_some_and(|call| {
         call.kind() == "METHOD_INVOCATION"
-            && call.get("methodSelect").is_some_and(|s| s.kind() == "IDENTIFIER" && s.str("name") == "super")
+            && call.get("methodSelect").is_some_and(|s| {
+                s.kind() == "IDENTIFIER" && s.str("name") == "super"
+                    || s.kind() == "MEMBER_SELECT" && s.str("identifier") == "super"
+            })
     })
 }
 

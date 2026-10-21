@@ -92,7 +92,9 @@ impl<'t> Lowering<'t> {
     ) -> Result<(), Error> {
         let descriptor = node.child("descriptor")?;
         let target = descriptor.str("target");
+        // A local interface's binary name has its number before its simple name.
         let interface = target.rsplit(['.', '$']).next().unwrap_or(target);
+        let interface = interface.trim_start_matches(|c: char| c.is_ascii_digit());
         let base = format!("{}{interface}LambdaIn{place}", self.package_of(class));
         let mut name = base.clone();
         let mut n = 2;
