@@ -956,6 +956,9 @@ impl<'a> Gen<'a> {
     }
 
     fn build_object(&mut self, ctor: usize, args: &'a [Expr], rep: Option<usize>, turbofish: &str) -> Code {
+        // Java initializes the class when `new` runs, before the arguments, which may see what
+        // the initialization does; the constructor initializes it again, which does nothing.
+        let init = self.init_call(self.class.methods[ctor].class).filter(|_| args.iter().any(sees_statics));
         let args = self.call_args(ctor, args).join(", ");
         let path = self.qualified_fn(ctor);
         let path = match path.rsplit_once("::") {
@@ -964,6 +967,10 @@ impl<'a> Gen<'a> {
         };
         let call = format!("{path}({args})");
         let call = self.raising(Code::atom(call), ctor).text;
+        let call = match init {
+            Some(init) => format!("{{ {init} {call} }}"),
+            None => call,
+        };
         let c = self.class.methods[ctor].class;
         let name = &self.class.types[c].name;
         let object = if self.facts.owned.contains(name) || !self.builds_plain(name) {
@@ -1000,7 +1007,7 @@ impl<'a> Gen<'a> {
             let args = self.call_args(index, args).join(", ");
             let obj = self.object(receiver);
             let path = self.method_path(receiver, index);
-            return Code::atom(format!("{obj}.{path}{}({args})", self.fn_names[index]));
+            return Code::atom(format!("{obj}.{path}{}({args})", self.call_name(index)));
         }
         let borrow = if mutating { ".borrow_mut()" } else { ".borrow()" };
         let Type::Class(class, _) = receiver.ty else { unreachable!("a receiver has a class type") };
@@ -1012,8 +1019,14 @@ impl<'a> Gen<'a> {
         let obj = self.object(receiver);
         let args = self.call_args(index, args).join(", ");
         let path = self.method_path(receiver, index);
-        let call = format!("{obj}{borrow}.{path}{}({args})", self.fn_names[index]);
+        let call = format!("{obj}{borrow}.{path}{}({args})", self.call_name(index));
         Code::atom(if self.guarded { format!("{{ {call} }}") } else { call })
+    }
+
+    /// The name by which method `index` is called on its object: a `toString` that is the class's
+    /// `Display` (see `displays`) is `to_string`, as `super.toString()` calls it.
+    fn call_name(&self, index: usize) -> &str {
+        if self.displays(index) { "to_string" } else { &self.fn_names[index] }
     }
 
     /// A method call whose arguments are bound before the call borrows its object, in Java's order:
@@ -1045,7 +1058,7 @@ impl<'a> Gen<'a> {
         }
         self.guarded = outer;
         let path = self.method_path(receiver, index);
-        lines.push(format!("{obj}{borrow}.{path}{}({})", self.fn_names[index], bound.join(", ")));
+        lines.push(format!("{obj}{borrow}.{path}{}({})", self.call_name(index), bound.join(", ")));
         Code::atom(format!("{{ {} }}", lines.join(" ")))
     }
 
@@ -1239,9 +1252,14 @@ impl<'a> Gen<'a> {
             Update::Compound(_, value) if ty == Type::String => {
                 lines.extend(init);
                 let old = Slot::Static { cell: cell.clone(), plain: false }.read(true);
+                // A static that may be null shows as `null` and is written as `Some`.
+                let nullable = self.place_nullable(target);
+                let old =
+                    if nullable { format!("{old}.unwrap_or_else(|| String::from(\"null\"))") } else { old };
                 let mut parts = vec![Part::Arg(Code::atom(old))];
                 self.parts(value, &mut parts);
                 let text = self.format("format!", parts).text;
+                let text = if nullable { format!("Some({text})") } else { text };
                 lines.push(format!("{cell}.set({text});"));
             }
             Update::Compound(..) | Update::Step(_) => {
@@ -1367,7 +1385,16 @@ impl<'a> Gen<'a> {
                 format!("{}({value})", self.runtime("non_null"))
             }
             Update::Compound(_, value) if ty == Type::String => {
-                let mut parts = vec![Part::Arg(Code::atom(slot.read(self.clones(ty))))];
+                let old = slot.read(self.clones(ty));
+                // A field that may be null is an `Option`, which shows as `null` and is written
+                // as `Some`: the text is never null.
+                let old = if self.place_nullable(place) {
+                    wrap = true;
+                    format!("{old}.unwrap_or_else(|| String::from(\"null\"))")
+                } else {
+                    old
+                };
+                let mut parts = vec![Part::Arg(Code::atom(old))];
                 self.parts(value, &mut parts);
                 lines.push(format!("let {new} = {};", self.format("format!", parts).text));
                 new.clone()
@@ -1696,6 +1723,24 @@ impl<'a> Gen<'a> {
             self.out.push('\n');
         }
     }
+}
+
+/// Whether evaluating `e` may see the static state of a class: it reads or writes a static
+/// field, or calls or creates something that may.
+fn sees_statics(e: &Expr) -> bool {
+    let mut found = false;
+    visit_expr(e, &mut |x| {
+        found |= matches!(
+            x.kind,
+            ExprKind::Static { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::MethodCall { .. }
+                | ExprKind::New { .. }
+                | ExprKind::Assign { target: Place::Static { .. }, .. }
+                | ExprKind::IncDec { target: Place::Static { .. }, .. }
+        )
+    });
+    found
 }
 
 /// Whether `e` is `null`, converted or not.
