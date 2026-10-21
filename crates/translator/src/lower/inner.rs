@@ -130,6 +130,8 @@ impl<'t> Lowering<'t> {
     /// Names the declarations of the local and anonymous classes after their place (see the
     /// module's comment), once every class is declared.
     pub(super) fn name_nested(&mut self) {
+        // A local class's name can say the name of the class it is in, which may be hoisted.
+        self.name_hoisted();
         for t in 0..self.types.len() {
             let Some(nested) = &self.types[t].nested else { continue };
             let place = self.place_name(nested);
@@ -231,6 +233,8 @@ impl<'t> Lowering<'t> {
                 let binary = format!("{}$$Lambda", self.types[self.lambda_holder(t)].javac);
                 Origin::Lambda { method: n.method, binary }
             }
+            // A hoisted type's method is not kept: nothing reads it.
+            None if self.is_hoisted(t) => Origin::Local { method: None, binary },
             _ => Origin::Member,
         }
     }

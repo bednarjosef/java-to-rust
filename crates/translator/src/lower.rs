@@ -35,6 +35,7 @@ mod initializers;
 mod inner;
 mod java_arrays;
 mod java_objects;
+mod local_types;
 mod natives;
 mod patterns;
 mod primitives;
@@ -348,7 +349,8 @@ impl<'t> Lowering<'t> {
             "float" => Ok(Type::Float),
             // A type variable hides a class of the same name.
             _ if let Some(erased) = self.type_variable(node, name) => erased,
-            _ if self.enum_index(name).is_some() => Ok(Type::enum_type(name)),
+            // The declared name, which can differ from javac's (a hoisted enum, see `local_types`).
+            _ if let Some(e) = self.enum_index(name) => Ok(Type::enum_type(&self.types[e].name)),
             _ if let Some(t) = self.type_index(name) => {
                 // A Rust generic used without type arguments.
                 if self.is_real(real_generics::Owner::Class(t)) && !self.class_type_params(t).is_empty() {
