@@ -739,6 +739,19 @@ pub enum Builtin {
     ClassName {
         simple: bool,
     },
+    /// `Point.class.getName()`: the binary name of class `class` (an index into
+    /// `Class::types`); with `simple`, `Point.class.getSimpleName()`. A class literal compared
+    /// with a class is its binary name too (see `lower::classes`).
+    ClassLiteralName {
+        class: usize,
+        simple: bool,
+    },
+    /// `[a, b]`: whether two classes are the same, `a.getClass() == b.getClass()` (`!same`:
+    /// `!=`), where each is the binary name of an object's class (`ClassName`) or of a class
+    /// literal (`ClassLiteralName`).
+    SameClass {
+        same: bool,
+    },
 }
 
 /// The methods of the boxed classes. The kind of the boxes comes from the types of the operands
