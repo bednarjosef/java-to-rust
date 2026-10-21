@@ -2289,12 +2289,9 @@ fn the_survey_follows_calls_to_the_classes_whose_objects_are_created() {
     let report = survey(&program).report;
     // `Circle.area` runs for `s.area()`; `Square` is named but never created, and the annotation
     // does nothing.
-    assert_contains(
-        &report,
-        &["Reachable from Main: 6 classes (3 instantiated), 7 methods", "  Box.Inner: inner classes\n"],
-    );
-    // The program's own interfaces translate.
-    assert_lacks(&report, &["Square:", "Tag", "interfaces"]);
+    assert_contains(&report, &["Reachable from Main: 6 classes (3 instantiated), 7 methods"]);
+    // The program's own interfaces and inner classes translate.
+    assert_lacks(&report, &["Square:", "Tag", "interfaces", "inner classes"]);
 }
 
 /// The survey of a program, which must not fail.
@@ -2323,10 +2320,10 @@ fn lambda_sources(dir: &str) -> std::path::PathBuf {
     let java = [
         "package app;",
         "public class Main {",
-        "    static Runnable a() { return () -> {}; }",
-        "    static Runnable b() { return () -> {}; }",
-        "    static Runnable c() { return () -> {}; }",
-        "    static Runnable d() { return () -> {}; }",
+        "    static Runnable a() { return new StringBuilder()::reverse; }",
+        "    static Runnable b() { return new StringBuilder()::reverse; }",
+        "    static Runnable c() { return new StringBuilder()::reverse; }",
+        "    static Runnable d() { return new StringBuilder()::reverse; }",
         "    public static void main(String[] args) {",
         "        a().run(); b().run(); c().run(); d().run();",
         "    }",
@@ -2341,8 +2338,9 @@ fn local_and_anonymous_classes_are_declared_so_their_calls_are_not_outside() {
     let dir = write_sources(
         "survey_local",
         &[(
-            "Main.java",
-            "public class Main {
+            "app/Main.java",
+            "package app;
+            public class Main {
                 public static void main(String[] args) {
                     enum Local { A; int n() { return 2; } }
                     Object anon = new Object() { };
@@ -2351,13 +2349,14 @@ fn local_and_anonymous_classes_are_declared_so_their_calls_are_not_outside() {
             }",
         )],
     );
-    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
     let report = survey(&program).report;
-    // The local enum moves to the top level of a file without a package, so it is no feature;
-    // its calls are not calls to classes outside the sources either.
+    // The local enum of a file with a package is a feature of the method that declares it; its
+    // calls are not calls to classes outside the sources.
+    // classes outside the sources.
     let table = feature_table(&report, "Program code: features");
-    assert!(!table.contains("local interfaces"), "{table}");
-    assert!(feature_row(table, "anonymous classes").contains("Main.java:"), "{table}");
+    assert!(feature_row(table, "local interfaces, enums and records").contains("Main.java:"), "{table}");
+    assert!(!table.contains("anonymous classes"), "{table}");
     assert!(!table.contains("classes outside"), "{table}");
     assert_lacks(&report, &["(outside)"]);
 }
@@ -2367,11 +2366,11 @@ fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
     let dir = write_sources(
         "survey_split",
         &[(
-            "Main.java",
-            "public class Main {
+            "app/Main.java",
+            "package app;
+            public class Main {
                 public static void main(String[] args) {
                     enum Local { A; int n() { return 1; } }
-                    Object anon = new Object() { };
                     System.out.println(Helper.run() + Local.A.n());
                 }
             }",
@@ -2380,12 +2379,12 @@ fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
     let lib = write_sources(
         "survey_split_lib",
         &[(
-            "Helper.java",
-            "public class Helper { static int run() { Runnable r = () -> {}; r.run(); return 1; } }",
+            "app/Helper.java",
+            "package app; public class Helper { static int run() { Runnable r = new StringBuilder()::reverse; r.run(); return 1; } }",
         )],
     );
     let program = java_to_rust::Program {
-        main: "Main".into(),
+        main: "app.Main".into(),
         sources: vec![dir],
         libraries: vec![lib.clone()],
         ..Default::default()
@@ -2394,13 +2393,13 @@ fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
     let program_table = feature_table(&report, "Program code: features");
     let library_table = feature_table(&report, "Library code: features");
     assert!(report.find("Program code:").unwrap() < report.find("Library code:").unwrap(), "{report}");
-    assert!(feature_row(program_table, "anonymous classes").contains("Main.java:"), "{program_table}");
-    assert!(!program_table.contains("lambdas"), "{program_table}");
+    assert!(feature_row(program_table, "local interfaces").contains("Main.java:"), "{program_table}");
+    assert!(!program_table.contains("computed method receivers"), "{program_table}");
     // The library's example is relative to its root, not the absolute path.
-    let row = feature_row(library_table, "lambdas");
+    let row = feature_row(library_table, "computed method receivers");
     assert!(row.contains("Helper.java:1"), "{row}");
     assert!(!row.contains(lib.to_str().unwrap()), "{row}");
-    assert!(!library_table.contains("anonymous classes"), "{library_table}");
+    assert!(!library_table.contains("local interfaces"), "{library_table}");
 }
 
 #[test]
@@ -2412,9 +2411,10 @@ fn the_survey_names_up_to_three_example_places_per_feature() {
     };
     let report = survey(&program).report;
     let table = feature_table(&report, "Program code: features");
-    // Four pieces use a lambda; the first three are named, relative to the source root.
+    // Four pieces use a computed receiver; the first three are named, relative to the source root.
     assert!(
-        feature_row(table, "lambdas").ends_with("app/Main.java:3, app/Main.java:4, app/Main.java:5"),
+        feature_row(table, "computed method receivers")
+            .ends_with("app/Main.java:3, app/Main.java:4, app/Main.java:5"),
         "{table}"
     );
     assert_lacks(&report, &["app/Main.java:6"]);
@@ -2434,7 +2434,7 @@ fn the_survey_json_lists_the_pieces_with_their_example_places() {
     assert_eq!(a["source"], "program");
     assert_eq!(a["kind"], "method");
     assert_eq!(a["location"], "app/Main.java:3");
-    assert_eq!(a["features"]["lambdas"], "app/Main.java:3");
+    assert_eq!(a["features"]["computed method receivers"], "app/Main.java:3");
     assert!(json["runtime_calls"].is_array(), "{json}");
     assert!(json["natives"].is_array(), "{json}");
 }
@@ -3005,11 +3005,11 @@ fn a_class_whose_subclasses_never_become_its_values_is_not_an_enum() {
 #[test]
 fn interfaces_outside_the_program_are_rejected_except_comparable() {
     let err = java_to_rust::translate(
-        "class C implements Runnable { public void run() {} }
-        class A { public static void main(String[] a) { new C().run(); } }",
+        "class C implements java.util.EventListener { public void close() {} }
+        class A { public static void main(String[] a) { new C().close(); } }",
     )
     .unwrap_err();
-    assert!(err.to_string().contains("implementing `java.lang.Runnable` not supported yet"), "{err}");
+    assert!(err.to_string().contains("implementing `java.util.EventListener` not supported yet"), "{err}");
     let rust = translate(
         "class V implements Comparable<V> {
             final int n;

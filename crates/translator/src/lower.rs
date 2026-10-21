@@ -7,8 +7,11 @@ mod code_point;
 mod enum_nulls;
 mod enums;
 mod exceptions;
+mod functional;
+mod generic_args;
 mod generics;
 mod hierarchy;
+mod lambdas;
 mod object;
 mod objects;
 mod real_generics;
@@ -40,6 +43,8 @@ mod system;
 mod varargs;
 use arrays::{is_array_length, reads_name};
 pub use exceptions::{is_standard, standard_names, standard_subclass};
+pub use functional::is_functional;
+pub use lambdas::computed_receiver;
 pub use program::lower_program;
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
@@ -54,10 +59,14 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let mut lowering = Lowering::declare(&decls)?;
         lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
         lowering.declare_standard()?;
+        let declared = lowering.types.iter().map(|t| t.name.clone()).collect();
+        lowering.functional = functional::Functional::select(decls.iter().map(|d| d.0), &declared);
+        lowering.declare_functional()?;
         lowering.name_nested();
         lowering.plan_captures().map_err(|(_, e)| e)?;
         lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
-        lowering.plan_object(&decls);
+        let planned: Vec<Node> = decls.iter().copied().chain(lowering.functional_decls()).collect();
+        lowering.plan_object(&planned);
         let mut types: Vec<TypeDecl> =
             (0..lowering.types.len()).map(|t| lowering.type_decl(t)).collect::<Result<_, _>>()?;
         let mut methods: Vec<Method> =
@@ -200,6 +209,10 @@ struct Lowering<'t> {
     failed: RefCell<real_generics::Real>,
     /// The pattern variables in scope that name a value without testing it (see `patterns`).
     aliases: RefCell<Vec<patterns::Alias>>,
+    /// The JDK's functional interfaces that the program uses and lowering provides (see `functional`).
+    functional: functional::Functional,
+    /// The lambdas and method references of the code being lowered (see `lambdas`).
+    lambdas: Vec<lambdas::LambdaInfo<'t>>,
     /// The identifiers that read a local captured by the class whose code they are in, by
     /// address (see `captures`).
     capture_refs: std::collections::HashSet<*const Value>,
@@ -234,6 +247,9 @@ impl<'t> Lowering<'t> {
     }
 
     fn method_in_scope(&self, index: usize) -> Result<Method, Error> {
+        if let Some(method) = self.lambda_member(index) {
+            return method;
+        }
         let info = &self.methods[index];
         let node = info.node;
         self.current.set(info.owner);
@@ -564,7 +580,7 @@ impl<'t> Lowering<'t> {
                 Some(constant) => constant,
                 None => self.select(node)?,
             },
-            "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => return unsupported(node, "lambdas"),
+            "LAMBDA_EXPRESSION" | "MEMBER_REFERENCE" => self.lambda(node)?,
             "INSTANCE_OF" => self.instance_of(node)?,
             "SWITCH_EXPRESSION" => self.switch_expr(node)?,
             kind => {
@@ -756,7 +772,7 @@ impl<'t> Lowering<'t> {
             _ if self.type_index(symbol.owner).is_some() => {
                 let name = symbol.name.to_string();
                 let resolved = self.method_index(&symbol);
-                let args = self.convert_args(resolved, args)?;
+                let args = self.convert_generic_args(node, resolved, args)?;
                 if symbol.is_static {
                     return Ok(ExprKind::Call { name, args, resolved });
                 }

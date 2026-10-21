@@ -32,6 +32,9 @@ impl<'t> Lowering<'t> {
         for clause in node.list("implementsClause") {
             let name = clause.java_type();
             let raw = name.split('<').next().unwrap_or(name);
+            if functional::is_marker(raw) {
+                continue;
+            }
             match self.type_index(raw) {
                 Some(i) if self.types[i].node.kind() == "INTERFACE" => out.push(i),
                 None if matches!(
@@ -180,6 +183,12 @@ impl<'t> Lowering<'t> {
         } else if self.is_subclass(b, a) {
             let ty = left.ty;
             (left, self.convert(right, ty))
+        } else if self.object.is_some() {
+            // Neither is a subtype of the other, as with an interface and a class that does not
+            // implement it (a subclass may): both are compared as `Object`s, which such a
+            // comparison makes the program use (see `plan_object`).
+            let object = Type::class(OBJECT);
+            (self.convert(left, object), self.convert(right, object))
         } else {
             (left, right)
         }

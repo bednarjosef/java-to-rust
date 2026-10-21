@@ -117,7 +117,7 @@ pub fn survey(units: &[&Value], reach: &Reach, program: &Program, files: &[PathB
     }
     for (unit, origin) in units.iter().zip(&origins) {
         for decl in unit["tree"]["typeDecls"].as_array().into_iter().flatten() {
-            census.class(decl, None, origin, reach);
+            census.class(decl, origin, reach);
         }
     }
     census.chains(&program.main);
@@ -203,7 +203,7 @@ impl Census {
         }
     }
 
-    fn class(&mut self, decl: &Value, outer: Option<&Value>, origin: &Origin, reach: &Reach) {
+    fn class(&mut self, decl: &Value, origin: &Origin, reach: &Reach) {
         if !CLASS_KINDS.contains(&text(decl, "kind")) {
             return;
         }
@@ -211,7 +211,7 @@ impl Census {
         if !reach.classes.contains(&class) {
             return;
         }
-        let header: BTreeMap<&'static str, String> = class_features(decl, outer, &self.declared)
+        let header: BTreeMap<&'static str, String> = class_features(decl, &self.declared)
             .into_iter()
             .map(|f| (f, place(&origin.file, decl)))
             .collect();
@@ -239,7 +239,7 @@ impl Census {
                 "BLOCK" if member["static"].as_bool() == Some(true) => reach.initialized.contains(&class),
                 "BLOCK" => reach.instantiated.contains(&class),
                 _ => {
-                    self.class(member, Some(decl), origin, reach);
+                    self.class(member, origin, reach);
                     continue;
                 }
             };
@@ -291,13 +291,12 @@ impl Census {
                 let kind = text(node, "kind");
                 let ty = text(node, "javaType");
                 match kind {
-                    "LAMBDA_EXPRESSION" => scan.feature("lambdas", node),
-                    "MEMBER_REFERENCE" => scan.feature("method references", node),
-                    "NEW_CLASS" if !node["classBody"].is_null() => scan.feature("anonymous classes", node),
-                    "NEW_CLASS" if !node["enclosingExpression"].is_null() => {
-                        scan.feature("inner classes", node)
+                    // A method reference translates unless its receiver is computed (any field is
+                    // taken for a final one here).
+                    "MEMBER_REFERENCE" if crate::lower::computed_receiver(node, &|_, _| true).is_some() => {
+                        scan.feature("computed method receivers", node)
                     }
-                    // An anonymous class body is a class node too: it is counted above.
+                    // An anonymous class body is a class node too, but no local declaration.
                     "INTERFACE" | "ENUM" | "RECORD" if !is_anonymous(symbol_type(node)) => {
                         scan.feature("local interfaces, enums and records", node)
                     }
@@ -738,7 +737,7 @@ fn piece_kind(member: &Value) -> &'static str {
 }
 
 /// The unsupported features of a class declaration, which every piece of its code shares.
-fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String>) -> BTreeSet<&'static str> {
+fn class_features(decl: &Value, declared: &HashSet<String>) -> BTreeSet<&'static str> {
     let mut features = BTreeSet::new();
     let kind = text(decl, "kind");
     if kind == "ANNOTATION_TYPE" {
@@ -762,10 +761,6 @@ fn class_features(decl: &Value, outer: Option<&Value>, declared: &HashSet<String
     }
     if intersects(decl) {
         features.insert("intersection types");
-    }
-    let in_class = outer.is_some_and(|o| matches!(text(o, "kind"), "CLASS" | "ENUM" | "RECORD"));
-    if kind == "CLASS" && in_class && !has_flag(decl, "STATIC") {
-        features.insert("inner classes");
     }
     if kind == "ENUM" && members(decl).any(|m| !m["initializer"]["classBody"].is_null()) {
         features.insert("enum constants with bodies");

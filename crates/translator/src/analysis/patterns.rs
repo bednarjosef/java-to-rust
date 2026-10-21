@@ -131,6 +131,11 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                         {
                             found.get_or_insert((x.pos, "an array as an `Object` value"));
                         }
+                        ExprKind::Cast(Type::Class(name, _), inner)
+                            if *name == OBJECT && inner.ty == Type::StringBuilder =>
+                        {
+                            found.get_or_insert((x.pos, "a `StringBuilder` as an `Object` value"));
+                        }
                         ExprKind::Binary(BinOp::Eq | BinOp::Ne, l, r)
                             if holds_values
                                 && may_be_value(l)

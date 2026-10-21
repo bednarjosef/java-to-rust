@@ -1129,3 +1129,93 @@ Decisions that change during the implementation are recorded here, milestone by 
   `outer` fields would differ); a field named `outer` in a nested class with an enclosing
   instance; `Outer.super.m()`; a qualified `super(..)` (`outer.super()`); an enclosing
   instance needed in static code (which javac rejects as well).
+
+### Inner classes
+
+- **Inner classes come with the captures commit**, as the same desugaring covers them; this
+  milestone adds their corpus, shape tests and survey rows. An inner class extending a static
+  nested class keeps `outer` after `base`; inner subclasses of an inner class share the
+  superclass's `outer`.
+- **`is_inner` is renamed `has_subclasses`**, not `has_fields_struct`: it holds for every class
+  with subclasses, and `fields_structs` picks those of them that get a fields struct.
+- **An inner object kept in a field of its outer object is a reference cycle** (the outer
+  object holds the inner one, which holds `outer`), which `Rc` never frees where Java's
+  collector would; a `HashMap` that caches its `keySet()` leaks with its view. Programs print
+  the same; memory is the cost, as with any other cycle of objects in the translation.
+
+### Anonymous classes
+
+- **Anonymous classes come with the captures commit too**; this milestone adds their corpus,
+  shape tests and survey row, and fixes found on the way: a static field of an interface type
+  had its initializer unconverted (no variant), a method of an immutable class took `&mut self`
+  when another method of its override group changes its object, and an anonymous subclass of a
+  local class was named after the local class's binary name (`1CounterInChained`).
+- **The name of an anonymous class has no enclosing class**: `<package><Supertype>In<Place>`
+  (`OrderInMain`, `TaskInInit`) as 2.5 says, numbered from 2 on a clash.
+- **An anonymous class extending a class or implementing an interface of the JDK** (`new
+  Runnable() { .. }`, `new Comparator<..>() { .. }`) needs those types as program types: the
+  lambdas work's runtime interfaces in single-file mode, the JDK's sources in whole-program
+  mode. Without them it is rejected as "implementing `java.lang.Runnable`".
+
+### Lambdas and method references
+
+- **Captures came before the closure forms.** The captures landed while the object form of
+  lambdas was done, and lambdas as objects take them with no new machinery (below), so the
+  lambda captures milestone was done second and the closure forms milestone follows it.
+- **A lambda lowers to `new` of its class, converted to the interface**, not to a new
+  `ExprKind::Lambda`: `Cast(Interface, New { class, args, ctor })`. The class is the synthetic
+  concrete class of 4.1, declared with the members of the class whose code holds the lambda. So
+  the object model's variants, dispatch, bridges and the analyses take it with no new case.
+- **A lambda's class is a nested class** (`NestKind::Lambda`, `Origin::Lambda`), declared in the
+  class and method whose code holds it (an enclosing lambda's class and method, for a lambda in
+  a lambda), so `lower/captures.rs` finds what it captures as for a local class: the walk of the
+  enclosing code takes a lambda as an object of a class declared there, and the walk of the
+  lambda's own code is its body. Captured locals are fields set by the constructor from
+  trailing parameters that the creating expression passes (`OpLambdaInMain::new(k, &name)`),
+  and `this`, or a field or method of the enclosing class named without it, reads the field
+  `outer` (`self.outer.borrow().base`); in a lambda in a lambda, `this` is the outermost class's
+  object, reached through both `outer` fields. There is no prelude block of clones: the
+  arguments of the `new` are the clones. `analysis/closures.rs` and `codegen/closures.rs` stay
+  for the closure forms.
+- **The class is named `<Interface>LambdaIn<Method>`** (`IntOpLambdaInMain`, numbered
+  `IntOpLambdaInMain2` in the order of the source), in the package of the enclosing top-level
+  class; a field initializer or block is named after the class, a constructor too. The variant of
+  the interface's enum repeats it (`AIntOp::IntOpLambdaInMain`). `getClass().getName()` gives
+  `Main$$Lambda`, the JVM's name without its varying suffix.
+- **The method takes javac's substituted descriptor** (`descriptor.substituted`, which
+  `JavaTree` prints with the declared and erased types and the referenced method's type), so a
+  lambda of `Function<Integer, Integer>` is `apply_integer(i32) -> i32` with the bridge
+  `apply(Object)`, exactly as a class implementing the interface gets.
+- **A method reference's body is a call that lowering builds as javac tree JSON**
+  (`METHOD_INVOCATION`, `NEW_CLASS` or `NEW_ARRAY` on parameters `a`, `b`, .., skipping names
+  that the receiver uses), made when the class is declared, and lowered like any call. So
+  `String::length`, `Integer::parseInt`, `Math::max` and `System.out::println` get the same
+  library mappings as written calls, javac's referent symbol picks the overload, and the capture
+  walk sees the receiver in that call.
+- **A bound method reference's receiver must be a local, `this`, a string literal,
+  `System.out`/`System.err` or a final field** (read through `this` or a class), whose value
+  where the reference is evaluated is the value at every call. Any other receiver
+  (`new StringBuilder()::reverse`, `a.b()::m`, a field that is not final) is rejected, and
+  `--survey` counts those as "computed method receivers" (lambdas and method references are no
+  longer features of the survey). javac also checks the receiver for null where the reference
+  is; the translation checks it at the call.
+- **`super` in a lambda (`super.m()`, `super::m`) is rejected.**
+- **The JDK's functional interfaces in single-file mode come from a template**
+  (`crates/translator/java/Functional.java`, compiled by `build.rs` like `Standard.java`): the
+  abstract methods of `Runnable`, `Callable`, `Comparator`, `Iterable`, `Iterator` and the
+  `java.util.function` interfaces, declared for the program when it mentions them. Their default
+  and static methods are not in it (the JDK functional interfaces milestone takes them from the
+  JDK's sources).
+- **Marker interfaces are dropped** where they are named as supertypes and from intersection
+  casts (`(Op & Serializable) a -> ..`), in `JavaTree` (`javaType` of the cast) and in
+  `hierarchy::interfaces`.
+- Fixed on the way, in shared files: a string method taking an `Integer` (`"ab".repeat(n)`)
+  passed a reference; a `StringBuilder` converted to `Object` panicked in the generator instead
+  of being rejected; and a call of an interface method returning an array, on an interface with
+  one implementor, called the interface's `make`.
+- **Still rejected:** the receivers and `super` above; a functional interface whose descriptor
+  has an array of a type variable (`IntFunction<int[]>`, as any generic method, 4.4); a
+  `StringBuilder` or array as the value of a generic functional interface
+  (`Supplier<StringBuilder>`: it would be an `Object`); a lambda converted to a JDK interface
+  outside the template in single-file mode; creating a local class declared in a lambda where
+  a local hides one of its captures.

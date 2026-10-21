@@ -24,6 +24,8 @@ pub(super) enum NestKind {
     Local,
     /// `new T(..) { .. }`.
     Anonymous,
+    /// The class of a lambda or method reference (see `lambdas`).
+    Lambda,
 }
 
 pub(super) struct Nested<'t> {
@@ -74,7 +76,7 @@ impl<'t> Lowering<'t> {
         self.declare_members(self.types.len() - 1)
     }
 
-    fn nested(
+    pub(super) fn nested(
         &self,
         kind: NestKind,
         enclosing: usize,
@@ -132,7 +134,7 @@ impl<'t> Lowering<'t> {
             let Some(nested) = &self.types[t].nested else { continue };
             let place = self.place_name(nested);
             let base = match nested.kind {
-                NestKind::Inner => continue,
+                NestKind::Inner | NestKind::Lambda => continue,
                 NestKind::Local => {
                     format!("{}.{}", self.types[nested.enclosing].name, self.types[t].node.str("simpleName"))
                 }
@@ -140,7 +142,9 @@ impl<'t> Lowering<'t> {
                     let new = nested.new.expect("an anonymous class has its `new`");
                     let supertype = new.get("identifier").map_or("", |i| i.java_type());
                     let supertype = supertype.split('<').next().unwrap_or_default();
+                    // A local class's binary name has its number before its simple name.
                     let simple = supertype.rsplit(['.', '$']).next().unwrap_or_default();
+                    let simple = simple.trim_start_matches(|c: char| c.is_ascii_digit());
                     let package = self.package_of(t);
                     format!("{package}{simple}In{place}")
                 }
@@ -179,7 +183,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// The package prefix of class `t`'s name (`com.example.`), from its top-level class.
-    fn package_of(&self, t: usize) -> String {
+    pub(super) fn package_of(&self, t: usize) -> String {
         let mut top = t;
         while let Some(n) = &self.types[top].nested {
             top = n.enclosing;
@@ -220,6 +224,10 @@ impl<'t> Lowering<'t> {
         match self.nesting(t) {
             Some(n) if n.kind == NestKind::Local => Origin::Local { method: n.method, binary },
             Some(n) if n.kind == NestKind::Anonymous => Origin::Anonymous { method: n.method, binary },
+            Some(n) if n.kind == NestKind::Lambda => {
+                let binary = format!("{}$$Lambda", self.types[self.lambda_holder(t)].javac);
+                Origin::Lambda { method: n.method, binary }
+            }
             _ => Origin::Member,
         }
     }

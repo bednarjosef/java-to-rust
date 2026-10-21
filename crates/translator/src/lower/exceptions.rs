@@ -33,7 +33,19 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
 /// name: `owner#name`, or `owner#` for any method of the owner; `enum#valueOf` for the `valueOf`
 /// of any enum of the program).
 const RAISED: &[(&str, &[&str])] = &[
-    ("java.lang.ArithmeticException", &["DIVIDE", "REMAINDER", "DIVIDE_ASSIGNMENT", "REMAINDER_ASSIGNMENT"]),
+    (
+        "java.lang.ArithmeticException",
+        &[
+            "DIVIDE",
+            "REMAINDER",
+            "DIVIDE_ASSIGNMENT",
+            "REMAINDER_ASSIGNMENT",
+            "java.lang.Math#floorDiv",
+            "java.lang.Math#floorMod",
+            "java.lang.StrictMath#floorDiv",
+            "java.lang.StrictMath#floorMod",
+        ],
+    ),
     ("java.lang.ArrayIndexOutOfBoundsException", &["ARRAY_ACCESS"]),
     ("java.lang.IllegalArgumentException", &["enum#valueOf"]),
     ("java.lang.StringIndexOutOfBoundsException", &["java.lang.String#charAt", "java.lang.String#substring"]),

@@ -28,8 +28,8 @@ shared and mutable, and a reference that may be null is an `Option` of it. An ar
 counting, not by a garbage collector, so a cycle of objects is never freed. The runtime crate
 (`crates/runtime`) supplies what Rust lacks: Java's exact number semantics (wrapping integer
 overflow, Java's float rules and printing), strings, `StringBuilder`, `String.format`, regular
-expressions and charsets with Java's results. Collections, lambdas and threads are not translated
-yet (see "Not yet" below).
+expressions and charsets with Java's results. Collections and threads are not translated yet (see
+"Not yet" below).
 
 ### Level 2: analysis-driven Rust
 
@@ -165,9 +165,10 @@ A small subset, end to end:
   (`struct Stack<T>`, `impl<T: Clone> Stack<T>`, `fn choose<T: Clone>(..)`), and its uses keep the
   substituted types with no casts. One that needs more of them (their text, `equals`, a bound, a
   cast, an array of them), a class with a supertype or a subclass, a raw use, and a method whose
-  type parameters its parameters do not all mention stay erased. Other interfaces of the JDK
-  (`Runnable`, `Iterable`) and lambdas are rejected with an error that names the construct and its
-  position. The design of the object model, and what is still to come, is in
+  type parameters its parameters do not all mention stay erased. The JDK's functional interfaces
+  (`Runnable`, `Comparator`, `java.util.function`) translate with their abstract methods (see
+  lambdas below); its other interfaces are rejected with an error that names the construct and
+  its position. The design of the object model, and what is still to come, is in
   [docs/object-model.md](docs/object-model.md).
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
   and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
@@ -387,16 +388,41 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   only ever used through an interface stays a plain struct. The methods of an override group share what the analyses decide about their parameters and
   results, as a call may run any of them. A superclass's static initialization runs before its
   subclass's.
-- Local classes (`lower/captures.rs`, `lower/inner.rs`), lowered as javac desugars them: the
-  locals that a local class reads from its method are fields of its struct, set by every
-  constructor from trailing parameters that each `new` passes (`MainLabeler::new(scale, &unit)`),
-  and the enclosing object, when its code uses it, is the field `outer`, which an unqualified
-  field or method of the enclosing class reads (`self.outer.borrow().factor`). A local class that
-  creates another of the same method passes on its own captures of it. The struct is named after
-  the enclosing class (`MainLabeler`), with the method appended where two local classes of a
-  class share a name (`MainBoxInSecond`), and `getName` gives javac's binary name
-  (`Main$1Labeler`). A captured array is shared with the method. Not yet: local interfaces,
-  enums and records, and member classes of local classes.
+- Inner, local and anonymous classes (`lower/captures.rs`, `lower/inner.rs`), lowered as javac
+  desugars them. An object of an inner class holds its enclosing object in the field `outer`
+  (`outer: Rc<RefCell<Names>>`), which every constructor takes first and each `new` passes:
+  `this`, or the object of `names.new Cursor()`. An unqualified field or method of the enclosing
+  class, and `Names.this`, read through it (`self.outer.borrow().size`), two levels up through
+  `self.outer.borrow().outer`; the subclasses of an inner class share its `outer` in `base`. The
+  locals that a local class reads from its method are fields of its struct too, set from
+  trailing constructor parameters (`MainLabeler::new(scale, &unit)`), and its enclosing object is
+  `outer` when its code uses it. A local class that creates another of the same method passes on
+  its own captures of it, and a captured array is shared with the method. Field initializers of
+  such a class run in its constructors, after `outer` and the captures are set. A local class
+  is named after the enclosing class (`MainLabeler`), with the method appended where two local
+  classes of a class share a name (`MainBoxInSecond`), and `getName` gives javac's binary name
+  (`Main$1Labeler`). An anonymous class is a class like the others, named after its supertype
+  and its place (`OrderInMain`, `ReportInMain2`, `TaskInInit` in a field initializer): a variant
+  of its interface's enum, or a subclass whose constructor passes the arguments of its `new` to
+  the superclass's and its captures after them (`ReportInMain::new("squares", &sep)`); its
+  `getName` is javac's (`Main$1`) and its `getSimpleName` empty. Not yet: local interfaces, enums and records, member classes of local
+  classes, `Outer.super.m()`, `outer.super()`, and an inner class extending one nested in
+  another class.
+- Lambdas and method references (`lower/lambdas.rs`), lowered as javac desugars them: each is a
+  class that implements its functional interface (`IntOpLambdaInMain`), a variant of the
+  interface's enum like any other implementor, whose one method is the lambda's body with
+  javac's substituted descriptor (`apply_integer(&self, x: i32) -> i32` for a
+  `Function<Integer, Integer>`, with the bridge `apply(Object)`). A method reference's body is
+  the call it makes (`a.len() as i32` for `String::length`, `Point::new`, `int[]::new`,
+  `System.out::println`), lowered as a written call. A lambda's class is nested like a local
+  class: the locals it captures are fields set from its constructor
+  (`OpLambdaInMain::new(k, &name)`), and `this` and the enclosing class's members are read
+  through `outer` (`self.outer.borrow().base`), also from a lambda in a lambda or in a local or
+  anonymous class. A bound method reference takes a local, `this` or a final field as its
+  receiver. In single-file mode the JDK's functional interfaces come from
+  `crates/translator/java/Functional.java` (abstract methods only). Not yet: other receivers,
+  `super` in a lambda, the closure forms (`impl FnMut`, `Rc<dyn Fn>`) and the JDK interfaces'
+  default and static methods.
 
 ### Whole programs
 
@@ -490,9 +516,10 @@ Each construct below is rejected at translation with an error that names it:
 
 - the exceptions and try-with-resources listed under "Exceptions" above, and intersection bounds
   (`T extends A & B`);
-- records, inner and anonymous classes, local interfaces, enums and records, and record
-  patterns;
-- lambdas and method references, and for-each over an `Iterable`;
+- records, local interfaces, enums and records, and record patterns;
+- method references on a receiver other than a local, `this` or a final field, `super` in a
+  lambda, the default and static methods of the JDK's functional interfaces, and for-each over
+  an `Iterable`;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
 - threads: a program runs on one thread, and `Thread` is only the runtime's class for the calls

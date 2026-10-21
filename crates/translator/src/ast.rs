@@ -356,11 +356,15 @@ pub enum Origin {
     /// An anonymous class, `new T(..) { .. }`, in `method` (`None`: in an initializer), which
     /// implements or extends `T`; `binary` is javac's binary name, such as `Main$1`.
     Anonymous { method: Option<usize>, binary: String },
+    /// The class of a lambda or method reference in `method` (`None`: in an initializer);
+    /// `binary` is the name the JVM gives such a class, up to the part that varies between runs
+    /// (`Main$$Lambda`).
+    Lambda { method: Option<usize>, binary: String },
 }
 
 impl Origin {
-    /// The names that `Class.getName` and `Class.getSimpleName` give a local or anonymous class:
-    /// its binary name, and its simple name (empty for an anonymous class).
+    /// The names that `Class.getName` and `Class.getSimpleName` give a local or anonymous class
+    /// or a lambda's: its binary name, and its simple name (empty for an anonymous class).
     pub fn java_names(&self) -> Option<(&str, &str)> {
         match self {
             Origin::Member => None,
@@ -369,6 +373,7 @@ impl Origin {
                 Some((binary, last.trim_start_matches(|c: char| c.is_ascii_digit())))
             }
             Origin::Anonymous { binary, .. } => Some((binary, "")),
+            Origin::Lambda { binary, .. } => Some((binary, binary.rsplit('.').next().unwrap_or_default())),
         }
     }
 }

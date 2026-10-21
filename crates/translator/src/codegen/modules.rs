@@ -58,8 +58,13 @@ fn set_current(package: &str) {
 /// The path prefix that names a class from the module being written (empty inside its own
 /// module), and its name inside its package (`Outer.Inner` for a nested class).
 pub(super) fn split(name: &str) -> (String, &str) {
-    // The standard exception classes are items of the crate's root, named by their simple names.
-    if crate::lower::is_standard(name) {
+    // The standard exception classes are items of the crate's root, named by their simple names,
+    // and so are the functional interfaces lowering provides, which have no package (the JDK's
+    // own, translated from its sources, are in theirs).
+    let provided = crate::lower::is_functional(name)
+        && CONTEXT
+            .with_borrow(|c| c.as_ref().is_none_or(|c| c.packages.get(name).is_some_and(String::is_empty)));
+    if crate::lower::is_standard(name) || provided {
         let simple = name.rsplit('.').next().unwrap_or(name);
         let root = CONTEXT.with_borrow(|c| {
             c.as_ref().and_then(|c| c.current.as_deref()).is_some_and(|current| !current.is_empty())
