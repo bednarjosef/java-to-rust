@@ -142,16 +142,57 @@ pub const TRANSLATED_ANYWAY: &[&str] = &["java.lang.reflect.Array"];
 
 /// Methods of translated classes whose calls the lowering replaces with the runtime's code
 /// (`lower/natives.rs`), so that reachability does not enter them, as with the runtime's classes.
-/// They take a `Class`, which the translation has no value for, and every call that `Unsafe`'s
-/// own initialization makes passes a class literal of an array class.
+/// They take a `Class`, which the translation has no value for: every call that `Unsafe`'s own
+/// initialization makes of the first two passes a class literal of an array class, and
+/// `objectFieldOffset` of a class literal and a field's name makes a field handle
+/// (`lower/handles.rs`).
 pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Unsafe", "arrayBaseOffset", "(java.lang.Class<?>)long"),
     ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int"),
+    ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.Class<?>,java.lang.String)long"),
 ];
 
-/// Whether the method is one of the `REPLACED_METHODS`.
+/// Whether the method is one of the `REPLACED_METHODS`, or an access of `Unsafe` through a
+/// field's offset, which the lowering replaces with the field.
 pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
     REPLACED_METHODS.contains(&(class, name, signature))
+        || unsafe_field_access(class, name, signature).is_some()
+}
+
+/// Whether the method is one of `Unsafe`'s reads or writes of a field at an offset:
+/// `get<Kind><Mode>(Object, long)` (`Some(false)`) or `put<Kind><Mode>(Object, long, value)`
+/// (`Some(true)`), of a primitive kind or `Reference`, plain, `Volatile`, `Acquire`, `Release` or
+/// `Opaque`.
+pub fn unsafe_field_access(class: &str, name: &str, signature: &str) -> Option<bool> {
+    if class != "jdk.internal.misc.Unsafe" {
+        return None;
+    }
+    let (put, rest) = match (name.strip_prefix("get"), name.strip_prefix("put")) {
+        (Some(rest), _) => (false, rest),
+        (_, Some(rest)) => (true, rest),
+        _ => return None,
+    };
+    let kinds = [
+        ("Reference", "java.lang.Object"),
+        ("Boolean", "boolean"),
+        ("Byte", "byte"),
+        ("Short", "short"),
+        ("Char", "char"),
+        ("Int", "int"),
+        ("Long", "long"),
+        ("Float", "float"),
+        ("Double", "double"),
+    ];
+    let (kind, ty) = kinds.into_iter().find(|(k, _)| rest.starts_with(k))?;
+    let mode = &rest[kind.len()..];
+    let modes: &[&str] =
+        if put { &["", "Volatile", "Release", "Opaque"] } else { &["", "Volatile", "Acquire", "Opaque"] };
+    let expected = if put {
+        format!("(java.lang.Object,long,{ty})void")
+    } else {
+        format!("(java.lang.Object,long){ty}")
+    };
+    (modes.contains(&mode) && signature == expected).then_some(put)
 }
 
 /// Static fields that are `false` in every translated program, so the code they guard never runs.
@@ -470,6 +511,13 @@ impl<'t> Walk<'t> {
             if self.reach.external.insert(key.clone()) {
                 for overrider in self.overriders(&key) {
                     self.work.push(Item::Method(overrider));
+                }
+                // The thread that `start()` starts runs the thread's `run()`, which runs its
+                // `Runnable` (see `java/Threads.java` in the translator).
+                if key.0 == "java.lang.Thread" && key.1 == "start" {
+                    for class in ["java.lang.Thread", "java.lang.Runnable"] {
+                        self.work.push(Item::Method((class.into(), "run".into(), "()void".into())));
+                    }
                 }
             }
             return;

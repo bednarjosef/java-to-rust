@@ -1582,13 +1582,14 @@ fn program_errors_name_their_file() {
             ),
             (
                 "p/Other.java",
-                "package p;\nclass Other {\n    static void run() {\n        Thread t = null;\n    }\n}\n",
+                "package p;\nclass Other {\n    static void run() {\n        ProcessBuilder t = null;\n    }\n}\n",
             ),
         ],
     );
     let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
-    let error = java_to_rust::translate_program(&program).expect_err("Thread is not supported").to_string();
-    assert!(error.ends_with("Other.java:4:9: type `java.lang.Thread` not supported yet"), "{error}");
+    let error =
+        java_to_rust::translate_program(&program).expect_err("ProcessBuilder is not supported").to_string();
+    assert!(error.ends_with("Other.java:4:9: type `java.lang.ProcessBuilder` not supported yet"), "{error}");
 }
 
 #[test]
@@ -2864,6 +2865,39 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             public static native long getuid();
             public static long badOffset() { return theUnsafe.arrayBaseOffset(new int[0].getClass()); }
             public static int badScale() { return theUnsafe.arrayIndexScale(String.class); }
+            public long objectFieldOffset(Class<?> c, String name) {
+                if (c == null || name == null) { throw new NullPointerException(); }
+                return objectFieldOffset1(c, name);
+            }
+            private native long objectFieldOffset1(Class<?> c, String name);
+            public native Object getReferenceVolatile(Object o, long offset);
+            public native void putReferenceVolatile(Object o, long offset, Object x);
+            public final Object getReferenceAcquire(Object o, long offset) { return getReferenceVolatile(o, offset); }
+            public final void putReferenceRelease(Object o, long offset, Object x) { putReferenceVolatile(o, offset, x); }
+            public native int getInt(Object o, long offset);
+            public native void putIntVolatile(Object o, long offset, int x);
+        }",
+    ),
+    (
+        "lib/jdk/internal/misc/Lazy.java",
+        "package jdk.internal.misc;
+        public final class Lazy {
+            private static final Unsafe U = Unsafe.getUnsafe();
+            private static final long VALUE = U.objectFieldOffset(Lazy.class, \"value\");
+            private static final long COUNT = U.objectFieldOffset(Lazy.class, \"count\");
+            private String value;
+            private int count;
+            public String get() {
+                String v = (String) U.getReferenceAcquire(this, VALUE);
+                if (v == null) {
+                    v = \"computed\";
+                    U.putReferenceRelease(this, VALUE, v);
+                    U.putIntVolatile(this, COUNT, U.getInt(this, COUNT) + 1);
+                }
+                return v;
+            }
+            public int count() { return count; }
+            public static long offset() { return VALUE; }
         }",
     ),
     (
@@ -2937,6 +2971,21 @@ fn natives_of_jdk_classes_become_runtime_calls() {
 }
 
 #[test]
+fn an_access_through_a_field_offset_is_the_field() {
+    let rust = translate_with_natives(
+        "jdk-field-handles",
+        "Lazy l = new Lazy(); System.out.println(l.get() + l.get() + l.count());",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    // The offsets are no fields, and `Unsafe`'s accessors are not translated.
+    assert_lacks(
+        &rust,
+        &["LAZY_VALUE", "LAZY_COUNT", "field_offset", "fn get_reference_acquire", "fn get_int"],
+    );
+    assert_contains(&rust, &["self.value", "self.count"]);
+}
+
+#[test]
 fn natives_the_runtime_lacks_are_rejected_by_name() {
     let rejection =
         |dir: &str, statements: &str| translate_with_natives(dir, statements).expect_err("must be rejected");
@@ -2955,6 +3004,8 @@ fn natives_the_runtime_lacks_are_rejected_by_name() {
         error.ends_with("`Unsafe.arrayIndexScale` of a class that is not an array not supported yet"),
         "{error}"
     );
+    let error = rejection("jdk-natives-offset-value", "System.out.println(Lazy.offset());");
+    assert!(error.ends_with("a field offset used as a value not supported yet"), "{error}");
 }
 
 const INTERFACES: &str = "
@@ -4002,4 +4053,21 @@ fn new_object_creates_a_plain_object_with_its_identity() {
         &rust,
         &["struct PlainObject {", "let o = Rc::new(PlainObject::new());", "java.lang.Object"],
     );
+}
+
+#[test]
+fn an_element_that_may_be_null_is_passed_as_the_receiver_that_it_is() {
+    // `start` uses `this` as a value, so it takes the element's `&Rc<..>`, which the null check
+    // already gives.
+    let rust = translate(
+        "class P {
+            static class Box { int v; static void register(Box b) { b.v++; } void start() { register(this); } }
+            public static void main(String[] args) {
+                Box[] boxes = new Box[2];
+                for (int i = 0; i < 2; i++) { boxes[i] = new Box(); boxes[i].start(); }
+                System.out.println(boxes[0].v + boxes[1].v);
+            }
+        }",
+    );
+    assert_contains(&rust, &["PBox::start(java::non_null(boxes[i as usize].as_ref()));"]);
 }

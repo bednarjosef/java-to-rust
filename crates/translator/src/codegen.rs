@@ -10,6 +10,7 @@ use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
 mod boxing;
+mod chains;
 mod character;
 mod charsets;
 mod classes;
@@ -138,7 +139,9 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         try_assigned: HashSet::new(),
         dereferenced: HashSet::new(),
         rejected: None,
+        chains: chains::Chains::default(),
     };
+    g.chains = g.find_chains();
     if modules.is_some() {
         let text = g.program(&live);
         g.check_dereferences();
@@ -203,6 +206,8 @@ enum Part {
 
 struct Gen<'a> {
     class: &'a Class,
+    /// The structs and enums that take part in long chains of objects (see `chains`).
+    chains: chains::Chains,
     facts: &'a Facts,
     /// Where each method is emitted (see `analysis::hierarchy`).
     homes: Vec<Home>,
@@ -537,12 +542,21 @@ impl<'a> Gen<'a> {
         {
             self.line(&format!("{}();", statics::init_name(&self.class.types[t].name)));
         }
+        // The program ends when its last thread does, not when `main` returns.
+        if m.is_main && self.facts.threaded {
+            let guard = self.runtime("main_thread");
+            self.line(&format!("let _main = {guard}();"));
+        }
+        let initializes = m.name == "<clinit>" && self.facts.threaded;
         if never_runs {
             self.line(&no_object(&self.class.types[m.class].name));
         } else if m.is_ctor {
             self.constructor(m);
         } else {
-            self.stmts(&m.body, true);
+            self.stmts(&m.body, !initializes);
+            if initializes {
+                self.init_done(name);
+            }
             if self.throwing && m.ret == Type::Void && exceptions::completes_all(&m.body) {
                 self.line("Ok(())");
             }

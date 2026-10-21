@@ -237,11 +237,14 @@ pub fn flows(
 
 /// How values of class type `t` are represented.
 pub fn rep(class: &Class, facts: &Facts, t: usize) -> Rep {
-    // A thrown value is a `Throwable`, which `catch` clauses match by class; a standard class
-    // that several classes extend is one too, rather than an enum of its own.
+    // A thrown value is a `Throwable`, which `catch` clauses match by class; a standard exception
+    // class that several classes extend is one too, rather than an enum of its own.
+    let name = &class.types[t].name;
     if let Some(throwable) = class.type_index("java.lang.Throwable")
         && (t == throwable
-            || (crate::lower::is_standard(&class.types[t].name) && variants(class, facts, t).len() > 1))
+            || (crate::lower::is_standard(name)
+                && crate::lower::standard_subclass(name, "java.lang.Throwable")
+                && variants(class, facts, t).len() > 1))
     {
         return Rep::Enum(throwable);
     }
@@ -298,12 +301,14 @@ pub fn to_string_impl(class: &Class, c: usize) -> Option<usize> {
 /// fields and to call such methods that nothing overrides: they live on the class's fields
 /// struct and borrow it, as `&self` or `&mut self`. That is only safe when nothing they run
 /// reaches an object of their class tree through another handle (see `borrowing`), unless the
-/// tree is immutable, whose objects have no `RefCell`.
+/// tree is immutable, whose objects have no `RefCell`. A method of a class that threads share
+/// borrows only when it is short (`long` has those that are not; see `threads`).
 pub fn field_level(
     class: &Class,
     reach: &[HashSet<&str>],
     immutable: &HashSet<String>,
     structs: &HashSet<usize>,
+    long: &HashSet<usize>,
 ) -> HashSet<usize> {
     let h = &class.hierarchy;
     let mut level: HashSet<usize> = (0..class.methods.len())
@@ -319,7 +324,8 @@ pub fn field_level(
                 return false;
             }
             let family: Vec<&str> = h.family(t).into_iter().map(|c| class.types[c].name.as_str()).collect();
-            family.iter().all(|c| immutable.contains(*c)) || !family.iter().any(|c| reach[m].contains(c))
+            family.iter().all(|c| immutable.contains(*c))
+                || (!long.contains(&m) && !family.iter().any(|c| reach[m].contains(c)))
         })
         .collect();
     loop {

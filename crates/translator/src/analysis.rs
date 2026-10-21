@@ -30,6 +30,7 @@ mod owned;
 mod patterns;
 mod ranges;
 mod statics;
+mod threads;
 mod whole_objects;
 
 use crate::ast::*;
@@ -41,6 +42,13 @@ pub use whole_objects::whole_objects;
 
 #[derive(Default)]
 pub struct Facts {
+    /// Whether the program starts a thread (see `threads`).
+    pub threaded: bool,
+    /// The classes, by type index, whose objects two threads may reach: `Arc`s, with a
+    /// `java::Locked` unless immutable.
+    pub thread_shared: HashSet<usize>,
+    /// The methods of those classes that must not borrow their object for the whole call.
+    pub long_methods: HashSet<usize>,
     /// Integer `+`, `-`, `*`, negation, `++`, `--`, compound assignments and `Math.abs` that
     /// never overflow.
     pub no_overflow: HashSet<ExprId>,
@@ -193,6 +201,9 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
     patterns::check_enum_casts(class, &facts)?;
     patterns::check_object_values(class, &facts)?;
     boxing::analyze(class, &mut facts);
+    if facts.threaded {
+        threads::check(class, &facts)?;
+    }
     borrowed_params(class, &mut facts);
     facts.borrowed_objects = borrowed_objects(class, &facts);
     ascii_strings(class, &mut facts);
@@ -210,9 +221,20 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
 /// How the objects of each class are represented and which methods borrow them: the facts from
 /// `immutable` to `writers`, given `fields_structs`.
 fn representation(class: &Class, facts: &mut Facts) {
+    facts.threaded = threads::threaded(class);
+    if facts.threaded {
+        facts.thread_shared = threads::thread_shared(class);
+        facts.long_methods = threads::long_methods(class, &facts.thread_shared);
+    }
     let reach = borrowing::reach(class);
     facts.immutable = objects::immutable_classes(class);
-    facts.field_level = hierarchy::field_level(class, &reach.reach, &facts.immutable, &facts.fields_structs);
+    facts.field_level = hierarchy::field_level(
+        class,
+        &reach.reach,
+        &facts.immutable,
+        &facts.fields_structs,
+        &facts.long_methods,
+    );
     facts.owned = owned::owned_classes(class, &facts.immutable, &facts.field_level);
     facts.flows = hierarchy::flows(class, &facts.field_level, &Default::default());
     // An exception is converted to `Throwable` when it is thrown, so it is never a plain value.
