@@ -30,7 +30,7 @@ impl<'t> Lowering<'t> {
         let blocks: Vec<Node<'t>> = class
             .node
             .list("members")
-            .filter(|m| m.kind() == "BLOCK" && !Self::is_static_block(*m) && self.keeps(*m, &class.name))
+            .filter(|m| m.kind() == "BLOCK" && !Self::is_static_block(*m) && self.keeps(*m, &class.javac))
             .collect();
         let mut lowered = Vec::new();
         for block in blocks {

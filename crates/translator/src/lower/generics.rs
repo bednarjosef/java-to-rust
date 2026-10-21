@@ -30,14 +30,34 @@ pub(super) fn split_args(args: &str) -> Vec<&str> {
 
 impl<'t> Lowering<'t> {
     /// The declaration of the type variable `name` in scope: the method's being lowered (or the
-    /// one `scope` names), then its class's and those of the classes it is nested in.
+    /// one `scope` names), then its class's and those of the code it is nested in. One of the
+    /// code around an inner, local or anonymous class is erased there: its struct has no type
+    /// parameters of its own for it.
     fn type_var(&self, name: &str) -> Option<(Node<'t>, Owner)> {
         let (class, method) = self.scope.get().unwrap_or((self.current.get(), self.method_ctx.get()));
+        let found = self.type_var_around(name, class, method)?;
+        let around = match found.1 {
+            Owner::Method(m) => Some(m) != method,
+            Owner::Class(t) => t != class,
+        };
+        if around && self.nesting(class).is_some() && self.is_real(found.1) {
+            self.fail(found.1);
+        }
+        Some(found)
+    }
+
+    fn type_var_around(&self, name: &str, class: usize, method: Option<usize>) -> Option<(Node<'t>, Owner)> {
         let declares = |node: Node<'t>| node.list("typeParameters").find(|p| p.str("name") == name);
         if let Some(m) = method
             && let Some(found) = declares(self.methods[m].node)
         {
             return Some((found, Owner::Method(m)));
+        }
+        if let Some(nested) = self.nesting(class) {
+            if let Some(found) = declares(self.types[class].node) {
+                return Some((found, Owner::Class(class)));
+            }
+            return self.type_var_around(name, nested.enclosing, nested.method);
         }
         let mut outer = Some(self.types[class].name.as_str());
         while let Some(name) = outer {
