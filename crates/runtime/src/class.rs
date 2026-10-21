@@ -68,6 +68,7 @@ impl Class {
     pub const CLASS: Class = Class::standard("java.lang.Class", "Class");
     pub const ENUM: Class = Class::standard("java.lang.Enum", "Enum");
     pub const COMPARABLE: Class = Class::interface("java.lang.Comparable", "Comparable");
+    pub const CHAR_SEQUENCE: Class = Class::interface("java.lang.CharSequence", "CharSequence");
     pub const INTEGER: Class = Class::new("java.lang.Integer", "Integer", Some(|| Class::NUMBER));
     pub const LONG: Class = Class::new("java.lang.Long", "Long", Some(|| Class::NUMBER));
     pub const DOUBLE: Class = Class::new("java.lang.Double", "Double", Some(|| Class::NUMBER));
@@ -125,6 +126,23 @@ impl Class {
     /// `isPrimitive()`.
     pub fn is_primitive(&self) -> bool {
         self.kind == Kind::Primitive
+    }
+
+    /// `isInstance(x)`, given the binary names of the class of `x` and of every class and
+    /// interface above it (`None` for a null `x`), which the translation knows.
+    pub fn is_instance(&self, names: Option<&[&str]>) -> bool {
+        names.is_some_and(|names| names.contains(&self.name))
+    }
+
+    /// The check of `cast(x)`, given the names as for `is_instance`, the class of `x` first: a
+    /// `ClassCastException` unless `x` is null or an instance.
+    pub fn check_cast(&self, names: Option<&[&str]>) {
+        if let Some(names) = names
+            && !names.contains(&self.name)
+        {
+            let from = names.first().copied().unwrap_or("java.lang.Object");
+            crate::throw("java.lang.ClassCastException", &format!("Cannot cast {from} to {}", self.name));
+        }
     }
 
     /// `hashCode()`: Java's is the class object's identity hash, which nothing can depend on; this

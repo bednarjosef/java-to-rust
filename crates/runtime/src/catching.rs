@@ -44,6 +44,14 @@ pub(crate) fn raise(class: &str, message: &str) {
     resume_unwind(Box::new(Raised(Exception::new(class, message))))
 }
 
+/// `raise` of an exception made already; outside `catching`, it is given back.
+pub(crate) fn raise_exception(e: Exception) -> Exception {
+    if DEPTH.with(Cell::get) == 0 {
+        return e;
+    }
+    resume_unwind(Box::new(Raised(e)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -21,7 +21,10 @@
 //! in the fields of its object and passed to its constructor by the expression that creates it,
 //! and `this`, or a member of the enclosing class named without it, is the enclosing instance,
 //! held in the field `outer` (see `inner`). A bound method reference's receiver is its capture:
-//! a local, `this`, or a final field read through it.
+//! a local, `this`, or a final field read through it. Any other receiver (`a.b()::c`, a field
+//! that is not final) is evaluated once, where the reference is created, as Java does: into a
+//! synthetic local of the creating code, checked for null there, which the class captures (see
+//! `plan_receivers`).
 
 use super::inner::NestKind;
 use super::*;
@@ -41,6 +44,11 @@ pub(super) struct LambdaInfo<'t> {
     /// The method's code: a lambda's body, or the call that a method reference makes, as a tree
     /// made here (see `reference_call`).
     pub code: Node<'t>,
+    /// The member of a class whose code holds the lambda (a method, a field, an initializer).
+    pub member: Node<'t>,
+    /// For a method reference whose receiver is computed: the name of the synthetic local that
+    /// holds the receiver's value, and the receiver.
+    pub receiver: Option<(&'t str, Node<'t>)>,
 }
 
 /// The kinds of javac's symbols of local variables.
@@ -75,7 +83,7 @@ impl<'t> Lowering<'t> {
                 Some(&(_, l)) => (self.lambdas[l].class, Some(self.lambdas[l].method), true),
                 None => (class, method, instance),
             };
-            self.declare_lambda(Node(lambda), enclosing, method, instance, &place)?;
+            self.declare_lambda(Node(lambda), member, enclosing, method, instance, &place)?;
             declared.push((lambda, self.lambdas.len() - 1));
         }
         Ok(())
@@ -85,6 +93,7 @@ impl<'t> Lowering<'t> {
     fn declare_lambda(
         &mut self,
         node: Node<'t>,
+        member: Node<'t>,
         class: usize,
         method: Option<usize>,
         instance: bool,
@@ -108,7 +117,7 @@ impl<'t> Lowering<'t> {
         } else {
             let taken = names(&node.0["qualifierExpression"]);
             let params = param_names(param_types.len(), &taken);
-            let call = self.reference_call(node, &param_types, &params)?;
+            let call = self.reference_call(node, &param_types, &params, None)?;
             (params, Node(call))
         };
         let index = self.types.len();
@@ -122,8 +131,59 @@ impl<'t> Lowering<'t> {
             name: descriptor.str("name"),
             sig: descriptor.str("substituted"),
         });
-        self.lambdas.push(LambdaInfo { node, class: index, ctor, method: ctor + 1, params, code });
+        let lambda =
+            LambdaInfo { node, class: index, ctor, method: ctor + 1, params, code, member, receiver: None };
+        self.lambdas.push(lambda);
         Ok(())
+    }
+
+    /// Gives each method reference whose receiver is computed (see `computed_receiver`) a
+    /// synthetic local for the receiver's value, which its call reads: the code that creates the
+    /// reference evaluates the receiver into it, and the class captures it. Runs once every class
+    /// is declared, which telling a final field needs. An error comes with the index of the class
+    /// it is in.
+    pub(super) fn plan_receivers(&mut self) -> Result<(), (usize, Error)> {
+        let mut taken: Vec<(*const Value, HashSet<&'t str>)> = Vec::new();
+        for i in 0..self.lambdas.len() {
+            let l = &self.lambdas[i];
+            let Some(qualifier) =
+                computed_receiver(l.node.0, &|owner, name| self.is_final_field(owner, name))
+            else {
+                continue;
+            };
+            let (node, member, class) = (l.node, l.member, l.class);
+            // A name that the member's code does not use, nor the reference's parameters.
+            let at = match taken.iter().position(|(m, _)| std::ptr::eq(*m, member.0)) {
+                Some(at) => at,
+                None => {
+                    taken.push((member.0, names(member.0)));
+                    taken.len() - 1
+                }
+            };
+            let names = &mut taken[at].1;
+            let base = "receiver";
+            let name = (1..)
+                .map(|n| if n == 1 { base.to_string() } else { format!("{base}{n}") })
+                .find(|n| !names.contains(n.as_str()) && !l.params.contains(&n.as_str()))
+                .expect("a free name");
+            let name: &'t str = Box::leak(name.into_boxed_str());
+            names.insert(name);
+            let descriptor = node.child("descriptor").map_err(|e| (class, e))?;
+            let (param_types, _) = signature(descriptor.str("substituted"));
+            let params = l.params.clone();
+            let code =
+                self.reference_call(node, &param_types, &params, Some(name)).map_err(|e| (class, e))?;
+            let l = &mut self.lambdas[i];
+            l.code = Node(code);
+            l.receiver = Some((name, Node(qualifier)));
+        }
+        Ok(())
+    }
+
+    /// The synthetic local and the receiver of the method reference `node`, when its receiver is
+    /// computed (see `plan_receivers`).
+    pub(super) fn lambda_receiver(&self, node: Node<'t>) -> Option<(&'t str, Node<'t>)> {
+        self.lambdas.iter().find(|l| std::ptr::eq(l.node.0, node.0)).and_then(|l| l.receiver)
     }
 
     /// The lambda whose class is `t`.
@@ -211,9 +271,33 @@ impl<'t> Lowering<'t> {
         };
         let ty = self.ty(node, node.java_type())?;
         let class_ty = Type::class(&self.types[l.class].name);
+        let pos = node.pos();
+        // A computed receiver is evaluated first, into its local, and checked for null.
+        let receiver = match l.receiver {
+            Some((name, qualifier)) => {
+                let value = self.expr(qualifier)?;
+                let capture = self.nesting(l.class).and_then(|n| n.captures.iter().find(|c| c.name == name));
+                let local_ty = match capture {
+                    Some(c) => self.capture_type(c)?,
+                    None => value.ty,
+                };
+                let value = self.convert(value, local_ty);
+                let var = || self.synth(ExprKind::Var(name.to_string()), pos, local_ty);
+                let checked = self.synth(ExprKind::Builtin(Builtin::NullChecked, vec![var()]), pos, local_ty);
+                let local = Stmt::Local { ty: local_ty, name: name.to_string(), init: Some(value), pos };
+                Some(vec![local, Stmt::Expr(checked)])
+            }
+            None => None,
+        };
         let args = self.with_synthetic(self.creation_args(node, l.class)?, Vec::new());
         let new = ExprKind::New { class: l.class, args, ctor: Some(l.ctor) };
-        Ok(ExprKind::Cast(ty, Box::new(self.synth(new, node.pos(), class_ty))))
+        let created = ExprKind::Cast(ty, Box::new(self.synth(new, pos, class_ty)));
+        let Some(mut block) = receiver else { return Ok(created) };
+        block.push(Stmt::Yield(self.synth(created, pos, ty)));
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        })
     }
 
     /// The constructor or method of a lambda's class, when `index` is one.
@@ -259,14 +343,6 @@ impl<'t> Lowering<'t> {
     ) -> Result<(&'t str, Vec<Param>, Type, Vec<Stmt>, Option<usize>), Error> {
         let node = l.node;
         let stub = self.stubbing.get();
-        if let Some(qualifier) =
-            computed_receiver(node.0, &|owner, name| self.is_final_field(owner, name)).filter(|_| !stub)
-        {
-            return unsupported(
-                Node(qualifier),
-                "a method reference on a receiver that is not a local, `this` or a final field",
-            );
-        }
         if let Some(sup) = uses_super(l.code.0).filter(|_| !stub) {
             return unsupported(Node(sup), "`super` in a lambda");
         }
@@ -331,11 +407,14 @@ impl<'t> Lowering<'t> {
 
     /// The call that a method reference makes, as javac's tree of it: the referenced method or
     /// constructor applied to the lambda's parameters `params` (of the descriptor's types).
+    /// `receiver`, when set, names the local that holds a computed receiver's value, which the
+    /// call reads in place of the receiver.
     fn reference_call(
         &self,
         node: Node<'t>,
         param_types: &[&str],
         params: &[&str],
+        receiver: Option<&str>,
     ) -> Result<&'t Value, Error> {
         let at = |mut v: Value| {
             v["line"] = node.0["line"].clone();
@@ -373,7 +452,15 @@ impl<'t> Lowering<'t> {
                     "identifier": qualifier.0.clone(), "arguments": args}))
             }
             _ => {
-                let (receiver, first) = if unbound { (param(0), 1) } else { (qualifier.0.clone(), 0) };
+                let bound = match receiver {
+                    Some(name) => {
+                        let ty = qualifier.java_type();
+                        at(json!({"kind": "IDENTIFIER", "name": name, "javaType": ty, "symbol":
+                            {"kind": "LOCAL_VARIABLE", "name": name, "owner": "", "static": false, "type": ty}}))
+                    }
+                    None => qualifier.0.clone(),
+                };
+                let (receiver, first) = if unbound { (param(0), 1) } else { (bound, 0) };
                 let args: Vec<Value> = (first..param_types.len()).map(param).collect();
                 let select = at(json!({"kind": "MEMBER_SELECT", "identifier": node.str("name"),
                     "symbol": symbol, "expression": receiver}));
@@ -407,11 +494,15 @@ pub fn computed_receiver<'t>(node: &'t Value, final_field: &dyn Fn(&str, &str) -
     let takes = match qualifier.kind() {
         "STRING_LITERAL" => true,
         _ if is_type(qualifier) => true,
+        // `super::m` and `Outer.super::m` call the method on the enclosing object, as a lambda's
+        // `super.m()` does.
         "IDENTIFIER" => {
-            qualifier.str("name") == "this"
+            matches!(qualifier.str("name"), "this" | "super")
                 || qualifier.symbol().is_some_and(|s| LOCAL_KINDS.contains(&s.kind))
                 || field(qualifier)
         }
+        // A class literal is a constant, and never null.
+        "MEMBER_SELECT" if matches!(qualifier.str("identifier"), "super" | "class") => true,
         "MEMBER_SELECT" => {
             let on = Node(&qualifier.0["expression"]);
             field(qualifier) && ((on.kind() == "IDENTIFIER" && on.str("name") == "this") || is_type(on))
@@ -421,7 +512,9 @@ pub fn computed_receiver<'t>(node: &'t Value, final_field: &dyn Fn(&str, &str) -
     (!takes).then_some(qualifier.0)
 }
 
-/// The first `super` in a lambda's code, outside the classes it declares.
+/// The first `super` in a lambda's code, outside the classes it declares, that is not the
+/// receiver of a method call (`super.m()`, which runs on the object of the class whose code holds
+/// the lambda, as javac's synthetic method does) other than `super.clone()`.
 fn uses_super(v: &Value) -> Option<&Value> {
     match v {
         Value::Object(map) => {
@@ -431,6 +524,13 @@ fn uses_super(v: &Value) -> Option<&Value> {
             }
             if kind == "IDENTIFIER" && map.get("name").and_then(Value::as_str) == Some("super") {
                 return Some(v);
+            }
+            if kind == "MEMBER_SELECT"
+                && Node(v).symbol().is_some_and(|s| s.kind == "METHOD" && s.name != "clone")
+                && Node(&v["expression"]).kind() == "IDENTIFIER"
+                && v["expression"]["name"] == "super"
+            {
+                return None;
             }
             map.iter().filter(|(k, _)| *k != "symbol" && *k != "classBody").find_map(|(_, c)| uses_super(c))
         }

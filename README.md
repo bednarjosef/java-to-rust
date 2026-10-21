@@ -237,7 +237,10 @@ A small subset, end to end:
   `intValue()` and the others convert as Java does, and over the program's classes that extend
   `Number` (the JDK's `AtomicInteger` and `BigInteger`), whose own `intValue()` to
   `doubleValue()` run; `Number`'s `byteValue()` and `shortValue()` narrow `intValue()`, and a
-  class that overrides them is rejected. A method
+  class that overrides them is rejected. `CharSequence` is such an enum too, over strings,
+  builders and the program's classes that implement it: `length()`, `charAt` and `subSequence` run
+  the class's own, or the string's or builder's (a `subSequence` that returns a `String` is
+  rejected), and `toString()` gives the text. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &
@@ -276,8 +279,11 @@ A small subset, end to end:
   and equal by binary name: `x.getClass()` of an object, string, box, array or enum constant,
   class literals (`int[].class`, `String.class`, `Dog.class`), and `getName`, `getSimpleName`,
   `getSuperclass`, `getComponentType`, `isArray`, `isInterface`, `isPrimitive`, `isEnum`,
-  `toString`, `hashCode` and `equals`. Reflection (`getDeclaredFields`, `newInstance`, ...) is
-  rejected, as are a record with an array component (its text would be the array's identity) and
+  `toString`, `hashCode` and `equals`. `isInstance(x)` and `cast(x)` of any class value compare
+  its binary name with those of `x`'s class and of every class and interface above it, which the
+  generator writes out for each class `x` may be of; a failed `cast` throws Java's
+  `ClassCastException` (`Cannot cast java.lang.String to Main$Dog`), which a `catch` sees.
+  Reflection (`getDeclaredFields`, `newInstance`, ...) is rejected, as are a record with an array component (its text would be the array's identity) and
   a generic record in a record pattern. An accessor written in the record runs at each use of a
   pattern variable that names a component, not once.
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
@@ -426,6 +432,10 @@ can differ from Java on code points the corpus does not test.
 
 The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`, `charAt` agree on
 `"né😀e"`), and throw what Java throws (`StringIndexOutOfBoundsException` with Java's message).
+`codePointAt`, `codePointBefore`, `codePointCount` and `offsetByCodePoints` (of strings and
+builders) pair surrogates as Java does; `regionMatches` ignores case as `compareToIgnoreCase` does;
+`contentEquals` of a `CharSequence` that is neither a string nor a builder compares with its
+`toString()`, which the interface's contract makes its characters.
 `toUpperCase` and `toLowerCase` are the root-locale mappings; with a `Locale` (in a whole
 program) they are too, but for Turkish, Azeri and Lithuanian, which end the program. A `StringBuilder` is a
 `java::StringBuilder`, a shared handle to UTF-16 units like an array: every variable, field and
@@ -436,9 +446,9 @@ collection) is the same handle in `Object`'s `StringBuilder` variant: `==`, `equ
 `hashCode` are its identity's, and it prints as its text.
 
 `split`, `replaceAll`, `replaceFirst` and `matches` run a small backtracking regular expression
-engine with a literal fast path: literals and escapes, `.`, `\d \s \w` and their negations, sets
-and ranges, groups, alternation, `^ $` and greedy and lazy quantifiers. What it lacks (lookaround,
-flags, backreferences, `\b`, `\p{..}`, possessive quantifiers, set intersections) is rejected when
+engine with a literal fast path: literals and escapes, `.`, `\d \s \w` and their negations, the
+line break `\R`, sets and ranges, groups, back references (`\1`, read as Java reads `\11`),
+alternation, `^ $` and greedy and lazy quantifiers. What it lacks (lookaround, flags, `\b`, `\p{..}`, possessive quantifiers, set intersections) is rejected when
 the pattern is a constant and throws `UnsupportedOperationException` when it is not; a malformed
 pattern throws `PatternSyntaxException` as in Java.
 
@@ -487,7 +497,8 @@ methods initialize it first. Unlike Java, using a constant (`Shape.SQUARE`, `val
 
 `java.lang.Enum` as a type (the JDK's `EnumMap` and `EnumSet`, `<E extends Enum<E>>`) is an enum
 over the program's enums, like `Object`; `ordinal()`, `name()`, `compareTo` and
-`getDeclaringClass()` on it match on the enums it can be, and the constants of an enum's class,
+`getDeclaringClass()` on it match on the enums it can be, and `equals` and `hashCode` of any enum
+constant are `Object`'s identity ones, and the constants of an enum's class,
 which the JDK reads through `SharedSecrets`, are those of the program's enum whose class it is. A
 cast to an enum of a value that may be null (a key from a generic collection) ends the program
 if the value is null, as an enum that comes out of an `Object` is never an `Option`.
@@ -654,8 +665,11 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   class: the locals it captures are fields set from its constructor
   (`OpLambdaInMain::new(k, &name)`), and `this` and the enclosing class's members are read
   through `outer` (`self.outer.borrow().base`), also from a lambda in a lambda or in a local or
-  anonymous class. A bound method reference takes a local, `this` or a final field as its
-  receiver. In single-file mode the JDK's functional interfaces come from
+  anonymous class. A bound method reference captures its receiver: a local, `this` or a final
+  field as it is, and any other receiver (`make()::run`, a field that is not final) evaluated once
+  where the reference is created, into a local that is checked for null there, as Java does.
+  `super.m()` and `super::m` in a lambda call the superclass's method on the object of the class
+  whose code holds the lambda, as javac's synthetic method does. In single-file mode the JDK's functional interfaces come from
   `crates/translator/java/Functional.java` (abstract methods only), and a call of one of their
   default or static methods is rejected with a pointer to whole-program mode. Translated whole
   with the JDK's sources, those methods are the JDK's own code, lambdas in interface methods
@@ -675,7 +689,7 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   a call is a call of the closure (`op(acc, x)`). A local that only calls its lambda is the
   closure itself, borrowing what it captures (`let scale = |x: i32| -> i32 {
   x.wrapping_mul(this.borrow().factor) };`). Every other functional interface keeps the class
-  per lambda. Not yet: other receivers, `super` in a lambda, typed closures for a generic
+  per lambda. Not yet: typed closures for a generic
   interface's instantiations, and the parameter form (`impl FnMut`).
 
 ### Whole programs
@@ -799,8 +813,8 @@ Each construct below is rejected at translation with an error that names it:
 - the exceptions and try-with-resources listed under "Exceptions" above;
 - record patterns in `instanceof` (those in `switch` translate), and blocks, member classes,
   static fields and non-constant initializers in an enum constant's body;
-- method references on a receiver other than a local, `this` or a final field, `super` in a
-  lambda, and without the JDK's sources the default and static methods of its functional
+- `super` in a lambda other than as the receiver of a method call (`super.x`, `super.clone()`),
+  and without the JDK's sources the default and static methods of the JDK's functional
   interfaces;
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
