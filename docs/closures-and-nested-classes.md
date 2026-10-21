@@ -1324,13 +1324,19 @@ Decisions that change during the implementation are recorded here, milestone by 
   result is converted, is a closure called at once inside the outer one,
   `Object::Integer((|x: i32| -> i32 { if x > k { return x.wrapping_sub(k); } .. })(java::cast(..)))`,
   since its `return`s would leave the outer closure with the unconverted value.
-- **Only the stored form, `Rc<dyn Fn(A) -> R>`,** for every place: locals, parameters (`&Op`, as
-  the borrowing analysis already lends objects), fields, statics, elements and returns. The
-  parameter form `impl FnMut` and the local form `let f = |x| ..` of 4.3 are later refinements,
-  as is a type alias per signature instead of per interface (the alias is named after the
-  interface: `type ClosureFormsIntOp = Rc<dyn Fn(i32, i32) -> i32>;`). The argument and result types are
-  those of the interface's method as its dispatcher would take them (`Fn(&str) -> i32` for a
-  borrowed string parameter, `Result<_, Throwable>` when the method throws).
+- **The stored form, `Rc<dyn Fn(A) -> R>`, and the local form**: a local whose every
+  declaration in the method has a lambda as its initializer and that is only called
+  (`Facts::closure_locals`: never assigned, captured, passed, returned or used with a default
+  method) is the closure itself, `let f = |x: i32| -> i32 { .. };`, which borrows what it
+  captures when each capture is a local or a clone of one (`this` included: `|a: i32| -> i32 {
+  a.wrapping_mul(this.borrow().base) }`), and moves its captures in otherwise. Every other place
+  has the stored form: parameters (`&Op`, as the borrowing analysis already lends objects),
+  fields, statics, elements and returns. The parameter form `impl FnMut` of 4.3 is a later
+  refinement, as is a type alias per signature instead of per interface (the alias is named
+  after the interface: `type ClosureFormsIntOp = Rc<dyn Fn(i32, i32) -> i32>;`). The argument
+  and result types are those of the interface's method as its dispatcher would take them
+  (`Fn(&str) -> i32` for a borrowed string parameter, `Result<_, Throwable>` when the method
+  throws).
 - **A lambda is written where it is created** (`codegen/closures.rs`): the lambda class's method
   is generated inside the creating expression with its own names and facts (the generator's
   method state is set aside and restored), and its capture fields are locals bound before the
@@ -1362,7 +1368,9 @@ Decisions that change during the implementation are recorded here, milestone by 
 - **A call clones a closure out of a `RefCell`** before running it,
   `({ let f = a.borrow().op.clone(); f })(3)`, since the closure may reach the object again; a
   local, a capture or a field of a plain object is called in place (`op(x)`, `(self.op)(x)`).
-- **Corpus**: `features/ClosureDefaultMethods.java` (default methods that create lambdas over
+- **Corpus**: `features/LocalClosures.java` (local closures over `this`, an array, a string and
+  a `StringBuilder`, in loops, and a name declared twice, once stored);
+  `features/ClosureDefaultMethods.java` (default methods that create lambdas over
   `this`, call each other and call the closure, and a static method);
   `whole-program/FunctionChains.java` (`Predicate`, `IntPredicate` and `BiFunction` from the
   JDK's sources with their default methods, `Function` with `UnaryOperator`);

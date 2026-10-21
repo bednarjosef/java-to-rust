@@ -182,7 +182,8 @@ fn a_closure_that_threads_share_is_an_arc_that_any_thread_may_call() {
                 t.start();
                 t.join();
                 Local l = x -> x * 2;
-                System.out.println(l.apply(out[0]));
+                Local m = l;
+                System.out.println(m.apply(out[0]));
             }
         }",
     );

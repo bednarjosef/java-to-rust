@@ -70,14 +70,13 @@ fn a_method_reference_is_a_closure_of_the_call_it_makes() {
     assert_contains(
         &rust,
         &[
-            "type AMeasure = Rc<dyn Fn(&str) -> i32>;",
-            "let length = Rc::new(|a: &str| -> i32 { a.len() as i32 }) as AMeasure;",
-            "let doubled = Rc::new(|a: &str| -> i32 { twice(a) }) as AMeasure;",
-            "Rc::new(|a: i32| -> Rc<APoint> { Rc::new(APoint::new(a)) }) as AMake",
+            "let length = |a: &str| -> i32 { a.len() as i32 };",
+            "let doubled = |a: &str| -> i32 { twice(a) };",
+            "let make = |a: i32| -> Rc<APoint> { Rc::new(APoint::new(a)) };",
             "length(\"abc\")",
         ],
     );
-    assert_lacks(&rust, &["struct MeasureLambdaInMain", "enum AMeasure"]);
+    assert_lacks(&rust, &["struct MeasureLambdaInMain", "enum AMeasure", "type AMeasure"]);
 }
 
 #[test]
@@ -97,10 +96,9 @@ fn a_generic_interfaces_closure_converts_its_arguments_and_its_result() {
     assert_contains(
         &rust,
         &[
-            "type Function = Rc<dyn Fn(Object) -> Object>;",
-            "let square = Rc::new(|t: Object| -> Object { let x: i32 = java::cast(t.as_integer(), \"java.lang.Integer\"); Object::Integer(x.wrapping_mul(x)) }) as Function;",
+            "let square = |t: Object| -> Object { let x: i32 = java::cast(t.as_integer(), \"java.lang.Integer\"); Object::Integer(x.wrapping_mul(x)) };",
             "square(Object::Integer(7))",
-            "let show = Rc::new(|t: Object| {\n        let s: &str = &java::cast(t.as_string(), \"java.lang.String\");\n        java::println!(\"{}\", java::string_length(s));\n    }) as Consumer;",
+            "let show = |t: Object| {\n        let s: &str = &java::cast(t.as_string(), \"java.lang.String\");\n        java::println!(\"{}\", java::string_length(s));\n    };",
         ],
     );
     assert_lacks(&rust, &["fn apply_integer", "struct FunctionLambdaInMain"]);
@@ -153,11 +151,12 @@ fn a_lambda_moves_the_locals_it_captures_into_its_closure() {
     let rust = translate(
         "class A {
             interface Op { int apply(int a); }
+            static int run(Op op) { return op.apply(1); }
             public static void main(String[] args) {
                 int k = 3;
                 String name = \"n\";
                 Op op = a -> a + k + name.length();
-                System.out.println(op.apply(1));
+                System.out.println(run(op));
             }
         }",
     );
@@ -169,6 +168,31 @@ fn a_lambda_moves_the_locals_it_captures_into_its_closure() {
             "op(1)",
         ],
     );
+}
+
+#[test]
+fn a_local_that_only_calls_its_lambda_is_a_closure_that_borrows_its_captures() {
+    let rust = translate(
+        "class A {
+            interface Op { int apply(int a); }
+            int base = 2;
+            int run(int x) { Op scaled = a -> a * base; base++; return scaled.apply(x); }
+            public static void main(String[] args) {
+                String name = \"n\";
+                Op op = a -> a + name.length();
+                System.out.println(op.apply(1) + new A().run(3) + name);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "let scaled = |a: i32| -> i32 { a.wrapping_mul(this.borrow().base) };",
+            "let op = |a: i32| -> i32 { a.wrapping_add(java::string_length(&name)) };",
+            "op(1)",
+        ],
+    );
+    assert_lacks(&rust, &["type AOp", "Rc::new(|", "move |"]);
 }
 
 #[test]
@@ -211,12 +235,7 @@ fn a_lambda_in_a_lambda_takes_its_captures_from_the_outer_one() {
             }
         }",
     );
-    assert_contains(
-        &rust,
-        &[
-            "let inner = Rc::new(move |z: i32| -> i32 { z.wrapping_add(x).wrapping_add(k) }) as IntUnaryOperator;",
-        ],
-    );
+    assert_contains(&rust, &["let inner = |z: i32| -> i32 { z.wrapping_add(x).wrapping_add(k) };"]);
 }
 
 #[test]

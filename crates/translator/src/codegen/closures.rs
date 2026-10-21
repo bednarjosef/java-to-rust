@@ -186,11 +186,28 @@ impl<'a> Gen<'a> {
     /// A lambda converted to its closure type `t`: its captures bound to locals, and the closure
     /// that moves them in, whose body is the lambda class's method.
     pub(super) fn closure(&mut self, t: usize, ctor: usize, args: &'a [Expr]) -> Code {
-        let (prelude, closure) = self.closure_parts(t, ctor, args);
+        let (prelude, closure) = self.closure_parts(t, ctor, args, false);
+        let closure = format!("{}::new({closure}) as {}", self.closure_handle(t).0, self.closure_name(t));
         if prelude.is_empty() {
             return Code::new(closure, AS);
         }
         Code::atom(format!("{{ {} {closure} }}", prelude.join(" ")))
+    }
+
+    /// The initializer of a local that only calls its closure (`Facts::closure_locals`): the
+    /// closure itself, `let f = |x: i32| -> i32 { .. };`, with no handle around it.
+    pub(super) fn local_closure(&mut self, name: &str, init: &'a Expr) -> Option<String> {
+        if !self.facts.closure_locals.contains(&(self.method, name.to_string())) {
+            return None;
+        }
+        let ExprKind::Cast(to, lambda) = &init.kind else { return None };
+        let ExprKind::New { args, ctor: Some(ctor), .. } = &lambda.kind else { return None };
+        let t = self.closure_type(*to)?;
+        let (prelude, closure) = self.closure_parts(t, *ctor, args, true);
+        if prelude.is_empty() {
+            return Some(closure);
+        }
+        Some(format!("{{ {} {closure} }}", prelude.join(" ")))
     }
 
     /// The closure that `value`, the value of a function's final `return`, is, as the lines that
@@ -205,15 +222,20 @@ impl<'a> Gen<'a> {
             return None;
         }
         // The function's result type converts the closure without `as`.
-        let (prelude, closure) = self.closure_parts(t, *ctor, args);
-        let closure =
-            closure.rsplit_once(" as ").map_or(closure.as_str(), |(closure, _)| closure).to_string();
-        Some((prelude, closure))
+        let (prelude, closure) = self.closure_parts(t, *ctor, args, false);
+        Some((prelude, format!("{}::new({closure})", self.closure_handle(t).0)))
     }
 
     /// The lines that bind the captures of a lambda converted to closure type `t`, and the
-    /// closure.
-    fn closure_parts(&mut self, t: usize, ctor: usize, args: &'a [Expr]) -> (Vec<String>, String) {
+    /// closure, `move |x: i32| -> i32 { .. }`. A closure that does not outlive the locals it
+    /// captures (`borrowing`) borrows them instead, when each is a local or a clone of one.
+    fn closure_parts(
+        &mut self,
+        t: usize,
+        ctor: usize,
+        args: &'a [Expr],
+        borrowing: bool,
+    ) -> (Vec<String>, String) {
         let c = self.class.methods[ctor].class;
         let Some(m) = self.class.hierarchy.implementation(self.closure_method(t), c) else {
             unreachable!("a closure type's lambda implements its method")
@@ -258,8 +280,18 @@ impl<'a> Gen<'a> {
         self.this_form = ThisForm::SelfRef;
         let mut prelude = Vec::new();
         let mut moving = false;
+        let borrowed = borrowing
+            && fields
+                .iter()
+                .zip(&values)
+                .all(|(field, value)| field.is_none() || captured_local(value).is_some());
         for (field, value) in fields.iter().zip(&values) {
             let Some(field) = field else { continue };
+            if borrowed {
+                let name = captured_local(value).expect("checked above").to_string();
+                self.field_locals.insert(field.clone(), name);
+                continue;
+            }
             let name = unique(snake_case(field), &mut used);
             // A local passed as it is is moved in by its own name.
             if *value != name {
@@ -303,13 +335,7 @@ impl<'a> Gen<'a> {
         self.restore(saved);
         let moving = if moving { "move " } else { "" };
         let body = self.braced(&text);
-        let closure = format!(
-            "{}::new({moving}|{}|{ret} {body}) as {}",
-            self.closure_handle(t).0,
-            params.join(", "),
-            self.closure_name(t)
-        );
-        (prelude, closure)
+        (prelude, format!("{moving}|{}|{ret} {body}", params.join(", ")))
     }
 
     /// Whether `this.m(..)` (`receiver`, method `index`) is, in a closure's body, a call of the
@@ -477,6 +503,12 @@ impl<'a> Gen<'a> {
         self.chars = s.chars;
         self.exhaustive = s.exhaustive;
     }
+}
+
+/// The local that a capture's value `x` or `x.clone()` is.
+fn captured_local(value: &str) -> Option<&str> {
+    let name = value.strip_suffix(".clone()").unwrap_or(value);
+    (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(name)
 }
 
 /// Whether `body` returns only at its end.
