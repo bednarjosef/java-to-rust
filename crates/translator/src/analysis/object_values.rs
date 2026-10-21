@@ -17,14 +17,32 @@
 //! An expression of one of the program's own classes is never a string or a box, whatever it
 //! reads: the translation's type for it holds none (a value read through an erased type variable
 //! is cast to the class first).
+//!
+//! For the calls that can run (`live_methods`), the classes must cover every object that an
+//! expression can be, as a call that misses one would run a method that was taken out. That
+//! analysis (`analyze_for_dispatch`) follows more:
+//!
+//! - An array element is read as any element of the program's arrays whose class fits the type,
+//!   since an array is written through one type and read through another (`Object[]` and
+//!   `String[]`, `T[]` and its argument's).
+//! - An instance method is followed for every concrete class under its own, as `super.m()` runs
+//!   it on objects of a class that overrides it, and so is an instance field's initializer.
+//! - The constants of an enum set its instance fields.
+//! - The parameters of a method that the runtime may call itself (`runtime_called`) hold what
+//!   calls in the code pass them and what the runtime holds (`handed`): the objects it was given.
+//! - "Any class its type allows" is spelled out as those classes where the type is not open
+//!   (`Object`, a type variable), so that it stays within the type wherever the value goes. A
+//!   compound assignment stores a number or a string; a switch expression is one of the values it
+//!   yields; a value checked for null or copied by `clone()` is the value given; what ends the
+//!   program has none.
 
 use super::Facts;
 use crate::ast::*;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 /// The context of code that has no `this`: a static method, or a method that no class runs.
-const STATIC: usize = usize::MAX;
+pub(super) const STATIC: usize = usize::MAX;
 
 /// The types whose values include strings or boxes: `Object` and the interfaces and classes of
 /// the JDK that strings or boxes implement.
@@ -43,34 +61,93 @@ const HOLDING_VALUES: [&str; 10] = [
 
 /// What a place or an expression may hold.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
-struct Flow {
+pub(super) struct Flow {
     /// A string, a box or a primitive held as an object.
     value: bool,
     /// Objects of any class its type allows; `classes` lists them otherwise.
-    any: bool,
-    classes: BTreeSet<usize>,
+    pub any: bool,
+    pub classes: ClassSet,
 }
 
 impl Flow {
     fn top() -> Flow {
-        Flow { value: true, any: true, classes: BTreeSet::new() }
+        Flow { value: true, any: true, classes: ClassSet::default() }
     }
 
     fn of(class: usize) -> Flow {
-        Flow { classes: BTreeSet::from([class]), ..Flow::default() }
+        let mut classes = ClassSet::default();
+        classes.insert(class);
+        Flow { classes, ..Flow::default() }
     }
 
     /// Adds what `other` may hold; whether that changed anything.
     fn join(&mut self, other: &Flow) -> bool {
-        let before = (self.value, self.any, self.classes.len());
+        let before = (self.value, self.any);
         self.value |= other.value;
         self.any |= other.any;
-        if !self.any {
-            self.classes.extend(other.classes.iter().copied());
-        }
-        before != (self.value, self.any, self.classes.len())
+        let grew = !self.any && self.classes.union(&other.classes);
+        grew || before != (self.value, self.any)
     }
 }
+
+/// A set of classes, by index into `Class::types`: a bit for each.
+#[derive(Clone, Default, Debug)]
+pub(super) struct ClassSet {
+    words: Vec<u64>,
+}
+
+impl ClassSet {
+    fn insert(&mut self, c: usize) {
+        if self.words.len() <= c / 64 {
+            self.words.resize(c / 64 + 1, 0);
+        }
+        self.words[c / 64] |= 1 << (c % 64);
+    }
+
+    /// Adds the classes of `other`; whether that added any.
+    fn union(&mut self, other: &ClassSet) -> bool {
+        if self.words.len() < other.words.len() {
+            self.words.resize(other.words.len(), 0);
+        }
+        let mut grew = false;
+        for (word, &more) in self.words.iter_mut().zip(&other.words) {
+            grew |= more & !*word != 0;
+            *word |= more;
+        }
+        grew
+    }
+
+    /// Keeps the classes that are also in `other`.
+    fn intersect(&mut self, other: &ClassSet) {
+        for (i, word) in self.words.iter_mut().enumerate() {
+            *word &= other.words.get(i).copied().unwrap_or(0);
+        }
+    }
+
+    pub(super) fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.words
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &word)| (0..64).filter(move |b| word & (1 << b) != 0).map(move |b| i * 64 + b))
+    }
+}
+
+impl FromIterator<usize> for ClassSet {
+    fn from_iter<I: IntoIterator<Item = usize>>(classes: I) -> ClassSet {
+        let mut set = ClassSet::default();
+        classes.into_iter().for_each(|c| set.insert(c));
+        set
+    }
+}
+
+impl PartialEq for ClassSet {
+    fn eq(&self, other: &ClassSet) -> bool {
+        let n = self.words.len().max(other.words.len());
+        (0..n).all(|i| self.words.get(i).unwrap_or(&0) == other.words.get(i).unwrap_or(&0))
+    }
+}
+
+impl Eq for ClassSet {}
 
 /// What the analysis found: the places that may hold a string or a box, and the classes of
 /// their objects.
@@ -85,9 +162,17 @@ pub struct ObjectValues {
     /// The variables of each method that the analysis follows: its parameters (unless the
     /// runtime may call it) and the variables it declares, loops over or binds with a pattern.
     followed: Vec<HashSet<String>>,
+    /// For dispatch, the parameters of each method that the runtime may call itself
+    /// (`runtime_called`), which hold what the runtime holds besides what calls pass them.
+    runtime_params: Vec<Vec<String>>,
+    /// For dispatch, the objects that the runtime holds: those given to a builtin
+    /// (`hands_objects`), the operands of a string concatenation, and the exceptions thrown.
+    handed: Flow,
     /// The classes whose objects run each method, `STATIC` for one without `this`.
-    contexts: Vec<Vec<usize>>,
+    pub(super) contexts: Vec<Vec<usize>>,
     types: Types,
+    /// The analysis for the calls that can run (see the module's comment).
+    dispatch: bool,
 }
 
 /// What the analysis needs to know of the program's types.
@@ -98,18 +183,23 @@ struct Types {
     /// Types that objects of every class may be values of: `Object` and its kin, and type
     /// variables.
     open: Vec<bool>,
-    /// Every supertype of each type, itself included.
-    supers: Vec<HashSet<usize>>,
     /// The concrete classes that are each type or its subtypes.
     concretes: Vec<Vec<usize>>,
+    /// The same, as sets.
+    concrete_sets: Vec<ClassSet>,
+    /// The types that are each type or its subtypes.
+    subtypes: Vec<ClassSet>,
     all_concretes: Vec<usize>,
+    /// Whether "any class its type allows" is spelled out as those classes for the types that
+    /// are not open, so that it does not spread past them (the analysis for dispatch).
+    bounded: bool,
     /// The method with a body that each type declares for an override group.
     declared: HashMap<(usize, usize), usize>,
     implementations: RefCell<HashMap<(usize, usize), Option<usize>>>,
 }
 
 impl Types {
-    fn new(class: &Class) -> Types {
+    fn new(class: &Class, bounded: bool) -> Types {
         let n = class.types.len();
         let index = class.types.iter().enumerate().map(|(t, d)| (d.name.clone(), t)).collect();
         let open: Vec<bool> = class
@@ -148,15 +238,24 @@ impl Types {
                 declared.insert((method.class, class.hierarchy.group_id(m)), m);
             }
         }
+        let concrete_sets = concretes.iter().map(|c| c.iter().copied().collect()).collect();
+        let mut subtypes = vec![ClassSet::default(); n];
+        for (c, set) in supers.iter().enumerate() {
+            for &s in set {
+                subtypes[s].insert(c);
+            }
+        }
         Types {
             index,
             excluded,
             open,
-            supers,
             concretes,
+            concrete_sets,
+            subtypes,
             all_concretes,
             declared,
             implementations: RefCell::default(),
+            bounded,
         }
     }
 
@@ -206,12 +305,19 @@ impl Types {
                     if self.excluded[t] {
                         flow.value = false;
                     }
-                    if !self.open[t] {
-                        flow.classes.retain(|&c| self.supers[c].contains(&t));
+                    if !self.open[t] && self.bounded && flow.any {
+                        flow.any = false;
+                        flow.classes = self.concrete_sets[t].clone();
+                    } else if !self.open[t] {
+                        flow.classes.intersect(&self.subtypes[t]);
                     }
                 }
                 flow
             }
+            Type::Enum(name) if self.bounded => match self.index.get(name) {
+                Some(&t) => Flow { classes: self.concrete_sets[t].clone(), ..Flow::default() },
+                None => Flow { any: true, ..Flow::default() },
+            },
             Type::Enum(_) => Flow { any: true, ..Flow::default() },
             Type::Null | Type::Void | Type::Array(_) | Type::StringBuilder => Flow::default(),
             _ => Flow { value: true, ..Flow::default() },
@@ -232,11 +338,39 @@ impl ObjectValues {
         if !self.followed.get(m).is_some_and(|f| f.contains(name)) {
             return Flow::top();
         }
-        self.vars.get(&(m, ctx)).and_then(|v| v.get(name)).cloned().unwrap_or_default()
+        let mut flow = self.vars.get(&(m, ctx)).and_then(|v| v.get(name)).cloned().unwrap_or_default();
+        if self.runtime_params[m].iter().any(|p| p == name) {
+            flow.join(&self.handed);
+        }
+        flow
+    }
+
+    /// The elements of arrays of element type `element` that a read may give: in the analysis
+    /// for dispatch, those of every array whose class fits the type (see the module's comment).
+    pub(super) fn elements_of(&self, element: Type) -> Flow {
+        if !self.dispatch {
+            return self.elements.get(&element).cloned().unwrap_or_default();
+        }
+        let mut flow = Flow::default();
+        for stored in self.elements.values() {
+            flow.join(stored);
+        }
+        self.types.filter(flow, element)
+    }
+
+    /// The concrete classes whose objects a value of type `ty` may be, whatever it holds.
+    pub(super) fn concretes_of(&self, ty: Type) -> &[usize] {
+        self.types.concretes_of(ty)
+    }
+
+    /// The implementation that an object of class `c` runs for a call of a method of override
+    /// group `group`.
+    pub(super) fn implementation(&self, class: &Class, group: usize, c: usize) -> Option<usize> {
+        self.types.implementation(class, group, c)
     }
 
     /// What `e`, evaluated in method `m` on an object of class `ctx`, may be.
-    fn eval(&self, class: &Class, m: usize, ctx: usize, e: &Expr) -> Flow {
+    pub(super) fn eval(&self, class: &Class, m: usize, ctx: usize, e: &Expr) -> Flow {
         let flow = match &e.kind {
             ExprKind::Null | ExprKind::NewArray(_) | ExprKind::ArrayLit(_) => Flow::default(),
             ExprKind::This if ctx == STATIC => Flow::top(),
@@ -258,11 +392,34 @@ impl ObjectValues {
             ExprKind::Static { class: c, name } => {
                 self.statics.get(&(*c, name.clone())).cloned().unwrap_or_default()
             }
-            ExprKind::Index(array, _) => self.elements.get(&array.ty.element()).cloned().unwrap_or_default(),
+            ExprKind::Index(array, _) => self.elements_of(array.ty.element()),
             ExprKind::Call { resolved: Some(_), .. } | ExprKind::MethodCall { resolved: Some(_), .. } => {
                 let mut flow = Flow::default();
                 for target in self.targets(class, m, ctx, e) {
                     flow.join(&self.returns.get(&target).cloned().unwrap_or_default());
+                }
+                flow
+            }
+            // For dispatch: what ends the program has no value, a checked value or a copy is the
+            // value it is given.
+            ExprKind::Builtin(
+                Builtin::UnknownClass | Builtin::MissingResource | Builtin::NoObject { .. },
+                _,
+            ) if self.dispatch => Flow::default(),
+            ExprKind::Builtin(Builtin::NullChecked | Builtin::ObjectClone, args)
+                if self.dispatch && matches!(args.len(), 1 | 2) =>
+            {
+                self.eval(class, m, ctx, &args[args.len() - 1])
+            }
+            // For dispatch, a switch expression is one of the values it yields.
+            ExprKind::Switch { cases, .. } if self.dispatch => {
+                let mut flow = Flow::default();
+                for s in cases.iter().flat_map(|c| &c.body) {
+                    visit_stmt_outside_switches(s, &mut |s| {
+                        if let Stmt::Yield(e) = s {
+                            flow.join(&self.eval(class, m, ctx, e));
+                        }
+                    });
                 }
                 flow
             }
@@ -273,7 +430,7 @@ impl ObjectValues {
 
     /// The methods that the call `e` in method `m` on an object of class `ctx` may run, each with
     /// the class of the object it runs on.
-    fn targets(&self, class: &Class, m: usize, ctx: usize, e: &Expr) -> Vec<(usize, usize)> {
+    pub(super) fn targets(&self, class: &Class, m: usize, ctx: usize, e: &Expr) -> Vec<(usize, usize)> {
         let context = |r: usize, ctx: usize| if class.methods[r].is_static { STATIC } else { ctx };
         match &e.kind {
             ExprKind::Call { resolved: Some(r), .. } => vec![(*r, context(*r, ctx))],
@@ -290,7 +447,7 @@ impl ObjectValues {
                 let classes: Vec<usize> = if flow.any {
                     self.types.concretes_of(receiver.ty).to_vec()
                 } else {
-                    flow.classes.into_iter().collect()
+                    flow.classes.iter().collect()
                 };
                 classes
                     .into_iter()
@@ -309,25 +466,120 @@ enum Update {
     Field(usize, String, Flow),
     Static(usize, String, Flow),
     Element(Type, Flow),
+    /// Objects that the runtime is handed (see `handed`).
+    Handed(Flow),
 }
 
-/// Follows the program's strings, boxes and objects through its places.
-pub fn analyze(class: &Class, _facts: &Facts) -> ObjectValues {
-    let types = Types::new(class);
-    // Methods the runtime may call itself, such as `equals` from a library's map: their
-    // parameters may be anything.
-    let runtime_called: HashSet<usize> = class
+/// The override groups of the methods that the runtime may call itself on an object it holds,
+/// such as `equals` from a library's map or `toString` to print it: those of `Object` and of the
+/// JDK interfaces and classes that strings and boxes implement.
+pub(super) fn runtime_called(class: &Class) -> HashSet<usize> {
+    class
         .methods
         .iter()
         .enumerate()
         .filter(|(_, method)| HOLDING_VALUES.contains(&class.types[method.class].name.as_str()))
         .map(|(m, _)| class.hierarchy.group_id(m))
-        .collect();
+        .collect()
+}
+
+/// `runtime_called` for dispatch: with the groups of every `toString()`, `hashCode()`,
+/// `equals(Object)` and `compareTo(T)`, which override methods of `Object` and `Comparable` that
+/// the program may not declare (the translation's `Object` has none).
+pub(super) fn runtime_called_for_dispatch(class: &Class) -> HashSet<usize> {
+    let mut groups = runtime_called(class);
+    for (m, method) in class.methods.iter().enumerate() {
+        let shape = (method.name.as_str(), method.params.len());
+        if !method.is_static
+            && !method.is_ctor
+            && matches!(shape, ("toString" | "hashCode", 0) | ("equals" | "compareTo", 1))
+        {
+            groups.insert(class.hierarchy.group_id(m));
+        }
+    }
+    groups
+}
+
+/// Whether the runtime may hold an object given to `builtin`, and so call a method of it
+/// (`runtime_called`): all builtins but those that only lock, wait, name, test, hash by identity,
+/// copy or fill.
+pub(super) fn hands_objects(builtin: &Builtin) -> bool {
+    !matches!(
+        builtin,
+        Builtin::MonitorEnter
+            | Builtin::GetClass
+            | Builtin::ClassName { .. }
+            | Builtin::SameClass { .. }
+            | Builtin::NullChecked
+            | Builtin::NoObject { .. }
+            | Builtin::InitializeClass { .. }
+            | Builtin::ClassLiteral(_)
+            | Builtin::ClassLiteralName { .. }
+            | Builtin::EnumOrdinal
+            | Builtin::ArraysCopyOf
+            | Builtin::ArraysFill
+            | Builtin::StringArrayOf
+            | Builtin::ObjectArrayOf
+            | Builtin::Native(
+                Native::IdentityHash
+                    | Native::SystemIdentityHash
+                    | Native::MonitorWait
+                    | Native::MonitorNotify { .. }
+                    | Native::HoldsLock
+                    | Native::ArrayCopy
+            )
+    )
+}
+
+/// What the runtime is handed by `e`, the argument of a builtin: its value, or the elements of
+/// the innermost arrays of an array.
+pub(super) fn handed_by(
+    values: &ObjectValues,
+    class: &Class,
+    m: usize,
+    ctx: usize,
+    e: &Expr,
+) -> (Flow, Type) {
+    let mut ty = e.ty;
+    while let Type::Array(element) = ty {
+        ty = *element;
+    }
+    match e.ty {
+        Type::Array(_) => (values.elements_of(ty), ty),
+        _ => (values.eval(class, m, ctx, e), ty),
+    }
+}
+
+/// Follows the program's strings, boxes and objects through its places.
+pub fn analyze(class: &Class, _facts: &Facts) -> ObjectValues {
+    analyze_with(class, false)
+}
+
+/// The analysis for the calls that can run (see the module's comment).
+pub(super) fn analyze_for_dispatch(class: &Class) -> ObjectValues {
+    analyze_with(class, true)
+}
+
+fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
+    let types = Types::new(class, dispatch);
+    // Methods the runtime may call itself, such as `equals` from a library's map: their
+    // parameters may be anything. For dispatch, they may be anything that the runtime holds.
+    let runtime_called = if dispatch { runtime_called_for_dispatch(class) } else { runtime_called(class) };
+    let by_runtime = |m: usize| runtime_called.contains(&class.hierarchy.group_id(m));
     let followed = class
         .methods
         .iter()
         .enumerate()
-        .map(|(m, method)| followed(method, !runtime_called.contains(&class.hierarchy.group_id(m))))
+        .map(|(m, method)| followed(method, dispatch || !by_runtime(m)))
+        .collect();
+    let runtime_params = class
+        .methods
+        .iter()
+        .enumerate()
+        .map(|(m, method)| match dispatch && by_runtime(m) {
+            true => method.params.iter().map(|p| p.name.clone()).collect(),
+            false => Vec::new(),
+        })
         .collect();
     let contexts = class
         .methods
@@ -336,7 +588,7 @@ pub fn analyze(class: &Class, _facts: &Facts) -> ObjectValues {
         .map(|(m, method)| {
             let found: Vec<usize> = if method.is_static {
                 Vec::new()
-            } else if method.is_ctor {
+            } else if method.is_ctor || dispatch {
                 types.concretes[method.class].clone()
             } else {
                 let group = class.hierarchy.group_id(m);
@@ -356,8 +608,11 @@ pub fn analyze(class: &Class, _facts: &Facts) -> ObjectValues {
         statics: HashMap::new(),
         elements: HashMap::new(),
         followed,
+        runtime_params,
+        handed: Flow::default(),
         contexts,
         types,
+        dispatch,
     };
     loop {
         let mut changed = false;
@@ -375,16 +630,36 @@ pub fn analyze(class: &Class, _facts: &Facts) -> ObjectValues {
                 decl.fields.iter().map(|f| (f, false)).chain(decl.statics.iter().map(|f| (f, true)))
             {
                 let Some(init) = &f.init else { continue };
-                let flow = values.types.filter(values.eval(class, usize::MAX, STATIC, init), f.ty);
-                updates.push(match is_static {
-                    true => Update::Static(t, f.name.clone(), flow),
-                    false => Update::Field(t, f.name.clone(), flow),
-                });
-                updates.extend(visit_value(&values, class, usize::MAX, STATIC, init));
+                // For dispatch, an instance field's initializer runs on each object that has it.
+                let contexts = match is_static || !dispatch || values.types.concretes[t].is_empty() {
+                    true => vec![STATIC],
+                    false => values.types.concretes[t].clone(),
+                };
+                for ctx in contexts {
+                    let flow = values.types.filter(values.eval(class, usize::MAX, ctx, init), f.ty);
+                    updates.push(match is_static {
+                        true => Update::Static(t, f.name.clone(), flow),
+                        false => Update::Field(t, f.name.clone(), flow),
+                    });
+                    updates.extend(visit_value(&values, class, usize::MAX, ctx, init));
+                }
             }
         }
         for e in &class.raised {
             updates.extend(visit_value(&values, class, usize::MAX, STATIC, e));
+            if dispatch {
+                updates.push(Update::Handed(values.eval(class, usize::MAX, STATIC, e)));
+            }
+        }
+        // The constants of an enum set its instance fields, in declaration order.
+        for (t, decl) in class.types.iter().enumerate().filter(|_| dispatch) {
+            for constant in decl.enum_constants.iter().flatten() {
+                for (field, value) in decl.fields.iter().zip(&constant.values) {
+                    let flow = values.types.filter(values.eval(class, usize::MAX, STATIC, value), field.ty);
+                    updates.push(Update::Field(t, field.name.clone(), flow));
+                    updates.extend(visit_value(&values, class, usize::MAX, STATIC, value));
+                }
+            }
         }
         changed |= apply(&mut values, updates);
         if !changed {
@@ -404,6 +679,7 @@ fn apply(values: &mut ObjectValues, updates: Vec<Update>) -> bool {
             Update::Field(t, name, flow) => values.fields.entry((t, name)).or_default().join(&flow),
             Update::Static(t, name, flow) => values.statics.entry((t, name)).or_default().join(&flow),
             Update::Element(ty, flow) => values.elements.entry(ty).or_default().join(&flow),
+            Update::Handed(flow) => values.handed.join(&flow),
         };
     }
     changed
@@ -420,10 +696,11 @@ fn visit(values: &ObjectValues, class: &Class, m: usize, ctx: usize, body: &[Stm
                 declared.push(Update::Var(m, ctx, name.clone(), flow));
             }
             Stmt::ForEach { ty, name, array, .. } => {
-                let flow = values.elements.get(&array.ty.element()).cloned().unwrap_or_default();
+                let flow = values.elements_of(array.ty.element());
                 declared.push(Update::Var(m, ctx, name.clone(), values.types.filter(flow, *ty)));
             }
             Stmt::Return(Some(e), _) => declared.push(Update::Return(m, ctx, values.eval(class, m, ctx, e))),
+            Stmt::Throw(e) if values.dispatch => declared.push(Update::Handed(values.eval(class, m, ctx, e))),
             _ => {}
         });
     }
@@ -438,7 +715,12 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
     let mut out = Vec::new();
     visit_expr(e, &mut |x| match &x.kind {
         ExprKind::Assign { op, target, value } => {
-            let flow = if op.is_some() { Flow::top() } else { eval(value) };
+            // A compound assignment stores a number or a string, whatever the place is.
+            let flow = match op {
+                Some(_) if values.dispatch => values.types.filter(Flow::top(), x.ty),
+                Some(_) => Flow::top(),
+                None => eval(value),
+            };
             match target {
                 Place::Var(name) => out.push(Update::Var(m, ctx, name.clone(), flow)),
                 Place::Field { object, name } => match class.field_owner(object.ty, name) {
@@ -482,9 +764,7 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
             let mut flow = Flow::default();
             for a in args {
                 match a.ty {
-                    Type::Array(element) => {
-                        flow.join(&values.elements.get(element).cloned().unwrap_or_default())
-                    }
+                    Type::Array(element) => flow.join(&values.elements_of(*element)),
                     _ => flow.join(&eval(a)),
                 };
             }
@@ -496,7 +776,31 @@ fn visit_value(values: &ObjectValues, class: &Class, m: usize, ctx: usize, e: &E
         }
         _ => {}
     });
+    if values.dispatch {
+        visit_expr(e, &mut |x| {
+            out.extend(handed(values, class, m, ctx, x).into_iter().map(|(f, _)| Update::Handed(f)))
+        });
+    }
     out
+}
+
+/// What the runtime is handed by the expression `x` itself, not counting the expressions inside
+/// it: the arguments of a builtin that may hold them (`hands_objects`), and the operands of a
+/// string concatenation.
+pub(super) fn handed(
+    values: &ObjectValues,
+    class: &Class,
+    m: usize,
+    ctx: usize,
+    x: &Expr,
+) -> Vec<(Flow, Type)> {
+    let operands: Vec<&Expr> = match &x.kind {
+        ExprKind::Builtin(builtin, args) if hands_objects(builtin) => args.iter().collect(),
+        ExprKind::Binary(_, l, r) if x.ty == Type::String => vec![l, r],
+        ExprKind::Assign { op: Some(_), value, .. } if x.ty == Type::String => vec![value],
+        _ => Vec::new(),
+    };
+    operands.into_iter().map(|a| handed_by(values, class, m, ctx, a)).collect()
 }
 
 /// The variables of `method` that the analysis follows, its parameters among them when `params`.

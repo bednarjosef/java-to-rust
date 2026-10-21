@@ -61,19 +61,49 @@ pub struct Rejected {
     pub unit: Option<usize>,
     pub anchor: Option<Pos>,
     pub error: Error,
+    /// The type whose code it is in, by index into `Class::types`.
+    pub ty: usize,
+    /// The method, by index into `Class::methods`, when the code is part of its body alone: a
+    /// method that lowering stubbed, or a block or an initializer left out of its body.
+    pub method: Option<usize>,
 }
 
 /// `lower_program` for a census (see `census`): a piece of code that lowering rejects is recorded
-/// and replaced by a stub, and lowering goes on.
+/// and replaced by a stub, and lowering goes on. A panic while lowering a method is a rejection
+/// of the method.
 pub fn census_lower_program<'t>(
     units: &[&'t Value],
     program_units: usize,
     reach: &'t Reach,
     main: &str,
 ) -> Lowered {
+    lower_going_on(units, program_units, reach, main, true)
+}
+
+/// `census_lower_program` for the translation of a whole program, which keeps the methods that
+/// can run (`analysis::live_methods`): what lowering rejects in the others is no reason to
+/// reject the program. A panic ends lowering, as in `lower_program`, and the check for null
+/// enums is left to the caller, on the methods that can run.
+pub fn tolerant_lower_program<'t>(
+    units: &[&'t Value],
+    program_units: usize,
+    reach: &'t Reach,
+    main: &str,
+) -> Lowered {
+    lower_going_on(units, program_units, reach, main, false)
+}
+
+/// `census_lower_program`, which takes panics for rejections when `catch_panics`.
+fn lower_going_on<'t>(
+    units: &[&'t Value],
+    program_units: usize,
+    reach: &'t Reach,
+    main: &str,
+    catch_panics: bool,
+) -> Lowered {
     let census = RefCell::new((Vec::new(), Vec::new()));
     let class = super::real_generics::retry(|real, covariant| {
-        lower_with(units, program_units, reach, main, real, covariant, Some(&census))
+        lower_with(units, program_units, reach, main, real, covariant, Some((&census, catch_panics)))
     });
     let (rejected, units) = census.into_inner();
     Lowered { class, rejected, units }
@@ -91,20 +121,23 @@ fn lower_with<'t>(
     main: &str,
     real: Option<&super::real_generics::Real>,
     covariant: &super::covariant::Covariant,
-    census: Option<&CensusSink>,
+    census: Option<(&CensusSink, bool)>,
 ) -> Result<(Class, super::real_generics::Real, super::real_generics::Real), (Option<usize>, Error)> {
     let mut lowering = Lowering::empty();
     lowering.covariant = covariant.clone();
     lowering.reach = Some(reach);
     lowering.census = census.map(|_| RefCell::default());
+    lowering.catch_panics = census.is_some_and(|(_, catch_panics)| catch_panics);
     let mut unit_of = Vec::new();
     let lowered = lower_into(&mut lowering, &mut unit_of, units, program_units, reach, main, real);
-    let Some(census) = census else { return lowered };
+    let Some((census, _)) = census else { return lowered };
     // Each attempt's rejections replace the last's.
     let unit = |t: usize| unit_of.get(t).copied().filter(|&u| u != usize::MAX);
     let rejected = lowering.census.take().unwrap_or_default().into_inner();
-    let rejected: Vec<Rejected> =
-        rejected.into_iter().map(|(t, anchor, error)| Rejected { unit: unit(t), anchor, error }).collect();
+    let rejected: Vec<Rejected> = rejected
+        .into_iter()
+        .map(|(t, anchor, method, error)| Rejected { unit: unit(t), anchor, error, ty: t, method })
+        .collect();
     // As without a census, an error with Rust generics is retried with all of them erased.
     let first = rejected.first().map(|r| Error { pos: r.error.pos, message: r.error.message.clone() });
     let retried = lowered.is_ok() && !lowering.real.is_empty();
