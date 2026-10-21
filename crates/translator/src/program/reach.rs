@@ -393,6 +393,10 @@ pub fn writes_string_array(node: &Value) -> bool {
 /// A method of the JDK, by class, name and javac's type of it.
 pub type JdkMethod = (&'static str, &'static str, &'static str);
 
+/// `Locale.getLanguage()`, which `String.toUpperCase(locale)` and `toLowerCase(locale)` call to
+/// tell the languages with their own case mapping (see `lower::strings`).
+pub const LOCALE_LANGUAGE: JdkMethod = ("java.util.Locale", "getLanguage", "()java.lang.String");
+
 /// The methods of `String` that stream with the JDK's methods (see `lower::strings`), and those
 /// methods, each called on what the one before returns. `chars()` streams the string's UTF-16 code
 /// units as an `int[]`. `lines()` streams its lines, an `Object[]` of strings, through an iterator,
@@ -1103,6 +1107,14 @@ impl<'t> Walk<'t> {
     fn symbol(&mut self, symbol: &Value) {
         let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
         match text(symbol, "kind") {
+            "METHOD"
+                if owner == "java.lang.String"
+                    && matches!(name.as_str(), "toUpperCase" | "toLowerCase")
+                    && text(symbol, "type") == "(java.util.Locale)java.lang.String" =>
+            {
+                let (class, method, signature) = LOCALE_LANGUAGE;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
             "METHOD"
                 if owner == "java.lang.String"
                     && let Some((_, methods)) = STRING_STREAMS.iter().find(|(m, _)| *m == name) =>

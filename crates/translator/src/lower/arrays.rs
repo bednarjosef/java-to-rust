@@ -75,6 +75,79 @@ impl<'t> Lowering<'t> {
         })
     }
 
+    /// `Arrays.setAll(array, generator)` as a statement: a loop that stores the generator's value
+    /// at each index, as the JDK's does, with the array and the generator computed once, first.
+    /// `None` for any other statement.
+    pub(super) fn set_all(&self, node: Node<'t>) -> Result<Option<Stmt>, Error> {
+        let call = node.child("expression")?;
+        let Some(symbol) = call.symbol().filter(|_| call.kind() == "METHOD_INVOCATION") else {
+            return Ok(None);
+        };
+        if symbol.owner != "java.util.Arrays" || symbol.name != "setAll" {
+            return Ok(None);
+        }
+        let nodes: Vec<Node<'t>> = call.list("arguments").collect();
+        let [array_node, generator_node] = nodes[..] else { return Ok(None) };
+        let array = self.expr(array_node)?;
+        let Type::Array(elem) = array.ty else { return Ok(None) };
+        let elem = *elem;
+        let (interface, name, sig) = match elem {
+            Type::Int => ("java.util.function.IntUnaryOperator", "applyAsInt", "(int)int"),
+            Type::Long => ("java.util.function.IntToLongFunction", "applyAsLong", "(int)long"),
+            Type::Double => ("java.util.function.IntToDoubleFunction", "applyAsDouble", "(int)double"),
+            _ => ("java.util.function.IntFunction", "apply", "(int)R"),
+        };
+        let resolved = self
+            .methods
+            .iter()
+            .position(|m| self.types[m.owner].javac == interface && m.name == name && m.sig == sig);
+        if resolved.is_none() {
+            return unsupported(call, "`Arrays.setAll` with this generator");
+        }
+        let generator = self.expr(generator_node)?;
+        let pos = call.pos();
+        let var = |name: &str, ty: Type| self.synth(ExprKind::Var(name.to_string()), pos, ty);
+        let (a, g, i) = (
+            self.fresh_name("setAllArray"),
+            self.fresh_name("setAllGenerator"),
+            self.fresh_name("setAllIndex"),
+        );
+        let (array_ty, generator_ty) = (array.ty, generator.ty);
+        let length = self.synth(ExprKind::Length(Box::new(var(&a, array_ty))), pos, Type::Int);
+        let cond = self.synth(
+            ExprKind::Binary(BinOp::Lt, Box::new(var(&i, Type::Int)), Box::new(length)),
+            pos,
+            Type::Boolean,
+        );
+        let update = self.synth(
+            ExprKind::IncDec { target: Place::Var(i.clone()), increment: true, prefix: false },
+            pos,
+            Type::Int,
+        );
+        let apply = ExprKind::MethodCall {
+            receiver: Box::new(var(&g, generator_ty)),
+            name: name.to_string(),
+            args: vec![var(&i, Type::Int)],
+            resolved,
+            is_super: false,
+        };
+        // An erased generator's value is an `Object`, cast to the element type.
+        let value = self.synth(self.erased_use(call, apply, elem)?, pos, elem);
+        let target = Place::Index(Box::new(var(&a, array_ty)), Box::new(var(&i, Type::Int)));
+        let store = self.synth(ExprKind::Assign { op: None, target, value: Box::new(value) }, pos, elem);
+        let zero = self.synth(ExprKind::Int(0), pos, Type::Int);
+        Ok(Some(Stmt::Block(vec![
+            Stmt::Local { ty: array_ty, name: a.clone(), init: Some(array), pos },
+            Stmt::Local { ty: generator_ty, name: g.clone(), init: Some(generator), pos },
+            Stmt::For {
+                init: vec![Stmt::Local { ty: Type::Int, name: i.clone(), init: Some(zero), pos }],
+                cond: Some(cond),
+                update: vec![update],
+                body: Box::new(Stmt::Expr(store)),
+            },
+        ])))
+    }
+
     /// `Arrays.toString`, `fill`, `sort` and `copyOf`, for the element types the runtime covers.
     pub(super) fn arrays_call(&self, node: Node<'t>, name: &str, args: Vec<Expr>) -> Result<ExprKind, Error> {
         let elem = match args.first().map(|a| a.ty) {
@@ -173,7 +246,8 @@ impl<'t> Lowering<'t> {
 
 /// Whether the runtime does the call `Arrays.name(..)` whose arguments have javac's types
 /// `args`: the calls that `arrays_call` and `java_arrays_call` cover, on arrays of primitives and
-/// strings, and `copyOf` and `copyOfRange` of any array. With the JDK's sources, any other call is one of the
+/// strings, `copyOf` and `copyOfRange` of any array, and `setAll`, which becomes a loop. With the
+/// JDK's sources, any other call is one of the
 /// translated `java.util.Arrays`, and reachability enters only those (see `program::reach`).
 pub fn runtime_arrays_call(name: &str, args: &[&str]) -> bool {
     let Some(elem) = args.first().and_then(|a| a.strip_suffix("[]")) else { return false };
@@ -186,6 +260,8 @@ pub fn runtime_arrays_call(name: &str, args: &[&str]) -> bool {
         | ("sort", 3)
         | ("fill" | "binarySearch", 4) => printable(elem),
         ("copyOf", 2 | 3) | ("copyOfRange", 3 | 4) => true,
+        // A statement of its own (see `Lowering::set_all`).
+        ("setAll", 2) => true,
         ("deepToString", 1) => elem.strip_suffix("[]").is_some_and(printable),
         _ => false,
     }

@@ -7,8 +7,8 @@ mod reach;
 mod survey;
 
 pub use reach::{
-    CLASS_KINDS, Reach, STRING_STREAMS, class_for_name, class_name, component_array, created_by_name,
-    live_branch, unsafe_field_access, untranslated, writes_string_array,
+    CLASS_KINDS, LOCALE_LANGUAGE, Reach, STRING_STREAMS, class_for_name, class_name, component_array,
+    created_by_name, live_branch, unsafe_field_access, untranslated, writes_string_array,
 };
 pub use survey::Survey;
 
@@ -73,9 +73,12 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Str
     let (units, reach) = load(program, string_array_writes)?;
     let units: Vec<&Value> = units.iter().collect();
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
-    let mut class =
-        phase("lower", || lower::lower_program(&trees, &reach, &program.main)).map_err(|(unit, error)| {
-            ProgramError { file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string), error }
+    // The program's files are the first units (`load`).
+    let program_units = source_files(program)?.len();
+    let mut class = phase("lower", || lower::lower_program(&trees, program_units, &reach, &program.main))
+        .map_err(|(unit, error)| ProgramError {
+            file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string),
+            error,
         })?;
     phase("whole objects", || analysis::whole_objects(&mut class))
         .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;

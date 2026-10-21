@@ -185,9 +185,7 @@ fn set_by_construction(class: &Class, facts: &Facts, t: usize, name: &str) -> bo
         return init.is_some_and(|e| !maybe_null(facts, usize::MAX, e));
     }
     class.methods.iter().enumerate().filter(|(_, m)| m.is_ctor && m.class == t).all(|(index, m)| {
-        let delegates =
-            matches!(m.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })));
-        if delegates {
+        if delegates(&m.body) {
             return true;
         }
         let leading = leading_assignments(class, m, facts);

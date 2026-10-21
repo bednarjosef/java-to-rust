@@ -36,16 +36,20 @@ impl<'t> Lowering<'t> {
 /// it is in.
 pub fn lower_program<'t>(
     units: &[&'t Value],
+    program_units: usize,
     reach: &'t Reach,
     main: &str,
 ) -> Result<Class, (Option<usize>, Error)> {
-    super::real_generics::retry(|real, covariant| lower_with(units, reach, main, real, covariant))
+    super::real_generics::retry(|real, covariant| {
+        lower_with(units, program_units, reach, main, real, covariant)
+    })
 }
 
 /// `lower_program` with the Rust generics `real`, or with the candidates when it is `None`, and
 /// the arrays `covariant`.
 fn lower_with<'t>(
     units: &[&'t Value],
+    program_units: usize,
     reach: &'t Reach,
     main: &str,
     real: Option<&super::real_generics::Real>,
@@ -96,6 +100,8 @@ fn lower_with<'t>(
     lowering.plan_captures().map_err(|(t, e)| ((unit_of[t] != usize::MAX).then_some(unit_of[t]), e))?;
     packages.resize(lowering.types.len(), String::new());
     lowering.entry = lowering.type_index(main);
+    // The units after the program's are the library's; a stub's class is the library's too.
+    lowering.library = unit_of.iter().map(|&unit| unit >= program_units).collect();
     let unit = |t: usize| (unit_of[t] != usize::MAX).then_some(unit_of[t]);
     let decls: Vec<Node> = units
         .iter()
