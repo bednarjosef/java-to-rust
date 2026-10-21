@@ -133,7 +133,13 @@ A small subset, end to end:
   instance initializer blocks, static fields, constructors (including `this(...)`), `new`,
   object-typed fields and `null` objects, and a user `toString` in `println` and concatenation.
   `synchronized (x)` checks `x` for null and runs the block: a program has one thread, so the lock
-  does nothing.
+  does nothing. An override may return a subtype of the overridden method's return type (a
+  covariant return): the override's value is converted to the overridden method's representation,
+  so a caller that goes through the supertype sees the same value as Java's. In a class that
+  implements `Cloneable` with no superclass and no subclasses, `super.clone()` (or `clone()` with no
+  receiver) is a shallow copy of the fields: primitives and strings by value, arrays and object
+  references shared, as Java shares them. `clone` of another object, or in a class with a superclass
+  or a subclass, is rejected.
 - **Class trees, interfaces and generics**: class trees of the program's own classes translate,
   abstract or not and of any depth: `extends`, abstract methods, overriding and virtual calls,
   `super(...)` and `super.m(...)`, upcasts, `==` on objects of a class tree, and printing through
@@ -217,7 +223,9 @@ A small subset, end to end:
   catches, throwing a value that may be null, and a `yield` or a constructor's `return` through a
   `finally`. A constructor that throws returns a `Result`, as a method does. The design is in
   [docs/exceptions.md](docs/exceptions.md).
-- **Output**: `System.out.print` and `println` are buffered (`java::println!`).
+- **Output**: `System.out.print` and `println` are buffered (`java::println!`), and so are
+  `System.out.println(char[])` and `System.err.print`/`println`, which also print a `char[]`.
+  `System.err` is written as it is, after `System.out` is flushed, so the two stay in order.
 - **Library**: a set of `Math`, `StrictMath`, `Double`, `Float`, `Boolean`, `Integer`, `Long`,
   `Byte`, `Short` and `Character` methods, `String`, `StringBuilder` and `StringBuffer`, and
   `String.format`, all hand-written in the runtime with Java's exact results:
@@ -238,7 +246,10 @@ A small subset, end to end:
     `forDigit` and `getNumericValue`, case conversion, and the `MIN_VALUE`, `MAX_VALUE` and
     `MIN_NORMAL` constants of the wrapper classes.
   - `String`: searching, slicing, case, trimming, replacing, comparing, `split`, `replaceAll`,
-    `matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf` and `new String(char[])`.
+    `matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf` and `new String(char[])`,
+    and `String.valueOf(char[])` and `valueOf(char[], offset, count)` (which throw as Java does
+    for a bad offset or count; a null array throws `NullPointerException`, which a `catch` cannot
+    see yet).
 
 The pieces: javac compiles the source (parse and attribute only) through a small Java program,
 `crates/translator/java/JavaTree.java`, that prints javac's syntax tree as JSON with the type of
@@ -503,8 +514,10 @@ what reading standard input pulls in.
 
 The native layer, the JDK methods that bottom out in the JVM, is hand-written in the runtime
 (`natives.rs`, `math.rs`, `fdlibm/`, `out.rs`) and recognised by owner and name
-(`lower/natives.rs`): `System.arraycopy` (between shared or plain arrays, overlap as through a
-temporary, bounds checked first), the `Double` and `Float` bit conversions, `Math` and
+(`lower/natives.rs`): `System.arraycopy` (between shared or plain arrays of the same element type,
+overlap as through a temporary, bounds checked first; between arrays of different reference types,
+such as a `String[]` and an `Object[]`, it is rejected, because the two are different Rust types and
+the copy would need the element type at run time to throw `ArrayStoreException`), the `Double` and `Float` bit conversions, `Math` and
 `StrictMath`, `System.identityHashCode` and an inherited `hashCode()` (derived from the object's
 address: stable for the object's life, but like Java's different on every run), the clocks,
 `availableProcessors`, the line separator, `System.err` and `System.out.write`/`flush`.
