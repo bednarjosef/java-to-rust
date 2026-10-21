@@ -9,8 +9,9 @@
 //!   creating class too (a capture of a capture, as javac does), and a local class extending
 //!   another passes it the superclass's captures;
 //! - the class needs its enclosing instance when its code uses a member of an enclosing class
-//!   (a field or method named without `this`, or `Outer.this`), or creates an object of an inner
-//!   or local class whose enclosing instance it must pass.
+//!   (a field or method named without `this`, or `Outer.this`), creates an object of an inner
+//!   or local class whose enclosing instance it must pass, or has a nested class that reaches an
+//!   instance further out through it.
 //!
 //! These depend on each other between classes, so they are computed to a fixpoint. Lowering then
 //! reads an identifier that reads a captured local as the field that holds it (the constructor's
@@ -137,9 +138,14 @@ impl<'t> Lowering<'t> {
             .and_then(|s| self.nesting(s))
             .map(|s| s.captures.iter().map(|c| (c.name, c.field.clone())).collect())
             .unwrap_or_default();
+        let has_superclass = self.superclass(t)?.is_some();
         let nested = self.types[t].nested.as_mut().expect("a nested class");
         nested.own_outer = outer && !inherited_outer;
         let mut taken: HashSet<String> = fields.clone();
+        // A subclass's struct holds its superclass's fields as `base`.
+        if has_superclass {
+            taken.insert("base".to_string());
+        }
         let mut params: HashSet<String> = declared;
         params.insert(OUTER.to_string());
         for c in &mut nested.captures {
@@ -263,11 +269,25 @@ impl<'t> Lowering<'t> {
     /// the enclosing class that has the member.
     pub(super) fn implicit_this(&self, node: Node<'t>) -> Option<Result<Expr, Error>> {
         let symbol = node.symbol().filter(|s| !s.is_static && matches!(s.kind, "FIELD" | "METHOD"))?;
-        let owner = self.type_index(symbol.owner)?;
+        let owner = self.member_owner(self.current.get(), symbol.owner)?;
         if self.is_subclass(self.current.get(), owner) {
             return None;
         }
         Some(self.enclosing_instance(owner, node.pos()))
+    }
+
+    /// The class of the program whose instance a member of `owner` named in the code of class
+    /// `class` belongs to: `owner` itself, or for a method of `java.lang.Enum` (`name()`,
+    /// `ordinal()`) the innermost enum around the code.
+    fn member_owner(&self, class: usize, owner: &str) -> Option<usize> {
+        if owner != "java.lang.Enum" {
+            return self.type_index(owner);
+        }
+        let mut at = class;
+        while self.types[at].node.kind() != "ENUM" {
+            at = self.nesting(at)?.enclosing;
+        }
+        Some(at)
     }
 
     /// `Outer.this` (`node`): the instance of the enclosing class `Outer`.
@@ -307,8 +327,8 @@ fn declared_names(node: Node, out: &mut HashSet<String>) {
 }
 
 impl<'t> Walk<'_, 't> {
-    /// The code of the class: its methods, field initializers and initializer blocks, and what
-    /// its superclass's constructor needs passed.
+    /// The code of the class: its methods, field initializers and initializer blocks, what its
+    /// superclass's constructor needs passed, and what the classes nested in it need.
     fn class_code(&mut self) -> Result<(), Error> {
         let l = self.lowering;
         let info = &l.types[self.class];
@@ -320,6 +340,14 @@ impl<'t> Walk<'_, 't> {
             }
             if nested.outer {
                 self.need(nested.enclosing);
+            }
+        }
+        // A class nested in this one reaches the instances it needs beyond this one's through
+        // this one's `outer`.
+        let class = self.class;
+        for nested in l.types.iter().filter_map(|t| t.nested.as_ref()).filter(|n| n.enclosing == class) {
+            for &n in &nested.needs {
+                self.need(n);
             }
         }
         for member in info.node.list("members").filter(|m| l.keeps(*m, &info.javac)) {
@@ -486,7 +514,7 @@ impl<'t> Walk<'_, 't> {
                 } else if matches!(symbol.kind, "FIELD" | "METHOD")
                     && !symbol.is_static
                     && !matches!(name, "this" | "super")
-                    && let Some(owner) = l.type_index(symbol.owner)
+                    && let Some(owner) = l.member_owner(self.class, symbol.owner)
                 {
                     self.need(owner);
                 }
