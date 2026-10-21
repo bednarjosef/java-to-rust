@@ -503,13 +503,20 @@ impl<'m> Walk<'m> {
             },
             // An atomic update of an element takes the array's handle and borrows it whole, so the
             // array is shared (see `lower::handles`).
-            ExprKind::Builtin(Builtin::ElementUpdate(_), args) => {
+            // So does a view of the bytes of an array (`Builtin::ByteView`).
+            ExprKind::Builtin(Builtin::ElementUpdate(_) | Builtin::ByteView { .. }, args) => {
                 for a in args {
                     match &a.kind {
                         ExprKind::Assign { target: Place::Index(array, index), value, .. } => {
                             self.expr(array);
                             self.expr(index);
                             self.expr(value);
+                        }
+                        ExprKind::Index(array, index)
+                            if matches!(e.kind, ExprKind::Builtin(Builtin::ByteView { .. }, _)) =>
+                        {
+                            self.expr(array);
+                            self.expr(index);
                         }
                         _ => self.expr(a),
                     }

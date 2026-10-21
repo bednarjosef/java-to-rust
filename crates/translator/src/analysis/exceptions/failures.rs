@@ -270,9 +270,9 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         Builtin::Charset(_) => None,
         // What an object's `toString` throws is a point of its own (`text_objects`).
         Builtin::ObjectText => None,
-        // `Unsafe` checks no index: the JDK's code passes one inside the array, and an index
-        // outside it, which the JVM does not see, ends the translated program.
-        Builtin::ElementUpdate(_) => None,
+        // An atomic update of an element, and a view of a byte array's bytes, fail as their
+        // operand, the access of the element, does (`lower::handles`).
+        Builtin::ElementUpdate(_) | Builtin::ByteView { .. } => None,
         Builtin::ArraysCopyOf => Some("java.lang.NegativeArraySizeException"),
         Builtin::Native(Native::ArrayCopy) => Some("java.lang.ArrayIndexOutOfBoundsException"),
         // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
@@ -457,6 +457,11 @@ pub(super) fn runtime_failures(
                     out.push(("java.lang.ArithmeticException", "this division", true, x.id));
                 }
             }
+            // An atomic update of an element fails as its store does, which is its operand.
+            Builtin::ElementUpdate(_) => {}
+            // A view of a byte array's bytes fails as its element access does, and also where
+            // the index is in bounds but the bytes from it on are too few for the value.
+            Builtin::ByteView { .. } => out.push((INDEX, "this array access", true, args[0].id)),
             // Each array that may be null is dereferenced with the checked form, then the
             // positions are checked, with the checked form of the copy.
             Builtin::Native(Native::ArrayCopy) => {

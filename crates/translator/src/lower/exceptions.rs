@@ -287,6 +287,18 @@ fn template_type(name: &str) -> Option<&'static Value> {
     template_types().iter().find(|(n, _)| n == name).map(|(_, d)| *d)
 }
 
+/// The class of the type of the field `field` of the standard class `class`, when it is one of the
+/// JDK's classes (not a primitive, nor a standard class).
+pub fn standard_field_type(class: &str, field: &str) -> Option<String> {
+    let member = template_type(class)?["members"]
+        .as_array()?
+        .iter()
+        .find(|m| m["kind"].as_str() == Some("VARIABLE") && m["name"].as_str() == Some(field))?;
+    let ty = member["symbol"]["type"].as_str()?;
+    let ty = ty.split('<').next().unwrap_or(ty).trim_end_matches("[]");
+    (ty.contains('.') && !is_standard(ty)).then(|| ty.to_string())
+}
+
 /// Whether `name` is the qualified name of a standard class the translator provides.
 pub fn is_standard(name: &str) -> bool {
     static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
