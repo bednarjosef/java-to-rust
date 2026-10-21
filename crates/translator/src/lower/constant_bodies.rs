@@ -5,7 +5,7 @@
 //! constant overrides it). A body may only override the enum's methods.
 
 use super::*;
-use enums::is_enum_constant;
+use enums::{is_enum_constant, pure, subst};
 
 /// A constant's ordinal, and the statements of its body's override of a method.
 type Override = (usize, Vec<Stmt>);
@@ -69,6 +69,123 @@ impl<'t> Lowering<'t> {
         }))
     }
 
+    /// The enum that a field read in an enum constant's body belongs to. javac gives such a field
+    /// no owner, and the body's methods are lowered in the enum, so the enum is the current class.
+    pub(super) fn body_field_owner(&self, symbol: &Symbol) -> Option<usize> {
+        if symbol.kind != "FIELD" || !symbol.owner.is_empty() {
+            return None;
+        }
+        self.enum_index(&self.types[self.current.get()].name)
+    }
+
+    /// The instance fields that the bodies of the constants of enum `class` declare, by ordinal.
+    /// Each is a field of the enum: the body's methods read it through `this`, and only its own
+    /// constant has an initializer for it (see `body_field_value`).
+    pub(super) fn constant_body_fields(&self, class: usize) -> Result<Vec<Vec<Field>>, Error> {
+        self.current.set(class);
+        self.in_ctor.set(false);
+        let mut all = Vec::new();
+        for constant in self.types[class].node.list("members").filter(|m| is_enum_constant(*m)) {
+            let mut fields = Vec::new();
+            let body = constant.get("initializer").and_then(|i| i.get("classBody"));
+            for member in body.into_iter().flat_map(|b| b.list("members")).filter(|m| m.kind() == "VARIABLE")
+            {
+                if member.has_flag("STATIC") {
+                    return unsupported(member, "static fields in an enum constant's body");
+                }
+                let ty = self.ty(member, member.symbol().map_or("", |s| s.ty))?;
+                if !matches!(
+                    ty,
+                    Type::Int
+                        | Type::Long
+                        | Type::Double
+                        | Type::Float
+                        | Type::Char
+                        | Type::Boolean
+                        | Type::String
+                ) {
+                    return unsupported(member, "fields of this type in an enum constant's body");
+                }
+                let init = member.get("initializer").map(|i| self.expr(i)).transpose()?;
+                let init = init.map(|e| self.convert(e, ty));
+                let name = member.str("name").to_string();
+                fields.push(Field { name, ty, init, constant: false, pos: member.pos() });
+            }
+            all.push(fields);
+        }
+        Ok(all)
+    }
+
+    /// Adds the fields of the constants' bodies to the enum's `fields`, which hold the enum's own
+    /// fields before. A name that two bodies declare is one field, which needs one type.
+    pub(super) fn add_body_fields(
+        &self,
+        bodies: &[Vec<Field>],
+        fields: &mut Vec<Field>,
+    ) -> Result<(), Error> {
+        let own = fields.len();
+        for field in bodies.iter().flatten() {
+            if fields[..own].iter().any(|f| f.name == field.name) {
+                return error(
+                    field.pos,
+                    "an enum constant's body field with the name of a field of the enum",
+                );
+            }
+            match fields[own..].iter().find(|f| f.name == field.name) {
+                Some(other) if other.ty != field.ty => {
+                    return error(
+                        field.pos,
+                        "enum constant bodies that declare fields of one name with different types",
+                    );
+                }
+                Some(_) => {}
+                None => fields.push(Field {
+                    name: field.name.clone(),
+                    ty: field.ty,
+                    init: None,
+                    constant: false,
+                    pos: field.pos,
+                }),
+            }
+        }
+        Ok(())
+    }
+
+    /// The value of an enum field that a constant's body declares, for the constant with ordinal
+    /// `ordinal`: the body's initializer, which must be pure as the enum's are, or the zero of the
+    /// type when this constant's body does not declare it (or gives no initializer). `None` for a
+    /// field that no body declares.
+    pub(super) fn body_field_value(
+        &self,
+        bodies: &[Vec<Field>],
+        ordinal: usize,
+        field: &Field,
+    ) -> Option<Result<Expr, Error>> {
+        if !bodies.iter().flatten().any(|b| b.name == field.name) {
+            return None;
+        }
+        let declared = bodies[ordinal].iter().find(|b| b.name == field.name);
+        Some(match declared.and_then(|b| b.init.as_ref()) {
+            Some(init) if pure(init, false) => Ok(subst(init, &[])),
+            Some(init) => error(init.pos, "enum field initializers that are not constants"),
+            None => Ok(self.zero(field.ty, field.pos)),
+        })
+    }
+
+    /// The zero of a type of a field that an enum constant's body declares.
+    fn zero(&self, ty: Type, pos: Pos) -> Expr {
+        let kind = match ty {
+            Type::Long => ExprKind::Long(0),
+            Type::Double => ExprKind::Double(0.0),
+            Type::Float => ExprKind::Float(0.0),
+            Type::Char => ExprKind::Char(0),
+            Type::Boolean => ExprKind::Bool(false),
+            Type::String => ExprKind::Str(String::new()),
+            _ => ExprKind::Int(0),
+        };
+        self.synth(kind, pos, ty)
+    }
+
     /// Moves the methods of the constants' bodies of enum `class` into the enum's methods, as arms
     /// of a switch on `this`.
     pub(super) fn constant_bodies(&self, class: usize, methods: &mut [Method]) -> Result<(), Error> {
@@ -86,8 +203,9 @@ impl<'t> Lowering<'t> {
                 match member.kind() {
                     "METHOD" if member.str("name") == "<init>" => continue,
                     "METHOD" => {}
-                    "EMPTY_STATEMENT" => continue,
-                    _ => return unsupported(member, "fields, blocks and classes in an enum constant's body"),
+                    // The fields are lowered by `constant_body_fields`.
+                    "EMPTY_STATEMENT" | "VARIABLE" => continue,
+                    _ => return unsupported(member, "blocks and classes in an enum constant's body"),
                 }
                 let symbol = member.symbol();
                 let sig = symbol.as_ref().map_or("", |s| s.ty);

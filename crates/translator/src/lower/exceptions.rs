@@ -32,8 +32,8 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
 
 /// The standard classes that the runtime raises and a translation can catch, each with the
 /// kinds of javac's tree of the operations that may raise it (a method call by its owner and
-/// name: `owner#name`, or `owner#` for any method of the owner; `enum#valueOf` for the `valueOf`
-/// of any enum of the program).
+/// name: `owner#name`, `owner#` for any method of the owner, or `METHOD_INVOCATION` for any
+/// call; `enum#valueOf` for the `valueOf` of any enum of the program).
 const RAISED: &[(&str, &[&str])] = &[
     (
         "java.lang.ArithmeticException",
@@ -49,8 +49,18 @@ const RAISED: &[(&str, &[&str])] = &[
         ],
     ),
     ("java.lang.ArrayIndexOutOfBoundsException", &["ARRAY_ACCESS"]),
+    // A call or a field access on an object that may be null.
+    ("java.lang.NullPointerException", &["METHOD_INVOCATION", "MEMBER_SELECT"]),
     ("java.lang.IllegalArgumentException", &["enum#valueOf"]),
-    ("java.lang.StringIndexOutOfBoundsException", &["java.lang.String#charAt", "java.lang.String#substring"]),
+    (
+        "java.lang.StringIndexOutOfBoundsException",
+        &[
+            "java.lang.String#charAt",
+            "java.lang.String#substring",
+            "java.lang.String#valueOf",
+            "java.lang.String#copyValueOf",
+        ],
+    ),
     (
         "java.lang.NumberFormatException",
         &[
@@ -210,6 +220,7 @@ impl Uses {
                         }
                     }
                     "METHOD_INVOCATION" => {
+                        self.operations.insert(kind.clone());
                         self.operations.insert(format!("{owner}#{}", text(symbol, "name")));
                         self.operations.insert(format!("{owner}#"));
                         // `E.valueOf(String)` of an enum `E` of the program.

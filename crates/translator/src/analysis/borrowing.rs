@@ -125,8 +125,12 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
             methods.remove(&m);
         }
     }
+    // A call may run any method of an override group, so the group changes its object, or writes
+    // or touches other objects, when one of its methods does; and so does a method that calls one.
+    let spread = |set: &HashSet<usize>| -> HashSet<usize> { set.iter().flat_map(|&m| h.group(m)).collect() };
     let mut mutating: HashSet<usize> = (0..scans.len()).filter(|&m| scans[m].writes_this).collect();
     loop {
+        mutating = spread(&mutating);
         let added: Vec<usize> = (0..scans.len())
             .filter(|m| {
                 !mutating.contains(m)
@@ -183,6 +187,7 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
         })
         .collect();
     loop {
+        writers = spread(&writers);
         let added: Vec<usize> = (0..scans.len())
             .filter(|m| !writers.contains(m) && scans[*m].calls.iter().any(|(c, _)| writers.contains(c)))
             .collect();
@@ -191,16 +196,10 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
         }
         writers.extend(added);
     }
-    // A call may run any method of an override group, so the group changes its object, or writes
-    // or touches other objects, when one of its methods does.
-    let spread = |set: &HashSet<usize>| -> HashSet<usize> { set.iter().flat_map(|&m| h.group(m)).collect() };
     // A method of an immutable class changes nothing: its object has no `RefCell` to borrow
     // mutably, whatever the other methods of its group do.
-    let mutating = spread(&mutating)
-        .into_iter()
-        .filter(|&m| !facts.immutable.contains(name(class.methods[m].class)))
-        .collect();
-    let writers = spread(&writers);
+    let mutating =
+        mutating.into_iter().filter(|&m| !facts.immutable.contains(name(class.methods[m].class))).collect();
     let isolated: HashSet<usize> = isolated;
     let isolated =
         isolated.iter().copied().filter(|&m| h.group(m).iter().all(|g| isolated.contains(g))).collect();

@@ -70,9 +70,11 @@ pub(super) const OUTER: &str = "outer";
 impl<'t> Lowering<'t> {
     /// Declares the inner (non-static member) class `member` of class `outer`.
     pub(super) fn declare_inner(&mut self, outer: usize, member: Node<'t>) -> Result<(), Error> {
-        let name = format!("{}.{}", self.types[outer].javac, member.str("simpleName"));
+        // A class in a local class has javac's binary name, with `$` before its simple name.
+        let separator = if self.types[outer].javac.contains('$') { '$' } else { '.' };
+        let javac = format!("{}{separator}{}", self.types[outer].javac, member.str("simpleName"));
         let nested = self.nested(NestKind::Inner, outer, None, true, None);
-        self.types.push(TypeInfo { name: name.clone(), javac: name, node: member, nested: Some(nested) });
+        self.types.push(TypeInfo { name: javac.clone(), javac, node: member, nested: Some(nested) });
         self.declare_members(self.types.len() - 1)
     }
 
@@ -130,7 +132,15 @@ impl<'t> Lowering<'t> {
     /// Names the declarations of the local and anonymous classes after their place (see the
     /// module's comment), once every class is declared.
     pub(super) fn name_nested(&mut self) {
+        // A local class's name can say the name of the class it is in, which may be hoisted.
+        self.name_hoisted();
         for t in 0..self.types.len() {
+            // A member of a local or anonymous class is declared after it, so its name is final.
+            if let Some(&(_, outer)) = self.member_outers.iter().find(|(member, _)| *member == t) {
+                self.types[t].name =
+                    format!("{}.{}", self.types[outer].name, self.types[t].node.str("simpleName"));
+                continue;
+            }
             let Some(nested) = &self.types[t].nested else { continue };
             let place = self.place_name(nested);
             let base = match nested.kind {
@@ -231,6 +241,8 @@ impl<'t> Lowering<'t> {
                 let binary = format!("{}$$Lambda", self.types[self.lambda_holder(t)].javac);
                 Origin::Lambda { method: n.method, binary }
             }
+            // A hoisted type's method is not kept: nothing reads it.
+            None if self.is_hoisted(t) => Origin::Local { method: None, binary },
             _ => Origin::Member,
         }
     }
@@ -347,9 +359,23 @@ impl<'t> Lowering<'t> {
     /// same class (`this(..)`) or of a subclass (`super(..)`): the enclosing instance, and each
     /// captured local, from the calling constructor's own parameters.
     pub(super) fn passed_on(&self, t: usize, pos: Pos) -> Result<(Vec<Expr>, Vec<Expr>), Error> {
+        self.passed_on_from(t, pos, None)
+    }
+
+    /// `passed_on`, with the enclosing instance of class `t` given as `outer` (`o.super(..)`)
+    /// rather than found from the current class.
+    pub(super) fn passed_on_from(
+        &self,
+        t: usize,
+        pos: Pos,
+        outer: Option<Expr>,
+    ) -> Result<(Vec<Expr>, Vec<Expr>), Error> {
         let Some(nested) = self.nesting(t) else { return Ok((Vec::new(), Vec::new())) };
-        let first =
-            if nested.outer { vec![self.enclosing_instance(nested.enclosing, pos)?] } else { Vec::new() };
+        let first = match outer {
+            Some(value) => vec![value],
+            None if nested.outer => vec![self.enclosing_instance(nested.enclosing, pos)?],
+            None => Vec::new(),
+        };
         let current = self.current.get();
         let mut last = Vec::new();
         for c in &nested.captures {

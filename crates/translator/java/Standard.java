@@ -269,6 +269,12 @@ class NullPointerException extends RuntimeException {
     public NullPointerException(String s) {
         super(s);
     }
+
+    // Java's override describes a dereference that the runtime raises the exception for; the
+    // analysis rejects reading that message, so this is the message the code gave.
+    public String getMessage() {
+        return super.getMessage();
+    }
 }
 
 class UnsupportedOperationException extends RuntimeException {

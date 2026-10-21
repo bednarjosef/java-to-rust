@@ -2,7 +2,9 @@
 //! `nonNull`, which the `equals` and `hashCode` of records use too (see `javac::records`). A
 //! string, a box or an enum compares and hashes as a value (`ObjectsEquals`, `ObjectsHashCode`);
 //! an object calls its class's `equals` or `hashCode`, which the builtin carries as its last
-//! argument, so that the analyses see the call.
+//! argument, so that the analyses see the call. This is for programs without the JDK's sources;
+//! with them, `Objects` is translated from its own source like any class, and only the calls of
+//! the members written for records stay here.
 
 use super::*;
 

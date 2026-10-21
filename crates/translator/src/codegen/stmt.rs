@@ -6,7 +6,7 @@ use super::*;
 /// of a nested loop does not need the loop's steps, but counting it costs only a plainer frame.
 pub(super) fn has_continue(body: &Stmt) -> bool {
     let mut found = false;
-    visit_stmt(body, &mut |_| {}, &mut |s| found |= matches!(s, Stmt::Continue | Stmt::ContinueLabel(_)));
+    visit_stmt_outside_switches(body, &mut |s| found |= matches!(s, Stmt::Continue | Stmt::ContinueLabel(_)));
     found
 }
 

@@ -12,8 +12,10 @@ use std::collections::{HashMap, HashSet};
 mod boxing;
 mod character;
 mod charsets;
+mod classes;
 mod code;
 mod code_point;
+mod covariant;
 mod dispatch;
 mod enums;
 mod exceptions;
@@ -23,6 +25,7 @@ mod idiomatic;
 mod math;
 mod names;
 mod null;
+mod object_clone;
 mod primitives;
 mod statics;
 mod stmt;
@@ -88,6 +91,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         fn_names,
         group_names,
         live: live.clone(),
+        runs: running_types(class, facts),
         wanted: wanted.clone(),
         needs: std::cell::RefCell::new(Needs::new()),
         homes,
@@ -127,10 +131,12 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         finallies: Vec::new(),
         attempt_count: 0,
         try_assigned: HashSet::new(),
+        dereferenced: HashSet::new(),
         rejected: None,
     };
     if modules.is_some() {
         let text = g.program(&live);
+        g.check_dereferences();
         return (text, g.needs.take(), g.rejected);
     }
     for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
@@ -152,6 +158,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
             g.method(i);
         }
     }
+    g.check_dereferences();
     let mut header = format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name);
     let uses = modules::use_lines(&g.out);
     if !uses.is_empty() {
@@ -198,6 +205,8 @@ struct Gen<'a> {
     group_names: HashMap<usize, String>,
     /// Which classes have a struct (see `live_types`).
     live: Vec<bool>,
+    /// Which classes' instance methods can run (see `running_types`).
+    runs: Vec<bool>,
     /// The enum items to write, which an earlier pass found used (see `generate`).
     wanted: Needs,
     /// The enum items that the code written so far uses.
@@ -283,6 +292,8 @@ struct Gen<'a> {
     /// The current method's locals declared without a value that a `try` block assigns (see
     /// `exceptions::try_assigned`).
     try_assigned: HashSet<String>,
+    /// The objects of `Facts::null_checked` whose checked dereference has been written.
+    dereferenced: HashSet<ExprId>,
     /// The first construct found that cannot be translated, which `generate` reports.
     rejected: Option<Error>,
 }
@@ -479,6 +490,13 @@ impl<'a> Gen<'a> {
         }
         params.extend(self.typed_params(index, true));
         let ret = self.ret_text(index);
+        // The body of a method or constructor that never runs may call what was never emitted,
+        // such as the default methods of an interface on a class that implements it without
+        // objects, or the methods of a superclass whose values are all of another subclass.
+        let never_runs = !m.is_static && m.name != "<clinit>" && !self.runs[m.class];
+        if never_runs {
+            self.line("#[allow(unused_variables)]");
+        }
         if self.display {
             self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
         } else {
@@ -506,7 +524,10 @@ impl<'a> Gen<'a> {
             self.line(&format!("let _main = {guard}();"));
         }
         let initializes = m.name == "<clinit>" && self.facts.threaded;
-        if m.is_ctor {
+        if never_runs {
+            let name = &self.class.types[m.class].name;
+            self.line(&format!("unreachable!(\"no object of {name} is created\")"));
+        } else if m.is_ctor {
             self.constructor(m);
         } else {
             self.stmts(&m.body, !initializes);

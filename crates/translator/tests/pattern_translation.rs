@@ -171,3 +171,37 @@ fn a_caught_value_of_failure_uses_the_checked_form() {
         ],
     );
 }
+
+#[test]
+fn comparing_classes_matches_the_variant_of_the_class() {
+    let rust = translate(
+        "public class A {
+            static class Animal {}
+            static class Dog extends Animal {}
+            static final class Money {
+                final long cents;
+                Money(long cents) { this.cents = cents; }
+                @Override public boolean equals(Object o) {
+                    if (o == null || getClass() != o.getClass()) return false;
+                    return cents == ((Money) o).cents;
+                }
+                @Override public int hashCode() { return (int) cents; }
+            }
+            public static void main(String[] args) {
+                Animal a = args.length > 0 ? new Animal() : new Dog();
+                System.out.println(a.getClass() == Dog.class);
+                Object o = args.length > 1 ? null : new Money(1);
+                System.out.println(new Money(1).equals(o) + Dog.class.getSimpleName() + new Money(2).equals(a));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "matches!(a, AAnimal::Dog(_))",
+            "!matches!(java::non_null(o.as_ref()), Object::Money(_))",
+            "String::from(\"Dog\")",
+        ],
+    );
+    assert_lacks(&rust, &["\"A$Dog\" =="]);
+}

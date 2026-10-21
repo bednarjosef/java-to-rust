@@ -39,6 +39,10 @@ pub enum Native {
     PrintChars {
         newline: bool,
     },
+    /// `System.err.print(char[])` and `println(char[])`.
+    ErrPrintChars {
+        newline: bool,
+    },
     /// `System.getProperty(key)` for a key whose value does not depend on the JVM (see
     /// `lower/system.rs`), by its literal key.
     SystemProperty(&'static str),

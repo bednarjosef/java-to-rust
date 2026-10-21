@@ -153,8 +153,12 @@ pub fn write_byte(b: i32) {
     let _ = out().write_all(&[b as u8]);
 }
 
-/// `System.out.print(char[])`: the UTF-16 units as text, a lone surrogate as `?` the way Java's
-/// UTF-8 output writes it.
+/// The UTF-16 units as text, a lone surrogate as `?` the way Java's UTF-8 output writes it.
+fn chars_text(chars: &[u16]) -> String {
+    char::decode_utf16(chars.iter().copied()).map(|c| c.unwrap_or('?')).collect()
+}
+
+/// `System.out.print(char[])`.
 pub fn print_chars(chars: &[u16]) {
     let _ = out().write_all(chars_text(chars).as_bytes());
 }
@@ -166,8 +170,16 @@ pub fn println_chars(chars: &[u16]) {
     let _ = out().write_all(text.as_bytes());
 }
 
-fn chars_text(chars: &[u16]) -> String {
-    char::decode_utf16(chars.iter().copied()).map(|c| c.unwrap_or('?')).collect()
+/// `System.err.print(char[])`: what `System.out` printed before goes out first.
+pub fn eprint_chars(chars: &[u16]) {
+    flush();
+    let _ = io::stderr().write_all(chars_text(chars).as_bytes());
+}
+
+/// `System.err.println(char[])`.
+pub fn eprintln_chars(chars: &[u16]) {
+    eprint_chars(chars);
+    let _ = io::stderr().write_all(b"\n");
 }
 
 /// `System.out.println(...)`, buffered; used as `java::println!` with `println!`'s arguments.

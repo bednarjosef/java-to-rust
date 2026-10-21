@@ -45,6 +45,9 @@ impl<'a> Gen<'a> {
                     let address = self.receiver_address(&args[0], c);
                     return call(self, "address_hash", vec![address]);
                 }
+                if let Some(t) = self.enum_of(&args[0]) {
+                    return self.enum_identity_hash(t, &args[0]);
+                }
                 let object = match &args[0].kind {
                     ExprKind::Var(name) => format!("&{}", self.local(name)),
                     // `this` is already a reference to the `Rc`.
@@ -74,6 +77,10 @@ impl<'a> Gen<'a> {
             Native::PrintChars { newline } => {
                 let chars = self.slice_of(&args[0]);
                 call(self, if newline { "println_chars" } else { "print_chars" }, vec![chars])
+            }
+            Native::ErrPrintChars { newline } => {
+                let chars = self.slice_of(&args[0]);
+                call(self, if newline { "eprintln_chars" } else { "eprint_chars" }, vec![chars])
             }
             Native::SystemProperty(key) => call(self, "system_property", vec![rust_string(key)]),
             Native::TotalMemory => call(self, "total_memory", vec![]),
@@ -190,6 +197,25 @@ impl<'a> Gen<'a> {
     fn thread_name(&mut self, name: &'a Expr) -> String {
         let text = self.value(name, Type::String).text;
         if self.nullable(name) { format!("{}({text})", self.runtime("non_null")) } else { text }
+    }
+
+    /// `System.identityHashCode(e)` of a value of the enum of `t` (`Object`, an interface, a
+    /// class with subclasses): the identity hash of the object in its variant, which is what
+    /// `Object.hashCode` gives where no class overrides it; the hash of the value for a string or
+    /// a box, which the translation holds by value; 0 for null.
+    fn enum_identity_hash(&mut self, t: usize, e: &'a Expr) -> Code {
+        let nullable = self.nullable(e);
+        let value = if nullable { format!("{}.as_ref()", self.object_place(e)) } else { self.object_ref(e) };
+        let mut arms = Vec::new();
+        for c in self.enum_variants(t) {
+            let variant = self.variant(t, c);
+            let pattern = if nullable { format!("Some({variant}(o))") } else { format!("{variant}(o)") };
+            arms.push(format!("{pattern} => {},", self.value_hash(c, "o")));
+        }
+        if nullable || arms.is_empty() {
+            arms.push("_ => 0,".to_string());
+        }
+        Code::atom(format!("match {value} {{ {} }}", arms.join(" ")))
     }
 
     /// A `Math` or `StrictMath` function. `ty` is the type of the call, which picks the overload;

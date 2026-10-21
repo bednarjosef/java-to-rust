@@ -158,6 +158,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     let mut live_tries = HashSet::new();
     let mut raising_tries = HashSet::new();
     let mut raising = HashSet::new();
+    let mut null_checked = std::collections::HashMap::new();
+    // The `try`s whose `catch` gets a `NullPointerException` that the runtime raises.
+    let mut runtime_npe_tries = HashSet::new();
     let mut raised_classes = BTreeSet::new();
     for (m, method) in class.methods.iter().enumerate() {
         for p in &points[m] {
@@ -182,7 +185,14 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
                     && checked
                     && let Some(c) = raised_class
                 {
-                    raising.insert(id);
+                    if name == "java.lang.NullPointerException" {
+                        null_checked.insert(id, p.pos);
+                        if let Some(f) = catcher {
+                            runtime_npe_tries.insert(f.id);
+                        }
+                    } else {
+                        raising.insert(id);
+                    }
                     raised_classes.insert(c);
                 } else if seen_here {
                     let simple = name.rsplit('.').next().unwrap_or_default();
@@ -213,6 +223,46 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         }
         if method.name == "toString" && method.params.is_empty() {
             return error(method.pos, "a toString that throws an exception that is caught not supported yet");
+        }
+    }
+
+    // Java's message of a `NullPointerException` that the runtime raises describes the
+    // dereference ("Cannot invoke ..."); the message of one that code creates is its own.
+    let npe = Kind::Runtime("java.lang.NullPointerException");
+    for method in &class.methods {
+        let mut found = None;
+        for s in &method.body {
+            visit_stmt(s, &mut |_| {}, &mut |s| {
+                let Stmt::Try { catches, .. } = s else { return };
+                if !runtime_npe_tries.contains(&(s as *const Stmt as usize)) {
+                    return;
+                }
+                let Some(catch) = catches.iter().find(|c| c.types.iter().any(|&t| matches(&npe, t))) else {
+                    return;
+                };
+                for b in &catch.body {
+                    visit_stmt(
+                        b,
+                        &mut |e| {
+                            visit_expr(e, &mut |x| {
+                                if let ExprKind::MethodCall { receiver, name, .. } = &x.kind
+                                    && matches!(name.as_str(), "getMessage" | "getLocalizedMessage")
+                                    && matches!(&receiver.kind, ExprKind::Var(v) if *v == catch.name)
+                                {
+                                    found.get_or_insert(x.pos);
+                                }
+                            })
+                        },
+                        &mut |_| {},
+                    );
+                }
+            });
+        }
+        if let Some(pos) = found {
+            return error(
+                pos,
+                "the message of a `NullPointerException` that the runtime raises not supported yet",
+            );
         }
     }
 
@@ -278,6 +328,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     facts.live_tries = live_tries;
     facts.raising_tries = raising_tries;
     facts.raising = raising;
+    facts.null_checked = null_checked;
     facts.raised_classes = raised_classes;
     Ok(())
 }
@@ -311,9 +362,7 @@ fn method_points(class: &Class, facts: &Facts, m: usize) -> Vec<Point> {
     let method = &class.methods[m];
     let mut out = Vec::new();
     let mut frames = Vec::new();
-    for s in &method.body {
-        stmt_points(class, facts, m, s, &mut frames, &[], &mut out);
-    }
+    block_points(class, facts, m, &method.body, &mut frames, &[], &mut out);
     // A constructor runs the initializers of its class's fields, unless it starts with `this(..)`.
     if method.is_ctor
         && !matches!(method.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })))
@@ -331,8 +380,93 @@ fn method_points(class: &Class, facts: &Facts, m: usize) -> Vec<Point> {
 /// that `assigned` says the code they hold for may assign.
 fn narrowed(safe: &[String], cond: &Expr, when: bool, assigned: impl Fn(&str) -> bool) -> Vec<String> {
     let mut out = safe.to_vec();
-    out.extend(non_null_names(cond, when).into_iter().filter(|v| !assigned(v)).map(str::to_string));
+    for (v, fact) in proved(cond, when) {
+        if !assigned(v) {
+            out.push(fact);
+        }
+    }
     out
+}
+
+/// What `safe` holds for a variable that is an instance of the class `name`, besides not null.
+fn instance_fact(v: &str, name: &str) -> String {
+    format!("{v} instanceof {name}")
+}
+
+/// What `cond` proves when it is `when`, by variable: that it is not null (its null tests), and
+/// for a top-level `instanceof` when true, that it is an instance of the class too; through a
+/// `!`, what its operand proves.
+fn proved(cond: &Expr, when: bool) -> Vec<(&str, String)> {
+    if let ExprKind::Unary(UnOp::Not, inner) = &cond.kind {
+        return proved(inner, !when);
+    }
+    let mut out: Vec<(&str, String)> =
+        non_null_names(cond, when).into_iter().map(|v| (v, v.to_string())).collect();
+    if when {
+        let mut parts = Vec::new();
+        super::nullness::conjuncts(cond, &mut parts);
+        for (k, part) in parts.iter().enumerate() {
+            if let ExprKind::InstanceOf { value, ty, .. } = &part.kind
+                && let ExprKind::Var(v) = &value.kind
+                && !parts[k + 1..].iter().any(|later| assigns(later, v))
+            {
+                out.push((v, v.clone()));
+                if let Type::Class(name, _) = ty {
+                    out.push((v, instance_fact(v, name)));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether `e` is a variable that `safe` knows not null, or a cast of one.
+fn is_tested(e: &Expr, safe: &[String]) -> bool {
+    match &e.kind {
+        ExprKind::Var(v) => safe.contains(v),
+        // A cast of a reference keeps its null.
+        ExprKind::Cast(to, value) if to.is_reference() => is_tested(value, safe),
+        _ => false,
+    }
+}
+
+/// Whether `s` never completes normally: it returns, throws, breaks or continues.
+fn leaves(s: &Stmt) -> bool {
+    match s {
+        Stmt::Return(..) | Stmt::Throw(_) | Stmt::Break | Stmt::Continue => true,
+        Stmt::BreakLabel(_) | Stmt::ContinueLabel(_) => true,
+        Stmt::Block(stmts) => stmts.last().is_some_and(leaves),
+        _ => false,
+    }
+}
+
+/// The points of a block's statements: after `if (cond) return;`, what `cond` proves when false
+/// holds for the statements that follow, until one of them assigns the variable.
+fn block_points(
+    class: &Class,
+    facts: &Facts,
+    m: usize,
+    stmts: &[Stmt],
+    frames: &mut Vec<Frame>,
+    safe: &[String],
+    out: &mut Vec<Point>,
+) {
+    let mut safe = safe.to_vec();
+    for (k, s) in stmts.iter().enumerate() {
+        stmt_points(class, facts, m, s, frames, &safe, out);
+        let rest = &stmts[k + 1..];
+        let assigned = |v: &str| rest.iter().any(|r| assigns_stmt(r, v));
+        match s {
+            Stmt::If { cond, then, otherwise: None } if leaves(then) => {
+                safe = narrowed(&safe, cond, false, assigned);
+            }
+            // A local set to a value known not null, such as `Point p = (Point) o;`.
+            Stmt::Local { name, init: Some(init), .. } if is_tested(init, &safe) && !assigned(name) => {
+                safe.push(name.clone());
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The points of statement `s`, with the `try`s around it (`frames`) and the variables known not
@@ -420,6 +554,7 @@ fn stmt_points(
                 stmt_points(class, facts, m, b, frames, safe, out);
             }
         }
+        Stmt::Block(stmts) => block_points(class, facts, m, stmts, frames, safe, out),
         _ => {
             // The expressions of this statement, then its nested statements.
             visit_own(s, &mut |e| expr_points(class, facts, m, e, frames, safe, out));
@@ -491,8 +626,8 @@ fn expr_points(
             push(Raise::Call(shown), object.pos, "this toString");
         }
     }
-    for (name, what, checked) in runtime_failures(class, facts, m, x, safe) {
-        push(Raise::Runtime { class: name, checked, id: x.id }, x.pos, what);
+    for (name, what, checked, id) in runtime_failures(class, facts, m, x, safe) {
+        push(Raise::Runtime { class: name, checked, id }, x.pos, what);
     }
     if let ExprKind::Switch { selector, cases } = &x.kind {
         // The statements of a switch expression's cases may `throw` and hold `try`s.
@@ -568,7 +703,7 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
 fn text_objects(x: &Expr) -> Vec<&Expr> {
     let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..));
     match &x.kind {
-        ExprKind::Builtin(Builtin::ClassName { .. }, _) => Vec::new(),
+        ExprKind::Builtin(Builtin::ClassName { .. } | Builtin::ClassLiteralName { .. }, _) => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
             [&**l, &**r].into_iter().filter(is_object).collect()
@@ -594,6 +729,12 @@ fn to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
     out
 }
 
+/// Whether the generator has the checked form of dereferencing `object`: the object of a call or
+/// a field access is written by `Gen::object` and its relatives, which check it with `non_null`.
+fn object_checked(object: &Expr) -> bool {
+    matches!(object.ty, Type::Class(..))
+}
+
 /// What a method of the library that the runtime implements may throw besides a
 /// `NullPointerException` for a null argument: `None` when nothing, `"?"` when it is not known
 /// exactly.
@@ -616,10 +757,12 @@ fn constant_pattern(builtin: &Builtin, args: &[Expr]) -> bool {
     }
 }
 
-fn library_failure(builtin: &Builtin) -> Option<&'static str> {
+fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
     match builtin {
         Builtin::String(op) => match op {
-            StringOp::Substring | StringOp::FromChars => Some("java.lang.StringIndexOutOfBoundsException"),
+            StringOp::Substring => Some("java.lang.StringIndexOutOfBoundsException"),
+            // `valueOf(chars)` copies the whole array; only an offset and a count can be out of range.
+            StringOp::FromChars if args.len() == 3 => Some("java.lang.StringIndexOutOfBoundsException"),
             StringOp::Repeat => Some("java.lang.IllegalArgumentException"),
             // A malformed pattern, a bad group in a replacement, an unknown charset.
             StringOp::ReplaceAll
@@ -692,17 +835,19 @@ fn library_failure(builtin: &Builtin) -> Option<&'static str> {
 }
 
 /// The failures of the runtime that evaluating `x` itself (not its operands) may raise, by
-/// standard class name, with what raises them in words.
+/// standard class name, with what raises them in words, whether the generator has their checked
+/// form, and the expression that the checked form is written for: `x`, or for a
+/// `NullPointerException` of a call or a field access, the object that is dereferenced.
 fn runtime_failures(
     class: &Class,
     facts: &Facts,
     m: usize,
     x: &Expr,
     safe: &[String],
-) -> Vec<(&'static str, &'static str, bool)> {
+) -> Vec<(&'static str, &'static str, bool, ExprId)> {
     const NPE: &str = "java.lang.NullPointerException";
     const INDEX: &str = "java.lang.ArrayIndexOutOfBoundsException";
-    let tested = |e: &Expr| matches!(&e.kind, ExprKind::Var(v) if safe.contains(v));
+    let tested = |e: &Expr| is_tested(e, safe);
     let null = |e: &Expr| {
         (m != usize::MAX && !tested(e) && maybe_null(facts, m, e)) || matches!(e.kind, ExprKind::Null)
     };
@@ -714,7 +859,7 @@ fn runtime_failures(
             let constant =
                 matches!(r.kind, ExprKind::Int(v) if v != 0) || matches!(r.kind, ExprKind::Long(v) if v != 0);
             if !constant && !facts.safe_division.contains(&x.id) {
-                out.push(("java.lang.ArithmeticException", "this division", true));
+                out.push(("java.lang.ArithmeticException", "this division", true, x.id));
             }
         }
         ExprKind::Assign { op: Some(BinOp::Div | BinOp::Rem), value, .. }
@@ -723,33 +868,35 @@ fn runtime_failures(
             let constant = matches!(value.kind, ExprKind::Int(v) if v != 0)
                 || matches!(value.kind, ExprKind::Long(v) if v != 0);
             if !constant && !facts.safe_division.contains(&x.id) {
-                out.push(("java.lang.ArithmeticException", "this division", true));
+                out.push(("java.lang.ArithmeticException", "this division", true, x.id));
             }
         }
         ExprKind::Index(array, _) => {
             if null(array) {
-                out.push((NPE, "this array access", false));
+                out.push((NPE, "this array access", false, x.id));
             }
             if !facts.in_bounds.contains(&x.id) {
-                out.push((INDEX, "this array access", true));
+                out.push((INDEX, "this array access", true, x.id));
             }
         }
-        ExprKind::Length(array) if null(array) => out.push((NPE, "this length", false)),
-        ExprKind::Field { object, .. } if null(object) => out.push((NPE, "this field access", false)),
+        ExprKind::Length(array) if null(array) => out.push((NPE, "this length", false, x.id)),
+        ExprKind::Field { object, .. } if null(object) => {
+            out.push((NPE, "this field access", object_checked(object), object.id))
+        }
         ExprKind::MethodCall { receiver, resolved: Some(r), is_super: false, .. }
             if !class.methods[*r].is_static && null(receiver) =>
         {
-            out.push((NPE, "this call", false))
+            out.push((NPE, "this call", object_checked(receiver), receiver.id))
         }
         ExprKind::NewArray(sizes) => {
             if sizes.iter().any(|s| !matches!(s.kind, ExprKind::Int(v) if v >= 0)) {
-                out.push(("java.lang.NegativeArraySizeException", "this array creation", false));
+                out.push(("java.lang.NegativeArraySizeException", "this array creation", false, x.id));
             }
         }
         ExprKind::Cast(to, value)
             if !to.is_reference() && matches!(value.ty, Type::Boxed(_)) && null(value) =>
         {
-            out.push((NPE, "this unboxing", false))
+            out.push((NPE, "this unboxing", false, x.id))
         }
         ExprKind::Builtin(builtin, args) => match builtin {
             Builtin::Println
@@ -780,24 +927,26 @@ fn runtime_failures(
             | Builtin::EnumCompareTo
             | Builtin::Exit
             | Builtin::ClassName { .. }
+            | Builtin::ClassLiteralName { .. }
+            | Builtin::SameClass { .. }
             // A null is a value to them, and an object's own method is a call of its own.
             | Builtin::ObjectsEquals
             | Builtin::ObjectsHashCode => {}
             Builtin::StringLength | Builtin::StringEquals => {
                 if args.first().is_some_and(null) {
-                    out.push((NPE, "this call", false));
+                    out.push((NPE, "this call", false, x.id));
                 }
             }
             Builtin::StringCharAt => {
                 if args.first().is_some_and(null) {
-                    out.push((NPE, "this call", false));
+                    out.push((NPE, "this call", false, x.id));
                 }
                 if !facts.index_in_bounds.contains(&x.id) {
-                    out.push(("java.lang.StringIndexOutOfBoundsException", "this charAt", true));
+                    out.push(("java.lang.StringIndexOutOfBoundsException", "this charAt", true, x.id));
                 }
             }
             Builtin::Boxed(BoxedOp::Parse | BoxedOp::ParseRadix, _) => {
-                out.push(("java.lang.NumberFormatException", "this parse", true));
+                out.push(("java.lang.NumberFormatException", "this parse", true, x.id));
             }
             Builtin::Boxed(
                 BoxedOp::Box
@@ -809,10 +958,10 @@ fn runtime_failures(
                 | BoxedOp::Logical(_),
                 _,
             ) => {}
-            Builtin::NullCheck => out.push((NPE, "this synchronized", false)),
+            Builtin::NullCheck => out.push((NPE, "this synchronized", false, x.id)),
             Builtin::NullChecked | Builtin::Unmatched => {
                 if null(&args[0]) {
-                    out.push((NPE, "this null check", false));
+                    out.push((NPE, "this null check", false, x.id));
                 }
             }
             // A zero divisor throws, as in a division.
@@ -820,7 +969,7 @@ fn runtime_failures(
                 let constant = matches!(args[1].kind, ExprKind::Int(v) if v != 0)
                     || matches!(args[1].kind, ExprKind::Long(v) if v != 0);
                 if !constant {
-                    out.push(("java.lang.ArithmeticException", "this division", true));
+                    out.push(("java.lang.ArithmeticException", "this division", true, x.id));
                 }
             }
             _ => {
@@ -839,18 +988,18 @@ fn runtime_failures(
                     &args[..]
                 };
                 if !takes_null && checked.iter().any(null) {
-                    out.push((NPE, "this call", false));
+                    out.push((NPE, "this call", false, x.id));
                 }
-                if let Some(failure) = library_failure(builtin)
+                if let Some(failure) = library_failure(builtin, args)
                     && !constant_pattern(builtin, args)
                 {
                     let checked = matches!(
                         builtin,
-                        Builtin::String(StringOp::Substring)
+                        Builtin::String(StringOp::Substring | StringOp::FromChars)
                             | Builtin::Bits(BitsOp::ParseRadix, _)
                             | Builtin::EnumValueOf
                     );
-                    out.push((failure, "this call of the library", checked));
+                    out.push((failure, "this call of the library", checked, x.id));
                 }
             }
         },
@@ -860,30 +1009,43 @@ fn runtime_failures(
     | ExprKind::IncDec { target: Place::Index(array, _), .. } = &x.kind
     {
         if null(array) {
-            out.push((NPE, "this array access", false));
+            out.push((NPE, "this array access", false, x.id));
         }
         if !facts.in_bounds.contains(&x.id) {
-            out.push((INDEX, "this array access", true));
+            out.push((INDEX, "this array access", true, x.id));
         }
     }
     if let ExprKind::Assign { target: Place::Field { object, .. }, .. }
     | ExprKind::IncDec { target: Place::Field { object, .. }, .. } = &x.kind
         && null(object)
     {
-        out.push((NPE, "this field access", false));
+        out.push((NPE, "this field access", false, x.id));
     }
-    // A cast to a class that the value's type is not under may fail.
+    // A cast to a class that the value's type is not under may fail, unless an `instanceof`
+    // tested the variable.
+    // The variable was tested to be an instance of a class under `t`.
+    let instance = |t: usize, value: &Expr| {
+        let ExprKind::Var(v) = &value.kind else { return false };
+        let prefix = instance_fact(v, "");
+        safe.iter()
+            .filter_map(|fact| fact.strip_prefix(&prefix))
+            .any(|name| class.type_index(name).is_some_and(|tested| class.hierarchy.is_subtype(tested, t)))
+    };
+    // A cast that lowering inserted (at its value's position) is javac's conversion of an erased
+    // type variable's value, as `Entry<K, V> e = i.next()`, which does not fail.
     if let ExprKind::Cast(to, value) = &x.kind
+        && x.pos != value.pos
         && let (Some(t), Some(s)) = (class.class_index(*to), class.class_index(value.ty))
         && !class.hierarchy.is_subtype(s, t)
+        && !instance(t, value)
     {
-        out.push(("java.lang.ClassCastException", "this cast", false));
+        out.push(("java.lang.ClassCastException", "this cast", false, x.id));
     }
     // A box that may be null is unboxed by arithmetic and comparisons.
     if let ExprKind::Binary(_, l, r) = &x.kind {
         for operand in [l, r] {
             if matches!(operand.ty, Type::Boxed(_)) && null(operand) && !matches!(x.ty, Type::String) {
-                out.push((NPE, "this unboxing", false));
+                out.push((NPE, "this unboxing", false, x.id));
             }
         }
     }

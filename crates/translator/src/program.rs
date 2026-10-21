@@ -63,8 +63,43 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
     let class = lower::lower_program(&trees, &reach, &program.main).map_err(|(unit, error)| {
         ProgramError { file: unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string), error }
     })?;
-    let facts = analysis::analyze(&class).map_err(|error| ProgramError { file: None, error })?;
-    codegen::generate(&class, &facts).map_err(|error| ProgramError { file: None, error })
+    let located = |error: Error| ProgramError { file: locate(&units, &class, error.pos), error };
+    let facts = analysis::analyze(&class).map_err(located)?;
+    codegen::generate(&class, &facts).map_err(located)
+}
+
+/// The file of the code at `pos` that an analysis or the generator rejected, which the error
+/// does not carry: the unit of the classes whose methods have code there, when they agree on one
+/// (a line and column of one file may be that of another file's code too).
+fn locate(units: &[&Value], class: &crate::ast::Class, pos: Pos) -> Option<String> {
+    use crate::ast::{visit_expr, visit_stmt};
+    let mut files = std::collections::BTreeSet::new();
+    for method in &class.methods {
+        let mut here = method.pos == pos;
+        let decl = &class.types[method.class];
+        let fields = decl.fields.iter().chain(&decl.statics).filter_map(|f| f.init.as_ref());
+        fields.for_each(|e| visit_expr(e, &mut |x| here |= x.pos == pos));
+        for s in &method.body {
+            visit_stmt(s, &mut |e| visit_expr(e, &mut |x| here |= x.pos == pos), &mut |_| {});
+        }
+        if !here {
+            continue;
+        }
+        // The unit that declares the class, or the class that it is nested in.
+        let name = &decl.name;
+        let unit = units.iter().find(|u| {
+            u["tree"]["typeDecls"].as_array().into_iter().flatten().any(|d| {
+                let top = class_name(d);
+                name == &top || name.strip_prefix(top.as_str()).is_some_and(|r| r.starts_with(['.', '$']))
+            })
+        });
+        files.insert(unit.and_then(|u| u["file"].as_str())?);
+    }
+    let mut files = files.into_iter();
+    match (files.next(), files.next()) {
+        (Some(file), None) => Some(file.to_string()),
+        _ => None,
+    }
 }
 
 /// The survey of what the code reachable from the program's `main` uses that the translator does

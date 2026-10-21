@@ -107,13 +107,13 @@ impl<'a> Gen<'a> {
     /// and whether that value is a constant, which Rust evaluates at compile time. An eager
     /// class's cells start at Java's default.
     fn static_cell(&mut self, t: usize, f: &'a Field) -> (String, String, String, bool) {
-        let nullable = self.facts.nullable_statics.contains(&(t, f.name.clone()));
+        let stored = self.static_optional(t, &f.name);
         let init = match &f.init {
-            Some(e) if !self.facts.eager_init.contains(&t) => self.field_value(e, f.ty, nullable),
-            _ => self.placeholder(f.ty, nullable),
+            Some(e) if !self.facts.eager_init.contains(&t) => self.field_value(e, f.ty, stored),
+            _ => self.placeholder(f.ty, stored),
         };
         let cell = cell_name(&self.class.types[t].name, &f.name);
-        let ty = self.field_ty_name(f.ty, nullable);
+        let ty = self.field_ty_name(f.ty, stored);
         let constant = init == "None"
             || init == "String::new()"
             || init.parse::<f64>().is_ok()
@@ -176,6 +176,13 @@ impl<'a> Gen<'a> {
         let init = self.facts.init_class(self.class, class)?;
         let initialized = current == init || self.class.hierarchy.ancestors(current).contains(&init);
         (!initialized).then(|| format!("{}();", init_name(&self.class.types[init].name)))
+    }
+
+    /// Whether the cell of static `name` of class `class` holds an `Option`: the static may be
+    /// null, or it starts empty (`Facts::placeholder_statics`).
+    pub(super) fn static_optional(&self, class: usize, name: &str) -> bool {
+        let key = (class, name.to_string());
+        self.facts.nullable_statics.contains(&key) || self.facts.placeholder_statics.contains(&key)
     }
 
     /// The `const` read of a constant static field, or `None` for any other static field.

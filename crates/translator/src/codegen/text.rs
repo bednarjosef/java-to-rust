@@ -185,7 +185,7 @@ impl<'a> Gen<'a> {
                 match args.get(1..) {
                     Some([offset, count]) => {
                         let (offset, count) = (self.int_arg(offset), self.int_arg(count));
-                        call(self, "from_chars_range", vec![chars, offset, count])
+                        self.may_fail(id, "from_chars_range", "", &format!("{chars}, {offset}, {count}"))
                     }
                     _ => call(self, "from_units", vec![chars]),
                 }

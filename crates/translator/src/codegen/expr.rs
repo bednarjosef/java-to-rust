@@ -591,6 +591,7 @@ impl<'a> Gen<'a> {
                 self.format(&mac, parts)
             }
             Builtin::ObjectText => self.object_to_string(&args[0]),
+            Builtin::ObjectClone => self.object_clone(&args[0]),
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty, id)
             }
@@ -606,6 +607,10 @@ impl<'a> Gen<'a> {
             }
             Builtin::NullCheck => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
+            Builtin::SameClass { same } => self.same_class(same, args),
+            Builtin::ClassLiteralName { class, simple } => {
+                Code::atom(format!("String::from({})", rust_string(&self.java_class_name(class, simple))))
+            }
             Builtin::MathAbs => {
                 let x = self.value(&args[0], ty);
                 // Math.abs(Integer.MIN_VALUE) is Integer.MIN_VALUE.
