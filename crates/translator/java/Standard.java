@@ -143,11 +143,6 @@ class AssertionError extends Error {
     public AssertionError(String message, Throwable cause) {
         super(message, cause);
     }
-
-    // Java's message is `String.valueOf(detailMessage)`, and a throwable is the cause too.
-    public AssertionError(Object detailMessage) {
-        super(String.valueOf(detailMessage), detailMessage instanceof Throwable ? (Throwable) detailMessage : null);
-    }
 }
 
 class RuntimeException extends Exception {
