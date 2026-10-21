@@ -618,10 +618,10 @@ impl<'t> Lowering<'t> {
                 }
                 // A cast between the program's types, up, down or across: `Cast` converts as the
                 // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
-                // `Integer` and unboxes. `(C) super.clone()` is already a `C`: the copy has the
-                // node's type, so the cast is the copy itself.
-                if matches!(value.kind, ExprKind::Builtin(Builtin::ObjectClone, _)) {
-                    value.kind
+                // `Integer` and unboxes. `(C) super.clone()` in `C` is the copy itself, which has
+                // `C`'s type: it is not converted to `Object` and back.
+                if Self::is_clone(&value) {
+                    self.cast_clone(value, ty)
                 } else if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
                     let boxed = self.synth(
                         ExprKind::Cast(Type::boxed(ty), Box::new(value)),
