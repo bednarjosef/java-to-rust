@@ -42,6 +42,18 @@ impl<'t> Lowering<'t> {
             ("Array", "clone") => return self.array_clone(node, receiver, args),
             ("java.lang.System", "arraycopy") => {
                 let (src, dest) = (args[0].ty, args[2].ty);
+                // An `Object` that holds an array, as the JDK's code generic over the kind of array
+                // passes one (`SpinedBuffer.OfPrimitive`'s `T_ARR`): both are then `Object`s, and
+                // the generator matches their arrays' types.
+                if (Self::is_object(src) || Self::is_object(dest))
+                    && [src, dest].iter().all(|&ty| Self::is_object(ty) || matches!(ty, Type::Array(_)))
+                {
+                    let all = std::mem::take(args).into_iter().enumerate();
+                    *args = all
+                        .map(|(i, a)| if i == 0 || i == 2 { self.convert(a, Type::class(OBJECT)) } else { a })
+                        .collect();
+                    return Ok(Some(Builtin::Native(Native::ArrayCopy)));
+                }
                 if !matches!(src, Type::Array(_)) || src != dest {
                     return unsupported(node, "`System.arraycopy` between arrays of different types");
                 }
@@ -91,6 +103,10 @@ impl<'t> Lowering<'t> {
                 Native::Sleep { nanos: args.len() == 2 }
             }
             ("java.lang.Thread", "onSpinWait") => Native::OnSpinWait,
+            ("java.lang.Thread", "holdsLock") => {
+                self.check_lock(node, &args[0])?;
+                Native::HoldsLock
+            }
             ("java.lang.Thread", "yield") => Native::ThreadYield,
             ("java.io.FileInputStream", "open0") => Native::FileOpenRead,
             ("java.io.FileInputStream", "read0") => {

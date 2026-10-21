@@ -166,6 +166,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         g.enum_items(index);
     }
     g.statics();
+    g.class_monitors();
     for i in 0..class.methods.len() {
         if g.emitted_free(i) {
             g.gap();
@@ -563,6 +564,7 @@ impl<'a> Gen<'a> {
             let guard = self.runtime("main_thread");
             self.line(&format!("let _main = {guard}();"));
         }
+        self.method_monitor(index);
         let initializes = m.name == "<clinit>" && self.facts.threaded;
         if !never_runs {
             self.written.insert(index);

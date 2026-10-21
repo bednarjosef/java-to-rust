@@ -7,10 +7,11 @@
 //! declaration reachable in turn: a worklist that runs until nothing new is found.
 
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod by_name;
 mod sequential;
+mod stubs;
 
 pub use by_name::created_by_name;
 
@@ -52,6 +53,10 @@ pub struct Reach {
     /// where reachability stops (`outside`): those that the sources do not have, and those whose
     /// units javac has not given yet when it gives them as they are asked for (`javac::Session`).
     pub missing: BTreeSet<String>,
+    /// Classes that are not translated but that reachable code uses as the types of variables,
+    /// which are only ever null, with the instance methods that it calls on them, by name and
+    /// signature (`stubs.rs`).
+    pub stubs: BTreeMap<String, BTreeSet<(String, String)>>,
 }
 
 impl Reach {
@@ -319,6 +324,30 @@ pub fn outside(class: &str) -> bool {
 /// classes, or a standard exception class (see `lower::exceptions`).
 pub fn provided(class: &str) -> bool {
     RUNTIME_CLASSES.contains(&class) || crate::lower::is_standard(class)
+}
+
+/// The array `a` and the length `n` of `Array.newInstance(a.getClass().getComponentType(), n)`,
+/// the new array of `a`'s own class that the JDK's collections make in `toArray(T[])` and its
+/// sorts make for their work (see `lower::arrays::component_array`): it reaches what `a` and `n`
+/// do, and not `java.lang.reflect.Array` or `Class`.
+pub fn component_array(node: &Value) -> Option<(&Value, &Value)> {
+    let call = |v: &Value, owner: &str, name: &str| {
+        text(v, "kind") == "METHOD_INVOCATION"
+            && text(&v["symbol"], "owner") == owner
+            && text(&v["symbol"], "name") == name
+            && v["methodSelect"]["kind"] == "MEMBER_SELECT"
+    };
+    if !call(node, "java.lang.reflect.Array", "newInstance") {
+        return None;
+    }
+    let [component, length] = &node["arguments"].as_array()?[..] else { return None };
+    let class = &component["methodSelect"]["expression"];
+    if !call(component, "java.lang.Class", "getComponentType") || !call(class, "java.lang.Object", "getClass")
+    {
+        return None;
+    }
+    let array = &class["methodSelect"]["expression"];
+    text(array, "javaType").ends_with("[]").then_some((array, length))
 }
 
 /// Whether the node is a call of `java.util.Arrays` that the runtime does rather than the JDK's
@@ -688,6 +717,10 @@ impl<'t> Walk<'t> {
             Value::Object(_) if let Some(branch) = live_branch(value, self.sequential) => {
                 self.scan(branch);
             }
+            Value::Object(_) if let Some((array, length)) = component_array(value) => {
+                self.scan(array);
+                self.scan(length);
+            }
             // A call of `java.util.Arrays` that the runtime does (`lower::runtime_arrays_call`)
             // reaches only what its arguments do.
             Value::Object(_) if runtime_arrays_call(value) => self.scan(&value["arguments"]),
@@ -711,6 +744,9 @@ impl<'t> Walk<'t> {
                             signature.to_string(),
                         )));
                     }
+                }
+                if text(value, "kind") == "VARIABLE" {
+                    self.stub_type(text(&value["symbol"], "type"));
                 }
                 if text(value, "kind") == "STRING_LITERAL"
                     && let Some(literal) = value["value"].as_str()
@@ -754,6 +790,7 @@ impl<'t> Walk<'t> {
                 self.work.push(Item::Method((class.into(), method.into(), signature.into())));
             }
             "METHOD" | "CONSTRUCTOR" => {
+                self.stub_method(symbol);
                 self.work.push(Item::Method((owner, name, text(symbol, "type").to_string())));
             }
             "FIELD" | "ENUM_CONSTANT" => self.work.push(Item::Field((owner, name))),
@@ -954,6 +991,29 @@ mod tests {
         assert!(reach.methods.contains(&method("Build", "run")), "{reach:?}");
         assert!(reach.methods.contains(&method("Build", "again")), "{reach:?}");
         assert!(!reach.classes.contains("Restore"), "{reach:?}");
+    }
+
+    #[test]
+    fn a_new_array_of_another_arrays_class_does_not_reach_reflection() {
+        let select = |expression: Value, owner: &str, name: &str| {
+            json!({"kind": "METHOD_INVOCATION",
+                "symbol": {"kind": "METHOD", "owner": owner, "name": name, "type": "()void"},
+                "methodSelect": {"kind": "MEMBER_SELECT", "expression": expression}, "arguments": []})
+        };
+        let array = json!({"kind": "IDENTIFIER", "javaType": "java.lang.Object[]"});
+        let component =
+            select(select(array, "java.lang.Object", "getClass"), "java.lang.Class", "getComponentType");
+        let mut make = select(json!({"kind": "IDENTIFIER"}), "java.lang.reflect.Array", "newInstance");
+        make["arguments"] = json!([component, call("Size", "run")["expression"]]);
+        let unit = json!({"typeDecls": [
+            class("Main", &[("main", vec![json!({"kind": "EXPRESSION_STATEMENT", "expression": make})])]),
+            class("java.lang.reflect.Array", &[("newInstance", vec![call("Native", "run")])]),
+            class("Native", &[("run", vec![])]),
+            class("Size", &[("run", vec![])]),
+        ]});
+        let reach = reach(&[&unit], "Main").unwrap();
+        assert!(!reach.classes.contains("Native"), "{reach:?}");
+        assert!(reach.classes.contains("Size"), "{reach:?}");
     }
 
     #[test]

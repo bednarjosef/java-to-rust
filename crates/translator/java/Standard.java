@@ -111,6 +111,35 @@ class AssertionError extends Error {
     public AssertionError() {
     }
 
+    // Java's constructor takes the text of the object and, for a `Throwable`, makes it the cause.
+    public AssertionError(Object detailMessage) {
+        super(String.valueOf(detailMessage), detailMessage instanceof Throwable ? (Throwable) detailMessage : null);
+    }
+
+    public AssertionError(boolean detailMessage) {
+        super(String.valueOf(detailMessage));
+    }
+
+    public AssertionError(char detailMessage) {
+        super(String.valueOf(detailMessage));
+    }
+
+    public AssertionError(int detailMessage) {
+        super(String.valueOf(detailMessage));
+    }
+
+    public AssertionError(long detailMessage) {
+        super(String.valueOf(detailMessage));
+    }
+
+    public AssertionError(float detailMessage) {
+        super(String.valueOf(detailMessage));
+    }
+
+    public AssertionError(double detailMessage) {
+        super(String.valueOf(detailMessage));
+    }
+
     public AssertionError(String message, Throwable cause) {
         super(message, cause);
     }
@@ -226,6 +255,23 @@ class IllegalStateException extends RuntimeException {
     }
 
     public IllegalStateException(Throwable cause) {
+        super(cause);
+    }
+}
+
+class IllegalMonitorStateException extends RuntimeException {
+    public IllegalMonitorStateException() {
+    }
+
+    public IllegalMonitorStateException(String s) {
+        super(s);
+    }
+
+    public IllegalMonitorStateException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public IllegalMonitorStateException(Throwable cause) {
         super(cause);
     }
 }

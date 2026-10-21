@@ -23,6 +23,7 @@ mod objects;
 mod real_generics;
 mod statics;
 mod strings;
+mod stubs;
 mod unsigned;
 
 use crate::ast::*;
@@ -361,6 +362,7 @@ impl<'t> Lowering<'t> {
             class: info.owner,
             pos: node.pos(),
             is_abstract,
+            is_synchronized: node.has_flag("SYNCHRONIZED"),
             overrides: self.overrides(node),
             type_params: self.method_type_params(index),
         })
@@ -597,6 +599,7 @@ impl<'t> Lowering<'t> {
             "TYPE_CAST" if let Some(name) = crate::program::created_by_name(node.0) => {
                 self.created_by_name(node, Node(name))?
             }
+            "TYPE_CAST" if arrays::casts_component_array(node) => self.component_array(node)?,
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
                 let value = self.expr(node.child("expression")?)?;
@@ -773,6 +776,9 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::ThisCall { args, resolved });
         }
         let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
+        if let Some(kind) = self.monitor_call(node, &symbol, receiver, &mut args)? {
+            return Ok(kind);
+        }
         if symbol.owner == "java.lang.Object" && symbol.name == "clone" {
             return self.object_clone(node, receiver);
         }

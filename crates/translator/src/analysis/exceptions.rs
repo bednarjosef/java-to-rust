@@ -890,6 +890,13 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::ThreadJoin
             | Native::ThreadRename,
         ) => None,
+        // A monitor that the thread does not hold (and for `wait` a negative timeout, which
+        // `runtime_failures` adds). Nothing interrupts a thread, so `wait` never throws
+        // `InterruptedException`.
+        Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. }) => {
+            Some("java.lang.IllegalMonitorStateException")
+        }
+        Builtin::Native(Native::HoldsLock) => None,
         Builtin::CodePoint(CodePointOp::ToCharsInto) => Some("java.lang.IllegalArgumentException"),
         Builtin::CodePoint(
             CodePointOp::CharCount
@@ -1067,7 +1074,7 @@ fn runtime_failures(
                 | BoxedOp::Logical(_),
                 _,
             ) => {}
-            Builtin::NullCheck => out.push((NPE, "this synchronized", true, args[0].id)),
+            Builtin::MonitorEnter => out.push((NPE, "this synchronized", true, args[0].id)),
             Builtin::NullChecked | Builtin::Unmatched => {
                 if null(&args[0]) {
                     out.push((NPE, "this null check", true, args[0].id));
@@ -1121,8 +1128,14 @@ fn runtime_failures(
                             | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
                             | Builtin::CodePoint(CodePointOp::ToCharsInto)
                             | Builtin::EnumValueOf
+                            | Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. })
                     );
                     out.push((failure, "this call of the library", checked, x.id));
+                }
+                if let Builtin::Native(Native::MonitorWait) = builtin
+                    && !matches!(args[1].kind, ExprKind::Long(n) if n >= 0)
+                {
+                    out.push(("java.lang.IllegalArgumentException", "this call of the library", true, x.id));
                 }
             }
         },
