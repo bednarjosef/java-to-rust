@@ -16,12 +16,14 @@ mod generics;
 mod handles;
 mod hierarchy;
 mod lambdas;
+mod local_names;
 mod object;
 mod object_clone;
 mod objects;
 mod real_generics;
 mod statics;
 mod strings;
+mod stubs;
 mod unsigned;
 
 use crate::ast::*;
@@ -280,7 +282,9 @@ impl<'t> Lowering<'t> {
         let outer = self.method_ctx.replace(Some(index));
         let method = self.method_in_scope(index);
         self.method_ctx.set(outer);
-        method
+        let mut method = method?;
+        local_names::distinct_locals(&mut method);
+        Ok(method)
     }
 
     fn method_in_scope(&self, index: usize) -> Result<Method, Error> {
@@ -594,6 +598,7 @@ impl<'t> Lowering<'t> {
             "TYPE_CAST" if let Some(name) = crate::program::created_by_name(node.0) => {
                 self.created_by_name(node, Node(name))?
             }
+            "TYPE_CAST" if arrays::casts_component_array(node) => self.component_array(node)?,
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
                 let value = self.expr(node.child("expression")?)?;

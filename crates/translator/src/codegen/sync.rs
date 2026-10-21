@@ -9,7 +9,7 @@ impl<'a> Gen<'a> {
     pub(super) fn null_check(&mut self, lock: &'a Expr) -> Code {
         if self.nullable(lock) {
             let option = self.option_ref(lock);
-            return Code::atom(format!("{}({option})", self.runtime("non_null")));
+            return Code::atom(self.dereference(&[lock.id], &option));
         }
         let value = self.expr(lock).text;
         Code::atom(format!("{{ let _ = {value}; }}"))

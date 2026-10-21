@@ -60,8 +60,12 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.Long#parseUnsignedLong",
         ],
     ),
-    // A call or a field access on an object that may be null.
-    ("java.lang.NullPointerException", &["METHOD_INVOCATION", "MEMBER_SELECT"]),
+    // A call, a field access, an array access or a switch on a reference that may be null.
+    (
+        "java.lang.NullPointerException",
+        &["METHOD_INVOCATION", "MEMBER_SELECT", "ARRAY_ACCESS", "SWITCH", "SWITCH_EXPRESSION"],
+    ),
+    ("java.lang.ClassCastException", &["TYPE_CAST"]),
     ("java.lang.IllegalArgumentException", &["enum#valueOf", "java.lang.Character#toChars"]),
     (
         "java.lang.StringIndexOutOfBoundsException",

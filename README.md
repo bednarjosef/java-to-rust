@@ -450,7 +450,9 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   arrays of primitive or `String` rows. `a.clone()` is a shallow copy; rows of a 2-D array are
   shared, as in Java. Sorting an array with a null `String` throws `NullPointerException`.
   `copyOf` works on any array, and `copyOf(a, n, type)` and `copyOfRange(a, from, to, type)` are
-  the same copies as without the class, which is dropped.
+  the same copies as without the class, which is dropped (a class literal, a `getClass()` or a
+  variable holding a class). `(T[]) Array.newInstance(a.getClass().getComponentType(), n)`, as
+  the JDK's `toArray(T[])` and sorts write it, is a new array of `n` nulls of `a`'s type.
   Translated with the JDK's sources, every other call of `Arrays` (a sort with a `Comparator`, a
   sort of objects, `asList`) is a call of the translated `java/util/Arrays.java`, and
   reachability follows only those (`lower::runtime_arrays_call`). Not yet without the JDK:
@@ -523,8 +525,13 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   of its interface's enum, or a subclass whose constructor passes the arguments of its `new` to
   the superclass's and its captures after them (`ReportInMain::new("squares", &sep)`); its
   `getName` is javac's (`Main$1`) and its `getSimpleName` empty. Local interfaces, enums and
-  records and member classes of local and anonymous classes translate, as do `Outer.super.m()`
-  and `outer.super()`. Not yet: an inner class extending one nested in another class.
+  records and member classes of local and anonymous classes translate, as do `Outer.super.m()`,
+  `outer.super()` and `o.new Inner() { .. }`. A class extending an inner class nested in
+  another class (an inner class of an inner class, of a subclass of the outer class or of an
+  unrelated class, a local or anonymous class in an inner class's method) holds its own
+  enclosing instance as `outer_` next to the superclass's `outer` in `base`; the JDK's
+  `AbstractList.ListItr extends Itr` translates. Not yet: an inner class with subclasses whose
+  constructor uses `this` as a value or calls an overridable method.
 - For-each over an `Iterable` (`lower/foreach.rs`) is the loop Java runs: `let it =
   Names::iterator(&names); while it.borrow().has_next() { let s = it.borrow_mut().next(); .. }`,
   with the program's or the JDK's `iterator`, `hasNext` and `next`, so a translated iterator
@@ -619,7 +626,9 @@ The native layer, the JDK methods that bottom out in the JVM, is hand-written in
 (`lower/natives.rs`): `System.arraycopy` (between shared or plain arrays of the same element type,
 overlap as through a temporary, bounds checked first; between arrays of different reference types,
 such as a `String[]` and an `Object[]`, it is rejected, because the two are different Rust types and
-the copy would need the element type at run time to throw `ArrayStoreException`), the `Double` and `Float` bit conversions, `Math` and
+the copy would need the element type at run time to throw `ArrayStoreException`; between arrays
+held as `Object`s it copies when both are arrays of one type and throws `ArrayStoreException`
+otherwise), the `Double` and `Float` bit conversions, `Math` and
 `StrictMath`, `System.identityHashCode` and an inherited `hashCode()` (derived from the object's
 address: stable for the object's life, but like Java's different on every run), the clocks,
 `availableProcessors`, the line separator, `System.err` and `System.out.write`/`flush`.
