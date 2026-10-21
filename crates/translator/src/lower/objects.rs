@@ -200,6 +200,7 @@ impl<'t> Lowering<'t> {
             outer: self.nesting(index).filter(|n| n.outer).map(|n| n.enclosing),
             captures: self.captures_of(index)?,
             origin: self.origin(index),
+            cloneable: self.is_cloneable(index),
         })
     }
 

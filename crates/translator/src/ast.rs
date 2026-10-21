@@ -358,6 +358,9 @@ pub struct TypeDecl {
     /// class.
     pub captures: Vec<Capture>,
     pub origin: Origin,
+    /// The class or a superclass implements `Cloneable`, directly or through an interface, so
+    /// that `Object`'s `clone` copies its objects rather than throwing.
+    pub cloneable: bool,
 }
 
 /// A local variable that a local or anonymous class captures.

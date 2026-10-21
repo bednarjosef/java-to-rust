@@ -801,6 +801,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         // An index out of the builder's bounds.
         Builtin::Builder(_) => Some("?"),
         Builtin::ArraysSort | Builtin::ArraysToString => None,
+        // A negative length (a null array is the caller's `NullPointerException`).
+        Builtin::ArraysCopyOf => Some("java.lang.NegativeArraySizeException"),
         Builtin::Arrays(
             ArraysOp::Equals | ArraysOp::HashCode | ArraysOp::SortAll | ArraysOp::BinarySearch,
         ) => None,
@@ -1001,6 +1003,15 @@ fn runtime_failures(
                 _,
             ) => {}
             Builtin::NullCheck => out.push((NPE, "this synchronized", false, x.id)),
+            // An object of a class that is not `Cloneable` refuses to be copied.
+            Builtin::ObjectClone => {
+                let refused = class
+                    .class_index(args[0].ty)
+                    .is_some_and(|t| class.hierarchy.concretes(t).iter().any(|&c| !class.types[c].cloneable));
+                if refused {
+                    out.push(("java.lang.CloneNotSupportedException", "this clone", true, x.id));
+                }
+            }
             Builtin::NullChecked | Builtin::Unmatched => {
                 if null(&args[0]) {
                     out.push((NPE, "this null check", false, x.id));

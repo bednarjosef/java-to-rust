@@ -142,11 +142,14 @@ A small subset, end to end:
   `synchronized (x)` checks `x` for null and runs the block; it does not lock yet (see "Threads").
   An override may return a subtype of the overridden method's return type (a
   covariant return): the override's value is converted to the overridden method's representation,
-  so a caller that goes through the supertype sees the same value as Java's. In a class that
-  implements `Cloneable` with no superclass and no subclasses, `super.clone()` (or `clone()` with no
-  receiver) is a shallow copy of the fields: primitives and strings by value, arrays and object
-  references shared, as Java shares them. `clone` of another object, or in a class with a superclass
-  or a subclass, is rejected.
+  so a caller that goes through the supertype sees the same value as Java's. `super.clone()` (or
+  `clone()` with no receiver) of `Object` is a shallow copy of the object's runtime class: its
+  fields and its superclasses' (the `base` structs), primitives and strings by value, arrays and
+  object references shared, as Java shares them. In a class with subclasses it is a `match` on the
+  object's variant, so the copy of a subclass's object is one of the subclass, as `EnumSet.clone`
+  copies a `RegularEnumSet`. A class that is not `Cloneable` (itself, a superclass or an interface)
+  throws `CloneNotSupportedException` with its binary name, which the program can catch. `clone`
+  of another object than `this` is rejected.
 - **Class trees, interfaces and generics**: class trees of the program's own classes translate,
   abstract or not and of any depth: `extends`, abstract methods, overriding and virtual calls,
   `super(...)` and `super.m(...)`, upcasts, `==` on objects of a class tree, and printing through

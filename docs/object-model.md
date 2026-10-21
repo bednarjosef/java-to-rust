@@ -1810,3 +1810,26 @@ per-instantiation variants are not done, and a generic that needs them stays era
   arguments, a cell that may hold null, nested instantiations, generic methods) and
   `corpus/programs/LinkedQueue.java` (a generic queue of generic pairs driving a breadth-first
   search, and a generic tally). The collections project's `Node<T>` became real.
+
+### `Object.clone` in class trees
+
+- `super.clone()` of `Object` is a copy of the object's runtime class, as Java's is, in any class
+  of a tree: on the enum of the class (the method that calls it uses `this` as a value, so it is
+  object-level) it is a `match` with a struct literal per variant, which reads each field of the
+  variant's struct and of the fields structs it embeds as `base`, cloning a field where its type's
+  values are cloned (handles are shared, as Java shares the references). On a struct it reads the
+  fields through `this` as before. `(C) super.clone()` in `C` is the copy itself, of `C`'s type; a
+  cast to another type converts it.
+- Whether a class may be copied is `TypeDecl::cloneable`: it, a superclass or an interface it
+  implements extends `Cloneable`, which lowering reads from javac's tree since `Cloneable` itself
+  is not a type of the program. A variant that is not `Cloneable` throws
+  `CloneNotSupportedException` with its binary name (`java::clone_refused`): a failure of the
+  runtime (`lower/exceptions.rs` `RAISED`, for `Object#clone`), which a `catch` sees through
+  `java::try_clone_refused`, so `EnumSet.clone`'s and `ArrayList.clone`'s `try` translate.
+- `AssertionError(Object)` joined `java/Standard.java` (`EnumSet.clone`'s `catch` throws one),
+  and `Arrays.copyOf` fails only with `NegativeArraySizeException`, so a `catch` of another
+  class around it is no longer rejected.
+- Corpus: `corpus/features/CloneInClassTrees.java` (a `Cloneable` abstract superclass copying
+  objects of its subclasses, a subclass's `clone` over its superclass's, a superclass that is not
+  `Cloneable` clearing a cache in its copy, a subclass whose objects refuse, caught) and
+  `corpus/features/CloneRefusedUncaught.java` (the refusal ending the program).
