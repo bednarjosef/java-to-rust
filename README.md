@@ -806,6 +806,10 @@ as its command-line arguments, on `java` and as the translated binary alike.
   translator runs and how much memory it needs, the steps to cut both, an estimate at the scale of
   the Minecraft server, and the goal of translating javac so that it uses less memory than on the
   JVM.
+- [docs/large-projects.md](docs/large-projects.md): what large multi-file projects need: the
+  translator's scale, output in several crates, reading build tools, dependencies' sources,
+  generated sources, resources and tests, the library coverage they lean on, and working
+  through their blockers.
 - [docs/closures-and-nested-classes.md](docs/closures-and-nested-classes.md): captures, inner,
   local and anonymous classes, lambdas, method references and for-each over `Iterable`, after
   the object model.
