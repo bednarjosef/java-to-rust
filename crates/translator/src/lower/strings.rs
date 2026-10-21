@@ -37,10 +37,19 @@ impl<'t> Lowering<'t> {
         self.synth(ExprKind::Binary(BinOp::Add, Box::new(empty), Box::new(x)), pos, Type::String)
     }
 
-    /// `s.chars()`: the JDK's `Arrays.stream(int[])` over the string's UTF-16 code units, which
-    /// streams the same values with the same characteristics as the JDK's own spliterator.
-    fn string_chars(&self, node: Node<'t>, receiver: Option<Node<'t>>) -> Result<ExprKind, Error> {
-        let (owner, name, sig) = crate::program::STRING_CHARS;
+    /// `s.chars()` and `s.lines()`: the JDK's `Arrays.stream` over an array the runtime makes, of
+    /// the string's UTF-16 code units or of its lines, which streams the same values with the same
+    /// characteristics as the JDK's own spliterators.
+    fn string_stream(
+        &self,
+        node: Node<'t>,
+        method: &str,
+        receiver: Option<Node<'t>>,
+    ) -> Result<ExprKind, Error> {
+        let (_, (owner, name, sig)) = *crate::program::STRING_STREAMS
+            .iter()
+            .find(|(m, _)| *m == method)
+            .expect("a method of `String` that streams");
         let Some(stream) = self
             .methods
             .iter()
@@ -48,19 +57,20 @@ impl<'t> Lowering<'t> {
         else {
             return error(
                 node.pos(),
-                "`String.chars` streams with the JDK's code: translate the program with the JDK's sources \
-                 (`--main` and `--library`) for it"
-                    .to_string(),
+                format!(
+                    "`String.{method}` streams with the JDK's code: translate the program with the JDK's \
+                     sources (`--main` and `--library`) for it"
+                ),
             );
         };
         let receiver = self.expr(receiver.expect("an instance method has a receiver"))?;
         let pos = receiver.pos;
-        let units = self.synth(
-            ExprKind::Builtin(Builtin::String(StringOp::CharCodes), vec![receiver]),
-            pos,
-            Type::array(Type::Int),
-        );
-        Ok(ExprKind::Call { name: name.to_string(), args: vec![units], resolved: Some(stream) })
+        let (op, ty) = match method {
+            "chars" => (StringOp::CharCodes, Type::array(Type::Int)),
+            _ => (StringOp::Lines, Type::array(Type::class(OBJECT))),
+        };
+        let array = self.synth(ExprKind::Builtin(Builtin::String(op), vec![receiver]), pos, ty);
+        Ok(ExprKind::Call { name: name.to_string(), args: vec![array], resolved: Some(stream) })
     }
 
     /// A call of a method of `String`. `args` are the lowered arguments, without the receiver.
@@ -100,7 +110,7 @@ impl<'t> Lowering<'t> {
             "equalsIgnoreCase" => StringOp::EqualsIgnoreCase,
             "concat" => StringOp::Concat,
             "toCharArray" => StringOp::ToCharArray,
-            "chars" if args.is_empty() => return self.string_chars(node, receiver),
+            "chars" | "lines" if args.is_empty() => return self.string_stream(node, name, receiver),
             "hashCode" => StringOp::HashCode,
             "toString" | "intern" => StringOp::Identity,
             "equals" => StringOp::EqualsOther,

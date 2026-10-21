@@ -209,6 +209,20 @@ pub fn starts_with_at(s: &str, prefix: &str, offset: i32) -> bool {
     }
 }
 
+/// `s.lines()`: the lines of `s`, each ended by `\n`, `\r` or `\r\n` or by the end of the
+/// string, without an empty line after the last line end.
+pub fn lines(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while !rest.is_empty() {
+        let end = rest.find(['\n', '\r']).unwrap_or(rest.len());
+        out.push(rest[..end].to_string());
+        let after = &rest[end..];
+        rest = after.strip_prefix("\r\n").or_else(|| after.strip_prefix(['\n', '\r'])).unwrap_or(after);
+    }
+    out
+}
+
 /// Java's `s.isBlank()`: empty or only whitespace, as `Character.isWhitespace` defines it.
 pub fn is_blank(s: &str) -> bool {
     s.chars().all(|c| is_java_whitespace(c as u32))
@@ -514,5 +528,14 @@ mod tests {
         assert!(is_blank(" \u{2028}\u{1F}"));
         assert_eq!(uppercase("straße"), "STRASSE");
         assert_eq!(join(", ", &[Some("a"), None]), "a, null");
+    }
+
+    #[test]
+    fn lines_end_at_each_line_terminator() {
+        assert_eq!(lines("a\nb\r\nc\rd\n\ne\n"), ["a", "b", "c", "d", "", "e"]);
+        assert!(lines("").is_empty());
+        assert_eq!(lines("\n"), [""]);
+        assert_eq!(lines("\r\r\n"), ["", ""]);
+        assert_eq!(lines("x"), ["x"]);
     }
 }

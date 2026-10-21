@@ -738,12 +738,17 @@ for when a program needs time zones.
   `ENABLED` is `Boolean.getBoolean` of a property that only `-D` sets, so it joins the JFR flags in
   `FALSE_FLAGS`, and the condition of a skipped branch is no longer scanned (the lowering drops
   it), so the class is not reached for its flag.
-- **`String.chars()`** (`program::STRING_CHARS`): `String` is the runtime's, so the JDK's
-  `chars()`, which streams the string's `byte[]` through `StringLatin1.CharsSpliterator`, is not
-  translated. The call is the JDK's `Arrays.stream(int[])` over the string's UTF-16 code units
-  instead, which streams the same values with the same spliterator characteristics (`ORDERED`,
-  `SIZED`, `SUBSIZED`, `IMMUTABLE`); reachability reaches that method for every `String.chars`
-  call. Without the JDK's sources the call is rejected.
+- **`String.chars()` and `String.lines()`** (`program::STRING_STREAMS`): `String` is the
+  runtime's, so the JDK's `chars()` and `lines()`, which stream the string's `byte[]` through
+  `StringLatin1.CharsSpliterator` and `LinesSpliterator`, are not translated. `chars()` is the
+  JDK's `Arrays.stream(int[])` over the string's UTF-16 code units instead, which streams the
+  same values with the same spliterator characteristics (`ORDERED`, `SIZED`, `SUBSIZED`,
+  `IMMUTABLE`). `lines()` is `Arrays.stream(T[])` over an `Object[]` of the lines that the
+  runtime splits (`java::lines`: ended by `\n`, `\r` or `\r\n`, without an empty last line). Its
+  spliterator is `SIZED` where the JDK's is not, so a `count()` straight after `lines()`, `map` or
+  `peek` computes the size without running the pipeline's lambdas, which the JDK runs.
+  Reachability reaches `Arrays.stream` for every such call; without the JDK's sources the call is
+  rejected.
 
 With these, `StreamPipeline` reaches 264 classes (176 instantiated), 1,144 methods and 4 natives,
 all in the runtime (the `CDS` ones and `Unsafe.registerNatives`), against the 372 classes and 28
