@@ -2,7 +2,8 @@
 //! type says how Java compares, hashes and tests it equal, so one function serves every type.
 
 use crate::{
-    Elements, bool_hash, double_compare, double_hash, float_hash, len, long_hash, string_hash, throw,
+    Elements, MadeElements, bool_hash, double_compare, double_hash, float_hash, len, long_hash, string_hash,
+    throw,
 };
 use std::cmp::Ordering;
 
@@ -127,7 +128,7 @@ fn range(len: usize, from: i32, to: i32) -> std::ops::Range<usize> {
 
 /// `Arrays.equals(a, b)`: the same length, and equal elements in order. A null array equals only
 /// another null array.
-pub fn equals<T: JavaElement>(a: Option<&impl Elements<T>>, b: Option<&impl Elements<T>>) -> bool {
+pub fn equals<T: JavaElement, A: Elements<T>>(a: Option<&A>, b: Option<&A>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => {
             let (a, b) = (a.items(), b.items());
@@ -162,7 +163,7 @@ pub fn fill_range<T: Clone>(a: &impl Elements<T>, from: i32, to: i32, v: T) {
 
 /// `Arrays.copyOfRange(a, from, to)`: the elements from `from` up to `to`, padded with `zero` past
 /// the end of `a`.
-pub fn copy_of_range<T: Clone, A: Elements<T>>(a: &A, from: i32, to: i32, zero: T) -> A {
+pub fn copy_of_range<T: Clone, A: MadeElements<T>>(a: &A, from: i32, to: i32, zero: T) -> A {
     if from > to {
         throw("java.lang.IllegalArgumentException", &format!("{from} > {to}"));
     }
@@ -212,6 +213,6 @@ pub fn deep_to_string<T: Clone>(a: Option<&impl Elements<T>>, show: impl Fn(T) -
 
 /// `a.clone()`: a new array of the same elements. The elements are handles, so rows of an array
 /// of arrays are shared with the copy, as in Java.
-pub fn clone_array<T: Clone, A: Elements<T>>(a: &A) -> A {
+pub fn clone_array<T: Clone, A: MadeElements<T>>(a: &A) -> A {
     A::made(a.items().clone())
 }

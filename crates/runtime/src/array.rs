@@ -16,14 +16,35 @@ pub type Array<T> = Rc<RefCell<Vec<T>>>;
 /// An array of a program with threads.
 pub type SharedArray<T> = Arc<Locked<Vec<T>>>;
 
-/// A handle of an array: an `Array`, or a `SharedArray`, whose elements are borrowed the same way.
+/// A handle of an array: an `Array`, or a `SharedArray`, whose elements are borrowed the same way,
+/// or a reference to one.
 pub trait Elements<T> {
     fn items(&self) -> impl Deref<Target = Vec<T>> + '_;
     fn items_mut(&self) -> impl DerefMut<Target = Vec<T>> + '_;
-    /// A new array of the same kind, such as a copy.
-    fn made(items: Vec<T>) -> Self;
     /// The array's address, which is its identity.
     fn address(&self) -> *const u8;
+}
+
+/// A handle that a new array can be made as: an `Array` or a `SharedArray`.
+pub trait MadeElements<T>: Elements<T> {
+    /// A new array of the same kind, such as a copy.
+    fn made(items: Vec<T>) -> Self;
+}
+
+impl<T, A: Elements<T>> Elements<T> for &A {
+    #[inline]
+    fn items(&self) -> impl Deref<Target = Vec<T>> + '_ {
+        (**self).items()
+    }
+
+    #[inline]
+    fn items_mut(&self) -> impl DerefMut<Target = Vec<T>> + '_ {
+        (**self).items_mut()
+    }
+
+    fn address(&self) -> *const u8 {
+        (**self).address()
+    }
 }
 
 impl<T> Elements<T> for Array<T> {
@@ -37,12 +58,14 @@ impl<T> Elements<T> for Array<T> {
         self.borrow_mut()
     }
 
-    fn made(items: Vec<T>) -> Array<T> {
-        from_vec(items)
-    }
-
     fn address(&self) -> *const u8 {
         Rc::as_ptr(self) as *const u8
+    }
+}
+
+impl<T> MadeElements<T> for Array<T> {
+    fn made(items: Vec<T>) -> Array<T> {
+        from_vec(items)
     }
 }
 
@@ -57,12 +80,14 @@ impl<T> Elements<T> for SharedArray<T> {
         self.borrow_mut()
     }
 
-    fn made(items: Vec<T>) -> SharedArray<T> {
-        shared_from_vec(items)
-    }
-
     fn address(&self) -> *const u8 {
         Arc::as_ptr(self) as *const u8
+    }
+}
+
+impl<T> MadeElements<T> for SharedArray<T> {
+    fn made(items: Vec<T>) -> SharedArray<T> {
+        shared_from_vec(items)
     }
 }
 
@@ -283,7 +308,7 @@ pub fn sort_floats(a: &impl Elements<f32>) {
 }
 
 /// `Arrays.copyOf(a, len)`: the first `len` elements, padded with `zero`.
-pub fn copy_of<T: Clone, A: Elements<T>>(a: &A, len: i32, zero: T) -> A {
+pub fn copy_of<T: Clone, A: MadeElements<T>>(a: &A, len: i32, zero: T) -> A {
     let len = size(len);
     let mut items = a.items().clone();
     items.resize(len, zero);
