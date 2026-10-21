@@ -745,6 +745,14 @@ impl<'a> Gen<'a> {
         };
         self.enter_method(r);
         let m = &self.class.methods[r];
+        // The arms bind the object to `o`, which must not hide a parameter of that name.
+        let names: Vec<String> = m.params.iter().map(|p| self.local(&p.name)).collect();
+        for p in &m.params {
+            if self.local(&p.name) == "o" {
+                let fresh = (1..).map(|n| format!("o{n}")).find(|f| !names.contains(f)).expect("a free name");
+                self.locals.insert(p.name.clone(), fresh);
+            }
+        }
         let params = self.typed_params(r, false);
         let ret = self.ret_text(r);
         let args: Vec<String> = m.params.iter().map(|p| self.local(&p.name)).collect();
