@@ -250,7 +250,12 @@ impl<'a> Gen<'a> {
         }
         let mutable = if assigns_any(std::slice::from_ref(body), name) { "mut " } else { "" };
         let var = self.local(name);
-        let source = self.expr(array).text;
+        // A null array throws `NullPointerException` as the loop starts.
+        let source = if self.nullable(array) {
+            format!("{}.clone()", self.handle(array))
+        } else {
+            self.expr(array).text
+        };
         let each = self.runtime("each");
         self.line(&format!("for {mutable}{var} in {each}({source}) {{"));
         self.loop_body(Loop::Plain, body, &[]);

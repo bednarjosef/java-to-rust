@@ -251,8 +251,8 @@ impl<'a> Gen<'a> {
                 let rust = self.local(name);
                 match e.ty {
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
-                    // An object narrowed by a null check is a reference to the `Rc`.
-                    Type::Class(_) | Type::StringBuilder if self.borrowed.contains(name) => {
+                    // An object or array narrowed by a null check is a reference to the `Rc`.
+                    Type::Class(_) | Type::StringBuilder | Type::Array(_) if self.borrowed.contains(name) => {
                         Code::atom(format!("{rust}.clone()"))
                     }
                     ty if self.clones(ty) && !self.facts.moves.contains(&e.id) => {
