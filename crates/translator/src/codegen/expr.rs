@@ -421,8 +421,10 @@ impl<'a> Gen<'a> {
                 if let Some(code) = self.narrowed_conditional(e, cond, a, b) {
                     return code;
                 }
-                // The condition of an `if` drops its temporaries before a branch runs.
-                let outer = std::mem::replace(&mut self.guarded, false);
+                // The condition of an `if` drops its temporaries before a branch runs. With threads,
+                // two locks held at once in the condition itself could wait for each other.
+                let guarded = self.facts.threaded && self.conflicts(&[&**cond]);
+                let outer = std::mem::replace(&mut self.guarded, guarded);
                 let cond = self.condition(cond);
                 self.guarded = outer;
                 let chain = std::mem::replace(&mut self.chain, false);
@@ -628,7 +630,7 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({})", self.runtime("exit"), code.text))
             }
             Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
-            Builtin::NullCheck => self.null_check(&args[0]),
+            Builtin::MonitorEnter => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),
             Builtin::SameClass { same } => self.same_class(same, args),
             Builtin::GetClass => self.get_class(&args[0]),

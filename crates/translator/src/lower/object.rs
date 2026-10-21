@@ -289,6 +289,7 @@ impl<'t> Lowering<'t> {
             class: at.decl,
             pos: Pos::default(),
             is_abstract: true,
+            is_synchronized: false,
             overrides: Vec::new(),
             type_params: Vec::new(),
         };
@@ -503,6 +504,7 @@ impl<'t> Lowering<'t> {
             class: m.class,
             pos,
             is_abstract: false,
+            is_synchronized: false,
             overrides: vec![index],
             type_params: Vec::new(),
         }

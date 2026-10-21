@@ -225,6 +225,7 @@ impl<'t> Lowering<'t> {
             class: l.class,
             pos: l.node.pos(),
             is_abstract: false,
+            is_synchronized: false,
             overrides,
             type_params: Vec::new(),
         };

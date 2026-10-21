@@ -60,7 +60,15 @@ const RAISED: &[(&str, &[&str])] = &[
     ),
     // A call or a field access on an object that may be null.
     ("java.lang.NullPointerException", &["METHOD_INVOCATION", "MEMBER_SELECT"]),
-    ("java.lang.IllegalArgumentException", &["enum#valueOf", "java.lang.Character#toChars"]),
+    (
+        "java.lang.IllegalArgumentException",
+        &["enum#valueOf", "java.lang.Character#toChars", "java.lang.Object#wait"],
+    ),
+    // A monitor that the thread does not hold.
+    (
+        "java.lang.IllegalMonitorStateException",
+        &["java.lang.Object#wait", "java.lang.Object#notify", "java.lang.Object#notifyAll"],
+    ),
     (
         "java.lang.StringIndexOutOfBoundsException",
         &[

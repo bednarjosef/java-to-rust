@@ -102,6 +102,7 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
             class: t,
             pos,
             is_abstract: false,
+            is_synchronized: false,
             overrides: Vec::new(),
             type_params: Vec::new(),
         });
@@ -129,6 +130,7 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
                 class: t,
                 pos: class.methods[starting[0]].pos,
                 is_abstract: false,
+                is_synchronized: false,
                 overrides: Vec::new(),
                 type_params: Vec::new(),
             });
@@ -206,6 +208,7 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
             class: t,
             pos,
             is_abstract: false,
+            is_synchronized: false,
             overrides: Vec::new(),
             type_params,
         });

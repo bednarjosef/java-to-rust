@@ -437,6 +437,9 @@ pub struct Method {
     pub pos: Pos,
     /// A method without a body: abstract, or an interface method that is not a default method.
     pub is_abstract: bool,
+    /// A `synchronized` method, which holds the monitor of its object, or of its class when
+    /// static, for the call.
+    pub is_synchronized: bool,
     /// The methods of the program that this one overrides, as javac lists them (indexes into
     /// `Class::methods`).
     pub overrides: Vec<usize>,
@@ -676,8 +679,10 @@ pub enum Builtin {
     NoObject {
         class: usize,
     },
-    /// Evaluates the lock of a `synchronized` block and throws if it is null; the value is dropped.
-    NullCheck,
+    /// The lock of a `synchronized` block, the statement before the block: evaluated, and a
+    /// `NullPointerException` when it is null. Where the program can tell (`codegen::sync`), the
+    /// block holds the lock's monitor.
+    MonitorEnter,
     MathAbs,
     MathMax,
     MathMin,

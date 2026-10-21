@@ -91,6 +91,10 @@ impl<'t> Lowering<'t> {
                 Native::Sleep { nanos: args.len() == 2 }
             }
             ("java.lang.Thread", "onSpinWait") => Native::OnSpinWait,
+            ("java.lang.Thread", "holdsLock") => {
+                self.check_lock(node, &args[0])?;
+                Native::HoldsLock
+            }
             ("java.lang.Thread", "yield") => Native::ThreadYield,
             ("java.io.FileInputStream", "open0") => Native::FileOpenRead,
             ("java.io.FileInputStream", "read0") => {
