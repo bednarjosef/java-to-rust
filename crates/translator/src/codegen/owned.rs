@@ -18,7 +18,8 @@ impl<'a> Gen<'a> {
             Some((Stmt::Expr(Expr { kind: ExprKind::ThisCall { args, resolved }, .. }), rest)) => {
                 let index = resolved.expect("calls are resolved by the checker");
                 let args = self.call_args(index, args).join(", ");
-                (format!("{}({args})", self.qualified_fn(index)), rest, false)
+                let call = Code::atom(format!("{}({args})", self.qualified_fn(index)));
+                (self.raising(call, index).text, rest, false)
             }
             _ => {
                 let initialize = !self.inline_inits(m.class) && decl.fields.iter().any(|f| f.init.is_some());
@@ -29,6 +30,11 @@ impl<'a> Gen<'a> {
         };
         let rest = without_final_return(rest);
         if rest.is_empty() && !initialize {
+            // A constructor that only delegates to one that throws returns its `Result`.
+            let start = match start.strip_suffix('?') {
+                Some(result) if self.throwing => result.to_string(),
+                _ => self.ok(start),
+            };
             self.line(&start);
             return;
         }
@@ -40,7 +46,8 @@ impl<'a> Gen<'a> {
         self.ctor_result = Some("this");
         self.stmts(rest, false);
         self.ctor_result = None;
-        self.line("this");
+        let this = self.ok("this".to_string());
+        self.line(&this);
     }
 
     /// The struct literal that a constructor starts from, and the statements of its body that are

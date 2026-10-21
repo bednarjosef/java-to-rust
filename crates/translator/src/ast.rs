@@ -246,6 +246,13 @@ pub struct Class {
     pub methods: Vec<Method>,
     /// Subtypes and overriders, computed from the types and methods (see `hierarchy`).
     pub hierarchy: Hierarchy,
+    /// `new C(message)` for each standard class `C` whose objects the runtime may raise where
+    /// the program could catch them, `message` a `String` variable: how a failure of the runtime
+    /// becomes the program's exception (see `lower/exceptions.rs`).
+    pub raised: Vec<Expr>,
+    /// The `close` methods that try-with-resources statements call, with the position of each
+    /// resource; the analysis checks that they cannot fail (see `lower/exceptions.rs`).
+    pub closes: Vec<(usize, Pos)>,
 }
 
 /// What kind of type a declaration is.
@@ -418,6 +425,26 @@ pub enum Stmt {
     ContinueLabel(String),
     /// `yield value;`, the value of the innermost switch expression.
     Yield(Expr),
+    /// `throw value;`. The value has been converted to `java.lang.Throwable`'s type.
+    Throw(Expr),
+    /// `try body catch (..) .. finally ..`.
+    Try {
+        body: Vec<Stmt>,
+        catches: Vec<Catch>,
+        finally: Option<Vec<Stmt>>,
+    },
+}
+
+/// One `catch` clause: the exception classes it catches (indexes into `Class::types`, several
+/// for a multi-catch `catch (A | B e)`), its parameter, and its statements.
+pub struct Catch {
+    pub types: Vec<usize>,
+    pub name: String,
+    /// The parameter's type: the one class it catches, or for a multi-catch the closest class
+    /// above all of them.
+    pub ty: Type,
+    pub body: Vec<Stmt>,
+    pub pos: Pos,
 }
 
 /// One `case` group of a switch: the labels that select it and its statements. A group falls
@@ -646,6 +673,12 @@ pub enum Builtin {
     /// `Objects.hashCode(o)` on a string, a box, an enum or an object; for an object a second
     /// argument is the call `o.hashCode()` that runs when `o` is not null.
     ObjectsHashCode,
+    /// `o.getClass().getName()`: Java's binary name of the class of the object `o`, such as
+    /// `java.lang.IllegalStateException` or `Bank$Overdrawn`; with `simple`,
+    /// `o.getClass().getSimpleName()`, its name in its source: `IllegalStateException`, `Overdrawn`.
+    ClassName {
+        simple: bool,
+    },
 }
 
 /// The methods of the boxed classes. The kind of the boxes comes from the types of the operands
@@ -891,7 +924,14 @@ pub fn visit_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn
             }
         }
         Stmt::Labeled { body, .. } => visit_stmt(body, on_expr, on_stmt),
-        Stmt::Yield(e) => on_expr(e),
+        Stmt::Yield(e) | Stmt::Throw(e) => on_expr(e),
+        Stmt::Try { body, catches, finally } => {
+            body.iter().for_each(|s| visit_stmt(s, on_expr, on_stmt));
+            for catch in catches {
+                catch.body.iter().for_each(|s| visit_stmt(s, on_expr, on_stmt));
+            }
+            finally.iter().flatten().for_each(|s| visit_stmt(s, on_expr, on_stmt));
+        }
         Stmt::Return(None, _)
         | Stmt::Break
         | Stmt::Continue

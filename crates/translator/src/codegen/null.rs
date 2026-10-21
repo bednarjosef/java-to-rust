@@ -275,7 +275,7 @@ pub(super) fn negated_pattern(e: &Expr) -> Option<(&Expr, Type, &str)> {
 /// Whether `stmt` always leaves the block it is in.
 pub(super) fn exits(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Return(..) | Stmt::Break | Stmt::Continue => true,
+        Stmt::Return(..) | Stmt::Break | Stmt::Continue | Stmt::Throw(_) => true,
         Stmt::Block(stmts) => stmts.last().is_some_and(exits),
         _ => false,
     }
@@ -307,7 +307,14 @@ impl<'a> Gen<'a> {
     /// .. else { .. }`, whose else branch binds `name`. Returns false, emitting nothing, when the
     /// `if` is of neither form, or the else branch does not use the name (a binding that is never
     /// read would only warn), or assigns it. (`if (s != null && ..)` is a let chain, `let_chain`.)
-    pub(super) fn narrow_if(&mut self, cond: &'a Expr, then: &'a Stmt, otherwise: Option<&'a Stmt>) -> bool {
+    /// In tail position (`tail`), the branches are the function's value (see `tail.rs`).
+    pub(super) fn narrow_if(
+        &mut self,
+        cond: &'a Expr,
+        then: &'a Stmt,
+        otherwise: Option<&'a Stmt>,
+        tail: bool,
+    ) -> bool {
         if !self.narrows_else(cond, otherwise) {
             return false;
         }
@@ -329,10 +336,10 @@ impl<'a> Gen<'a> {
                 self.narrow(name)
             }
         };
-        self.nested(passed);
+        self.nested_in(passed, tail);
         self.unnarrow(narrowed);
         self.line("} else {");
-        self.nested(then);
+        self.nested_in(then, tail);
         self.line("}");
         true
     }

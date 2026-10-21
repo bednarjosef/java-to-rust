@@ -38,7 +38,7 @@ impl<'a> Gen<'a> {
         self.value(e, Type::Char).typed()
     }
 
-    pub(super) fn string_builtin(&mut self, op: StringOp, args: &'a [Expr]) -> Code {
+    pub(super) fn string_builtin(&mut self, op: StringOp, args: &'a [Expr], id: ExprId) -> Code {
         let call = |g: &mut Self, f: &str, parts: Vec<String>| {
             Code::atom(format!("{}({})", g.runtime(f), parts.join(", ")))
         };
@@ -49,10 +49,10 @@ impl<'a> Gen<'a> {
                 let s = self.text_ref(&args[0]);
                 let begin = self.int_arg(&args[1]);
                 match args.get(2) {
-                    None => call(self, "substring_from", vec![s, begin]),
+                    None => self.may_fail(id, "substring_from", "", &format!("{s}, {begin}")),
                     Some(end) => {
                         let end = self.int_arg(end);
-                        call(self, "substring", vec![s, begin, end])
+                        self.may_fail(id, "substring", "", &format!("{s}, {begin}, {end}"))
                     }
                 }
             }
@@ -505,14 +505,13 @@ impl<'a> Gen<'a> {
     }
 
     /// A bit or radix method of `Integer` (`kind` is `int`) or `Long`.
-    pub(super) fn bits_builtin(&mut self, op: BitsOp, kind: Type, args: &'a [Expr]) -> Code {
+    pub(super) fn bits_builtin(&mut self, op: BitsOp, kind: Type, args: &'a [Expr], id: ExprId) -> Code {
         let bits = if kind == Type::Long { 64 } else { 32 };
         let rust = rust_type(kind);
         if op == BitsOp::ParseRadix {
             let s = self.text_ref(&args[0]);
             let radix = self.int_arg(&args[1]);
-            let f = self.runtime("parse_radix");
-            return Code::atom(format!("{f}::<{rust}>(Some({s}), {radix})"));
+            return self.may_fail(id, "parse_radix", &format!("::<{rust}>"), &format!("Some({s}), {radix}"));
         }
         let v = self.value(&args[0], kind);
         let recv = self.recv(&v, kind);

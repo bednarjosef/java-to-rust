@@ -22,7 +22,9 @@ impl<'t> Lowering<'t> {
 
     /// The program's interfaces that type `t` implements (a class or an enum) or extends (an
     /// interface), directly. `java.lang.Comparable` is accepted and left out: a class that
-    /// implements it only declares its `compareTo`, which the program calls directly.
+    /// implements it only declares its `compareTo`, which the program calls directly; so are
+    /// `java.lang.AutoCloseable` and `java.io.Closeable`, whose `close` a try-with-resources
+    /// calls directly.
     pub(super) fn interfaces(&self, t: usize) -> Result<Vec<usize>, Error> {
         let node = self.types[t].node;
         // javac lists the interfaces that an interface extends as its `implementsClause` too.
@@ -32,7 +34,10 @@ impl<'t> Lowering<'t> {
             let raw = name.split('<').next().unwrap_or(name);
             match self.type_index(raw) {
                 Some(i) if self.types[i].node.kind() == "INTERFACE" => out.push(i),
-                None if raw == "java.lang.Comparable" => {}
+                None if matches!(
+                    raw,
+                    "java.lang.Comparable" | "java.lang.AutoCloseable" | "java.io.Closeable"
+                ) => {}
                 _ => return unsupported(clause, &format!("implementing `{raw}`")),
             }
         }
@@ -91,6 +96,7 @@ impl<'t> Lowering<'t> {
             return Ok(None);
         }
         let Some(symbol) = call.symbol() else { return unsupported(call, "this `super` call") };
+        self.check_standard_member(call, &symbol)?;
         let args: Vec<Expr> = call.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
         let args = self.packed_args(call, &symbol, args)?;
         let resolved = self.method_index(&symbol);

@@ -6,6 +6,7 @@
 mod code_point;
 mod enum_nulls;
 mod enums;
+mod exceptions;
 mod generics;
 mod hierarchy;
 mod object;
@@ -35,6 +36,7 @@ mod sync;
 mod system;
 mod varargs;
 use arrays::{is_array_length, reads_name};
+pub use exceptions::{is_standard, standard_names, standard_subclass};
 pub use program::lower_program;
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
@@ -47,6 +49,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
     let Some(first) = decls.first().copied() else { return error(unit.pos(), "no class found") };
     real_generics::retry(|real| {
         let mut lowering = Lowering::declare(&decls)?;
+        lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
+        lowering.declare_standard()?;
         lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
         lowering.plan_object(&decls);
         let mut types: Vec<TypeDecl> =
@@ -59,7 +63,10 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         lowering.param_decls(&mut types);
         let failed = lowering.verify(&types, &methods);
         let hierarchy = Hierarchy::new(&types, &methods);
-        let class = Class { name: first.str("simpleName").to_string(), types, methods, hierarchy };
+        let raised = lowering.raised_objects(&types, &methods);
+        let closes = lowering.closes.take();
+        let name = first.str("simpleName").to_string();
+        let class = Class { name, types, methods, hierarchy, raised, closes };
         enums::check_nulls(&class)?;
         Ok((class, lowering.real.clone(), failed))
     })
@@ -173,6 +180,10 @@ struct Lowering<'t> {
     reach: Option<&'t crate::program::Reach>,
     /// In a whole program, the class whose `main` is the entry point; in a file, every `main` is.
     entry: Option<usize>,
+    /// The standard exception classes that the program uses (see `exceptions`).
+    standard: exceptions::Standard,
+    /// The `close` methods that try-with-resources statements call (see `exceptions`).
+    closes: std::cell::RefCell<Vec<(usize, Pos)>>,
     /// Where `Object` goes, in a program that uses it (see `object`).
     object: Option<object::ObjectIndexes>,
     /// The generic classes and methods that are Rust generics (see `real_generics`).
@@ -402,7 +413,8 @@ impl<'t> Lowering<'t> {
             "YIELD" => Stmt::Yield(self.expr(node.child("value")?)?),
             "ENHANCED_FOR_LOOP" => self.for_each(node)?,
             "SWITCH" => self.switch_stmt(node)?,
-            "TRY" | "THROW" => return unsupported(node, "exceptions"),
+            "TRY" => self.try_stmt(node)?,
+            "THROW" => self.throw(node)?,
             "LABELED_STATEMENT" => self.labeled(node)?,
             "CLASS" | "INTERFACE" | "ENUM" | "RECORD" => return unsupported(node, "local classes"),
             kind => return unsupported(node, &kind_words(kind)),
@@ -567,7 +579,11 @@ impl<'t> Lowering<'t> {
             Some(s)
                 if matches!(
                     s.kind,
-                    "LOCAL_VARIABLE" | "PARAMETER" | "EXCEPTION_PARAMETER" | "BINDING_VARIABLE"
+                    "LOCAL_VARIABLE"
+                        | "PARAMETER"
+                        | "EXCEPTION_PARAMETER"
+                        | "BINDING_VARIABLE"
+                        | "RESOURCE_VARIABLE"
                 ) =>
             {
                 Ok(node.str("name").to_string())
@@ -636,6 +652,10 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.constant_body_call(node, &symbol, receiver, &mut args)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.class_name_call(&symbol, receiver)? {
+            return Ok(kind);
+        }
+        self.check_standard_member(node, &symbol)?;
         let builtin = match (symbol.owner, symbol.name) {
             ("java.io.PrintStream", "println") if system_out => Builtin::Println,
             ("java.io.PrintStream", "print") if system_out => Builtin::Print,

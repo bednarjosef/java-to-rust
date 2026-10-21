@@ -7,6 +7,13 @@ pub fn non_null<T>(value: Option<T>) -> T {
     }
 }
 
+/// `non_null` where the program observes the `NullPointerException`. Java's message names what
+/// was null in terms of the bytecode, which a translation cannot reproduce; the translator
+/// rejects programs that read it.
+pub fn try_non_null<T>(value: Option<T>) -> Result<T, crate::Exception> {
+    value.ok_or_else(|| crate::Exception::bare("java.lang.NullPointerException"))
+}
+
 /// Java's string form of a reference that may be null: `null`, or the value's own.
 pub struct OrNull<T>(Option<T>);
 

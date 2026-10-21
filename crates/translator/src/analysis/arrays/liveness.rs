@@ -4,9 +4,9 @@
 //! `a = b; b = c;` hands `b`'s array to `a`, since `b` is assigned before anything reads it again.
 //!
 //! The analysis is the classic backward one over the structured statements; loops are solved by
-//! iterating to a fixed point. A `switch` is not looked into: every array it mentions counts as
-//! live throughout it, and so does everything live where a jump inside it could lead. Anything
-//! this module cannot follow is live, which only keeps an array shared.
+//! iterating to a fixed point. A `switch` and a `try` are not looked into: every array they
+//! mention counts as live throughout them, and so does everything live where a jump inside them
+//! could lead. Anything this module cannot follow is live, which only keeps an array shared.
 
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
@@ -135,18 +135,18 @@ impl Walk<'_> {
             }
             Stmt::Switch { selector, cases } => {
                 // Every array the switch mentions, and wherever a jump out of it may lead.
-                let mut live = union(&[&out, &self.uses(selector)]);
-                for case in cases {
-                    for stmt in &case.body {
-                        visit_stmt(stmt, &mut |e| live.extend(self.uses(e)), &mut |_| {});
-                    }
-                }
-                let targets = self.continues.iter().chain(self.labels.iter().flat_map(|(_, b, c)| [b, c]));
-                for target in targets {
-                    live.extend(target.iter().cloned());
-                }
-                live
+                let live = union(&[&out, &self.uses(selector)]);
+                self.opaque(live, cases.iter().flat_map(|c| &c.body))
             }
+            Stmt::Try { body, catches, finally } => {
+                // Every array the `try` mentions, and wherever a jump out of it may lead.
+                let stmts =
+                    body.iter().chain(catches.iter().flat_map(|c| &c.body)).chain(finally.iter().flatten());
+                self.opaque(out, stmts)
+            }
+            // Nothing of the method is live after a `throw` that leaves it; one inside a `try` is
+            // not walked.
+            Stmt::Throw(e) => self.uses(e),
             Stmt::Labeled { label, body } => {
                 self.labels.push((label.clone(), out.clone(), Live::new()));
                 let is_loop = matches!(
@@ -166,6 +166,20 @@ impl Walk<'_> {
             // A `yield` belongs to a switch expression, which is not walked into.
             Stmt::Yield(e) => union(&[&out, &self.uses(e)]),
         }
+    }
+
+    /// The live set before a statement that is not looked into, made of `stmts`: `live`, every
+    /// array they mention, and wherever a jump out of them may lead.
+    fn opaque<'s>(&self, mut live: Live, stmts: impl Iterator<Item = &'s Stmt>) -> Live {
+        for stmt in stmts {
+            visit_stmt(stmt, &mut |e| live.extend(self.uses(e)), &mut |_| {});
+        }
+        let targets =
+            self.breaks.iter().chain(&self.continues).chain(self.labels.iter().flat_map(|(_, b, c)| [b, c]));
+        for target in targets {
+            live.extend(target.iter().cloned());
+        }
+        live
     }
 
     fn label(&self, label: &str) -> &(String, Live, Live) {
