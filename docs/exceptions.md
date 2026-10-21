@@ -46,11 +46,14 @@ signature. Everything else is decided here.
    callers observe it. The methods of an override group agree. The `toString` that making an
    object's text runs (`"" + o`, `println(o)`, `append(o)`, `String.valueOf(o)`) is not such a
    call: the text is `Display`, which cannot return an exception, so what that `toString` throws
-   ends the program there. A `catch` right around the text that would catch it is rejected; one
-   further up the calls is not looked at, a deviation that matters only when a `toString` really
-   throws and a caller catches it. (Before, the JDK's collections' `toString`s were all taken as
-   observed: `AbstractList.Itr.next` catches the `IndexOutOfBoundsException` of `get`, whose
-   message formats a `List` with `%s`.) An explicit `o.toString()` is an ordinary call.
+   ends the program there. Where a `toString` that the program wrote may run and may throw what a
+   `catch` around the text, or around a call on the way to it, would catch, the program is
+   rejected. The JDK's own `toString`s are not looked at: they throw only for bugs, such as a
+   collection changed while it is shown (`ConcurrentModificationException`), which then end the
+   program even where a `catch` would see them. (Before, the JDK's collections' `toString`s were
+   all taken as observed: `AbstractList.Itr.next` catches the `IndexOutOfBoundsException` of
+   `get`, whose message formats a `List` with `%s`.) An explicit `o.toString()` is an ordinary
+   call.
 6. **Failures of the runtime become values only where they are observed.** Division by zero,
    array indexes and sizes, null dereferences, parsing and the string indexes raise exceptions in
    the runtime today by printing them and exiting (`java::throw`). That stays the translation
@@ -82,8 +85,9 @@ signature. Everything else is decided here.
     `getMessage()` in a `catch` that such an exception reaches is rejected, while the message of
     one that code creates, as `Objects.requireNonNull(x, "msg")` does, is its own),
     catching `StackOverflowError`, `OutOfMemoryError` or `VirtualMachineError` (the translation
-    cannot raise them), a `toString` that throws an exception that a call of it observes, or
-    that a `catch` right around an object's text would catch (it is `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace` and `initCause`.
+    cannot raise them), a `toString` that throws an exception that a call of it observes, or a
+    `toString` of the program that throws what a `catch` around an object's text, or around a
+    call on the way to it, would catch (it is `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace` and `initCause`.
 
 ## 1. The representation
 

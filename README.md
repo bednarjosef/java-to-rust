@@ -253,9 +253,9 @@ A small subset, end to end:
   Rejected for now, by name: try-with-resources over a library type (an `AutoCloseable` variable or
   lambda), catching or letting a `finally` see a null dereference, a negative array size, a failed
   cast or a failure of the library other than these, a `toString`, a constructor of an exception or
-  an enum that throws something a caller catches (for the `toString` that making an object's text
-  runs, only a `catch` right around the text counts: one further up does not see its exception,
-  which ends the program), and a `finally` that sees a static initializer's
+  an enum that throws something a caller catches (the JDK's own `toString`s throw only for bugs,
+  such as a collection changed while it is shown, and those end the program even where a caller
+  would catch them), and a `finally` that sees a static initializer's
   failure in a program that catches none of those classes. The design is in
   [docs/exceptions.md](docs/exceptions.md).
 - **Threads** are the platform's: a class that extends `Thread` and overrides `run`, or a

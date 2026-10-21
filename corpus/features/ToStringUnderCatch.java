@@ -1,6 +1,7 @@
-// A `toString` that may throw, run to make an object's text in a method whose caller catches the
-// same exception: the caller's `catch` sees the method's own `throw`, and the `toString`, which
-// does not throw here, keeps its plain signature.
+// A `toString` that may throw, run to make an object's text in a method whose caller catches
+// another exception: the caller's `catch` sees the method's own `throw`, and the `toString`, whose
+// exception nothing catches, keeps its plain signature. The JDK's `toString`s (a builder's) are not
+// looked at.
 public class ToStringUnderCatch {
     static class Item {
         final int n;
@@ -12,7 +13,7 @@ public class ToStringUnderCatch {
         @Override
         public String toString() {
             if (n < 0) {
-                throw new IllegalStateException("negative item");
+                throw new ArithmeticException("negative item");
             }
             return "Item " + n;
         }

@@ -23,9 +23,10 @@
 //! The `toString` that making an object's text runs (`"" + o`, `println(o)`, `append(o)`,
 //! `String.valueOf(o)`) is not such a call: the generator writes it with `Display`, which has no
 //! way to return an exception, so what it throws ends the program there, as an exception that
-//! nothing catches does. Where a `catch` directly around the text would catch it, the program is
-//! rejected; a `catch` further up the calls is not looked at (a deviation where a `toString`
-//! throws and a caller catches it). An explicit `o.toString()` is an ordinary call.
+//! nothing catches does. Where a `toString` that the program wrote may throw what a `catch`
+//! around the text, or around a call on the way to it, would catch, the program is rejected. The
+//! JDK's own `toString`s throw only for bugs (a collection changed while it is shown) and are not
+//! looked at. An explicit `o.toString()` is an ordinary call.
 
 mod entry;
 mod failures;
@@ -178,10 +179,13 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     }
     let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|&t| matches(k, t));
 
-    // A `catch` right around an object's text that would catch what its `toString` throws.
-    for p in points.iter().flatten() {
+    // An object's text whose `toString`, one the program wrote, may throw what a `catch` around
+    // the text, or around a call on the way to it, would catch. The JDK's own `toString`s throw
+    // only for bugs (a collection changed while it is shown) and are not looked at.
+    for (m, p) in points.iter().enumerate().flat_map(|(m, ps)| ps.iter().map(move |p| (m, p))) {
         let Raise::Text(shown) = &p.raise else { continue };
-        if shown.iter().flat_map(|&c| &escapes[c]).any(|k| caught(k, &p.frames)) {
+        let program = shown.iter().filter(|&&c| !from_jdk(&class.types[class.methods[c].class]));
+        if program.flat_map(|&c| &escapes[c]).any(|k| caught(k, &p.frames) || observed(k, &seen[m])) {
             return error(
                 p.pos,
                 "catching an exception that this toString may throw not supported yet".to_string(),
@@ -776,6 +780,13 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
         Place::Field { object, .. } => out.push(object),
         Place::Var(_) | Place::Static { .. } => {}
     }
+}
+
+/// Whether `decl` is a class of the JDK, which no program may declare.
+fn from_jdk(decl: &TypeDecl) -> bool {
+    ["java", "javax", "jdk", "sun"]
+        .iter()
+        .any(|root| decl.package == *root || decl.package.starts_with(&format!("{root}.")))
 }
 
 /// The objects whose text an expression makes, which runs their `toString`.
