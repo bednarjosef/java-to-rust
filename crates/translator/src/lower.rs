@@ -50,6 +50,7 @@ mod natives;
 mod patterns;
 mod primitives;
 mod program;
+mod prologues;
 mod switch;
 mod sync;
 mod system;
@@ -192,6 +193,12 @@ fn unsupported<T>(node: Node, what: &str) -> Result<T, Error> {
 }
 
 /// `ENHANCED_FOR_LOOP` as `enhanced for loop`.
+/// Whether javac's type `name` is an instantiation of the generic class `class`, such as
+/// `java.lang.Enum<?>` (and not an array of one, `java.lang.Enum<?>[]`).
+fn generic_of(name: &str, class: &str) -> bool {
+    name.strip_prefix(class).is_some_and(|rest| rest.starts_with('<') && rest.ends_with('>'))
+}
+
 fn kind_words(kind: &str) -> String {
     kind.to_lowercase().replace('_', " ")
 }
@@ -348,6 +355,7 @@ impl<'t> Lowering<'t> {
             None => return unsupported(node, "methods without a body"),
         };
         let params = if is_ctor {
+            self.constructor_prologue(node, info.owner, &mut body)?;
             self.run_initializer_blocks(info.owner, &mut body)?;
             self.start_constructor(info.owner, &mut body)?;
             let (first, last) = self.synthetic_params(info.owner)?;
@@ -388,9 +396,10 @@ impl<'t> Lowering<'t> {
             "void" => Ok(Type::Void),
             "java.lang.String" => Ok(Type::String),
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
-            _ if name == "java.lang.Class" || name.starts_with("java.lang.Class<") => Ok(Type::JavaClass),
+            // An array of these (`Class<?>[]`, `Enum<?>[]`) is an array type, below.
+            _ if name == "java.lang.Class" || generic_of(name, "java.lang.Class") => Ok(Type::JavaClass),
             // A value of one of the program's enums (see `enums::enum_call`).
-            _ if (name == "java.lang.Enum" || name.starts_with("java.lang.Enum<"))
+            _ if (name == "java.lang.Enum" || generic_of(name, "java.lang.Enum"))
                 && self.object.is_some_and(|at| at.enumeration.is_some()) =>
             {
                 Ok(Type::class(ENUM))

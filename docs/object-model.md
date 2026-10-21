@@ -516,6 +516,15 @@ fn new(r: f64) -> Circle {
   (`codegen/objects.rs::constructor`): `let obj = Rc::new(RefCell::new(Circle { base:
   BaseFields::new("circle"), r: 0.0 }));` then `field_inits`, then the body on `this`.
 - `this(...)` delegation is unchanged; `super(...)` and `this(...)` are exclusive in Java.
+- Statements before `super(...)` or `this(...)` (Java 25's flexible constructor bodies, which the
+  JDK's `SortedOps` uses; `lower/prologues.rs`) are written before the object is built, so their
+  locals reach the call's arguments and the rest of the body. They cannot use `this`, except to
+  assign a field without an initializer: that value goes into a local, `early$f`, and
+  `this.f = early$f` right after the call stores it, which the struct literal takes in. In the
+  second form above, the stores run on the zero object before the superclass's
+  `construct<Name>`, which may call a method that reads them, as in Java. Before a `super()` of
+  `Object`, which is left out, the statements are the start of the body; a class with field
+  initializers is rejected there, as they would run first.
 - Static initialization order: `init_circle()` calls `init_base()` first (section 2.5).
 
 ### 1.5 `instanceof` with and without pattern, downcasts

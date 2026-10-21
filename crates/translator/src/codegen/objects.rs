@@ -1808,11 +1808,12 @@ impl<'a> Gen<'a> {
             return self.plain_constructor(m);
         }
         let decl = &class.types[m.class];
-        let (delegate, rest) = match m.body.split_first() {
+        let body = self.prologue(&m.body);
+        let (delegate, rest) = match body.split_first() {
             Some((Stmt::Expr(Expr { kind: ExprKind::ThisCall { args, resolved }, .. }), rest)) => {
                 (Some((args, resolved.expect("calls are resolved by the checker"))), rest)
             }
-            _ => (None, &m.body[..]),
+            _ => (None, body),
         };
         let (base, rest) = self.super_init(m.class, rest);
         let initialize = delegate.is_none() && decl.fields.iter().any(|f| f.init.is_some());
@@ -1865,6 +1866,14 @@ impl<'a> Gen<'a> {
         self.ctor_result = None;
         let result = self.ok(result.to_string());
         self.line(&result);
+    }
+
+    /// Writes the statements of a constructor's `body` before its `this(..)` or `super(..)`, which
+    /// run before the object exists (see `lower::prologues`), and returns the rest of the body.
+    pub(super) fn prologue(&mut self, body: &'a [Stmt]) -> &'a [Stmt] {
+        let (prologue, body) = body.split_at(explicit_call(body).unwrap_or(0));
+        self.stmts(prologue, false);
+        body
     }
 
     /// The `super(...)` that starts the statements of a constructor of class `t`, if one does: the
