@@ -479,6 +479,7 @@ impl<'t> Lowering<'t> {
                 };
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
             }
+            "EXPRESSION_STATEMENT" if let Some(set_all) = self.set_all(node)? => set_all,
             "EXPRESSION_STATEMENT" => match self.expr(node.child("expression")?)? {
                 // A native that does nothing here, such as `registerNatives()`, leaves no trace.
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
