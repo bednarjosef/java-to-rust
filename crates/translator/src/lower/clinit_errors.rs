@@ -34,9 +34,9 @@ impl<'t> Lowering<'t> {
     ) {
         let throwable = Type::class(THROWABLE);
         let (Some(to_eiie), Some(eiie_text), Some(ncdfe), Some(error), Some(any)) = (
-            self.ctor(methods, EIIE, &[throwable.clone()]),
+            self.ctor(methods, EIIE, &[throwable]),
             self.ctor(methods, EIIE, &[Type::String]),
-            self.ctor(methods, NCDFE, &[Type::String, throwable.clone()]),
+            self.ctor(methods, NCDFE, &[Type::String, throwable]),
             self.type_index(ERROR),
             self.type_index(THROWABLE),
         ) else {
@@ -57,7 +57,7 @@ impl<'t> Lowering<'t> {
             let target = Place::Static { class: index, name: name.to_string() };
             Stmt::Expr(self.synth(ExprKind::Assign { op: None, target, value: Box::new(value) }, pos, ty))
         };
-        let throw = |e: Expr| Stmt::Throw(self.convert(e, throwable.clone()));
+        let throw = |e: Expr| Stmt::Throw(self.convert(e, throwable));
         let when = |cond: Expr, body: Vec<Stmt>| Stmt::If {
             cond,
             then: Box::new(Stmt::Block(body)),
@@ -86,11 +86,11 @@ impl<'t> Lowering<'t> {
         let any_catch = Catch {
             types: vec![any],
             name: "failure".to_string(),
-            ty: throwable.clone(),
+            ty: throwable,
             body: vec![
                 set(STATE, Type::Int, int(2)),
-                set(FAILURE, Type::String, failure_of(var("failure", throwable.clone()))),
-                throw(new(to_eiie, vec![var("failure", throwable.clone())])),
+                set(FAILURE, Type::String, failure_of(var("failure", throwable))),
+                throw(new(to_eiie, vec![var("failure", throwable)])),
             ],
             pos,
         };
@@ -101,7 +101,7 @@ impl<'t> Lowering<'t> {
             Type::String,
         );
         let message = concat(text("Could not initialize class "), binary);
-        let cause = self.convert(new(eiie_text, vec![failure()]), throwable.clone());
+        let cause = self.convert(new(eiie_text, vec![failure()]), throwable);
         let original = std::mem::take(&mut method.body);
         method.body = vec![
             when(is(2), vec![throw(new(ncdfe, vec![message, cause]))]),
