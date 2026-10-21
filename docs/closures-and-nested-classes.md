@@ -1338,7 +1338,10 @@ Decisions that change during the implementation are recorded here, milestone by 
   local passed as it is moves in under its own name; the closure owns what the class's
   constructor would have borrowed. A closure with no captures has no `move`, and a one-line
   body stays on the closure's line. The value is `Rc::new(closure) as Op`, so that every place
-  gets the alias's type without an annotation.
+  gets the alias's type without an annotation; the captures are bound in a block around it,
+  `{ let outer = self.clone(); Rc::new(move |x| ..) as Op }`, except where the closure is a
+  function's final value: there they are statements of the function, and the result type
+  converts `Rc::new(move |x| ..)` without `as`.
 - **Default methods are an extension trait** (4.6): `trait PredicateMethods { fn negate(&self)
   -> Predicate; .. }` beside the alias and `impl PredicateMethods for Predicate`, with only the
   default methods the program calls. `self` is `&Rc<dyn Fn ..>`: `test(x)` is `self(x)`, and a

@@ -179,6 +179,34 @@ impl<'a> Gen<'a> {
     /// A lambda converted to its closure type `t`: its captures bound to locals, and the closure
     /// that moves them in, whose body is the lambda class's method.
     pub(super) fn closure(&mut self, t: usize, ctor: usize, args: &'a [Expr]) -> Code {
+        let (prelude, closure) = self.closure_parts(t, ctor, args);
+        if prelude.is_empty() {
+            return Code::new(closure, AS);
+        }
+        Code::atom(format!("{{ {} {closure} }}", prelude.join(" ")))
+    }
+
+    /// The closure that `value`, the value of a function's final `return`, is, as the lines that
+    /// bind its captures and the closure: in tail position they need no block of their own.
+    pub(super) fn returned_closure(&mut self, value: &'a Expr) -> Option<(Vec<String>, String)> {
+        let ExprKind::Cast(to, lambda) = &value.kind else { return None };
+        let ExprKind::New { args, ctor: Some(ctor), .. } = &lambda.kind else { return None };
+        let t = self.closure_type(*to)?;
+        let plain =
+            !self.display && !self.optional_return() && !self.facts.owned_returns.contains(&self.method);
+        if !plain || *to != self.ret {
+            return None;
+        }
+        // The function's result type converts the closure without `as`.
+        let (prelude, closure) = self.closure_parts(t, *ctor, args);
+        let closure =
+            closure.rsplit_once(" as ").map_or(closure.as_str(), |(closure, _)| closure).to_string();
+        Some((prelude, closure))
+    }
+
+    /// The lines that bind the captures of a lambda converted to closure type `t`, and the
+    /// closure.
+    fn closure_parts(&mut self, t: usize, ctor: usize, args: &'a [Expr]) -> (Vec<String>, String) {
         let c = self.class.methods[ctor].class;
         let Some(m) = self.class.hierarchy.implementation(self.closure_method(t), c) else {
             unreachable!("a closure type's lambda implements its method")
@@ -270,10 +298,7 @@ impl<'a> Gen<'a> {
         let body = self.braced(&text);
         let closure =
             format!("Rc::new({moving}|{}|{ret} {body}) as {}", params.join(", "), self.closure_name(t));
-        if prelude.is_empty() {
-            return Code::new(closure, AS);
-        }
-        Code::atom(format!("{{ {} {closure} }}", prelude.join(" ")))
+        (prelude, closure)
     }
 
     /// Whether `this.m(..)` (`receiver`, method `index`) is, in a closure's body, a call of the
