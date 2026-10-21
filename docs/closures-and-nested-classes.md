@@ -1081,3 +1081,51 @@ anonymous `Runnable` started as threads and joined). Unblocks: `ComparatorSortin
 ## 9. Deviations
 
 Decisions that change during the implementation are recorded here, milestone by milestone.
+
+### Captures and local classes
+
+- **Desugared as javac does, so no new expression kinds.** Lowering turns each inner, local and
+  anonymous class into an ordinary class: a synthetic field `outer` (first in the struct) for
+  the enclosing instance and a field per captured local, constructor parameters for them (the
+  enclosing instance before the declared ones, the captured locals after them, as javac orders
+  them), assignments of the fields at the start of every constructor that does not call
+  `this(..)`, and the arguments in every `new`, `this(..)` and `super(..)`. `Outer.this` and an
+  unqualified member of an enclosing class become a chain of `outer` field reads
+  (`this.outer.outer`), starting at the `outer` parameter inside a constructor; a captured local
+  reads its field (its parameter, inside a constructor). So `ExprKind::New` keeps its shape and
+  there is no `ExprKind::OuterThis`: the analyses and the generator see fields, parameters and
+  arguments they already handle, and the this-as-value facts of 1.3 fall out of the existing
+  ones (a method that creates a local class reading the object's fields passes `this` as a
+  value, which already gives it the handle form). `analysis/captures.rs` and
+  `codegen/captures.rs` are therefore not needed; `lower/captures.rs` computes the captures on
+  javac's tree before lowering, and `lower/inner.rs` declares, names and desugars the classes.
+- **The AST additions differ in detail.** `TypeDecl` has `outer: Option<usize>` and
+  `captures: Vec<Capture>` as planned, but `Capture` also names its field (`field`, which gets a
+  `_` appended where the class or a superclass already has a field of that name), and
+  `Origin` is `Member`, `Local { method, binary }` or `Anonymous { method, binary }` (binary:
+  javac's binary name, which `getName` and the default `toString` print). The lambdas work adds
+  its own variant. The captures are informational for later analyses (threads); the struct
+  fields are already in `fields`.
+- **Field initializers move into the constructors** of a class that holds an enclosing instance
+  or captures, after the synthetic assignments and before the initializer blocks (javac's
+  order), since they may read what those set.
+- **The synthetic fields are set after `super(..)`, not before it** as javac does: the
+  superclass's constructor builds the struct's `base`. A superclass constructor that calls a
+  method overridden in the nested class, which reads a capture, would see it unset; no program
+  in the corpus or targets does that.
+- **`this` captured in a constructor is not rejected** (1.5): a constructor that uses `this` as
+  a value already builds the object behind its handle first (`field_inits` and then the body on
+  the handle), so `new Inner()` in a constructor or a field initializer works.
+- **JavaTree names local and anonymous classes by their binary names** (`Main$1Labeler`,
+  `Main$1`) in types, symbol types and owners, where javac's `toString` gives the simple name or
+  `<anonymous Runnable>`, which is ambiguous between two methods. Enum constant bodies keep
+  javac's names, which `lower/constant_bodies.rs` relies on. A separate commit; the lambdas
+  implementer owns the file and is told.
+- **Reachability declares local and anonymous classes** (with the class whose member declares
+  them as their outer class), so that their members are in `Reach::methods` and are lowered in
+  whole-program mode; their code is still scanned whole with the code that declares them.
+- **Still rejected:** local interfaces, enums and records (the records work); member classes of
+  local and anonymous classes; a nested class extending one nested in another class (the two
+  `outer` fields would differ); a field named `outer` in a nested class with an enclosing
+  instance; `Outer.super.m()`; a qualified `super(..)` (`outer.super()`); an enclosing
+  instance needed in static code (which javac rejects as well).

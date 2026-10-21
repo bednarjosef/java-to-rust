@@ -141,6 +141,9 @@ impl<'a> Gen<'a> {
         if decl.kind == TypeKind::Runtime {
             return decl.name.clone();
         }
+        if let Some((binary, _)) = decl.origin.java_names() {
+            return binary.to_string();
+        }
         match decl.name.strip_prefix(&decl.package).and_then(|rest| rest.strip_prefix('.')) {
             Some(rest) if !decl.package.is_empty() => format!("{}.{}", decl.package, rest.replace('.', "$")),
             _ => decl.name.replace('.', "$"),

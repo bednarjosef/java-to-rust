@@ -61,6 +61,8 @@ fn lower_with<'t>(
     lowering.standard = super::exceptions::Standard::select(reachable);
     lowering.declare_standard().map_err(|e| (None, e))?;
     unit_of.resize(lowering.types.len(), usize::MAX);
+    lowering.name_nested();
+    lowering.plan_captures().map_err(|(t, e)| ((unit_of[t] != usize::MAX).then_some(unit_of[t]), e))?;
     packages.resize(lowering.types.len(), String::new());
     lowering.entry = lowering.type_index(main);
     let unit = |t: usize| (unit_of[t] != usize::MAX).then_some(unit_of[t]);
