@@ -38,7 +38,8 @@ public class ClassCastAndIsInstance {
         }
         Shape s = as(Shape.class, values[0]);
         System.out.println(s.area());
-        System.out.println(as(Square.class, values[0]) == null);
+        System.out.println(as(Square.class, values[0]));
+        System.out.println("square " + as(Square.class, values[1]));
         Circle c = Circle.class.cast(values[0]);
         System.out.println(c.area() + " " + describe(Circle.class, c));
         System.out.println(String.class.cast(null) + " " + Integer.class.cast(values[3]));
