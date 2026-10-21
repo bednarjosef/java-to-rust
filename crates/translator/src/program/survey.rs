@@ -325,8 +325,12 @@ impl Census {
                     {
                         scan.feature("reference casts", node)
                     }
-                    "ENHANCED_FOR_LOOP" if !text(&node["expression"], "javaType").ends_with(']') => {
-                        scan.feature("for-each over collections", node)
+                    // A for-each over one of the program's `Iterable`s calls its iterator.
+                    "ENHANCED_FOR_LOOP"
+                        if !text(&node["expression"], "javaType").ends_with(']')
+                            && !self.declared.contains(&raw(text(&node["expression"], "javaType"))) =>
+                    {
+                        scan.feature("for-each over types outside the sources", node)
                     }
                     "BINDING_PATTERN" | "RECORD_PATTERN" => scan.feature("patterns", node),
                     _ => {}

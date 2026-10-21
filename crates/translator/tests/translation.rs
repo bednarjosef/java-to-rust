@@ -2360,6 +2360,28 @@ fn local_and_anonymous_classes_are_declared_so_their_calls_are_not_outside() {
 }
 
 #[test]
+fn the_survey_counts_only_a_for_each_over_a_type_outside_the_sources() {
+    let dir = write_sources(
+        "survey_for_each",
+        &[(
+            "Main.java",
+            "import java.util.Iterator;
+            public class Main implements Iterable<String> {
+                public Iterator<String> iterator() { return null; }
+                static void own(Main m) { for (String s : m) System.out.println(s); }
+                static void jdk(java.util.List<String> l) { for (String s : l) System.out.println(s); }
+                public static void main(String[] args) { own(new Main()); jdk(null); }
+            }",
+        )],
+    );
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let report = survey(&program).report;
+    let table = feature_table(&report, "Program code: features");
+    let row = feature_row(table, "for-each over types outside the sources");
+    assert!(row.contains("Main.java:5") && !row.contains("Main.java:4"), "{table}");
+}
+
+#[test]
 fn the_survey_reports_the_program_and_its_libraries_in_separate_tables() {
     let dir = write_sources(
         "survey_split",
