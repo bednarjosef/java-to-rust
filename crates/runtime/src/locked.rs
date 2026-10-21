@@ -181,11 +181,26 @@ impl RawLock {
 }
 
 impl RawLock {
-    /// Enters the lock as the object's monitor: `synchronized`.
+    /// Enters the lock as the object's monitor: `synchronized`. A thread that waits for another
+    /// to exit it is `BLOCKED` meanwhile, as `Thread.getState()` tells.
     #[inline]
     pub(crate) fn enter(&self) {
-        self.acquire();
+        let me = thread_token();
+        if self.owner.load(Ordering::Relaxed) == me {
+            self.depth.set(self.depth.get() + 1);
+        } else {
+            if self.owner.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                self.blocked(me);
+            }
+            self.depth.set(1);
+        }
         self.entered.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Waits for the monitor as a `BLOCKED` thread.
+    #[cold]
+    fn blocked(&self, me: usize) {
+        crate::thread::in_state(crate::thread::State::Blocked, || self.wait(me));
     }
 
     /// Exits the monitor that `enter` entered.
@@ -225,24 +240,31 @@ impl RawLock {
         self.release();
         let deadline = timeout.map(|t| Instant::now() + t);
         crate::thread::waiting_in(Some(bucket_index(address)));
-        let mut guard = lock();
-        let interrupted = loop {
-            let at = guard.iter().position(|w| w.ticket == ticket).expect("a waiter leaves its own entry");
-            let now = Instant::now();
-            // `interrupt` sets the status, then notifies under this mutex: no wakeup is lost. A
-            // waiter both notified and interrupted returns normally with the status set.
-            let interrupted = !guard[at].notified && crate::thread::take_interrupt();
-            if guard[at].notified || interrupted || deadline.is_some_and(|d| now >= d) {
-                guard.swap_remove(at);
-                break interrupted;
+        let state = crate::thread::State::waiting(deadline.is_some());
+        let interrupted = crate::thread::in_state(state, || {
+            let mut guard = lock();
+            loop {
+                let at =
+                    guard.iter().position(|w| w.ticket == ticket).expect("a waiter leaves its own entry");
+                let now = Instant::now();
+                // `interrupt` sets the status, then notifies under this mutex: no wakeup is lost. A
+                // waiter both notified and interrupted returns normally with the status set.
+                let interrupted = !guard[at].notified && crate::thread::take_interrupt();
+                if guard[at].notified || interrupted || deadline.is_some_and(|d| now >= d) {
+                    guard.swap_remove(at);
+                    break interrupted;
+                }
+                let step =
+                    deadline.map_or(Duration::from_millis(50), |d| (d - now).min(Duration::from_millis(50)));
+                guard = bucket.condvar.wait_timeout(guard, step).unwrap_or_else(|e| e.into_inner()).0;
             }
-            let step =
-                deadline.map_or(Duration::from_millis(50), |d| (d - now).min(Duration::from_millis(50)));
-            guard = bucket.condvar.wait_timeout(guard, step).unwrap_or_else(|e| e.into_inner()).0;
-        };
-        drop(guard);
+        });
         crate::thread::waiting_in(None);
-        self.acquire();
+        // Notified, the thread enters the monitor again, blocked while another holds it.
+        let me = thread_token();
+        if self.owner.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            self.blocked(me);
+        }
         self.depth.set(depth);
         self.entered.store(entered, Ordering::Relaxed);
         if interrupted { Waited::Interrupted } else { Waited::Done }

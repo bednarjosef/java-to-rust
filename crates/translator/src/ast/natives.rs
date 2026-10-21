@@ -83,6 +83,8 @@ pub enum Native {
     ThreadStart,
     /// `alive0(tid)`, `join0(tid, millis)` and `rename0(tid, name)`.
     ThreadAlive,
+    /// `state0(tid)`: what the thread is doing, by `Thread.State`'s ordinal, or 0 without a record.
+    ThreadState,
     ThreadJoin,
     ThreadRename,
     /// `interrupt0(tid)`, `isInterrupted0(tid)`, and `clearInterrupt0()` of `Thread.interrupted()`,
@@ -217,6 +219,7 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
             Native::ThreadStart
         }
         ("java.lang.Thread", "alive0", "(long)boolean") => Native::ThreadAlive,
+        ("java.lang.Thread", "state0", "(long)int") => Native::ThreadState,
         ("java.lang.Thread", "join0", "(long,long)void") => Native::ThreadJoin,
         ("java.lang.Thread", "rename0", "(long,java.lang.String)void") => Native::ThreadRename,
         ("java.lang.Thread", "interrupt0", "(long)void") => Native::ThreadInterrupt,

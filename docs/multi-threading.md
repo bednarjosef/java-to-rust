@@ -587,8 +587,13 @@ lowered. `java.lang.Thread`:
   `interrupt`, `isInterrupted`, `interrupted`, `currentThread`, `sleep` (`long`, `long,int`,
   `Duration`), `yield`, `onSpinWait`, `holdsLock`, `getName`/`setName`, `isDaemon`/`setDaemon`
   (`IllegalThreadStateException` after start), `getId`/`threadId`, `getPriority`/`setPriority`,
-  `getThreadGroup`, `getState` (`NEW`, `RUNNABLE`, `TERMINATED`; `WAITING`, `TIMED_WAITING` and
-  `BLOCKED` from the record's blocking state), `getUncaughtExceptionHandler`/`set...`,
+  `getThreadGroup`, `getState` (`NEW` before the start and `TERMINATED` after the end, when the
+  runtime has no record of the thread; else the state in the record, a byte that `sleep`, `park`,
+  `join`, `wait` and a contended monitor entry set around their waits: `TIMED_WAITING`,
+  `WAITING` or `BLOCKED`, and `RUNNABLE` otherwise), `getContextClassLoader`/`set...` (a slot:
+  the main thread's is the application's loader, `ClassLoader.getSystemClassLoader()`, and a new
+  thread starts with its parent's; `ClassLoader` is that value and nothing more, so loading a
+  class through it is rejected), `getUncaughtExceptionHandler`/`set...`,
   `getDefaultUncaughtExceptionHandler`/`set...`, `toString` (`Thread[#1,main,5,main]`),
   `dispatchUncaughtException` (the handler chain ending in `ThreadGroup.uncaughtException`,
   which prints `Exception in thread "<name>" ` and `e.printStackTrace()` to standard error
@@ -607,7 +612,7 @@ lowered. `java.lang.Thread`:
 Rejected, each with a message naming it: virtual threads (`Thread.ofVirtual`,
 `startVirtualThread`, `Executors.newVirtualThreadPerTaskExecutor`), `Thread.Builder`,
 `ScopedValue`, `StructuredTaskScope`, `getStackTrace`, `getAllStackTraces`, `dumpStack`,
-`stop`/`suspend`/`resume`, `ThreadGroup` enumeration, `setContextClassLoader`.
+`stop`/`suspend`/`resume`, `ThreadGroup` enumeration, what a `ClassLoader` does.
 
 ### 5.2 Natives and their Rust
 
