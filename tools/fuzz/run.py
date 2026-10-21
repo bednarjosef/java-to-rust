@@ -75,17 +75,19 @@ def compile_java(run):
 
 
 EXCEPTION = re.compile(r'^Exception in thread "main" ([\w.$]+)(?:: ?(.*))?$', re.M)
+CLASS_ONLY = {'java.lang.NullPointerException', 'java.lang.ClassCastException'}
 
 
 def exception(stderr):
     """The class and message of the uncaught exception in `stderr`, or None. Java's messages
-    for NullPointerException describe the expression that was null, which the translation does
-    not repeat, so only that class is compared."""
+    for NullPointerException describe the expression that was null, and those for
+    ClassCastException name the class loader and module, which the translation does not repeat,
+    so only the class of those is compared."""
     found = EXCEPTION.search(stderr)
     if found is None:
         return None
     name, message = found.group(1), (found.group(2) or '').strip()
-    return (name, '') if name == 'java.lang.NullPointerException' else (name, message)
+    return (name, '') if name in CLASS_ONLY else (name, message)
 
 
 def describe(java, rust):

@@ -37,7 +37,8 @@ Statuses:
 
 - `match`: the translation prints the same stdout and exits with the same code as Java, and an
   uncaught exception has the same class and message (the first line of standard error; for a
-  `NullPointerException` only the class, as Java's message describes the null expression)
+  `NullPointerException` only the class, as Java's message describes the null expression, and
+  likewise for a `ClassCastException`, whose message names the class loader)
 - `mismatch`: they differ; `target/fuzz/runs/<seed>/` keeps `Prog.java`, `java.out`, `rust.out`
 - `rustc`: the translation does not compile; the detail is the first rustc error
 - `translator-crash`: the translator panics or exits without a rejection message
