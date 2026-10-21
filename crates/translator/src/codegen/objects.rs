@@ -1000,8 +1000,9 @@ impl<'a> Gen<'a> {
         let mutating = self.facts.mutating.contains(&index);
         if self.is_plain(receiver) {
             // The call borrows a plain object itself, and two-phase borrows accept `p.set(p.x + 1)`;
-            // an argument that changes the object must run before the call borrows it.
-            if mutating && args.iter().any(|a| changes_object(a, receiver, &self.facts.mutating)) {
+            // an argument that changes the object must run before the call borrows it, whether the
+            // call borrows it mutably or not.
+            if args.iter().any(|a| changes_object(a, receiver, &self.facts.mutating)) {
                 return self.bound_call(receiver, index, args, "");
             }
             let args = self.call_args(index, args).join(", ");
