@@ -805,7 +805,7 @@ impl<'a> Gen<'a> {
 
     /// The text that `call`, a call of `toString` method `index`, gives: `"null"` where it
     /// returns null, as `String.valueOf` shows it.
-    fn null_text(&self, index: usize, call: String) -> String {
+    pub(super) fn null_text(&self, index: usize, call: String) -> String {
         if self.facts.nullable_returns.contains(&index) {
             format!("{call}.unwrap_or_else(|| String::from(\"null\"))")
         } else {

@@ -409,7 +409,8 @@ impl<'a> Gen<'a> {
         self.finallies.clear();
         self.attempt_count = 0;
         self.try_assigned = exceptions::try_assigned(self.facts, &m.body);
-        if let Some(e) = exceptions::check_try_assigned(&m.body, &self.try_assigned) {
+        let optional = |ty: Type, name: &str| self.optional_var(index, ty, name);
+        if let Some(e) = exceptions::check_try_assigned(&m.body, &self.try_assigned, optional) {
             self.rejected.get_or_insert(e);
         }
         self.name_locals(m);

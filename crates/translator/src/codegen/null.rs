@@ -81,6 +81,11 @@ impl<'a> Gen<'a> {
         let rust = self.local(name);
         let rust_ty = self.ty_name(ty);
         match init {
+            None if self.try_assigned.contains(name) => {
+                // As for a local of `exceptions::default_value`: null, as a field starts.
+                self.line("#[allow(unused_assignments)]");
+                self.line(&format!("let {mutable}{rust}: Option<{rust_ty}> = None;"));
+            }
             None => self.line(&format!("let {mutable}{rust}: Option<{rust_ty}>;")),
             Some(init) => {
                 let code = self.optional_to(init, ty);

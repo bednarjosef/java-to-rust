@@ -204,6 +204,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         Builtin::ObjectText => None,
         Builtin::ArraysCopyOf => Some("java.lang.NegativeArraySizeException"),
         Builtin::Native(Native::ArrayCopy) => Some("java.lang.ArrayIndexOutOfBoundsException"),
+        // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
+        Builtin::Arrays(op) if op.ranged() => Some("java.lang.ArrayIndexOutOfBoundsException"),
         // A literal format that fits its arguments' types never throws.
         Builtin::Format => match &args[0].kind {
             ExprKind::Str(format)
@@ -447,6 +449,11 @@ pub(super) fn runtime_failures(
                             | Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. })
                     ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })));
                     out.push((failure, "this call of the library", checked, x.id));
+                }
+                if let Builtin::Arrays(op) = builtin
+                    && op.ranged()
+                {
+                    out.push(("java.lang.IllegalArgumentException", "this call of the library", false, x.id));
                 }
                 if let Builtin::Native(Native::MonitorWait) = builtin
                     && !matches!(args[1].kind, ExprKind::Long(n) if n >= 0)
