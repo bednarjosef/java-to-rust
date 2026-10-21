@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Generates programs from seeds, runs each on Java and as translated Rust, and reports.
 
-    python3 tools/fuzz/run.py [--count 200] [--start 1] [--size 30] [--jobs 4] [--strings]
+    python3 tools/fuzz/run.py [--count 200] [--start 1] [--size 30] [--jobs 4] [--strings] [--arrays]
 
 Text is read and written as UTF-8 whatever the locale, because the string features print
 non-ASCII characters. The one exception is String.format, which uses the default locale.
 
 Each program gets one status:
   match             the translation prints the same stdout and exits with the same code as Java
-  mismatch          they differ in stdout or exit code (the detail shows the first difference)
+  mismatch          they differ in stdout, exit code or the uncaught exception's class and
+                    message (the detail shows the first difference)
   rustc             the translation does not compile (the detail shows the first error)
   translator-crash  the translator panics or exits without a rejection message
   rust-timeout      the translation runs past the time limit
@@ -23,6 +24,7 @@ every result, crates/<slot>/ for the Cargo projects (one per parallel slot, reus
 
 import argparse
 import json
+import os
 import queue
 import re
 import shutil
@@ -36,8 +38,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fuzz  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
-WORK = ROOT / 'target' / 'fuzz'
-TRANSLATOR = ROOT / 'target' / 'release' / 'java-to-rust'
+# Two runs at once (say, of two builds of the translator) need their own work directories:
+# FUZZ_WORK and FUZZ_TRANSLATOR override these, and --no-build keeps the given translator.
+WORK = Path(os.environ.get('FUZZ_WORK', ROOT / 'target' / 'fuzz')).resolve()
+TRANSLATOR = Path(os.environ.get('FUZZ_TRANSLATOR', ROOT / 'target' / 'release' / 'java-to-rust')).resolve()
 JAVA_TIMEOUT = 30
 TRANSLATE_TIMEOUT = 120
 BUILD_TIMEOUT = 900
@@ -69,6 +73,20 @@ def compile_java(run):
     return next((ln for ln in done.stderr.splitlines() if ': error: ' in ln), 'javac failed')
 
 
+EXCEPTION = re.compile(r'^Exception in thread "main" ([\w.$]+)(?:: ?(.*))?$', re.M)
+
+
+def exception(stderr):
+    """The class and message of the uncaught exception in `stderr`, or None. Java's messages
+    for NullPointerException describe the expression that was null, which the translation does
+    not repeat, so only that class is compared."""
+    found = EXCEPTION.search(stderr)
+    if found is None:
+        return None
+    name, message = found.group(1), (found.group(2) or '').strip()
+    return (name, '') if name == 'java.lang.NullPointerException' else (name, message)
+
+
 def describe(java, rust):
     """The first line where the two stdouts differ, and the two exit codes."""
     jl, rl = java.stdout.splitlines(), rust.stdout.splitlines()
@@ -77,7 +95,9 @@ def describe(java, rust):
         b = rl[i] if i < len(rl) else '<end>'
         if a != b:
             return f'line {i + 1}: java {a!r}, rust {b!r}; exit {java.returncode} vs {rust.returncode}'
-    return f'exit {java.returncode} vs {rust.returncode}'
+    if java.returncode != rust.returncode:
+        return f'exit {java.returncode} vs {rust.returncode}'
+    return f'exception: java {exception(java.stderr)}, rust {exception(rust.stderr)}'
 
 
 class Runner:
@@ -177,7 +197,8 @@ class Runner:
                                   stdin=subprocess.DEVNULL, **UTF8, timeout=JAVA_TIMEOUT)
         except subprocess.TimeoutExpired:
             return finish('java-timeout', 'Java ran past the time limit')
-        if (rust.stdout, rust.returncode) == (java.stdout, java.returncode):
+        if (rust.stdout, rust.returncode, exception(rust.stderr)) == \
+                (java.stdout, java.returncode, exception(java.stderr)):
             return finish('match', '')
         (run / 'java.out').write_text(java.stdout, encoding='utf-8')
         (run / 'rust.out').write_text(rust.stdout, encoding='utf-8')
@@ -209,6 +230,8 @@ def main():
     ap.add_argument('--jobs', type=int, default=4, help='programs in parallel')
     ap.add_argument('--strings', action='store_true',
                     help='also generate String, StringBuilder, String.format and Arrays code')
+    ap.add_argument('--arrays', action='store_true',
+                    help='also generate arrays of every depth, aliases, moves, rows and loops')
     ap.add_argument('--no-build', action='store_true', help='skip cargo build of the translator')
     args = ap.parse_args()
 
@@ -216,7 +239,7 @@ def main():
         build_translator()
     WORK.mkdir(parents=True, exist_ok=True)
     runner = Runner(args.jobs)
-    items = [(f's{seed}', fuzz.generate(seed, args.size, strings=args.strings))
+    items = [(f's{seed}', fuzz.generate(seed, args.size, strings=args.strings, arrays=args.arrays))
              for seed in range(args.start, args.start + args.count)]
     results = []
     for i, result in enumerate(runner.classify_many(items), 1):

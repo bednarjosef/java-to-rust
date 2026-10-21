@@ -9,16 +9,22 @@ while the same failure persists. Python 3 standard library only.
     cargo build --release -p java-to-rust          # run.py builds it too, unless --no-build
     python3 tools/fuzz/run.py --count 300 --start 1 --jobs 4
     python3 tools/fuzz/run.py --count 300 --start 1 --jobs 4 --strings
+    python3 tools/fuzz/run.py --count 300 --start 1 --jobs 4 --arrays
 
     python3 tools/fuzz/reduce.py target/fuzz/runs/s17/Prog.java --out target/fuzz/reduced/s17.java
 
 `run.py` options: `--count` (seeds, default 200), `--start` (first seed, default 1), `--size`
 (statements in `main`, default 30), `--jobs` (programs in parallel, default 4), `--strings`
 (also generate the String, StringBuilder, `String.format` and `Arrays` code described below),
+`--arrays` (also generate the array code described below; it combines with `--strings`),
 `--no-build`. It prints one status per program, the rejection messages with their counts, and
 the first failures of each kind. Every result is in `target/fuzz/results.jsonl`.
 
-`fuzz.py SEED [SIZE] [--strings]` prints the program for one seed, for inspection.
+Two runs at once, of two builds of the translator say, need their own work directories: the
+environment variables `FUZZ_WORK` (instead of `target/fuzz`) and `FUZZ_TRANSLATOR` (instead of
+`target/release/java-to-rust`, with `--no-build`) apply to `run.py` and `reduce.py`.
+
+`fuzz.py SEED [SIZE] [--strings] [--arrays]` prints the program for one seed, for inspection.
 
 Text is read and written as UTF-8 whatever the locale, because the string features print
 non-ASCII characters. Java runs with `-Dstdout.encoding=UTF-8`. `String.format` uses the default
@@ -26,7 +32,9 @@ locale, so run the fuzzer with a fixed locale (`LANG=C.UTF-8`) when comparing ru
 
 Statuses:
 
-- `match`: the translation prints the same stdout and exits with the same code as Java
+- `match`: the translation prints the same stdout and exits with the same code as Java, and an
+  uncaught exception has the same class and message (the first line of standard error; for a
+  `NullPointerException` only the class, as Java's message describes the null expression)
 - `mismatch`: they differ; `target/fuzz/runs/<seed>/` keeps `Prog.java`, `java.out`, `rust.out`
 - `rustc`: the translation does not compile; the detail is the first rustc error
 - `translator-crash`: the translator panics or exits without a rejection message
@@ -92,6 +100,42 @@ With `--strings`, also:
 Every index is reduced into range with `Math.floorMod`, so string programs do not throw (apart
 from the deliberate exceptions above).
 
+With `--arrays` (`fuzz_arrays.py`), also:
+
+- Arrays of one, two and three dimensions of every primitive type and `String`: `new` with all
+  or some sizes, literals, jagged rows made by a loop, `null` rows and `null` strings
+- Second names: `b = a`, `x = c ? a : b`, a row in a local (`int[] r = m[i]`), a row loop
+  variable, a parameter, a static, an array returned by the method it was given to; writes
+  through one name and reads through the others
+- Moves and swaps: `a = b; b = new ..`, `t = a; a = b; b = t;`, `a = c ? b : a`, `a = a.clone()`
+- Rows replaced by new rows, by other rows (`m[i] = m[j]`), by a local array or a clone, and
+  swapped
+- For-each over arrays and over rows, with writes to the array and to the row in the body
+- Counting loops bounded by `length`, by a variable (`Math.min` of two lengths), by a guard in
+  the body, downward, by twos, from 1, `<=` to `length - 1`, as a `while`, over the rows of a
+  grid and product-like over two grids; each with or without other statements in its body
+- Helper methods that read, write, return the array they were given, return a new one, keep it
+  in a static, pick one of two, copy one into another (also into itself), replace their
+  parameter, recurse over it, take a grid and a row of it
+- `a.clone()`, `==` on arrays and rows, `Arrays.equals`, `hashCode`, `sort` (whole and by range),
+  `fill` (whole and by range), `toString`, `deepToString`, `binarySearch`, `copyOf`,
+  `copyOfRange`, `System.arraycopy` (also within one array), `new String(char[])`
+- Stores whose value replaces the array: `a[a.length - 1] = (a = b)[0]`
+- The deliberate exceptions, at the chosen statement, are array failures in Java: an index past
+  the end or below zero in a loop that prints first, a bound taken before the array was
+  replaced, a size known at the declaration and then changed, a null row, a negative size,
+  a jagged row, `System.arraycopy`, `Arrays.fill` and `copyOfRange` out of range, a for-each over
+  a null row, a null string's `length()`
+
+An array is tracked with a tag: plain (not null, not empty, rows likewise, strings not null),
+so any index reduced with `Math.floorMod` is in range, or loose (may be empty, rows may be null),
+whose every access is guarded. A plain array may also be private: no statement gives it a
+second name (no alias, row local, `==`, `Arrays` call, clone or call that keeps or returns it),
+so the translator keeps it as a `Vec` and exercises borrowed parameters, moves and loops over
+slices. The arrays a counting loop walks cannot be assigned in its body,
+so only the deliberate exceptions throw. Half of these programs have no array statics, since
+a static array keeps the translator from lending shared arrays to calls.
+
 Every program terminates: loops have constant bounds, and recursion counts a depth parameter
 down from at most 4.
 
@@ -99,8 +143,8 @@ down from at most 4.
 
 - Classes, objects, fields of instance type, `null`, `instanceof`, inheritance, interfaces
 - Enums, generics, lambdas, streams, inner or anonymous classes, multiple top-level classes
-- Two-dimensional or array-of-array values, arrays of `String`, `Arrays` methods other than the four
-  listed above
+- Without `--arrays`: two-dimensional or array-of-array values, arrays of `String`, `Arrays`
+  methods other than the four listed above; with it, arrays of objects and arrays in fields
 - String methods other than those listed, `String` values with `null`, `Character` and `Integer`
   static methods, `String.join`, regular expressions, `StringBuilder` methods other than the
   listed ones
