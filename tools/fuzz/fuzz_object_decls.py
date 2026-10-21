@@ -150,6 +150,7 @@ class ObjectDeclGen:
         self.emit_helpers()
         self.exception_decls()
         self.kinds, self.methods, self.obj_hooks = saved
+        self.construction_decls()
         if self.chance(0.5):
             t = self.pick([d.name for d in self.decls.values()])
             self.emit(f'static {t} sObj = {self.new_object(t, 1)};')

@@ -8,7 +8,8 @@ static counters, constructors calling `super(...)` and `this(...)`, overridden a
 methods, `super.m()` calls, `toString`, `equals` and `hashCode` overrides, and a class that
 implements `Comparable`; and generic classes (a box, a pair, a linked stack, a sorted list) and
 generic methods. Each `st_obj_*` method is a statement kind of `main`, and the other methods build
-expressions.
+expressions. Construction trees, whose superclass constructors need the whole object, are planned
+apart from the world (fuzz_constructions.py).
 
 Every program terminates and is deterministic:
 - Each instance method group has a rank, and a method body calls only groups of a lower rank (on
@@ -24,6 +25,7 @@ Variables of object types live in Gen's scopes beside the primitive ones, with t
 primitive code never asks for, so it never sees them.
 """
 
+from fuzz_constructions import ConstructionGen
 from fuzz_object_decls import ObjectDeclGen
 from fuzz_object_stmts import ObjectStmtGen
 
@@ -64,7 +66,7 @@ class Decl:
         self.comparable = False  # declares `implements Comparable<Self>`
 
 
-class ObjectGen(ObjectDeclGen, ObjectStmtGen):
+class ObjectGen(ObjectDeclGen, ObjectStmtGen, ConstructionGen):
     # Object expressions wait for `plan_world`: what the array statics and helpers, written
     # before it, generate has none.
     obj_hooks = False
