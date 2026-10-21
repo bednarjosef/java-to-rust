@@ -6,7 +6,7 @@
 mod reach;
 mod survey;
 
-pub use reach::{CLASS_KINDS, Reach, class_name};
+pub use reach::{CLASS_KINDS, Reach, class_name, never_true};
 pub use survey::Survey;
 
 use crate::ast::{Error, Pos};

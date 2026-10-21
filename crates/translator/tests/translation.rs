@@ -2439,6 +2439,71 @@ fn the_survey_json_lists_the_pieces_with_their_example_places() {
 }
 
 #[test]
+fn the_survey_names_the_shortest_chain_of_calls_to_each_native_method() {
+    let dir = write_sources(
+        "survey_chain",
+        &[(
+            "Main.java",
+            "public class Main {
+                public static void main(String[] args) {
+                    Counter c = new Counter();
+                    System.out.println(c.toString() + Clock.now());
+                }
+            }",
+        )],
+    );
+    // `Clock.now` reaches `raw` directly and through `slow`, and `stamp` is called by the static
+    // initializer of `Clock`, which any use of a static member runs.
+    let lib = write_sources(
+        "survey_chain_lib",
+        &[
+            (
+                "Clock.java",
+                "public class Clock {
+                    static final long START = stamp();
+                    static long now() { return slow() + raw(); }
+                    static long slow() { return raw(); }
+                    static native long raw();
+                    static native long stamp();
+                }",
+            ),
+            (
+                "Counter.java",
+                "public class Counter { public String toString() { return \"\" + Clock.START; } }",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir],
+        libraries: vec![lib],
+        ..Default::default()
+    };
+    let census = survey(&program);
+    assert_contains(
+        &census.report,
+        &[
+            "  Clock.raw()long\n      via Main.main -> Clock.now -> Clock.raw\n",
+            "  Clock.stamp()long\n      via Main.main -> Clock.<clinit> -> Clock.stamp\n",
+        ],
+    );
+    let natives = census.json["natives"].as_array().expect("natives");
+    let raw = natives.iter().find(|n| n["method"] == "Clock.raw()long").expect("raw is reached");
+    assert_eq!(raw["chain"], serde_json::json!(["Main.main", "Clock.now", "Clock.raw"]));
+    // Calls into the runtime's classes are listed with their chains too.
+    let external = census.json["external"].as_array().expect("external");
+    let println = external
+        .iter()
+        .find(|e| e["method"] == "java.io.PrintStream.println(java.lang.String)void")
+        .expect("println is called");
+    assert_eq!(println["chain"], serde_json::json!(["Main.main", "java.io.PrintStream.println"]));
+    // So is each class whose objects are created, with the chain to its constructor.
+    let instantiated = census.json["instantiated"].as_array().expect("instantiated");
+    let counter = instantiated.iter().find(|c| c["class"] == "Counter").expect("Counter is created");
+    assert_eq!(counter["chain"], serde_json::json!(["Main.main", "Counter.<init>"]));
+}
+
+#[test]
 fn survey_json_writes_the_census_to_the_file_given() {
     let dir = lambda_sources("survey_cli");
     let json = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("survey_cli.json");
