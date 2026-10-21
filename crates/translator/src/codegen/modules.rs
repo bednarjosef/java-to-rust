@@ -181,6 +181,7 @@ impl<'a> Gen<'a> {
         let depth = if package.is_empty() { 0 } else { package.split('.').count() };
         set_current(package);
         let outer = std::mem::take(&mut self.out);
+        let outer_traits = std::mem::take(&mut self.traits);
         self.indent = depth;
         for (index, decl) in class.types.iter().enumerate() {
             if live[index] && decl.package == package {
@@ -217,9 +218,15 @@ impl<'a> Gen<'a> {
             self.line("}");
         }
         let items = std::mem::replace(&mut self.out, outer);
+        let traits = std::mem::replace(&mut self.traits, outer_traits);
         let pad = "    ".repeat(depth);
         let mut text = String::new();
-        for uses in use_lines(&items) {
+        let mut uses = use_lines(&items);
+        // The extension traits whose methods the module calls are in scope.
+        if !traits.is_empty() {
+            uses.push(traits.iter().map(|path| format!("use {path};\n")).collect());
+        }
+        for uses in uses {
             for line in uses.lines() {
                 text.push_str(&format!("{pad}{line}\n"));
             }

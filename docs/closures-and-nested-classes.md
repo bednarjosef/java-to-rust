@@ -1299,13 +1299,12 @@ Decisions that change during the implementation are recorded here, milestone by 
 ### Closure forms
 
 - **The first closure types are a subset of 4.2**: an interface is one when it has one abstract
-  method, no default method, no interface above or below it, every class
+  method (besides `Object`'s, which `Comparator` declares again), no interface above or below it, every class
   below it is a lambda's that implements it alone, every `new` of such a class is converted to
   the interface right away, and no value of it is converted to another type (`Object`,
   printing, a collection), compared with `==`, tested with `instanceof`, passed to a builtin or
-  called with anything but its method; and each lambda's method uses `this` only to read its
-  capture fields. The JDK's interfaces with default methods (4.6), interfaces that extend
-  another (`UnaryOperator<T> extends Function<T, T>`, condition 4 of 4.2, which makes both
+  called with anything but its method and its default methods; and each lambda's method uses
+  `this` only to read its capture fields. Interfaces that extend another (`UnaryOperator<T> extends Function<T, T>`, condition 4 of 4.2, which makes both
   enums) and interfaces seen as objects (condition 3 of 4.2 as written, and identity) stay enums
   for now.
 - **A generic interface's closure is erased, per interface, not per instantiation** (4.4 asks
@@ -1336,10 +1335,22 @@ Decisions that change during the implementation are recorded here, milestone by 
   constructor would have borrowed. A closure with no captures has no `move`, and a one-line
   body stays on the closure's line. The value is `Rc::new(closure) as Op`, so that every place
   gets the alias's type without an annotation.
+- **Default methods are an extension trait** (4.6): `trait PredicateMethods { fn negate(&self)
+  -> Predicate; .. }` beside the alias and `impl PredicateMethods for Predicate`, with only the
+  default methods the program calls. `self` is `&Rc<dyn Fn ..>`: `test(x)` is `self(x)`, and a
+  lambda that captures `this` gets `let outer = self.clone();`. A call is method syntax,
+  `empty.negate().and(longer)`, and a module that calls the default methods of a closure type
+  of another module imports its trait (`use crate::java_::util::function::PredicateMethods;`).
+  Two closure types with the same Rust type and a default method of the same name would make
+  such a call ambiguous; no two of `java.util.function` do, and no corpus program has such a
+  pair.
 - **A call clones a closure out of a `RefCell`** before running it,
   `({ let f = a.borrow().op.clone(); f })(3)`, since the closure may reach the object again; a
   local, a capture or a field of a plain object is called in place (`op(x)`, `(self.op)(x)`).
-- **Corpus**: `features/GenericClosures.java` (the generic interfaces of `java.util.function`
+- **Corpus**: `features/ClosureDefaultMethods.java` (default methods that create lambdas over
+  `this`, call each other and call the closure, and a static method);
+  `whole-program/FunctionChains.java` (`Predicate`, `IntPredicate` and `BiFunction` from the
+  JDK's sources with their default methods); `features/GenericClosures.java` (the generic interfaces of `java.util.function`
   and the program's own: an early return, a lambda that throws behind a bridge, a single
   lambda of an interface passed as an argument, a generic method calling its closure, and
   `UnaryOperator` keeping `Function` an enum); `features/ClosureForms.java` (captures, `this` through `outer`, a field and a

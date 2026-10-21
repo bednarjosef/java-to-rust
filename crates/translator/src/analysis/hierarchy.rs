@@ -266,6 +266,10 @@ pub fn home(class: &Class, facts: &Facts, m: usize) -> Home {
     if method.is_abstract {
         return Home::Nowhere;
     }
+    // A default method of a closure type is a method of its extension trait.
+    if facts.closure_types.contains(&t) {
+        return Home::Enum(t);
+    }
     if method.is_ctor || class.types[t].enum_constants.is_some() || !class.hierarchy.has_subtypes(t) {
         return Home::Class(t);
     }
