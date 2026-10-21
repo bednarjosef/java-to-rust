@@ -207,7 +207,7 @@ public class JavaTree {
             Element element = trees.getElement(path);
             if (element != null) {
                 out.append(",\"symbol\":");
-                symbol(element, tree instanceof MethodTree, out);
+                symbol(element, tree instanceof MethodTree || tree instanceof ClassTree, out);
             }
         }
         Class<?> type = tree.getKind().asInterface();
@@ -285,6 +285,9 @@ public class JavaTree {
         string(typeText(e.asType()), out);
         if (declaration && e.getKind() == ElementKind.METHOD && owner instanceof TypeElement t) {
             overrides((ExecutableElement) e, t, out);
+        }
+        if (declaration && e instanceof TypeElement t && (e.getKind() == ElementKind.CLASS || e.getKind() == ElementKind.ENUM)) {
+            inherits(t, out);
         }
         // The value of a constant variable, as text: javac's compile-time constant.
         if (e instanceof VariableElement v && v.getConstantValue() != null) {
@@ -434,6 +437,65 @@ public class JavaTree {
                     out.append(",\"type\":");
                     string(typeText(x.asType()), out);
                     out.append('}');
+                }
+            }
+        }
+        if (any) {
+            out.append(']');
+        }
+    }
+
+    /**
+     * The methods that class {@code c} inherits from a superclass that implement a method of an
+     * interface of {@code c} which that superclass does not implement: javac lists such an
+     * implementation with neither method, as only {@code c} makes the one implement the other.
+     */
+    private void inherits(TypeElement c, StringBuilder out) {
+        List<TypeElement> interfaces = new ArrayList<>();
+        List<TypeMirror> work = new ArrayList<>(types.directSupertypes(c.asType()));
+        while (!work.isEmpty()) {
+            TypeMirror next = work.remove(work.size() - 1);
+            if (types.asElement(next) instanceof TypeElement i && !interfaces.contains(i)) {
+                if (i.getKind().isInterface()) {
+                    interfaces.add(i);
+                }
+                work.addAll(types.directSupertypes(i.asType()));
+            }
+        }
+        String mark = ",\"inherits\":[";
+        boolean any = false;
+        for (TypeMirror up = c.getSuperclass(); types.asElement(up) instanceof TypeElement s; up = s.getSuperclass()) {
+            if (s.getQualifiedName().contentEquals("java.lang.Object")) {
+                break;
+            }
+            for (Element member : s.getEnclosedElements()) {
+                if (!(member instanceof ExecutableElement m) || member.getKind() != ElementKind.METHOD
+                        || m.getModifiers().contains(Modifier.STATIC) || m.getModifiers().contains(Modifier.PRIVATE)) {
+                    continue;
+                }
+                for (TypeElement i : interfaces) {
+                    if (types.isSubtype(types.erasure(s.asType()), types.erasure(i.asType()))) {
+                        continue;
+                    }
+                    for (Element candidate : i.getEnclosedElements()) {
+                        if (candidate instanceof ExecutableElement x && candidate.getKind() == ElementKind.METHOD
+                                && !x.getModifiers().contains(Modifier.STATIC)
+                                && x.getSimpleName().equals(m.getSimpleName()) && elements.overrides(m, x, c)) {
+                            out.append(any ? "," : mark);
+                            any = true;
+                            out.append("{\"name\":");
+                            string(m.getSimpleName().toString(), out);
+                            out.append(",\"owner\":");
+                            string(className(s), out);
+                            out.append(",\"type\":");
+                            string(typeText(m.asType()), out);
+                            out.append(",\"implements\":{\"owner\":");
+                            string(className(i), out);
+                            out.append(",\"type\":");
+                            string(typeText(x.asType()), out);
+                            out.append("}}");
+                        }
+                    }
                 }
             }
         }

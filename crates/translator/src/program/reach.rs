@@ -383,6 +383,18 @@ impl<'t> Walk<'t> {
                 _ => self.declare(member, Some(&class)),
             }
         }
+        // A method inherited from a superclass that implements a method of this class's interfaces.
+        for inherited in decl["symbol"]["inherits"].as_array().into_iter().flatten() {
+            let name = text(inherited, "name").to_string();
+            let implemented = &inherited["implements"];
+            let overridden =
+                (text(implemented, "owner").to_string(), name.clone(), text(implemented, "type").to_string());
+            let key = (text(inherited, "owner").to_string(), name, text(inherited, "type").to_string());
+            let overriders = self.overriders.entry(overridden).or_default();
+            if !overriders.contains(&key) {
+                overriders.push(key);
+            }
+        }
         let mut supertypes: Vec<String> = ["extendsClause", "implementsClause"]
             .iter()
             .flat_map(|header| match &decl[header] {

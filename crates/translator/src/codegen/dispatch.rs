@@ -889,7 +889,8 @@ impl<'a> Gen<'a> {
     /// method `r`: `Object`'s `equals` or `hashCode`, or for an enum's constant a method that
     /// every enum has, which `lower` checks: `name()`, `toString()` or `ordinal()`.
     fn builtin_arm(&mut self, r: usize, c: usize) -> String {
-        if self.is_object_method(r) {
+        // An interface may declare `Object`'s `equals` or `hashCode` again (as `Comparator` does).
+        if self.class.hierarchy.group(r).into_iter().any(|g| self.is_object_method(g)) {
             return self.object_arm(r, c);
         }
         if self.is_comparable_method(r) {
