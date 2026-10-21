@@ -116,8 +116,7 @@ impl<'t> Lowering<'t> {
         }
         for &c in ctors.iter().chain(&fields_init) {
             let method = &mut methods[c];
-            let starts_with_this_call =
-                matches!(method.body.first(), Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })));
+            let starts_with_this_call = delegates(&method.body);
             if method.is_ctor {
                 method.is_ctor = false;
                 method.is_static = true;

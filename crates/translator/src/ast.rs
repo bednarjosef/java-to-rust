@@ -1055,6 +1055,49 @@ pub fn mentions_this(e: &Expr) -> bool {
     found
 }
 
+/// The index in a constructor's `body` of its `this(..)` or `super(..)`. Java 25 lets statements
+/// that do not use `this` come before it (see `lower::prologues`); in most constructors it is
+/// first.
+pub fn explicit_call(body: &[Stmt]) -> Option<usize> {
+    body.iter().position(|s| {
+        matches!(s, Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. } | ExprKind::SuperInit { .. }, .. }))
+    })
+}
+
+/// Whether a constructor's `body` calls another constructor of its class with `this(..)`.
+pub fn delegates(body: &[Stmt]) -> bool {
+    explicit_call(body)
+        .is_some_and(|i| matches!(&body[i], Stmt::Expr(Expr { kind: ExprKind::ThisCall { .. }, .. })))
+}
+
+/// A constructor's `body` split at its `this(..)` or `super(..)`: the statements before it, the
+/// call, and the statements after it.
+pub fn split_explicit_call(body: &[Stmt]) -> (&[Stmt], Option<&Expr>, &[Stmt]) {
+    match explicit_call(body) {
+        Some(i) => match &body[i] {
+            Stmt::Expr(call) => (&body[..i], Some(call), &body[i + 1..]),
+            _ => unreachable!("an explicit constructor call is an expression statement"),
+        },
+        None => (&[], None, body),
+    }
+}
+
+/// The local that holds the value a constructor's statements before `super(..)` assign to field
+/// `field`, until the object exists (see `lower::prologues`).
+pub fn early_field_local(field: &str) -> String {
+    format!("early${field}")
+}
+
+/// Whether `stmt` is `this.f = early$f`, the assignment that sets a field assigned before
+/// `super(..)` once the object exists.
+pub fn is_early_field_assignment(stmt: &Stmt) -> bool {
+    matches!(stmt, Stmt::Expr(Expr {
+        kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, value },
+        ..
+    }) if matches!(object.kind, ExprKind::This)
+        && matches!(&value.kind, ExprKind::Var(v) if *v == early_field_local(name)))
+}
+
 pub fn mentions(e: &Expr, name: &str) -> bool {
     let mut found = false;
     visit_expr(e, &mut |x| match &x.kind {

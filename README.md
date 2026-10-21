@@ -177,7 +177,11 @@ A small subset, end to end:
   does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s. Arrays of strings
   are not converted this way yet. `==` between two `Object`s that may both be strings or boxes (whose identity the
   translation does not keep, except in the shortcut `a == b || a.equals(b)` and in `TreeMap`'s own
-  comparisons of the keys of its entries, which are distinct values) is rejected. The
+  comparisons of the keys of its entries, which are distinct values) is rejected. Whether a side
+  may be one is a points-to analysis of the program (`analysis/object_values.rs`): it follows
+  strings, boxes and the classes of objects through variables, parameters, returns, fields and
+  array elements, each inherited method once for every class that runs it, so an identity map or
+  set whose keys are only ever the program's objects compares them by identity. The
   program's generic classes, interfaces and methods translate erased, as javac compiles them: a type
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
   and a use where javac substituted a type argument gets the checked cast back
@@ -344,7 +348,8 @@ can differ from Java on code points the corpus does not test.
 
 The `String` methods count in UTF-16 units as Java does (`indexOf`, `substring`, `charAt` agree on
 `"né😀e"`), and throw what Java throws (`StringIndexOutOfBoundsException` with Java's message).
-`toUpperCase` and `toLowerCase` are the root-locale mappings. A `StringBuilder` is a
+`toUpperCase` and `toLowerCase` are the root-locale mappings; with a `Locale` (in a whole
+program) they are too, but for Turkish, Azeri and Lithuanian, which end the program. A `StringBuilder` is a
 `java::StringBuilder`, a shared handle to UTF-16 units like an array: every variable, field and
 parameter that holds the builder sees it change, `reverse` keeps surrogate pairs in order, and a
 chain is Rust's chain (`sb.append_str("a").append(1)`), the handle cloned only where the builder

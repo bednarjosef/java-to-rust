@@ -106,6 +106,38 @@ impl<'t> Lowering<'t> {
         unreachable!("a stream of a string has a last call")
     }
 
+    /// `s.toUpperCase(locale)` or `s.toLowerCase(locale)`: the case mapping of the root locale,
+    /// given the locale's language, `locale.getLanguage()`, as the JDK's tells the languages with
+    /// their own (Turkish, Azeri and Lithuanian), which the runtime does not have and ends the
+    /// program for (`java_runtime::string::uppercase_in`). The call throws on a null locale.
+    fn case_in_locale(
+        &self,
+        node: Node<'t>,
+        name: &str,
+        receiver: Option<Node<'t>>,
+        arg_nodes: &[Node<'t>],
+    ) -> Result<ExprKind, Error> {
+        let (Some(receiver), [locale]) = (receiver, arg_nodes) else {
+            return unsupported(node, &format!("this `String.{name}`"));
+        };
+        let (class, method, signature) = crate::program::LOCALE_LANGUAGE;
+        let (line, column) = (&locale.0["line"], &locale.0["column"]);
+        let language = serde_json::json!({"kind": "METHOD_INVOCATION", "line": line, "column": column,
+            "javaType": "java.lang.String", "arguments": [],
+            "methodSelect": {"kind": "MEMBER_SELECT", "line": line, "column": column,
+                "identifier": method, "expression": locale.0,
+                "symbol": {"kind": "METHOD", "name": method, "owner": class, "static": false,
+                    "type": signature}},
+            "symbol": {"kind": "METHOD", "name": method, "owner": class, "static": false,
+                "type": signature}});
+        let language: &'t serde_json::Value = Box::leak(Box::new(language));
+        // The receiver is evaluated before the argument, as in Java.
+        let s = self.expr(receiver)?;
+        let language = self.expr(Node(language))?;
+        let op = if name == "toUpperCase" { StringOp::ToUpperCase } else { StringOp::ToLowerCase };
+        Ok(ExprKind::Builtin(Builtin::String(op), vec![s, language]))
+    }
+
     /// A call of a method of `String`. `args` are the lowered arguments, without the receiver.
     pub(super) fn string_call(
         &self,
@@ -131,6 +163,9 @@ impl<'t> Lowering<'t> {
             "stripTrailing" => StringOp::StripTrailing,
             "toUpperCase" if args.is_empty() => StringOp::ToUpperCase,
             "toLowerCase" if args.is_empty() => StringOp::ToLowerCase,
+            "toUpperCase" | "toLowerCase" if symbol.ty == "(java.util.Locale)java.lang.String" => {
+                return self.case_in_locale(node, name, receiver, &arg_nodes);
+            }
             "replace" => StringOp::Replace,
             "replaceAll" => StringOp::ReplaceAll,
             "replaceFirst" => StringOp::ReplaceFirst,

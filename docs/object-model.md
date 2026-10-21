@@ -516,6 +516,15 @@ fn new(r: f64) -> Circle {
   (`codegen/objects.rs::constructor`): `let obj = Rc::new(RefCell::new(Circle { base:
   BaseFields::new("circle"), r: 0.0 }));` then `field_inits`, then the body on `this`.
 - `this(...)` delegation is unchanged; `super(...)` and `this(...)` are exclusive in Java.
+- Statements before `super(...)` or `this(...)` (Java 25's flexible constructor bodies, which the
+  JDK's `SortedOps` uses; `lower/prologues.rs`) are written before the object is built, so their
+  locals reach the call's arguments and the rest of the body. They cannot use `this`, except to
+  assign a field without an initializer: that value goes into a local, `early$f`, and
+  `this.f = early$f` right after the call stores it, which the struct literal takes in. In the
+  second form above, the stores run on the zero object before the superclass's
+  `construct<Name>`, which may call a method that reads them, as in Java. Before a `super()` of
+  `Object`, which is left out, the statements are the start of the body; a class with field
+  initializers is rejected there, as they would run first.
 - Static initialization order: `init_circle()` calls `init_base()` first (section 2.5).
 
 ### 1.5 `instanceof` with and without pattern, downcasts
@@ -1664,6 +1673,22 @@ Decisions that changed during the implementation, milestone by milestone.
   value, so two keys that are equal values compare as 0 and cannot both be in the map. The rule
   is that narrow because the argument rests on that invariant: in general, two equal strings
   held by different nodes are different objects in Java.
+- Later, "may be strings or boxes" became a points-to analysis (`analysis/object_values.rs`),
+  for Are We Fast Yet's Havlak, whose `IdentityDictionary` compares keys held as `Object`
+  (`this.key == key`) and whose `IdentitySet` compares elements in a lambda. It follows, until
+  nothing changes, whether each variable, parameter, return value, field, static and array
+  element type may hold a string or a box, and which classes its objects may be of. The classes
+  pick the implementations a call runs, and each instance method is followed once per class
+  whose objects run it, with `this` of that class: `IdentitySet` inherits `Set.add`, which calls
+  the `contains` it overrides, and other sets of the program hold boxes, so only the context
+  tells that identity sets never get one. An expression of one of the program's own classes is
+  never a string or a box, whatever it reads, because its Rust type holds none; that is what
+  keeps the erased generic storage (`Vector`'s `Object[]`, shared by every vector) from
+  spreading boxes to keys typed `K extends CustomHash`. What the analysis does not follow (a
+  library call's result, a catch parameter, the parameters of `equals` or `compareTo`, which the
+  runtime may call) may be anything. `==` is rejected only when both sides may be strings or
+  boxes on an object of the same class: when one side never is, Java's identity and the
+  translation's agree, since an object of the program's classes equals only itself.
 - Two analyses had to learn about the new sources of values: a string bound by a pattern
   (`o instanceof String s`) is not known to be ASCII, and the generator's nullness of a cast
   follows its operand, which a null check may have narrowed.
