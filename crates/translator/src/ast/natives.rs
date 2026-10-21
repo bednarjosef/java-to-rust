@@ -174,6 +174,9 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
             ("java.io.FileInputStream", "open0" | "read0" | "readBytes" | "available0" | "skip0" | "close0")
                 | ("java.io.FileOutputStream", "open0" | "write" | "writeBytes" | "close0")
                 | ("java.io.FileDescriptor", "close0")
+                // Lowered as code on the referent (`lower::references`).
+                | ("java.lang.ref.Reference", "get0" | "refersTo0" | "clear0")
+                | ("java.lang.ref.PhantomReference", "refersTo0" | "clear0")
         )
 }
 
