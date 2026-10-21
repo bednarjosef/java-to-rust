@@ -313,6 +313,14 @@ impl<'t> Lowering<'t> {
                 );
                 error(node.pos(), message)
             }
+            // Another compile-time constant of a library class (`Double.PRECISION`) is its value,
+            // as javac would have written it.
+            None if let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD" && s.is_static)
+                && let Some(text) = symbol.constant =>
+            {
+                let ty = self.signature_type(node, symbol.ty)?;
+                self.constant_literal(node, ty, text)
+            }
             None => unsupported(node, "fields"),
         }
     }

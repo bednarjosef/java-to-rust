@@ -586,10 +586,17 @@ pub(super) fn runtime_failures(
     {
         out.push(("java.lang.ClassCastException", "this cast", true, x.id));
     }
-    // A box that may be null is unboxed by arithmetic and comparisons.
-    if let ExprKind::Binary(_, l, r) = &x.kind {
-        for operand in [l, r] {
-            if matches!(operand.ty, Type::Boxed(_)) && null(operand) && !matches!(x.ty, Type::String) {
+    // A box that may be null is unboxed by arithmetic and comparisons, but not by `==` or `!=`
+    // with an operand that is no primitive (`v == null`), which compares references.
+    if let ExprKind::Binary(op, l, r) = &x.kind {
+        for (operand, other) in [(l, r), (r, l)] {
+            let reference =
+                matches!(op, BinOp::Eq | BinOp::Ne) && !(other.ty.is_numeric() || other.ty == Type::Boolean);
+            if matches!(operand.ty, Type::Boxed(_))
+                && null(operand)
+                && !matches!(x.ty, Type::String)
+                && !reference
+            {
                 out.push((NPE, "this unboxing", false, x.id));
             }
         }
