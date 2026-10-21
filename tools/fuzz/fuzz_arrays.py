@@ -138,7 +138,7 @@ class ArrayGen(ArrayHelperGen):
         not (either when None)."""
         out = []
         for n, t, w in self.all_vars():
-            if '[]' not in t or (writable and (not w or n in self.pinned)):
+            if '[]' not in t or (writable and (not w or n in self.walked)):
                 continue
             if elem is not None and elem_of(t) != elem:
                 continue
@@ -372,7 +372,7 @@ class ArrayGen(ArrayHelperGen):
                 value = f'new {elem}{"[]" * (dims - 1)} {self.literal_grid(elem, dims - 1)}'
             self.guarded(f'{k} < {name}.length', f'{name}[{k}] = {value};')
             return
-        if name in self.pinned:
+        if name in self.walked:
             # A loop runs over these rows with a bound taken before it: keep their lengths.
             if not is_private(t):
                 row = self.declare(row_t, self.path(name, 1))
@@ -458,7 +458,7 @@ class ArrayGen(ArrayHelperGen):
     def st_arr_count(self, depth):
         """A counting loop over an array: bounds from `length`, from variables, from guards,
         downward, by twos, from 1; over the rows of a grid; with or without other statements.
-        The arrays it walks are pinned while the body's other statements are generated, so that
+        The arrays it walks are held fixed while the body's other statements are generated, so that
         nothing shrinks them under the index."""
         found = self.some_array(loose=False) if self.chance(0.85) else self.some_array()
         if not found:
@@ -474,7 +474,7 @@ class ArrayGen(ArrayHelperGen):
             return self.grid_loop(name, t, depth)
         i = self.name('i')
         other = self.some_array(1, elem, loose=False)
-        pinned = {name}
+        walked = {name}
         # The array whose elements the loop walks: a row of a grid at an index fixed first.
         walk = name
         if dims > 1 and not loose:
@@ -487,7 +487,7 @@ class ArrayGen(ArrayHelperGen):
             bound = f'{walk}.length'
             if other and self.chance(0.6):
                 bound = f'Math.min({walk}.length, {other[0]}.length)'
-                pinned.add(other[0])
+                walked.add(other[0])
                 bounded = True
             self.emit(f'int {n} = {bound};')
             header = f'for (int {i} = 0; {i} < {n}; {i}++) {{'
@@ -525,11 +525,11 @@ class ArrayGen(ArrayHelperGen):
         if self.chance(0.5):
             self.frames.append([(i, 'int', False)])
             self.loops.append(('loop', None))
-            saved = set(self.pinned)
-            self.pinned |= pinned
+            saved = set(self.walked)
+            self.walked |= walked
             for _ in range(self.r.randint(1, 2)):
                 self.stmt(depth - 1)
-            self.pinned = saved
+            self.walked = saved
             self.loops.pop()
             self.frames.pop()
         self.indent -= 1
@@ -662,7 +662,7 @@ class ArrayGen(ArrayHelperGen):
             else:
                 self.emit(f'{name}({arg[0]}, {k})[0] = {self.elem_value(elem, 1)};')
         elif role in ('setRow', 'addRow'):
-            if arg[0] in self.pinned and role == 'setRow':
+            if arg[0] in self.walked and role == 'setRow':
                 return
             r = self.r.random()
             if r < 0.4:
@@ -674,7 +674,7 @@ class ArrayGen(ArrayHelperGen):
             else:
                 self.emit(f'{name}({arg[0]}, {row});')
         elif role == 'swapRows':
-            if arg[0] not in self.pinned:
+            if arg[0] not in self.walked:
                 self.emit(f'{name}({arg[0]}, {k}, {self.pure_int()});')
 
     def st_arr_compare(self, depth):

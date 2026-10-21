@@ -10,21 +10,24 @@ while the same failure persists. Python 3 standard library only.
     python3 tools/fuzz/run.py --count 300 --start 1 --jobs 4
     python3 tools/fuzz/run.py --count 300 --start 1 --jobs 4 --strings
     python3 tools/fuzz/run.py --count 300 --start 1 --jobs 4 --arrays
+    python3 tools/fuzz/run.py --count 300 --start 1 --jobs 4 --objects
 
     python3 tools/fuzz/reduce.py target/fuzz/runs/s17/Prog.java --out target/fuzz/reduced/s17.java
 
 `run.py` options: `--count` (seeds, default 200), `--start` (first seed, default 1), `--size`
 (statements in `main`, default 30), `--jobs` (programs in parallel, default 4), `--strings`
 (also generate the String, StringBuilder, `String.format` and `Arrays` code described below),
-`--arrays` (also generate the array code described below; it combines with `--strings`),
-`--no-build`. It prints one status per program, the rejection messages with their counts, and
-the first failures of each kind. Every result is in `target/fuzz/results.jsonl`.
+`--arrays` (also generate the array code described below), `--objects` (also generate the
+classes, interfaces and generics described below), each of which combines with `--strings` but
+not yet with the other, `--no-build`. It prints one status per program, the rejection messages with their counts,
+and the first failures of each kind. Every result is in `target/fuzz/results.jsonl`.
 
 Two runs at once, of two builds of the translator say, need their own work directories: the
 environment variables `FUZZ_WORK` (instead of `target/fuzz`) and `FUZZ_TRANSLATOR` (instead of
 `target/release/java-to-rust`, with `--no-build`) apply to `run.py` and `reduce.py`.
 
-`fuzz.py SEED [SIZE] [--strings] [--arrays]` prints the program for one seed, for inspection.
+`fuzz.py SEED [SIZE] [--strings] [--arrays] [--objects]` prints the program for one seed, for
+inspection.
 
 Text is read and written as UTF-8 whatever the locale, because the string features print
 non-ASCII characters. Java runs with `-Dstdout.encoding=UTF-8`. `String.format` uses the default
@@ -136,15 +139,60 @@ slices. The arrays a counting loop walks cannot be assigned in its body,
 so only the deliberate exceptions throw. Half of these programs have no array statics, since
 a static array keeps the translator from lending shared arrays to calls.
 
+With `--objects` (`fuzz_objects.py` for the types and expressions,
+`fuzz_object_decls.py` for the declarations, `fuzz_object_stmts.py` for the statements), also:
+
+- One or two class trees of one to three levels as static nested classes: abstract and concrete
+  classes, fields of primitive and `String` type with and without initializers (which may
+  change statics), a nullable field of the tree's own type, static counters (whose initializers
+  may read statics) and static methods, one or two constructors with `super(...)` or `this(...)`,
+  printing and sometimes calling an overridable method
+- Method groups with ranks: abstract, concrete and overriding methods returning `int` or
+  `String`, with no parameters, `int` ones, or another object of the tree; `super.m(..)` calls;
+  an `ov` overload family (`int`, `long`, `double`) across subclasses; `touch`, which returns
+  `this`. A body calls only groups of a lower rank, so every call chain ends.
+- Zero to two interfaces with abstract, default and static methods and a constant, implemented by
+  one or more classes (a class may implement two), `I.super.m()` calls
+- `toString`, `equals(Object)` (pattern or cast form) and `hashCode` overrides, and the defaults
+  where a class has none; `Comparable<Self>` implemented by a root class
+- Generic classes `GBox<T>`, `GPair<A, B>` (with `swap`), `GStack<T>` over `GNode<T>`, and
+  `GSorted<T extends Comparable<T>>`, with or without `toString` (so both real and erased
+  generics); generic methods `pick`, `boxOf` and `maxOf`; type arguments of the program's types,
+  `String`, `Integer`, `Object` and `GBox<..>`
+- In `main` and Prog's static methods: variables of class, interface, `Object` and generic types,
+  assigned new objects, aliases, upcasts, guarded downcasts (`x instanceof C ? (C) x : ..`),
+  conditionals, factory calls and container reads; field writes through variables, array
+  elements and `GBox.get()`; calls; `instanceof` with and without a pattern, negated patterns,
+  chains over an `Object`; `==` between objects, `equals`, `hashCode` where every class it may
+  run overrides it; null variables and null tests that narrow; arrays of objects (with null
+  elements from `new C[n]`), for and for-each loops over them; overloads of a static `which` on a
+  superclass chain, `Object`, `int`, `long` and `String`; an `Object` static field holding an
+  object; `describe(Object)` with a chain of patterns
+- Exceptions (`fuzz_exceptions.py`, in most programs): the program's own `Fail extends
+  RuntimeException` with a field, `Worse extends Fail` and a checked `Checked extends Exception`;
+  methods that throw them; `try` blocks that throw behind a condition, call those methods or
+  divide by zero, with `catch` clauses from the most specific (`Worse`, `Fail`, `Checked`,
+  `ArithmeticException`, `RuntimeException`) printing the message, the exception or its field,
+  and sometimes `finally`. Rarely a failing cast or a null dereference inside a `try` that
+  catches it, which the translator rejects for now
+- Deliberate exceptions: a failing cast (`ClassCastException`), a null dereference
+  (`NullPointerException`) or a `Fail`, uncaught, at the statement that `zero0` would use
+
+An object is printed only when every class it may be has a `toString` of the program's, so no
+identity hash is printed; values that may be null are only dereferenced behind a null test.
+
 Every program terminates: loops have constant bounds, and recursion counts a depth parameter
 down from at most 4.
 
 ## What it does not cover
 
-- Classes, objects, fields of instance type, `null`, `instanceof`, inheritance, interfaces
-- Enums, generics, lambdas, streams, inner or anonymous classes, multiple top-level classes
+- Without `--objects`: classes, objects, `null`, `instanceof`, inheritance, interfaces, generics.
+  With it: fields hidden by subclasses, private members, interfaces extending interfaces,
+  generic interfaces, bounded type variables other than `Comparable`, wildcards, records
+- Enums, lambdas, streams, inner or anonymous classes, multiple top-level classes
 - Without `--arrays`: two-dimensional or array-of-array values, arrays of `String`, `Arrays`
-  methods other than the four listed above; with it, arrays of objects and arrays in fields
+  methods other than the four listed above; with it, arrays in fields, and arrays of objects
+  other than those `--objects` makes
 - String methods other than those listed, `String` values with `null`, `Character` and `Integer`
   static methods, `String.join`, regular expressions, `StringBuilder` methods other than the
   listed ones

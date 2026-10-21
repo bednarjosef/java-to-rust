@@ -649,6 +649,13 @@ fn library_failure(builtin: &Builtin) -> Option<&'static str> {
         Builtin::Bits(..) => None,
         Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => None,
         Builtin::Unsigned(UnsignedOp::Compare | UnsignedOp::ToString | UnsignedOp::Widen, _) => None,
+        // Overflow, and bounds the wrong way round.
+        Builtin::Native(Native::Math { name, .. }) if name.ends_with("Exact") => {
+            Some("java.lang.ArithmeticException")
+        }
+        Builtin::Native(Native::Math { name: "clamp", .. }) => Some("java.lang.IllegalArgumentException"),
+        // The others are functions on numbers, which never throw.
+        Builtin::Native(Native::Math { .. }) => None,
         Builtin::CodePoint(
             CodePointOp::CharCount
             | CodePointOp::ToCodePoint
@@ -778,6 +785,14 @@ fn runtime_failures(
                 _,
             ) => {}
             Builtin::NullCheck => out.push((NPE, "this synchronized", false)),
+            // A zero divisor throws, as in a division.
+            Builtin::Native(Native::Math { name: "floorDiv" | "floorMod", .. }) => {
+                let constant = matches!(args[1].kind, ExprKind::Int(v) if v != 0)
+                    || matches!(args[1].kind, ExprKind::Long(v) if v != 0);
+                if !constant {
+                    out.push(("java.lang.ArithmeticException", "this division", true));
+                }
+            }
             _ => {
                 // A null argument throws, except where the method takes null (an `equals`, the
                 // elements of `join`, the text of `Arrays.toString`).

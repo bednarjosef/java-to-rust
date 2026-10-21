@@ -323,7 +323,8 @@ pub fn leading_assignments<'c>(class: &Class, ctor: &'c Method, facts: &Facts) -
         if !matches!(object.kind, ExprKind::This) || mentions_this(value) {
             break;
         }
-        let i = decl.fields.iter().position(|f| &f.name == name).expect("a field of the class");
+        // A field of a superclass is in `base`, built by `super(...)`: it is assigned after it.
+        let Some(i) = decl.fields.iter().position(|f| &f.name == name) else { break };
         if out.iter().any(|&(j, _)| j == i) || decl.fields[i].init.as_ref().is_some_and(has_effects) {
             break;
         }

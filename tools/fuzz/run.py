@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generates programs from seeds, runs each on Java and as translated Rust, and reports.
 
-    python3 tools/fuzz/run.py [--count 200] [--start 1] [--size 30] [--jobs 4] [--strings] [--arrays]
+    python3 tools/fuzz/run.py [--count 200] [--start 1] [--size 30] [--jobs 4] [--strings]
+                                [--arrays] [--objects]
 
 Text is read and written as UTF-8 whatever the locale, because the string features print
 non-ASCII characters. The one exception is String.format, which uses the default locale.
@@ -232,6 +233,8 @@ def main():
                     help='also generate String, StringBuilder, String.format and Arrays code')
     ap.add_argument('--arrays', action='store_true',
                     help='also generate arrays of every depth, aliases, moves, rows and loops')
+    ap.add_argument('--objects', action='store_true',
+                    help='also generate class trees, interfaces, Object values and generics')
     ap.add_argument('--no-build', action='store_true', help='skip cargo build of the translator')
     args = ap.parse_args()
 
@@ -239,7 +242,8 @@ def main():
         build_translator()
     WORK.mkdir(parents=True, exist_ok=True)
     runner = Runner(args.jobs)
-    items = [(f's{seed}', fuzz.generate(seed, args.size, strings=args.strings, arrays=args.arrays))
+    items = [(f's{seed}', fuzz.generate(seed, args.size, strings=args.strings, arrays=args.arrays,
+                                        objects=args.objects))
              for seed in range(args.start, args.start + args.count)]
     results = []
     for i, result in enumerate(runner.classify_many(items), 1):

@@ -6,13 +6,14 @@ small bound, and recursion counts down from a depth of at most 4. A program thro
 purpose, through the static field `zero0`, which is never assigned. Each statement is one
 line and a block opens on a line ending in `{`, so the reducer can delete whole statements.
 
-    python3 fuzz.py SEED [SIZE] [--strings] [--arrays]     # prints the program for SEED
+    python3 fuzz.py SEED [SIZE] [--strings] [--arrays] [--objects]   # prints the program for SEED
 """
 
 import random
 import sys
 
 from fuzz_arrays import ARRAY_NESTING, ARRAY_STATEMENTS, ArrayGen
+from fuzz_objects import OBJECT_NESTING, OBJECT_STATEMENTS, ObjectGen
 from fuzz_strings import STRING_NESTING, STRING_STATEMENTS, StringGen
 
 NUMERIC = ['byte', 'short', 'char', 'int', 'long', 'float', 'double']
@@ -73,28 +74,34 @@ STATEMENTS = {
 NESTING = {'if', 'loop', 'switch'}
 
 
-def generate(seed, size=30, strings=False, arrays=False):
+def generate(seed, size=30, strings=False, arrays=False, objects=False):
     """Returns the source of `public class Prog` for `seed`, with `size` statements in main.
 
     With `strings`, the programs also use String, StringBuilder, String.format and Arrays
     (see fuzz_strings.py); with `arrays`, arrays of every depth and their aliases, moves, rows
-    and loops (see fuzz_arrays.py). Without either, the programs are the same as before those
-    options existed.
+    and loops (see fuzz_arrays.py); with `objects`, class trees, interfaces, `Object` values and
+    generic containers (see fuzz_objects.py). Without any, the programs are the same as before
+    those options existed.
     """
-    return Gen(seed, size, strings, arrays).program()
+    if arrays and objects:
+        raise ValueError('--arrays and --objects do not combine yet')
+    return Gen(seed, size, strings, arrays, objects).program()
 
 
-class Gen(StringGen, ArrayGen):
-    def __init__(self, seed, size, strings=False, arrays=False):
+class Gen(ObjectGen, StringGen, ArrayGen):
+    def __init__(self, seed, size, strings=False, arrays=False, objects=False):
         self.r = random.Random(seed)
         self.size = size
         self.strings = strings
         self.arrays = arrays
+        self.objects = objects
         self.kinds = {**STATEMENTS, **STRING_STATEMENTS} if strings else STATEMENTS
         if arrays:
             self.kinds = {**self.kinds, **ARRAY_STATEMENTS}
-        self.nesting = NESTING | STRING_NESTING | ARRAY_NESTING
-        self.pinned = set()  # arrays that a loop walks: no statement may assign them
+        if objects:
+            self.kinds = {**self.kinds, **OBJECT_STATEMENTS}
+        self.nesting = NESTING | STRING_NESTING | ARRAY_NESTING | OBJECT_NESTING
+        self.walked = set()  # arrays that a loop walks: no statement may assign them
         self.array_methods = []
         self.count = 0
         self.out = []
@@ -131,7 +138,7 @@ class Gen(StringGen, ArrayGen):
 
     def visible(self, typ, writable=False):
         return [n for n, t, w in self.all_vars()
-                if t == typ and (w or not writable) and not (writable and n in self.pinned)]
+                if t == typ and (w or not writable) and not (writable and n in self.walked)]
 
     def literal(self, t):
         return self.pick(LITERALS[t])
@@ -185,6 +192,10 @@ class Gen(StringGen, ArrayGen):
             return self.string_num(t, d)
         if self.arrays and d > 0 and self.chance(0.15):
             text = self.array_num(t, d)
+            if text:
+                return text
+        if self.objects and d > 0 and t == 'int' and self.chance(0.2):
+            text = self.object_num(t, d)
             if text:
                 return text
         names = self.visible(t)
@@ -262,6 +273,10 @@ class Gen(StringGen, ArrayGen):
             return self.literal('boolean')
         if self.strings and self.chance(0.15):
             return self.string_bool(d)
+        if self.objects and self.chance(0.15):
+            text = self.object_bool(d)
+            if text:
+                return text
         kind = self.pick(['compare', 'compare', 'logic', 'not', 'ternary', 'side', 'element',
                           'call'])
         text = None
@@ -580,12 +595,16 @@ class Gen(StringGen, ArrayGen):
                 self.trap()
             elif i == self.throw_at:
                 # Exit code 1 with the output so far; the zero is never assigned.
-                if self.chance(0.5):
+                if self.objects and self.chance(0.5) and self.object_throw():
+                    pass
+                elif self.chance(0.5):
                     self.emit('System.out.println(1 / zero0);')
                 else:
                     self.emit('System.out.println(aInt[aInt.length + zero0]);')
             self.stmt(3)
         for n, t, _ in self.frames[0] + self.statics:
+            if self.objects and self.dump_object(n, t):
+                continue
             if self.arrays and '[]' in t:
                 self.dump_any(n, t)
             elif t.endswith('[]'):
@@ -625,6 +644,8 @@ class Gen(StringGen, ArrayGen):
             self.statics.append((name, t + '[]', True))
         if self.arrays:
             self.helpers()
+        if self.objects:
+            self.object_decls()
         for i in range(self.r.randint(0, 4)):
             self.method_decl(i)
         self.main()
@@ -637,4 +658,4 @@ if __name__ == '__main__':
     seed = int(args[0])
     size = int(args[1]) if len(args) > 1 else 30
     sys.stdout.write(generate(seed, size, strings='--strings' in sys.argv,
-                              arrays='--arrays' in sys.argv))
+                              arrays='--arrays' in sys.argv, objects='--objects' in sys.argv))

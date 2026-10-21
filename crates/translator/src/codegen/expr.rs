@@ -283,7 +283,7 @@ impl<'a> Gen<'a> {
             ExprKind::Static { class, name } => self.static_read(*class, name, e.ty),
             ExprKind::New { args, ctor, .. } => {
                 let ctor = ctor.expect("constructors are resolved by the checker");
-                self.new_object(ctor, args)
+                self.new_object(ctor, args, e.ty)
             }
             ExprKind::Unary(op, operand) => {
                 let code = self.value(operand, e.ty);
@@ -637,7 +637,7 @@ impl<'a> Gen<'a> {
             | Builtin::CharIsSurrogate
             | Builtin::CharIsHighSurrogate
             | Builtin::CharIsLowSurrogate => self.char_builtin(builtin, args, id),
-            Builtin::Native(native) => self.native(native, args, ty),
+            Builtin::Native(native) => self.native(native, args, ty, id),
             Builtin::String(op) => self.string_builtin(op, args, id),
             // A chained call gives `&Self`; as a value, the builder is another handle to it.
             Builtin::Builder(op) if op.chains() => {

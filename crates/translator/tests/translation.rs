@@ -2289,12 +2289,9 @@ fn the_survey_follows_calls_to_the_classes_whose_objects_are_created() {
     let report = survey(&program).report;
     // `Circle.area` runs for `s.area()`; `Square` is named but never created, and the annotation
     // does nothing.
-    assert_contains(
-        &report,
-        &["Reachable from Main: 6 classes (3 instantiated), 7 methods", "  Box.Inner: inner classes\n"],
-    );
-    // The program's own interfaces translate.
-    assert_lacks(&report, &["Square:", "Tag", "interfaces"]);
+    assert_contains(&report, &["Reachable from Main: 6 classes (3 instantiated), 7 methods"]);
+    // The program's own interfaces and inner classes translate.
+    assert_lacks(&report, &["Square:", "Tag", "interfaces", "inner classes"]);
 }
 
 /// The survey of a program, which must not fail.
@@ -2357,7 +2354,7 @@ fn local_and_anonymous_classes_are_declared_so_their_calls_are_not_outside() {
     // classes outside the sources.
     let table = feature_table(&report, "Program code: features");
     assert!(feature_row(table, "local interfaces, enums and records").contains("Main.java:"), "{table}");
-    assert!(feature_row(table, "anonymous classes").contains("Main.java:"), "{table}");
+    assert!(!table.contains("anonymous classes"), "{table}");
     assert!(!table.contains("classes outside"), "{table}");
     assert_lacks(&report, &["(outside)"]);
 }

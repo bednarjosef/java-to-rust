@@ -268,7 +268,7 @@ impl<'t> Lowering<'t> {
         let args = self.packed_args(node, &symbol, args)?;
         self.check_standard_member(node, &symbol)?;
         let ctor = self.method_index(&symbol);
-        let args = self.convert_args(ctor, args)?;
+        let args = self.convert_generic_args(node, ctor, args)?;
         let args = self.with_synthetic(self.creation_args(node, class)?, args);
         Ok(ExprKind::New { class, args, ctor })
     }
