@@ -146,19 +146,23 @@ of the translator and of its java process:
 
 | program | before | after |
 |---|---|---|
-| IntegerKeyedGroups | 20.6 s, 3.43 GB + 3.64 GB | 3.7 s, 0.16 GB + 1.12 GB |
+| IntegerKeyedGroups | 20.6 s, 3.43 GB + 3.64 GB | 3.2 s, 0.09 GB + 0.98 GB |
 | WordFrequency | 26.9 s, 3.43 GB + 3.65 GB | 3.2 s, 0.10 GB + 1.10 GB |
 | ListOperations | 21.2 s, 3.43 GB + 3.29 GB | 3.7 s, 0.19 GB + 1.16 GB |
 | CheckedExceptions | 21.7 s, 3.43 GB + 3.71 GB | 2.6 s, 3 MB + 0.89 GB |
 
-All 28 targets and the 3 whole-program corpus programs took 20 to 37 s each before and 2.2 to
-3.8 s after, except `ScannerGrades` and `TextAdventure` (18 s) and `StreamPipeline` (8 s). With
-the debug translator, which `run.sh` uses, the first three took 36, 41 and 40 s before and 4.8,
-4.2 and 5.3 s after. Most of what remains is the JVM and javac starting and attributing the
-program's own file (2.4 s and 0.9 GB for `CheckedExceptions`, which uses no library unit).
-`-Xmx512m` halves the java process's peak (to about 0.5 GB) at no visible cost for these
-programs, and 256 MB makes it three times slower; it is not set, as a larger program may need
-more.
+All 28 targets and the 3 whole-program corpus programs took 20 to 37 s each before and 2.1 to
+3.1 s after, except the two that read with `Scanner` and format with `MessageFormat`
+(`ScannerGrades`, `TextAdventure`: 630 units, 14 s, 1.2 GB + 2.3 GB) and `StreamPipeline` (161
+units, 6.6 s, 0.35 GB + 1.9 GB). Each reachability round completes the records of copies of
+only the units that this changes (those with a record or without a package), which halved the
+translator's peak for those three. With the debug translator, which `run.sh` uses, the first
+three of the table took 36, 41 and 40 s before and 4.8, 4.2 and 5.3 s after. Most of what
+remains for a small program is the JVM and javac starting and attributing the program's own
+file (2.4 s and 0.9 GB for `CheckedExceptions`, which uses no library unit); for the large ones,
+javac's attribution and the reachability rounds, each of which walks every unit again.
+`-Xmx512m` halves the java process's peak (to about 0.5 GB) at no visible cost for the small
+programs, and 256 MB makes it three times slower; it is not set, as the large ones need more.
 
 ## NodeList: does not compile (translator bug)
 
