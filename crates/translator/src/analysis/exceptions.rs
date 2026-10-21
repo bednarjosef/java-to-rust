@@ -159,6 +159,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
     let mut raising_tries = HashSet::new();
     let mut raising = HashSet::new();
     let mut null_checked = std::collections::HashMap::new();
+    // The `try`s whose `catch` gets a `NullPointerException` that the runtime raises.
+    let mut runtime_npe_tries = HashSet::new();
     let mut raised_classes = BTreeSet::new();
     for (m, method) in class.methods.iter().enumerate() {
         for p in &points[m] {
@@ -185,6 +187,9 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
                 {
                     if name == "java.lang.NullPointerException" {
                         null_checked.insert(id, p.pos);
+                        if let Some(f) = catcher {
+                            runtime_npe_tries.insert(f.id);
+                        }
                     } else {
                         raising.insert(id);
                     }
@@ -218,6 +223,46 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Error> {
         }
         if method.name == "toString" && method.params.is_empty() {
             return error(method.pos, "a toString that throws an exception that is caught not supported yet");
+        }
+    }
+
+    // Java's message of a `NullPointerException` that the runtime raises describes the
+    // dereference ("Cannot invoke ..."); the message of one that code creates is its own.
+    let npe = Kind::Runtime("java.lang.NullPointerException");
+    for method in &class.methods {
+        let mut found = None;
+        for s in &method.body {
+            visit_stmt(s, &mut |_| {}, &mut |s| {
+                let Stmt::Try { catches, .. } = s else { return };
+                if !runtime_npe_tries.contains(&(s as *const Stmt as usize)) {
+                    return;
+                }
+                let Some(catch) = catches.iter().find(|c| c.types.iter().any(|&t| matches(&npe, t))) else {
+                    return;
+                };
+                for b in &catch.body {
+                    visit_stmt(
+                        b,
+                        &mut |e| {
+                            visit_expr(e, &mut |x| {
+                                if let ExprKind::MethodCall { receiver, name, .. } = &x.kind
+                                    && matches!(name.as_str(), "getMessage" | "getLocalizedMessage")
+                                    && matches!(&receiver.kind, ExprKind::Var(v) if *v == catch.name)
+                                {
+                                    found.get_or_insert(x.pos);
+                                }
+                            })
+                        },
+                        &mut |_| {},
+                    );
+                }
+            });
+        }
+        if let Some(pos) = found {
+            return error(
+                pos,
+                "the message of a `NullPointerException` that the runtime raises not supported yet",
+            );
         }
     }
 

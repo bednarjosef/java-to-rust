@@ -66,7 +66,9 @@ signature. Everything else is decided here.
    that (a `catch` of it, `Error` or `Throwable`, or a `finally`) is rejected.
 10. **Rejected for now**, each with a message naming the construct: try-with-resources (needs
     `AutoCloseable`, an interface: object model milestone 3), observing the message of a
-    `NullPointerException` the runtime raises (Java's helpful message names bytecode locals),
+    `NullPointerException` the runtime raises (Java's helpful message names bytecode locals;
+    `getMessage()` in a `catch` that such an exception reaches is rejected, while the message of
+    one that code creates, as `Objects.requireNonNull(x, "msg")` does, is its own),
     catching `StackOverflowError`, `OutOfMemoryError` or `VirtualMachineError` (the translation
     cannot raise them), a `toString` that throws an exception someone observes (it is
     `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace`, `initCause`,
