@@ -286,6 +286,9 @@ pub const ENUM: &str = "Enum";
 /// The name of the type of `java.lang.Number`'s values, which lowering adds to a program that uses
 /// it as a type, beside `OBJECT`: the numeric boxes are its values.
 pub const NUMBER: &str = "Number";
+/// The name of the type of `java.lang.CharSequence`'s values, which lowering adds to a program
+/// that uses it as a type, beside `OBJECT`: strings and builders are its values.
+pub const CHAR_SEQUENCE: &str = "CharSequence";
 
 /// The name of the function that builds a constant of the enum `name` with tables
 /// (`lower/enum_tables.rs`): its constructor, `initShapeConstant` for `Main.Shape`.
@@ -680,6 +683,9 @@ pub enum Builtin {
     Println,
     Print,
     Exit,
+    /// The `String[]` that `main` gets as `args`: the command-line arguments, each a new string.
+    /// Built fresh where it is read (`lower::arrays::args_decl`), so it is an owned array.
+    MainArgs,
     /// The body of an instance method of a class that has no objects (`Reach::dormant`): it never
     /// runs.
     NoObject {
@@ -689,6 +695,11 @@ pub enum Builtin {
     /// is of no class of the translated program, and the program ends with a
     /// `ClassNotFoundException` that nothing catches.
     UnknownClass,
+    /// `[]`: runs the static initialization of the class, as its first use would, for
+    /// `Class.forName` with a name that the code spells out (`lower::by_name`).
+    InitializeClass {
+        class: usize,
+    },
     /// The lock of a `synchronized` block, the statement before the block: evaluated, and a
     /// `NullPointerException` when it is null. Where the program can tell (`codegen::sync`), the
     /// block holds the lock's monitor.
@@ -1012,6 +1023,7 @@ pub fn has_effects(e: &Expr) -> bool {
                         | Builtin::Exit
                         | Builtin::NoObject { .. }
                         | Builtin::UnknownClass
+                        | Builtin::InitializeClass { .. }
                         | Builtin::Native(_),
                     _
                 )

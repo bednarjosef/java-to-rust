@@ -235,7 +235,9 @@ impl<'m> Walk<'m> {
         let movable = shareable(e.ty, self.facts);
         match &e.kind {
             ExprKind::NewArray(sizes) if sizes.len() == depth(e.ty) => Owned::Fresh,
-            ExprKind::ArrayLit(_) if depth(e.ty) == 1 => Owned::Fresh,
+            ExprKind::ArrayLit(_) | ExprKind::Builtin(Builtin::MainArgs, _) if depth(e.ty) == 1 => {
+                Owned::Fresh
+            }
             ExprKind::ArrayLit(rows) if movable => {
                 Owned::Rows(rows.iter().map(|r| self.owned_row(r)).collect())
             }

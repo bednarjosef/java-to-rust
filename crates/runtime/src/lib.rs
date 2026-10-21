@@ -10,6 +10,7 @@ pub use slice::*;
 
 use std::fmt;
 
+mod arguments;
 mod boxed;
 mod builder;
 mod catching;
@@ -48,6 +49,7 @@ mod system;
 mod thread;
 mod unsigned;
 mod vm;
+pub use arguments::main_args;
 pub use boxed::*;
 pub use builder::{StringBuilder, same_builder};
 pub use catching::catching;
