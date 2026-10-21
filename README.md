@@ -159,7 +159,9 @@ A small subset, end to end:
   variable is its bound (`Object` without one), `Box<Integer>` is `Box`, a wildcard is its bound,
   and a use where javac substituted a type argument gets the checked cast back
   (`java::cast(b.get().as_integer(), ..)`). `Comparable` as a type (a bound, mostly) is an enum like
-  `Object`, over strings, boxes, the program's enums and its classes that implement it. A method
+  `Object`, over strings, boxes, the program's enums and its classes that implement it, and so is
+  `Number` (`T extends Number`, `List<? extends Number>`), over the numeric boxes, whose
+  `intValue()` and the others convert as Java does. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &

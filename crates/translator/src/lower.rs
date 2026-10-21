@@ -367,6 +367,9 @@ impl<'t> Lowering<'t> {
             "java.lang.Comparable" if self.object.is_some_and(|at| at.comparable.is_some()) => {
                 Ok(Type::class(COMPARABLE))
             }
+            "java.lang.Number" if self.object.is_some_and(|at| at.number.is_some()) => {
+                Ok(Type::class(NUMBER))
+            }
             _ if let Some(erased) = self.erased(node, name) => erased,
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
             "java.lang.Object" => unsupported(node, "Object"),
@@ -698,6 +701,9 @@ impl<'t> Lowering<'t> {
         }
         if symbol.owner == "java.lang.Comparable" && symbol.name == "compareTo" {
             return self.comparable_call(node, receiver, args);
+        }
+        if symbol.owner == "java.lang.Number" {
+            return self.number_call(node, &symbol, receiver);
         }
         if symbol.name == "equals"
             && !symbol.is_static

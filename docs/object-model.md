@@ -1571,6 +1571,13 @@ Generics are erased in lowering, and nothing after it knows they existed:
   `java::double_compare`, `java::bool_compare`, a difference of `char`s or ordinals), which throws
   `ClassCastException` when the argument is of another class. A program that only calls a class's
   `compareTo` directly translates as before.
+- `java.lang.Number` is a third synthetic interface of the same kind, `NUMBER`, planned when the
+  program uses it as the type of a value (a variable, a bound such as `T extends Number`, the
+  elements of a `List<? extends Number>`). The six numeric boxes implement it, and its abstract
+  `byteValue()` to `doubleValue()` have an arm per box in `codegen::dispatch::number_arm`: the
+  value converted with `as`, which converts as Java's primitive conversions do (a floating-point
+  value becomes a `byte` or a `short` through an `int`). A program class that extends `Number` is
+  still rejected, as is any extension of a runtime class.
 - Bridges are methods, not conversions in dispatcher arms: when a method overrides one whose erased
   parameter or return types differ (`Integer next()` implementing `T next()` of `Source<Integer>`,
   `compareTo(Point)` implementing `Comparable`'s), lowering adds a method to its class with the

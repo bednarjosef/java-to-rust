@@ -802,6 +802,9 @@ impl<'a> Gen<'a> {
         if self.is_comparable_method(r) {
             return self.compare_arm(r, c);
         }
+        if self.is_number_method(r) {
+            return self.number_arm(r, c);
+        }
         match self.class.methods[r].name.as_str() {
             "ordinal" => "*o as i32".to_string(),
             "name" => "o.enum_name()".to_string(),
@@ -829,6 +832,30 @@ impl<'a> Gen<'a> {
     fn is_comparable_method(&self, r: usize) -> bool {
         let t = &self.class.types[self.class.methods[r].class];
         t.kind == TypeKind::Interface && t.name == COMPARABLE
+    }
+
+    /// Whether method `r` is one of `Number`'s own abstract `byteValue()` to `doubleValue()`.
+    fn is_number_method(&self, r: usize) -> bool {
+        let t = &self.class.types[self.class.methods[r].class];
+        t.kind == TypeKind::Interface && t.name == NUMBER
+    }
+
+    /// `Number`'s `intValue()` and the others (method `r`) for a box of class `c` bound to `o`:
+    /// its value converted as Java's primitive conversions convert it, which Rust's `as` does
+    /// (wrapping to narrower integers, saturating from floating point, NaN to 0). Floating point
+    /// becomes a `byte` or a `short` through an `int`, as in Java.
+    fn number_arm(&self, r: usize, c: usize) -> String {
+        let ret = self.class.methods[r].ret;
+        let Some(ty) = self.runtime_of(c) else { return "unreachable!()".to_string() };
+        let value = if self.faithful_box(ty) { "**o" } else { "*o" };
+        let from = ty.unboxed();
+        if from == ret {
+            return value.to_string();
+        }
+        if matches!(from, Type::Float | Type::Double) && matches!(ret, Type::Byte | Type::Short) {
+            return format!("(({value}) as i32) as {}", rust_type(ret));
+        }
+        format!("({value}) as {}", rust_type(ret))
     }
 
     /// `Comparable`'s `compareTo` (method `r`) for a value of class `c` bound to `o`, a string,

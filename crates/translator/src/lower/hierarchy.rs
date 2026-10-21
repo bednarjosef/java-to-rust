@@ -151,7 +151,7 @@ impl<'t> Lowering<'t> {
             return e;
         }
         let differs = match (e.ty, to) {
-            (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE => {
+            (_, Type::Class(b, _)) if b == OBJECT || b == COMPARABLE || b == NUMBER => {
                 !matches!(e.ty, Type::Null | Type::Void) && e.ty != to
             }
             (Type::Class(a, _) | Type::Enum(a), Type::Class(b, _)) => a != b,
