@@ -1594,6 +1594,7 @@ impl<'a> Gen<'a> {
             self.indent -= 1;
             self.line("}");
         }
+        self.chain_items(index);
     }
 
     /// Whether method `i` is emitted in the `impl` of the struct of class `t`: it lives there, and

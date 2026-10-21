@@ -114,7 +114,9 @@ included). A program that warms up also reports the time of its timed kernel. Me
 measured.
 
 `docs/performance.md` has the table from one run on the `array-ownership` branch, and the causes
-of the slow cases. `NodeList` does not compile yet.
+of the slow cases. Freeing a long chain of objects, such as `NodeList`'s list, does not
+overflow the stack: classes on a cycle of field types get an iterative `Drop`
+(docs/object-model.md, "1.13 Dropping long chains").
 
 ## First milestone
 
