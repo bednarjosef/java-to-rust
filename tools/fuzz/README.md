@@ -9,16 +9,18 @@ while the same failure persists. Python 3 standard library only.
     cargo build --release -p java-to-rust          # run.py builds it too, unless --no-build
     python3 tools/fuzz/run.py --count 300 --start 1 --jobs 4
     python3 tools/fuzz/run.py --count 300 --start 1 --jobs 4 --strings
+    python3 tools/fuzz/run.py --count 300 --start 1 --jobs 4 --objects
 
     python3 tools/fuzz/reduce.py target/fuzz/runs/s17/Prog.java --out target/fuzz/reduced/s17.java
 
 `run.py` options: `--count` (seeds, default 200), `--start` (first seed, default 1), `--size`
 (statements in `main`, default 30), `--jobs` (programs in parallel, default 4), `--strings`
 (also generate the String, StringBuilder, `String.format` and `Arrays` code described below),
-`--no-build`. It prints one status per program, the rejection messages with their counts, and
+`--objects` (also generate the classes, interfaces and generics described below; it combines with
+`--strings`), `--no-build`. It prints one status per program, the rejection messages with their counts, and
 the first failures of each kind. Every result is in `target/fuzz/results.jsonl`.
 
-`fuzz.py SEED [SIZE] [--strings]` prints the program for one seed, for inspection.
+`fuzz.py SEED [SIZE] [--strings] [--objects]` prints the program for one seed, for inspection.
 
 Text is read and written as UTF-8 whatever the locale, because the string features print
 non-ASCII characters. Java runs with `-Dstdout.encoding=UTF-8`. `String.format` uses the default
@@ -92,13 +94,50 @@ With `--strings`, also:
 Every index is reduced into range with `Math.floorMod`, so string programs do not throw (apart
 from the deliberate exceptions above).
 
+With `--objects` (`fuzz_objects.py` for the types, expressions and statements,
+`fuzz_object_decls.py` for the declarations), also:
+
+- One or two class trees of one to three levels as static nested classes: abstract and concrete
+  classes, fields of primitive and `String` type with and without initializers (which may
+  change statics), a nullable field of the tree's own type, static counters (whose initializers
+  may read statics) and static methods, one or two constructors with `super(...)` or `this(...)`,
+  printing and sometimes calling an overridable method
+- Method groups with ranks: abstract, concrete and overriding methods returning `int` or
+  `String`, with no parameters, `int` ones, or another object of the tree; `super.m(..)` calls;
+  an `ov` overload family (`int`, `long`, `double`) across subclasses; `touch`, which returns
+  `this`. A body calls only groups of a lower rank, so every call chain ends.
+- Zero to two interfaces with abstract, default and static methods and a constant, implemented by
+  one or more classes (a class may implement two), `I.super.m()` calls
+- `toString`, `equals(Object)` (pattern or cast form) and `hashCode` overrides, and the defaults
+  where a class has none; `Comparable<Self>` implemented by a root class
+- Generic classes `GBox<T>`, `GPair<A, B>` (with `swap`), `GStack<T>` over `GNode<T>`, and
+  `GSorted<T extends Comparable<T>>`, with or without `toString` (so both real and erased
+  generics); generic methods `pick`, `boxOf` and `maxOf`; type arguments of the program's types,
+  `String`, `Integer`, `Object` and `GBox<..>`
+- In `main` and Prog's static methods: variables of class, interface, `Object` and generic types,
+  assigned new objects, aliases, upcasts, guarded downcasts (`x instanceof C ? (C) x : ..`),
+  conditionals, factory calls and container reads; field writes through variables, array
+  elements and `GBox.get()`; calls; `instanceof` with and without a pattern, negated patterns,
+  chains over an `Object`; `==` between objects, `equals`, `hashCode` where every class it may
+  run overrides it; null variables and null tests that narrow; arrays of objects (with null
+  elements from `new C[n]`), for and for-each loops over them; overloads of a static `which` on a
+  superclass chain, `Object`, `int`, `long` and `String`; an `Object` static field holding an
+  object; `describe(Object)` with a chain of patterns
+- Deliberate exceptions: a failing cast (`ClassCastException`) or a null dereference
+  (`NullPointerException`), uncaught, at the statement that `zero0` would use
+
+An object is printed only when every class it may be has a `toString` of the program's, so no
+identity hash is printed; values that may be null are only dereferenced behind a null test.
+
 Every program terminates: loops have constant bounds, and recursion counts a depth parameter
 down from at most 4.
 
 ## What it does not cover
 
-- Classes, objects, fields of instance type, `null`, `instanceof`, inheritance, interfaces
-- Enums, generics, lambdas, streams, inner or anonymous classes, multiple top-level classes
+- Without `--objects`: classes, objects, `null`, `instanceof`, inheritance, interfaces, generics.
+  With it: fields hidden by subclasses, private members, interfaces extending interfaces,
+  generic interfaces, bounded type variables other than `Comparable`, wildcards, records
+- Enums, lambdas, streams, inner or anonymous classes, multiple top-level classes
 - Two-dimensional or array-of-array values, arrays of `String`, `Arrays` methods other than the four
   listed above
 - String methods other than those listed, `String` values with `null`, `Character` and `Integer`
