@@ -1648,6 +1648,143 @@ fn library_roots_are_read_only_where_used() {
     assert_lacks(&rust, &["unused", "Broken"]);
 }
 
+/// A program whose source root is a module that requires a library's module, both with a
+/// `module-info.java` (without the JDK's sources, so both are compiled in the unnamed module).
+fn module_sources(dir: &str) -> std::path::PathBuf {
+    write_sources(
+        dir,
+        &[
+            (
+                "app/module-info.java",
+                "/** The application. */\nmodule com.example.app {\n    requires org.lib;\n}\n",
+            ),
+            (
+                "app/com/example/app/Main.java",
+                "package com.example.app;\nimport org.lib.text.Shout;\npublic class Main {\n    public static void main(String[] a) { System.out.println(Shout.shout(\"hi\")); }\n}\n",
+            ),
+            ("lib/module-info.java", "module org.lib {\n    exports org.lib.text;\n}\n"),
+            (
+                "lib/org/lib/text/Shout.java",
+                "package org.lib.text;\npublic class Shout {\n    public static String shout(String s) { return s + \"!\"; }\n}\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn library_roots_that_are_modules_are_read_as_sources() {
+    let dir = module_sources("module-roots");
+    let program = java_to_rust::Program {
+        main: "com.example.app.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &["crate::org::lib::text::shout(\"hi\")", "pub(crate) fn shout(s: &str) -> String"],
+    );
+    let report = survey(&program).report;
+    assert_contains(&report, &["  Library: 1 pieces; 1 (100.0%) reach nothing outside the sources."]);
+}
+
+#[test]
+fn a_required_module_that_is_not_given_is_named() {
+    let dir = module_sources("module-missing");
+    let program = java_to_rust::Program {
+        main: "com.example.app.Main".into(),
+        sources: vec![dir.join("app")],
+        ..Default::default()
+    };
+    let error = java_to_rust::translate_program(&program).expect_err("org.lib is not given");
+    assert!(
+        error.to_string().ends_with(
+            "Main.java:2:20: package org.lib.text does not exist; module com.example.app requires module org.lib, \
+             whose sources are not given: pass the root of its sources as --library"
+        ),
+        "{error}"
+    );
+    // A package of a module that javac has only as class files, here the JDK's `java.base`, whose
+    // `jdk.internal.misc` is not exported.
+    let dir = write_sources(
+        "module-not-visible",
+        &[(
+            "app/p/Main.java",
+            "package p;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(jdk.internal.misc.VM.isBooted());\n    }\n}\n",
+        )],
+    );
+    let program =
+        java_to_rust::Program { main: "p.Main".into(), sources: vec![dir.join("app")], ..Default::default() };
+    let error = java_to_rust::translate_program(&program).expect_err("java.base is not given");
+    assert!(
+        error.to_string().ends_with(
+            "Main.java:4:40: package jdk.internal.misc is in module java.base, whose sources are not given: \
+             pass the root of its sources as --library"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn annotation_types_used_only_as_annotations_are_left_out_of_a_whole_program() {
+    let dir = write_sources(
+        "annotation-types",
+        &[
+            (
+                "app/Tag.java",
+                "package app;\nimport java.lang.annotation.*;\n@Retention(RetentionPolicy.RUNTIME)\npublic @interface Tag {\n    String value() default \"\";\n}\n",
+            ),
+            (
+                "app/Main.java",
+                "package app;\n@Tag(\"main\")\npublic class Main {\n    @interface Note { int level(); }\n    @Note(level = 2) @Tag static int twice(@Tag int x) { return 2 * x; }\n    public static void main(String[] a) { System.out.println(twice(4)); }\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "app.Main".into(),
+        sources: vec![dir.join("app")],
+        ..Default::default()
+    };
+    let rust =
+        java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["fn twice(x: i32) -> i32", "twice(4)"]);
+    assert_lacks(&rust, &["Tag", "Note", "level", "Retention"]);
+}
+
+#[test]
+fn annotation_types_used_as_values_are_rejected_where_the_code_uses_them() {
+    let rejected = |name: &str, main: &str| {
+        let tag = "package app;\npublic @interface Tag {\n    String value() default \"\";\n    StringBuilder NAMES = new StringBuilder();\n}\n";
+        let dir = write_sources(name, &[("app/Tag.java", tag), ("app/Main.java", main)]);
+        let program =
+            java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+        java_to_rust::translate_program(&program).expect_err("a value of an annotation type").to_string()
+    };
+    let error = rejected(
+        "annotation-variable",
+        "package app;\npublic class Main {\n    public static void main(String[] a) {\n        Tag t = Main.class.getAnnotation(Tag.class);\n        System.out.println(t == null);\n    }\n}\n",
+    );
+    assert!(
+        error.ends_with("app/Main.java:4:9: using the annotation type `app.Tag` other than as an annotation not supported yet"),
+        "{error}"
+    );
+    let error = rejected(
+        "annotation-field",
+        "package app;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(Tag.NAMES.length());\n    }\n}\n",
+    );
+    assert!(
+        error.ends_with("app/Main.java:4:28: a field of the annotation type `app.Tag` not supported yet"),
+        "{error}"
+    );
+    let error = rejected(
+        "annotation-implemented",
+        "package app;\npublic class Main implements Tag {\n    public String value() { return \"v\"; }\n    public Class<? extends java.lang.annotation.Annotation> annotationType() { return Tag.class; }\n    public static void main(String[] a) { System.out.println(new Main().value()); }\n}\n",
+    );
+    assert!(error.ends_with("app/Main.java:2:30: implementing `app.Tag` not supported yet"), "{error}");
+}
+
 #[test]
 fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
     let library = (
@@ -2886,6 +3023,46 @@ fn the_census_reports_every_rejection_not_only_the_first() {
     );
     assert_eq!(census.json["complete"], true);
     assert_eq!(census.json["totals"]["program"]["rejected"], 3);
+}
+
+#[test]
+fn the_census_rejects_a_class_whose_declaration_is_rejected_with_its_code_and_goes_on() {
+    let dir = write_sources(
+        "census_class",
+        &[
+            (
+                "p/Main.java",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(new Loader().n() + Other.fine());\n        Number x = Integer.valueOf(5);\n        System.out.println(x.intValue());\n    }\n}\n",
+            ),
+            (
+                "p/Loader.java",
+                "package p;\nclass Loader extends java.security.SecureClassLoader {\n    int count = 3;\n    { count++; }\n    int n() { return count; }\n}\n",
+            ),
+            ("p/Other.java", "package p;\nclass Other {\n    static int fine() { return 4; }\n}\n"),
+        ],
+    );
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    let error = java_to_rust::translate_program(&program).expect_err("SecureClassLoader is not translated");
+    assert!(
+        error
+            .to_string()
+            .ends_with("p/Loader.java:2:22: extending `java.security.SecureClassLoader` not supported yet"),
+        "{error}"
+    );
+    // The class's constructor, field initializer, initializer block and method are rejected with
+    // it, and `main`, which uses the class, and `fine` translate. (With `Number` in the program,
+    // lowering asks for the superclass of every class with a method without parameters, which
+    // once ended the census at this error.)
+    let census = census(&program);
+    assert_lacks(&census.report, &["Incomplete"]);
+    assert_contains(
+        &census.report,
+        &[
+            "  Program: 6 pieces; 2 (33.3%) translate, 4 rejected.",
+            "       4  extending `…` not supported yet\n          at p/Loader.java:2:22\n",
+        ],
+    );
+    assert_eq!(census.json["complete"], true);
 }
 
 #[test]

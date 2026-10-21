@@ -7,7 +7,7 @@ use super::*;
 impl<'t> Lowering<'t> {
     /// The superclass of class `t` when the program declares it; `None` for `Object`, and for
     /// `Number`, which is the object model's (see `lower::object`). A class that extends another
-    /// class of the runtime is rejected.
+    /// class of the runtime is rejected (in a census, it extends nothing, see `reject_class`).
     pub(super) fn superclass(&self, t: usize) -> Result<Option<usize>, Error> {
         let node = self.types[t].node;
         let Some(clause) = node.get("extendsClause") else { return Ok(None) };
@@ -17,9 +17,9 @@ impl<'t> Lowering<'t> {
         match self.type_index(name) {
             Some(s) if self.types[s].node.kind() == "CLASS" => Ok(Some(s)),
             None if name == "java.lang.Object" || name == "java.lang.Number" => Ok(None),
-            // A census's stub of the class extends nothing.
+            // A census's stub of the class extends nothing, nor does a class it rejected.
             _ if self.stubbing.get() => Ok(None),
-            _ => unsupported(clause, &format!("extending `{name}`")),
+            _ => self.reject_class(t, unsupported(clause, &format!("extending `{name}`"))).map(|()| None),
         }
     }
 
@@ -48,7 +48,7 @@ impl<'t> Lowering<'t> {
                         | "java.lang.CharSequence"
                 ) => {}
                 _ if self.stubbing.get() => {}
-                _ => return unsupported(clause, &format!("implementing `{raw}`")),
+                _ => self.reject_class(t, unsupported(clause, &format!("implementing `{raw}`")))?,
             }
         }
         Ok(out)
