@@ -68,14 +68,10 @@ impl<'t> Lowering<'t> {
     /// switch (0) { default -> { String d = delimiter; Iterator it = elements.iterator();
     ///     String joined = ""; boolean first = true;
     ///     while (it.hasNext()) {
-    ///         if (first) { first = false; joined = "" + (String) it.next(); }
-    ///         else { joined = joined + d + (String) it.next(); } }
+    ///         String e = (String) it.next();
+    ///         if (first) { first = false; joined = "" + e; } else { joined = joined + d + e; } }
     ///     yield joined; } }
     /// ```
-    ///
-    /// A delimiter without effects is written where it is used instead of in `d`. (The locals of
-    /// a switch expression's block are not seen by the nullness analysis, so none of them may
-    /// hold null: the element is used where it is read.)
     pub(super) fn join_iterable(
         &self,
         node: Node<'t>,
@@ -92,7 +88,8 @@ impl<'t> Lowering<'t> {
         else {
             return rejected();
         };
-        let [d, it, joined, first] = ["delimiter", "it", "joined", "first"].map(|n| self.fresh_name(n));
+        let [d, it, e, joined, first] =
+            ["delimiter", "it", "element", "joined", "first"].map(|n| self.fresh_name(n));
         let var = |name: &str, ty: Type| self.synth(ExprKind::Var(name.to_string()), pos, ty);
         let local = |name: &str, ty: Type, init: Expr| Stmt::Local {
             ty,
@@ -111,27 +108,21 @@ impl<'t> Lowering<'t> {
         let boolean = |b: bool| self.synth(ExprKind::Bool(b), pos, Type::Boolean);
         // The elements are `CharSequence`s, and the only ones that can be `Object` values are
         // strings, so the erased element is cast to a string.
-        let element = || -> Result<Expr, Error> {
-            let element = self.call_of(var(&it, it_ty), next, pos)?;
-            Ok(match element.ty {
-                Type::String => element,
-                _ => self.synth(ExprKind::Cast(Type::String, Box::new(element)), pos, Type::String),
-            })
-        };
-        let mut block = Vec::new();
-        let delimiter = if has_effects(&delimiter) {
-            block.push(local(&d, Type::String, delimiter));
-            var(&d, Type::String)
-        } else {
-            delimiter
+        let element = self.call_of(var(&it, it_ty), next, pos)?;
+        let element = match element.ty {
+            Type::String => element,
+            _ => self.synth(ExprKind::Cast(Type::String, Box::new(element)), pos, Type::String),
         };
         let first_text = assign(
             &joined,
             Type::String,
-            concat(self.synth(ExprKind::Str(String::new()), pos, Type::String), element()?),
+            concat(self.synth(ExprKind::Str(String::new()), pos, Type::String), var(&e, Type::String)),
         );
-        let later_text =
-            assign(&joined, Type::String, concat(concat(var(&joined, Type::String), delimiter), element()?));
+        let later_text = assign(
+            &joined,
+            Type::String,
+            concat(concat(var(&joined, Type::String), var(&d, Type::String)), var(&e, Type::String)),
+        );
         let body = Stmt::If {
             cond: var(&first, Type::Boolean),
             then: Box::new(Stmt::Block(vec![assign(&first, Type::Boolean, boolean(false)), first_text])),
@@ -139,15 +130,16 @@ impl<'t> Lowering<'t> {
         };
         let looped = Stmt::While {
             cond: self.call_of(var(&it, it_ty), has_next, pos)?,
-            body: Box::new(Stmt::Block(vec![body])),
+            body: Box::new(Stmt::Block(vec![local(&e, Type::String, element), body])),
         };
-        block.extend([
+        let block = vec![
+            local(&d, Type::String, delimiter),
             local(&it, it_ty, start),
             local(&joined, Type::String, self.synth(ExprKind::Str(String::new()), pos, Type::String)),
             local(&first, Type::Boolean, boolean(true)),
             looped,
             Stmt::Yield(var(&joined, Type::String)),
-        ]);
+        ];
         let selector = self.synth(ExprKind::Int(0), pos, Type::Int);
         Ok(ExprKind::Switch {
             selector: Box::new(selector),
