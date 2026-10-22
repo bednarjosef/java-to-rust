@@ -25,6 +25,24 @@ fn only_under(class: &Class, facts: &Facts, s: usize, t: usize) -> bool {
     })
 }
 
+/// Whether `cond` being true (`when` true) or false (`when` false) means that local `v` is not
+/// null: `v != null`, or `v == null` for false, alone or in a chain of `&&` (`||`).
+fn checks_null(cond: &Expr, v: &str, when: bool) -> bool {
+    let is_v = |e: &Expr| matches!(&e.kind, ExprKind::Var(n) if n == v);
+    match &cond.kind {
+        ExprKind::Binary(op @ (BinOp::Ne | BinOp::Eq), a, b)
+            if (*op == BinOp::Ne) == when
+                && (is_v(a) && matches!(b.kind, ExprKind::Null)
+                    || is_v(b) && matches!(a.kind, ExprKind::Null)) =>
+        {
+            true
+        }
+        ExprKind::Binary(BinOp::And, a, b) if when => checks_null(a, v, when) || checks_null(b, v, when),
+        ExprKind::Binary(BinOp::Or, a, b) if !when => checks_null(a, v, when) || checks_null(b, v, when),
+        _ => false,
+    }
+}
+
 /// Whether `builtin` is a regular expression call whose pattern (and replacement) are constants
 /// that compile, or whose pattern is `Pattern.quote`'s, which matches its text and has no groups,
 /// so that it never throws.
@@ -911,14 +929,20 @@ pub(super) fn runtime_failures(
     }
     // A box that may be null is unboxed by arithmetic and comparisons, but not by `==` or `!=`
     // with an operand that is no primitive (`v == null`), which compares references.
+    // The right operand of `&&` (`||`) runs once the left one is true (false): `v != null && v`
+    // unboxes a `v` that is not null.
     if let ExprKind::Binary(op, l, r) = &x.kind {
         for (operand, other) in [(l, r), (r, l)] {
             let reference =
                 matches!(op, BinOp::Eq | BinOp::Ne) && !(other.ty.is_numeric() || other.ty == Type::Boolean);
+            let checked = std::ptr::eq(operand, r)
+                && matches!(&r.kind, ExprKind::Var(v) if checks_null(l, v, *op == BinOp::And))
+                && matches!(op, BinOp::And | BinOp::Or);
             if matches!(operand.ty, Type::Boxed(_))
                 && null(operand)
                 && !matches!(x.ty, Type::String)
                 && !reference
+                && !checked
             {
                 out.push((NPE, "this unboxing", false, x.id));
             }
