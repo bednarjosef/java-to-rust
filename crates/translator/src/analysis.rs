@@ -48,6 +48,7 @@ pub(crate) use npe_messages::{SEARCH_NULL_ELEMENT, SEARCH_NULL_KEY};
 
 pub use arrays::{RowIndex, Slice, SlicedLoop};
 pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
+pub use threads::array_family;
 pub use whole_objects::whole_objects;
 
 #[derive(Default)]
@@ -63,6 +64,9 @@ pub struct Facts {
     /// Whether two threads may reach a `StringBuilder`, whose builders are then all
     /// `java::SharedStringBuilder`s (see `threads::shares_builders`).
     pub shared_builders: bool,
+    /// The families of the arrays that two threads may reach (`threads::array_family`), whose
+    /// arrays are `java::SharedArray`s; every other array is a `java::Array`.
+    pub shared_arrays: HashSet<Type>,
     /// The methods of those classes that must not borrow their object for the whole call, and
     /// the methods that use the kept monitor of `this` (see `monitors`).
     pub long_methods: HashSet<usize>,
@@ -324,6 +328,7 @@ fn representation(class: &Class, facts: &mut Facts) {
     if facts.threaded {
         facts.thread_shared = threads::thread_shared(class);
         facts.shared_builders = threads::shares_builders(class, &facts.thread_shared);
+        facts.shared_arrays = threads::shared_arrays(class, &facts.thread_shared);
         facts.long_methods = threads::long_methods(class, &facts.thread_shared);
     }
     facts.monitors = monitors::observed(class);

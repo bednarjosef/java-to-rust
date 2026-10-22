@@ -364,7 +364,7 @@ impl<'a> Gen<'a> {
             return None;
         }
         let value = self.owned(e);
-        let share = self.runtime(if self.facts.threaded { "share_across" } else { "share" });
+        let share = self.runtime(if self.shared_array_type(e.ty) { "share_across" } else { "share" });
         Some(Code::atom(format!("{share}({value})")))
     }
 

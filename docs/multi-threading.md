@@ -1295,10 +1295,11 @@ Decisions that change during the implementation are recorded here, milestone by 
 - **`main` holds a `java::MainThread`** (`let _main = java::main_thread();`) instead of calling
   `end_main`: its drop waits for the non-daemon threads and flushes, also when `main` returns
   early.
-- **Shared arrays are chosen per program, not per site**: in a threaded program every array
-  that is not a plain `Vec` is a `java::SharedArray<T>` (`Arc<java::Locked<Vec<T>>>`, the last
-  row of 2.4), and the runtime's array functions take either form through the `Elements<T>`
-  trait. The atomic and read-only forms of 2.4 need the per-site facts of the escape milestone.
+- **Shared arrays are chosen per family, not per site**: an array that is not a plain `Vec` is a
+  `java::SharedArray<T>` (`Arc<java::Locked<Vec<T>>>`, the last row of 2.4) when two threads may
+  reach arrays of its family, the type of its innermost elements (`analysis/threads.rs`,
+  `shared_arrays`, by the rule of shared builders below), else a `java::Array<T>`; the runtime's
+  array functions take either form through the `Elements<T>` trait. The atomic and read-only forms of 2.4 need the per-site facts of the escape milestone.
 - **The type-based closure walks superclasses except `Object`, and subtypes**, but not
   interfaces upward: going up through `Object` or an interface would make every class shared.
   Java enums are never shared: their values are plain Rust values, which every thread may hold.
@@ -1318,9 +1319,6 @@ Decisions that change during the implementation are recorded here, milestone by 
   every builder stays a `java::StringBuilder`, even in a program with threads, and its monitor
   is the address of its `Rc`, which is enough when one thread has it. This is decided by type,
   as it is for classes, not per allocation site.
-  Pending: arrays are still decided for the whole program: every array of a program with
-  threads is a `java::SharedArray`. The same narrowing would keep the arrays that no other
-  thread reaches `Rc`s.
 - **Not yet shared**: a box compared by identity (an `Rc`) in a static or in a field of a shared
   class is rejected (`analysis/threads.rs`, `check`) until the escape milestone gives it a shared
   form. The closure does not follow the type arguments of a generic

@@ -374,7 +374,8 @@ A small subset, end to end:
   that ends a thread prints `Exception in thread "<name>" ...` and the other threads go on. In a
   program that starts a thread, the classes that threads may share (`Thread` and its subclasses,
   the classes of statics, and what their fields reach) are `Arc<java::Locked<C>>`, or `Arc<C>` when
-  immutable, and every other class keeps `Rc<RefCell<C>>`; arrays are `java::SharedArray<T>`; and
+  immutable, and every other class keeps `Rc<RefCell<C>>`; arrays that threads may reach are
+  `java::SharedArray<T>`; and
   statics are process-wide (`java::Atomic<T>` for primitives, `java::Locked<T>` otherwise, and a
   `java::ClassInit` that runs a class's initializer once). A program without threads translates
   exactly as before. Monitors are Java's: synchronized methods (static ones on the class's

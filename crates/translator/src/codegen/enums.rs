@@ -39,8 +39,7 @@ impl<'a> Gen<'a> {
         if nullable {
             return "None".to_string();
         }
-        // The arrays of a program with threads are `SharedArray`s.
-        if matches!(ty, Type::Array(_)) && self.facts.threaded {
+        if matches!(ty, Type::Array(_)) && self.shared_array_type(ty) {
             return "java::shared_from_vec(Vec::new())".to_string();
         }
         let Type::Enum(name) = ty else { return default_value(ty).to_string() };
