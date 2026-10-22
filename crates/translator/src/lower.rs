@@ -1382,6 +1382,8 @@ impl<'t> Lowering<'t> {
             // `String`'s own `join` of the first `size` elements between a prefix and a suffix,
             // which `StringJoiner` reaches through `SharedSecrets` (`String` is the runtime's).
             ("jdk.internal.access.JavaLangAccess", "join") if args.len() == 5 => {
+                // Its elements, a `String[]` that may be an `Object[]` (`covariant`).
+                args = self.string_array_args(node, std::mem::take(&mut args), false, false)?;
                 Builtin::String(StringOp::JoinRange)
             }
             // What the JVM's `JavaLangAccess` does, which a translated program does not have
