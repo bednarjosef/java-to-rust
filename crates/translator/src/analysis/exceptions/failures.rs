@@ -764,6 +764,19 @@ pub(super) fn runtime_failures(
                 | Builtin::RawMemory { .. } = builtin
                 {
                     // A null base is an address outside the heap, which ends the program.
+                } else if let Builtin::Arrays(ArraysOp::BinarySearch | ArraysOp::BinarySearchRange) = builtin {
+                    // The array is dereferenced with the checked form, and so is a key that may
+                    // be null, which fails where it is compared with an element; where elements
+                    // may be null, comparing either fails in the search (`Gen::arrays_op`).
+                    let key = &args[args.len() - 1];
+                    if null(&args[0]) {
+                        out.push((NPE, "this call", true, args[0].id));
+                    }
+                    if facts.nullable_elements.contains(&args[0].ty.element()) {
+                        out.push((NPE, "this call", true, x.id));
+                    } else if null(key) {
+                        out.push((NPE, "this call", true, key.id));
+                    }
                 } else if !takes_null && checked.iter().any(null) {
                     let receiver = !checked[1..].iter().any(null);
                     out.push((NPE, "this call", receiver, if receiver { args[0].id } else { x.id }));

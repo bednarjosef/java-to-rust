@@ -4,6 +4,16 @@
 
 use super::*;
 
+/// `match obj { arms }` over the variants of an enum of classes. With no arms, for an interface
+/// that no created class implements, `obj` has no value to match; Rust takes no empty `match` on
+/// a reference, so it is run and then the code is unreachable.
+pub(super) fn variant_match(obj: &str, arms: &[String]) -> String {
+    match arms.is_empty() {
+        true => format!("{{ let _ = {obj}; unreachable!() }}"),
+        false => format!("match {obj} {{ {} }}", arms.join(", ")),
+    }
+}
+
 impl<'a> Gen<'a> {
     /// `GetClass(o)`: the class of the value of `o`, from the variant of an enum of classes.
     pub(super) fn get_class(&mut self, object: &'a Expr) -> Code {
@@ -14,7 +24,7 @@ impl<'a> Gen<'a> {
                 .into_iter()
                 .map(|c| format!("{}(_) => {}", self.variant(t, c), self.decl_class(c)))
                 .collect();
-            return Code::new(format!("match {obj} {{ {} }}", arms.join(", ")), LOWEST);
+            return Code::new(variant_match(&obj, &arms), LOWEST);
         }
         let class = match object.ty {
             Type::Class(..) => {
@@ -221,7 +231,7 @@ impl<'a> Gen<'a> {
             if nullable {
                 arms.push("None => None".to_string());
             }
-            return format!("match {value} {{ {} }}", arms.join(", "));
+            return variant_match(&value, &arms);
         }
         let names = match x.ty {
             Type::Class(..) => match self.struct_class(x) {

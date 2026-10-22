@@ -290,7 +290,10 @@ impl<'a> Gen<'a> {
                 // Rust cannot tell that a `try` block or its `catch` clauses assign it before it is
                 // read, as Java can: it starts as the value Java would give a field.
                 let ty_text = self.ty_name(ty);
-                let value = exceptions::default_value(ty).unwrap_or("todo!()");
+                let value = match ty {
+                    Type::Array(_) => self.placeholder(ty, false),
+                    _ => exceptions::default_value(ty).unwrap_or("todo!()").to_string(),
+                };
                 self.line("#[allow(unused_assignments)]");
                 self.line(&format!("let {mutable}{rust}: {ty_text} = {value};"));
             }

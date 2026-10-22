@@ -32,7 +32,7 @@ impl<'a> Gen<'a> {
                 };
                 arms.push(arm);
             }
-            return Code::atom(format!("match {obj} {{ {} }}", arms.join(", ")));
+            return Code::atom(super::class_values::variant_match(&obj, &arms));
         }
         let c = self.struct_class(object).expect("`clone` of an object of a class");
         if !self.class.types[c].cloneable {
