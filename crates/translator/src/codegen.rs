@@ -29,6 +29,7 @@ mod expr;
 mod field_inits;
 mod files;
 mod idiomatic;
+mod imports;
 mod inflate;
 mod math;
 mod names;

@@ -5,7 +5,7 @@
 //! the package) and the `use` lines they need. A [`Layout`] then decides the files:
 //!
 //! - [`Layout::OneFile`]: everything in one `main.rs`, packages as inline `mod a { .. }` blocks.
-//!   A translated single file, and any program without packages, is always one file.
+//!   A translated single file, and any program with no package or one, is always one file.
 //! - [`Layout::FilePerModule`]: a file per package that has items, at the path of the package
 //!   (`com.example.util` is `src/com/example/util.rs`), the way a Rust project is laid out.
 //!
@@ -118,8 +118,8 @@ impl Module {
 }
 
 impl ModuleTree {
-    /// The source files of the program in `layout`. A program without packages is one `main.rs`
-    /// in every layout.
+    /// The source files of the program in `layout`. A program without packages, or with one, is
+    /// one `main.rs` in every layout.
     pub fn files(&self, layout: Layout) -> Vec<SourceFile> {
         match layout {
             Layout::OneFile => vec![SourceFile { path: "main.rs".into(), text: self.one_file() }],
@@ -170,7 +170,8 @@ impl ModuleTree {
         let Some(root) = self.modules.iter().position(|m| m.path.is_empty()) else {
             return Vec::new();
         };
-        if self.modules.len() == 1 {
+        // A program of one package is one file, like a translated file.
+        if self.modules.iter().filter(|m| !m.path.is_empty() && !m.items.is_empty()).count() <= 1 {
             return self.files(Layout::OneFile);
         }
         let mut files = Vec::new();

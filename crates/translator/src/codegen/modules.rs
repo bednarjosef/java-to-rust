@@ -394,15 +394,8 @@ impl<'a> Gen<'a> {
         let text = std::mem::replace(&mut self.out, outer);
         let traits = std::mem::replace(&mut self.traits, outer_traits);
         let ends = items.iter().skip(1).map(|(_, start, _)| *start).chain([text.len()]);
-        let items: Vec<Item> = items
-            .iter()
-            .zip(ends)
-            .map(|((origin, start, refers), end)| Item {
-                origin: origin.clone(),
-                text: text[*start..end].to_string(),
-                refers: refers.clone(),
-            })
-            .collect();
+        let mut texts: Vec<String> =
+            items.iter().zip(ends).map(|((_, start, _), end)| text[*start..end].to_string()).collect();
         let mut uses = use_lines(&text);
         // The modules it names through their own names, and the extension traits whose methods
         // it calls, from the crate root.
@@ -411,12 +404,29 @@ impl<'a> Gen<'a> {
             let absolute = with(|r| r.absolute_path(trait_path)).unwrap_or_else(|| trait_path.clone());
             crate_uses.push_str(&format!("use {absolute};\n"));
         }
+        // The crate root's items, in a package's module, by their names where nothing else has them.
+        if !package.is_empty() {
+            let taken: BTreeSet<String> = uses
+                .iter()
+                .chain([&crate_uses])
+                .flat_map(|group| group.lines())
+                .filter_map(|line| line.trim_end_matches(';').rsplit([':', ' ']).next())
+                .map(str::to_string)
+                .collect();
+            let roots = packages.iter().filter(|p| !p.contains('.')).map(|p| module_name(p)).collect();
+            crate_uses.push_str(&imports::import_root_items(&mut texts, &roots, &taken));
+        }
         if !crate_uses.is_empty() {
             let mut lines: Vec<&str> = crate_uses.lines().collect();
             lines.sort_unstable();
             lines.dedup();
             uses.push(lines.iter().map(|line| format!("{line}\n")).collect());
         }
+        let items = items
+            .into_iter()
+            .zip(texts)
+            .map(|((origin, _, refers), text)| Item { origin, text, refers })
+            .collect();
         modules.push(Module { package: package.to_string(), path: path.clone(), uses, items });
         let prefix = if package.is_empty() { String::new() } else { format!("{package}.") };
         let children = packages
