@@ -194,6 +194,12 @@ pub enum Native {
     NanoTimeAdjustment,
     /// `Unsafe.arrayBaseOffset(c)` of a class literal `c` of an array class.
     ArrayBaseOffset,
+    /// `java.lang.reflect.Array`'s `newArray(componentType, length)`, `getLength(array)` and
+    /// `set(array, index, value)`, on the arrays that become `Object`s: the generator matches the
+    /// component type's name, or the array's variant, against those of the program.
+    ReflectNewArray,
+    ReflectArrayLength,
+    ReflectArraySet,
     /// `Unsafe.arrayIndexScale(c)` of a class literal of an array class, by the element type: a
     /// primitive type, or `java.lang.Object` for every reference type.
     ArrayIndexScale(&'static str),
@@ -322,6 +328,13 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         }
         ("java.util.TimeZone", "getSystemGMTOffsetID", "()java.lang.String") => Native::SystemGmtOffsetId,
         ("jdk.internal.misc.CDS", "getCDSConfigStatus", "()int") => Native::CdsConfigStatus,
+        ("java.lang.reflect.Array", "newArray", "(java.lang.Class<?>,int)java.lang.Object") => {
+            Native::ReflectNewArray
+        }
+        ("java.lang.reflect.Array", "getLength", "(java.lang.Object)int") => Native::ReflectArrayLength,
+        ("java.lang.reflect.Array", "set", "(java.lang.Object,int,java.lang.Object)void") => {
+            Native::ReflectArraySet
+        }
         ("jdk.internal.misc.CDS", "getRandomSeedForDumping", "()long") => Native::CdsRandomSeed,
         // Without an archive there is nothing to restore. Its argument is a class literal, which
         // the lowering drops with the call (`class_literal_call`).

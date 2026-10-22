@@ -450,7 +450,9 @@ existed:
   `T extends Comparable<T>`), looked up in the method and then its class and the classes it is
   nested in. A type variable hides a class of the same name.
 - A parameterized type is its class; `? extends X` and `capture#1 of ? extends X` are `X`; `?`
-  and `? super X` are `Object`. javac writes an inner class of a generic class with the outer's
+  and `? super X` are `Object`. A capture of those has its type variable's bound, so
+  `JavaTree` writes it as a capture of `? extends` the bound's erasure (`ChronoLocalDateTime<?>`'s
+  `toLocalDate()` is a `ChronoLocalDate`). javac writes an inner class of a generic class with the outer's
   type arguments (`EnumMap<K,V>.EntryIterator`); those are dropped first
   (`without_outer_args`).
 - Members are declared with erased types. A use whose type javac substituted (a call's result, a

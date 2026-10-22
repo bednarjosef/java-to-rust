@@ -180,6 +180,11 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
             class.methods[f].body = inline.take().unwrap_or_default();
         }
         for &m in &ctors {
+            // A constructor of a leaf that never runs keeps its body, which codegen writes as
+            // such: it builds no object, so neither its superclass's nor its fields'.
+            if !whole.contains(&t) && super::live_methods::never_runs(&class.methods[m]) {
+                continue;
+            }
             let own = match shared {
                 _ if !starting.contains(&m) => Vec::new(),
                 Some(f) => {

@@ -234,7 +234,8 @@ impl<'a> Gen<'a> {
         if let Some(t) = self.enum_of(x) {
             self.need(Need::RuntimeTypeNames(t));
             if nullable {
-                let value = self.option_ref(x);
+                // A value of the enum that may be null is an `Option<&..>`.
+                let value = self.enum_option(x);
                 return format!("{}.map(|o| o.runtime_type_names())", Code::new(value, LOWEST).left_at(ATOM));
             }
             let value = self.expr(x).at(ATOM);

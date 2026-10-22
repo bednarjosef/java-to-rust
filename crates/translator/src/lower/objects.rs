@@ -58,6 +58,7 @@ impl<'t> Lowering<'t> {
             field_updates: Default::default(),
             static_qualifiers: Default::default(),
             calls: Default::default(),
+            body_class: Default::default(),
             covariant: Default::default(),
             object: None,
             plain_object: None,
@@ -365,6 +366,9 @@ impl<'t> Lowering<'t> {
                         && !receiver.ends_with(']');
                     (named && class).then(|| receiver.to_string())
                 }),
+                // A method of an enum constant's body, which javac gives no owner
+                // (`constant_body_call`), by the body's anonymous class.
+                "IDENTIFIER" if symbol.owner.is_empty() => self.body_class.borrow().clone(),
                 "IDENTIFIER" => self.plain_qualifier(symbol.owner).map(str::to_string),
                 _ => None,
             }

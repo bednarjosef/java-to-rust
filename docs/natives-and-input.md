@@ -87,6 +87,21 @@ something a translated program does not have.
 | `SecureRandom.getSeed` | `random.rs` | seed bytes from the operating system |
 | the natives of the translator's `Thread` | `thread.rs` | see [multi-threading.md](multi-threading.md) |
 | `StandardOutput.write0`, `writeBytes0`, `flush0`, `close0` | `out.rs` | see "System.out, System.err and System.in as values" |
+| `java.lang.reflect.Array.newArray`, `getLength`, `set` | code (`codegen/dispatch.rs`) | a `match` over the arrays that become `Object`s, see below |
+
+`java.lang.reflect.Array`'s natives work on the arrays that the program makes `Object`s, each a
+variant of `Object` (`int[]`, `String[]`): `newArray` matches the component type's name
+(`Class.getName()`) against their element types, `getLength` and `set` the array's variant, and
+`set` widens a box to a primitive element as the JVM does, failing in its order (a null array, one
+that is not an array, a null for a primitive, the index, then the value). A component type of which
+the program makes no array as an `Object` ends the program with `not_translated`. The analyses take
+`newArray` to make an array of each of those types, with null references, and an `Object[]` that
+stands for several array types ([object-model.md](object-model.md) 1.11, covariant arrays) takes any
+reference, as a store into it does. The failures without a message (`void`, a null array) are built
+with the class's constructor without arguments, so `getMessage()` is null. The JDK's `(T[])
+Array.newInstance(a.getClass().getComponentType(), n)` (`toArray(T[])`, `TimSort`'s work arrays)
+does not reach the native: it is lowered to a new array of `n` nulls of `a`'s type
+(`lower::arrays::component_array`, `program::component_array`).
 
 The natives of the runtime's own classes (`System.arraycopy`, `Object.hashCode`,
 `System.identityHashCode`, the bit conversions of `Double` and `Float`, the clocks,
@@ -107,10 +122,6 @@ compared with one recorded run.
   reached: the translator gives the program its own `Throwable` and standard exceptions
   (`java/Standard.java`). Stack traces and helpful null-pointer messages are in
   [exceptions.md](exceptions.md).
-- `java.lang.reflect.Array.newArray`. The JDK's `(T[]) Array.newInstance(a.getClass().getComponentType(), n)`
-  (`toArray(T[])`, `TimSort`'s work arrays) is lowered to a new array of `n` nulls of `a`'s type
-  without it (`lower::arrays::component_array`, `program::component_array`); any other call of
-  `Array.newInstance` reaches the native and is rejected where it can run.
 - `FileChannelImpl` (the channel of `RandomAccessFile.getChannel()` and `FileInputStream.getChannel()`)
   reaches the channel natives above, but its path stops before them: `AbstractInterruptibleChannel`
   calls `JavaLangAccess.blockedOn`, and `InnocuousThread` uses a field offset as a value. So no

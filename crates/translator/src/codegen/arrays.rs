@@ -289,7 +289,10 @@ impl<'a> Gen<'a> {
         let new = self.step_value(ty, increment, id, old);
         let new = self.closure_value(id, new);
         let helper = if prefix { "update" } else { "post_update" };
-        let call = self.may_fail(id, helper, "", &format!("{handle}, {i}, |{old}| {new}")).text;
+        // The element's type is named: `old.wrapping_add(1)` does not tell it, and rustc may not
+        // see it through the array's borrow (`&this.borrow().digits`).
+        let typed = if ty.is_numeric() { format!("{old}: {}", code::rust_type(ty)) } else { old.to_string() };
+        let call = self.may_fail(id, helper, "", &format!("{handle}, {i}, |{typed}| {new}")).text;
         Self::bound_write(binding, call)
     }
 
