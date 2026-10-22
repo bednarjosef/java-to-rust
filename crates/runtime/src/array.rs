@@ -5,7 +5,7 @@
 //! (`SharedArray`), which one thread at a time may borrow; the functions here take either handle
 //! (`Elements`), and those that make an array have a `shared_` twin.
 
-use crate::{Exception, Locked, throw, uncaught};
+use crate::{Exception, Locked, throw};
 use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
@@ -528,9 +528,10 @@ pub fn each<T: Clone>(a: impl Elements<T>) -> impl Iterator<Item = T> {
     (0..len).map(move |k| get(&a, k))
 }
 
-/// Checks the sizes of a multi-dimensional `new`, before any array is allocated.
+/// Checks the sizes of a multi-dimensional `new`, before any array is allocated. Inside
+/// `catching`, a negative size unwinds to it.
 pub fn check_sizes(dims: &[i32]) {
-    try_check_sizes(dims).unwrap_or_else(uncaught)
+    try_check_sizes(dims).unwrap_or_else(|e| crate::throw_exception(e))
 }
 
 /// `check_sizes` where the program observes the `NegativeArraySizeException`.
