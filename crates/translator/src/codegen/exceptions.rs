@@ -213,8 +213,8 @@ pub(super) fn default_value(ty: Type) -> Option<&'static str> {
 }
 
 /// A local of the method that `try_assigned` names (`assigned`) whose type has no
-/// `default_value` and that is not an `Option` (`optional`), which starts as `None`: not supported
-/// yet.
+/// `default_value`, that is not an array (which starts empty) and that is not an `Option`
+/// (`optional`), which starts as `None`: not supported yet.
 pub(super) fn check_try_assigned(
     body: &[Stmt],
     assigned: &HashSet<String>,
@@ -828,7 +828,9 @@ impl<'a> Gen<'a> {
                 })
                 .collect();
             // A clause that nothing the body throws reaches is not written.
-            if !matched.is_empty() {
+            if matched.is_empty() {
+                self.not_written(&catch.body);
+            } else {
                 covered.extend(&matched);
                 arms.push((catch, matched));
             }

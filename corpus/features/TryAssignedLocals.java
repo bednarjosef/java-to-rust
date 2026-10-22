@@ -1,5 +1,6 @@
 // Locals declared without a value and assigned in a `try` block that only the block reads, as in
-// javac's ClassReader and the JDK's CharPredicates: of an enum and of a class, also in a loop.
+// javac's ClassReader and the JDK's CharPredicates: of an enum and of a class, also in a loop;
+// and arrays read after the `try`, as in the JDK's BreakIteratorResourceBundle.
 public class TryAssignedLocals {
     enum Script {
         LATIN,
@@ -75,6 +76,40 @@ public class TryAssignedLocals {
         return out.toString();
     }
 
+    static byte[] bytesOf(String text) {
+        if (text.isEmpty()) {
+            throw new IllegalArgumentException("no bytes");
+        }
+        return text.getBytes();
+    }
+
+    static int sum(String text) {
+        byte[] data;
+        try {
+            data = bytesOf(text);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException("can't load " + text, e);
+        }
+        int total = 0;
+        for (byte b : data) {
+            total += b;
+        }
+        return total;
+    }
+
+    static byte[] kept;
+
+    static int keep(String text) {
+        byte[] data;
+        try {
+            data = bytesOf(text);
+        } catch (IllegalArgumentException e) {
+            data = new byte[] {1, 2};
+        }
+        kept = data;
+        return kept.length;
+    }
+
     public static void main(String[] args) {
         System.out.println(forScript("greek"));
         System.out.println(forScript("runic"));
@@ -82,5 +117,13 @@ public class TryAssignedLocals {
         System.out.println(readBoth("x", "y"));
         System.out.println(readBoth("x", ""));
         System.out.println(counted(new String[] {"latin", "cyrillic", "Greek"}));
+        System.out.println(sum("abc"));
+        try {
+            System.out.println(sum(""));
+        } catch (IllegalStateException e) {
+            System.out.println(e.getMessage() + " (" + e.getCause().getMessage() + ")");
+        }
+        System.out.println(keep("hello"));
+        System.out.println(keep(""));
     }
 }

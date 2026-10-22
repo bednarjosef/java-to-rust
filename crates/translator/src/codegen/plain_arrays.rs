@@ -256,6 +256,11 @@ impl<'a> Gen<'a> {
                 let value = self.owned(init);
                 self.line(&format!("let {mutable}{rust}: {ty_text} = {value};"));
             }
+            // Assigned in a `try` block, which Rust does not follow (see `local_decl`).
+            None if self.try_assigned.contains(name) => {
+                self.line("#[allow(unused_assignments)]");
+                self.line(&format!("let {mutable}{rust}: {ty_text} = Vec::new();"));
+            }
             None => self.line(&format!("let {mutable}{rust}: {ty_text};")),
         }
     }
