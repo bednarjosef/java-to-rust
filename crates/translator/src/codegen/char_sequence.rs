@@ -38,7 +38,7 @@ impl<'a> Gen<'a> {
         let length = self.char_sequence_method(sequence, "length", 0);
         let char_at = self.char_sequence_method(sequence, "charAt", 1);
         let throws = [length, char_at].map(|m| self.facts.throwing.contains(&m));
-        let (seq, index) = (self.temp("seq"), self.temp("index"));
+        let (builder, seq, index) = (self.temp("builder"), self.temp("seq"), self.temp("index"));
         let length_call = format!("{seq}.{}()", self.dispatch_name(t, length));
         let char_call = format!("{seq}.{}({index})", self.dispatch_name(t, char_at));
         let length_call = if throws[0] { length_call } else { format!("Ok({length_call})") };
@@ -47,23 +47,31 @@ impl<'a> Gen<'a> {
             if throws.contains(&true) { self.throwable_type() } else { "java::Exception".to_string() };
         let args = format!("{range}, {length_call}, |{index}| {char_call}");
         let call = if self.facts.raising.contains(&id) || throws.contains(&true) {
-            let call = format!("{sb}.try_append_seq_range::<{error}>({args})");
+            let call = format!("{builder}.try_append_seq_range::<{error}>({args})");
             Code::atom(self.passed_on(Code::atom(call)))
         } else {
-            Code::atom(format!("{sb}.append_seq_range::<{error}>({args})"))
+            Code::atom(format!("{builder}.append_seq_range::<{error}>({args})"))
         };
+        // The appends give `&Self`, a borrow of the builder: where the builder is a temporary (a
+        // `new StringBuilder`), that borrow must not leave the block or arm, so the block gives
+        // another handle to the builder instead.
+        let ty = self.builder_type();
+        let handle = |body: &str| format!("{{ let {builder}: &{ty} = &{sb}; {body}; {builder}.clone() }}");
         if self.nullable(s) {
             let option = self.expr(s);
-            let null = self.append_range_call(id, sb, &format!("\"null\", {range}"));
+            let null = self.append_range_call(id, &builder, &format!("\"null\", {range}"));
             return Code::atom(format!(
                 "match &{} {{ Some({seq}) => {}, None => {} }}",
                 option.at(ATOM),
-                call.text,
-                null.text
+                handle(&call.text),
+                handle(&null.text)
             ));
         }
         let obj = self.object(s);
-        Code::atom(format!("{{ let {seq} = &{obj}; {} }}", call.text))
+        Code::atom(format!(
+            "{{ let {builder}: &{ty} = &{sb}; let {seq} = &{obj}; {}; {builder}.clone() }}",
+            call.text
+        ))
     }
 
     /// The index of the method `name` with `params` parameters of the `CharSequence` at `sequence`.
