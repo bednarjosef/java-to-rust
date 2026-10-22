@@ -582,6 +582,18 @@ impl<'a> Gen<'a> {
         if matches!(value.kind, ExprKind::Null) {
             return Code::atom("None");
         }
+        // A string, a builder or a box as a value of a type of the program whose values do not
+        // include it, which `lower::hierarchy::convert` leaves to the generator.
+        if matches!(value.ty, Type::String | Type::StringBuilder | Type::Boxed(_))
+            && !self
+                .type_of(value.ty)
+                .zip(self.type_of(to))
+                .is_some_and(|(s, t)| self.class.hierarchy.is_subtype(s, t))
+        {
+            let message = format!("a `{}` as a `{to}` not supported yet", value.ty);
+            self.rejected.push(Error { pos: value.pos, message });
+            return Code::atom("unreachable!()");
+        }
         match self.narrowing(value, to) {
             Narrowing::Down(s) => return self.downcast(s, to, value, checked),
             Narrowing::Known(false) => return self.failing_cast(to, value, checked),
@@ -1043,6 +1055,9 @@ impl<'a> Gen<'a> {
         if self.is_char_sequence_method(r) {
             return self.char_sequence_arm(r, c);
         }
+        if self.is_appendable_method(r) {
+            return self.appendable_arm(r, c);
+        }
         match self.class.methods[r].name.as_str() {
             "ordinal" => "*o as i32".to_string(),
             "name" => "o.enum_name()".to_string(),
@@ -1114,6 +1129,48 @@ impl<'a> Gen<'a> {
         };
         let value = format!("{}({text})", self.variant(char_sequence, string));
         if self.facts.nullable_returns.contains(&r) { format!("Some({value})") } else { value }
+    }
+
+    /// Whether method `r` is one of the JDK's `Appendable`'s own `append` methods, which a builder
+    /// answers (see `lower::object`).
+    fn is_appendable_method(&self, r: usize) -> bool {
+        let t = &self.class.types[self.class.methods[r].class];
+        t.kind == TypeKind::Interface && t.name == "java.lang.Appendable"
+    }
+
+    /// `Appendable`'s `append(csq)`, `append(csq, start, end)` or `append(c)` (method `r`) for a
+    /// builder of class `c` bound to `o`: the builder's own, which returns the builder itself. A
+    /// null `csq` appends `"null"`, as Java's does.
+    fn appendable_arm(&mut self, r: usize, c: usize) -> String {
+        let method = &self.class.methods[r];
+        let appendable = method.class;
+        if self.runtime_of(c) != Some(Type::StringBuilder) {
+            return "unreachable!()".to_string();
+        }
+        let names: Vec<String> = method.params.iter().map(|p| self.local(&p.name)).collect();
+        let append = match (&method.params[..], &names[..]) {
+            ([p], [x]) if p.ty == Type::Char => format!("o.append_char({x})"),
+            ([p, ..], [csq, rest @ ..]) if matches!(p.ty, Type::Class(..)) => {
+                if let Some(t) = self.type_of(p.ty) {
+                    self.need(Need::Display(t));
+                }
+                let text = if self.optional_var(r, p.ty, &p.name) {
+                    format!("match {csq} {{ Some(s) => s.to_string(), None => \"null\".to_string() }}")
+                } else {
+                    format!("{csq}.to_string()")
+                };
+                match rest {
+                    [] => format!("o.append_str(&{text})"),
+                    [start, end] => format!("o.append_range(&{text}, {start}, {end})"),
+                    _ => return "unreachable!()".to_string(),
+                }
+            }
+            _ => return "unreachable!()".to_string(),
+        };
+        let builder = format!("{}(o.clone())", self.variant(appendable, c));
+        let value =
+            if self.facts.nullable_returns.contains(&r) { format!("Some({builder})") } else { builder };
+        format!("{{ {append}; {value} }}")
     }
 
     /// Whether method `r` is one of `Number`'s own abstract `byteValue()` to `doubleValue()`.
