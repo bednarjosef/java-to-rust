@@ -210,6 +210,7 @@ A small subset, end to end:
   instanceof Circle c` binds `c` with `if let`, a let chain, `let .. else` (for `if (!(x instanceof
   Circle c)) return ..;`) or `is_some_and`, and a downcast or a cast across interfaces is checked,
   throwing `ClassCastException` when it fails. A pattern variable read anywhere else is rejected.
+  One may be assigned (`n = n.next` in a loop), except one of a record or switch pattern.
   `Object` is an enum too, with a variant for each of the program's classes and enums whose values
   become `Object`s and one for each string or box (`Object::String(..)`, `Object::Integer(5)`), so
   `Object` variables, fields, parameters, arrays and varargs translate, with `instanceof` and casts
@@ -242,8 +243,10 @@ A small subset, end to end:
   `doubleValue()` run; `Number`'s `byteValue()` and `shortValue()` narrow `intValue()`, and a
   class that overrides them is rejected. `CharSequence` is such an enum too, over strings,
   builders and the program's classes that implement it: `length()`, `charAt` and `subSequence` run
-  the class's own, or the string's or builder's (a `subSequence` that returns a `String` is
-  rejected), and `toString()` gives the text. A method
+  the class's own, or the string's or builder's (a `subSequence` that returns a `String`, as
+  javac's names have it, gets a bridge that converts the string), and `toString()` gives the
+  text. `CharSequence.getChars` is rejected: Java runs the string's, the builder's or the
+  interface's default method by the object's class, and their exceptions differ. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &
@@ -494,7 +497,10 @@ name throws `UnsupportedCharsetException` or `IllegalCharsetNameException` with 
 which here ends the program uncaught with exit code 1, since the translation cannot catch them.
 `Charset.defaultCharset()` is UTF-8, as Java answers from version 18 on (JEP 400). The runtime
 knows only the six charsets above, so `forName` rejects other names, such as `windows-1252`, that
-Java supports. A `Charset` is never null. Encoding replaces unmappable characters as Java does,
+Java supports. A `Charset` may be null as a reference may (a field or a parameter given null,
+compared with null, printed as `null`); using a null one throws `NullPointerException`, with
+Java's message where a method of the charset is called. Only an array of charsets that would hold
+null is rejected. Encoding replaces unmappable characters as Java does,
 and decoding replaces malformed input as Java's `String` does (`crates/runtime/src/charset.rs`).
 
 #### Enums
@@ -508,7 +514,10 @@ field that is not final is accepted as long as only the constructor sets it. An 
 overridden method becomes a `match self` with an arm per overriding constant and the enum's own
 body (if it is not abstract) for the rest. `valueOf` of a name that is no constant throws
 `IllegalArgumentException` with Java's message (`No enum constant Main.Size.HUGE`), which a
-`catch` can take (`Size::try_enum_value_of(s)?`).
+`catch` can take (`Size::try_enum_value_of(s)?`). `Enum.valueOf(cls, name)` with a class value,
+as javac's annotation proxies call it, tests the class against each of the program's enums and
+takes that enum's `valueOf`; a class that is no enum throws `IllegalArgumentException` (`java.lang.String
+is not an enum class`).
 
 An enum whose constructor does more than set fields to constant values (a loop, a call, an
 argument that is another enum's constant or a static method's result, as the JDK's
@@ -892,7 +901,10 @@ fence), and so `loadFence` and `storeFence`. `Unsafe.arrayBaseOffset` and
 for references) and are answered at the call, so their `Class`-taking natives are not reached.
 `Unsafe.park` and `unpark` park the current thread and unpark a thread by its id, as
 `LockSupport` does.
-`String.intern()` is the string itself; `==` on two strings stays rejected.
+`String.intern()` is the string itself; `==` on two strings stays rejected, except where Java's
+sharing makes identity the same as equal text: both sides are constant expressions, `intern()`
+calls, conditionals of those, or calls of methods that cannot be overridden and return only such
+strings (`corpus/features/InternedStringIdentity.java`).
 
 ### Not yet
 
@@ -914,8 +926,7 @@ Each construct below is rejected at translation with an error that names it:
 Also rejected: `Scanner` (it reaches `java.util.regex`, which needs
 `Character.UnicodeScript`), `System.out`, `System.err` or `System.in` as a value without the
 JDK's sources, readers and writers in charsets other than UTF-8, US-ASCII, ISO-8859-1, UTF-16BE
-and UTF-16LE (an `UnsupportedOperationException` when one is created), `Charset.aliases()`, `null` as a `Charset` (and a `Charset` field or array element
-that starts out null), catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and
+and UTF-16LE (an `UnsupportedOperationException` when one is created), `Charset.aliases()`, a `Charset` array element that is or starts out null, catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and
 charsets beyond the six above.
 
 `docs/jdk-coverage.md` has the census of the JDK code that the target programs reach: what share

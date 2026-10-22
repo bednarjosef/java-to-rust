@@ -174,10 +174,18 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
     facts.placeholder_statics.retain(|key| !nullable.contains(key));
 }
 
-/// The fields whose nullness is analyzed: strings, arrays and objects. A boxed field is always an
-/// `Option`.
+/// The fields whose nullness is analyzed: strings, arrays, objects and charsets. A boxed field is
+/// always an `Option`.
 fn may_be_unset(ty: Type) -> bool {
-    matches!(ty, Type::String | Type::StringBuilder | Type::Array(_) | Type::Class(..) | Type::JavaClass)
+    matches!(
+        ty,
+        Type::String
+            | Type::StringBuilder
+            | Type::Array(_)
+            | Type::Class(..)
+            | Type::JavaClass
+            | Type::Charset
+    )
 }
 
 /// An enum field that starts as `null`, with no initializer or `null`: an `Option` unless every
@@ -216,15 +224,16 @@ pub fn nullable_var(facts: &Facts, m: usize, name: &str) -> bool {
     facts.nullable_vars.contains(&(m, name.to_string()))
 }
 
-/// The types whose values can be null: references, and enums, which are only ever null in a local
-/// (see `lower::enum_nulls`).
+/// The types whose values can be null: references, enums, which are only ever null where
+/// `lower::enum_nulls` allows, and charsets, the runtime's `Copy` values, which are `Option`s
+/// where they may be null as a `java::Class` is.
 pub fn nullable_type(ty: Type) -> bool {
-    ty.is_reference() || matches!(ty, Type::Enum(_))
+    ty.is_reference() || matches!(ty, Type::Enum(_) | Type::Charset)
 }
 
 /// Whether `e`, evaluated in method `m`, can produce null.
 pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
-    // Only references, enums and the null literal can be null.
+    // Only references, enums, charsets and the null literal can be null.
     if !nullable_type(e.ty) {
         return false;
     }

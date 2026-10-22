@@ -117,6 +117,7 @@ const RAISED: &[(&str, &[&str])] = &[
         "java.lang.IllegalArgumentException",
         &[
             "enum#valueOf",
+            "java.lang.Enum#valueOf",
             "java.lang.Character#toChars",
             // An invalid code point of `new String(codePoints, offset, count)`.
             "java.lang.String#<init>",
