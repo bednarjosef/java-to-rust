@@ -20,13 +20,16 @@
 //! yet (a null dereference, an array creation, a cast, ...) is rejected where its failure would
 //! be seen.
 //!
-//! The `toString` that making an object's text runs (`"" + o`, `println(o)`, `append(o)`,
-//! `String.valueOf(o)`) is not such a call: the generator writes it with `Display`, which has no
-//! way to return an exception, so what it throws ends the program there, as an exception that
-//! nothing catches does. Where a `toString` that the program wrote may throw what a `catch`
-//! around the text, or around a call on the way to it, would catch, the program is rejected. The
-//! JDK's own `toString`s throw only for bugs (a collection changed while it is shown) and are not
-//! looked at. An explicit `o.toString()` is an ordinary call, except that one of the JDK's own
+//! The `toString` that making an object's text runs is such a call where the generator makes the
+//! text (`"" + o`, `println(o)`, `String.valueOf(o)`, `append(o)`, `String.format`): it calls the
+//! `toString` of the program, and what that throws goes on from there. Elsewhere (the `hashCode`
+//! that `Object`'s `toString` shows, the text of an enum's constant, the message of an exception,
+//! `printf`, the objects that other library calls show) the text is made through `Display`,
+//! which has no way to return an exception, so what it throws ends the program there, as an
+//! exception that nothing catches does; where a `toString` that the program wrote may throw what
+//! a `catch` around such a text, or around a call on the way to it, would catch, the program is
+//! rejected. The JDK's own `toString`s throw only for bugs (a collection changed while it is
+//! shown) and are not looked at. An explicit `o.toString()` is an ordinary call, except that one of the JDK's own
 //! `toString`s lets out only what the program's code that it runs throws, and the `catch` clauses
 //! around the call are not looked for in its own code. The JDK's static initializers run on the
 //! JDK's own constants and flags, and so none of the program's code: one lets out nothing.
@@ -454,14 +457,18 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         }
         // An exception object is built where it is thrown, and an enum constant where the enum
         // is initialized, outside any `try` of the program.
-        let throwable = class.type_index("java.lang.Throwable");
         let decl = &class.types[method.class];
-        if method.is_ctor && throwable.is_some_and(|t| class.hierarchy.is_subtype(method.class, t)) {
+        if exception_ctor(class, m) {
             reject(method.pos, "a constructor of an exception that throws not supported yet");
         } else if method.is_ctor && decl.enum_constants.is_some() {
             reject(method.pos, "a constructor of an enum that throws not supported yet");
         }
-        if method.name == "toString" && method.params.is_empty() {
+        // The text of an enum's constant is its `Display`, which cannot throw; that of an object is
+        // a call of its `toString` where the generator makes it (`generator_text`).
+        let of_enum = std::iter::once(method.class)
+            .chain(h.ancestors(method.class))
+            .any(|t| class.types[t].kind == TypeKind::Enum);
+        if method.name == "toString" && method.params.is_empty() && of_enum {
             // At the override that throws, which may not be the first of its group.
             let thrower = h.group(m).into_iter().find(|g| own.contains(g)).unwrap_or(m);
             let pos = class.methods[thrower].pos;
@@ -1231,10 +1238,38 @@ fn expr_points(
     for init in static_inits(class, facts, m, x) {
         push(Raise::Call(vec![init]), x.pos, "this static use");
     }
+    // A constructor of an exception cannot throw yet (`analyze`), so what a `toString` in its
+    // message throws ends the program, as one through `Display` does.
+    let calls_text = generator_text(x) && !exception_ctor(class, m);
     for object in text_objects(x) {
         let shown = to_string_impls(class, object.ty);
+        // Where the generator makes the text itself, a `toString` of the program is a call, whose
+        // exception goes on from there; the `hashCode` that `Object`'s `toString` shows, and the
+        // text that the runtime makes, go through `Display`.
+        let (calls, shown): (Vec<usize>, Vec<usize>) = shown.into_iter().partition(|&i| {
+            calls_text
+                && class.methods[i].name == "toString"
+                && !from_jdk(&class.types[class.methods[i].class])
+        });
+        if !calls.is_empty() {
+            push(Raise::Call(calls), object.pos, "this toString");
+        }
         if !shown.is_empty() {
             push(Raise::Text(shown), object.pos, "this toString");
+        }
+    }
+    // `printf` makes all its text before it prints (`lower::strings::printf_call`), where Java
+    // prints the text before each argument first: a `catch` would see less printed.
+    if let ExprKind::Builtin(Builtin::Print, args) | ExprKind::MethodCall { args, .. } = &x.kind
+        && let [format] = args.as_slice()
+        && matches!(format.kind, ExprKind::Builtin(Builtin::Format, _))
+        && format.pos == x.pos
+    {
+        for object in text_objects(format) {
+            let shown = to_string_impls(class, object.ty);
+            if !shown.is_empty() {
+                push(Raise::Text(shown), object.pos, "this toString");
+            }
         }
     }
     for (name, what, checked, id) in runtime_failures(class, facts, m, x, safe) {
@@ -1338,8 +1373,8 @@ pub(super) fn from_jdk(decl: &TypeDecl) -> bool {
 }
 
 /// The objects whose text an expression makes, which runs their `toString`.
-fn text_objects(x: &Expr) -> Vec<&Expr> {
-    let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..));
+pub fn text_objects(x: &Expr) -> Vec<&Expr> {
+    let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..) | Type::Enum(_));
     match &x.kind {
         ExprKind::Builtin(Builtin::ClassName { .. } | Builtin::ClassLiteralName { .. }, _) => Vec::new(),
         // The class, identity or ordinal of an object, which no `toString` gives, its monitor, and
@@ -1371,9 +1406,53 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
     }
 }
 
+/// Whether method `m` (`usize::MAX` for code outside the methods) is a constructor of an
+/// exception.
+fn exception_ctor(class: &Class, m: usize) -> bool {
+    let Some(method) = class.methods.get(m) else { return false };
+    method.is_ctor
+        && class
+            .type_index("java.lang.Throwable")
+            .is_some_and(|t| class.hierarchy.is_subtype(method.class, t))
+}
+
+/// Whether the generator makes the text of the objects that `x` shows (`text_objects`) with a
+/// call of their `toString` (`codegen::objects::object_text`): a concatenation, a print (to
+/// `System.err` too), `String.valueOf` (which a builder's `append` of an object calls) and
+/// `String.format` with its arguments one by one.
+pub fn generator_text(x: &Expr) -> bool {
+    match &x.kind {
+        ExprKind::Builtin(
+            Builtin::Println
+            | Builtin::Print
+            | Builtin::ObjectText
+            | Builtin::Format
+            | Builtin::Native(Native::ErrPrint { .. }),
+            _,
+        ) => true,
+        ExprKind::Binary(BinOp::Add, ..) | ExprKind::Assign { op: Some(BinOp::Add), .. } => {
+            x.ty == Type::String
+        }
+        _ => false,
+    }
+}
+
 /// The `toString` methods that showing a value of type `ty` may run, and the `hashCode`s that
 /// `Object`'s `toString` shows.
 fn to_string_impls(class: &Class, ty: Type) -> Vec<usize> {
+    // A plain enum's value shows the `toString` of its constant, or `Enum`'s, which shows its name.
+    if let Type::Enum(name) = ty {
+        let Some(t) = class.type_index(name) else { return Vec::new() };
+        let mut out = Vec::new();
+        for c in std::iter::once(t).chain(class.hierarchy.concretes(t)) {
+            if let Some(i) = hierarchy::to_string_impl(class, c)
+                && !out.contains(&i)
+            {
+                out.push(i);
+            }
+        }
+        return out;
+    }
     let Some(t) = class.class_index(ty) else { return Vec::new() };
     let mut out = Vec::new();
     for c in class.hierarchy.concretes(t) {
