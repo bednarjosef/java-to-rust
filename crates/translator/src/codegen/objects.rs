@@ -1149,10 +1149,23 @@ impl<'a> Gen<'a> {
         if let Some(constant) = self.constant_read(class, name, ty) {
             return constant;
         }
+        self.static_cell_read(class, name, ty, false)
+    }
+
+    /// A static that starts empty (`Facts::placeholder_statics`) read as the `Option` it holds,
+    /// `None` while its class's initialization, under way, has not set it yet; `None` for any
+    /// other static.
+    pub(super) fn placeholder_read(&mut self, class: usize, name: &str, ty: Type) -> Option<Code> {
+        let placeholder = self.facts.placeholder_statics.contains(&(class, name.to_string()));
+        placeholder.then(|| self.static_cell_read(class, name, ty, true))
+    }
+
+    /// A read of the cell of a static, which initializes its class first. A static that starts
+    /// empty holds its value once its class is initialized: it is that value, unless `optional`.
+    fn static_cell_read(&mut self, class: usize, name: &str, ty: Type, optional: bool) -> Code {
         let cell = cell_name(&self.class.types[class], name);
         let read = Slot::Static { cell, plain: is_cell(ty) }.read(self.clones(ty));
-        // A static that starts empty holds its value once its class is initialized.
-        let read = if self.facts.placeholder_statics.contains(&(class, name.to_string())) {
+        let read = if !optional && self.facts.placeholder_statics.contains(&(class, name.to_string())) {
             format!("{}({read})", self.runtime("non_null"))
         } else {
             read

@@ -73,6 +73,13 @@ impl<'a> Gen<'a> {
         if self.nullable(e) {
             return self.expr(e);
         }
+        // A static still being initialized may be null (see `analysis::nullness`).
+        if let ExprKind::Static { class, name } = &e.kind
+            && ty == e.ty
+            && let Some(read) = self.placeholder_read(*class, name, ty)
+        {
+            return read;
+        }
         let value = self.value(e, ty);
         Code::atom(format!("Some({})", value.text))
     }
