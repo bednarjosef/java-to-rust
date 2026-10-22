@@ -102,7 +102,7 @@ impl<'a> Gen<'a> {
             "list0" => {
                 let names = format!("{}({})", self.runtime("fs_list"), values.join(", "));
                 let each = self.string_vec_as(ty, "names".to_string());
-                let array = format!("{}({each})", self.array_maker("from_vec"));
+                let array = format!("{}({each})", self.array_maker("from_vec", ty));
                 return Code::atom(format!("{names}.map(|names| {array})"));
             }
             "createDirectory0" => "fs_create_directory",
@@ -143,7 +143,7 @@ impl<'a> Gen<'a> {
         }
         let call = format!("{}({})", self.runtime(f), values.join(", "));
         if matches!(ty, Type::Array(_)) {
-            let array = format!("{}({call})", self.array_maker("from_vec"));
+            let array = format!("{}({call})", self.array_maker("from_vec", ty));
             return Code::atom(array);
         }
         Code::atom(call)

@@ -132,7 +132,7 @@ impl<'a> Gen<'a> {
             format!("{}({a}, {b})", self.runtime("same"))
         } else {
             let (a, b) = (self.handle(l), self.handle(r));
-            let pointer = if self.facts.threaded { "Arc" } else { "Rc" };
+            let pointer = if self.shared_array_type(l.ty) { "Arc" } else { "Rc" };
             format!("{pointer}::ptr_eq({a}, {b})")
         };
         if op == BinOp::Ne { Code::new(format!("!{same}"), UNARY) } else { Code::atom(same) }

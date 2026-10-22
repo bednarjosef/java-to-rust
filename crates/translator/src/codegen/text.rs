@@ -167,7 +167,7 @@ impl<'a> Gen<'a> {
                 } else {
                     parts
                 };
-                Code::atom(format!("{}({parts})", self.array_maker("from_vec")))
+                Code::atom(format!("{}({parts})", self.array_maker("from_vec", Type::array(Type::String))))
             }
             StringOp::Join => self.join(args),
             StringOp::EqualsIgnoreCase => {
@@ -192,7 +192,7 @@ impl<'a> Gen<'a> {
             StringOp::ToCharArray => {
                 let s = self.text_ref(&args[0]);
                 let units = call(self, "units", vec![s]).text;
-                Code::atom(format!("{}({units})", self.array_maker("from_vec")))
+                Code::atom(format!("{}({units})", self.array_maker("from_vec", Type::array(Type::Char))))
             }
             StringOp::GetChars => {
                 let s = self.text_ref(&args[0]);
@@ -247,7 +247,7 @@ impl<'a> Gen<'a> {
                 let units = call(self, "units", vec![s]).text;
                 Code::atom(format!(
                     "{}({units}.into_iter().map(i32::from).collect())",
-                    self.runtime("from_vec")
+                    self.array_maker("from_vec", Type::array(Type::Int))
                 ))
             }
             StringOp::JoinRange => {
@@ -270,7 +270,7 @@ impl<'a> Gen<'a> {
                 };
                 Code::atom(format!(
                     "{}({lines}.into_iter().map(|line| {line}).collect())",
-                    self.array_maker("from_vec")
+                    self.array_maker("from_vec", Type::array(Type::class(OBJECT)))
                 ))
             }
             StringOp::FromChars => {
@@ -296,7 +296,7 @@ impl<'a> Gen<'a> {
                     None => format!("{}::Utf8", self.runtime("Charset")),
                 };
                 let bytes = call(self, "get_bytes", vec![s, charset]).text;
-                Code::atom(self.made_array(bytes))
+                Code::atom(self.made_array(bytes, Type::array(Type::Byte)))
             }
             StringOp::FromBytes => {
                 let bytes = self.slice_of(&args[0]);
