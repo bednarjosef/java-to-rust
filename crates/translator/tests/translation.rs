@@ -4781,7 +4781,9 @@ fn a_type_variable_with_several_bounds_is_cast_to_the_later_bound_it_calls() {
         &rust,
         &[
             "fn max(a: Object, b: Object) -> Object {",
-            "java::cast(a.as_comparable(), \"Comparable\").compare_to(",
+            // The argument, a cast that may fail, is computed before the receiver's check.
+            "let receiver_0 = java::cast(a.as_comparable(), \"Comparable\");",
+            "receiver_0.compare_to(",
             "t.name()",
         ],
     );

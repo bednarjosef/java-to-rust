@@ -34,6 +34,9 @@ use crate::value::Value;
 use objects::{MethodInfo, TypeInfo};
 use std::cell::{Cell, RefCell};
 
+mod annotation_objects;
+mod annotation_presence;
+mod argument_order;
 mod arrays;
 mod boxing;
 mod by_name;
@@ -66,6 +69,7 @@ mod switch;
 mod sync;
 mod system;
 mod varargs;
+pub(crate) use argument_order::{RECEIVER, held_local, ordered_call};
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
@@ -92,7 +96,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
     real_generics::retry(|real, covariant| {
         let mut lowering = Lowering::declare(&decls)?;
         let annotations = unit.list("typeDecls").filter(|n| n.kind() == "ANNOTATION_TYPE");
-        lowering.annotation_types.extend(annotations.map(|n| crate::program::class_name(n.0)));
+        lowering.annotation_types.extend(annotations.map(|n| (crate::program::class_name(n.0), n)));
         lowering.covariant = covariant.clone();
         lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
         lowering.declare_standard()?;
@@ -480,9 +484,12 @@ struct Lowering<'t> {
     /// The methods of enums that a constant's body declares and that override nothing, which only
     /// that body's code calls (see `constant_bodies::body_methods`).
     body_helpers: std::collections::HashSet<usize>,
-    /// The annotation types (`@interface`) that were left out, by javac's name: an annotation
-    /// does nothing when the program runs, but a value of one is not translated.
-    annotation_types: std::collections::HashSet<String>,
+    /// The annotation types (`@interface`) that were left out, by javac's name, with their
+    /// declarations: an annotation does nothing when the program runs, but a value of one is not
+    /// translated, and `isAnnotationPresent` reads them (`annotation_presence`).
+    annotation_types: std::collections::HashMap<String, Node<'t>>,
+    /// In a whole program, the annotation types that are the library's (the JDK's).
+    library_annotations: std::collections::HashSet<String>,
     /// What each method asks about its caller (see `callers`).
     callers: callers::Callers,
 }
@@ -571,6 +578,7 @@ impl<'t> Lowering<'t> {
         let mut method = method?;
         local_names::distinct_locals(&mut method);
         self.share_element_reads(&mut method);
+        self.arguments_before_receivers(&mut method);
         Ok(method)
     }
 
@@ -748,12 +756,12 @@ impl<'t> Lowering<'t> {
             "java.lang.Object" => unsupported(node, "Object"),
             // A value of an annotation type (what `getAnnotation(Documented.class)` returns) is
             // an `Annotation`, which is all the code may call on it.
-            _ if self.annotation_types.contains(name)
+            _ if self.annotation_types.contains_key(name)
                 && let Some(t) = self.type_index("java.lang.annotation.Annotation") =>
             {
                 Ok(self.self_type(t))
             }
-            _ if self.annotation_types.contains(name) => {
+            _ if self.annotation_types.contains_key(name) => {
                 unsupported(node, &format!("using the annotation type `{name}` other than as an annotation"))
             }
             _ => unsupported(node, &format!("type `{name}`")),
@@ -1293,6 +1301,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.module_native(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.annotation_members_native(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(kind) = self.processor_annotations_native(node, &symbol, &mut args)? {

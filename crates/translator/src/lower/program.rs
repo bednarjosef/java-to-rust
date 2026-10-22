@@ -180,7 +180,10 @@ fn lower_into<'t>(
             // An annotation type does nothing when the program runs: annotations are left out,
             // and a value of one is rejected where the code has it (`Lowering::annotation_types`).
             if decl.kind() == "ANNOTATION_TYPE" {
-                lowering.annotation_types.insert(crate::program::class_name(decl.0));
+                lowering.annotation_types.insert(crate::program::class_name(decl.0), decl);
+                if index >= program_units {
+                    lowering.library_annotations.insert(crate::program::class_name(decl.0));
+                }
             } else if reach.classes.contains(&crate::program::class_name(decl.0)) {
                 let outer = (!package.is_empty()).then_some(package.as_str());
                 lowering.declare_type(decl, outer).map_err(|e| (Some(index), e))?;

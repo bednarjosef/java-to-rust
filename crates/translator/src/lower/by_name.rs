@@ -218,7 +218,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// `T.class` of the class `t` of the program.
-    fn class_literal_of(&self, node: Node<'t>, t: usize) -> Result<Expr, Error> {
+    pub(super) fn class_literal_of(&self, node: Node<'t>, t: usize) -> Result<Expr, Error> {
         let ty = self.ty(node, &self.types[t].javac)?;
         Ok(self.synth(ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new()), node.pos(), Type::JavaClass))
     }

@@ -117,6 +117,7 @@ final class Method {
 
     // `c.getMethod(name, types)`, or with `declared` `c.getDeclaredMethod(name, types)`.
     static Method find(Class<?> c, String name, Class<?>[] types, boolean declared) throws NoSuchMethodException {
+        annotationMembers(c);
         Method[] all = table();
         for (int i = 0; i < all.length; i++) {
             Method m = all[i];
@@ -131,6 +132,7 @@ final class Method {
 
     // `c.getMethods()`, or with `declared` `c.getDeclaredMethods()`: those of the table.
     static Method[] list(Class<?> c, boolean declared) {
+        annotationMembers(c);
         Method[] all = table();
         int n = 0;
         for (int i = 0; i < all.length; i++) {
@@ -147,6 +149,16 @@ final class Method {
             }
         }
         return out;
+    }
+
+    // An annotation type is not translated, so its members, which an annotation object's values
+    // are read by (javac's `AnnotationProxyMaker`), are not in the table: looking them up fails
+    // loudly rather than as a member that the type does not have.
+    private static void annotationMembers(Class<?> c) {
+        if (c != null && c.isAnnotation()) {
+            throw new UnsupportedOperationException("the methods of the annotation type " + c.getName()
+                    + ", which is not in the translation");
+        }
     }
 
     private boolean found(Class<?> c, boolean declared) {

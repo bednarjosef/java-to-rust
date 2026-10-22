@@ -179,12 +179,17 @@ handles.
   `Reach::reflected` and `Reach::services`) in a whole program, and to `file_names` in a single
   file. The rest of the table needs nothing new.
 - **The report** of the lookups that cannot be resolved when translating is not written yet.
-- **Annotations read by reflection** (`getAnnotation`, javac's `AnnotationProxyMaker`), method
-  handles, `Proxy` and `java.lang.invoke` are still rejected, except the three annotations that
+- **Annotations read by reflection** (`getAnnotation`), method handles, `Proxy` and
+  `java.lang.invoke` are still rejected, except the annotation objects that the JDK's
+  `AnnotationParser.annotationForMap` makes (javac's `AnnotationProxyMaker`), which are the
+  patched `AnnotationInvocationHandler` itself (`lower/annotation_objects.rs`; reading a member's
+  value is not translated), the three annotations that
   `AbstractProcessor` reads of its processor's class (`@SupportedOptions`,
   `@SupportedAnnotationTypes`, `@SupportedSourceVersion`): its overlay reads them through the
   native `TranslatedProcessorAnnotations.values0`, which the translator writes from the program's
-  annotations (`lower/processors.rs`).
+  annotations (`lower/processors.rs`), and `isAnnotationPresent` of an annotation type's class
+  literal, a chain of tests of the class against those whose declarations have it
+  (`lower/annotation_presence.rs`).
 - **Module layers** other than the boot layer, which load code from a module path, and a
   module's `ModuleDescriptor`.
 - **A bundle of the program's own** (`ResourceBundle.getBundle` of a class of the program, as

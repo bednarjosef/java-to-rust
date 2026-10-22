@@ -1266,20 +1266,25 @@ pub fn mentions(e: &Expr, name: &str) -> bool {
 
 /// Calls `on_expr` on every top-level expression and `on_stmt` on every statement in `stmt`, and on
 /// the statements inside the switch expressions of those expressions, at any depth.
-pub fn visit_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn FnMut(&Stmt)) {
+pub fn visit_stmt<'s>(stmt: &'s Stmt, on_expr: &mut dyn FnMut(&'s Expr), on_stmt: &mut dyn FnMut(&'s Stmt)) {
     walk_stmt(stmt, on_expr, on_stmt, true);
 }
 
 /// Calls `on_stmt` on every statement in `stmt` except those inside its switch expressions. For
 /// callers that count what belongs to one switch expression or loop: a `yield` or `continue` in a
 /// nested switch expression belongs to that expression, and Java does not let one leave it.
-pub fn visit_stmt_outside_switches(stmt: &Stmt, on_stmt: &mut dyn FnMut(&Stmt)) {
+pub fn visit_stmt_outside_switches<'s>(stmt: &'s Stmt, on_stmt: &mut dyn FnMut(&'s Stmt)) {
     walk_stmt(stmt, &mut |_| {}, on_stmt, false);
 }
 
 /// `visit_stmt`, where `switches` says whether the statements of switch expressions are reported.
 /// `visit_expr` walks those itself, so its own walk turns this off to report each one once.
-fn walk_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn FnMut(&Stmt), switches: bool) {
+fn walk_stmt<'s>(
+    stmt: &'s Stmt,
+    on_expr: &mut dyn FnMut(&'s Expr),
+    on_stmt: &mut dyn FnMut(&'s Stmt),
+    switches: bool,
+) {
     on_stmt(stmt);
     match stmt {
         Stmt::Local { init: Some(e), .. } => top_expr(e, on_expr, on_stmt, switches),
@@ -1341,7 +1346,12 @@ fn walk_stmt(stmt: &Stmt, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn FnMu
 
 /// Calls `on_expr` on a top-level expression of a statement, then `on_stmt` on the statements of
 /// the switch expressions inside it (see `switch_stmts`) when `switches` is set.
-fn top_expr(e: &Expr, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn FnMut(&Stmt), switches: bool) {
+fn top_expr<'s>(
+    e: &'s Expr,
+    on_expr: &mut dyn FnMut(&'s Expr),
+    on_stmt: &mut dyn FnMut(&'s Stmt),
+    switches: bool,
+) {
     on_expr(e);
     if switches {
         switch_stmts(e, on_stmt);
@@ -1351,7 +1361,7 @@ fn top_expr(e: &Expr, on_expr: &mut dyn FnMut(&Expr), on_stmt: &mut dyn FnMut(&S
 /// Calls `on_stmt` on the statements of every switch expression in `e`, at any depth. Each case
 /// body is walked once, by the switch expression that owns it; `walk_stmt` does not descend into
 /// the expressions of those statements, which `visit_expr` already reaches.
-fn switch_stmts(e: &Expr, on_stmt: &mut dyn FnMut(&Stmt)) {
+fn switch_stmts<'s>(e: &'s Expr, on_stmt: &mut dyn FnMut(&'s Stmt)) {
     visit_expr(e, &mut |x| {
         if let ExprKind::Switch { cases, .. } = &x.kind {
             for case in cases {
@@ -1364,7 +1374,7 @@ fn switch_stmts(e: &Expr, on_stmt: &mut dyn FnMut(&Stmt)) {
 }
 
 /// Calls `f` on `e` and every expression inside it.
-pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+pub fn visit_expr<'s>(e: &'s Expr, f: &mut dyn FnMut(&'s Expr)) {
     f(e);
     match &e.kind {
         ExprKind::Unary(_, x)
@@ -1414,7 +1424,7 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
 }
 
 /// Calls `f` on the expressions inside a place: `a` and `i` in `a[i]`, the object of a field.
-pub fn visit_place(place: &Place, f: &mut dyn FnMut(&Expr)) {
+pub fn visit_place<'s>(place: &'s Place, f: &mut dyn FnMut(&'s Expr)) {
     match place {
         Place::Index(array, index) => {
             visit_expr(array, f);
