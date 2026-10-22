@@ -832,9 +832,15 @@ does not set (`java.locale.providers`, `java.util.currency.data`, the program's 
 or the default given. The key must be a literal or a constant, and the two keys whose value the
 translation cannot match are rejected: `sun.java.command` (the command line) and
 `user.timezone` (set once `TimeZone` runs). In a whole program `System.getProperties()` is a
-`Properties` of the keys of a plain run, made once (`java/overlay/java/lang/TranslatedProperties.java`). The memory
+`Properties` of the keys of a plain run, made once (`java/overlay/java/lang/TranslatedProperties.java`).
+`Integer.getInteger` and `Long.getLong` read a property the same way and decode it as
+`Integer.decode` does, giving the default (or null) when it is unset or no number.
+`Runtime.version().feature()` is the release of the JDK the translator ran with
+(`java.specification.version`); a `Runtime.Version` itself is still rejected. Preview features are
+off, and there is no security manager, so the `jrt:` file system's permission check does nothing;
+`SecurityProperties.includedInExceptions` reads the JDK's `conf/security/java.security`. The memory
 figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
-JVM's, and `gc()` does nothing. `Runtime.halt` flushes the output and exits without shutdown
+JVM's, and `gc()` does nothing, as `System.gc()` does. `Runtime.halt` flushes the output and exits without shutdown
 hooks. `onSpinWait` and `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
 thread's record, which an interrupt wakes. The runtime's
 descriptor table (`fd.rs`) backs the `FileInputStream`, `FileOutputStream` and `FileDescriptor`
@@ -896,7 +902,13 @@ signature, and any other is rejected with its name and signature. The runtime ha
 as with `-XX:-VMContinuations`); `VM.getNanoTimeAdjustment` (HotSpot's, from the system clock);
 `FileDescriptor.getHandle` (-1) and `getAppend` (the descriptor's `O_APPEND`); and
 `CRC32.update` and `updateBytes0` (zlib's CRC-32); `Unsafe.fullFence` (a sequentially consistent
-fence), and so `loadFence` and `storeFence`. `Unsafe.arrayBaseOffset` and
+fence), and so `loadFence` and `storeFence`, and `VarHandle`'s static fences (`fullFence`,
+`acquireFence`, `releaseFence`, `loadLoadFence`, `storeStoreFence`). `Unsafe.copyMemory0` and
+`copySwapMemory0` between two arrays of primitives copy the bytes between them, swapping each
+unit for the second, as the heap buffers' `put` and `compact` do; a plain `get` or `put` of a
+primitive at an offset that is neither a field's nor an element's (`getCharUnaligned`, the
+buffers' typed reads of a `byte[]`) reads or writes the bytes of the array at that offset. A base
+that is null or no array of primitives is memory outside the heap, which ends the program. `Unsafe.arrayBaseOffset` and
 `arrayIndexScale` of an array class literal are HotSpot's layout (16, and 1 to 8 by element, 4
 for references) and are answered at the call, so their `Class`-taking natives are not reached.
 `Unsafe.park` and `unpark` park the current thread and unpark a thread by its id, as
