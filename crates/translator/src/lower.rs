@@ -535,14 +535,14 @@ impl<'t> Lowering<'t> {
             self.add_body_fields(&bodies, &mut types[index].fields)?;
             self.enum_constants(index, &types[index].fields, methods, &bodies)
         });
-        // An enum whose constructors do more than the pure form allows has tables instead,
-        // when its constants' bodies declare no fields.
+        // An enum whose constructors do more than the pure form allows has tables instead, the
+        // fields of its constants' bodies too.
         let constants = match pure {
             Ok(constants) => constants,
-            Err(e) if bodies.iter().any(|b| !b.is_empty()) => return Err(e),
             Err(_) => {
                 types[index].fields.truncate(own_fields);
-                self.enum_tables(index, types, methods)?;
+                self.add_body_fields(&bodies, &mut types[index].fields)?;
+                self.enum_tables(index, types, methods, bodies)?;
                 let names = self.enum_constant_names(index);
                 names.map(|name| EnumConstant { name: name.to_string(), values: Vec::new() }).collect()
             }

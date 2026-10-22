@@ -6,8 +6,9 @@
 //! classes it can look in are those that code can get a `Class` value of without naming them in
 //! a type: the classes that string literals of reachable code name (`by_name`), the locale data
 //! that a computed name finds, and, for methods and fields, the classes of the class literals of
-//! reachable code. A lookup on a class literal looks in that class only, and one on a `Class<?
-//! extends T>` in those that are or extend or implement `T`. The names it can find are the one it
+//! reachable code. A lookup on a class literal, or on `Class.forName` of a name spelled out,
+//! looks in that class only, and one on a `Class<? extends T>` in those that are or extend or
+//! implement `T`. The names it can find are the one it
 //! spells out as a string literal, or for a name that code computes, any string literal of
 //! reachable code; `getMethods()` and its relatives find every member. Each member found is
 //! reachable, with the members of the same name that the class inherits, and is noted in
@@ -22,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use super::{Item, MethodKey, Walk, by_name::class_bound, literal_class, text};
+use super::{Item, MethodKey, Walk, by_name::class_bound, by_name::class_for_name, literal_class, text};
 use crate::value::Value;
 
 /// What a lookup looks for.
@@ -79,7 +80,8 @@ pub fn lookup(node: &Value) -> Option<Lookup> {
         name,
         every,
         no_parameters: kind == Kind::Constructor && !every && arguments.is_empty(),
-        literal: receiver.and_then(literal_class),
+        literal: receiver
+            .and_then(|r| literal_class(r).or_else(|| class_for_name(r).map(|(class, _)| class))),
         bound: class_bound(receiver.map_or("", |r| text(r, "javaType"))),
     })
 }
