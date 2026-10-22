@@ -157,12 +157,14 @@ impl<'t> Lowering<'t> {
     }
 
     /// The enum that a field read in an enum constant's body belongs to. javac gives such a field
-    /// no owner, and the body's methods are lowered in the enum, so the enum is the current class.
+    /// no owner, and the body's methods are lowered in the enum, so the enum is the current class
+    /// or, in a lambda or a class in such a method, the innermost enum around it.
     pub(super) fn body_field_owner(&self, symbol: &Symbol) -> Option<usize> {
         if symbol.kind != "FIELD" || !symbol.owner.is_empty() {
             return None;
         }
-        self.enum_index(&self.types[self.current.get()].name)
+        let at = self.enclosing_enum(self.current.get())?;
+        self.enum_index(&self.types[at].name)
     }
 
     /// The instance fields that the bodies of the constants of enum `class` declare, by ordinal.

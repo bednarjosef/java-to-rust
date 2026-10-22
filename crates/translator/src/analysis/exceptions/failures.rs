@@ -638,10 +638,8 @@ pub(super) fn runtime_failures(
             | Builtin::NoObject { .. }
             | Builtin::MissingResource
             | Builtin::InitializeClass { .. }
-            | Builtin::ClassName { .. }
             | Builtin::ClassLiteralName { .. }
             | Builtin::SameClass { .. }
-            | Builtin::GetClass
             | Builtin::ClassLiteral(_)
             | Builtin::ClassMethod(_)
             | Builtin::ClassIsInstance
@@ -649,6 +647,13 @@ pub(super) fn runtime_failures(
             // A null is a value to them, and an object's own method is a call of its own.
             | Builtin::ObjectsEquals
             | Builtin::ObjectsHashCode => {}
+            // The class of an object that may be null, which is dereferenced with the checked form
+            // (`Gen::after_object`).
+            Builtin::GetClass | Builtin::ClassName { .. } => {
+                if null(&args[0]) {
+                    out.push((NPE, "this call", true, args[0].id));
+                }
+            }
             // An enum that may be null is dereferenced with the checked form (`Gen::enum_value`),
             // the argument of `compareTo` too.
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo => {
@@ -779,6 +784,8 @@ pub(super) fn runtime_failures(
                         | Builtin::Unsigned(UnsignedOp::Parse, _)
                         | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported | CharsetOp::Equals)
                         | Builtin::Native(Native::SystemIdentityHash)
+                        // The JVM's `getSystemTimeZoneID` gives null for a null Java home.
+                        | Builtin::Native(Native::SystemTimeZoneId)
                         // The expected and the new element of an atomic update may be null.
                         | Builtin::ElementUpdate(_)
                 );
