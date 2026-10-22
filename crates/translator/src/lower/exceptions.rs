@@ -59,6 +59,12 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.Math#floorMod",
             "java.lang.StrictMath#floorDiv",
             "java.lang.StrictMath#floorMod",
+            "java.lang.Math#ceilDiv",
+            "java.lang.Math#ceilMod",
+            "java.lang.Math#ceilDivExact",
+            "java.lang.StrictMath#ceilDiv",
+            "java.lang.StrictMath#ceilMod",
+            "java.lang.StrictMath#ceilDivExact",
             "java.lang.Integer#divideUnsigned",
             "java.lang.Integer#remainderUnsigned",
             "java.lang.Long#divideUnsigned",
@@ -708,6 +714,11 @@ impl Standard {
                 "toString".into(),
                 "()java.lang.String".into(),
             ));
+        }
+        // A `Throwable` logged through a `PlatformLogger` prints its trace (see `platform_logger`).
+        if uses.operations.iter().any(|o| super::platform_logger::logs_throwable(o)) {
+            let (owner, name, sig) = super::platform_logger::PRINT_STACK_TRACE;
+            uses.members.insert((owner.into(), name.into(), sig.into()));
         }
         let decls: Vec<(String, &'static Value)> = template().iter().map(|d| (qualified(d), d)).collect();
         let decl = template_type;

@@ -230,7 +230,13 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Blocker", "begin", "()boolean"),
     ("jdk.internal.misc.Blocker", "begin", "(boolean)boolean"),
     ("jdk.internal.misc.Blocker", "end", "(boolean)void"),
-    // A translated program has no native library to load (`lower/libraries.rs`).
+    // A translated program has no native library to load, and no garbage collector whose
+    // collections a cleaner thread would wait for (`lower/libraries.rs`).
+    (
+        "jdk.internal.ref.CleanerImpl",
+        "start",
+        "(java.lang.ref.Cleaner,java.util.concurrent.ThreadFactory)void",
+    ),
     ("jdk.internal.loader.BootLoader", "loadLibrary", "(java.lang.String)void"),
     ("java.security.SecureRandom", "getSeed", "(int)byte[]"),
     // Preview features are off in a plain run, and there is no security manager to check the

@@ -156,7 +156,9 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Bits(..) => &[],
         Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => &[],
         Builtin::Unsigned(UnsignedOp::Compare | UnsignedOp::ToString | UnsignedOp::Widen, _) => &[],
-        // Overflow, and bounds the wrong way round.
+        // Overflow, and bounds the wrong way round. `ceilDivExact` also throws for a zero divisor,
+        // which `runtime_failures` declares as the checked form.
+        Builtin::Native(Native::Math { name: "ceilDivExact", .. }) => &[],
         Builtin::Native(Native::Math { name, .. }) if name.ends_with("Exact") => {
             &["java.lang.ArithmeticException"]
         }
@@ -519,9 +521,17 @@ pub(super) fn runtime_failures(
                 }
             }
             // A zero divisor throws, as in a division.
-            Builtin::Native(Native::Math { name: "floorDiv" | "floorMod", .. }) => {
+            Builtin::Native(Native::Math { name: "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod", .. }) => {
                 let constant = matches!(args[1].kind, ExprKind::Int(v) if v != 0)
                     || matches!(args[1].kind, ExprKind::Long(v) if v != 0);
+                if !constant {
+                    out.push(("java.lang.ArithmeticException", "this division", true, x.id));
+                }
+            }
+            // `MIN_VALUE / -1` overflows too, so only another constant divisor is known to pass.
+            Builtin::Native(Native::Math { name: "ceilDivExact", .. }) => {
+                let constant = matches!(args[1].kind, ExprKind::Int(v) if v != 0 && v != -1)
+                    || matches!(args[1].kind, ExprKind::Long(v) if v != 0 && v != -1);
                 if !constant {
                     out.push(("java.lang.ArithmeticException", "this division", true, x.id));
                 }

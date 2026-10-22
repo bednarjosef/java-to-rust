@@ -370,6 +370,9 @@ impl<'a> Gen<'a> {
         if let Some(code) = self.math_extra(name, args, ty) {
             return code;
         }
+        if let Some(code) = self.ceil_division(name, args, ty, id) {
+            return code;
+        }
         // The operand type of the overloads: `round(float)` returns `int`, `floorMod(long, int)`
         // computes in `long`.
         let operand = match name {

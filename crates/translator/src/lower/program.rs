@@ -138,9 +138,18 @@ fn lower_with<'t>(
         .into_iter()
         .map(|(t, anchor, method, error)| Rejected { unit: unit(t), anchor, error, ty: t, method })
         .collect();
-    // As without a census, an error with Rust generics is retried with all of them erased.
+    // As without a census, an error with Rust generics is retried with all of them erased, but
+    // only an error in code that can run (`analysis::live_methods`): the others leave the
+    // program as it is, and the Rust generics may stay.
+    let retried = !lowering.real.is_empty()
+        && !rejected.is_empty()
+        && lowered.as_ref().is_ok_and(|(class, ..)| {
+            match crate::analysis::live_methods::live_methods(class) {
+                Ok(live) => rejected.iter().any(|r| live.runs(r.ty, r.method)),
+                Err(_) => true,
+            }
+        });
     let first = rejected.first().map(|r| Error { pos: r.error.pos, message: r.error.message.clone() });
-    let retried = lowered.is_ok() && !lowering.real.is_empty();
     *census.borrow_mut() = (rejected, (0..lowering.types.len()).map(unit).collect());
     match first {
         Some(error) if retried => Err((None, error)),
