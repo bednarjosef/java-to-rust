@@ -972,7 +972,15 @@ block's end or after it was freed ends the program. So direct buffers work, with
 freed only when the program frees it (no thread waits for them to be collected:
 `BufferCleaner.startCleaningThreadIfNeeded` does nothing). `UnsafeConstants` holds what the JVM
 injects (`java/overlay/jdk/internal/misc/UnsafeConstants.java`): 8-byte addresses, little-endian,
-unaligned access, 64-byte cache lines, and the system's page size. A base that is no array of
+unaligned access, 64-byte cache lines, and the system's page size. Memory segments work on
+arrays and on memory from an arena: `segment.get(layout, offset)` and `set` of a value layout of
+a primitive make the layout's `VarHandle` in the JDK, which the translation does not make; it
+calls `TranslatedSegments` instead (`java/overlay/jdk/internal/foreign/TranslatedSegments.java`),
+which checks the access as the handle does (bounds, alignment, read-only, the session) and reads
+or writes through `ScopedMemoryAccess` in the layout's byte order. `jdk.internal.foreign.Utils`
+is the translator's (`java/overlay/jdk/internal/foreign/Utils.java`), without the method handles
+of address layouts, and `makeRawSegmentViewVarHandle` throws `UnsupportedOperationException`
+(`corpus/whole-program/MemorySegments.java`). A base that is no array of
 primitives ends the program, and so does a lock, `wait` or `notify` on a string, a box or a class
 held as an `Object`, whose monitor the translation does not keep. `Unsafe.arrayBaseOffset` and
 `arrayIndexScale` of an array class literal are HotSpot's layout (16, and 1 to 8 by element, 4

@@ -276,6 +276,20 @@ pub fn caller_query(class: &str, name: &str, signature: &str) -> Option<&'static
     CALLER_QUERIES.iter().find(|q| **q == (class, name, signature)).map(|q| q.0)
 }
 
+/// The field of its own class that `MhUtil.findVarHandle(MethodHandles.lookup(), "name", type)`
+/// makes a handle of: the lookup is of the class whose code calls it, so the field is reached
+/// though no code names it (`lower/handles.rs`).
+fn own_field_handle(node: &Value) -> Option<String> {
+    let symbol = &node["symbol"];
+    if text(node, "kind") != "METHOD_INVOCATION"
+        || (text(symbol, "owner"), text(symbol, "name")) != ("jdk.internal.invoke.MhUtil", "findVarHandle")
+    {
+        return None;
+    }
+    let [_, field, _] = &node["arguments"].as_array()?[..] else { return None };
+    field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL").map(str::to_string)
+}
+
 /// The class and the field that `node` is the offset of, when it is a call of `Unsafe`'s
 /// `objectFieldOffset` of a class literal and the field's name, or of the field that
 /// `getDeclaredField` of a class literal finds by its name: the field is reached, though no code
@@ -993,6 +1007,53 @@ pub fn redirected_call(owner: &str, name: &str, signature: &str) -> Option<(&'st
 /// A method of the JDK, by class, name and javac's type of it.
 pub type JdkMethod = (&'static str, &'static str, &'static str);
 
+/// The translator's class of the accesses of a memory segment through a value layout's handle.
+pub const TRANSLATED_SEGMENTS: &str = "jdk.internal.foreign.TranslatedSegments";
+
+/// The translator's method that the access `node` calls in its place, by name and signature, when
+/// it is `layout.varHandle().get(segment, offset)` or `layout.varHandle().set(segment, offset,
+/// value)` of a value layout of a primitive (`ValueLayout.OfInt`), as `AbstractMemorySegmentImpl`'s
+/// typed accessors make them: the handle is made at run time, and the translator's method
+/// (`java/overlay/jdk/internal/foreign/TranslatedSegments.java`) does what it does, with the
+/// layout as an argument after the segment.
+pub fn segment_access(node: &Value) -> Option<(&'static str, String)> {
+    let symbol = &node["symbol"];
+    if text(node, "kind") != "METHOD_INVOCATION" || text(symbol, "owner") != "java.lang.invoke.VarHandle" {
+        return None;
+    }
+    let name = match text(symbol, "name") {
+        "get" => "get",
+        "set" => "set",
+        _ => return None,
+    };
+    let receiver = &node["methodSelect"]["expression"];
+    if text(receiver, "kind") != "METHOD_INVOCATION"
+        || text(&receiver["symbol"], "name") != "varHandle"
+        || receiver["arguments"].as_array().is_none_or(|a| !a.is_empty())
+    {
+        return None;
+    }
+    let layout = text(&receiver["methodSelect"]["expression"], "javaType");
+    let primitive = match layout.strip_prefix("java.lang.foreign.ValueLayout.Of")? {
+        "Byte" => "byte",
+        "Boolean" => "boolean",
+        "Char" => "char",
+        "Short" => "short",
+        "Int" => "int",
+        "Float" => "float",
+        "Long" => "long",
+        "Double" => "double",
+        _ => return None,
+    };
+    let arguments = node["arguments"].as_array()?;
+    let signature = match (name, arguments.len()) {
+        ("get", 2) => format!("(java.lang.foreign.MemorySegment,{layout},long){primitive}"),
+        ("set", 3) => format!("(java.lang.foreign.MemorySegment,{layout},long,{primitive})void"),
+        _ => return None,
+    };
+    Some((name, signature))
+}
+
 /// `Locale.getLanguage()`, which `String.toUpperCase(locale)` and `toLowerCase(locale)` call to
 /// tell the languages with their own case mapping (see `lower::strings`).
 pub const LOCALE_LANGUAGE: JdkMethod = ("java.util.Locale", "getLanguage", "()java.lang.String");
@@ -1255,6 +1316,9 @@ struct Walk<'t> {
     literals: HashSet<String>,
     /// The method whose code is being scanned.
     scanning: Option<MethodKey>,
+    /// The class whose code (a method, a field's initializer or an initializer block) is being
+    /// scanned, which `MethodHandles.lookup()` looks up in (`own_field_handle`).
+    lookup_class: Option<String>,
     /// The locale data classes of the libraries, which a computed `Class.forName(module, name)`
     /// can find (`by_name::locale_data_classes`), and whether reachable code has one.
     locale_data: Vec<String>,
@@ -1529,7 +1593,9 @@ impl<'t> Walk<'t> {
                 continue;
             }
             if text(member, "kind") == "BLOCK" {
+                let outer = self.lookup_class.replace(class.to_string());
                 self.scan(member);
+                self.lookup_class = outer;
             } else if has_effects(&member["initializer"]) && !for_serialization(member) {
                 self.work.push(Item::Field((class.to_string(), text(member, "name").to_string())));
             }
@@ -1611,9 +1677,11 @@ impl<'t> Walk<'t> {
                 self.work.push(Item::Method(overrider));
             }
         }
+        let outer_class = self.lookup_class.replace(key.0.clone());
         let outer = self.scanning.replace(key);
         self.scan(node);
         self.scanning = outer;
+        self.lookup_class = outer_class;
     }
 
     /// Whether `class` is a class whose objects come from its constructors, which reachability
@@ -1732,9 +1800,11 @@ impl<'t> Walk<'t> {
         }
         self.work.push(Item::Class(key.0.clone()));
         if has_flag(node, "STATIC") {
-            self.work.push(Item::Init(key.0));
+            self.work.push(Item::Init(key.0.clone()));
         }
+        let outer = self.lookup_class.replace(key.0);
         self.scan(node);
+        self.lookup_class = outer;
     }
 
     /// An item that needs a class: when no unit declares it, the class is missing, and the item
@@ -1802,6 +1872,13 @@ impl<'t> Walk<'t> {
             // So does a call that the runtime makes on `System.out` or `System.err`
             // (`direct_stream_call`).
             Value::Object(_) if runtime_stream_call(value) => self.scan(&value["arguments"]),
+            // An access of a segment through a value layout's handle calls the translator's
+            // method, with the layout, and makes no handle.
+            Value::Object(_) if let Some((name, signature)) = segment_access(value) => {
+                self.work.push(Item::Method((TRANSLATED_SEGMENTS.into(), name.into(), signature)));
+                self.scan(&value["methodSelect"]["expression"]["methodSelect"]["expression"]);
+                self.scan(&value["arguments"]);
+            }
             // An object created from a class name (`by_name`) reaches the constructors of the
             // classes that the name can be, not reflection.
             Value::Object(_) if let Some(name) = created_by_name(value) => {
@@ -1849,6 +1926,11 @@ impl<'t> Walk<'t> {
                 }
                 if let Some(field) = field_offset_named(value) {
                     self.work.push(Item::Field(field));
+                }
+                if let Some(field) = own_field_handle(value)
+                    && let Some(class) = self.lookup_class.clone()
+                {
+                    self.work.push(Item::Field((class, field)));
                 }
                 if text(value, "kind") == "STRING_LITERAL"
                     && let Some(literal) = value["value"].as_str()
