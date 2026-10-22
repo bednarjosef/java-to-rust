@@ -71,10 +71,13 @@ impl<'t> Lowering<'t> {
         if let Some(name) = &binding {
             self.forget_alias(name);
         }
-        // `Object` may also hold a string, a box or an array.
+        // `Object` may also hold a string, a box or an array, and `CharSequence` a string or a
+        // builder.
+        let char_sequence = matches!(value.ty, Type::Class(name, _) if name == CHAR_SEQUENCE);
         let target = matches!(ty, Type::Class(..) | Type::Enum(_))
             || (Self::is_object(value.ty)
-                && matches!(ty, Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_)));
+                && matches!(ty, Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_)))
+            || (char_sequence && matches!(ty, Type::String | Type::StringBuilder));
         if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
             return unsupported(node, "instanceof on these types");
         }
