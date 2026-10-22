@@ -73,17 +73,19 @@ fn a_class_no_thread_reaches_is_translated_as_before() {
 }
 
 #[test]
-fn statics_are_process_wide_in_a_threaded_program() {
+fn statics_that_a_started_thread_touches_are_process_wide() {
     let rust = translate(WORKER);
+    // The worker reads `base`, so `A`'s statics are the process's; only main touches
+    // `ClassLoader`'s, which stay thread-local.
     assert_contains(
         &rust,
         &[
             "static A_BASE: java::Atomic<i32> = java::Atomic::new(3);",
             "static A_LABEL: java::Locked<Option<String>> = java::Locked::new(None);",
             "let _main = java::main_thread();",
+            "static CLASSLOADER_SYSTEM: RefCell<Option<Arc<ClassLoader>>> = const { RefCell::new(None) };",
         ],
     );
-    assert_lacks(&rust, &["thread_local!"]);
 }
 
 #[test]

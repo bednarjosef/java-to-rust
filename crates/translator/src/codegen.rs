@@ -705,7 +705,7 @@ impl<'a> Gen<'a> {
         if m.name == "<clinit>" {
             // A rewritten `<clinit>` keeps its own state, which is its guard (`lower/clinit_errors.rs`).
             if !crate::lower::rewritten_clinit(&self.class.types[m.class]) {
-                self.init_guard(name);
+                self.init_guard(m.class);
             }
             // Java initializes the superclass first.
             let superclass = self.class.hierarchy.superclass(m.class);
@@ -725,7 +725,7 @@ impl<'a> Gen<'a> {
             self.line(&format!("let _main = {guard}();"));
         }
         self.method_monitor(index);
-        let initializes = m.name == "<clinit>" && self.facts.threaded;
+        let initializes = m.name == "<clinit>" && self.facts.process_statics(m.class);
         if !never_runs {
             self.written.insert(index);
         }
@@ -749,7 +749,7 @@ impl<'a> Gen<'a> {
         } else {
             self.stmts(&m.body, !initializes);
             if initializes {
-                self.init_done(name);
+                self.init_done(m.class);
             }
             if self.throwing && m.ret == Type::Void && exceptions::completes_all(&m.body) {
                 self.line("Ok(())");

@@ -272,6 +272,7 @@ fn lower_into<'t>(
         annotation_classes,
         shared_strings: false,
         module_labels: module_labels(reach),
+        thread_statics: None,
     };
     Ok((class, lowering.real.clone(), failed))
 }

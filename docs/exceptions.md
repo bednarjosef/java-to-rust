@@ -312,7 +312,7 @@ A static block or static field initializer that throws is wrapped in
   The state is its own guard, so the rewritten `<clinit>` gets no `init_guard`; its callers
   return `Result`, and so does a method that starts by running it (`Facts::entry_init`,
   `analysis/exceptions/entry.rs`). In a program that starts a thread, the two fields are
-  process-wide statics like the others.
+  process-wide or thread-local with the class's other statics.
 - **The JDK's static initializers** run on the JDK's own constants and flags and none of the
   program's code, so they throw only for bugs: one lets out nothing, and the `catch` clauses
   around a use of its class are not looked for in its own code. A `catch` inside a rewritten JDK
