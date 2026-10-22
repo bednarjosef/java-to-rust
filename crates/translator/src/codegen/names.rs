@@ -6,11 +6,11 @@ use std::collections::BTreeSet;
 /// Rust's keywords, strict and reserved, which a snake-cased Java name can be: `Return` and `If`
 /// are names of javac's `TreeMaker`, though Java's own keywords never name anything.
 pub(super) const RUST_KEYWORDS: &[&str] = &[
-    "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate", "do",
-    "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl", "in", "let",
-    "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref", "return",
-    "self", "static", "struct", "super", "trait", "true", "try", "type", "typeof", "unsafe",
-    "unsized", "use", "virtual", "where", "while", "yield",
+    "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate", "do", "dyn",
+    "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl", "in", "let", "loop",
+    "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref", "return", "self", "static",
+    "struct", "super", "trait", "true", "try", "type", "typeof", "unsafe", "unsized", "use", "virtual",
+    "where", "while", "yield",
 ];
 
 /// `maxValue` becomes `max_value`, `HTTPServer` becomes `http_server`.

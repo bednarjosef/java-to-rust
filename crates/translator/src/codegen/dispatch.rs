@@ -1650,7 +1650,9 @@ impl<'a> Gen<'a> {
         match self.homes[i] {
             // A Java enum's constant is a `Copy` value whose methods take it by value: through
             // the reference, `to_string(locale, messages)` would be `ToString`'s.
-            Home::Class(_) if self.class.types[c].kind == TypeKind::Enum => (format!("(*o).{name}({args})"), true),
+            Home::Class(_) if self.class.types[c].kind == TypeKind::Enum => {
+                (format!("(*o).{name}({args})"), true)
+            }
             Home::Class(_) if self.facts.self_methods.contains(&i) || self.holds_value(c) => {
                 (format!("o{borrow}.{name}({args})"), true)
             }
