@@ -1746,21 +1746,24 @@ impl<'a> Gen<'a> {
         let fail = failed(self, from);
         if optional {
             // A null argument fails inside the class's own `compareTo`, with that one's message: a
-            // string's or a box's as a `Result` that the `?` of `compare_to` passes on. An enum's
-            // `compare_to` returns no `Result`, so its NPE is thrown, which a `java::catching`
-            // around the call turns into the exception a `catch` sees.
+            // string's or a box's as a `Result` that the `?` of `compare_to` passes on, where the
+            // group gives a `Result`. Otherwise (an enum's, or a group of only `i32`s) it is
+            // thrown, which a `java::catching` around the call turns into the exception a
+            // `catch` sees.
             let other = match self.runtime_of(c) {
-                Some(ty) => {
+                Some(ty) if self.facts.throwing.contains(&r) => {
                     let message = compare_null_message(ty.unboxed());
                     let checked =
                         format!("{}(b.as_ref(), {message:?})?", self.runtime("try_non_null_message"));
                     format!("{{ let b = {checked}; {fail} }}")
                 }
-                None => {
-                    let throw = format!(
-                        "{}(\"java.lang.NullPointerException\", {ENUM_COMPARE_NULL:?})",
-                        self.runtime("throw")
-                    );
+                _ => {
+                    let message = match self.runtime_of(c) {
+                        Some(ty) => compare_null_message(ty.unboxed()),
+                        None => ENUM_COMPARE_NULL.to_string(),
+                    };
+                    let throw =
+                        format!("{}(\"java.lang.NullPointerException\", {message:?})", self.runtime("throw"));
                     format!("{{ {throw} }}")
                 }
             };
