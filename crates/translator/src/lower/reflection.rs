@@ -66,6 +66,7 @@ const LOOKUPS: &[(&str, &str, &str, &str, Option<bool>)] = &[
     ("asSubclass", CONSTRUCTOR, "subclass", SUBCLASS, None),
     // Not reflection's, but answered the same way (`java/Threads.java`).
     ("getClassLoader", "java.lang.ClassLoader", "of", "(java.lang.Class<?>)java.lang.ClassLoader", None),
+    ("descriptorString", CONSTRUCTOR, "descriptor", "(java.lang.Class<?>)java.lang.String", None),
 ];
 
 /// The members of the translator's classes that a call of `Class`'s method `name` uses: the
@@ -75,7 +76,7 @@ pub(super) fn lookup_members(name: &str) -> Vec<(String, String, String)> {
     let Some(&(_, class, method, sig, _)) = LOOKUPS.iter().find(|l| l.0 == name) else { return Vec::new() };
     let mut out = vec![(class.to_string(), method.to_string(), sig.to_string())];
     if let Some((_, init)) = MEMBER_CONSTRUCTORS.iter().find(|(c, _)| *c == class)
-        && method != "subclass"
+        && !matches!(method, "subclass" | "descriptor")
     {
         out.push((class.to_string(), "<init>".to_string(), init.to_string()));
     }

@@ -1,10 +1,12 @@
 //! Source and library roots that are Java modules, with a `module-info.java` at the root.
 //!
 //! The translation treats a program as one closed world, so the modules' boundaries (what each
-//! exports and requires) do not change what it does: javac compiles every root as part of one
+//! exports and requires) do not change what compiles: javac compiles every root as part of one
 //! module, `java.base` when the JDK's own sources are a library and the unnamed module otherwise,
 //! so that each class is read from its source on the source path and not from the JDK's class
-//! files (`JavaTree`'s `oneModule`). What the modules declare still serves one purpose: when the
+//! files (`JavaTree`'s `oneModule`). What the modules declare serves at run time instead: the
+//! translation's `java.lang.Module` answers from it as the JVM's boot layer does (`contents`),
+//! `ServiceLoader` finds the providers that modules declare (`service_providers`), and when the
 //! program uses a module whose sources are not given, the error says which one to add.
 
 use super::ProgramError;
@@ -92,6 +94,129 @@ pub fn service_providers<'a>(roots: impl IntoIterator<Item = &'a PathBuf> + Clon
         }
     }
     out
+}
+
+/// What a module declares and what its root holds, which the translation's `java.lang.Module`
+/// answers with (`java/patches/java/lang/Module.java`, `lower/modules.rs`). The unnamed module,
+/// whose name is empty, holds the roots without a `module-info.java`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Contents {
+    pub name: String,
+    /// Whether it is an `open module`.
+    pub open: bool,
+    /// The modules it requires, each with whether `transitive`.
+    pub requires: Vec<(String, bool)>,
+    /// The packages it exports and opens, each with the modules it does so to (none: to all).
+    pub exports: Vec<(String, Vec<String>)>,
+    pub opens: Vec<(String, Vec<String>)>,
+    /// The services it uses, by qualified name.
+    pub uses: Vec<String>,
+    /// Its packages: the directories of its root with Java sources, as packages.
+    pub packages: Vec<String>,
+    /// The files of its root that are not Java sources, by their path from the root with `/`.
+    pub resources: Vec<String>,
+}
+
+/// The contents of the modules among `roots`, in their order, then of the unnamed module if a
+/// root has no `module-info.java`. The packages of the translator's own classes (`overlay`) are
+/// `java.base`'s, as the classes they replace or add to are.
+pub fn contents<'a>(roots: impl IntoIterator<Item = &'a PathBuf>, overlay: Option<&Path>) -> Vec<Contents> {
+    let mut named: Vec<Contents> = Vec::new();
+    let mut unnamed = Contents::default();
+    let mut any_unnamed = false;
+    for root in roots {
+        let source = std::fs::read_to_string(root.join("module-info.java")).ok();
+        let declared = source.as_deref().and_then(full_declaration);
+        let (packages, resources) = root_contents(root);
+        match declared {
+            Some(mut module) => {
+                module.packages = packages;
+                module.resources = resources;
+                named.push(module);
+            }
+            None => {
+                any_unnamed = true;
+                unnamed.packages.extend(packages);
+                unnamed.resources.extend(resources);
+            }
+        }
+    }
+    if let (Some(overlay), Some(base)) = (overlay, named.iter_mut().find(|m| m.name == "java.base")) {
+        base.packages.extend(root_contents(overlay).0);
+        base.packages.sort();
+        base.packages.dedup();
+    }
+    if any_unnamed {
+        unnamed.packages.sort();
+        unnamed.packages.dedup();
+        named.push(unnamed);
+    }
+    named
+}
+
+/// The packages of the root `root` (each directory with a Java source, the root itself being the
+/// unnamed package `""`) and its other files, sorted.
+fn root_contents(root: &Path) -> (Vec<String>, Vec<String>) {
+    let (mut packages, mut resources) = (Vec::new(), Vec::new());
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let mut has_source = false;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            let relative = relative.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+            if path.is_dir() {
+                dirs.push(path);
+            } else if relative.ends_with(".java") {
+                has_source |= relative != "module-info.java";
+            } else {
+                resources.push(relative);
+            }
+        }
+        if has_source {
+            let package = dir.strip_prefix(root).unwrap_or(&dir).to_string_lossy();
+            packages.push(package.replace(std::path::MAIN_SEPARATOR, "."));
+        }
+    }
+    packages.sort();
+    resources.sort();
+    (packages, resources)
+}
+
+/// What `source` declares: the module's name, whether it is open, and its `requires`,
+/// `exports`, `opens` and `uses`.
+fn full_declaration(source: &str) -> Option<Contents> {
+    let source = without_comments(source);
+    let tokens = tokens(&source);
+    let at = tokens.iter().position(|t| *t == "module")?;
+    let name = tokens.get(at + 1).filter(|n| n.chars().all(|c| c.is_alphanumeric() || "._$".contains(c)))?;
+    let mut module =
+        Contents { name: name.to_string(), open: tokens[..at].contains(&"open"), ..Contents::default() };
+    let body = tokens[at + 2..].iter().position(|t| *t == "{").map_or(at + 2, |b| at + 3 + b);
+    let mut rest = tokens[body.min(tokens.len())..].iter();
+    while let Some(&keyword) = rest.next() {
+        let directive: Vec<&str> =
+            rest.by_ref().take_while(|t| **t != ";").copied().filter(|t| *t != ",").collect();
+        match (keyword, &directive[..]) {
+            // `requires [transitive] [static] name;`, where `transitive` may also be a module's name.
+            ("requires", [.., last]) => {
+                let transitive = directive[..directive.len() - 1].contains(&"transitive");
+                module.requires.push((last.to_string(), transitive));
+            }
+            ("exports" | "opens", [package, rest @ ..]) => {
+                let to: Vec<String> = match rest {
+                    ["to", targets @ ..] => targets.iter().map(|t| t.to_string()).collect(),
+                    _ => Vec::new(),
+                };
+                let list = if keyword == "exports" { &mut module.exports } else { &mut module.opens };
+                list.push((package.to_string(), to));
+            }
+            ("uses", [service]) => module.uses.push(service.replace('$', ".")),
+            _ => {}
+        }
+    }
+    Some(module)
 }
 
 /// The name of the module that `source` declares and the modules it requires.
@@ -212,7 +337,7 @@ fn system_modules() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{declaration, service_providers};
+    use super::{contents, declaration, full_declaration, service_providers};
 
     #[test]
     fn providers_come_from_provides_then_service_files() {
@@ -239,6 +364,38 @@ mod tests {
                 ("b.Other.Spi", "b.Impl.Nested", false)
             ]
         );
+    }
+
+    #[test]
+    fn a_full_declaration_has_what_the_module_exports_opens_and_uses() {
+        let source = "open module m.n { requires transitive a.b; requires static c; exports p.q; exports p.r to x, y; opens p.s to z; uses p.q.Spi; uses p.q.Outer$Inner; provides p.q.Spi with p.r.Impl; }";
+        let module = full_declaration(source).expect("a module");
+        assert_eq!(module.name, "m.n");
+        assert!(module.open);
+        assert_eq!(module.requires, [("a.b".to_string(), true), ("c".to_string(), false)]);
+        let strings = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            module.exports,
+            [("p.q".to_string(), Vec::new()), ("p.r".to_string(), strings(&["x", "y"]))]
+        );
+        assert_eq!(module.opens, [("p.s".to_string(), strings(&["z"]))]);
+        assert_eq!(module.uses, strings(&["p.q.Spi", "p.q.Outer.Inner"]));
+        assert!(!full_declaration("module plain { }").expect("a module").open);
+    }
+
+    #[test]
+    fn a_root_holds_packages_and_resources() {
+        let root = std::env::temp_dir().join(format!("module-contents-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::create_dir_all(root.join("a/empty")).unwrap();
+        std::fs::write(root.join("module-info.java"), "module m { exports a.b; }").unwrap();
+        std::fs::write(root.join("a/b/C.java"), "package a.b; class C {}").unwrap();
+        std::fs::write(root.join("a/b/data.txt"), "x").unwrap();
+        let found = contents(std::slice::from_ref(&root), None);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].packages, ["a.b"]);
+        assert_eq!(found[0].resources, ["a/b/data.txt"]);
     }
 
     #[test]

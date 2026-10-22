@@ -302,6 +302,14 @@ impl<'t> Lowering<'t> {
         }
         Ok(match self.field_place(node)? {
             Some(place) => read(place),
+            // A compile-time constant of a library class that a static import names
+            // (`REF_invokeInterface` of `MethodHandleInfo`) is its value, as for a select.
+            None if let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD" && s.is_static)
+                && let Some(text) = symbol.constant =>
+            {
+                let ty = self.signature_type(node, symbol.ty)?;
+                self.constant_literal(node, ty, text)?
+            }
             None => ExprKind::Var(self.local(node)?),
         })
     }

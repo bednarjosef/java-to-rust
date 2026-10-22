@@ -137,7 +137,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
   file is written under `DIR` as javac read it. Line numbers in javac's messages about a patched
   class are those of that text.
 - `cargo test --test jdk_patches` applies every patch to the JDK's sources when
-  `JAVA_BASE_SOURCES` is set, and checks the patch mechanism itself either way. By hand:
+  `JAVA_BASE_SOURCES` is set (and the JDK's other modules next to it), and checks the patch mechanism itself either way. By hand:
   `java -cp <build dir>/out JdkPatch crates/translator/java/patches $JAVA_BASE_SOURCES --out DIR`.
 - A patch can patch any library's classes, not only the JDK's: it applies to the file of its path
   wherever javac's source path has it.
@@ -148,11 +148,13 @@ skipped. The error names the patch's file and line, and the JDK's file:
 |---|---|
 | `java/io/PrintStream.java` | encodes text itself with `String.getBytes` instead of through a `StreamEncoder` |
 | `java/io/InputStreamReader.java`, `OutputStreamWriter.java` | decode and encode the common charsets themselves instead of through `StreamDecoder` and `StreamEncoder` |
+| `java/lang/Module.java`, `ModuleLayer.java` | the translation's modules, from its roots' declarations; no layers but the boot layer |
 | `java/net/InetAddress.java`, `Inet4AddressImpl.java`, `Inet6AddressImpl.java` | names looked up by the system through `TranslatedNet`; no hosts file and no resolver of the program's own |
 | `java/net/URI.java` | decodes escaped octets with `new String(bytes, UTF_8)` instead of a `CharsetDecoder` |
 | `java/net/URLClassLoader.java` | finds only what its parent finds; code from its URLs fails loudly |
 | `java/nio/file/DirectoryIteratorException.java`, `InvalidPathException.java` | constructors that do not throw |
 | `java/nio/file/TempFileHelper.java` | names from `java.util.Random` instead of `SecureRandom` |
+| `java/util/PropertyResourceBundle.java` | reads a stream through `TranslatedPropertyFiles` |
 | `java/util/ServiceLoader.java` | the providers the translator read from the sources |
 | `jdk/internal/jimage/BasicImageReader.java` | reads the image's index and resources into arrays instead of mapping the file |
 | `jdk/internal/jrtfs/JrtFileAttributes.java`, `JrtFileSystem.java`, `SystemImage.java` | the `jrt:` file system without `%tc`, `CodeSource` and exploded images |
@@ -160,13 +162,15 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `jdk/internal/util/ByteArray.java` | shifts bytes instead of using array views |
 | `jdk/internal/util/Exceptions.java` | `%s` formatting of its own, and no wait for `VM.isBooted` |
 | `jdk/internal/vm/ScopedValueContainer.java` | runs the operation directly |
+| `javax/annotation/processing/AbstractProcessor.java` (module `java.compiler`) | reads its processor's annotations through `TranslatedProcessorAnnotations` |
 | `sun/nio/cs/UTF_8.java` and the other standard charsets | their nested `Decoder` and `Encoder` can be made by `TranslatedCoders`, the coders of a charset that is the runtime's value |
 | `sun/nio/fs/*.java` | system calls through the runtime (`UnixNativeDispatcher`), channels and streams of our own, no extended attributes |
 
 ## Checks
 
 `scripts/check-jdk-copies.py JAVA_BASE_SOURCES` compares each file of `java/patches` and
-`java/overlay` with the JDK's file of the same path. It fails when:
+`java/overlay` with the JDK's file of the same path, in `java.base` or in another of the JDK's
+modules next to it (as in the JDK's `src.zip`). It fails when:
 
 - a file of `java/overlay` has the path of a JDK file (a change to a JDK class is a patch);
 - a patch names a path the JDK does not have;
@@ -178,8 +182,9 @@ lines of only brackets, the bare lines of comments, lines under 16 characters (`
 `} else {`), and in a patch the class's line and the declarations after the markers, which name
 the JDK's members. With those rules the patches share at most 11 lines each (short idioms such as
 `throw new NoSuchElementException();`), while the whole-file copies they replaced shared 14 to
-987 (`InetAddress`), and the generated `TranslatedCoders` 241 with `UTF_8.java` alone. `scripts/check.sh` runs the check when `JAVA_BASE_SOURCES` is set; `--verbose` lists the
-shared lines of every file.
+987 (`InetAddress`), and the generated `TranslatedCoders` 241 with `UTF_8.java` alone.
+`scripts/check.sh` runs the check when `JAVA_BASE_SOURCES` is set; `--verbose` lists the shared
+lines of every file.
 
 A class of our own (a file of `java/overlay` at a path the JDK does not have) is compared with
 each JDK file of its package instead. Code copied from a JDK class of another package would not be

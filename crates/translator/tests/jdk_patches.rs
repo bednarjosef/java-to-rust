@@ -1,7 +1,8 @@
 //! The translator's patches of library classes (`java/patches`, applied by `java/JdkPatch.java`;
 //! see docs/jdk-overlays.md): how a patch changes a file, that a patch naming what the file does
 //! not have is refused, and that every patch applies to the JDK's sources that
-//! `JAVA_BASE_SOURCES` names (without the variable, that test says it skipped and passes).
+//! `JAVA_BASE_SOURCES` names, with the JDK's other modules next to it (without the variable,
+//! that test says it skipped and passes).
 
 use java_to_rust::javac::check_patches;
 use std::path::{Path, PathBuf};
@@ -145,8 +146,17 @@ fn every_patch_applies_to_the_jdk() {
         println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to apply the patches");
         return;
     };
+    // java.base first, then the JDK's other modules next to it (as in the JDK's `src.zip`), whose
+    // classes some patches change (`javax.annotation.processing`, of `java.compiler`).
+    let mut roots = vec![java_base.clone()];
+    if let Some(Ok(entries)) = java_base.parent().map(std::fs::read_dir) {
+        let mut others: Vec<PathBuf> =
+            entries.map(|e| e.unwrap().path()).filter(|p| p.is_dir() && *p != java_base).collect();
+        others.sort();
+        roots.extend(others);
+    }
     let patches = Path::new(java_to_rust::program::PATCHES);
-    if let Err(error) = check_patches(patches, &[java_base], None) {
+    if let Err(error) = check_patches(patches, &roots, None) {
         panic!("{error}");
     }
 }

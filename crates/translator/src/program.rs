@@ -10,14 +10,16 @@ mod reach;
 mod survey;
 
 pub use census::{Census, census_program};
+pub use modules::Contents as ModuleContents;
 pub use reach::{
-    CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, LOCALE_LANGUAGE, Lookup, LookupKind, PRINT_FORMATTED, Reach,
-    STRING_STREAMS, TRANSLATED_LANG_ACCESS, TRANSLATED_LANG_ACCESS_CLASS, TRANSLATED_NESTED,
-    TRANSLATED_PROPERTIES, UNSET_PROPERTIES, caller_query, charset_coder, class_bound, class_for_name,
-    class_name, component_array, computed_for_name, created_by_name, direct_stream_call, field_offset_named,
-    is_ensure_initialized, literal_class, live_branch, lookup, module_for_name, provided,
-    recreated_exception, redirected_call, release_query, standard_stream_field, stream_of_call,
-    unsafe_field_access, unsafe_field_update, unset_property_ifs, untranslated, writes_string_array,
+    CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind,
+    PRINT_FORMATTED, Reach, STRING_STREAMS, TRANSLATED_LANG_ACCESS, TRANSLATED_LANG_ACCESS_CLASS,
+    TRANSLATED_MODULES, TRANSLATED_NESTED, TRANSLATED_PROPERTIES, UNSET_PROPERTIES, caller_query,
+    charset_coder, class_bound, class_for_name, class_name, component_array, computed_for_name,
+    created_by_name, direct_stream_call, field_offset_named, is_ensure_initialized, literal_class,
+    live_branch, lookup, module_call, module_for_name, provided, recreated_exception, redirected_call,
+    release_query, standard_stream_field, stream_of_call, unsafe_field_access, unsafe_field_update,
+    unset_property_ifs, untranslated, writes_string_array,
 };
 pub use survey::Survey;
 
@@ -91,9 +93,12 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
     let (units, reach) = load(program, string_array_writes)?;
     // The program's files are the first units (`load`).
     let program_units = source_files(program)?.len();
-    let lowered = {
+    let (lowered, switch_temps) = {
         let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
-        phase("lower", || lower::tolerant_lower_program(&trees, program_units, &reach, &program.main))
+        let lowered =
+            phase("lower", || lower::tolerant_lower_program(&trees, program_units, &reach, &program.main));
+        // What the JDK's messages of a `NullPointerException` need of its trees.
+        (lowered, javac::jdk_switch_temps(&trees[program_units..]))
     };
     // javac's trees are not needed once the program is lowered: only the file and the classes
     // of each unit, to say where an error is.
@@ -113,9 +118,10 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
     let mut facts = phase("analyze", || analysis::analyze(&class)).map_err(located)?;
     // A `catch` reads the message of a `NullPointerException`: it names the class file's code.
     if facts.npe_message_read.is_some() {
-        let names = phase("class files", || {
+        let mut names = phase("class files", || {
             javac::program_names(&source_files(program)?).map_err(|error| ProgramError { file: None, error })
         })?;
+        names.add_jdk_switch_temps(switch_temps);
         phase("messages", || analysis::npe_messages(&class, &mut facts, &names)).map_err(located)?;
     }
     phase("codegen", || codegen::generate_modules(&class, &facts)).map_err(located)
@@ -260,7 +266,11 @@ fn load(program: &Program, string_array_writes: bool) -> Result<(Vec<Value>, Rea
         }
     }
     walks += rounds.restarts();
-    let reach = rounds.finish();
+    let mut reach = rounds.finish();
+    if !program.libraries.is_empty() {
+        let roots = program.sources.iter().chain(&program.libraries);
+        reach.modules = modules::contents(roots, Some(std::path::Path::new(OVERLAY)));
+    }
     let changing: Vec<usize> = changing.iter().map(|&(index, _, _)| index).collect();
     let mut units = given.into_values();
     for index in changing {

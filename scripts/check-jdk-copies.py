@@ -3,6 +3,9 @@
 
 Usage: scripts/check-jdk-copies.py JAVA_BASE_SOURCES [--verbose]
 
+JAVA_BASE_SOURCES is the source root of java.base; the JDK's other modules are looked for next to
+it (as in the JDK's src.zip, where each module has a directory of its own).
+
 The translator's patches of JDK classes (crates/translator/java/patches) and its own classes
 (crates/translator/java/overlay) must hold only code written for this repository (see
 docs/jdk-overlays.md). For each such file, this compares its lines with those of the JDK's file of
@@ -73,6 +76,12 @@ def main():
         print(__doc__.strip().splitlines()[2], file=sys.stderr)
         return 2
     jdk = args[0]
+    # java.base first, then the JDK's other modules next to it.
+    parent = os.path.dirname(os.path.abspath(jdk))
+    roots = [jdk] + sorted(
+        os.path.join(parent, d) for d in os.listdir(parent)
+        if os.path.isdir(os.path.join(parent, d)) and os.path.abspath(os.path.join(parent, d)) != os.path.abspath(jdk)
+    )
     failures = []
     for kind in ("patches", "overlay"):
         base = os.path.join(ROOT, kind)
@@ -82,7 +91,8 @@ def main():
                     continue
                 path = os.path.join(directory, name)
                 relative = os.path.relpath(path, base)
-                theirs = os.path.join(jdk, relative)
+                theirs = next((os.path.join(r, relative) for r in roots if os.path.isfile(os.path.join(r, relative))),
+                              os.path.join(jdk, relative))
                 if os.path.isfile(theirs):
                     if kind == "overlay":
                         failures.append(f"overlay/{relative}: the JDK has this class; change it with a patch in patches/")
@@ -98,7 +108,7 @@ def main():
                 ours = set(counted(read(path), kind == "patches"))
                 for other in compared:
                     shared = sorted(ours & set(counted(read(other), False)))
-                    name = os.path.relpath(other, jdk)
+                    name = os.path.relpath(other, parent)
                     if verbose or len(shared) > MAX_SHARED:
                         print(f"{kind}/{relative}: {len(shared)} lines shared with the JDK's {name}")
                         for line in shared:

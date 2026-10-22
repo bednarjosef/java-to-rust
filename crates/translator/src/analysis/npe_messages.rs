@@ -21,6 +21,14 @@ use crate::javac::{BytecodeNames, CHECKED_JAVA, NameKind};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+/// The overlays of `java.lang` (`java/overlay/java/lang`), by qualified name.
+const JAVA_LANG_OVERLAYS: &[&str] = &[
+    "java.lang.Module",
+    "java.lang.ModuleLayer",
+    "java.lang.TranslatedModules",
+    "java.lang.TranslatedProperties",
+];
+
 /// How many steps back the JVM follows where a null came from: `a.b.c.d.e` is shown from `b`.
 const MAX_DETAIL: usize = 5;
 
@@ -47,10 +55,12 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
         let Some(outermost) = outermost(class, method.class) else { continue };
         // The JDK's classes are compiled with the names of their locals (`-g`), so the JVM shows
         // those. The classes of `java.lang` that a program gets are the translator's own
-        // (`java/Standard.java`, `java/Threads.java`), whose code is not the JDK's.
+        // (`java/Standard.java`, `java/Threads.java`), whose code is not the JDK's; those of its
+        // overlays get the messages of their own code, as other overlays do.
         let decl = &class.types[method.class];
         let jdk = super::exceptions::from_jdk(decl);
-        if jdk && decl.package == "java.lang" {
+        let outer = decl.name.split('.').take(3).collect::<Vec<_>>().join(".");
+        if jdk && decl.package == "java.lang" && !JAVA_LANG_OVERLAYS.contains(&outer.as_str()) {
             continue;
         }
         // `CharSequence`'s default `getChars` in a class of the program is the JDK's code too.
@@ -158,6 +168,12 @@ impl Messages<'_> {
     /// The messages of the dereferences that expression `x` makes itself, by object.
     fn expr(&self, x: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
         let mut add = |object: &Expr, action: Option<String>| {
+            // The JVM gives no message for the null receiver of an unbound method reference
+            // (`String::length`), which the class it makes for the reference dereferences.
+            if self.reference_receiver(object) {
+                out.insert(object.id, None);
+                return;
+            }
             if let Some(message) = action.and_then(|a| self.message(&a, object)) {
                 out.insert(object.id, Some(message));
             }
@@ -168,6 +184,17 @@ impl Messages<'_> {
             {
                 let call = self.call(x.pos, name).or_else(|| self.jdk_call(x));
                 add(receiver, call.map(|m| format!("Cannot invoke \"{m}\"")))
+            }
+            // Unboxing in the JDK's code, which javac writes as a call of the boxed class's
+            // method (`Integer.intValue()`, also for a wider result), on the failing conversion.
+            ExprKind::Cast(to, value)
+                if self.jdk && !to.is_reference() && matches!(value.ty, Type::Boxed(_)) =>
+            {
+                let primitive = value.ty.unboxed();
+                let action = format!("Cannot invoke \"java.lang.{}.{primitive}Value()\"", value.ty);
+                if let Some(message) = self.message(&action, value) {
+                    out.insert(x.id, Some(message));
+                }
             }
             ExprKind::Field { object, name } => add(object, Some(format!("Cannot read field \"{name}\""))),
             ExprKind::Index(array, _) => {
@@ -189,16 +216,28 @@ impl Messages<'_> {
                 add(array, element(array).map(|t| format!("Cannot load from {t} array")))
             }
             ExprKind::Builtin(builtin, args) if !args.is_empty() => {
-                let method = match builtin {
-                    Builtin::StringLength => "length",
-                    Builtin::StringEquals => "equals",
-                    Builtin::StringCharAt => "charAt",
-                    // The methods of a charset that may be null.
-                    Builtin::Charset(CharsetOp::Name) => "name",
-                    Builtin::Charset(CharsetOp::DisplayName) => "displayName",
-                    Builtin::Charset(CharsetOp::ToString) => "toString",
-                    Builtin::Charset(CharsetOp::HashCode) => "hashCode",
-                    Builtin::Charset(CharsetOp::Equals) => "equals",
+                // A method of `String`, which javac names by `String` with the parameters of the
+                // overload it chose.
+                if let Some((method, params)) = string_method(builtin, args) {
+                    let call = match self.jdk {
+                        true => (args[0].ty == Type::String).then(|| format!("String.{method}({params})")),
+                        false => self.call(x.pos, method),
+                    };
+                    return add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                }
+                // The methods of a charset that may be null.
+                let charset = match builtin {
+                    Builtin::Charset(CharsetOp::Name) => Some("name"),
+                    Builtin::Charset(CharsetOp::DisplayName) => Some("displayName"),
+                    Builtin::Charset(CharsetOp::ToString) => Some("toString"),
+                    Builtin::Charset(CharsetOp::HashCode) => Some("hashCode"),
+                    Builtin::Charset(CharsetOp::Equals) => Some("equals"),
+                    _ => None,
+                };
+                if let Some(method) = charset {
+                    return add(&args[0], self.call(x.pos, method).map(|m| format!("Cannot invoke \"{m}\"")));
+                }
+                match builtin {
                     // `i.intValue()`, which javac names by the boxed class.
                     Builtin::Boxed(BoxedOp::Unbox, kind) => {
                         let method = format!("{}Value", x.ty);
@@ -206,7 +245,7 @@ impl Messages<'_> {
                             true => Some(format!("java.lang.{}.{method}()", Type::boxed(*kind))),
                             false => self.call(x.pos, &method),
                         };
-                        return add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                        add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")))
                     }
                     // `Arrays.copyOf` of a null, which fails in the JDK's code (`-g`, so the
                     // parameter has its name): the copy of an array of objects first asks for its
@@ -219,7 +258,28 @@ impl Messages<'_> {
                             _ => "Cannot read the array length",
                         };
                         out.insert(args[0].id, Some(format!("{failure} because \"original\" is null")));
-                        return;
+                    }
+                    // `new StringBuilder(s)` of a null string, which fails in the JDK's
+                    // constructor.
+                    Builtin::Builder(BuilderOp::New) if args.len() == 1 && args[0].ty == Type::String => {
+                        let message = "Cannot invoke \"String.length()\" because \"str\" is null";
+                        out.insert(args[0].id, Some(message.to_string()));
+                    }
+                    // `new String(s)` of a null, which fails in the JDK's constructor.
+                    Builtin::String(StringOp::Identity) => {
+                        let message = "Cannot read field \"value\" because \"original\" is null";
+                        out.insert(args[0].id, Some(message.to_string()));
+                    }
+                    // `new String(bytes, ..)` of a null array, which fails in the JDK's
+                    // constructor, unless a charset name that may be null fails first (a
+                    // `Charset` never is null).
+                    Builtin::String(StringOp::FromBytes)
+                        if args[1..]
+                            .iter()
+                            .all(|a| a.ty != Type::String || matches!(a.kind, ExprKind::Str(_))) =>
+                    {
+                        let message = "Cannot read the array length because \"bytes\" is null";
+                        out.insert(args[0].id, Some(message.to_string()));
                     }
                     // `System.arraycopy` of a null, which the JVM's native code throws without
                     // a message.
@@ -227,7 +287,6 @@ impl Messages<'_> {
                         for array in [&args[0], &args[2]] {
                             out.insert(array.id, None);
                         }
-                        return;
                     }
                     // `new StringBuilder(seq)` of a null `seq`, which the JDK's constructor
                     // asks for its length (`-g`, so the parameter has its name).
@@ -235,21 +294,27 @@ impl Messages<'_> {
                     {
                         let failure = "Cannot invoke \"java.lang.CharSequence.length()\"";
                         out.insert(args[0].id, Some(format!("{failure} because \"seq\" is null")));
-                        return;
                     }
                     // `synchronized` on a null.
                     Builtin::MonitorEnter => {
-                        return add(&args[0], Some("Cannot enter synchronized block".to_string()));
+                        add(&args[0], Some("Cannot enter synchronized block".to_string()))
+                    }
+                    // The JDK's `Objects.requireNonNull` of the text that
+                    // `Long.parseLong(s, begin, end, radix)` and its kin read, whose exception has
+                    // no message: the parse's own (`exceptions::failures`), and the text's for
+                    // the unsigned forms.
+                    Builtin::Bits(BitsOp::ParseRange, _) => {
+                        out.insert(x.id, None);
                     }
                     // javac's `Objects.requireNonNull` of a pattern switch's selector, whose
                     // exception has no message.
-                    Builtin::NullChecked | Builtin::Unmatched => {
+                    Builtin::NullChecked
+                    | Builtin::Unmatched
+                    | Builtin::Unsigned(UnsignedOp::ParseRange, _) => {
                         out.insert(args[0].id, None);
-                        return;
                     }
-                    _ => return,
-                };
-                add(&args[0], self.call(x.pos, method).map(|m| format!("Cannot invoke \"{m}\"")))
+                    _ => {}
+                }
             }
             ExprKind::Switch { selector, .. } => self.string_switch(selector, out),
             _ => {}
@@ -327,6 +392,11 @@ impl Messages<'_> {
             ExprKind::Assign { op: None, target: Place::Var(_), value } => return self.source(value, detail),
             ExprKind::Var(name) if self.jdk => self.jdk_local(name)?,
             ExprKind::Var(_) => self.names.get(self.outermost, e.pos, NameKind::Local, "")?.to_string(),
+            // A static field of the JDK's, by its class's binary name: `java.util.Locale.ROOT`.
+            ExprKind::Static { class, name } if self.jdk => {
+                let declared = self.class.types[*class].statics.iter().any(|f| &f.name == name);
+                format!("{}.{name}", self.java_class_at(*class).filter(|_| declared)?)
+            }
             ExprKind::Static { name, .. } => {
                 self.names.get(self.outermost, e.pos, NameKind::Static, name)?.to_string()
             }
@@ -339,6 +409,24 @@ impl Messages<'_> {
                 match self.source(object, detail - 1)? {
                     Source::Shown(object) => format!("{object}.{name}"),
                     Source::Hidden => name,
+                }
+            }
+            // A field of an enum in the table form (`lower/enum_tables.rs`): `e.f` is
+            // `fOfConstants[e.ordinal()]`, and `this.f` in a constructor
+            // `fOfConstants[constantOrdinal]`.
+            ExprKind::Index(array, index)
+                if let ExprKind::Static { class, name } = &array.kind
+                    && let Some(field) = crate::lower::tabled_field(name)
+                    && self.class.types[*class].kind == TypeKind::Enum =>
+            {
+                let object = match &index.kind {
+                    ExprKind::Builtin(Builtin::EnumOrdinal, args) => self.source(&args[0], detail - 1)?,
+                    ExprKind::Var(v) if v == crate::lower::TABLE_ORDINAL => Source::Shown("this".to_string()),
+                    _ => return None,
+                };
+                match object {
+                    Source::Shown(object) => format!("{object}.{field}"),
+                    Source::Hidden => field.to_string(),
                 }
             }
             ExprKind::Index(array, index) => {
@@ -365,9 +453,58 @@ impl Messages<'_> {
     fn called(&self, e: &Expr) -> Option<String> {
         match &e.kind {
             ExprKind::MethodCall { name, .. } => self.call(e.pos, name).or_else(|| self.jdk_call(e)),
-            ExprKind::Call { name, .. } => self.call(e.pos, name),
+            ExprKind::Call { name, .. } => self.call(e.pos, name).or_else(|| self.jdk_static_call(e)),
             _ => None,
         }
+    }
+
+    /// The static method that the call `x` in the JDK's code calls, which javac names by the
+    /// class that declares it, unless the call reaches it by inheritance: the class that the code
+    /// names, or that inherits it, which the translation does not tell.
+    fn jdk_static_call(&self, x: &Expr) -> Option<String> {
+        let ExprKind::Call { name, resolved: Some(r), .. } = &x.kind else { return None };
+        let callee = &self.class.methods[*r];
+        if !self.jdk || !callee.is_static {
+            return None;
+        }
+        // The classes the code is in, which an unqualified call may find the method by.
+        let mut t = Some(self.method.class);
+        while let Some(c) = t {
+            if c != callee.class && self.extends(c, callee.class) {
+                return None;
+            }
+            t = self.enclosing(c);
+        }
+        let owner = self.java_class_at(callee.class)?;
+        let params: Option<Vec<String>> = callee.params.iter().map(|p| self.java_param(p.ty)).collect();
+        Some(format!("{owner}.{name}({})", params?.join(", ")))
+    }
+
+    /// The class whose code class `t` is declared in: the one it is a member of, or that has
+    /// the method it is local to.
+    fn enclosing(&self, t: usize) -> Option<usize> {
+        let decl = &self.class.types[t];
+        match &decl.origin {
+            Origin::Member => {
+                let (outer, _) = decl.name.rsplit_once('.')?;
+                self.class.types.iter().position(|o| o.name == outer && matches!(o.origin, Origin::Member))
+            }
+            Origin::Local { method, .. }
+            | Origin::Anonymous { method, .. }
+            | Origin::Lambda { method, .. } => method.map(|m| self.class.methods[m].class),
+            Origin::Object => None,
+        }
+    }
+
+    /// Whether class `t` extends or implements `ancestor`.
+    fn extends(&self, t: usize, ancestor: usize) -> bool {
+        let decl = &self.class.types[t];
+        t == ancestor
+            || decl
+                .extends
+                .into_iter()
+                .chain(decl.implements.iter().copied())
+                .any(|s| self.extends(s, ancestor))
     }
 
     /// The method that the call `x` in the JDK's code calls, as the class file refers to it,
@@ -407,9 +544,24 @@ impl Messages<'_> {
         Some(format!("{owner}.{name}({})", params?.join(", ")))
     }
 
+    /// Whether `object` is the receiver of the call that an unbound method reference makes: the
+    /// first parameter of the method of the reference's class, which the translation reads at the
+    /// reference's position (`lower::lambdas`), where a lambda's body starts after its parameters.
+    fn reference_receiver(&self, object: &Expr) -> bool {
+        let method = self.method;
+        matches!(self.class.types[method.class].origin, Origin::Lambda { .. })
+            && !method.is_ctor
+            && object.pos == method.pos
+            && matches!(&object.kind, ExprKind::Var(name) if method.params.first().is_some_and(|p| &p.name == name))
+    }
+
     /// The binary name of a class of the JDK that `ty` is, when it is certain.
     fn java_class(&self, ty: Type) -> Option<String> {
-        let t = self.class.class_index(ty)?;
+        self.java_class_at(self.class.class_index(ty)?)
+    }
+
+    /// The binary name of the class of the JDK that is type `t`, when it is certain.
+    fn java_class_at(&self, t: usize) -> Option<String> {
         let decl = &self.class.types[t];
         if !matches!(decl.origin, Origin::Member) {
             return None;
@@ -445,12 +597,17 @@ impl Messages<'_> {
             Type::Float => "float".to_string(),
             Type::Boolean => "boolean".to_string(),
             Type::Array(element) => format!("{}[]", self.java_param(*element)?),
-            // The JVM writes `java.lang.String` without its package, as `Object`.
+            // The JVM writes `java.lang.String` without its package, as `Object`. A string is one
+            // where the code has `String`: a `CharSequence` is a class of its own (`lower::object`).
             Type::String => "String".to_string(),
+            Type::JavaClass => "java.lang.Class".to_string(),
             // A parameter declared `Object`, or of a type variable whose erasure is `Object`, as
-            // javac erases it in the descriptor too.
+            // javac erases it in the descriptor too: also one of a Rust generic, whose type
+            // variables have no bounds (`lower::real_generics`).
             Type::Class(..)
-                if self.class.class_index(ty).is_some_and(|t| is_object(&self.class.types[t])) =>
+                if self.class.class_index(ty).is_some_and(|t| {
+                    is_object(&self.class.types[t]) || self.class.types[t].kind == TypeKind::Param
+                }) =>
             {
                 "Object".to_string()
             }
@@ -476,6 +633,12 @@ impl Messages<'_> {
             decl.captures.iter().any(|c| c.field == name)
                 || (decl.outer.is_some() && name.trim_end_matches('_') == "outer")
         };
+        if self.jdk
+            && name.trim_end_matches('_') == "outer"
+            && let Some(field) = self.jdk_this_field(object)
+        {
+            return field;
+        }
         let mut t = self.class.class_index(object.ty);
         let mut own = true;
         while let Some(c) = t {
@@ -516,6 +679,51 @@ impl Messages<'_> {
         Some(JavaField::Named(name.to_string()))
     }
 
+    /// The enclosing instance of `object`, of an inner class of the JDK, as the class file reads
+    /// it: javac gives each inner class a field of its own for it (`this$0`), which the class's
+    /// code reads, while the translation may keep it in a superclass's of the same enclosing
+    /// class. A member class's is read so through any object; a local or anonymous class's only
+    /// through `this`, as the others are not certain. `None` for a value that is not an inner
+    /// class's, `Some(None)` where the name is not certain, as in a constructor, which reads its
+    /// parameter instead.
+    fn jdk_this_field(&self, object: &Expr) -> Option<Option<JavaField>> {
+        let o = self.class.class_index(object.ty)?;
+        let decl = &self.class.types[o];
+        let enclosing = decl.outer?;
+        let through_this = matches!(object.kind, ExprKind::This) && o == self.method.class;
+        let certain = match decl.origin {
+            Origin::Member => true,
+            Origin::Local { .. } | Origin::Anonymous { .. } => through_this,
+            _ => return None,
+        };
+        if !certain || through_this && self.method.is_ctor {
+            return Some(None);
+        }
+        let mut t = decl.extends;
+        while let Some(c) = t {
+            if self.class.types[c].outer.is_some_and(|e| e != enclosing) {
+                return Some(None);
+            }
+            t = self.class.types[c].extends;
+        }
+        Some(self.this_field(o))
+    }
+
+    /// The field of the JDK's inner class `c` that javac keeps its enclosing instance in:
+    /// `this$N`, where `N` is how many enclosing instances its enclosing class has itself.
+    fn this_field(&self, c: usize) -> Option<JavaField> {
+        let mut outer = self.class.types[c].outer?;
+        let mut depth = 0;
+        while let Some(o) = self.class.types[outer].outer {
+            if !matches!(self.class.types[outer].origin, Origin::Member) {
+                return None;
+            }
+            depth += 1;
+            outer = o;
+        }
+        Some(JavaField::Named(format!("this${depth}")))
+    }
+
     /// The name of the local `name` of a method of the JDK in its source, which its class file
     /// has; `None` for one that the translation may have renamed (`s2` for a second `s`, see
     /// `lower::local_names`).
@@ -544,6 +752,81 @@ impl Messages<'_> {
         decl.captures.iter().any(|c| c.field == name)
             || (decl.outer.is_some() && name.trim_end_matches('_') == "outer")
             || decl.extends.is_some_and(|s| self.inherits_synthetic(s, name))
+    }
+}
+
+/// The method of `String` that a builtin on a string `args[0]` calls, with the parameters of the
+/// overload as the JVM shows them (`String.indexOf(String, int)`); `None` for one that is no
+/// method of the string, or whose overload the builtin does not tell.
+fn string_method(builtin: &Builtin, args: &[Expr]) -> Option<(&'static str, String)> {
+    let text = |t: Type| match t {
+        Type::Char | Type::Int => Some("int"),
+        Type::String => Some("String"),
+        _ => None,
+    };
+    let rest: Vec<Type> = args[1..].iter().map(|a| a.ty).collect();
+    let fixed = |name: &'static str, params: &str| Some((name, params.to_string()));
+    let op = match builtin {
+        Builtin::StringLength => return fixed("length", ""),
+        Builtin::StringEquals => return fixed("equals", "Object"),
+        Builtin::StringCharAt => return fixed("charAt", "int"),
+        Builtin::String(op) => *op,
+        _ => return None,
+    };
+    match (op, rest.as_slice()) {
+        (StringOp::Substring, [_]) => fixed("substring", "int"),
+        (StringOp::Substring, [_, _]) => fixed("substring", "int, int"),
+        (StringOp::IndexOf | StringOp::LastIndexOf, [x, from @ ..]) if from.len() <= 1 => {
+            let name = if op == StringOp::IndexOf { "indexOf" } else { "lastIndexOf" };
+            Some((name, if from.is_empty() { text(*x)?.to_string() } else { format!("{}, int", text(*x)?) }))
+        }
+        (StringOp::Contains, [_]) => fixed("contains", "java.lang.CharSequence"),
+        (StringOp::StartsWith, [_]) => fixed("startsWith", "String"),
+        (StringOp::StartsWith, [_, _]) => fixed("startsWith", "String, int"),
+        (StringOp::EndsWith, [_]) => fixed("endsWith", "String"),
+        (StringOp::IsEmpty, []) => fixed("isEmpty", ""),
+        (StringOp::IsBlank, []) => fixed("isBlank", ""),
+        (StringOp::Trim, []) => fixed("trim", ""),
+        (StringOp::Strip, []) => fixed("strip", ""),
+        (StringOp::StripLeading, []) => fixed("stripLeading", ""),
+        (StringOp::StripTrailing, []) => fixed("stripTrailing", ""),
+        (StringOp::StripIndent, []) => fixed("stripIndent", ""),
+        (StringOp::ToUpperCase, []) => fixed("toUpperCase", ""),
+        (StringOp::ToLowerCase, []) => fixed("toLowerCase", ""),
+        (StringOp::Replace, [Type::Char, Type::Char]) => fixed("replace", "char, char"),
+        (StringOp::Replace, [_, _]) => fixed("replace", "java.lang.CharSequence, java.lang.CharSequence"),
+        (StringOp::ReplaceAll, [_, _]) => fixed("replaceAll", "String, String"),
+        (StringOp::ReplaceFirst, [_, _]) => fixed("replaceFirst", "String, String"),
+        (StringOp::Matches, [_]) => fixed("matches", "String"),
+        (StringOp::Split, [_]) => fixed("split", "String"),
+        (StringOp::Split, [_, _]) => fixed("split", "String, int"),
+        (StringOp::Repeat, [_]) => fixed("repeat", "int"),
+        (StringOp::CompareTo, [_]) => fixed("compareTo", "String"),
+        (StringOp::CompareToIgnoreCase, [_]) => fixed("compareToIgnoreCase", "String"),
+        (StringOp::EqualsIgnoreCase, [_]) => fixed("equalsIgnoreCase", "String"),
+        (StringOp::EqualsOther, [_]) => fixed("equals", "Object"),
+        (StringOp::Concat, [_]) => fixed("concat", "String"),
+        (StringOp::ToCharArray, []) => fixed("toCharArray", ""),
+        (StringOp::GetChars, [_, _, _, _]) => fixed("getChars", "int, int, char[], int"),
+        (StringOp::GetLowBytes, [_, _, _, _]) => fixed("getBytes", "int, int, byte[], int"),
+        (StringOp::GetBytes, []) => fixed("getBytes", ""),
+        (StringOp::GetBytes, [Type::Charset]) => fixed("getBytes", "java.nio.charset.Charset"),
+        (StringOp::GetBytes, [Type::String]) => fixed("getBytes", "String"),
+        (StringOp::CharCodes, []) => fixed("chars", ""),
+        (StringOp::Lines, []) => fixed("lines", ""),
+        (StringOp::HashCode, []) => fixed("hashCode", ""),
+        (StringOp::ToString, []) => fixed("toString", ""),
+        (StringOp::Intern, []) => fixed("intern", ""),
+        (StringOp::CodePointAt, [_]) => fixed("codePointAt", "int"),
+        (StringOp::CodePointBefore, [_]) => fixed("codePointBefore", "int"),
+        (StringOp::CodePointCount, [_, _]) => fixed("codePointCount", "int, int"),
+        (StringOp::OffsetByCodePoints, [_, _]) => fixed("offsetByCodePoints", "int, int"),
+        (StringOp::ContentEquals, [Type::String]) => fixed("contentEquals", "java.lang.CharSequence"),
+        (StringOp::RegionMatches, [_, _, _, _]) => fixed("regionMatches", "int, String, int, int"),
+        (StringOp::RegionMatches, [_, _, _, _, _]) => {
+            fixed("regionMatches", "boolean, int, String, int, int")
+        }
+        _ => None,
     }
 }
 

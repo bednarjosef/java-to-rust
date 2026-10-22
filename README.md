@@ -538,7 +538,8 @@ argument that is another enum's constant or a static method's result, as the JDK
 `fOfConstants` indexed by ordinal, the constructor is a function `init_shape_constant(ordinal, ..)` (for an enum `Shape`)
 that fills a constant's row, and the enum's static initialization builds every constant, in
 order, before its other static initializers (an exception there is Java's
-`ExceptionInInitializerError`). A read of `e.f` is `fOfConstants[e.ordinal()]`, and the enum's
+`ExceptionInInitializerError`, and where a `catch` observes it, the first use throws it and
+every later use `NoClassDefFoundError`, as for any static initializer). A read of `e.f` is `fOfConstants[e.ordinal()]`, and the enum's
 methods initialize it first. Unlike Java, using a constant (`Shape.SQUARE`, `values()`, a
 `switch`) does not initialize the enum by itself; reading its fields or calling its methods does.
 
@@ -751,7 +752,12 @@ few dozen of the JDK's units where javac by itself would attribute thousands (se
 whole programs" in docs/performance.md). A source or library root may be a module's, with a
 `module-info.java` (the JDK's are): the translation is of one closed program, so javac compiles
 every root as part of one module, `java.base` when the JDK's sources are a library and the
-unnamed module otherwise, and reads each class from its source (`program/modules.rs`). A
+unnamed module otherwise, and reads each class from its source (`program/modules.rs`). At run
+time the modules are what the roots declare: `Class.getModule()` is the named module of a root
+with a `module-info.java`, with the class loader the JVM gives it, or the unnamed module of the
+system class loader, and `Module` and `ModuleLayer.boot()` answer from the declarations as the
+JVM's boot layer does; defining a module layer throws, saying that code outside the translation
+cannot run (`java/patches/java/lang/Module.java`). A
 package of a module whose sources are not given is an error that names the module to pass as
 `--library`.
 
@@ -786,10 +792,12 @@ is, extends or implements. It stops at the classes that the runtime provides (`S
 `StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`; `RUNTIME_CLASSES`),
 whose sources reach deep into the JVM, and at what is not
 translated: reflection (but not `java.lang.reflect.Array`, which is array code, nor `Method`,
-`Field` and `Constructor`, which the reflection table is), method handles, serialization,
-security and class loading (`Module`, `ModuleLayer`, `jdk.internal.loader`; `UNTRANSLATED`;
-`ResourceBundle` is translated, and `ServiceLoader`, `ClassLoader` and `URLClassLoader` are the
-translator's own, over the translation's classes). Library code
+`Field` and `Constructor`, which the reflection table is), method handles (but not the
+`VarHandle` constants and a constructor's `MethodHandle` constant, resolved when translating, see
+`lower/handles.rs`), serialization,
+security and class loading (`jdk.internal.loader`; `UNTRANSLATED`; `ResourceBundle` is
+translated, and `ServiceLoader`, `ClassLoader`, `URLClassLoader`, `Module` and `ModuleLayer` are
+the translator's own, over the translation's classes and modules). Library code
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
 `comparableClassFor` and parallel streams reach threads, so the boundary is needed. An
 untranslated class that is the type of a variable (the `ObjectInputStream` of
@@ -872,6 +880,9 @@ literals or constants: `sun.java.command` (the command line) and `user.timezone`
 `TimeZone` runs). A key that code computes is a `switch` over the keys of a plain run, in which
 those two are unset, as they are in `System.getProperties()`. In a whole program `System.getProperties()` is a
 `Properties` of the keys of a plain run, made once (`java/overlay/java/lang/TranslatedProperties.java`).
+`File.separator` and `File.pathSeparator` (and their `char` forms) are the constants `/` and `:`,
+as the runtime's `file.separator` and `path.separator` are, so that a pattern made of one is
+known to compile.
 `System.getenv(name)` reads the environment the program runs in, as Java does (`system.rs`): null
 for a variable that is unset or a name that no variable can have. `System.getenv()`, the whole
 environment as a map, is not translated yet.

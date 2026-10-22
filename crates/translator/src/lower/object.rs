@@ -391,15 +391,25 @@ impl<'t> Lowering<'t> {
             }
         }
         // The `length()`, `charAt(int)`, `subSequence(int, int)` and `getChars(..)` that a class
-        // implementing `CharSequence` declares or inherits implement the interface's. A
+        // implementing `CharSequence` (directly, or through an interface of the program, as
+        // javac's names do through `javax.lang.model.element.Name`) declares or inherits
+        // implement the interface's. A
         // `subSequence` may return a subclass of `CharSequence` (`CharBuffer`'s returns a
         // `CharBuffer`), which the dispatcher converts, or a string (javac's names return theirs),
         // which a bridge converts. A class that has no `getChars` gets the interface's default,
         // and then the `getChars` of its subclasses implement the interface's too.
         let mut defaults: Vec<(usize, [Option<usize>; 2])> = Vec::new();
         if let Some(s) = at.char_sequence {
-            for t in (0..self.types.len()).filter(|&t| self.implements_directly(t, "java.lang.CharSequence"))
-            {
+            let mut sequences = Vec::new();
+            for t in 0..self.types.len() {
+                let above = self.superclass(t)?;
+                if self.is_char_sequence(t)?
+                    && !above.map(|s| self.is_char_sequence(s)).transpose()?.unwrap_or(false)
+                {
+                    sequences.push(t);
+                }
+            }
+            for t in sequences {
                 let mut implementations = [None; CHAR_SEQUENCE_METHODS.len()];
                 for (i, (name, params, ret)) in CHAR_SEQUENCE_METHODS.into_iter().enumerate() {
                     let mut class = Some(t);
@@ -764,6 +774,23 @@ impl<'t> Lowering<'t> {
             .node
             .list("implementsClause")
             .any(|c| c.java_type().split('<').next() == Some(interface))
+    }
+
+    /// Whether type `t` of the program implements `java.lang.CharSequence`, directly, through an
+    /// interface or through a superclass.
+    fn is_char_sequence(&self, t: usize) -> Result<bool, Error> {
+        if self.implements_directly(t, "java.lang.CharSequence") {
+            return Ok(true);
+        }
+        for i in self.interfaces(t)? {
+            if self.is_char_sequence(i)? {
+                return Ok(true);
+            }
+        }
+        match self.superclass(t)? {
+            Some(s) => self.is_char_sequence(s),
+            None => Ok(false),
+        }
     }
 
     /// Whether class `t` of the program names the JDK class `class` in its `extends` clause.

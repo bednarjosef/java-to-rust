@@ -111,12 +111,20 @@ impl<'t> Lowering<'t> {
                 let class = self.expr(receiver)?;
                 return Ok(Some(self.class_enum_constants(node, class)?));
             }
-            ("getResourceAsStream", [name]) => {
-                let class = receiver.java_type();
-                let class =
-                    class.strip_prefix("java.lang.Class<").and_then(|c| c.strip_suffix('>')).unwrap_or(class);
-                let class = self.synth(ExprKind::Str(class.to_string()), node.pos(), Type::String);
+            // `getResource` too; and a class's protection domain, the code source it was loaded
+            // from, which is no more in the translation than a resource is.
+            ("getResourceAsStream" | "getResource", [name]) => {
+                let class = self.class_name_text(node, receiver);
                 return Ok(Some(ExprKind::Builtin(Builtin::MissingResource, vec![class, self.expr(*name)?])));
+            }
+            ("getProtectionDomain", []) => {
+                let class = self.class_name_text(node, receiver);
+                let what = self.synth(
+                    ExprKind::Str("(its protection domain)".to_string()),
+                    node.pos(),
+                    Type::String,
+                );
+                return Ok(Some(ExprKind::Builtin(Builtin::MissingResource, vec![class, what])));
             }
             _ => {}
         }
@@ -129,7 +137,7 @@ impl<'t> Lowering<'t> {
             ("getName", 0) => ClassOp::GetName,
             ("getSimpleName", 0) => ClassOp::GetSimpleName,
             ("getSuperclass", 0) => ClassOp::GetSuperclass,
-            ("getComponentType", 0) => ClassOp::GetComponentType,
+            ("getComponentType" | "componentType", 0) => ClassOp::GetComponentType,
             ("isArray", 0) => ClassOp::IsArray,
             ("isInterface", 0) => ClassOp::IsInterface,
             ("isPrimitive", 0) => ClassOp::IsPrimitive,
@@ -152,6 +160,14 @@ impl<'t> Lowering<'t> {
             values.push(value);
         }
         Ok(Some(ExprKind::Builtin(Builtin::ClassMethod(op), values)))
+    }
+
+    /// The class that the type of `receiver`, a `Class<T>`, names, as text: `T`, which a missing
+    /// resource's message names.
+    fn class_name_text(&self, node: Node<'t>, receiver: Node<'t>) -> Expr {
+        let class = receiver.java_type();
+        let class = class.strip_prefix("java.lang.Class<").and_then(|c| c.strip_suffix('>')).unwrap_or(class);
+        self.synth(ExprKind::Str(class.to_string()), node.pos(), Type::String)
     }
 
     /// `class.cast(x)`: `x`, checked against the class (`Builtin::ClassCheck`), then converted

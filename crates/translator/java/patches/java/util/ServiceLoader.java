@@ -14,8 +14,9 @@ package java.util;
  * {@link #reload()} forgets them, while a {@link Provider}'s {@code get()} makes a new one. A class
  * loader that would load code from outside the translation, such as a {@code URLClassLoader}
  * over a directory with providers of the service, fails loudly when it is first iterated
- * ({@code check}); one over nothing finds no more than the translation has. A module layer is
- * not in the translation, so {@link #load(ModuleLayer, Class)} throws.
+ * ({@code check}); one over nothing finds no more than the translation has. A named module that
+ * loads a service must declare that it uses it, as in Java. A module layer is not in the
+ * translation, so {@link #load(ModuleLayer, Class)} throws.
  */
 class ServiceLoader {
     @Add
@@ -31,30 +32,48 @@ class ServiceLoader {
 
     @Add
     private ServiceLoader(Class<S> service, ClassLoader loader) {
-        this.service = Objects.requireNonNull(service);
+        nonNull(service);
+        this.service = service;
         this.loader = loader;
         reload();
     }
 
     @Replace
     public static <S> ServiceLoader<S> load(Class<S> service, ClassLoader loader) {
+        checkUses(Reflection.getCallerClass().getModule(), service);
         return new ServiceLoader<>(service, loader);
     }
 
     // `ResourceBundle`'s, for a named module's bundles: the translation's providers too.
     @Replace
     static <S> ServiceLoader<S> load(Class<S> service, ClassLoader loader, Module callerModule) {
+        checkUses(callerModule, service);
         return new ServiceLoader<>(service, loader);
     }
 
     @Replace
     public static <S> ServiceLoader<S> load(Class<S> service) {
+        checkUses(Reflection.getCallerClass().getModule(), service);
         return new ServiceLoader<>(service, null);
     }
 
     @Replace
     public static <S> ServiceLoader<S> loadInstalled(Class<S> service) {
+        checkUses(Reflection.getCallerClass().getModule(), service);
         return new ServiceLoader<>(service, null);
+    }
+
+    /**
+     * Java's check that a named module that loads a service declares that it uses it. (Java
+     * also checks that the caller can access the service's class, which javac checked.)
+     */
+    @Add
+    private static void checkUses(Module callerModule, Class<?> service) {
+        nonNull(service);
+        if (!callerModule.canUse(service)) {
+            throw new ServiceConfigurationError(service.getName() + ": " + callerModule
+                    + " does not declare `uses`");
+        }
     }
 
     @Replace
@@ -237,4 +256,12 @@ class ServiceLoader {
 
     @Remove
     class ProviderSpliterator {}
+
+    // `Objects.requireNonNull` of a class, which would hold it as an `Object`.
+    @Add
+    private static void nonNull(Class<?> c) {
+        if (c == null) {
+            throw new NullPointerException();
+        }
+    }
 }
