@@ -649,14 +649,31 @@ impl<'a> Gen<'a> {
         // Reach marks a method of a class without objects with a `NoObject` body.
         // So does the factory of a class built whole (`analysis::whole_objects`) when no object
         // of the class is created: its `construct<Name>` method is such a body.
-        let factory_without_objects = m.is_static
-            && matches!(&m.body[..], [Stmt::Local { init: Some(Expr { kind: ExprKind::New { class, .. }, .. }), .. }, ..] if !self.runs[*class]);
-        let never_runs = !m.is_static && m.name != "<clinit>" && !self.runs[m.class]
-            || factory_without_objects
-            || matches!(
+        // So does a factory whose `construct<Name>` call never runs, when nothing calls that
+        // constructor of a class that has objects (`UnsupportedOperationException(String,
+        // Throwable)` in javac).
+        let stub = |m: &Method| {
+            matches!(
                 &m.body[..],
                 [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, _), .. })]
-            );
+            )
+        };
+        // (A census's stub has a message, which its constructor ends the program with.)
+        let pruned = |m: &Method| matches!(&m.body[..], [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, args), .. })] if args.is_empty());
+        let factory_without_objects = m.is_static
+            && match &m.body[..] {
+                [
+                    Stmt::Local { init: Some(Expr { kind: ExprKind::New { class, .. }, .. }), .. },
+                    rest @ ..,
+                ] => {
+                    !self.runs[*class]
+                        || matches!(rest, [Stmt::Expr(Expr { kind: ExprKind::MethodCall { resolved: Some(c), .. }, .. }), ..]
+                            if pruned(&self.class.methods[*c]))
+                }
+                _ => false,
+            };
+        let never_runs =
+            !m.is_static && m.name != "<clinit>" && !self.runs[m.class] || factory_without_objects || stub(m);
         if never_runs {
             self.line("#[allow(unused_variables)]");
         }

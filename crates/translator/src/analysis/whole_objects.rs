@@ -233,32 +233,11 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
             resolved: Some(m),
             is_super: false,
         };
-        // The factory of a leaf's constructor that never runs, which kept its body above, never
-        // runs either: its body is the constructor's stub, with the census's message if it has one.
-        let never = match &class.methods[m].body[..] {
-            [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { class: c }, args), .. })]
-                if !whole.contains(&t) =>
-            {
-                let message = match &args[..] {
-                    [Expr { kind: ExprKind::Str(message), .. }] => Some(message.clone()),
-                    _ => None,
-                };
-                Some((*c, message))
-            }
-            _ => None,
-        };
-        let body = if let Some((c, message)) = never {
-            let args =
-                message.map(|m| rewrite.expr(ExprKind::Str(m), pos, Type::String)).into_iter().collect();
-            let stub = ExprKind::Builtin(Builtin::NoObject { class: c }, args);
-            vec![Stmt::Expr(rewrite.expr(stub, pos, Type::Void))]
-        } else {
-            vec![
-                Stmt::Local { ty, name: obj(), init: Some(new), pos },
-                Stmt::Expr(rewrite.expr(call, pos, Type::Void)),
-                Stmt::Return(Some(rewrite.expr(ExprKind::Var(obj()), pos, ty)), pos),
-            ]
-        };
+        let body = vec![
+            Stmt::Local { ty, name: obj(), init: Some(new), pos },
+            Stmt::Expr(rewrite.expr(call, pos, Type::Void)),
+            Stmt::Return(Some(rewrite.expr(ExprKind::Var(obj()), pos, ty)), pos),
+        ];
         let mut type_params = class.types[t].type_params.clone();
         type_params.extend(class.methods[m].type_params.iter().copied());
         let name = format!("new{}", simple_name(&class.types[t].name));
