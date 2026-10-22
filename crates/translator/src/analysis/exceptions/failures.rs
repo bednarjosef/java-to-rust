@@ -1020,8 +1020,15 @@ pub(super) fn runtime_failures(
     {
         out.push(("java.lang.ClassCastException", "this cast", true, x.id));
     }
+    // A null argument fails the call in the receiver's own `compareTo`, whose arm raises the
+    // message of its class (`Gen::dispatcher`), unchecked, inside `java::catching`.
     if is_compare_call(class, x) {
         out.push(("java.lang.ClassCastException", "this compareTo", false, x.id));
+        if let ExprKind::MethodCall { args, .. } = &x.kind
+            && args.first().is_some_and(null)
+        {
+            out.push((NPE, "this compareTo", false, x.id));
+        }
     }
     // A box that may be null is unboxed by arithmetic and comparisons, but not by `==` or `!=`
     // with an operand that is no primitive (`v == null`), which compares references.
