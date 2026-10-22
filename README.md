@@ -208,7 +208,7 @@ A small subset, end to end:
   implementing them, and `Comparable` implemented by a class that calls `compareTo` directly.
   Between the program's own types, `instanceof` is a `matches!` on the type's enum, a pattern `x
   instanceof Circle c` binds `c` with `if let`, a let chain, `let .. else` (for `if (!(x instanceof
-  Circle c)) return ..;`) or `is_some_and`, and a downcast or a cast across interfaces is checked,
+  Circle c)) return ..;`, or `throw`, `break`, `continue`) or `is_some_and`, and a downcast or a cast across interfaces is checked,
   throwing `ClassCastException` when it fails. A pattern variable read anywhere else is rejected.
   One may be assigned (`n = n.next` in a loop), except one of a record or switch pattern.
   `Object` is an enum too, with a variant for each of the program's classes and enums whose values
