@@ -102,6 +102,8 @@ const RAISED: &[(&str, &[&str])] = &[
         ],
     ),
     ("java.lang.NegativeArraySizeException", &["NEW_ARRAY", "java.util.Arrays#copyOf"]),
+    // A copy between arrays of objects whose types differ (`failures.rs`, `codegen/dispatch.rs`).
+    ("java.lang.ArrayStoreException", &["java.lang.System#arraycopy"]),
     // `super.clone()` of an object whose class is not `Cloneable`.
     ("java.lang.CloneNotSupportedException", &["java.lang.Object#clone"]),
     (
