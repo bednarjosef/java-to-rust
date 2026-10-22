@@ -1,4 +1,4 @@
-# Reflection, class loading and plugins (planned)
+# Reflection, class loading and plugins
 
 Java programs can find and run code by name at run time: `Class.forName`, `getMethod` and the
 rest of reflection, `ServiceLoader`, class loaders, plugins and javac's annotation processors.
@@ -6,9 +6,10 @@ The translator works on a *closed world*: it sees every class of the program whe
 and much of what it does depends on that. This document says why the world stays closed, how
 code reached by name can still run, and where the one real limit is.
 
-Today all of this is rejected ("(reflection) not supported yet", "type `java.lang.ClassLoader`
-not supported yet"). A census of javac on 2026-10-21 found about 70 pieces of code in javac and
-the JDK parts it uses that are blocked by reflection, class loading or `ServiceLoader`.
+Case 1 below, code that is in the program and reached by name, works except for the recording
+run (see "What case 1 does now"); cases 2 and 3 are planned. A census of javac on 2026-10-21
+found about 70 pieces of code in javac and the JDK parts it uses that were blocked by
+reflection, class loading or `ServiceLoader`.
 
 ## Why the world stays closed
 
@@ -71,6 +72,93 @@ A name that is in no table at run time raises a clear error that names the class
 says the recording run did not see it, and the translator's report lists every place in the
 program where such a lookup can happen, so they can be checked before the program ships.
 
+#### What case 1 does now
+
+- **Constant names** are resolved when translating. `Class.forName("com.foo.Bar")` is that
+  class, and `getName`, `getSimpleName`, `getCanonicalName`, `getPackageName`, `getSuperclass`,
+  `getInterfaces`, `isAssignableFrom` and `getEnumConstants` of a class literal are worked out
+  then too. A computed name becomes a `switch` over the binary names of the classes that code
+  can find by name.
+- **The reflection table.** `getMethod`, `getDeclaredMethod`, `getField`, `getConstructor`,
+  `newInstance` and the rest look members up in a table that the translation builds in. The
+  table holds only what lookups of reachable code can find. The classes are those named by
+  string literals of reachable code, plus the classes of its class literals for methods and
+  fields, or only the class of the receiver when it is a class literal. The member names are
+  the spelled-out name, or for a computed name any string literal of reachable code, or every
+  member for `getMethods()` and its relatives. Reachability finds these
+  (`program/reach/reflection.rs`, kept in `Reach::reflected`). In a single file the candidates
+  are its classes and the names in its string literals (`lower/reflection.rs`, `file_names`).
+  `Method`, `Field` and `Constructor` are the translator's own classes
+  (`java/Reflection.java`). Each holds a slot in the table, and `Method.invoke`, `Field.get` and
+  `set` (with their typed forms) and `Constructor.newInstance` are a `switch` over the slots,
+  each case a direct call, read or write. Arguments are checked and unboxed as Java does: a wrong
+  type is an `IllegalArgumentException` and a null receiver a `NullPointerException`. Two
+  things differ from Java: an exception of the called code is not wrapped in an
+  `InvocationTargetException`, and a final field is not written (an `IllegalAccessException`,
+  since the analyses rely on final fields keeping their value). Generic methods, and members
+  whose types do not box to and from `Object`, are not in the table.
+- **Names outside the translation** throw Java's own exception, which code can catch, with a
+  message that says so: `ClassNotFoundException: com.foo.Bar, which is not in the translation`,
+  and `NoSuchMethodException` or `NoSuchFieldException` for a member the table does not hold.
+- **`ServiceLoader`** is the translator's own (`java/overlay/java/util/ServiceLoader.java`). It
+  finds the providers that the `provides` clauses of the roots' `module-info.java` files and
+  their `META-INF/services` files declare, in that order (`program/modules.rs`,
+  `service_providers`; kept in `Reach::services`). A provider is made lazily, by its public
+  static `provider()` if it is a module's and has one, otherwise by its constructor, and is
+  kept by the loader's iterators, as in Java. `loadInstalled` works the same way;
+  `load(ModuleLayer, ...)` throws.
+- **`ClassLoader`** is a type. The system and platform loaders exist, with `getName`,
+  `getParent` and `getClassLoader()` of a class. `loadClass` goes through the `forName` table.
+  `getResource`, `getResources` and `getResourceAsStream` find nothing; javac does not need them
+  (its one use is `Class.getResource` behind the hidden `-XDshowClass` option).
+  `URLClassLoader` is the translator's own (`java/overlay/java/net/URLClassLoader.java`). It
+  finds what its parent finds and nothing of its own. A class or resource that is in one of its
+  directories, or a class asked of it while it has a jar file among its URLs, fails loudly:
+  "code that is not in the translation cannot run". A `ServiceLoader` over it fails the same
+  way when a directory declares providers of the service. Defining classes from bytes stays
+  rejected.
+- **javac without plugins**: javac always looks for `Plugin`s and annotation `Processor`s with a
+  `ServiceLoader` over a `URLClassLoader` of its class path. When the class path has no
+  providers (no `-processor`, `-processorpath` or `-Xplugin`, and no `META-INF/services` files
+  for them), discovery finds nothing, and the program is not rejected. When it does have
+  providers, javac reports its own error, "Bad service configuration file", with our message
+  naming the directory.
+
+#### javac's survey, before and after
+
+`--survey` of javac (jdk.compiler with java.compiler, jdk.internal.opt and java.base), pieces of
+code that use each feature, on 2026-10-22:
+
+| feature       | javac's code before | after | the JDK's code before | after |
+|---------------|--------------------:|------:|----------------------:|------:|
+| reflection    |                   4 |     0 |                    53 |    41 |
+| class loading |                  11 |     4 |                    30 |    16 |
+
+The four left in javac use the module system (`java.lang.Module`, `ModuleLayer`), on paths that
+only code outside the translation takes: `BasicJavacTask.initPlugin` once a plugin is found,
+`JavacFileManager.getServiceLoader` for a processor module path (`--processor-module-path`), the
+`accessInternalAPI` option, and the source launcher's `ModuleLayer.boot()`. They are still
+rejected when translating, not at run time. Making them runtime errors needs a `Module` of the
+translator's own (every class in the unnamed module) and a `ModuleLayer.boot()` that throws.
+In the JDK's code, the reflection left is mostly `ResourceBundle`'s providers for named modules,
+annotations, and method handles.
+
+#### What is left of case 1
+
+- **The recording run.** Names that code computes at run time from data the translator does not
+  see (a configuration file, a command-line option) are found only by chance today: as some
+  string literal of the program. The recording run would plug in where the lookups' candidates
+  are chosen: its record would add classes and member names to `Walk::reflect` (and so to
+  `Reach::reflected` and `Reach::services`) in a whole program, and to `file_names` in a single
+  file. The rest of the table needs nothing new.
+- **The report** of the lookups that cannot be resolved when translating is not written yet.
+- **Annotations read by reflection** (`getAnnotation`, javac's `AnnotationProxyMaker`), method
+  handles, `Proxy` and `java.lang.invoke` are still rejected.
+- **The module system** (`Module`, `ModuleLayer`), as above.
+- **Members of the runtime's classes** (`String`, the boxes, `Object`, ...) are not in the
+  table: a lookup on `String.class` finds nothing. `Modifier` is not translated in a single file.
+- **`InvocationTargetException`** wrapping, as above.
+
 ### 2. Plugins and processors chosen when translating
 
 javac with Lombok as an annotation processor, an application with three known plugins. The
@@ -104,7 +192,8 @@ Java code it has never seen. There are two ways, and they can be combined:
 1. **Case 1**: the reflection table, constant names resolved when translating, `ServiceLoader`
    from the fixed lists, the recording run, the error and the report for names outside the table.
    This covers what javac needs (its `ServiceLoader` uses, `Class.cast`, the annotation
-   reflection) and most ordinary programs. About a day of agent time.
+   reflection) and most ordinary programs. Done except for the recording run, the report,
+   annotations read by reflection and the module system (see "What is left of case 1").
 2. **Case 2** comes nearly free once the translator reads several source roots and modules, which
    the javac work needs anyway. With cases 1 and 2, a translated javac runs fully for normal use,
    with annotation processors named when translating.
