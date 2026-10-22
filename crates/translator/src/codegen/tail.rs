@@ -144,7 +144,13 @@ impl<'a> Gen<'a> {
             if let Stmt::If { cond, then, otherwise: next } = stmt
                 && !self.narrows_else(cond, next.as_deref())
             {
+                // Its condition is a statement's own: the borrows in it may conflict where those
+                // of the first condition do not (`else if (!c.type.isErroneous())` completes `c`
+                // while `c.base()` would hold it).
+                let conflicts = self.stmt_conflicts(stmt);
+                let outer = std::mem::replace(&mut self.guarded, conflicts);
                 let (cond_text, narrowed) = self.guard(cond, then);
+                self.guarded = outer;
                 self.line(&format!("}} else if {cond_text} {{"));
                 self.nested_in(then, tail);
                 self.unnarrow(narrowed);

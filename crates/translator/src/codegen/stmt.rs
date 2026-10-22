@@ -247,7 +247,9 @@ impl<'a> Gen<'a> {
     pub(super) fn range_loop(&mut self, counted: &Counting<'a>, body: &'a Stmt) {
         let ty = counted.ty;
         let start = self.value(counted.from, ty);
+        let start = self.range_bound(start, "start");
         let end = self.value(counted.to, ty);
+        let end = self.range_bound(end, "end");
         let mut used = false;
         visit_stmt(body, &mut |e| used |= mentions(e, counted.var), &mut |_| {});
         let var = if used { self.local(counted.var) } else { "_".to_string() };
