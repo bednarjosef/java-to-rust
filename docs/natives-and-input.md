@@ -70,6 +70,8 @@ something a translated program does not have.
 | `sun.nio.ch.UnixFileDispatcherImpl` natives (`read0`, `pread0`, `write0`, `pwrite0`, `seek0`, `size0`, `truncate0`, `available0`, `isOther0`, `setDirect0`, `release0`); `FileDispatcherImpl.init0`, `IOUtil.iovMax`, `IOUtil.writevMax`, `NativeThread.init`, `current0`, `signal0` | `file_channel.rs` | the channel natives of `FileChannelImpl`, on the descriptor table: `read0` and `pread0` give -1 at the end of the file; `seek0` with -1 gives the position; `setDirect0` always fails with an `IOException` ("Operation not supported": the standard library cannot set `O_DIRECT` on an open file); `release0` does nothing (no lock is taken, as `lock0` is not implemented); `signal0` does nothing (no translated thread is blocked in a native call to wake); `current0` is never 0 |
 | `UnixFileSystem` natives (`FILE_SYSTEM`) | `fs.rs` | `File`'s attributes, listing, creating, renaming, deleting; not `getSpace0` |
 | the translator's `sun.nio.fs.UnixNativeDispatcher` (`UNIX_CALLS`) | `unix.rs` | the system calls of `java.nio.file`, recording `errno` rather than failing |
+| `UnixNativeDispatcher.statvfs0` (the translator's patch, `long[]` fields) | `unix.rs`: `unix_statvfs` | the four fields `UnixFileStoreAttributes.fill` copies (block size, blocks, free and available blocks) |
+| `LinuxNativeDispatcher.init`, `posix_fadvise`; `UnixFileSystem.directCopy0`, `bufferedCopy0` | `file_copy.rs`, `codegen/file_copy.rs` | `init` does nothing; `posix_fadvise` checks the descriptor is open and gives 0, as its advice has no effect a program can see. `directCopy0` gives `UNSUPPORTED` (-4), so the JDK copies through `bufferedCopy0`, which moves the same bytes between the two descriptors (`copy_file_range` is not used); a failure there raises `java.io.IOException` where HotSpot raises `UnixException`, which `copyFile` turns into `FileSystemException` (only error paths differ) |
 | the translator's `java.net.TranslatedNet` (`NET_CALLS`) | `net.rs` | the C library's name service |
 | `Unsafe.allocateMemory0`, `reallocateMemory0`, `freeMemory0`, `setMemory0`, `copyMemory0`, `copySwapMemory0`; `UnsafeConstants.pageSize0` | `native_memory.rs`, `java::copy_memory` | memory outside the heap by address, for direct buffers |
 | `FileDispatcherImpl.transferTo0`, `transferFrom0` | `file_channels.rs`: `UNSUPPORTED_CASE` | the JDK's `transferToArbitraryChannel` (or its `transferFrom` twin) copies through buffers at the same positions and counts, so `Files.copy` and `FileChannel.transferTo`/`transferFrom` give Java's bytes and positions; `copy_file_range` is not used |
@@ -114,7 +116,9 @@ compared with one recorded run.
   program reaches them yet. `FileChannel.open` and `Files.newByteChannel` do not use
   `FileChannelImpl` at all: they use the overlay `UnixFileChannel` (`java/overlay/sun/nio/fs`).
 - Stack walking (`StackTraceElement.initStackTraceElements`, `StackStreamFactory`), class
-  definition and module natives, sockets, `statvfs`, `MappedMemoryUtils.isLoaded0`, `load0` and
+  definition and module natives, sockets, extended attributes (`UnixNativeDispatcher.fsetxattr0` and
+  the other `sun.nio.fs` xattr natives, which `Files.copy` reaches through `copyNonPosixAttributes`),
+  `MappedMemoryUtils.isLoaded0`, `load0` and
   `unload0` (`MappedByteBuffer.isLoaded`, `load`, `unload`), and every native not in the table.
 
 ## The reachability boundary
@@ -298,6 +302,10 @@ formatted at the call and printed through the package-private `formattedText`.
 charset lookup (whose provider search reaches `GB18030`, which reads a JVM property). The JDK's
 decoders and encoders of the six standard charsets are translated all the same and made by
 `java/overlay/sun/nio/cs/TranslatedCoders.java` for `newDecoder()` and `newEncoder()`.
+`Charset.decode(ByteBuffer)`, `encode(CharBuffer)` and `encode(String)` are routed to the same coders
+(`program::CHARSET_CODINGS`), with `REPLACE` for malformed input, so they never throw, as in Java.
+The translation of them is checked only by lowering and generating code: no passing program reaches
+them yet (`FileChannelReadWrite` stops first, see "Not done" below).
 
 ### Readers and writers over byte streams
 
@@ -340,6 +348,13 @@ Not done:
 
 - Hand-writing the remaining natives as programs need them, keeping to the policy above (for
   example `UnixFileSystem.getSpace0`, which needs `statvfs`).
+- The extended attributes of `Files.copy` (`fsetxattr0` and its siblings), so
+  `FileChannelTransfers` does not translate yet: it stops there.
+- The `CharSequence` enum of the object model has no variants when a program's only conversion of a
+  `CharBuffer` to `CharSequence` is the translator's own call (`char_sequence_call`). The flow
+  analysis (`analysis/hierarchy.rs` `flows`) records no edge for it, so the interface's methods have
+  no impl, and `FileChannelReadWrite` (which decodes into a `CharBuffer` from the JDK code) does not
+  compile. Fixing it changes how every interface's variants are chosen, so it is not done here.
 - Narrowing the dispatch of `Object`'s methods: library code calls `hashCode`, `equals` and
   `toString` on `Object`-typed values, and class-hierarchy dispatch then reaches every live class
   (`Hashtable.computeIfAbsent -> URL.hashCode -> InetAddress`). The rule that makes those methods

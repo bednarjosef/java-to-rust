@@ -953,6 +953,45 @@ pub fn charset_coder(owner: &str, name: &str, signature: &str) -> Option<JdkMeth
     (charset && signature.starts_with("()")).then_some(coder)
 }
 
+/// The methods of a charset that the JDK does by a coder with the charset's own methods and the
+/// arguments, by the method's name and type: `Charset.decode(ByteBuffer)` and the `encode`s
+/// replace malformed input, which the translator's `TranslatedCoders` does with the charset's
+/// coder (`CHARSET_CODERS`), the charset being its first argument.
+pub const CHARSET_CODINGS: &[((&str, &str), JdkMethod)] = &[
+    (
+        ("decode", "(java.nio.ByteBuffer)java.nio.CharBuffer"),
+        (
+            "sun.nio.cs.TranslatedCoders",
+            "decode",
+            "(java.nio.charset.Charset,java.nio.ByteBuffer)java.nio.CharBuffer",
+        ),
+    ),
+    (
+        ("encode", "(java.nio.CharBuffer)java.nio.ByteBuffer"),
+        (
+            "sun.nio.cs.TranslatedCoders",
+            "encode",
+            "(java.nio.charset.Charset,java.nio.CharBuffer)java.nio.ByteBuffer",
+        ),
+    ),
+    (
+        ("encode", "(java.lang.String)java.nio.ByteBuffer"),
+        (
+            "sun.nio.cs.TranslatedCoders",
+            "encode",
+            "(java.nio.charset.Charset,java.lang.String)java.nio.ByteBuffer",
+        ),
+    ),
+];
+
+/// The translator's method that does what the charset method `name` of type `signature` of the
+/// class `owner` does (`CHARSET_CODINGS`).
+pub fn charset_coding(owner: &str, name: &str, signature: &str) -> Option<JdkMethod> {
+    let charset = owner == "java.nio.charset.Charset" || owner.starts_with("sun.nio.cs.");
+    let coding = CHARSET_CODINGS.iter().find(|((method, ty), _)| *method == name && *ty == signature)?;
+    charset.then_some(coding.1)
+}
+
 /// Static methods of the JDK whose calls are calls of a static method of the translator's
 /// (`java/overlay`) with the same type, by the JDK's method and the translator's class and name
 /// (see `lower.rs`). Reachability goes to the translator's method, and not into the JDK's.
@@ -2140,7 +2179,8 @@ impl<'t> Walk<'t> {
             }
             // The coders of a charset (`CHARSET_CODERS`).
             "METHOD"
-                if let Some((class, to, signature)) = charset_coder(&owner, &name, text(symbol, "type")) =>
+                if let Some((class, to, signature)) = charset_coder(&owner, &name, text(symbol, "type"))
+                    .or_else(|| charset_coding(&owner, &name, text(symbol, "type"))) =>
             {
                 self.work.push(Item::Method((class.into(), to.into(), signature.into())));
             }
