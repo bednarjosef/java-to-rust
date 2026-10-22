@@ -441,6 +441,9 @@ impl<'a> Gen<'a> {
         } else {
             self.expr(array).text
         };
+        // The temporaries of a `for`'s iterator live to the end of the loop: a borrow of the
+        // object whose field holds the array would conflict with the body's.
+        let source = if matches!(array.kind, ExprKind::Var(_)) { source } else { format!("{{ {source} }}") };
         let each = self.runtime("each");
         let wrap = if self.wrap_each(name, element(array.ty)) { ".map(Some)" } else { "" };
         self.line(&format!("for {mutable}{var} in {each}({source}){wrap} {{"));
