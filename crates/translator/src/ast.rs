@@ -923,6 +923,9 @@ pub enum BoxedOp {
     /// `Integer.parseInt(s, radix)`, `Long.parseLong(s, radix)` and `Integer.valueOf(s, radix)`:
     /// the same, read in the radix given as the second argument.
     ParseRadix,
+    /// `Integer.decode(s)`, `Long.decode`, `Short.decode` and `Byte.decode`: the boxed kind of
+    /// the result, read from a string with a sign and a prefix of its radix (`0x`, `#`, `0`).
+    Decode,
     /// `Integer.valueOf(i)`: the boxed kind of the result, from its primitive argument.
     Box,
     /// `x.intValue()` and the other `xValue()`: the result's primitive, from the receiver.
