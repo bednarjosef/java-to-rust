@@ -126,19 +126,14 @@ fn analyse(
 ) -> Option<Rejection> {
     let generated: std::cell::RefCell<Option<ModuleTree>> = Default::default();
     let mut stubs = Stubs { next_id: next_id(class) + 1, stubbed: HashSet::new() };
-    // The check for null enums changes nothing, and `whole_objects` changes the program only when
-    // it passes: an error of theirs that no stub takes away is recorded, and the census goes on
-    // without them. An error of a check of the analyses that only rejects (as of a field's type)
-    // that no stub takes away is recorded too, and the analyses go on past it
-    // (`analysis::analyze_tolerating`). Any other error of the analyses or the generator that no
-    // stub takes away ends it. The generator reports every error it finds, which are stubbed
-    // together.
+    // `whole_objects` changes the program only when it passes: an error of it that no stub takes
+    // away is recorded, and the census goes on without it. An error of a check of the analyses
+    // that only rejects (as of a field's type) that no stub takes away is recorded too, and the
+    // analyses go on past it (`analysis::analyze_tolerating`). Any other error of the analyses or
+    // the generator that no stub takes away ends it. The generator reports every error it finds,
+    // which are stubbed together.
     let tolerated: std::cell::RefCell<Vec<Error>> = Default::default();
-    let passes: [Pass; 4] = [
-        &|class| {
-            crate::timings::phase("census: enum nulls", || lower::check_enum_nulls(class))
-                .map_err(|e| vec![e])
-        },
+    let passes: [Pass; 3] = [
         &|class| {
             crate::timings::phase("census: whole objects", || analysis::whole_objects(class))
                 .map_err(|e| vec![e])

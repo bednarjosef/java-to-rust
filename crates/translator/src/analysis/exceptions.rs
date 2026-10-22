@@ -1020,9 +1020,9 @@ fn stmt_points(
     safe: &[String],
     out: &mut Vec<Point>,
 ) {
-    // A switch on a string that is null throws, as its selector is dereferenced.
+    // A switch on a string or an enum that is null throws, as its selector is dereferenced.
     if let Stmt::Switch { selector, .. } = s
-        && selector.ty == Type::String
+        && matches!(selector.ty, Type::String | Type::Enum(_))
         && !is_tested(selector, safe)
         && maybe_null(facts, m, selector)
     {

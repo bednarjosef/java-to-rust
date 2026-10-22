@@ -21,8 +21,8 @@
 //! So is an array of an enum (`Day[]` passed for `E[]` of `<E extends Enum<E>>`, or as an
 //! `Enum<?>[]`): the translation holds its constants as values, Java as objects, so where it is
 //! an `Object[]` its constants are `Object`s (`values()` makes them so), and a read casts each back
-//! to the enum. A null element read as the enum ends the program (`java::null_enum`), but a test
-//! of one against `null` tests the checked cast.
+//! to the enum, an `Option` of it where the element may be null, as any enum that may be null is
+//! (`analysis::nullness`).
 //!
 //! Such an array does not remember its element class: storing an object of another class in it
 //! does not throw `ArrayStoreException`, and its `getClass()` is `Object[]`'s.
