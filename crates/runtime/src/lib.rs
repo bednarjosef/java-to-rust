@@ -51,6 +51,7 @@ mod statics;
 pub mod string;
 mod system;
 mod thread;
+mod unix;
 mod unsigned;
 mod vm;
 pub use allocator::{Allocator, release_thread_cache};
@@ -96,6 +97,7 @@ pub use statics::*;
 pub use string::*;
 pub use system::*;
 pub use thread::*;
+pub use unix::*;
 pub use unsigned::{
     compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,
     try_parse_unsigned,

@@ -123,7 +123,7 @@ pub(crate) fn last_error(e: io::Error) -> Failure {
 
 /// The reason in an `io::Error` as C's `strerror` gives it: `No such file or directory`, not
 /// `No such file or directory (os error 2)`.
-fn reason(e: &io::Error) -> String {
+pub(crate) fn reason(e: &io::Error) -> String {
     let text = e.to_string();
     match text.find(" (os error") {
         Some(end) => text[..end].to_string(),
@@ -412,6 +412,46 @@ fn open_flags(fd: i32) -> Option<u32> {
 fn with<T>(f: impl FnOnce(&mut FdTable) -> T) -> T {
     f(&mut FDS.lock().unwrap_or_else(|e| e.into_inner()))
 }
+
+/// A descriptor for `file`, which `sun.nio.fs`'s natives opened (`unix.rs`), to read, to write,
+/// or both.
+pub(crate) fn insert_file(file: File, read: bool, write: bool) -> i32 {
+    let entry = match (read, write) {
+        (true, true) => Entry::ReadWrite(file),
+        (false, true) => Entry::Write(file),
+        _ => Entry::Read(file),
+    };
+    with(|t| t.insert(entry))
+}
+
+/// `f` of the file that descriptor `fd` holds; `EBADF` where it holds none (closed, or a
+/// standard stream).
+pub(crate) fn with_file<T>(fd: i32, f: impl FnOnce(&File) -> io::Result<T>) -> io::Result<T> {
+    with(|t| match t.entries.get(fd as usize).and_then(Option::as_ref) {
+        Some(Entry::Read(file) | Entry::Write(file) | Entry::ReadWrite(file)) if fd >= 0 => f(file),
+        _ => Err(io::Error::from_raw_os_error(EBADF)),
+    })
+}
+
+/// `dup(fd)`: a new descriptor of the same open file.
+pub(crate) fn duplicate(fd: i32) -> io::Result<i32> {
+    with(|t| {
+        let entry = match t.entries.get(fd as usize).and_then(Option::as_ref) {
+            Some(Entry::Read(file)) if fd >= 0 => Entry::Read(file.try_clone()?),
+            Some(Entry::Write(file)) if fd >= 0 => Entry::Write(file.try_clone()?),
+            Some(Entry::ReadWrite(file)) if fd >= 0 => Entry::ReadWrite(file.try_clone()?),
+            _ => return Err(io::Error::from_raw_os_error(EBADF)),
+        };
+        Ok(t.insert(entry))
+    })
+}
+
+/// Whether descriptor `fd` is open.
+pub(crate) fn is_open(fd: i32) -> bool {
+    with(|t| fd >= 0 && t.entries.get(fd as usize).is_some_and(Option::is_some))
+}
+
+const EBADF: i32 = 9;
 
 /// The descriptor of a file to read, for `FileInputStream.open0`.
 pub fn fd_open_read(name: &str) -> Result<i32, Failure> {

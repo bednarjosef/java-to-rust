@@ -150,6 +150,11 @@ pub enum Native {
     /// A native of `java.io.UnixFileSystem` by its name (`getBooleanAttributes0`, `list0`, ...),
     /// whose `File` arguments are their paths (`java_runtime::fs`).
     FileSystem(&'static str),
+    /// A native of the translator's `sun.nio.fs.UnixNativeDispatcher`
+    /// (`java/overlay/sun/nio/fs/UnixNativeDispatcher.java`) by its name (`open0`, `stat0`, ...):
+    /// a system call of `java.nio.file` on the bytes of a path, which records its `errno` rather
+    /// than failing (`java_runtime::unix`, `UNIX_CALLS`).
+    Unix(&'static str),
     /// The natives of the stream under the translator's `System.out` and `System.err` objects
     /// (`java/overlay/java/io/StandardOutput.java`), the runtime's buffered standard output and
     /// error (`java_runtime::out`): `write0(fd, b)`, `writeBytes0(fd, b, off, len)`,
@@ -252,6 +257,7 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
 pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
     declared_native(class, name, signature).is_some()
         || (class == "java.io.UnixFileSystem" && FILE_SYSTEM.contains(&name))
+        || (class == UNIX_DISPATCHER && unix_call(name).is_some())
         || matches!(
             (class, name),
             (
@@ -292,6 +298,55 @@ pub const FILE_SYSTEM: &[&str] = &[
     "canonicalize0",
     "getNameMax0",
 ];
+
+/// The translator's class of the system calls of `java.nio.file`.
+pub const UNIX_DISPATCHER: &str = "sun.nio.fs.UnixNativeDispatcher";
+
+/// The natives of `UNIX_DISPATCHER` that the runtime implements (`Native::Unix`), with the
+/// runtime's function of each. The dispatcher's other natives (the calls relative to an open
+/// directory, extended attributes, `statvfs`, the mount table) are not among them.
+pub const UNIX_CALLS: &[(&str, &str)] = &[
+    ("lastError", "unix_last_error"),
+    ("getcwd0", "unix_getcwd"),
+    ("dup0", "unix_dup"),
+    ("open0", "unix_open"),
+    ("close0", "unix_close"),
+    ("link0", "unix_link"),
+    ("unlink0", "unix_unlink"),
+    ("rename0", "unix_rename"),
+    ("mkdir0", "unix_mkdir"),
+    ("rmdir0", "unix_rmdir"),
+    ("readlink0", "unix_readlink"),
+    ("realpath0", "unix_realpath"),
+    ("symlink0", "unix_symlink"),
+    ("stat0", "unix_stat"),
+    ("fstat0", "unix_fstat"),
+    ("chown0", "unix_chown"),
+    ("fchown0", "unix_fchown"),
+    ("chmod0", "unix_chmod"),
+    ("fchmod0", "unix_fchmod"),
+    ("futimens0", "unix_futimens"),
+    ("utimensat0", "unix_utimensat"),
+    ("opendir0", "unix_opendir"),
+    ("closedir0", "unix_closedir"),
+    ("readdir0", "unix_readdir"),
+    ("access0", "unix_access"),
+    ("getpwuid0", "unix_getpwuid"),
+    ("getgrgid0", "unix_getgrgid"),
+    ("strerror0", "unix_strerror"),
+    ("readBytes", "unix_read"),
+    ("writeBytes", "unix_write"),
+    ("position", "unix_position"),
+    ("seek", "unix_seek"),
+    ("size", "unix_size"),
+    ("truncate", "unix_truncate"),
+    ("sync", "unix_sync"),
+];
+
+/// The name of a native of `UNIX_DISPATCHER` that the runtime implements, as `UNIX_CALLS` has it.
+pub fn unix_call(name: &str) -> Option<&'static str> {
+    UNIX_CALLS.iter().find(|(n, _)| *n == name).map(|(n, _)| *n)
+}
 
 /// The `Math` and `StrictMath` functions the native layer covers (beyond `abs`, `max`, `min`).
 pub const MATH_FUNCTIONS: &[&str] = &[

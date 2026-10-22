@@ -516,7 +516,8 @@ impl<'t> Lowering<'t> {
             {
                 Ok(Type::class(ENUM))
             }
-            "java.nio.charset.Charset" => Ok(Type::Charset),
+            // The JDK's classes of the standard charsets too (`charsets::STANDARD_CHARSET_CLASSES`).
+            _ if charsets::is_charset_type(name) => Ok(Type::Charset),
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
@@ -999,6 +1000,23 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.system_property_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
+        // The translator's method in place of the JDK's (`program::REDIRECTED_CALLS`).
+        if symbol.is_static
+            && let Some((class, to)) = crate::program::redirected_call(symbol.owner, symbol.name, symbol.ty)
+        {
+            let resolved = self
+                .methods
+                .iter()
+                .position(|m| self.types[m.owner].javac == class && m.name == to && m.sig == symbol.ty);
+            if resolved.is_none() {
+                return unsupported(
+                    node,
+                    &format!("`{}.{}` outside a whole program", symbol.owner, symbol.name),
+                );
+            }
+            let args = self.convert_generic_args(node, resolved, args)?;
+            return Ok(ExprKind::Call { name: to.to_string(), args, resolved });
+        }
         if let Some(kind) = self.descriptor_call(node, &symbol, receiver, &mut args)? {
             return Ok(kind);
         }
@@ -1120,6 +1138,9 @@ impl<'t> Lowering<'t> {
                 _,
             ) => {
                 return self.builder_call(node, &symbol, receiver, args);
+            }
+            ("java.lang.Byte" | "java.lang.Short", "compareUnsigned") if args.len() == 2 => {
+                return Ok(self.small_compare_unsigned(node, &symbol, args));
             }
             (owner, name) if unsigned::is_unsigned_method(owner, name) => {
                 self.unsigned_call(node, &symbol, &args)?
