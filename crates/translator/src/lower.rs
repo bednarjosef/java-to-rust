@@ -218,6 +218,53 @@ impl<'t> Lowering<'t> {
     /// code of it that the targets reach makes a string with an identity of its own to tell it
     /// apart (a `new String` kept as a marker): there, the reference comparison gives what value
     /// equality does, which is how the library's code is lowered (`Objects.equals`).
+    ///
+    /// Two strings that Java interns are the same object exactly when they have the same text, so
+    /// the program's comparison of two of them is lowered that way too: constant expressions
+    /// (literals, constant variables and their concatenations, which the JVM shares), the result
+    /// of `intern()`, and a conditional of those. Any other string may be a copy with the same
+    /// text, and is rejected.
+    /// Whether the string `node` is one that Java interns: a constant expression, the result of
+    /// `intern()`, a conditional of two such, or a call of a method that no other method
+    /// overrides and that only returns such, followed `depth` calls deep.
+    fn interned(&self, node: Node<'t>, depth: usize) -> bool {
+        match node.kind() {
+            "PARENTHESIZED" => node.get("expression").is_some_and(|n| self.interned(n, depth)),
+            "CONDITIONAL_EXPRESSION" => {
+                node.get("trueExpression").is_some_and(|n| self.interned(n, depth))
+                    && node.get("falseExpression").is_some_and(|n| self.interned(n, depth))
+            }
+            "METHOD_INVOCATION" => {
+                let Some(symbol) = node.symbol() else { return false };
+                if symbol.owner == "java.lang.String" {
+                    return symbol.name == "intern" && !symbol.is_static && symbol.ty == "()java.lang.String";
+                }
+                let Some(m) = self.method_index(&symbol) else { return false };
+                let declaration = self.methods[m].node;
+                let fixed = symbol.is_static
+                    || declaration.has_flag("PRIVATE")
+                    || declaration.has_flag("FINAL")
+                    || self.types[self.methods[m].owner].node.has_flag("FINAL");
+                let Some(body) = declaration.get("body") else { return false };
+                if depth == 0 || !fixed {
+                    return false;
+                }
+                let mut returns = Vec::new();
+                fn collect<'t>(n: Node<'t>, out: &mut Vec<Option<Node<'t>>>) {
+                    match n.kind() {
+                        "RETURN" => out.push(n.get("expression")),
+                        // Their `return`s are not the method's.
+                        "LAMBDA_EXPRESSION" | "CLASS" | "ENUM" | "RECORD" | "INTERFACE" => {}
+                        _ => charsets::children(n).into_iter().for_each(|c| collect(c, out)),
+                    }
+                }
+                collect(body, &mut returns);
+                !returns.is_empty() && returns.iter().all(|r| r.is_some_and(|r| self.interned(r, depth - 1)))
+            }
+            _ => switch::constant_string(node),
+        }
+    }
+
     fn library_string_comparison(
         &self,
         node: Node<'t>,
@@ -225,7 +272,11 @@ impl<'t> Lowering<'t> {
         left: Expr,
         right: Expr,
     ) -> Result<ExprKind, Error> {
-        if !self.library.get(self.current.get()).copied().unwrap_or(false) {
+        let library = self.library.get(self.current.get()).copied().unwrap_or(false);
+        let both_interned = ["leftOperand", "rightOperand"]
+            .iter()
+            .all(|side| node.get(side).is_some_and(|n| self.interned(n, 3)));
+        if !library && !both_interned {
             return error(node.pos(), "== on strings compares references; not supported yet");
         }
         let equal = ExprKind::Builtin(Builtin::ObjectsEquals, vec![left, right]);
@@ -920,8 +971,13 @@ impl<'t> Lowering<'t> {
             return Ok(place);
         }
         match node.kind() {
-            "IDENTIFIER" if node.symbol().is_some_and(|s| s.kind == "BINDING_VARIABLE") => {
-                unsupported(node, "assigning a pattern variable")
+            // A pattern variable of a record or switch pattern names a value it does not hold (an
+            // alias, see `patterns`); that of `x instanceof T v` is a variable.
+            "IDENTIFIER"
+                if node.symbol().is_some_and(|s| s.kind == "BINDING_VARIABLE")
+                    && self.alias(node).is_some() =>
+            {
+                unsupported(node, "assigning a pattern variable of a record or switch pattern")
             }
             "IDENTIFIER" => Ok(Place::Var(self.local(node)?)),
             "ARRAY_ACCESS" => {

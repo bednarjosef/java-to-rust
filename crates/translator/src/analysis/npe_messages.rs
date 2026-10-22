@@ -191,6 +191,12 @@ impl Messages<'_> {
                     Builtin::StringLength => "length",
                     Builtin::StringEquals => "equals",
                     Builtin::StringCharAt => "charAt",
+                    // The methods of a charset that may be null.
+                    Builtin::Charset(CharsetOp::Name) => "name",
+                    Builtin::Charset(CharsetOp::DisplayName) => "displayName",
+                    Builtin::Charset(CharsetOp::ToString) => "toString",
+                    Builtin::Charset(CharsetOp::HashCode) => "hashCode",
+                    Builtin::Charset(CharsetOp::Equals) => "equals",
                     // `i.intValue()`, which javac names by the boxed class.
                     Builtin::Boxed(BoxedOp::Unbox, kind) => {
                         let method = format!("{}Value", x.ty);

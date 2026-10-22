@@ -203,6 +203,60 @@ impl<'t> Lowering<'t> {
 
     /// A call of an enum's methods: `values()` and `valueOf(s)` of the enum, and the methods that
     /// `java.lang.Enum` declares. `None` for any other call.
+    /// `Enum.valueOf(c, name)`, the constant `name` of the enum whose class is `c`: a test of
+    /// `c` against each enum of the program, with that enum's `valueOf`, and for any other class
+    /// the JDK's failure (`NotEnumClass`). Both arguments are evaluated first, as for the call.
+    fn value_of_class(&self, node: Node<'t>, args: Vec<Expr>) -> Result<ExprKind, Error> {
+        let pos = node.pos();
+        let ty = self.ty(node, node.java_type())?;
+        let mut args = args.into_iter();
+        let (class, name) = (args.next().expect("two arguments"), args.next().expect("two arguments"));
+        let (class_var, name_var) = (self.fresh_name("enum_class"), self.fresh_name("name"));
+        let class_read = || self.synth(ExprKind::Var(class_var.clone()), pos, Type::JavaClass);
+        let class_name = self.synth(
+            ExprKind::Builtin(Builtin::ClassMethod(ClassOp::GetName), vec![class_read()]),
+            pos,
+            Type::String,
+        );
+        let mut chain = ExprKind::Builtin(Builtin::NotEnumClass, vec![class_name]);
+        // A class of a known enum (`Class<Color>`) is that enum's.
+        let candidates = (0..self.types.len()).rev().filter(|&t| {
+            self.types[t].node.kind() == "ENUM"
+                && !matches!(ty, Type::Enum(name) if name != self.types[t].name)
+        });
+        for e in candidates {
+            let enum_ty = Type::enum_type(&self.types[e].name);
+            let literal = self.synth(
+                ExprKind::Builtin(Builtin::ClassLiteral(enum_ty), Vec::new()),
+                pos,
+                Type::JavaClass,
+            );
+            let test = ExprKind::Binary(BinOp::Eq, Box::new(class_read()), Box::new(literal));
+            let name = self.synth(ExprKind::Var(name_var.clone()), pos, Type::String);
+            let constant = self.synth(ExprKind::Builtin(Builtin::EnumValueOf, vec![name]), pos, enum_ty);
+            let rest = self.synth(chain, pos, ty);
+            chain = ExprKind::Conditional(
+                Box::new(self.synth(test, pos, Type::Boolean)),
+                Box::new(self.convert(constant, ty)),
+                Box::new(rest),
+            );
+        }
+        let block = vec![
+            Stmt::Local { ty: Type::JavaClass, name: class_var, init: Some(class), pos },
+            Stmt::Local {
+                ty: Type::String,
+                name: name_var,
+                init: Some(self.convert(name, Type::String)),
+                pos,
+            },
+            Stmt::Yield(self.synth(chain, pos, ty)),
+        ];
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        })
+    }
+
     pub(super) fn enum_call(
         &self,
         node: Node<'t>,
@@ -229,6 +283,9 @@ impl<'t> Lowering<'t> {
         }
         if symbol.owner != "java.lang.Enum" {
             return Ok(None);
+        }
+        if symbol.is_static && symbol.name == "valueOf" && args.len() == 2 {
+            return Ok(Some(self.value_of_class(node, std::mem::take(args))?));
         }
         let receiver = match receiver {
             Some(r) => self.expr(r)?,

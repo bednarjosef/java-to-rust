@@ -1142,7 +1142,7 @@ Decisions that change during the implementation are recorded here, milestone by 
   `int`, `long`, `double`, `float`, `char`, `boolean` and `String`. Still rejected in a body:
   blocks, member classes, static fields, fields of other types, and initializers that are not
   pure, since a side effect would repeat on each read.
-- **Still rejected:** a field named `outer` in a nested class with an enclosing instance; an
+- **Still rejected:** an
   enclosing instance needed in static code (which javac rejects as well); and `Outer.this` or
   `Outer.super` from an inner class that itself extends `Outer` (`enclosing_instance` stops at
   the first subclass of `Outer`, which is then `this`, not the enclosing object).

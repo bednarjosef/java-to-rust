@@ -308,12 +308,23 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The name that a pattern binds from `source` (`pattern_source`). Where no value of the
-    /// program is a `T` (`None::<T>`), the code that would run with it may still assign fields of
-    /// it, as of a value of a class that no object of the program is: it is bound `mut` there.
-    pub(super) fn pattern_binding(&self, name: &str, source: &str) -> String {
+    /// The pattern that binds `name`, of type `ty`, from `source` (`pattern_source`):
+    /// `Some(name)`. Where no value of the program is a `T` (`None::<T>`), the code that would run
+    /// with it may still assign fields of it, as of a value of a class that no object of the
+    /// program is: it is bound `mut` there, as it is where the method assigns the variable. A
+    /// variable that the method may set to null is an `Option` like any other local, bound whole
+    /// (`mut name @ Some(_)`).
+    pub(super) fn pattern_binding(&self, name: &str, source: &str, ty: Type) -> String {
         let local = self.local(name);
-        if source.starts_with("None::<") { format!("mut {local}") } else { local }
+        let assigned = assigns_any(&self.class.methods[self.method].body, name);
+        if self.optional_var(self.method, ty, name) {
+            return format!("mut {local} @ Some(_)");
+        }
+        if source.starts_with("None::<") || assigned {
+            format!("Some(mut {local})")
+        } else {
+            format!("Some({local})")
+        }
     }
 
     /// The `Option` that `value instanceof T name` binds `name` from: the value as a `T` when the
@@ -1416,9 +1427,15 @@ impl<'a> Gen<'a> {
                 // A box whose identity is kept is the same box only when it is the same object.
                 let faithful = self.runtime_of(c).is_some_and(|ty| self.faithful_box(ty));
                 let same_box = format!("{}(Some(a), Some(b))", self.runtime("same_optional"));
+                // A floating box held as a value is compared as `equals` compares it, so that
+                // where the translation compares values for Java's identity (a shortcut before
+                // `equals`), `-0.0` differs from `0.0` and NaN equals NaN.
+                let same_bits = format!("{}(f64::from(*a), f64::from(*b))", self.runtime("double_equals"));
+                let floating = matches!(self.runtime_of(c), Some(Type::Boxed(b)) if matches!(*b, Type::Double | Type::Float));
                 let same = match () {
                     _ if self.runtime_of(c) == Some(Type::StringBuilder) => "a.same(b)",
                     _ if faithful => &same_box,
+                    _ if floating && self.holds_value(c) => &same_bits,
                     _ if self.holds_value(c) && !array => "a == b",
                     _ if self.facts.thread_shared.contains(&c) || array && self.facts.threaded => {
                         "Arc::ptr_eq(a, b)"

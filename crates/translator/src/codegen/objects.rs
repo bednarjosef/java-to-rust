@@ -620,7 +620,18 @@ impl<'a> Gen<'a> {
     /// result is then a `&Rc<..>` when the reference is a place, else the `Rc` itself.
     pub(super) fn object(&mut self, e: &'a Expr) -> String {
         let id = e.id;
+        let ty = e.ty;
         let e = self.peel(e);
+        // A `null` cast to the object's type (`(CharSequence) null`) is a `None` of that type,
+        // which the dereference then throws for.
+        let mut inner = e;
+        while let ExprKind::Cast(_, value) = &inner.kind {
+            inner = value;
+        }
+        if matches!(inner.kind, ExprKind::Null) && matches!(ty, Type::Class(..)) {
+            let option = format!("None::<{}>", self.ty_name(ty));
+            return self.dereference(&[id, e.id], &option);
+        }
         let (text, place) = self.object_parts(e);
         if !(matches!(e.ty, Type::Class(..)) && self.nullable(e)) {
             return text;

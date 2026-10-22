@@ -768,6 +768,9 @@ pub enum Builtin {
     EnumCompareTo,
     /// `E.valueOf(s)` for the enum type of the call's result.
     EnumValueOf,
+    /// The failure of `Enum.valueOf(c, s)` for a class `c` that is no enum of the program: an
+    /// `IllegalArgumentException`, `<name> is not an enum class`, of the class's name.
+    NotEnumClass,
     /// `Character.getNumericValue(c)`: the digit value of a letter or digit, or -1.
     CharNumericValue,
     /// A method of a boxed class (`Integer.parseInt`, `x.intValue()`), see `BoxedOp`, with the

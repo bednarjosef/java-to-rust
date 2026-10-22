@@ -99,6 +99,7 @@ const RAISED: &[(&str, &[&str])] = &[
         "java.lang.IllegalArgumentException",
         &[
             "enum#valueOf",
+            "java.lang.Enum#valueOf",
             "java.lang.Character#toChars",
             "java.lang.AbstractStringBuilder#appendCodePoint",
             "java.lang.StringBuilder#appendCodePoint",

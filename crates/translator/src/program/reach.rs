@@ -1112,6 +1112,10 @@ struct Walk<'t> {
     /// (`recreated_exception`): each exception class whose objects are created has the
     /// constructor that does it.
     recreates: bool,
+    /// Whether reachable code calls `Enum.valueOf(c, name)`, which may make a constant of any
+    /// enum whose class it has: each enum that reachable code names is initialized
+    /// (`lower::enums`).
+    enum_by_class: bool,
     /// The parameters, by method and position, that a method gives `ensureInitialized`, and the
     /// class literals that reachable code passes to each parameter (`initialize.rs`).
     initializing: HashSet<(MethodKey, usize)>,
@@ -1301,8 +1305,11 @@ impl<'t> Walk<'t> {
         let Some((decl, outer)) = self.classes.get(&class).map(|(d, o)| (*d, o.clone())) else {
             return self.block(&class.clone(), Item::Class(class));
         };
-        if !self.reach.classes.insert(class) {
+        if !self.reach.classes.insert(class.clone()) {
             return;
+        }
+        if self.enum_by_class && self.is_enum(&class) {
+            self.work.push(Item::Init(class));
         }
         if let Some(outer) = outer {
             self.work.push(Item::Class(outer));
@@ -1348,6 +1355,13 @@ impl<'t> Walk<'t> {
     }
 
     fn method(&mut self, key: MethodKey) {
+        if key.0 == "java.lang.Enum"
+            && key.1 == "valueOf"
+            && !std::mem::replace(&mut self.enum_by_class, true)
+        {
+            let named: Vec<String> = self.reach.classes.iter().filter(|c| self.is_enum(c)).cloned().collect();
+            self.work.extend(named.into_iter().map(Item::Init));
+        }
         let node = self.methods.get(&key).filter(|_| !replaced(&key.0, &key.1, &key.2));
         let Some(&node) = node else {
             self.block(&key.0, Item::Method(key.clone()));
@@ -1426,6 +1440,11 @@ impl<'t> Walk<'t> {
         self.classes
             .get(class)
             .is_some_and(|(decl, _)| matches!(text(decl, "kind"), "CLASS" | "ENUM" | "RECORD"))
+    }
+
+    /// Whether `class` is an enum class.
+    fn is_enum(&self, class: &str) -> bool {
+        self.classes.get(class).is_some_and(|(decl, _)| text(decl, "kind") == "ENUM")
     }
 
     /// A class whose objects are created: it is live, and its instance initializers run.
