@@ -1,9 +1,9 @@
 # Known failures
 
 Minimal programs that the translator gets wrong, though the feature is in the supported subset
-(see the "Current state" section of the README). Each one is kept out of `corpus/`, which must
-pass. Java's output is what `java File.java` prints. When a failure is fixed, move its file into
-`corpus/features/` with the fixed behaviour.
+(see docs/supported-java.md). Each one is kept out of `corpus/`, which must pass. Java's output
+is what `java File.java` prints. When a failure is fixed, move its file into `corpus/features/`
+with the fixed behaviour.
 
 - `LoneSurrogateCompareTo.java`: `"😀x".substring(1)`, which starts with a lone low
   surrogate, compared with `compareTo`. Java prints `2 -56772 -30747`; the translation prints
