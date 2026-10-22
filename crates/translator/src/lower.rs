@@ -495,7 +495,7 @@ impl<'t> Lowering<'t> {
                 })
                 .collect::<Result<_, Error>>()?
         };
-        params.extend(self.caller_param(index, node, is_main)?);
+        params.extend(self.caller_param(index));
         // An abstract method of an enum is implemented by the constants' bodies, which
         // `constant_bodies` makes its body.
         let abstract_in_enum =
