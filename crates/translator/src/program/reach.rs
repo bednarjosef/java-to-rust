@@ -228,6 +228,10 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     // An action that `AccessController.doPrivileged` runs, which the translator's runs directly
     // (`REDIRECTED_CALLS`): a plain interface.
     "java.security.PrivilegedAction",
+    // The security code's debugging output, off unless a property turns it on, which library
+    // code asks for as it starts (`JarVerifier.debug = Debug.getInstance("jar")`); patched not
+    // to name the caller's frame (`java/patches/sun/security/util/Debug.java`).
+    "sun.security.util.Debug",
     "java.lang.reflect.Array",
     "java.lang.reflect.InvocationTargetException",
     "java.lang.reflect.Modifier",

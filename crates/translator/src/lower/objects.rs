@@ -471,6 +471,22 @@ impl<'t> Lowering<'t> {
             {
                 unsupported(node, &format!("a field of the annotation type `{owner}`"))
             }
+            // `SecurityProperties`, which is not translated, initializes this field with
+            // `includedInExceptions("jar")`, which lowering answers from the JDK's security
+            // properties (`lower/system.rs`).
+            None if node.symbol().is_some_and(|s| {
+                s.owner == "sun.security.util.SecurityProperties"
+                    && s.name == "INCLUDE_JAR_NAME_IN_EXCEPTIONS"
+            }) =>
+            {
+                match super::system::included_in_exceptions("jar") {
+                    Some(included) => Ok(ExprKind::Bool(included)),
+                    None => unsupported(
+                        node,
+                        "`SecurityProperties.INCLUDE_JAR_NAME_IN_EXCEPTIONS` without the JDK's security properties to read",
+                    ),
+                }
+            }
             None => unsupported(node, "fields"),
         }
     }

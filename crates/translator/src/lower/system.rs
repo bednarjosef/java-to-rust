@@ -152,7 +152,7 @@ fn security_properties() -> Option<&'static HashMap<String, String>> {
 /// `SecurityProperties.includedInExceptions(category)`: whether the system or security property
 /// `jdk.includeInExceptions` lists the category. No system property is set in a plain run, so it
 /// is the JDK's security property; `None` when the JDK's file cannot be read.
-fn included_in_exceptions(category: &str) -> Option<bool> {
+pub(super) fn included_in_exceptions(category: &str) -> Option<bool> {
     let listed = security_properties()?.get("jdk.includeInExceptions");
     Some(listed.is_some_and(|list| list.split(',').any(|c| c.trim().eq_ignore_ascii_case(category))))
 }
