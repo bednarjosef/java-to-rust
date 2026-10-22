@@ -5520,3 +5520,14 @@ fn a_range_loop_bound_that_reads_a_shared_field_is_bound_before_the_loop() {
     assert_contains(&rust, &["let start = this.borrow().next;", "for i in start..limit {"]);
     assert_lacks(&rust, &["for i in this.borrow()"]);
 }
+
+#[test]
+fn a_for_loop_whose_bound_is_a_field_the_body_writes_stays_a_while_loop() {
+    // Java re-reads `count` on every iteration, and the body grows it, so the loop must not be a
+    // Rust range, which would fix the end once.
+    let rust = translate(
+        "public class Main {\n    int count = 2;\n    void grow() {\n        count++;\n    }\n    int run() {\n        int seen = 0;\n        for (int i = 0; i < count; i++) {\n            if (count < 5) grow();\n            seen++;\n        }\n        return seen;\n    }\n    public static void main(String[] a) {\n        new Main().run();\n    }\n}\n",
+    );
+    assert_contains(&rust, &["while i < self.count {"]);
+    assert_lacks(&rust, &["for i in"]);
+}
