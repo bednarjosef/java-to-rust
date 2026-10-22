@@ -45,7 +45,10 @@
 //! What does not run of a method that does: the side of a branch whose condition has a value
 //! that the walk knows, such as a parameter that every call passes the same constant (`known`).
 //! The walk learns those values as it goes, and walks a method again when one it relied on
-//! changes.
+//! changes. Nor does a `catch` clause that catches no class with objects: what it catches is an
+//! object, and objects come only from where the walk sees them come from (above), the runtime's
+//! exceptions among them (`Class::raised`), so a clause whose classes have none yet waits, and the
+//! method is walked again once one of them does.
 
 use super::object_values::{self, Flow, ObjectValues, STATIC};
 use crate::ast::*;
@@ -98,6 +101,7 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
             seen: HashSet::new(),
             waiting: HashMap::new(),
             contexts: HashMap::new(),
+            catching: HashMap::new(),
             glued: HashSet::new(),
             known: known::Knowledge::default(),
             unknown: None,
@@ -126,7 +130,8 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
         let Some((m, ctx)) = next else { break };
         let env = walk.env(m);
         walk.state.borrow_mut().known.env = env;
-        let dead = walk.dead(m);
+        let mut dead = walk.dead(m);
+        dead.extend(walk.dead_catches(m));
         let code = |e: &Expr| {
             visit_expr(e, &mut |x| {
                 if dead.contains(&x.id) { walk.unresolved(x) } else { walk.expr(m, ctx, x) }
@@ -141,12 +146,11 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
         }
         walk.state.borrow_mut().known.env.clear();
     }
-    let Walk { state, supers, .. } = walk;
+    let Walk { state, .. } = walk;
     let State { unknown, mut live, .. } = state.into_inner();
     if let Some(unknown) = unknown {
         return Err(unknown);
     }
-    live.constructed = live.instantiated.iter().flat_map(|&c| supers[c].iter().copied()).collect();
     let mut touched: HashSet<usize> = live.initialized.clone();
     touched.extend(live.methods.iter().map(|&m| class.methods[m].class));
     touched.extend(live.constructed.iter().copied());
@@ -249,6 +253,10 @@ struct State {
     waiting: HashMap<usize, Vec<usize>>,
     /// The objects that each method has been walked on, by method.
     contexts: HashMap<usize, Vec<usize>>,
+    /// The methods with a `catch` clause that catches no class with objects yet, by each type
+    /// that the clause catches: they are walked again once an object of a class below it is
+    /// created.
+    catching: HashMap<usize, HashSet<usize>>,
     /// The classes whose objects the runtime has been handed (`glue`).
     glued: HashSet<usize>,
     /// The values that the walk knows (`known`).
@@ -331,6 +339,20 @@ impl Walk<'_> {
         if !self.state.borrow_mut().live.instantiated.insert(c) {
             return;
         }
+        // The `catch` clauses of a type above it can run now.
+        let woken: Vec<usize> = {
+            let mut state = self.state.borrow_mut();
+            let mut woken = Vec::new();
+            for &t in &self.supers[c] {
+                if state.live.constructed.insert(t) {
+                    woken.extend(state.catching.remove(&t).unwrap_or_default());
+                }
+            }
+            woken
+        };
+        for m in woken {
+            self.rescan(m);
+        }
         self.created(c);
         let waiting = self.state.borrow_mut().waiting.remove(&c).unwrap_or_default();
         for m in waiting {
@@ -344,6 +366,37 @@ impl Walk<'_> {
                 }
             }
         }
+    }
+
+    /// The expressions of the `catch` clauses of method `m` that catch no class with objects yet
+    /// (see the module's comment), which cannot run; the method waits for each type they catch.
+    fn dead_catches(&self, m: usize) -> HashSet<ExprId> {
+        let mut dead = HashSet::new();
+        let mut waiting = Vec::new();
+        {
+            let state = self.state.borrow();
+            let constructed = &state.live.constructed;
+            for s in &self.class.methods[m].body {
+                visit_stmt(s, &mut |_| {}, &mut |s| {
+                    let Stmt::Try { catches, .. } = s else { return };
+                    for catch in catches.iter().filter(|c| !c.types.iter().any(|t| constructed.contains(t))) {
+                        waiting.extend(catch.types.iter().copied());
+                        for b in &catch.body {
+                            visit_stmt(
+                                b,
+                                &mut |e| visit_expr(e, &mut |x| _ = dead.insert(x.id)),
+                                &mut |_| {},
+                            );
+                        }
+                    }
+                });
+            }
+        }
+        let mut state = self.state.borrow_mut();
+        for t in waiting {
+            state.catching.entry(t).or_default().insert(m);
+        }
+        dead
     }
 
     /// The statements of method `m` that the runtime sees an object in: a `throw`.

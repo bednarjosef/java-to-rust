@@ -14,12 +14,12 @@ pub use modules::Contents as ModuleContents;
 pub use reach::{
     CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind,
     PRINT_FORMATTED, Reach, STRING_STREAMS, TRANSLATED_LANG_ACCESS, TRANSLATED_LANG_ACCESS_CLASS,
-    TRANSLATED_MODULES, TRANSLATED_NESTED, TRANSLATED_PROPERTIES, UNSET_PROPERTIES, caller_query,
-    charset_coder, class_bound, class_for_name, class_name, component_array, computed_for_name,
+    TRANSLATED_MODULES, TRANSLATED_NESTED, TRANSLATED_PROPERTIES, TRANSLATED_SEGMENTS, UNSET_PROPERTIES,
+    caller_query, charset_coder, class_bound, class_for_name, class_name, component_array, computed_for_name,
     created_by_name, direct_stream_call, field_offset_named, is_ensure_initialized, literal_class,
     live_branch, lookup, module_call, module_for_name, provided, recreated_exception, redirected_call,
-    release_query, standard_stream_field, stream_of_call, unsafe_field_access, unsafe_field_update,
-    unset_property_ifs, untranslated, writes_string_array,
+    release_query, segment_access, standard_stream_field, stream_of_call, unsafe_field_access,
+    unsafe_field_update, unset_property_ifs, untranslated, writes_string_array,
 };
 pub use survey::Survey;
 
@@ -44,6 +44,10 @@ pub struct Program {
     /// Library roots, such as the JDK's own sources: javac reads a file from them only when the
     /// program uses one of its classes, and only what is reachable from `main` is translated.
     pub libraries: Vec<PathBuf>,
+    /// For a census only: javac's compile errors do not stop it, and the census rejects the piece
+    /// of code that each is in, the method, initializer or class (see `javac::Session::start`).
+    /// For code that is known to have some, such as a decompiler's output.
+    pub keep_going: bool,
 }
 
 /// A translation error with the file it is in, when it is in one.
@@ -90,7 +94,7 @@ pub fn translate_program_modules(program: &Program) -> Result<ModuleTree, Progra
 /// `translate_program`, with `Reach::string_array_writes` or without.
 fn translate_reached(program: &Program, string_array_writes: bool) -> Result<ModuleTree, ProgramError> {
     use crate::timings::phase;
-    let (units, reach) = load(program, string_array_writes)?;
+    let (units, reach) = load(program, string_array_writes, false)?;
     // The program's files are the first units (`load`).
     let program_units = source_files(program)?.len();
     let (lowered, switch_temps) = {
@@ -107,6 +111,7 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
     let units = kept;
     let file = |unit: Option<usize>| unit.map(|u| units[u].file.clone());
     let mut class = lowered.class.map_err(|(unit, error)| ProgramError { file: file(unit), error })?;
+    stamp_units(&mut class, &lowered.units);
     if let Err(rejected) = phase("live methods", || keep_live(&mut class, lowered.rejected)) {
         let file = file(rejected.unit).or_else(|| locate(&units, &class, rejected.error.pos));
         return Err(ProgramError { file, error: rejected.error });
@@ -191,14 +196,26 @@ fn narrow(
 /// Each round walks only what its units add (`reach::Rounds`), over the units with their records
 /// complete (`javac::Records`). Which members a record gets depends on every unit, so when a new
 /// unit changes those of a unit walked before, the round walks all of them again.
-fn load(program: &Program, string_array_writes: bool) -> Result<(Vec<Value>, Reach), ProgramError> {
+///
+/// With `keep_going`, javac goes on past compile errors (`Program::keep_going`).
+fn load(
+    program: &Program,
+    string_array_writes: bool,
+    keep_going: bool,
+) -> Result<(Vec<Value>, Reach), ProgramError> {
     let files = source_files(program)?;
     let modules = modules::modules(program.sources.iter().chain(&program.libraries));
     let javac_error = |(file, error)| modules::explain(ProgramError { file, error }, &modules);
     let (mut javac, mut reaching) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     let start = std::time::Instant::now();
-    let (mut session, mut new) =
-        javac::Session::start(&files, &sourcepath(program), modules::kept(&modules)).map_err(javac_error)?;
+    let (mut session, mut new) = javac::Session::start(
+        &files,
+        &sourcepath(program),
+        modules::kept(&modules),
+        patches(program),
+        keep_going,
+    )
+    .map_err(javac_error)?;
     javac += start.elapsed();
     // The units as javac gave them, and the copies of those whose records were completed.
     let (given, completed) = (Store::default(), Store::default());
@@ -259,6 +276,16 @@ fn load(program: &Program, string_array_writes: bool) -> Result<(Vec<Value>, Rea
         let start = std::time::Instant::now();
         new = session.load(&rounds.missing()).map_err(javac_error)?;
         javac += start.elapsed();
+        if crate::timings::enabled() {
+            // Each round as it ends, for a program whose loading takes long.
+            let received = session.received as f64 / 1e6;
+            eprintln!(
+                "timing: round {round}: {} units, {} more asked for, {received:.0} MB of trees{}",
+                trees.len(),
+                new.len(),
+                crate::timings::memory()
+            );
+        }
         if new.is_empty() {
             break;
         }
@@ -339,11 +366,37 @@ impl Unit {
     }
 }
 
-/// The file of the code at `pos` that an analysis or the generator rejected, which the error
-/// does not carry: the unit of the classes whose methods have code there, when they agree on one
-/// (a line and column of one file may be that of another file's code too).
+/// Stamps on the positions of the code of each class the unit it is in (`Pos::unit`): those of
+/// the methods, of the expressions in them and of the fields' initializers. `units` is the unit
+/// of each type, `None` for the types that lowering provides.
+pub(crate) fn stamp_units(class: &mut crate::ast::Class, units: &[Option<usize>]) {
+    use crate::ast::{rewrite_expr, rewrite_stmt};
+    let unit_of = |t: usize| units.get(t).copied().flatten().and_then(|u| u32::try_from(u).ok());
+    for method in &mut class.methods {
+        let unit = unit_of(method.class);
+        method.pos.unit = unit;
+        method.body.iter_mut().for_each(|s| rewrite_stmt(s, &mut |x| x.pos.unit = unit));
+    }
+    for (t, decl) in class.types.iter_mut().enumerate() {
+        let unit = unit_of(t);
+        for field in decl.fields.iter_mut().chain(&mut decl.statics) {
+            field.pos.unit = unit;
+            if let Some(init) = &mut field.init {
+                rewrite_expr(init, &mut |x| x.pos.unit = unit);
+            }
+        }
+    }
+}
+
+/// The file of the code at `pos` that an analysis or the generator rejected: the unit stamped on
+/// the position (`stamp_units`), or for a position without one, the unit of the classes whose
+/// methods have code there, when they agree on one (a line and column of one file may be that of
+/// another file's code too).
 fn locate(units: &[Unit], class: &crate::ast::Class, pos: Pos) -> Option<String> {
     use crate::ast::{visit_expr, visit_stmt};
+    if let Some(unit) = pos.unit {
+        return units.get(unit as usize).map(|u| u.file.clone());
+    }
     let mut files = std::collections::BTreeSet::new();
     for method in &class.methods {
         let mut here = method.pos == pos;
@@ -397,7 +450,7 @@ pub fn survey_program(program: &Program) -> Result<Survey, ProgramError> {
 /// javac's trees of the program, with those of every library unit that javac loads for it.
 fn javac_tree(program: &Program, files: &[PathBuf]) -> Result<Value, ProgramError> {
     let modules = modules::modules(program.sources.iter().chain(&program.libraries));
-    javac::program_tree(files, &sourcepath(program), modules::kept(&modules))
+    javac::program_tree(files, &sourcepath(program), modules::kept(&modules), patches(program))
         .map_err(|(file, error)| modules::explain(ProgramError { file, error }, &modules))
 }
 
@@ -408,10 +461,20 @@ fn sourcepath(program: &Program) -> Vec<PathBuf> {
     program.sources.iter().cloned().chain(overlay).chain(program.libraries.iter().cloned()).collect()
 }
 
-/// The translator's classes of `java.io` for a translation with the JDK's sources, ahead of the
-/// JDK's on the source path: a `PrintStream` that the translation can take, and the objects that
-/// `System.in`, `System.out` and `System.err` are (see docs/natives-and-input.md).
+/// The translator's own classes for a translation with the JDK's sources, which the JDK does not
+/// have, ahead of the JDK's on the source path: the objects that `System.in`, `System.out` and
+/// `System.err` are (see docs/natives-and-input.md), and the classes that calls of the JDK are
+/// redirected to (`reach::REDIRECTED_CALLS`). See docs/jdk-overlays.md.
 const OVERLAY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/java/overlay");
+
+/// The translator's patches of the JDK's classes, which javac applies to the JDK's files as it
+/// reads them (`java/JdkPatch.java`), with libraries.
+fn patches(program: &Program) -> Option<&'static Path> {
+    (!program.libraries.is_empty()).then(|| Path::new(PATCHES))
+}
+
+/// See `patches`, and docs/jdk-overlays.md.
+pub const PATCHES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/java/patches");
 
 /// The program's own files: the given files and every `.java` file under the source roots, sorted
 /// and without duplicates. A root's `module-info.java` is not one: javac compiles every root as

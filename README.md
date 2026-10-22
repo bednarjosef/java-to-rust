@@ -518,9 +518,9 @@ null is rejected. Encoding replaces unmappable characters as Java does,
 and decoding replaces malformed input as Java's `String` does (`crates/runtime/src/charset.rs`).
 In a whole program, `newDecoder()` and `newEncoder()` of a charset give the JDK's own
 `CharsetDecoder` and `CharsetEncoder` of the six charsets, which decode and encode between
-buffers, report or replace malformed and unmappable input, and throw as Java's do: their classes
-are copied from the JDK's sources into `java/overlay/sun/nio/cs/TranslatedCoders.java`
-(`scripts/generate-charset-coders.py`).
+buffers, report or replace malformed and unmappable input, and throw as Java's do: they are the
+JDK's nested classes of those charsets, translated from the JDK's sources and made by
+`java/overlay/sun/nio/cs/TranslatedCoders.java` (see docs/jdk-overlays.md).
 
 #### Enums
 
@@ -531,7 +531,8 @@ field that is not final is accepted as long as only the constructor sets it. An 
 `toString` is its `Display`, while `name()` stays the constant's name. A constant with a body
 (`PLUS { int apply(int a, int b) { return a + b; } }`) overrides the enum's methods, so each
 overridden method becomes a `match self` with an arm per overriding constant and the enum's own
-body (if it is not abstract) for the rest. `valueOf` of a name that is no constant throws
+body (if it is not abstract) for the rest; a lambda or method reference in an override is one of
+the enum's method, capturing the constant as `this`. `valueOf` of a name that is no constant throws
 `IllegalArgumentException` with Java's message (`No enum constant Main.Size.HUGE`), which a
 `catch` can take (`Size::try_enum_value_of(s)?`). `Enum.valueOf(cls, name)` with a class value,
 as javac's annotation proxies call it, tests the class against each of the program's enums and
@@ -764,7 +765,7 @@ time the modules are what the roots declare: `Class.getModule()` is the named mo
 with a `module-info.java`, with the class loader the JVM gives it, or the unnamed module of the
 system class loader, and `Module` and `ModuleLayer.boot()` answer from the declarations as the
 JVM's boot layer does; defining a module layer throws, saying that code outside the translation
-cannot run (`java/overlay/java/lang/Module.java`). A
+cannot run (`java/patches/java/lang/Module.java`). A
 package of a module whose sources are not given is an error that names the module to pass as
 `--library`.
 
@@ -910,7 +911,7 @@ figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausi
 JVM's, and `gc()` does nothing, as `System.gc()` does. `Runtime.halt` flushes the output and exits without shutdown
 hooks. Scoped values are the JDK's `ScopedValue` over the translator's `Thread`, which keeps a
 thread's bindings and its cache of values read, as the JVM does; a new thread has no bindings.
-The operation of a binding runs directly (`java/overlay/jdk/internal/vm/ScopedValueContainer.java`),
+The operation of a binding runs directly (`java/patches/jdk/internal/vm/ScopedValueContainer.java`),
 as the JDK's runs it when no `StructuredTaskScope`, a preview API, is open. `onSpinWait` and
 `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
 thread's record, which an interrupt wakes. The runtime's
@@ -931,7 +932,7 @@ rejected. A file stream's `FileCleanable.register` does nothing, since nothing i
 collected: a stream the program never closes stays open until it ends. `Blocker.begin` is `false`
 and `end` does nothing, as without virtual threads. `jdk.internal.util.ByteArray`, which
 `RandomAccessFile` and the data streams use to pack numbers, is the translator's own
-(`java/overlay/jdk/internal/util/ByteArray.java`), which shifts bytes where the JDK's uses
+(`java/patches/jdk/internal/util/ByteArray.java`), which shifts bytes where the JDK's uses
 `VarHandle` views, and the `JavaLangAccess` methods that the data streams call on
 `SharedSecrets` (`countPositives`, `countNonZeroAscii`, `uncheckedNewStringWithLatin1Bytes`,
 `inflateBytesToChars`, and `uncheckedNewStringOrThrow` and `uncheckedGetBytesOrThrow` for
@@ -939,7 +940,7 @@ and `end` does nothing, as without virtual threads. `jdk.internal.util.ByteArray
 (`java/overlay/jdk/internal/access/TranslatedLangAccess.java`).
 
 `InetAddress` looks names up through the system's name service, as the JVM's natives do: the
-JDK's `InetAddress`, `Inet4AddressImpl` and `Inet6AddressImpl` (`java/overlay/java/net`) call the
+JDK's `InetAddress`, `Inet4AddressImpl` and `Inet6AddressImpl` (patched: `java/patches/java/net`) call the
 translator's `java.net.TranslatedNet`, whose natives are libc's `getaddrinfo`, `getnameinfo`,
 `gethostname` and `getifaddrs` on the bytes of names and addresses (`net.rs`), and which makes the
 JDK's address objects of what they give, with the JDK's `UnknownHostException`s. Whether IPv4
@@ -950,7 +951,7 @@ sockets, `isReachable` and the listing of network interfaces stay rejected. A ho
 `UnknownHostException`, where the JDK's also wraps a custom resolver's `RuntimeException`.
 
 `java.nio.file` (`Files`, `Path`, `Paths`, directory streams, attributes) is the JDK's code over
-the translator's `sun.nio.fs.UnixNativeDispatcher` (`java/overlay/sun/nio/fs`), whose natives
+the translator's patch of `sun.nio.fs.UnixNativeDispatcher` (`java/patches/sun/nio/fs`), whose natives
 take paths as byte arrays, where the JDK's take addresses of native memory, and are `std::fs` and
 libc (`unix.rs`): `stat`, `lstat`, `fstat` (the attributes come back as an array of numbers that
 the translator's `UnixFileAttributes` copies), `open`, `close`, `mkdir`, `rmdir`, `unlink`,
@@ -979,14 +980,14 @@ The `jrt:` file system, through which javac reads the classes of the JDK, is the
 (`jdk.internal.jrtfs`) over the image file `lib/modules` of the JDK in `java.home`; it is among
 the installed providers (`FileSystemProvider.installedProviders`, which the JDK finds with a
 `ServiceLoader`, gives the default provider and the jrt one: `TranslatedFiles.java`). The
-translator's image reader (`java/overlay/jdk/internal/jimage/BasicImageReader.java`) reads the
+translator's image reader (`java/patches/jdk/internal/jimage/BasicImageReader.java`) reads the
 index of the image into an array once, and each resource into an array of its own, through a
 `FileChannel`, where the JDK's maps the file into memory. What differs from Java: a compressed
 image (`jlink --compress`) and a JDK of exploded modules, as it is built, throw
 `UnsupportedOperationException`; the `toString` of a jrt file's attributes, which formats times
 with `%tc`, throws the same; and a failure of the image's reader is thrown as it is, not given as
 the reason of an `InvalidPathException`. `URI` decodes its escaped octets as UTF-8 itself
-(`java/overlay/java/net/TranslatedURI.java`), and `jdk.internal.util.Exceptions`, which puts the
+(patched: `java/patches/java/net/URI.java`), and `jdk.internal.util.Exceptions`, which puts the
 input and the index into a `URISyntaxException`, reads its categories of detail without waiting
 for the JVM's boot and fills only `%s` in its messages, refusing any other conversion.
 
@@ -1004,8 +1005,27 @@ fence), and so `loadFence` and `storeFence`, and `VarHandle`'s static fences (`f
 `copySwapMemory0` between two arrays of primitives copy the bytes between them, swapping each
 unit for the second, as the heap buffers' `put` and `compact` do; a plain `get` or `put` of a
 primitive at an offset that is neither a field's nor an element's (`getCharUnaligned`, the
-buffers' typed reads of a `byte[]`) reads or writes the bytes of the array at that offset. A base
-that is null or no array of primitives is memory outside the heap, which ends the program. `Unsafe.arrayBaseOffset` and
+buffers' typed reads of a `byte[]`) reads or writes the bytes of the array at that offset. With
+a null base the offset is an address of memory outside the heap, which the runtime keeps
+(`native_memory.rs`): `allocateMemory0` gives a block of its own at an address that is never 0,
+far from every other block, `reallocateMemory0` and `freeMemory0` replace and free it, and the
+reads, writes, `setMemory0` fills and copies (to and from arrays too) at an address work inside
+one live block, behind a lock that threads share; an access outside every live block, past a
+block's end or after it was freed ends the program. So direct buffers work, with their memory
+freed only when the program frees it (no thread waits for them to be collected:
+`BufferCleaner.startCleaningThreadIfNeeded` does nothing). `UnsafeConstants` holds what the JVM
+injects (`java/patches/jdk/internal/misc/UnsafeConstants.java`): 8-byte addresses, little-endian,
+unaligned access, 64-byte cache lines, and the system's page size. Memory segments work on
+arrays and on memory from an arena: `segment.get(layout, offset)` and `set` of a value layout of
+a primitive make the layout's `VarHandle` in the JDK, which the translation does not make; it
+calls `TranslatedSegments` instead (`java/overlay/jdk/internal/foreign/TranslatedSegments.java`),
+which checks the access as the handle does (bounds, alignment, read-only, the session) and reads
+or writes through `ScopedMemoryAccess` in the layout's byte order. `jdk.internal.foreign.Utils`
+is patched (`java/patches/jdk/internal/foreign/Utils.java`): without the method handles of
+address layouts, and `makeRawSegmentViewVarHandle` throws `UnsupportedOperationException`
+(`corpus/whole-program/MemorySegments.java`). A base that is no array of
+primitives ends the program, and so does a lock, `wait` or `notify` on a string, a box or a class
+held as an `Object`, whose monitor the translation does not keep. `Unsafe.arrayBaseOffset` and
 `arrayIndexScale` of an array class literal are HotSpot's layout (16, and 1 to 8 by element, 4
 for references) and are answered at the call, so their `Class`-taking natives are not reached.
 `Unsafe.park` and `unpark` park the current thread and unpark a thread by its id, as
@@ -1094,6 +1114,9 @@ as its command-line arguments, on `java` and as the translated binary alike.
   translator's scale, output in several crates, reading build tools, dependencies' sources,
   generated sources, resources and tests, the library coverage they lean on, and working
   through their blockers.
+- [docs/minecraft-server.md](docs/minecraft-server.md): the Minecraft server as a target: how it is
+  decompiled and surveyed (`scripts/minecraft-server-survey.sh`), the first numbers, and its
+  blockers: the translator's memory first, then decompiled code that does not compile.
 - [docs/several-crates.md](docs/several-crates.md): splitting a translation into several crates:
   why the hierarchies' enums and Java's package cycles keep most code in one crate, how to find
   the groups that can be split off, and what a split would buy for javac.

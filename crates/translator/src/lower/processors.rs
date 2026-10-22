@@ -1,7 +1,7 @@
 //! The annotations of the program's annotation processors, which the JDK's `AbstractProcessor`
 //! reads by reflection (`getClass().getAnnotation(SupportedOptions.class).value()`). The
-//! translation has no annotation objects, so the translator's `AbstractProcessor`
-//! (`java/overlay/javax/annotation/processing`) reads them through the native
+//! translation has no annotation objects, so the JDK's `AbstractProcessor`, patched
+//! (`java/patches/javax/annotation/processing`), reads them through the native
 //! `TranslatedProcessorAnnotations.values0(c, name)`, which is a chain of tests of `c` against
 //! the classes of the program that have the annotation `name` themselves (none of the three is
 //! `@Inherited`), each giving its `value` as strings: `{ Class c = ..; yield c.equals(A.class) ?

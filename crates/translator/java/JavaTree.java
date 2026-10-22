@@ -75,7 +75,7 @@ public class JavaTree {
 
     /**
      * Whole-program mode: {@code java JavaTree --program [--sourcepath PATH] [--module-info FILE]
-     * FILE...} compiles all the files in one javac run, loading the other classes they use from the
+     * [--patches DIR] FILE...} compiles all the files in one javac run, loading the other classes they use from the
      * source path, and prints {@code {"units":[{"file":...,"tree":...},...]}}: the files given, in order, then every
      * unit javac loaded from the source path and attributed. Compile errors are printed as
      * {@code FILE:LINE:COLUMN: message}.
@@ -85,34 +85,51 @@ public class JavaTree {
      * given files are attributed at first, and the others as they are asked for (see
      * {@link #serve}).
      *
+     * <p>With {@code --keep-going} (with {@code --serve}), compile errors do not stop it: each is
+     * printed, and the piece of code that it is in is marked (see {@link #markErrors}), for a
+     * census of code such as a decompiler's output, which can have errors.
+     *
      * <p>Every root of the source path may be a module's, with a {@code module-info.java}: javac
      * would compile in the module of the first one it finds, and read the classes of other modules
      * from the JDK's class files instead of their sources on the path. So javac sees none of them,
      * except the one that {@code --module-info FILE} names (the JDK's {@code java.base}, whose
      * packages javac compiles only inside that module): all the sources are one module, that one
      * or the unnamed module (see {@link #oneModule}).
+     *
+     * <p>With {@code --patches DIR}, a source file of the source path that a patch in DIR names
+     * is read as the patch changes it (see {@link JdkPatch}).
      */
     private static void program(List<String> args) throws Exception {
         List<String> options = new ArrayList<>(List.of("-proc:none", "-Xlint:none", "-XDshould-stop.at=FLOW"));
         List<File> files = new ArrayList<>();
         boolean serve = false;
         File moduleInfo = null;
+        java.nio.file.Path patches = null;
         for (int i = 0; i < args.size(); i++) {
             if (args.get(i).equals("--sourcepath") && i + 1 < args.size()) {
                 options.add("-sourcepath");
                 options.add(args.get(++i));
             } else if (args.get(i).equals("--module-info") && i + 1 < args.size()) {
                 moduleInfo = new File(args.get(++i));
+            } else if (args.get(i).equals("--patches") && i + 1 < args.size()) {
+                patches = java.nio.file.Path.of(args.get(++i));
             } else if (args.get(i).equals("--serve")) {
                 serve = true;
+            } else if (args.get(i).equals("--keep-going")) {
+                keepGoing = true;
             } else {
                 files.add(new File(args.get(i)));
             }
         }
+        if (keepGoing) {
+            // javac reports the first 100 errors by default, and goes on silently past the rest.
+            options.addAll(List.of("-Xmaxerrs", Integer.toString(Integer.MAX_VALUE)));
+        }
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         StandardJavaFileManager fileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8);
-        JavacTask task = (JavacTask) compiler.getTask(null, oneModule(fileManager, moduleInfo), diagnostics,
+        JavaFileManager manager = JdkPatch.patching(oneModule(fileManager, moduleInfo), patches);
+        JavacTask task = (JavacTask) compiler.getTask(null, manager, diagnostics,
                 options, null, fileManager.getJavaFileObjectsFromFiles(files));
         // Units that javac loads from the source path are attributed too, but only reported here.
         Set<CompilationUnitTree> analyzed = new LinkedHashSet<>();
@@ -199,7 +216,11 @@ public class JavaTree {
                 }
             }
             task.analyze(classes);
-            failOnErrors(diagnostics);
+            if (keepGoing) {
+                takeErrors(diagnostics);
+            } else {
+                failOnErrors(diagnostics);
+            }
             print(trees, units, stdout);
             for (CompilationUnitTree unit : units) {
                 release(unit);
@@ -245,7 +266,9 @@ public class JavaTree {
             out.append("{\"file\":");
             string(unit.getSourceFile().getName(), out);
             out.append(",\"tree\":");
-            new JavaTree(trees, unit).node(new TreePath(unit), out);
+            JavaTree printer = new JavaTree(trees, unit);
+            printer.markErrors(errors.remove(unit.getSourceFile().toUri()));
+            printer.node(new TreePath(unit), out);
             out.append('}');
             stdout.append(out);
             // A large unit's text is not kept for the next.
@@ -288,17 +311,146 @@ public class JavaTree {
         }
     }
 
+    /**
+     * Prints the compile errors that javac reported since the last call, as
+     * {@code javac error: FILE:LINE:COLUMN: CODE: message}, and keeps those with a place in a file
+     * for when the file's unit is printed ({@link #markErrors}). An error of a unit is reported
+     * when javac parses or attributes it, before it is printed.
+     */
+    private static void takeErrors(DiagnosticCollector<JavaFileObject> diagnostics) {
+        List<Diagnostic<? extends JavaFileObject>> all = diagnostics.getDiagnostics();
+        for (; errorsTaken < all.size(); errorsTaken++) {
+            Diagnostic<? extends JavaFileObject> d = all.get(errorsTaken);
+            if (d.getKind() != Diagnostic.Kind.ERROR) {
+                continue;
+            }
+            String file = d.getSource() == null ? "" : d.getSource().getName();
+            String message = d.getMessage(Locale.ROOT).lines().findFirst().orElse("");
+            System.err.println("javac error: " + file + ":" + d.getLineNumber() + ":" + d.getColumnNumber() + ": "
+                    + d.getCode() + ": " + message);
+            if (d.getSource() != null && d.getPosition() != Diagnostic.NOPOS) {
+                errors.computeIfAbsent(d.getSource().toUri(), f -> new ArrayList<>()).add(d);
+            }
+        }
+        System.err.flush();
+    }
+
+    /** {@code --keep-going}: compile errors are marked in the trees instead of stopping the run. */
+    private static boolean keepGoing;
+    /** How many of the diagnostics {@link #takeErrors} has seen. */
+    private static int errorsTaken;
+    /** The compile errors of the units not printed yet, by file. */
+    private static final Map<URI, List<Diagnostic<? extends JavaFileObject>>> errors = new HashMap<>();
+
     private static Elements elements;
     private static Types types;
 
     private final Trees trees;
     private final CompilationUnitTree unit;
     private final SourcePositions positions;
+    /** The pieces of code that compile errors are in, with the code of the first error of each. */
+    private final Map<Tree, String> broken = new IdentityHashMap<>();
 
     private JavaTree(Trees trees, CompilationUnitTree unit) {
         this.trees = trees;
         this.unit = unit;
         this.positions = trees.getSourcePositions();
+    }
+
+    /**
+     * Marks the piece of code that each error is in, which the census rejects for it: the
+     * innermost method, initializer block of a class, initializer of a field or, for an error in
+     * none of those, such as one in a class's {@code extends}, class. A lambda between the error
+     * and that piece is marked too, as code of its own. The trees print the mark as
+     * {@code "javacError": CODE}, with javac's code of the error (such as
+     * {@code compiler.err.cant.resolve.location}). An error outside every class, such as one of an
+     * import, marks nothing: the code that uses what it names has errors of its own. Nor does an
+     * error in an annotation, such as one whose class is missing (a decompiled library's
+     * compile-only annotations, which the translation leaves out anyway).
+     */
+    private void markErrors(List<Diagnostic<? extends JavaFileObject>> errors) {
+        if (errors == null) {
+            return;
+        }
+        List<Tree> pieces = new ArrayList<>();
+        // The field initializers, which are pieces of their own when they are lambdas too.
+        Set<Tree> initializers = Collections.newSetFromMap(new IdentityHashMap<>());
+        List<Tree> annotations = new ArrayList<>();
+        new TreePathScanner<Void, Void>() {
+            private boolean member() {
+                return getCurrentPath().getParentPath().getLeaf() instanceof ClassTree;
+            }
+
+            @Override
+            public Void visitAnnotation(AnnotationTree tree, Void unused) {
+                annotations.add(tree);
+                return null;
+            }
+
+            @Override
+            public Void visitClass(ClassTree tree, Void unused) {
+                pieces.add(tree);
+                return super.visitClass(tree, unused);
+            }
+
+            @Override
+            public Void visitMethod(MethodTree tree, Void unused) {
+                pieces.add(tree);
+                return super.visitMethod(tree, unused);
+            }
+
+            @Override
+            public Void visitLambdaExpression(LambdaExpressionTree tree, Void unused) {
+                pieces.add(tree);
+                return super.visitLambdaExpression(tree, unused);
+            }
+
+            @Override
+            public Void visitBlock(BlockTree tree, Void unused) {
+                if (member()) {
+                    pieces.add(tree);
+                }
+                return super.visitBlock(tree, unused);
+            }
+
+            @Override
+            public Void visitVariable(VariableTree tree, Void unused) {
+                if (member() && tree.getInitializer() != null) {
+                    pieces.add(tree.getInitializer());
+                    initializers.add(tree.getInitializer());
+                }
+                return super.visitVariable(tree, unused);
+            }
+        }.scan(unit, null);
+        for (Diagnostic<? extends JavaFileObject> error : errors) {
+            long at = error.getPosition();
+            if (annotations.stream().anyMatch(a -> within(a, at))) {
+                continue;
+            }
+            List<Tree> around = new ArrayList<>();
+            for (Tree piece : pieces) {
+                if (within(piece, at)) {
+                    around.add(piece);
+                }
+            }
+            // From the innermost piece out, up to the first that is not a lambda.
+            around.sort(Comparator.comparingLong(p -> positions.getEndPosition(unit, p) == Diagnostic.NOPOS
+                    ? Long.MAX_VALUE
+                    : positions.getEndPosition(unit, p) - positions.getStartPosition(unit, p)));
+            for (Tree piece : around) {
+                broken.putIfAbsent(piece, error.getCode());
+                if (!(piece instanceof LambdaExpressionTree) || initializers.contains(piece)) {
+                    break;
+                }
+            }
+        }
+    }
+
+    /** Whether the position {@code at} is in the text of {@code tree}. */
+    private boolean within(Tree tree, long at) {
+        long start = positions.getStartPosition(unit, tree);
+        long end = positions.getEndPosition(unit, tree);
+        return start != Diagnostic.NOPOS && start <= at && (end == Diagnostic.NOPOS || at <= end);
     }
 
     /** Getters of each node interface, in declaration order, without those of Tree itself. */
@@ -334,6 +486,11 @@ public class JavaTree {
         if (start >= 0) {
             out.append(",\"line\":").append(unit.getLineMap().getLineNumber(start));
             out.append(",\"column\":").append(unit.getLineMap().getColumnNumber(start));
+        }
+        String error = broken.get(tree);
+        if (error != null) {
+            out.append(",\"javacError\":");
+            string(error, out);
         }
         if (tree instanceof ExpressionTree) {
             TypeMirror type = trees.getTypeMirror(path);

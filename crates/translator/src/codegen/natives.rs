@@ -116,6 +116,21 @@ impl<'a> Gen<'a> {
                 call(self, "getenv", vec![name])
             }
             Native::CopyMemory { .. } => self.copy_memory(args),
+            Native::AllocateNative => {
+                let bytes = self.value(&args[0], Type::Long).text;
+                call(self, "allocate_native", vec![bytes])
+            }
+            Native::ReallocateNative => {
+                let address = self.value(&args[0], Type::Long).text;
+                let bytes = self.value(&args[1], Type::Long).text;
+                call(self, "reallocate_native", vec![address, bytes])
+            }
+            Native::PageSize => call(self, "page_size", vec![]),
+            Native::FreeNative => {
+                let address = self.value(&args[0], Type::Long).text;
+                call(self, "free_native", vec![address])
+            }
+            Native::SetMemory => self.set_memory(args),
             Native::FullFence => {
                 Code::atom("std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst)".to_string())
             }
@@ -442,8 +457,9 @@ impl<'a> Gen<'a> {
     /// the copy's failure (`Facts::raising`), the checked form of each.
     /// `Unsafe.copyMemory0(srcBase, srcOffset, destBase, destOffset, bytes)` (and with a sixth
     /// argument, the unit size, `copySwapMemory0`): the bases are `Object`s that hold arrays of
-    /// primitives, matched by kind, whose bytes `java::copy_memory` copies. A base that is null
-    /// (an address outside the heap) or no such array ends the program.
+    /// primitives, matched by kind, whose bytes `java::copy_memory` copies, or null, where the
+    /// offset is an address outside the heap (`java::copy_from_native` and the others). A base
+    /// that is no such array ends the program.
     fn copy_memory(&mut self, args: &'a [Expr]) -> Code {
         let [src, src_offset, dest, dest_offset, bytes, rest @ ..] = args else {
             unreachable!("copyMemory0 has five arguments")
@@ -466,6 +482,13 @@ impl<'a> Gen<'a> {
                 ));
             }
         }
+        let (from, to, within) =
+            (self.runtime("copy_from_native"), self.runtime("copy_to_native"), self.runtime("copy_native"));
+        for v in &variants {
+            arms.push(format!("(None, Some({v}(dest))) => {from}({p}, dest, {q}, {n}, {k}),"));
+            arms.push(format!("(Some({v}(src)), None) => {to}(src, {p}, {q}, {n}, {k}),"));
+        }
+        arms.push(format!("(None, None) => {within}({p}, {q}, {n}, {k}),"));
         arms.push(format!(
             "_ => {}(\"an Unsafe copy of memory that is not between arrays of primitives\"),",
             self.runtime("unsupported_memory")
@@ -475,6 +498,31 @@ impl<'a> Gen<'a> {
             longs[0],
             longs[1],
             longs[2],
+            arms.join(" ")
+        ))
+    }
+
+    /// `Unsafe.setMemory0(base, offset, bytes, value)`: `bytes` bytes of `value` from `offset` in an
+    /// `Object` that holds an array of primitives (`java::set_memory`), or with a null base from
+    /// the address `offset` outside the heap (`java::set_native`).
+    fn set_memory(&mut self, args: &'a [Expr]) -> Code {
+        let base = self.optional(&args[0]).text;
+        let [offset, bytes] = [&args[1], &args[2]].map(|e| self.value(e, Type::Long).text);
+        let value = self.value(&args[3], Type::Byte).text;
+        let [o, n, v] = ["offset", "bytes", "value"].map(|name| self.temp(name));
+        let set = self.runtime("set_memory");
+        let mut arms: Vec<String> = self
+            .primitive_array_variants()
+            .iter()
+            .map(|variant| format!("Some({variant}(array)) => {set}(array, {o}, {n}, {v}),"))
+            .collect();
+        arms.push(format!("None => {}({o}, {n}, {v}),", self.runtime("set_native")));
+        arms.push(format!(
+            "_ => {}(\"an Unsafe fill of memory that is not in an array of primitives\"),",
+            self.runtime("unsupported_memory")
+        ));
+        Code::atom(format!(
+            "{{ let ({o}, {n}, {v}) = ({offset}, {bytes}, {value}); match &{base} {{ {} }} }}",
             arms.join(" ")
         ))
     }
@@ -518,6 +566,12 @@ impl<'a> Gen<'a> {
             .iter()
             .map(|variant| format!("Some({variant}(array)) => {call},"))
             .collect();
+        // A null base: the offset is an address outside the heap.
+        arms.push(if put {
+            format!("None => {}::<{rust}>({o}, {v}),", self.runtime("put_native"))
+        } else {
+            format!("None => {}::<{rust}>({o}),", self.runtime("get_native"))
+        });
         arms.push(format!(
             "_ => {}(\"an Unsafe access of memory that is not in an array of primitives\"),",
             self.runtime("unsupported_memory")

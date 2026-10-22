@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Everything CI checks, in its order: formatting, clippy with warnings as errors, all tests.
+# Everything CI checks, in its order: formatting, clippy with warnings as errors, all tests; with
+# JAVA_BASE_SOURCES set, also that the translator's Java holds no copy of the JDK's.
 # Prints only what fails. On success with a clean working tree, records the commit in
 # target/check-passed (the worker Stop hook reads it).
 # Results that cannot change until their inputs do (Java's output of each test program, javac's
@@ -14,6 +15,10 @@ fail() { echo "check failed: $1"; exit 1; }
 
 markers=$(git grep -nE '^(<<<<<<<|>>>>>>>) ' -- . ':!scripts/check.sh')
 [ -z "$markers" ] || { echo "$markers" | head -20; fail "merge conflict markers"; }
+# With the JDK's sources: no file of the translator's Java copies the JDK's (docs/jdk-overlays.md).
+if [ -n "${JAVA_BASE_SOURCES:-}" ]; then
+    out=$(python3 -I scripts/check-jdk-copies.py "$JAVA_BASE_SOURCES" 2>&1) || { echo "$out" | head -40; fail "JDK code in crates/translator/java (see docs/jdk-overlays.md)"; }
+fi
 cargo fmt --check >/dev/null 2>&1 || { cargo fmt --check 2>&1 | head -40; fail "cargo fmt (run \`cargo fmt\`)"; }
 out=$(cargo clippy --all-targets -q -- -D warnings 2>&1) || { echo "$out" | head -80; fail "clippy"; }
 out=$(cargo test -q 2>&1) || { echo "$out" | grep -vE '^\s*$|^running |^test result: ok' | head -120; fail "tests"; }

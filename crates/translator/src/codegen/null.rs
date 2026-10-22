@@ -71,6 +71,13 @@ impl<'a> Gen<'a> {
         if self.nullable(e) {
             return self.expr(e);
         }
+        // A static still being initialized may be null (see `analysis::nullness`).
+        if let ExprKind::Static { class, name } = &e.kind
+            && ty == e.ty
+            && let Some(read) = self.placeholder_read(*class, name, ty)
+        {
+            return read;
+        }
         let value = self.value(e, ty);
         Code::atom(format!("Some({})", value.text))
     }
@@ -253,8 +260,11 @@ impl<'a> Gen<'a> {
         if self.nullable(&args[1]) {
             let option = self.option_ref(&args[1]);
             // A `match` is parenthesised where it is used as an operand, not in an `if` condition.
-            let text =
-                format!("match {receiver} {{ receiver_ => {option}.is_some_and(|o| o == receiver_) }}");
+            // The receiver is bound by reference, which moves no string out of the object or local
+            // it is read from.
+            let text = format!(
+                "match {receiver} {{ ref receiver_ => {option}.is_some_and(|o| *o == **receiver_) }}"
+            );
             return Code::new(text, LOWEST);
         }
         let other = self.str_value(&args[1]);

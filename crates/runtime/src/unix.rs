@@ -1,6 +1,6 @@
 //! The system calls of `sun.nio.fs.UnixNativeDispatcher`, which `java.nio.file` makes its files,
 //! directories and attributes with (`ast::Native::Unix`). The translator's dispatcher
-//! (`java/overlay/sun/nio/fs/UnixNativeDispatcher.java`) gives each path as the bytes of its
+//! (`java/patches/sun/nio/fs/UnixNativeDispatcher.java`) gives each path as the bytes of its
 //! `UnixPath`, where the JVM's copies them to memory of its own first. None of these raises an
 //! exception: each one records the `errno` of its failure, or 0, and the dispatcher reads it with
 //! `unix_last_error` and throws the JDK's `UnixException` with it.

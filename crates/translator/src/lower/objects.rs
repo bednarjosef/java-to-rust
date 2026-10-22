@@ -55,6 +55,8 @@ impl<'t> Lowering<'t> {
             standard: exceptions::Standard::default(),
             object_arrays: Default::default(),
             field_updates: Default::default(),
+            static_qualifiers: Default::default(),
+            calls: Default::default(),
             covariant: Default::default(),
             object: None,
             plain_object: None,
@@ -150,6 +152,7 @@ impl<'t> Lowering<'t> {
         }
         if node.kind() == "ENUM" {
             self.body_methods(index);
+            self.declare_body_lambdas(index)?;
         }
         Ok(())
     }
@@ -188,13 +191,6 @@ impl<'t> Lowering<'t> {
         {
             // Moved initializers run in the constructors (see `inner`).
             let field = self.field(member, !rejected && !(moved && !member.has_flag("STATIC")))?;
-            // A subclass's struct holds its superclass's fields as `base`.
-            if !member.has_flag("STATIC")
-                && field.name.eq_ignore_ascii_case("base")
-                && self.superclass(index)?.is_some()
-            {
-                return unsupported(member, "a field named `base` in a subclass");
-            }
             if member.has_flag("STATIC") { statics.push(field) } else { fields.push(field) }
         }
         // An enum's constants need its constructors, which `lower` lowers after this.
@@ -276,6 +272,7 @@ impl<'t> Lowering<'t> {
             {
                 return unsupported(node, "static fields through an expression with effects");
             }
+            self.note_static_qualifier(node, receiver, symbol.owner, &name);
             return Ok(Some(Place::Static { class, name }));
         }
         let object = match receiver {
@@ -283,6 +280,132 @@ impl<'t> Lowering<'t> {
             None => self.this(node),
         };
         Ok(Some(Place::Field { object: Box::new(object), name }))
+    }
+
+    /// What the class files name (`Class::class_file`): the static fields' classes noted while
+    /// lowering, and the fields of the enclosing instances of the classes `types` declares.
+    /// javac names that field after the enclosing class's own depth of enclosing instances
+    /// (`Lower.outerThisName`).
+    pub(super) fn class_file_names(&self, types: &[TypeDecl]) -> ClassFileNames {
+        let mut outer_fields = std::collections::HashMap::new();
+        for (t, info) in self.types.iter().enumerate() {
+            let Some(nested) = &info.nested else { continue };
+            if nested.kind == super::inner::NestKind::Lambda || types.get(t).is_none_or(|d| d.outer.is_none())
+            {
+                continue;
+            }
+            let mut depth = 0;
+            let mut at = nested.enclosing;
+            let known = loop {
+                match &self.types[at].nested {
+                    None => break true,
+                    Some(n) if n.kind == super::inner::NestKind::Lambda => break false,
+                    Some(n) if n.instance => {
+                        depth += 1;
+                        at = n.enclosing;
+                    }
+                    Some(_) => break true,
+                }
+            };
+            if known {
+                outer_fields.insert(types[t].name.clone(), format!("this${depth}"));
+            }
+        }
+        ClassFileNames {
+            static_qualifiers: self.static_qualifiers.take(),
+            outer_fields,
+            calls: self.calls.take(),
+        }
+    }
+
+    /// Notes the method that the call `node` names in the class file (`Class::class_file`):
+    /// javac names it by the class that the call names it in, `C.m()`, or by the erasure of the
+    /// receiver's static type (`Gen.binaryQualifier`), except an instance method of `Object`,
+    /// with the erasures of its parameters' types. An unqualified call names it by the class
+    /// whose code calls it only when that class declares it; elsewhere javac's `Lower` decides,
+    /// by rules not followed here.
+    pub(super) fn note_call(&self, node: Node<'t>, symbol: &Symbol, select: Node<'t>) {
+        if symbol.kind != "METHOD" {
+            return;
+        }
+        let class = if symbol.owner == "java.lang.Object" && !symbol.is_static {
+            Some(symbol.owner.to_string())
+        } else {
+            match select.kind() {
+                "MEMBER_SELECT" => select.get("expression").and_then(|r| {
+                    let receiver = r.java_type();
+                    let receiver = receiver.split('<').next().unwrap_or(receiver);
+                    // A class, not `super`, a type variable, a capture or an intersection.
+                    let named = r.kind() != "IDENTIFIER" || r.str("name") != "super";
+                    let class = receiver.contains('.')
+                        && !receiver.contains([' ', '&', '?'])
+                        && !receiver.starts_with("capture")
+                        && !receiver.ends_with(']');
+                    (named && class).then(|| receiver.to_string())
+                }),
+                "IDENTIFIER" => {
+                    (self.types[self.current.get()].javac == symbol.owner).then(|| symbol.owner.to_string())
+                }
+                _ => None,
+            }
+        };
+        // A parameter of a type variable's type is of its erasure, which its declaration tells.
+        let callee = self.methods.iter().position(|m| {
+            self.types[m.owner].javac == symbol.owner && m.name == symbol.name && m.sig == symbol.ty
+        });
+        let param = |ty: &str| {
+            erased(ty).or_else(|| {
+                let m = callee?;
+                let var = ty.trim_end_matches("...").trim_end_matches("[]");
+                let dims = ty[var.len()..].matches("[]").count() + usize::from(ty.ends_with("..."));
+                let erasure = self.var_erasure_name(var, self.methods[m].owner, Some(m))?;
+                Some(erasure + &"[]".repeat(dims))
+            })
+        };
+        let params =
+            method_params(symbol.ty).and_then(|p| p.iter().map(|t| param(t)).collect::<Option<Vec<_>>>());
+        let named = class.zip(params).map(|(class, params)| CallName {
+            class,
+            name: symbol.name.to_string(),
+            params,
+        });
+        let mut calls = self.calls.borrow_mut();
+        let key = (self.types[self.current.get()].name.clone(), node.pos(), symbol.name.to_string());
+        match calls.get(&key) {
+            Some(known) if *known != named => {
+                calls.insert(key, None);
+            }
+            Some(_) => {}
+            None => {
+                calls.insert(key, named);
+            }
+        }
+    }
+
+    /// Notes the class that names the static field `name` of `owner` that `node` reads, in the
+    /// class file, where that is certain (`Class::static_qualifiers`): the class of `C.name`, as
+    /// javac names it (`Gen.binaryQualifier`), or `owner` when the code of `owner` itself reads
+    /// `name`. Elsewhere javac's `Lower` decides, by rules not followed here.
+    fn note_static_qualifier(&self, node: Node<'t>, receiver: Option<Node<'t>>, owner: &str, name: &str) {
+        let qualifier = match receiver {
+            Some(r) => match r.symbol() {
+                Some(s) if matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD") => Some(r.java_type()),
+                _ => None,
+            },
+            None => (self.types[self.current.get()].javac == owner).then_some(owner),
+        };
+        let qualifier = qualifier.map(|q| q.split('<').next().unwrap_or(q).to_string());
+        let mut qualifiers = self.static_qualifiers.borrow_mut();
+        let key = (self.types[self.current.get()].name.clone(), node.pos(), name.to_string());
+        match qualifiers.get(&key) {
+            Some(known) if *known != qualifier => {
+                qualifiers.insert(key, None);
+            }
+            Some(_) => {}
+            None => {
+                qualifiers.insert(key, qualifier);
+            }
+        }
     }
 
     /// An identifier: a field, `this`, or a local variable or parameter.
@@ -410,4 +533,48 @@ pub(super) fn read(place: Place) -> ExprKind {
         Place::Static { class, name } => ExprKind::Static { class, name },
         Place::Index(array, index) => ExprKind::Index(array, index),
     }
+}
+
+/// The parameters' types of javac's type of a method, `(int,java.util.List<T>)void` or
+/// `<R>(java.util.function.Function<? super java.lang.String,? extends R>)R`.
+fn method_params(ty: &str) -> Option<Vec<&str>> {
+    let mut depth = 0;
+    let mut start = None;
+    let mut params = Vec::new();
+    for (i, c) in ty.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            '(' if depth == 0 && start.is_none() => start = Some(i + 1),
+            ',' if depth == 0 && start.is_some() => {
+                params.push(&ty[start?..i]);
+                start = Some(i + 1);
+            }
+            ')' if depth == 0 => {
+                let from = start?;
+                if from < i {
+                    params.push(&ty[from..i]);
+                }
+                return Some(params);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The erasure of a parameter's type in javac's text: `java.util.List<T>` is `java.util.List`,
+/// `T...` an array. `None` for a type variable, whose erasure the text does not tell.
+fn erased(ty: &str) -> Option<String> {
+    let (ty, varargs) = match ty.strip_suffix("...") {
+        Some(element) => (element, true),
+        None => (ty, false),
+    };
+    let base = ty.split('<').next().unwrap_or(ty);
+    let rest = &ty[base.len()..];
+    let rest = rest.rsplit_once('>').map_or(rest, |(_, after)| after);
+    let dims = rest.matches("[]").count() + usize::from(varargs);
+    let primitive =
+        matches!(base, "int" | "long" | "double" | "float" | "short" | "byte" | "char" | "boolean");
+    (primitive || base.contains('.')).then(|| base.to_string() + &"[]".repeat(dims))
 }

@@ -30,6 +30,25 @@ main.rs, built against the hand-written runtime         crates/runtime
 `lib.rs::translate` shows the single-file path in five lines; `program::translate_program` is the
 whole-program path with reachability, the census and the survey around it.
 
+### The JDK's code, and the translator's changes to it
+
+With `--library`, the JDK's classes are translated from the JDK's own sources, which stay outside
+the repository. Where that code cannot be translated as it is, the translator changes it in one
+of three ways, all in `crates/translator/java` and all holding only our own code (see
+[jdk-overlays.md](jdk-overlays.md)):
+
+- **Redirects** (`REDIRECTED_CALLS` in `program/reach.rs`): every call of a JDK method becomes a
+  call of a static method of ours.
+- **Patches** (`java/patches/`): a file at the path of a JDK class that holds only the members it
+  replaces, adds, removes or edits. javac reads the JDK's file with the patch applied
+  (`java/JdkPatch.java`, inside the javac process), and refuses a patch that names a member the
+  JDK's file does not have.
+- **Overlay classes** (`java/overlay/`): whole classes of ours that the JDK does not have, put on
+  javac's source path before the JDK's sources.
+
+`scripts/check.sh` fails, with `JAVA_BASE_SOURCES` set, when one of these files shares more than
+a few lines with the JDK's file of the same path.
+
 ## Size, on 2026-10-21
 
 | part | files | lines |
@@ -40,7 +59,7 @@ whole-program path with reachability, the census and the survey around it.
 | `program`: reachability, survey, census | 7 | 4,000 |
 | `ast`, `javac`, crate root | 20 | 6,900 |
 | `crates/runtime`: strings, formatting, threads, math, Unicode tables, allocator, … | 50 | 15,600 |
-| `crates/translator/java`: JavaTree, BytecodeNames, Standard.java and the overlay classes | 10 | 3,200 |
+| `crates/translator/java`: JavaTree, BytecodeNames, Standard.java and the overlay classes (since 2026-10-22 also the patches of JDK classes) | 10 | 3,200 |
 | tests (`crates/translator/tests`) | 11 | 7,100 |
 
 Plus 542 Java programs in `corpus/` (each compared with real Java's output), 28 target programs,
@@ -136,8 +155,9 @@ and a message, so that a large project gets a list of problems instead of a cras
   it to `Program` and the like makes the code easier to read for anyone new.
 - **Per-method entry points for the whole-program analyses**, so that they can later run on
   summaries of methods instead of their bodies ([translator-speed-and-memory.md](translator-speed-and-memory.md)).
-- **The stand-ins for JDK classes** (`Standard.java`, `java/overlay/java/io`) on one written list,
-  each with the reason it exists and what would let it be replaced by the JDK's own class.
+- **The stand-ins for JDK classes** (`Standard.java`, `java/overlay`, `java/patches`) on one
+  written list, each with the reason it exists and what would let it be replaced by the JDK's own
+  class (the patches have theirs in [jdk-overlays.md](jdk-overlays.md)).
 - **Global state in the generator** (the thread-local name resolver) goes once the name
   functions take the resolver as a parameter (see change 2), which also matters once the
   generator runs on every core.

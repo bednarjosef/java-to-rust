@@ -96,10 +96,10 @@ fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<Bytecod
             "static" => NameKind::Static,
             _ => continue,
         };
-        let pos = Pos {
-            line: line.as_u64().unwrap_or_default() as usize,
-            column: column.as_u64().unwrap_or_default() as usize,
-        };
+        let pos = Pos::new(
+            line.as_u64().unwrap_or_default() as usize,
+            column.as_u64().unwrap_or_default() as usize,
+        );
         let name = if kind == NameKind::Local { String::new() } else { name.clone() };
         entries.insert((class.clone(), pos, kind, name), text.as_str().map(str::to_string));
     }
@@ -315,10 +315,10 @@ impl SwitchSlots<'_> {
         }
         self.expression(selector, false);
         if selector["javaType"].as_str() == Some("java.lang.String") {
-            let pos = Pos {
-                line: selector["line"].as_u64().unwrap_or_default() as usize,
-                column: selector["column"].as_u64().unwrap_or_default() as usize,
-            };
+            let pos = Pos::new(
+                selector["line"].as_u64().unwrap_or_default() as usize,
+                selector["column"].as_u64().unwrap_or_default() as usize,
+            );
             self.out.push((self.outermost.to_string(), pos, format!("<local{}>", self.next)));
             self.next += 2;
         }

@@ -1039,9 +1039,10 @@ bytes, their order between standard output and standard error, the flushes and t
 Java's. An out-of-range `write(byte[], off, len)` throws what the JVM's buffer throws (the
 `arraycopy` message for a range under 128 bytes, a bare `IndexOutOfBoundsException` above).
 
-`PrintStream` is the overlay's (`PrintStream.java`), not the JDK's: the JDK's encodes text
+`PrintStream` is the JDK's with the translator's patch (`java/patches/java/io/PrintStream.java`,
+see [jdk-overlays.md](jdk-overlays.md)): the JDK's encodes text
 through a `BufferedWriter` over an `OutputStreamWriter`, whose `StreamEncoder` needs
-`CharsetEncoder`, `ByteBuffer` and `CoderResult`, which do not translate yet. The overlay's
+`CharsetEncoder`, `ByteBuffer` and `CoderResult`, which do not translate yet. The patched class
 encodes each piece of text with `String.getBytes(charset)` (the runtime's `Charset`) and writes
 the bytes through its own `write(byte[], int, int)`, as the JDK's encoder does, so a subclass
 that overrides `write` sees the same bytes; `println` of a subclass goes through its `print` and
@@ -1057,15 +1058,15 @@ charset machinery (its provider lookup reaches `GB18030`, which reads a JVM prop
 `Reader`, `Writer`, `BufferedReader`, `BufferedWriter`, `PrintWriter` and the byte streams
 (`BufferedInputStream`, `BufferedOutputStream`, `FilterOutputStream`, `ByteArrayInputStream`,
 `ByteArrayOutputStream`, `FileInputStream`, `FileOutputStream`) are translated from the JDK.
-`InputStreamReader` and `OutputStreamWriter` are the overlay's, for the same reason as
+`InputStreamReader` and `OutputStreamWriter` are patched (`java/patches/java/io`), for the same reason as
 `PrintStream`: the JDK's decode and encode through `StreamDecoder` and `StreamEncoder`.
 
-- The overlay's `InputStreamReader` reads into a buffer of 8192 bytes, reading again in one call
+- The patched `InputStreamReader` reads into a buffer of 8192 bytes, reading again in one call
   only while the stream has bytes available, and decodes with `new String(bytes, off, len,
   charset)`, which replaces malformed input as the JDK's decoder does. Bytes at the end of a read
   that may begin a character (part of a UTF-8 sequence, an odd UTF-16 byte, a high surrogate)
   wait for the next read.
-- The overlay's `OutputStreamWriter` does what `StreamEncoder` does with its buffer: it starts at
+- The patched `OutputStreamWriter` does what `StreamEncoder` does with its buffer: it starts at
   512 bytes, grows up to 8192 for a long write, is passed to the stream when the next character
   does not fit, on `flush` and on `close`, and is lost if the program ends without either, as in
   Java. A lone surrogate and a character the charset cannot encode become the replacement (`?`,

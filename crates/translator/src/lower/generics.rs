@@ -71,6 +71,16 @@ impl<'t> Lowering<'t> {
         None
     }
 
+    /// The erasure of the type variable `name` of method `method` of class `class` (or of a
+    /// class around it), as javac writes it: that of its first bound, or `java.lang.Object`.
+    pub(super) fn var_erasure_name(&self, name: &str, class: usize, method: Option<usize>) -> Option<String> {
+        let (param, _) = self.type_var_around(name, class, method)?;
+        let Some(bound) = param.list("bounds").next() else { return Some("java.lang.Object".to_string()) };
+        let bound = bound.java_type();
+        let raw = bound.split('<').next().unwrap_or(bound);
+        if raw.contains('.') { Some(raw.to_string()) } else { self.var_erasure_name(raw, class, method) }
+    }
+
     /// The type of a type variable: its own type in a Rust generic, else its erasure.
     fn var_type(&self, node: Node, (param, owner): (Node<'t>, Owner)) -> Result<Type, Error> {
         if self.is_real(owner) {

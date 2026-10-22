@@ -57,12 +57,29 @@ impl<'t> Lowering<'t> {
         rejected.get(&t).map(|e| Error { pos: e.pos, message: e.message.clone() })
     }
 
+    /// The rejection, in a census, of a piece of code that javac reported a compile error in,
+    /// which javac marks when it goes on past compile errors (`Program::keep_going`): a method,
+    /// a lambda, an initializer block of a class, a field's initializer, or a class whose
+    /// declaration has the error.
+    pub(super) fn javac_error(&self, node: Node) -> Result<(), Error> {
+        if self.census.is_none() {
+            return Ok(());
+        }
+        match node.0.get("javacError").and_then(Value::as_str) {
+            Some(code) => {
+                Err(Error { pos: node.pos(), message: format!("javac reports a compile error ({code})") })
+            }
+            None => Ok(()),
+        }
+    }
+
     /// Checks the declarations of the classes in a census, before anything else asks for their
     /// superclasses and interfaces: those that are rejected are known before their code is
     /// lowered.
     pub(super) fn check_class_headers(&self) {
         if self.census.is_some() {
             for t in 0..self.types.len() {
+                let _ = self.reject_class(t, self.javac_error(self.types[t].node));
                 let _ = self.superclass(t);
                 let _ = self.interfaces(t);
             }
@@ -83,6 +100,9 @@ impl<'t> Lowering<'t> {
             let stub = self.method(index);
             self.stubbing.set(false);
             return stub;
+        }
+        if let Err(error) = self.javac_error(self.methods[index].node) {
+            return self.stub_if_rejected(index, Err(error));
         }
         // A panic of lowering is a rejection of the method like any other.
         let ctx = (self.method_ctx.get(), self.aliases.borrow().len());

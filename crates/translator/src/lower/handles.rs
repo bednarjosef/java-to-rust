@@ -931,6 +931,31 @@ impl<'t> Lowering<'t> {
         {
             return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::FullFence), Vec::new())));
         }
+        // `layout.varHandle().get(segment, offset)` of a value layout: the translator's access
+        // (`program::segment_access`), with the layout after the segment.
+        if let Some((name, signature)) = crate::program::segment_access(node.0) {
+            let class = crate::program::TRANSLATED_SEGMENTS;
+            let resolved = self
+                .methods
+                .iter()
+                .position(|m| self.types[m.owner].javac == class && m.name == name && m.sig == signature);
+            if resolved.is_none() {
+                return unsupported(
+                    node,
+                    "a segment's access through a layout's handle outside a whole program",
+                );
+            }
+            let layout = node
+                .child("methodSelect")?
+                .child("expression")?
+                .child("methodSelect")?
+                .child("expression")?;
+            let mut nodes: Vec<Node> = node.list("arguments").collect();
+            nodes.insert(1, layout);
+            let args = nodes.into_iter().map(|a| self.expr(a)).collect::<Result<Vec<_>, Error>>()?;
+            let args = self.convert_generic_args(node, resolved, args)?;
+            return Ok(Some(ExprKind::Call { name: name.to_string(), args, resolved }));
+        }
         let receiver = node.child("methodSelect")?.get("expression");
         let (Some((put, update)), Some(handle)) =
             (var_handle_method(symbol.name), receiver.and_then(|r| self.var_handle(r)))
@@ -1039,10 +1064,12 @@ impl<'t> Lowering<'t> {
                 _ => {
                     // A plain read or write of a primitive in an array of primitives held as an
                     // `Object` (as `getCharUnaligned` and the buffers' views of a `byte[]` read):
-                    // the bytes at the offset, whatever it is, as the JVM reads them.
+                    // the bytes at the offset, whatever it is, as the JVM reads them; with a
+                    // null base (`getInt(long address)`), at an address outside the heap.
                     let kind = access_kind(symbol.ty);
                     let base = plain(args[0]).java_type();
                     let raw_base = base == "java.lang.Object"
+                        || plain(args[0]).kind() == "NULL_LITERAL"
                         || base.strip_suffix("[]").is_some_and(|e| PRIMITIVES.contains(&e));
                     if update.is_none() && kind != "reference" && raw_base && self.object.is_some() {
                         return self.raw_memory(node, &args, kind, put == Some(true)).map(Some);
