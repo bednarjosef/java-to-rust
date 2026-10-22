@@ -473,16 +473,21 @@ impl ObjectValues {
                 vec![(*r, ctx)]
             }
             ExprKind::MethodCall { resolved: Some(r), is_super, receiver, .. } => {
-                if class.methods[*r].is_static || *is_super {
+                if class.methods[*r].is_static || *is_super && matches!(receiver.kind, ExprKind::This) {
                     return vec![(*r, context(*r, ctx))];
                 }
                 let flow = self.eval(class, m, ctx, receiver);
-                let group = class.hierarchy.group_id(*r);
                 let classes: Vec<usize> = if flow.any {
                     self.types.concretes_of(receiver.ty).to_vec()
                 } else {
                     flow.classes.iter().collect()
                 };
+                // A `super` call in a lambda's code is on the object that the lambda captured,
+                // and runs the method it names on it.
+                if *is_super {
+                    return classes.into_iter().map(|c| (*r, c)).collect();
+                }
+                let group = class.hierarchy.group_id(*r);
                 classes
                     .into_iter()
                     .filter_map(|c| Some((self.types.implementation(class, group, c)?, c)))
