@@ -417,10 +417,10 @@ impl<'a> Gen<'a> {
         format!("java::{path}")
     }
 
-    /// The Rust type of a builder: a `java::SharedStringBuilder` in a program with threads, which
-    /// several threads may reach, as its arrays are `java::SharedArray`s.
+    /// The Rust type of a builder: a `java::SharedStringBuilder` where two threads may reach
+    /// builders (`Facts::shared_builders`).
     fn builder_type(&mut self) -> String {
-        self.runtime(if self.facts.threaded { "SharedStringBuilder" } else { "StringBuilder" })
+        self.runtime(if self.facts.shared_builders { "SharedStringBuilder" } else { "StringBuilder" })
     }
 
     fn local(&self, java: &str) -> String {

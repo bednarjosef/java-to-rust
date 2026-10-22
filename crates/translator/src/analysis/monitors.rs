@@ -32,10 +32,10 @@ pub(super) fn observed(class: &Class) -> bool {
 
 impl Facts {
     /// Whether the monitor of an object of type `ty` is kept: the program observes monitors, or
-    /// threads may share the object. Any builder of a program with threads may be shared.
+    /// threads may share the object, as a builder is where they may reach builders.
     pub fn kept_monitor(&self, class: &Class, ty: Type) -> bool {
         self.monitors
-            || ty == Type::StringBuilder && self.threaded
+            || ty == Type::StringBuilder && self.shared_builders
             || class.class_index(ty).is_some_and(|t| self.kept_monitor_of(t))
     }
 
