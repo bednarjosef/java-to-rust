@@ -41,6 +41,7 @@ mod whole_objects;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
+pub use exceptions::{generator_text, text_objects};
 pub use npe_messages::npe_messages;
 
 pub use arrays::{RowIndex, Slice, SlicedLoop};

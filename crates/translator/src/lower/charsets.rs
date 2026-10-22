@@ -104,6 +104,22 @@ impl<'t> Lowering<'t> {
         let receiver =
             if symbol.is_static { None } else { Some(node.child("methodSelect")?.child("expression")?) };
         let args: Vec<Node> = node.list("arguments").collect();
+        // A decoder or an encoder of the charset: the JDK's, made by the translator's method
+        // (`program::CHARSET_CODERS`).
+        if let Some(receiver) = receiver
+            && let Some((class, to, sig)) =
+                crate::program::charset_coder(symbol.owner, symbol.name, symbol.ty)
+        {
+            let resolved = self
+                .methods
+                .iter()
+                .position(|m| self.types[m.owner].javac == class && m.name == to && m.sig == sig);
+            if resolved.is_none() {
+                return unsupported(node, &format!("`Charset.{}` outside a whole program", symbol.name));
+            }
+            let args = vec![self.expr(receiver)?];
+            return Ok(ExprKind::Call { name: to.to_string(), args, resolved });
+        }
         let op = match (symbol.name, args.len(), receiver.is_some()) {
             ("forName", 1, false) => CharsetOp::ForName,
             ("isSupported", 1, false) => CharsetOp::IsSupported,

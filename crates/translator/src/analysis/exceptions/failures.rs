@@ -119,6 +119,7 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             // `valueOf(chars)` copies the whole array; only an offset and a count can be out of range.
             StringOp::FromChars if args.len() == 3 => &["java.lang.StringIndexOutOfBoundsException"],
             StringOp::Repeat => &["java.lang.IllegalArgumentException"],
+            StringOp::TranslateEscapes => &["java.lang.IllegalArgumentException"],
             StringOp::GetChars => &["java.lang.StringIndexOutOfBoundsException"],
             StringOp::CodePointAt | StringOp::CodePointBefore | StringOp::GetLowBytes => {
                 &["java.lang.StringIndexOutOfBoundsException"]
@@ -269,6 +270,7 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::AvailableProcessors
             | Native::LineSeparator
             | Native::SystemProperty(_)
+            | Native::Getenv
             | Native::TotalMemory
             | Native::FreeMemory
             | Native::MaxMemory
@@ -300,6 +302,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::RawMemory { .. } => &[],
         // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).
         Builtin::Native(Native::Unix(_)) => &[],
+        // So do the name service calls of `java.net` (`java_runtime::net`).
+        Builtin::Native(Native::Net(_)) => &[],
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
         // of a closed descriptor does nothing.
         Builtin::Native(Native::FileOpenRead | Native::FileOpenWrite | Native::FileOpenRandom) => {
@@ -553,6 +557,15 @@ pub(super) fn runtime_failures(
             Builtin::Boxed(BoxedOp::Parse | BoxedOp::ParseRadix, _) => {
                 out.push(("java.lang.NumberFormatException", "this parse", true, x.id));
             }
+            // `decode` calls `isEmpty` on its string. The runtime gives the failure of a null one
+            // with Java's message, but only where nothing catches it, as a `NullPointerException`
+            // that a `catch` sees is a dereference's (`Facts::null_checked`).
+            Builtin::Boxed(BoxedOp::Decode, _) => {
+                if args.first().is_some_and(null) {
+                    out.push((NPE, "this decode", false, x.id));
+                }
+                out.push(("java.lang.NumberFormatException", "this decode", true, x.id));
+            }
             Builtin::Boxed(
                 BoxedOp::Box
                 | BoxedOp::ToString
@@ -692,6 +705,7 @@ pub(super) fn runtime_failures(
                         builtin,
                         Builtin::String(
                             StringOp::Substring | StringOp::FromChars | StringOp::GetChars | StringOp::FromBytes
+                                | StringOp::TranslateEscapes
                         )
                             | Builtin::ArraysCopyOf
                             | Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _)

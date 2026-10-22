@@ -186,6 +186,7 @@ impl<'t> Lowering<'t> {
             "offsetByCodePoints" => StringOp::OffsetByCodePoints,
             "regionMatches" => StringOp::RegionMatches,
             "stripIndent" => StringOp::StripIndent,
+            "translateEscapes" => StringOp::TranslateEscapes,
             // A `CharSequence` is compared by its text, which its `toString()` gives.
             "contentEquals" if matches!(args[0].ty, Type::Class(..)) => {
                 let x = args.pop().expect("one argument");
@@ -446,6 +447,11 @@ impl<'t> Lowering<'t> {
         if name == "subSequence" {
             args.insert(0, receiver);
             return self.as_char_sequence(node, Builtin::Builder(op), args);
+        }
+        // A range of a program class that implements `CharSequence` is a range of that interface.
+        if op == BuilderOp::Append && args.len() == 3 && matches!(args[0].ty, Type::Class(..)) {
+            let first = args.remove(0);
+            args.insert(0, self.convert(first, Type::class(CHAR_SEQUENCE)));
         }
         let shown = match op {
             BuilderOp::Append if args.len() == 1 => Some(0),

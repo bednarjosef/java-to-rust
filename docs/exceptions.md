@@ -43,15 +43,21 @@ signature. Everything else is decided here.
    each method may let escape, and of what the callers of each method observe. A method returns
    `Result` exactly when some caller observes an exception that may escape it: a call inside a
    `try` whose `catch` matches it or whose `finally` observes it, or a call in a method whose own
-   callers observe it. The methods of an override group agree. The `toString` that making an
-   object's text runs (`"" + o`, `println(o)`, `append(o)`, `String.valueOf(o)`) is not such a
-   call: the text is `Display`, which cannot return an exception, so what that `toString` throws
-   ends the program there. So does what the `hashCode` throws that `Object`'s `toString` shows
+   callers observe it. The methods of an override group agree. The `toString` of the program
+   that making an object's text runs is such a call where the generator makes the text (`"" + o`,
+   `println(o)`, `String.valueOf(o)` and so `append(o)`, `String.format` with its arguments one
+   by one): javac's `Type.toString` may throw what its callers catch. A class whose `toString`
+   throws is not `Display` then; the dispatching enum of classes under a common type gets
+   `try_text`, which returns the exception. Elsewhere the text is `Display`, which cannot return
+   an exception, so what the `toString` throws ends the program there: the text of an enum's
+   constant, the message of an exception (whose constructor cannot throw yet), and `printf`,
+   which makes all its text before it prints, where Java prints the text before each argument
+   first. So does what the `hashCode` throws that `Object`'s `toString` shows
    for a class without a `toString` of its own (`Collections.ReverseComparator2`'s, which asks
    its comparator), where the `hashCode` is a `Result` because a direct call of it is observed;
-   it counts as that object's `toString` below. Where a `toString` that the program wrote may run and may throw what a
-   `catch` around the text, or around a call on the way to it, would catch, the program is
-   rejected. The JDK's own `toString`s are not looked at: they throw only for bugs, such as a
+   it counts as that object's `toString` below. Where such a `toString` that the program wrote
+   may run and may throw what a `catch` around the text, or around a call on the way to it, would
+   catch, the program is rejected. The JDK's own `toString`s are not looked at: they throw only for bugs, such as a
    collection changed while it is shown (`ConcurrentModificationException`), which then end the
    program even where a `catch` would see them. (Before, the JDK's collections' `toString`s were
    all taken as observed: `AbstractList.Itr.next` catches the `IndexOutOfBoundsException` of

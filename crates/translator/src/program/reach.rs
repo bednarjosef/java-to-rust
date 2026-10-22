@@ -883,10 +883,42 @@ pub const TRANSLATED_LANG_ACCESS: &[&str] = &[
     "uncheckedGetBytesOrThrow",
     "uncheckedGetUTF16Char",
     "uncheckedPutCharUTF16",
+    "decodeASCII",
+    "uncheckedEncodeASCII",
 ];
 
 /// The class of `TRANSLATED_LANG_ACCESS`.
 pub const TRANSLATED_LANG_ACCESS_CLASS: &str = "jdk.internal.access.TranslatedLangAccess";
+
+/// The translator's `newDecoder` and `newEncoder` of a charset, by the name of the charset's
+/// method: a charset is the runtime's value (`lower::charsets`), whose coders are the JDK's,
+/// made by `java/overlay/sun/nio/cs/TranslatedCoders.java`.
+pub const CHARSET_CODERS: &[(&str, JdkMethod)] = &[
+    (
+        "newDecoder",
+        (
+            "sun.nio.cs.TranslatedCoders",
+            "newDecoder",
+            "(java.nio.charset.Charset)java.nio.charset.CharsetDecoder",
+        ),
+    ),
+    (
+        "newEncoder",
+        (
+            "sun.nio.cs.TranslatedCoders",
+            "newEncoder",
+            "(java.nio.charset.Charset)java.nio.charset.CharsetEncoder",
+        ),
+    ),
+];
+
+/// The translator's method that makes what the charset method `name` of type `signature` of
+/// the class `owner` (`Charset` or a standard charset's) makes (`CHARSET_CODERS`).
+pub fn charset_coder(owner: &str, name: &str, signature: &str) -> Option<JdkMethod> {
+    let charset = owner == "java.nio.charset.Charset" || owner.starts_with("sun.nio.cs.");
+    let coder = CHARSET_CODERS.iter().find(|(method, _)| *method == name).map(|&(_, m)| m)?;
+    (charset && signature.starts_with("()")).then_some(coder)
+}
 
 /// Static methods of the JDK whose calls are calls of a static method of the translator's
 /// (`java/overlay`) with the same type, by the JDK's method and the translator's class and name
@@ -1009,6 +1041,16 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
             "()java.util.List<java.nio.file.spi.FileSystemProvider>",
         ),
         ("sun.nio.fs.TranslatedFiles", "loadInstalledProviders"),
+    ),
+    // Whether a network interface has an address, and the interface of a name, which the JVM
+    // asks the system for (`java/net/TranslatedNet.java`).
+    (
+        ("java.net.NetworkInterface", "boundInetAddress0", "(java.net.InetAddress)boolean"),
+        ("java.net.TranslatedNet", "boundInetAddress0"),
+    ),
+    (
+        ("java.net.NetworkInterface", "getByName0", "(java.lang.String)java.net.NetworkInterface"),
+        ("java.net.TranslatedNet", "getByName0"),
     ),
     // The escaped octets of a URI's part decoded as UTF-8, which the JDK decodes with a
     // `CharsetDecoder` (`java/net/TranslatedURI.java`).
@@ -2000,6 +2042,12 @@ impl<'t> Walk<'t> {
             "METHOD" if owner == "java.lang.System" && name == "getProperties" => {
                 let (class, method, signature) = TRANSLATED_PROPERTIES;
                 self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
+            // The coders of a charset (`CHARSET_CODERS`).
+            "METHOD"
+                if let Some((class, to, signature)) = charset_coder(&owner, &name, text(symbol, "type")) =>
+            {
+                self.work.push(Item::Method((class.into(), to.into(), signature.into())));
             }
             // The translator's methods that replace some of the JDK's (`REDIRECTED_CALLS`).
             "METHOD" if let Some((class, to)) = redirected_call(&owner, &name, text(symbol, "type")) => {

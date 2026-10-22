@@ -335,7 +335,9 @@ impl Types {
                 None => Flow { any: true, ..Flow::default() },
             },
             Type::Enum(_) => Flow { any: true, ..Flow::default() },
-            Type::Null | Type::Void | Type::Array(_) | Type::StringBuilder => Flow::default(),
+            Type::Null | Type::Void | Type::Array(_) | Type::StringBuilder | Type::JavaClass => {
+                Flow::default()
+            }
             _ => Flow { value: true, ..Flow::default() },
         }
     }

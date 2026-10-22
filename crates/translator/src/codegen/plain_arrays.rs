@@ -294,7 +294,7 @@ impl<'a> Gen<'a> {
                 } else if self.class.methods[*index].is_static {
                     self.static_call(*index, args)
                 } else if !*is_super && let Some(t) = self.enum_of(receiver) {
-                    self.enum_call(t, receiver, *index, args)
+                    self.enum_call(t, e.pos, receiver, *index, args)
                 } else {
                     // The method of the receiver's class, which an interface's method is not.
                     let target = self.dispatch(receiver, *index, *is_super);
@@ -490,7 +490,12 @@ impl<'a> Gen<'a> {
             return format!("{slot} = {new}");
         }
         // A value that may fail is computed outside a closure, where its failure can go on.
-        if !used && !mentions(rhs, root) && !mentions(index, root) && !rows_mention && !self.raises_in(rhs) {
+        if !used
+            && !mentions(rhs, root)
+            && !mentions(index, root)
+            && !rows_mention
+            && !self.update_raises(op, ty, rhs)
+        {
             let reference = self.path_ref(&path, true);
             let i = self.value(index, Type::Int).text;
             let old = self.fresh_name(&["old", "previous", "before"]);

@@ -1944,11 +1944,18 @@ fn system_natives_go_through_the_runtime() {
             "java::available_processors()",
         ],
     );
-    let err = java_to_rust::translate(
+    // `System.getenv(name)` reads the environment the program runs in; the whole environment as a
+    // map is not translated.
+    let out = java_to_rust::translate(
         "class A { public static void main(String[] a) { System.out.println(System.getenv(\"HOME\")); } }",
     )
+    .unwrap();
+    assert!(out.contains("java::getenv(\"HOME\")"), "{out}");
+    let err = java_to_rust::translate(
+        "class A { public static void main(String[] a) { Object env = System.getenv(); } }",
+    )
     .unwrap_err();
-    assert!(err.to_string().contains("System.getenv` is not supported"), "{err}");
+    assert!(err.to_string().contains("`System.getenv()`, the whole environment"), "{err}");
 }
 
 #[test]
@@ -2115,9 +2122,9 @@ fn an_enum_element_that_may_be_null_is_an_option_and_used_as_a_value_is_rejected
 }
 
 #[test]
-fn a_catch_right_around_the_text_of_an_object_whose_to_string_throws_is_rejected() {
-    // The text is made with `Display`, which cannot pass the exception on to the `catch`.
-    let error = java_to_rust::translate(
+fn a_catch_right_around_the_text_of_an_object_whose_to_string_throws_catches_it() {
+    // The generator makes the text with a call of the `toString`, whose exception the `catch` sees.
+    let rust = translate(
         "public class A {
             static class Item {
                 public String toString() { throw new IllegalStateException(\"no text\"); }
@@ -2130,8 +2137,59 @@ fn a_catch_right_around_the_text_of_an_object_whose_to_string_throws_is_rejected
                 }
             }
         }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn to_string(&self) -> Result<String, Throwable> {",
+            "java::println!(\"item {}\", java::or_break!(Rc::new(AItem::new()).to_string(), 'attempt));",
+        ],
+    );
+}
+
+#[test]
+fn a_catch_around_the_text_of_an_enum_constant_whose_to_string_throws_is_rejected() {
+    // An enum's text is its `Display`, which cannot pass the exception on to the `catch`.
+    let error = java_to_rust::translate(
+        "public class A {
+            enum Color {
+                RED;
+                public String toString() { throw new IllegalStateException(\"no text\"); }
+            }
+            public static void main(String[] args) {
+                try {
+                    System.out.println(\"color \" + Color.RED);
+                } catch (IllegalStateException e) {
+                    System.out.println(\"caught\");
+                }
+            }
+        }",
     )
-    .expect_err("a toString whose exception a catch around the text sees");
+    .expect_err("an enum's toString whose exception a catch around the text sees");
+    assert!(
+        error.to_string().ends_with("a toString that throws an exception that is caught not supported yet"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_catch_around_a_printf_of_an_object_whose_to_string_throws_is_rejected() {
+    // `printf` makes its whole text before it prints, where Java prints `item ` first.
+    let error = java_to_rust::translate(
+        "public class A {
+            static class Item {
+                public String toString() { throw new IllegalStateException(\"no text\"); }
+            }
+            public static void main(String[] args) {
+                try {
+                    System.out.printf(\"item %s%n\", new Item());
+                } catch (IllegalStateException e) {
+                    System.out.println(\"caught\");
+                }
+            }
+        }",
+    )
+    .expect_err("a toString that printf runs, whose exception a catch around it sees");
     assert!(
         error.to_string().ends_with("catching an exception that this toString may throw not supported yet"),
         "{error}"
@@ -2188,9 +2246,9 @@ fn the_default_text_of_an_object_whose_hash_code_may_throw_ends_the_program_on_i
 }
 
 #[test]
-fn a_catch_on_the_way_to_the_text_of_an_object_whose_to_string_throws_is_rejected() {
-    // The `catch` is around a call of the method that makes the text.
-    let error = java_to_rust::translate(
+fn a_catch_on_the_way_to_the_text_of_an_object_whose_to_string_throws_catches_it() {
+    // The `catch` is around a call of the method that makes the text, which passes the exception on.
+    let rust = translate(
         "public class A {
             static class Item {
                 public String toString() { throw new IllegalStateException(\"no text\"); }
@@ -2204,11 +2262,14 @@ fn a_catch_on_the_way_to_the_text_of_an_object_whose_to_string_throws_is_rejecte
                 }
             }
         }",
-    )
-    .expect_err("a toString whose exception a caller's catch sees");
-    assert!(
-        error.to_string().ends_with("catching an exception that this toString may throw not supported yet"),
-        "{error}"
+    );
+    assert_contains(
+        &rust,
+        &[
+            "fn show(item: &Rc<AItem>) -> Result<(), Throwable> {",
+            "java::println!(\"item {}\", item.to_string()?);",
+            "java::or_break!(show(&Rc::new(AItem::new())), 'attempt);",
+        ],
     );
 }
 
@@ -5145,4 +5206,26 @@ fn a_builder_made_from_a_char_sequence_copies_its_text_and_rejects_program_class
         error.contains("creating a builder from a `CharSequence` that a program class implements"),
         "{error}"
     );
+}
+
+#[test]
+fn a_class_that_is_a_char_sequence_through_an_interface_gets_the_default_get_chars() {
+    // As javac's names are, through `javax.lang.model.element.Name`.
+    let rust = translate(
+        "public class Main {
+            interface Named extends CharSequence {}
+            static class Word implements Named {
+                public int length() { return 2; }
+                public char charAt(int i) { return 'w'; }
+                public CharSequence subSequence(int s, int e) { return \"w\"; }
+            }
+            public static void main(String[] a) {
+                CharSequence s = new Word();
+                char[] dst = new char[2];
+                s.getChars(0, 2, dst, 0);
+                System.out.println(new String(dst));
+            }
+        }",
+    );
+    assert_contains(&rust, &["java::check_from_to_index(", "java::check_index("]);
 }

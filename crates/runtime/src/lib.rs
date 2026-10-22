@@ -44,6 +44,7 @@ mod locked;
 mod math;
 mod monitor;
 mod natives;
+mod net;
 mod null;
 mod out;
 mod parse_range;
@@ -56,6 +57,7 @@ pub mod string;
 mod system;
 mod thread;
 mod time_zone;
+mod translate_escapes;
 mod unix;
 mod unsigned;
 mod vm;
@@ -88,12 +90,16 @@ pub use inflate::{
 };
 pub use initializer::*;
 pub use integer::*;
-pub use integer_parse::{parse_radix, parse_small_radix, try_parse_radix, try_parse_small_radix};
+pub use integer_parse::{
+    decode, decode_small, parse_radix, parse_small_radix, try_decode, try_decode_small, try_parse_radix,
+    try_parse_small_radix,
+};
 pub use java_arrays::*;
 pub use locked::{Locked, RawLock, Ref, RefMut};
 pub use math::*;
 pub use monitor::*;
 pub use natives::*;
+pub use net::*;
 pub use null::{Handle, OrNull, non_null, null_enum, or_null, same, try_non_null, try_non_null_message};
 pub use out::{
     Out, drain_stdout, eprint_chars, eprintln_chars, err, err_flush, flush, out, print_chars, println_chars,
@@ -109,6 +115,7 @@ pub use string::*;
 pub use system::*;
 pub use thread::*;
 pub use time_zone::*;
+pub use translate_escapes::*;
 pub use unix::*;
 pub use unsigned::{
     compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,

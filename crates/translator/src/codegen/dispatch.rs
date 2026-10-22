@@ -801,16 +801,27 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// A call of instance method `resolved` on a value of the enum of `t`: the method of the
-    /// enum that runs what the object's class runs. `toString` is the enum's `Display`.
+    /// A call at `pos` of instance method `resolved` on a value of the enum of `t`: the method of
+    /// the enum that runs what the object's class runs. `toString` is the enum's `Display`.
     pub(super) fn enum_call(
         &mut self,
         t: usize,
+        pos: Pos,
         receiver: &'a Expr,
         resolved: usize,
         args: &'a [Expr],
     ) -> Code {
         let m = &self.class.methods[resolved];
+        // A class of the program that has none of `CharSequence`'s methods (`lower` links its own
+        // or the default `getChars`, so none should) rejects each call that may reach it, and
+        // the dispatcher's arm for it never runs.
+        if self.is_char_sequence_method(resolved)
+            && self.enum_variants(t).into_iter().any(|c| self.missing_sequence_method(resolved, c))
+        {
+            let message = format!("`CharSequence.{}` of a class without one not supported yet", m.name);
+            self.rejected.push(Error { pos, message });
+            return Code::atom("unreachable!()".to_string());
+        }
         if m.name == "toString" && m.params.is_empty() {
             self.need(Need::Display(t));
             let text = format!("{}.to_string()", self.object(receiver));
@@ -842,7 +853,7 @@ impl<'a> Gen<'a> {
 
     /// The name of the method of the enum of `t` that a call of `resolved` calls: the body
     /// itself when every variant runs the one the enum has, else the dispatcher.
-    fn dispatch_name(&self, t: usize, resolved: usize) -> String {
+    pub(super) fn dispatch_name(&self, t: usize, resolved: usize) -> String {
         let h = &self.class.hierarchy;
         if let [only] = self.enum_targets(t, resolved)[..]
             && self.homes[only] == Home::Enum(t)
@@ -918,7 +929,20 @@ impl<'a> Gen<'a> {
     /// The text of a value of an enum, through its `Display`.
     pub(super) fn enum_text(&mut self, t: usize, obj: String) -> String {
         self.need(Need::Display(t));
+        if self.enum_text_throws(t) {
+            // A `toString` that throws is called, through `try_text`.
+            return self.passed_on(Code::atom(format!("{obj}.try_text()")));
+        }
         if self.lazy_text && !self.printing { obj } else { format!("{obj}.to_string()") }
+    }
+
+    /// Whether turning a value of the enum of `t` into text may throw an exception that the
+    /// program observes: some variant's `toString` throws.
+    pub(super) fn enum_text_throws(&self, t: usize) -> bool {
+        self.enum_variants(t)
+            .into_iter()
+            .filter_map(|c| hierarchy::to_string_impl(self.class, c))
+            .any(|i| self.facts.throwing.contains(&i))
     }
 
     /// Whether turning a value of the enum of `t` into text may write a shared object.
@@ -978,6 +1002,9 @@ impl<'a> Gen<'a> {
         self.monitor_impl(t, &variants);
         if self.wanted.contains(&Need::Display(t)) {
             self.display_impl(t, &variants);
+            if self.enum_text_throws(t) {
+                self.try_text_impl(t, &variants);
+            }
         }
         self.raised_impl(t);
         self.chain_enum_items(t, &variants);
@@ -1206,6 +1233,12 @@ impl<'a> Gen<'a> {
         t.kind == TypeKind::Interface && t.name == CHAR_SEQUENCE
     }
 
+    /// Whether a value of class `c` has no method for `CharSequence`'s method `r`: it is no
+    /// string or builder, and no method of the program implements `r` for it.
+    fn missing_sequence_method(&self, r: usize, c: usize) -> bool {
+        self.runtime_of(c).is_none() && self.class.hierarchy.implementation(r, c).is_none()
+    }
+
     /// `CharSequence`'s `length()`, `charAt(index)`, `subSequence(start, end)` or `getChars(..)`
     /// (method `r`) for a string or a builder of class `c` bound to `o`. What a string's throws
     /// is thrown for a `java::catching` around the call (see `analysis::exceptions`), as a
@@ -1213,10 +1246,8 @@ impl<'a> Gen<'a> {
     fn char_sequence_arm(&mut self, r: usize, c: usize) -> String {
         let method = &self.class.methods[r];
         let builder = self.runtime_of(c) == Some(Type::StringBuilder);
-        if self.runtime_of(c).is_none() {
-            // A class of the program implements each of these, or inherits the default.
-            let message = format!("`CharSequence.{}` of a class without one not supported yet", method.name);
-            self.rejected.push(Error { pos: method.pos, message });
+        if self.missing_sequence_method(r, c) {
+            // Each call that may reach it is rejected (`enum_call`).
             return "unreachable!()".to_string();
         }
         if method.name == "subSequence" {
@@ -1498,7 +1529,11 @@ impl<'a> Gen<'a> {
     pub(super) fn object_to_string(&mut self, receiver: &'a Expr) -> Code {
         let Some(t) = self.enum_of(receiver) else { return self.object_text(receiver) };
         self.need(Need::Display(t));
-        Code::atom(format!("{}.to_string()", self.object(receiver)))
+        let obj = self.object(receiver);
+        if self.enum_text_throws(t) {
+            return Code::atom(self.passed_on(Code::atom(format!("{obj}.try_text()"))));
+        }
+        Code::atom(format!("{obj}.to_string()"))
     }
 
     /// The hash code of a value of class `c`, reached through `handle`, a reference to what the
@@ -1731,6 +1766,33 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
+    /// `try_text()`: the text of a value whose class's `toString` may throw, or its exception;
+    /// the other classes' text is their `Display`.
+    fn try_text_impl(&mut self, t: usize, variants: &[usize]) {
+        let name = struct_name(&self.class.types[t].name);
+        let throwable = self.throwable_type();
+        self.gap();
+        self.line(&format!("impl {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn try_text(&self) -> Result<String, {throwable}> {{"));
+        self.indent += 1;
+        self.match_arms(t, variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
+            Some(i) if g.facts.throwing.contains(&i) => {
+                let (call, uses) = g.arm_call(t, c, i, "");
+                if g.facts.nullable_returns.contains(&i) {
+                    (format!("{call}.map(|text| text.unwrap_or_else(|| \"null\".to_string()))"), uses)
+                } else {
+                    (call, uses)
+                }
+            }
+            _ => ("Ok(self.to_string())".to_string(), false),
+        });
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     /// How the `Display` of the enum of `t` shows an object of class `c` bound to `o`, whose
     /// `toString` is method `i`; and whether it uses `o`.
     fn display_arm(&mut self, t: usize, c: usize, i: usize) -> (String, bool) {
@@ -1750,7 +1812,15 @@ impl<'a> Gen<'a> {
             };
             return (format!("fmt::Display::fmt({shown}, f)"), true);
         }
-        let (text, uses) = self.arm_call(t, c, i, "");
+        let (mut text, uses) = self.arm_call(t, c, i, "");
+        // Where the runtime makes the text, what a `toString` throws ends the program (see
+        // `analysis::exceptions`); the generator's own text calls it (`try_text`).
+        if self.facts.throwing.contains(&i) {
+            if let Some(t) = self.class.type_index("java.lang.Throwable").and_then(|t| self.enum_for(t)) {
+                self.need(Need::Display(t));
+            }
+            text = format!("{text}.unwrap_or_else({})", self.runtime("uncaught"));
+        }
         // A `toString` that may return null shows "null", as `String.valueOf` does.
         if self.facts.nullable_returns.contains(&i) {
             return (format!("f.write_str({text}.as_deref().unwrap_or(\"null\"))"), uses);

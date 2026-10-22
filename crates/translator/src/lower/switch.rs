@@ -15,6 +15,26 @@ pub(super) fn jump(node: Node) -> Stmt {
     }
 }
 
+/// Whether `stmt` reads or assigns the local `name`.
+fn uses_local(stmt: &Stmt, name: &str) -> bool {
+    let mut used = false;
+    visit_stmt(
+        stmt,
+        &mut |e| {
+            visit_expr(e, &mut |x| {
+                used |= match &x.kind {
+                    ExprKind::Var(v)
+                    | ExprKind::Assign { target: Place::Var(v), .. }
+                    | ExprKind::IncDec { target: Place::Var(v), .. } => v == name,
+                    _ => false,
+                }
+            })
+        },
+        &mut |_| {},
+    );
+    used
+}
+
 /// Whether a statement always leaves the code after it, so no `break` is needed after it.
 fn ends_by_leaving(stmt: &Stmt) -> bool {
     matches!(
@@ -34,8 +54,43 @@ impl<'t> Lowering<'t> {
             return self.pattern_switch_stmt(node);
         }
         let selector = self.selector(node)?;
-        let cases = self.cases(node, selector.ty, false)?;
-        Ok(Stmt::Switch { selector, cases })
+        let mut cases = self.cases(node, selector.ty, false)?;
+        let mut hoisted = self.hoist_shared_locals(&mut cases);
+        if hoisted.is_empty() {
+            return Ok(Stmt::Switch { selector, cases });
+        }
+        hoisted.push(Stmt::Switch { selector, cases });
+        Ok(Stmt::Block(hoisted))
+    }
+
+    /// The locals that a case declares at its top level and a later case uses (`case 3: int b
+    /// = ...; ... case 4: b = ...;`): the cases of a `switch` block are one scope in Java and
+    /// each an arm of its own in Rust. Each is declared before the switch, without a value, and
+    /// its declaration becomes an assignment of its initializer. Java requires that it is
+    /// assigned before each use, which Rust then checks the same way.
+    fn hoist_shared_locals(&self, cases: &mut [Case]) -> Vec<Stmt> {
+        let mut hoisted = Vec::new();
+        for i in 0..cases.len() {
+            let (before, after) = cases.split_at_mut(i + 1);
+            for stmt in before[i].body.iter_mut() {
+                let Stmt::Local { ty, name, init, pos } = stmt else { continue };
+                if !after.iter().any(|c| c.body.iter().any(|s| uses_local(s, name))) {
+                    continue;
+                }
+                let (ty, pos, name) = (*ty, *pos, name.clone());
+                let assigned = init.take().map(|value| {
+                    let kind = ExprKind::Assign {
+                        op: None,
+                        target: Place::Var(name.clone()),
+                        value: Box::new(value),
+                    };
+                    Stmt::Expr(self.synth(kind, pos, ty))
+                });
+                *stmt = assigned.unwrap_or(Stmt::Block(Vec::new()));
+                hoisted.push(Stmt::Local { ty, name, init: None, pos });
+            }
+        }
+        hoisted
     }
 
     pub(super) fn switch_expr(&self, node: Node<'t>) -> Result<ExprKind, Error> {

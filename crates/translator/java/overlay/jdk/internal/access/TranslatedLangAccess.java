@@ -7,9 +7,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.charset.UnmappableCharacterException;
 
 /**
- * The methods of {@code JavaLangAccess} that the JDK's {@code java.io} and {@code java.nio.file} call on
- * {@code SharedSecrets.getJavaLangAccess()}, which the JVM sets as it starts and a translated
- * program never has: each call of one of them is a call of the method of the same name here (see
+ * The methods of {@code JavaLangAccess} that the JDK's {@code java.io}, {@code java.nio.file} and
+ * charsets' coders call on {@code SharedSecrets.getJavaLangAccess()}, which the JVM sets as it
+ * starts and a translated program never has: each call of one of them is a call of the method of the same name here (see
  * {@code lower.rs}), which does what {@code String}'s own code does for it.
  */
 final class TranslatedLangAccess {
@@ -48,6 +48,34 @@ final class TranslatedLangAccess {
         for (int i = 0; i < len; i++) {
             dst[dstOff + i] = (char) (src[srcOff + i] & 0xff);
         }
+    }
+
+    /**
+     * Copies the ASCII bytes from {@code sp}, up to {@code len} and before the first that is not,
+     * to {@code da} as characters, and returns their number, as {@code String.decodeASCII} does
+     * for the charsets' decoders.
+     */
+    static int decodeASCII(byte[] sa, int sp, char[] da, int dp, int len) {
+        int count = countPositives(sa, sp, len);
+        inflateBytesToChars(sa, sp, da, dp, count);
+        return count;
+    }
+
+    /**
+     * Copies the ASCII characters from {@code sp}, up to {@code len} and before the first that
+     * is not, to {@code da} as bytes, and returns their number, as
+     * {@code StringCoding.implEncodeAsciiArray} does for the charsets' encoders.
+     */
+    static int uncheckedEncodeASCII(char[] sa, int sp, byte[] da, int dp, int len) {
+        int i = 0;
+        for (; i < len; i++) {
+            char c = sa[sp++];
+            if (c >= '\u0080') {
+                break;
+            }
+            da[dp++] = (byte) c;
+        }
+        return i;
     }
 
     /**
