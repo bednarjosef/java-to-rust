@@ -1,7 +1,7 @@
 //! The Java syntax tree the translator works on: a typed subset of Java, lowered from javac's
 //! attributed tree (`lower.rs`), so every expression has its Java type and calls are resolved.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{LazyLock, Mutex};
 
@@ -256,6 +256,38 @@ pub struct Class {
     /// the program could catch them, `message` a `String` variable: how a failure of the runtime
     /// becomes the program's exception (see `lower/exceptions.rs`).
     pub raised: Vec<Expr>,
+    /// What the class files name that lowering knows from javac's tree.
+    pub class_file: ClassFileNames,
+}
+
+/// What the class files that javac writes name, where lowering knows it from javac's tree: the
+/// JDK's code, which `javac::BytecodeNames` does not compile, needs it for the messages of its
+/// `NullPointerException`s (`analysis::npe_messages`).
+#[derive(Default)]
+pub struct ClassFileNames {
+    /// The class that names each static field read, by the class whose code reads it, the
+    /// position and the field's name: javac names a field `C.f` by `C`, which may be a subclass
+    /// of the field's own class. `None` where two reads there differ.
+    pub static_qualifiers: HashMap<(String, Pos, String), Option<String>>,
+    /// The field that holds the enclosing instance of an inner, local or anonymous class, by the
+    /// class's name: `this$0`, or `this$1` in a class whose enclosing class is itself an inner
+    /// class, and so on.
+    pub outer_fields: HashMap<String, String>,
+    /// The method that each call names, by the class whose code calls it, the call's
+    /// position and the method's name. `None` where two calls there differ, or where the class
+    /// is not certain.
+    pub calls: HashMap<(String, Pos, String), Option<CallName>>,
+}
+
+/// A method as a call in a class file names it, in javac's names: the class that javac names it
+/// by (the class the call names, the erasure of the receiver's static type, or
+/// `java.lang.Object` for an instance method of `Object`), its name, and the erasures of its
+/// parameters' types (`int`, `java.lang.String`, `java.util.Map.Entry[]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallName {
+    pub class: String,
+    pub name: String,
+    pub params: Vec<String>,
 }
 
 /// What kind of type a declaration is.
