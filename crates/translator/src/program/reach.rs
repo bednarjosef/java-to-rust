@@ -888,6 +888,16 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ),
         ("sun.nio.fs.TranslatedFiles", "newBufferedWriter"),
     ),
+    // The installed file-system providers, which the JDK loads with `ServiceLoader`; the
+    // translator's are those of `java.base`.
+    (
+        (
+            "java.nio.file.spi.FileSystemProvider",
+            "loadInstalledProviders",
+            "()java.util.List<java.nio.file.spi.FileSystemProvider>",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "loadInstalledProviders"),
+    ),
     // The escaped octets of a URI's part decoded as UTF-8, which the JDK decodes with a
     // `CharsetDecoder` (`java/net/TranslatedURI.java`).
     (

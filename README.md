@@ -893,6 +893,21 @@ and asynchronous file channels throw `UnsupportedOperationException`; and `statv
 store's space), the mount table, `getpwnam` and `getgrnam`, and the extended-attribute natives
 are rejected.
 
+The `jrt:` file system, through which javac reads the classes of the JDK, is the JDK's own
+(`jdk.internal.jrtfs`) over the image file `lib/modules` of the JDK in `java.home`; it is among
+the installed providers (`FileSystemProvider.installedProviders`, which the JDK finds with a
+`ServiceLoader`, gives the default provider and the jrt one: `TranslatedFiles.java`). The
+translator's image reader (`java/overlay/jdk/internal/jimage/BasicImageReader.java`) reads the
+index of the image into an array once, and each resource into an array of its own, through a
+`FileChannel`, where the JDK's maps the file into memory. What differs from Java: a compressed
+image (`jlink --compress`) and a JDK of exploded modules, as it is built, throw
+`UnsupportedOperationException`; the `toString` of a jrt file's attributes, which formats times
+with `%tc`, throws the same; and a failure of the image's reader is thrown as it is, not given as
+the reason of an `InvalidPathException`. `URI` decodes its escaped octets as UTF-8 itself
+(`java/overlay/java/net/TranslatedURI.java`), and `jdk.internal.util.Exceptions`, which puts the
+input and the index into a `URISyntaxException`, reads its categories of detail without waiting
+for the JVM's boot and fills only `%s` in its messages, refusing any other conversion.
+
 A native method of a translated JDK class is never lowered itself (javac marks it `native`); a
 call of one becomes the runtime function that `ast/natives.rs` names for its class, name and
 signature, and any other is rejected with its name and signature. The runtime has (`vm.rs`,
