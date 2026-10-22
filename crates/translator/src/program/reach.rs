@@ -159,6 +159,12 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "sun.util.logging.PlatformLogger",
 ];
 
+/// Classes nested in one of the `RUNTIME_CLASSES` that are translated from the JDK's sources all
+/// the same, as they are plain code over the JDK's other classes: `Runtime.Version`, a version
+/// string parsed and compared (`JarFile`'s and `ModulePath`'s release), with the pattern it
+/// parses with.
+pub const TRANSLATED_NESTED: &[&str] = &["java.lang.Runtime.Version", "java.lang.Runtime.VersionPattern"];
+
 /// What is not translated, by the prefix of qualified class names, with the feature it is:
 /// reachability stops there, as at the runtime's classes, and the survey counts its use. Library
 /// code reaches these on paths that only its data rules out, such as `TreeMap.addAll` reading
@@ -673,6 +679,19 @@ pub fn live_branch(node: &Value, sequential: bool) -> Option<&Value> {
     (archived_null_test(condition, true) || stub_null_test(condition, true)).then(|| then_branch(node))
 }
 
+/// Whether `node` is `Runtime.version().feature()`, the release of the JDK, which the translation
+/// knows (`lower::system`).
+pub fn release_query(node: &Value) -> bool {
+    let symbol = &node["symbol"];
+    let receiver = &node["methodSelect"]["expression"];
+    text(node, "kind") == "METHOD_INVOCATION"
+        && (text(symbol, "owner"), text(symbol, "name"), text(symbol, "type"))
+            == ("java.lang.Runtime.Version", "feature", "()int")
+        && text(receiver, "kind") == "METHOD_INVOCATION"
+        && (text(&receiver["symbol"], "owner"), text(&receiver["symbol"], "name"))
+            == ("java.lang.Runtime", "version")
+}
+
 /// Whether `condition` is `x == null` (`equal`) or `x != null` of a value `x` of a stub's type
 /// (`stubs`), which is only ever null, and which it reads without effects: a variable, or
 /// `System.getSecurityManager()`. So `if (sm != null)` skips what a security manager would check.
@@ -827,6 +846,13 @@ pub const TRANSLATED_LANG_ACCESS_CLASS: &str = "jdk.internal.access.TranslatedLa
 /// (`java/overlay`) with the same type, by the JDK's method and the translator's class and name
 /// (see `lower.rs`). Reachability goes to the translator's method, and not into the JDK's.
 pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
+    // The version of the JDK, which the JVM makes from the numbers of its build; the
+    // translator's parses `java.runtime.version`, which a plain run of that JDK has
+    // (`java/lang/TranslatedRuntime.java`).
+    (
+        ("java.lang.Runtime", "version", "()java.lang.Runtime.Version"),
+        ("java.lang.TranslatedRuntime", "version"),
+    ),
     // The default file system, whose provider a property could name and reflection create (the
     // property is not set in a translated program, see `lower::system`), and which the JDK finds
     // by the URI `file:///` (`sun/nio/fs/TranslatedFiles.java`).
@@ -1303,6 +1329,15 @@ impl<'t> Walk<'t> {
         }
         let class = class_name(decl);
         if outside(&class) {
+            if provided(&class) {
+                for member in members(decl) {
+                    if CLASS_KINDS.contains(&text(member, "kind"))
+                        && TRANSLATED_NESTED.contains(&class_name(member).as_str())
+                    {
+                        self.declare(member, Some(&class));
+                    }
+                }
+            }
             return;
         }
         for member in members(decl) {
@@ -1682,6 +1717,9 @@ impl<'t> Walk<'t> {
                     }
                 }
             }
+            // `Runtime.version().feature()`, a constant of the translation (`lower::system`),
+            // which makes no version.
+            Value::Object(_) if release_query(value) => {}
             // The branch that never runs is not reached, and neither is the condition, which the
             // lowering drops: a flag's class need not exist.
             Value::Object(_) if let Some(branch) = live_branch(value, self.sequential) => {

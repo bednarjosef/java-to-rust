@@ -246,14 +246,9 @@ impl<'t> Lowering<'t> {
                 return Ok(Some(ExprKind::Bool(included)));
             }
             // `Runtime.version().feature()`, the release of the JDK the translator ran with
-            // (`java.specification.version`, `26`), as the source versions of javac's code ask it.
-            // A `Runtime.Version` itself is the JDK's value, which the translation has none of.
-            ("java.lang.Runtime.Version", "feature", "()int")
-                if node.get("methodSelect").and_then(|s| s.get("expression")).is_some_and(|r| {
-                    r.kind() == "METHOD_INVOCATION"
-                        && r.symbol().is_some_and(|s| (s.owner, s.name) == ("java.lang.Runtime", "version"))
-                }) =>
-            {
+            // (`java.specification.version`, `26`), as the source versions of javac's code ask it,
+            // without making the version (`Runtime.version()` parses it, see `REDIRECTED_CALLS`).
+            ("java.lang.Runtime.Version", "feature", "()int") if crate::program::release_query(node.0) => {
                 let feature = jdk_properties()
                     .and_then(|p| p.get("java.specification.version"))
                     .and_then(|v| v.parse::<i32>().ok());

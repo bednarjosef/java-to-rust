@@ -973,6 +973,17 @@ impl<'t> Lowering<'t> {
         } else {
             receiver
         };
+        // A box's own `toString` and `hashCode`, where javac names `Object`'s (`Object::toString`
+        // over a stream of `Integer`s).
+        if let Type::Boxed(primitive) = receiver.ty
+            && let Some(op) = match symbol.name {
+                "toString" => Some(BoxedOp::ToString),
+                "hashCode" => Some(BoxedOp::HashCode),
+                _ => None,
+            }
+        {
+            return Ok(ExprKind::Builtin(Builtin::Boxed(op, *primitive), vec![receiver]));
+        }
         if !matches!(receiver.ty, Type::Class(..)) {
             return unsupported(node, &format!("`{}` of a value of this type", symbol.name));
         }
