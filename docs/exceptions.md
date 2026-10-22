@@ -52,10 +52,13 @@ signature. Everything else is decided here.
    an exception, so what the `toString` throws ends the program there: the text of an enum's
    constant, and `printf`,
    which makes all its text before it prints, where Java prints the text before each argument
-   first. So does what the `hashCode` throws that `Object`'s `toString` shows
-   for a class without a `toString` of its own (`Collections.ReverseComparator2`'s, which asks
-   its comparator), where the `hashCode` is a `Result` because a direct call of it is observed;
-   it counts as that object's `toString` below. Where such a `toString` that the program wrote
+   first. Comparing, hashing, cloning or null-checking an object, `Unsafe`'s memory operations,
+   copies and fills of arrays and the range of a `CharSequence` that a builder appends (read with
+   its `length` and `charAt`) make no text at all. The `hashCode` of the program that `Object`'s
+   `toString` shows for a class without a `toString` of its own (`Collections.ReverseComparator2`'s,
+   which asks its comparator; javac's keys of pairs, under the `Object`s that its messages show)
+   is called as such a `toString` is: where the generator makes the text, what it throws goes on
+   (`try_text` covers it too), and elsewhere it counts as that object's `toString` below. Where such a `toString` that the program wrote
    may run and may throw what a `catch` around the text, or around a call on the way to it, would
    catch, the program is rejected. The JDK's own `toString`s are not looked at: they throw only for bugs, such as a
    collection changed while it is shown (`ConcurrentModificationException`), which then end the

@@ -940,11 +940,12 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether turning a value of the enum of `t` into text may throw an exception that the
-    /// program observes: some variant's `toString` throws.
+    /// program observes: some variant's `toString` throws, or the `hashCode` that `Object`'s
+    /// `toString` shows.
     pub(super) fn enum_text_throws(&self, t: usize) -> bool {
         self.enum_variants(t)
             .into_iter()
-            .filter_map(|c| hierarchy::to_string_impl(self.class, c))
+            .filter_map(|c| hierarchy::to_string_impl(self.class, c).or_else(|| self.hash_index(c)))
             .any(|i| self.facts.throwing.contains(&i))
     }
 
@@ -1783,8 +1784,9 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
-    /// `try_text()`: the text of a value whose class's `toString` may throw, or its exception;
-    /// the other classes' text is their `Display`.
+    /// `try_text()`: the text of a value whose class's `toString`, or the `hashCode` that
+    /// `Object`'s `toString` shows, may throw, or its exception; the other classes' text is their
+    /// `Display`.
     fn try_text_impl(&mut self, t: usize, variants: &[usize]) {
         let name = struct_name(&self.class.types[t].name);
         let throwable = self.throwable_type();
@@ -1801,6 +1803,12 @@ impl<'a> Gen<'a> {
                 } else {
                     (call, uses)
                 }
+            }
+            None if g.hash_index(c).is_some_and(|i| g.facts.throwing.contains(&i)) => {
+                let i = g.hash_index(c).expect("a hashCode that throws");
+                let (call, uses) = g.arm_call(t, c, i, "");
+                let text = g.default_text(c, "hash".to_string());
+                (format!("{call}.map(|hash| {text})"), uses)
             }
             _ => ("Ok(self.to_string())".to_string(), false),
         });
