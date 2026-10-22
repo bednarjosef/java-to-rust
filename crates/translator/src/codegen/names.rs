@@ -192,9 +192,9 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
         let shadowed = match homes[i] {
             // A constructor's name already holds its class (`construct_error_string`), and its
             // calls name it so.
+            _ if m.is_ctor => false,
             Home::Class(c) | Home::Fields(c) => {
-                !m.is_ctor
-                    && c != m.class
+                c != m.class
                     && (0..class.methods.len())
                         .any(|o| o != i && same_struct(homes[o], c) && names[o] == names[i])
             }
