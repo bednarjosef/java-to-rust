@@ -100,8 +100,10 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
     // Each class has its own `impl`, so names only need to be unique within their class tree.
     // `base` and `base_mut` are taken in each: the enum of a class tree has methods of those
     // names, the fields of the object's class (`dispatch.rs`), beside a method of the JDK's own
-    // `base` (`ByteBuffer.base()`, then `base_2`).
-    let mut used = vec![HashSet::from(["base".to_string(), "base_mut".to_string()]); class.types.len()];
+    // `base` (`ByteBuffer.base()`, then `base_2`). So is `clone`, `Clone`'s, which copies a
+    // handle: a Java `clone()` (`CalendarDate.clone()`) is `clone_2`.
+    let taken = ["base", "base_mut", "clone"].map(String::from);
+    let mut used = vec![HashSet::from(taken); class.types.len()];
     let mut module_used: HashMap<&str, HashSet<String>> = HashMap::new();
     for m in class.methods.iter().filter(|m| m.is_main) {
         used[m.class].insert("main".to_string());
