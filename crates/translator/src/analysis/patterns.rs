@@ -9,7 +9,8 @@
 //!   then branch that always leaves the block (`return`, `break`, `continue`, `throw`), the rest
 //!   of the block.
 //!
-//! The statements of a switch expression are checked as a block of their own.
+//! The statements of a switch expression are checked as a block of their own, but those of the
+//! block that lowering makes of a call to compute its arguments first, which stands for the call.
 //!
 //! A program that reads a pattern variable anywhere else is rejected. Java has already checked
 //! that each read is in the variable's scope, which lets this check be simple: a read of `name`
@@ -405,10 +406,14 @@ fn patterns(e: &Expr) -> Vec<Pattern> {
     out
 }
 
-/// Calls `f` on the statements of each case of the switch expressions in `e`.
+/// Calls `f` on the statements of each case of the switch expressions in `e`. A block that computes
+/// a call's arguments before its receiver (`lower/argument_order.rs`) is not one: it stands for
+/// the call, which Java scopes as part of `e`.
 fn switch_bodies(e: &Expr, f: &mut dyn FnMut(&[Stmt])) {
     visit_expr(e, &mut |x| {
-        if let ExprKind::Switch { cases, .. } = &x.kind {
+        if let ExprKind::Switch { cases, .. } = &x.kind
+            && crate::lower::ordered_call(x).is_none()
+        {
             cases.iter().for_each(|c| f(&c.body));
         }
     });

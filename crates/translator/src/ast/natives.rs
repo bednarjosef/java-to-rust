@@ -489,6 +489,8 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
                 | ("java.lang.Module", "modules0" | "moduleOf0" | "declares0" | "holds0")
                 | ("java.util.ServiceLoader", "providers0" | "create0")
                 | ("javax.annotation.processing.TranslatedProcessorAnnotations", "values0")
+                // The members of an annotation type (`lower/annotation_objects.rs`).
+                | ("sun.reflect.annotation.TranslatedAnnotations", "members0")
         )
 }
 

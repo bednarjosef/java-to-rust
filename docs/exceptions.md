@@ -368,6 +368,11 @@ written in checked form exactly when it is in the analysis's set.
   fail either when every object its value may be is under the target type (`Facts::flows`).
 - **Casts that lowering inserts** (javac's conversion of an erased type variable's value) are not
   counted as `ClassCastException`.
+- **Arguments before the receiver's check**: Java throws the `NullPointerException` of a call on
+  null, and of a store into a null array or out of its bounds, only once the arguments (the
+  stored value) are computed. Where one may have an effect, lowering computes it first into a
+  local, and the receiver (the array) before it unless it is a local that nothing there assigns
+  (`lower/argument_order.rs`); the message names the receiver itself.
 - **Facts**: `throwing` (methods and constructors that return `Result`), `init_throwing`,
   `live_tries`, `raising_tries`, `raising`, `null_checked`, `catching`, `raised_classes`, and the
   `NullPointerException` message facts below.

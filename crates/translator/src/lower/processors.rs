@@ -36,7 +36,7 @@ impl<'t> Lowering<'t> {
         let var = || self.synth(ExprKind::Var(local.clone()), pos, Type::JavaClass);
         let mut chain = self.synth(ExprKind::Null, pos, Type::Null);
         for t in (0..self.types.len()).rev() {
-            let Some(values) = self.annotation_values(t, annotation)? else { continue };
+            let Some(values) = self.annotation_values(self.types[t].node, annotation)? else { continue };
             let values = values
                 .into_iter()
                 .map(|v| self.convert(self.synth(ExprKind::Str(v), pos, Type::String), strings.element()))
@@ -60,10 +60,13 @@ impl<'t> Lowering<'t> {
         }))
     }
 
-    /// The `value` of the annotation `annotation` (a qualified name) that the declaration of
-    /// class `t` has, as strings, or `None` when it has none.
-    fn annotation_values(&self, t: usize, annotation: &str) -> Result<Option<Vec<String>>, Error> {
-        let decl = self.types[t].node;
+    /// The `value` of the annotation `annotation` (a qualified name) that the declaration `decl`
+    /// has, as strings, or `None` when it has none.
+    pub(super) fn annotation_values(
+        &self,
+        decl: Node<'t>,
+        annotation: &str,
+    ) -> Result<Option<Vec<String>>, Error> {
         let Ok(modifiers) = decl.child("modifiers") else { return Ok(None) };
         for at in modifiers.list("annotations") {
             let Ok(ty) = at.child("annotationType") else { continue };

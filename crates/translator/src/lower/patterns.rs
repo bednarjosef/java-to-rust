@@ -599,8 +599,8 @@ impl<'t> Lowering<'t> {
         Ok(rest.expect("a pattern switch has a case"))
     }
 
-    /// Another expression of the selector, a variable.
-    fn copy(&self, selector: &Expr) -> Expr {
+    /// Another read of a variable (a pattern switch's selector).
+    pub(super) fn copy(&self, selector: &Expr) -> Expr {
         let ExprKind::Var(name) = &selector.kind else { unreachable!("the selector is a variable") };
         self.synth(ExprKind::Var(name.clone()), selector.pos, selector.ty)
     }

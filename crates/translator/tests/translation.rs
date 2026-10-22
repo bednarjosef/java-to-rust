@@ -4781,7 +4781,9 @@ fn a_type_variable_with_several_bounds_is_cast_to_the_later_bound_it_calls() {
         &rust,
         &[
             "fn max(a: Object, b: Object) -> Object {",
-            "java::cast(a.as_comparable(), \"Comparable\").compare_to(",
+            // The argument, a cast that may fail, is computed before the receiver's check.
+            "let receiver_0 = java::cast(a.as_comparable(), \"Comparable\");",
+            "receiver_0.compare_to(",
             "t.name()",
         ],
     );
@@ -5508,4 +5510,26 @@ fn copies_between_arrays_of_other_classes_are_rejected() {
             .contains("`System.arraycopy` from [LMain$Box; to [Ljava.lang.Object; not supported yet"),
         "{error}"
     );
+}
+
+#[test]
+fn a_range_loop_bound_that_reads_a_shared_field_is_bound_before_the_loop() {
+    // The start reads `this`'s field through a borrow; Rust keeps that borrow for the whole loop,
+    // so the bound is read into a local first, as Java reads it once before the loop.
+    let rust = translate(
+        "public class Main {\n    static Main last;\n    int next = 2;\n    void end(int i) {\n        next++;\n        last = this;\n    }\n    void ends(int limit) {\n        for (int i = next; i < limit; i++) end(i);\n    }\n    public static void main(String[] a) {\n        new Main().ends(6);\n    }\n}\n",
+    );
+    assert_contains(&rust, &["let start = this.borrow().next;", "for i in start..limit {"]);
+    assert_lacks(&rust, &["for i in this.borrow()"]);
+}
+
+#[test]
+fn a_for_loop_whose_bound_is_a_field_the_body_writes_stays_a_while_loop() {
+    // Java re-reads `count` on every iteration, and the body grows it, so the loop must not be a
+    // Rust range, which would fix the end once.
+    let rust = translate(
+        "public class Main {\n    int count = 2;\n    void grow() {\n        count++;\n    }\n    int run() {\n        int seen = 0;\n        for (int i = 0; i < count; i++) {\n            if (count < 5) grow();\n            seen++;\n        }\n        return seen;\n    }\n    public static void main(String[] a) {\n        new Main().run();\n    }\n}\n",
+    );
+    assert_contains(&rust, &["while i < self.count {"]);
+    assert_lacks(&rust, &["for i in"]);
 }

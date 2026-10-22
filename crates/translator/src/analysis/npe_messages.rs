@@ -63,7 +63,17 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
         }
         // `CharSequence`'s default `getChars` in a class of the program is the JDK's code too.
         let jdk = jdk || method.jdk_code;
-        let at = Messages { class, names, outermost: &outermost, method, jdk };
+        let mut receivers = HashMap::new();
+        for s in &method.body {
+            visit_stmt(s, &mut |_| {}, &mut |s| {
+                if let Stmt::Local { name, init: Some(init), .. } = s
+                    && name.starts_with(crate::lower::RECEIVER)
+                {
+                    receivers.insert(name.as_str(), init);
+                }
+            });
+        }
+        let at = Messages { class, names, outermost: &outermost, method, jdk, receivers };
         for s in &method.body {
             visit_stmt(
                 s,
@@ -140,6 +150,9 @@ struct Messages<'a> {
     /// `BytecodeNames` does not compile: what it names is not known, and its messages that need
     /// it (a call, a static field, javac's own locals) are not certain.
     jdk: bool,
+    /// The locals that hold the receiver of a call until its arguments are computed
+    /// (`lower/argument_order.rs`), with the receiver: the JVM names the receiver itself.
+    receivers: HashMap<&'a str, &'a Expr>,
 }
 
 /// A field as the class file has it.
@@ -591,7 +604,7 @@ impl Messages<'_> {
     /// The message of `action` on `object`, which is null: with where it came from, if the JVM
     /// shows that.
     fn message(&self, action: &str, object: &Expr) -> Option<String> {
-        let object = transparent(object)?;
+        let object = transparent(self.held(object))?;
         if let Some(call) = self.called(object) {
             return Some(format!("{action} because the return value of \"{call}\" is null"));
         }
@@ -615,7 +628,7 @@ impl Messages<'_> {
             let primitive = |t: Type| t.is_numeric() || t == Type::Boolean;
             return (primitive(*to) && primitive(inner.ty)).then_some(Source::Hidden);
         }
-        let e = transparent(e)?;
+        let e = transparent(self.held(e))?;
         if let Some(call) = self.called(e) {
             return Some(Source::Shown(call));
         }
@@ -695,6 +708,15 @@ impl Messages<'_> {
             _ => return None,
         };
         Some(Source::Shown(shown))
+    }
+
+    /// The receiver that `e` reads, where it is a local that holds one, or the call of a block that
+    /// computes the call's arguments first; else `e`.
+    fn held<'e>(&'e self, e: &'e Expr) -> &'e Expr {
+        match &e.kind {
+            ExprKind::Var(name) => self.receivers.get(name.as_str()).copied().unwrap_or(e),
+            _ => crate::lower::ordered_call(e).unwrap_or(e),
+        }
     }
 
     /// The method that `e` calls, as the class file names it, if it is a call.
@@ -1141,7 +1163,7 @@ impl Messages<'_> {
 /// The method of `String` that a builtin on a string `args[0]` calls, with the parameters of the
 /// overload as the JVM shows them (`String.indexOf(String, int)`); `None` for one that is no
 /// method of the string, or whose overload the builtin does not tell.
-fn string_method(builtin: &Builtin, args: &[Expr]) -> Option<(&'static str, String)> {
+pub(crate) fn string_method(builtin: &Builtin, args: &[Expr]) -> Option<(&'static str, String)> {
     let text = |t: Type| match t {
         Type::Char | Type::Int => Some("int"),
         Type::String => Some("String"),

@@ -28,7 +28,7 @@ mod indexing;
 pub mod live_methods;
 mod monitors;
 mod moves;
-mod npe_messages;
+pub(crate) mod npe_messages;
 mod nullness;
 mod object_values;
 mod objects;
@@ -892,4 +892,25 @@ fn ascii_strings(class: &Class, facts: &mut Facts) {
             );
         }
     }
+}
+
+/// The value that `e` reads where it is a local that lowering holds a call's argument or receiver
+/// in until the call (`lower/argument_order.rs`), in method `m`; else `e`.
+pub(crate) fn held_value<'c>(class: &'c Class, m: usize, e: &'c Expr) -> &'c Expr {
+    let ExprKind::Var(name) = &e.kind else { return e };
+    if !crate::lower::held_local(name) {
+        return e;
+    }
+    let Some(method) = class.methods.get(m) else { return e };
+    let mut found = None;
+    for stmt in &method.body {
+        visit_stmt(stmt, &mut |_| {}, &mut |s| {
+            if let Stmt::Local { name: local, init: Some(init), .. } = s
+                && local == name
+            {
+                found = Some(init);
+            }
+        });
+    }
+    found.unwrap_or(e)
 }

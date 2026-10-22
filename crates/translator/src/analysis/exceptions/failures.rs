@@ -52,9 +52,10 @@ fn checks_null(cond: &Expr, v: &str, when: bool) -> bool {
 /// Whether `builtin` is a regular expression call whose pattern (and replacement) are constants
 /// that compile, or whose pattern is `Pattern.quote`'s, which matches its text and has no groups,
 /// so that it never throws.
-fn constant_pattern(class: &Class, builtin: &Builtin, args: &[Expr]) -> bool {
-    let text = |i: usize| args.get(i).and_then(|a| crate::analysis::constants::text(class, a));
-    let quoted = args.get(1).is_some_and(|a| {
+fn constant_pattern(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) -> bool {
+    let arg = |i: usize| args.get(i).map(|a| crate::analysis::held_value(class, m, a));
+    let text = |i: usize| arg(i).and_then(|a| crate::analysis::constants::text(class, a));
+    let quoted = arg(1).is_some_and(|a| {
         matches!(a.kind, ExprKind::Call { resolved: Some(m), .. }
             if class.methods[m].name == "quote"
                 && class.types[class.methods[m].class].name == "java.util.regex.Pattern")
@@ -153,8 +154,9 @@ fn sequence_failures_of(name: &str, builder: bool) -> Option<&'static [&'static 
 /// What a method of the library that the runtime implements may throw besides a
 /// `NullPointerException` for a null argument, by standard class: none when nothing, `"?"` when
 /// it is not known exactly.
-fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static [&'static str] {
+fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) -> &'static [&'static str] {
     const SIOOBE: &str = "java.lang.StringIndexOutOfBoundsException";
+    let held = |i: usize| crate::analysis::held_value(class, m, &args[i]);
     match builtin {
         Builtin::String(op) => match op {
             StringOp::Substring => &["java.lang.StringIndexOutOfBoundsException"],
@@ -195,10 +197,10 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             // (`IllegalArgumentException`), or a group the pattern lacks
             // (`IndexOutOfBoundsException`), as `java::regex`'s `parse_replacement` raises them.
             StringOp::ReplaceAll | StringOp::ReplaceFirst
-                if !crate::analysis::constants::text(class, &args[2])
+                if !crate::analysis::constants::text(class, held(2))
                     .is_some_and(|r| !r.contains(['$', '\\'])) =>
             {
-                let pattern = crate::analysis::constants::text(class, &args[1]);
+                let pattern = crate::analysis::constants::text(class, held(1));
                 if pattern.is_some_and(|p| java_runtime::regex::never_fails(p, None)) {
                     &["java.lang.IllegalArgumentException", "java.lang.IndexOutOfBoundsException"]
                 } else {
@@ -879,8 +881,8 @@ pub(super) fn runtime_failures(
                     let receiver = !checked[1..].iter().any(null);
                     out.push((NPE, "this call", receiver, if receiver { args[0].id } else { x.id }));
                 }
-                let failures = library_failure(class, builtin, args);
-                if !failures.is_empty() && !constant_pattern(class, builtin, args) {
+                let failures = library_failure(class, m, builtin, args);
+                if !failures.is_empty() && !constant_pattern(class, m, builtin, args) {
                     let checked = matches!(
                         builtin,
                         Builtin::String(
