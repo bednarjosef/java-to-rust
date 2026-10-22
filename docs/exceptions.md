@@ -445,7 +445,9 @@ Adding a suppressed exception does not read either one, unless the program calls
 with javac's code generator (`java/BytecodeNames.java`, `javac/bytecode_names.rs`), which tells
 how the class file names each method (`Gen.binaryQualifier` and the erased descriptor), each
 static field and each local: the slot `Gen` gives it, read after code generation, so the slots
-are javac's own rather than a copy of its rules. A lambda's body is a method whose first
+are javac's own rather than a copy of its rules. A program whose sources are a module that the
+JDK has too (javac's `jdk.compiler`) compiles as part of that module (`--patch-module`), as the
+unnamed module may not hold its packages. A lambda's body is a method whose first
 parameters are its captures; a local or anonymous class reads a captured local as
 `this.val$x`; javac's own locals are named too (the `s$` of a string `switch`). The rest of the
 message follows the JVM's rules (`analysis/npe_messages.rs`): a field chain up to five steps

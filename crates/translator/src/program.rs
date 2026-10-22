@@ -129,7 +129,12 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
     // A `catch` reads the message of a `NullPointerException`: it names the class file's code.
     if facts.npe_message_read.is_some() {
         let mut names = phase("class files", || {
-            javac::program_names(&source_files(program)?).map_err(|error| ProgramError { file: None, error })
+            let modules = modules::modules(&program.sources)
+                .into_iter()
+                .filter_map(|m| Some((m.name, m.file.parent()?.to_path_buf())))
+                .collect::<Vec<_>>();
+            javac::program_names(&source_files(program)?, &modules)
+                .map_err(|error| ProgramError { file: None, error })
         })?;
         names.add_jdk_switch_temps(switch_temps);
         phase("messages", || analysis::npe_messages(&class, &mut facts, &names)).map_err(located)?;

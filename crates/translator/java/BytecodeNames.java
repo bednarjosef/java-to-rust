@@ -27,7 +27,9 @@ import javax.tools.*;
  * compiled without {@code -g} decides: compiles the program as {@code javac} does, code
  * generation included, and prints what javac's code generator gave its code.
  *
- * <p>Usage: {@code java BytecodeNames FILE...}, or the source on standard input for one file.
+ * <p>Usage: {@code java BytecodeNames [--patch-module MODULE=ROOT]... FILE...}, or the source on
+ * standard input for one file. The files under the root of a module that the JDK has too, such
+ * as javac's {@code jdk.compiler}, compile as part of that module, as the JDK compiles them.
  * Prints one line, {@code {"java":"26","entries":[[CLASS,LINE,COLUMN,KIND,NAME,TEXT],...]}}:
  * the Java version, then for each use in the source (by the outermost class it is in, and the
  * line and column where it starts) of
@@ -67,12 +69,22 @@ public class BytecodeNames {
                 };
             }
         };
-        Iterable<? extends JavaFileObject> sources;
-        if (args.length > 0) {
-            List<File> files = new ArrayList<>();
-            for (String a : args) {
-                files.add(new File(a));
+        List<String> options = new ArrayList<>(List.of("-proc:none", "-Xlint:none", "-nowarn"));
+        List<File> files = new ArrayList<>();
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].equals("--patch-module") && i + 1 < args.length) {
+                // A root of the JDK's own module, such as javac's `jdk.compiler`: its packages
+                // compile only as part of that module.
+                String patch = args[++i];
+                if (java.lang.module.ModuleFinder.ofSystem().find(patch.split("=", 2)[0]).isPresent()) {
+                    options.addAll(List.of("--patch-module", patch));
+                }
+            } else {
+                files.add(new File(args[i]));
             }
+        }
+        Iterable<? extends JavaFileObject> sources;
+        if (!files.isEmpty()) {
             sources = standard.getJavaFileObjectsFromFiles(files);
         } else {
             String source = new String(System.in.readAllBytes(), StandardCharsets.UTF_8);
@@ -88,8 +100,7 @@ public class BytecodeNames {
                 }
             });
         }
-        JavacTaskImpl task = (JavacTaskImpl) compiler.getTask(null, discarding, diagnostics,
-                List.of("-proc:none", "-Xlint:none", "-nowarn"), null, sources);
+        JavacTaskImpl task = (JavacTaskImpl) compiler.getTask(null, discarding, diagnostics, options, null, sources);
         BytecodeNames names = new BytecodeNames(task);
         task.addTaskListener(names.listener());
         task.generate();

@@ -53,9 +53,19 @@ pub fn source_names(source: &str) -> Result<BytecodeNames, Error> {
     names(Vec::new(), Some(source))
 }
 
-/// The names of the code of a program's files.
-pub fn program_names(files: &[PathBuf]) -> Result<BytecodeNames, Error> {
-    names(files.iter().map(|f| f.as_os_str().to_owned()).collect(), None)
+/// The names of the code of a program's files. `modules` are the program's roots that are
+/// modules, by name: the files of one that the JDK has too (javac's `jdk.compiler`) compile as
+/// part of it, since the unnamed module may not hold its packages.
+pub fn program_names(files: &[PathBuf], modules: &[(String, PathBuf)]) -> Result<BytecodeNames, Error> {
+    let mut args = Vec::new();
+    for (name, root) in modules {
+        args.push("--patch-module".into());
+        let mut patch = std::ffi::OsString::from(format!("{name}="));
+        patch.push(root);
+        args.push(patch);
+    }
+    args.extend(files.iter().map(|f| f.as_os_str().to_owned()));
+    names(args, None)
 }
 
 fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<BytecodeNames, Error> {
