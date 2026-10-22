@@ -278,6 +278,10 @@ impl<'a> Gen<'a> {
             ExprKind::Bool(b) => Code::atom(b.to_string()),
             ExprKind::Str(s) if super::shared_strings() => Code::atom(self.string_literal(&rust_string(s))),
             ExprKind::Str(s) if s.is_empty() => Code::atom("java::JString::new()"),
+            ExprKind::Units(units) => {
+                let text = self.units_literal(units);
+                Code::atom(self.string_literal(&text))
+            }
             ExprKind::Str(s) => Code::atom(format!("java::JString::from({})", rust_string(s))),
             ExprKind::Var(name) => {
                 let rust = self.local(name);

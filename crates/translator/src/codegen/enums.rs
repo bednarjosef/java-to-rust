@@ -147,7 +147,7 @@ impl<'a> Gen<'a> {
         self.line("match name.as_bytes() {");
         self.indent += 1;
         for c in constants {
-            self.line(&format!("{} => {name}::{},", byte_string(&c.name), variant_name(&c.name)));
+            self.line(&format!("{} => {name}::{},", byte_string(c.name.as_bytes()), variant_name(&c.name)));
         }
         let throw = self.runtime("throw");
         self.line(&format!(
@@ -255,7 +255,7 @@ impl<'a> Gen<'a> {
         self.line("Ok(match name.as_bytes() {");
         self.indent += 1;
         for c in constants {
-            self.line(&format!("{} => {name}::{},", byte_string(&c.name), variant_name(&c.name)));
+            self.line(&format!("{} => {name}::{},", byte_string(c.name.as_bytes()), variant_name(&c.name)));
         }
         self.line(&format!(
             "_ => return Err({exception}::new(\"java.lang.IllegalArgumentException\", format!(\"No enum constant {}.{{name}}\"))),",

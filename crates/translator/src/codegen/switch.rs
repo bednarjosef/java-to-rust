@@ -184,7 +184,8 @@ impl<'a> Gen<'a> {
         match &e.kind {
             ExprKind::Int(i) => i.to_string(),
             ExprKind::Char(c) => c.to_string(),
-            ExprKind::Str(s) => byte_string(s),
+            ExprKind::Str(s) => byte_string(s.as_bytes()),
+            ExprKind::Units(units) => byte_string(&super::strings::wtf8_of(units)),
             ExprKind::EnumConstant { class, ordinal } => self.constant_path(*class, *ordinal),
             ExprKind::Static { class, name } => cell_name(&self.class.types[*class], name),
             _ => unreachable!("lowering keeps only constant case labels"),
@@ -623,11 +624,10 @@ impl<'a> Gen<'a> {
     }
 }
 
-/// A string literal as a Rust byte string literal, for matching a string's bytes: its UTF-8,
-/// which is its WTF-8.
-pub(super) fn byte_string(s: &str) -> String {
+/// A string's WTF-8 bytes as a Rust byte string literal, for matching a string's bytes.
+pub(super) fn byte_string(bytes: &[u8]) -> String {
     let mut out = String::from("b\"");
-    for b in s.bytes() {
+    for &b in bytes {
         match b {
             b'"' => out.push_str("\\\""),
             b'\\' => out.push_str("\\\\"),

@@ -2761,12 +2761,11 @@ fn object_parameters_used_only_through_are_borrowed() {
 }
 
 #[test]
-fn strings_with_unpaired_surrogates_are_rejected() {
-    let err = java_to_rust::translate(
+fn a_string_literal_with_an_unpaired_surrogate_is_its_wtf8_bytes() {
+    let rust = translate(
         "class A { public static void main(String[] args) { System.out.println(\"a\\uD800b\".length()); } }",
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("a string with an unpaired surrogate not supported yet"), "{err}");
+    );
+    assert_contains(&rust, &["const { java::wtf8_bytes(b\"a\\xed\\xa0\\x80b\") }"]);
 }
 
 #[test]

@@ -86,6 +86,24 @@ pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
 pub use program::{Lowered, Rejected, census_lower_program, lower_program, tolerant_lower_program};
 
+/// The UTF-16 code units of a string that `JavaTree` wrote: a JSON string, or the array of its code
+/// units where it has a lone surrogate, which JSON cannot hold (`JavaTree.string`).
+fn string_units(value: &Value) -> Option<Vec<u16>> {
+    if let Some(text) = value.as_str() {
+        return Some(text.encode_utf16().collect());
+    }
+    value.as_array()?.iter().map(|u| u.as_u64().and_then(|u| u16::try_from(u).ok())).collect()
+}
+
+/// The literal of the string of code units `units`: a `Str` where they are well-formed UTF-16, else
+/// `Units`.
+fn string_literal(units: Vec<u16>) -> ExprKind {
+    match String::from_utf16(&units) {
+        Ok(text) => ExprKind::Str(text),
+        Err(_) => ExprKind::Units(units),
+    }
+}
+
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
     charsets::check(unit)?;
@@ -799,9 +817,9 @@ impl<'t> Lowering<'t> {
             "LONG_LITERAL" => ExprKind::Long(self.number(node)?),
             "DOUBLE_LITERAL" => ExprKind::Double(self.number(node)?),
             "BOOLEAN_LITERAL" => ExprKind::Bool(node.0["value"] == true),
-            "STRING_LITERAL" => match node.0["value"].as_str() {
-                Some(text) => ExprKind::Str(text.to_string()),
-                None => return unsupported(node, "a string with an unpaired surrogate"),
+            "STRING_LITERAL" => match string_units(&node.0["value"]) {
+                Some(units) => string_literal(units),
+                None => return unsupported(node, "this string literal"),
             },
             "CHAR_LITERAL" => self.char_literal(node)?,
             "FLOAT_LITERAL" => self.float_literal(node)?,

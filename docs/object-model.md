@@ -708,7 +708,10 @@ normal text stays plain UTF-8 at no cost:
   the plain owned string (a `Vec<u8>`), and `java::JStr` the shared one (an `Arc` of the same
   bytes, see 1.6); both deref to `Wtf8`. `Type::String` is `java::JString` (or `java::JStr`
   where strings are shared), a borrowed string parameter is a `&java::Wtf8`, and a literal is
-  `java::wtf8("..")`, a `&'static Wtf8` view of its UTF-8 made at compile time. The runtime's
+  `java::wtf8("..")`, a `&'static Wtf8` view of its UTF-8 made at compile time. A literal with
+  a lone surrogate, which javac's tree gives as its code units, is
+  `const { java::wtf8_bytes(b"..") }`: its WTF-8 bytes, checked when Rust compiles the program;
+  a `case` label folded from such literals matches the same bytes. The runtime's
   string functions take `&Wtf8` and return `JString`; a function that needs a `&str` (a
   regular expression, a format string, a path) checks for lone surrogates first: a path or a
   number to parse turns one into `?` as Java does, a pattern ends the program loudly.
@@ -731,9 +734,8 @@ normal text stays plain UTF-8 at no cost:
   against byte string literals (`b"..."`), a string constant in a `case` by its text.
 
 What does not hold a lone surrogate exactly: the message of an exception the runtime raises
-(a Rust `String`), a thread's name (Rust's), and the text of a charset or a `Class`. A string
-literal with a lone surrogate is rejected ("a string with an unpaired surrogate").
+(a Rust `String`), a thread's name (Rust's), and the text of a charset or a `Class`.
 
-Plan, not built yet: `known-failures/LoneSurrogateCompareTo.java`, the strings fuzzer's seeds
-18, 51 and 396 and four javac cases (`scripts/javac-check/known-differences`) become corpus
-programs and checks that pass, and javac is timed before and after.
+Plan, not built yet: the four javac cases of `scripts/javac-check/known-differences` (char
+literals with a lone surrogate) are checked with a javac translated from these strings and leave
+the list, and javac is timed before and after.

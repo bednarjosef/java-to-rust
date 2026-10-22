@@ -139,7 +139,7 @@ pub use unsigned::{
     try_parse_unsigned,
 };
 pub use vm::*;
-pub use wtf8::{JString, Piece, Wtf8, wtf8};
+pub use wtf8::{JString, Piece, Wtf8, wtf8, wtf8_bytes};
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
 pub struct Double(pub f64);

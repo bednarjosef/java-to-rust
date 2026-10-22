@@ -240,7 +240,7 @@ impl<'t> Lowering<'t> {
                     return Ok(CaseLabel::Value(named));
                 }
                 let kind = match (fold(constant), ty) {
-                    (Some(Folded::Text(s)), Type::String) => ExprKind::Str(s),
+                    (Some(Folded::Text(units)), Type::String) => super::string_literal(units),
                     (Some(Folded::Number(v)), Type::Char) => ExprKind::Char(v as u16),
                     (Some(Folded::Number(v)), Type::Int | Type::Short | Type::Byte) => {
                         ExprKind::Int(v as i32)
@@ -258,7 +258,8 @@ impl<'t> Lowering<'t> {
 enum Folded {
     /// An integral value (`int`, `char`, `short`, `byte` or `long`), already wrapped to its type.
     Number(i64),
-    Text(String),
+    /// A string, as its UTF-16 code units.
+    Text(Vec<u16>),
 }
 
 /// `v` wrapped to the integral type named `ty`, as Java's arithmetic in that type leaves it.
@@ -282,21 +283,23 @@ fn fold(node: Node) -> Option<Folded> {
         Folded::Text(_) => None,
     };
     let text = |f: Folded, ty: &str| match f {
-        Folded::Text(s) => Some(s),
-        Folded::Number(v) if ty == "char" => Some(char::from_u32(v as u32)?.to_string()),
-        Folded::Number(v) if ty != "boolean" => Some(v.to_string()),
+        Folded::Text(units) => Some(units),
+        Folded::Number(v) if ty == "char" => Some(vec![v as u16]),
+        Folded::Number(v) if ty != "boolean" => Some(v.to_string().encode_utf16().collect()),
         Folded::Number(_) => None,
     };
     if ty == "java.lang.String" {
         return match node.kind() {
-            "STRING_LITERAL" => node.0["value"].as_str().map(|s| Folded::Text(s.to_string())),
-            "IDENTIFIER" | "MEMBER_SELECT" => Some(Folded::Text(node.symbol()?.constant?.to_string())),
+            "STRING_LITERAL" => super::string_units(&node.0["value"]).map(Folded::Text),
+            "IDENTIFIER" | "MEMBER_SELECT" => {
+                super::string_units(node.get("symbol")?.0.get("constant")?).map(Folded::Text)
+            }
             "PARENTHESIZED" => fold(node.get("expression")?),
             "PLUS" => {
                 let (l, r) = (node.get("leftOperand")?, node.get("rightOperand")?);
-                let left = text(fold(l)?, l.java_type())?;
-                let right = text(fold(r)?, r.java_type())?;
-                Some(Folded::Text(left + &right))
+                let mut left = text(fold(l)?, l.java_type())?;
+                left.extend(text(fold(r)?, r.java_type())?);
+                Some(Folded::Text(left))
             }
             _ => None,
         };

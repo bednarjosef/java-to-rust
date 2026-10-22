@@ -24,6 +24,7 @@ impl<'a> Gen<'a> {
         match &e.kind {
             _ if self.nullable(e) => self.deref(e),
             ExprKind::Str(s) => self.wtf8_literal(s),
+            ExprKind::Units(units) => self.units_literal(units),
             ExprKind::Var(name) => self.local(name),
             ExprKind::Field { object, name } if self.field_in_place(object, name) => self.object_place(e),
             _ => self.expr(e).at(ATOM),

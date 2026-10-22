@@ -73,7 +73,7 @@ never freed.
   units exactly, lone surrogates included, and halves of a pair that a concatenation or an append
   brings together join. The `String` methods count in UTF-16 units as Java does (`indexOf`,
   `substring`, `charAt`, the code point methods) and throw what Java throws, with Java's
-  messages. A string literal with a lone surrogate is rejected.
+  messages.
 - **`StringBuilder` and `StringBuffer`** are `java::StringBuilder`, a shared handle to UTF-16
   units: every holder sees changes, and `append` chains stay chains. Where two threads may reach
   builders they are `java::SharedStringBuilder`.

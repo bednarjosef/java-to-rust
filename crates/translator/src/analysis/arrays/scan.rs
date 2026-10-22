@@ -591,6 +591,7 @@ impl<'m> Walk<'m> {
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
             | ExprKind::Str(_)
+            | ExprKind::Units(_)
             | ExprKind::Null
             | ExprKind::This
             | ExprKind::Static { .. }

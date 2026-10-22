@@ -18,6 +18,57 @@ pub const fn wtf8(s: &str) -> &Wtf8 {
     Wtf8::new(s)
 }
 
+/// The text of a string literal that holds a lone surrogate, given as its WTF-8 bytes. Written in
+/// a `const` block, it checks the bytes when the program is compiled.
+///
+/// # Panics
+/// If the bytes are not WTF-8, or hold a high surrogate's 3-byte form directly before a low one's.
+pub const fn wtf8_bytes(bytes: &[u8]) -> &Wtf8 {
+    assert!(well_formed(bytes), "a string literal that is not WTF-8");
+    // SAFETY: the bytes were just checked.
+    unsafe { Wtf8::from_bytes_unchecked(bytes) }
+}
+
+/// Whether `bytes` are WTF-8 in which no high surrogate's 3-byte form comes directly before a low
+/// one's.
+const fn well_formed(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    let mut after_high = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let (len, low, high) = match b {
+            0x00..=0x7F => (1, 0x80, 0xBF),
+            0xC2..=0xDF => (2, 0x80, 0xBF),
+            0xE0 => (3, 0xA0, 0xBF),
+            0xE1..=0xEF => (3, 0x80, 0xBF),
+            0xF0 => (4, 0x90, 0xBF),
+            0xF1..=0xF3 => (4, 0x80, 0xBF),
+            0xF4 => (4, 0x80, 0x8F),
+            _ => return false,
+        };
+        if i + len > bytes.len() {
+            return false;
+        }
+        if len > 1 && (bytes[i + 1] < low || bytes[i + 1] > high) {
+            return false;
+        }
+        let mut j = 2;
+        while j < len {
+            if bytes[i + j] & 0xC0 != 0x80 {
+                return false;
+            }
+            j += 1;
+        }
+        let surrogate = b == 0xED && bytes[i + 1] >= 0xA0;
+        if after_high && surrogate && bytes[i + 1] >= 0xB0 {
+            return false;
+        }
+        after_high = surrogate && bytes[i + 1] < 0xB0;
+        i += len;
+    }
+    true
+}
+
 /// A string slice of WTF-8 bytes.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
@@ -654,6 +705,19 @@ mod tests {
 
     fn units(s: &Wtf8) -> Vec<u16> {
         s.units().collect()
+    }
+
+    #[test]
+    fn literal_bytes_are_checked() {
+        const LONE: &Wtf8 = wtf8_bytes(b"a\xed\xa0\x80b");
+        assert_eq!(units(LONE), [0x61, 0xD800, 0x62]);
+        assert!(well_formed("aé😀".as_bytes()));
+        assert!(well_formed(b"\xed\xb0\x80\xed\xa0\x80"));
+        // The halves of a pair, a truncated character, an overlong form and a stray byte.
+        assert!(!well_formed(b"\xed\xa0\xbd\xed\xb8\x80"));
+        assert!(!well_formed(b"\xe2\x82"));
+        assert!(!well_formed(b"\xc0\xaf"));
+        assert!(!well_formed(b"\x80"));
     }
 
     #[test]

@@ -26,6 +26,7 @@ impl<'a> Gen<'a> {
         if super::shared_strings() {
             return match &e.kind {
                 ExprKind::Str(s) => self.wtf8_literal(s),
+                ExprKind::Units(units) => self.units_literal(units),
                 ExprKind::Var(name) => format!("{}.as_wtf8()", self.local(name)),
                 ExprKind::Field { object, name } if self.field_in_place(object, name) => {
                     format!("{}.as_wtf8()", self.object_place(e))
@@ -35,6 +36,7 @@ impl<'a> Gen<'a> {
         }
         match &e.kind {
             ExprKind::Str(s) => self.wtf8_literal(s),
+            ExprKind::Units(units) => self.units_literal(units),
             ExprKind::Var(name) if self.borrowed.contains(name) => self.local(name),
             ExprKind::Var(name) => format!("&{}", self.local(name)),
             ExprKind::Field { object, name } if self.field_in_place(object, name) => {
@@ -127,10 +129,17 @@ impl<'a> Gen<'a> {
         format!("{}({})", self.runtime("wtf8"), rust_string(s))
     }
 
+    /// A string literal with a lone surrogate, of code units `units`, as a `&'static java::Wtf8`:
+    /// its WTF-8 bytes, which Rust checks when it compiles the program.
+    pub(super) fn units_literal(&mut self, units: &[u16]) -> String {
+        format!("const {{ {}({}) }}", self.runtime("wtf8_bytes"), byte_string(&wtf8_of(units)))
+    }
+
     /// A string expression for comparing, without copying variables.
     pub(super) fn str_value(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             ExprKind::Str(s) => self.wtf8_literal(s),
+            ExprKind::Units(units) => self.units_literal(units),
             ExprKind::Var(name) => self.local(name),
             ExprKind::Field { object, name } if self.field_in_place(object, name) => self.object_place(e),
             _ => self.expr(e).at(CMP + 1),
@@ -215,6 +224,7 @@ impl<'a> Gen<'a> {
                 });
             }
             ExprKind::Str(s) => out.push(Part::Lit(s.clone())),
+            ExprKind::Units(units) => out.push(Part::Text(Code::atom(self.units_literal(units)))),
             ExprKind::Int(v) => out.push(Part::Lit(v.to_string())),
             ExprKind::Long(v) => out.push(Part::Lit(v.to_string())),
             ExprKind::Bool(v) => out.push(Part::Lit(v.to_string())),
@@ -371,4 +381,24 @@ impl<'a> Gen<'a> {
         let args: String = args.iter().map(|a| format!(", {a}")).collect();
         Code::atom(format!("{mac}(\"{template}\"{args})"))
     }
+}
+
+/// The WTF-8 bytes of the UTF-16 code units `units`: a pair is its character's 4-byte form, a lone
+/// surrogate its own 3-byte form, as `java::JString` holds them.
+pub(super) fn wtf8_of(units: &[u16]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for unit in char::decode_utf16(units.iter().copied()) {
+        match unit {
+            Ok(c) => out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes()),
+            Err(lone) => {
+                let u = lone.unpaired_surrogate();
+                out.extend_from_slice(&[
+                    0xE0 | (u >> 12) as u8,
+                    0x80 | (u >> 6 & 0x3F) as u8,
+                    0x80 | (u & 0x3F) as u8,
+                ]);
+            }
+        }
+    }
+    out
 }

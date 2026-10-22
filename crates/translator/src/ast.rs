@@ -669,6 +669,9 @@ pub enum ExprKind {
     Float(f32),
     Bool(bool),
     Str(String),
+    /// A string literal that holds a surrogate without its other half, as its UTF-16 code units,
+    /// which a Rust `String` cannot hold.
+    Units(Vec<u16>),
     /// The `null` literal; its type is `Type::Null` until it meets a reference type.
     Null,
     Var(String),
