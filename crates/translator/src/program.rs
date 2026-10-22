@@ -10,7 +10,7 @@ mod reach;
 mod survey;
 
 pub use census::{Census, census_program};
-pub use modules::Contents as ModuleContents;
+pub use modules::{Contents as ModuleContents, loader_name};
 pub use reach::{
     CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind,
     PRINT_FORMATTED, REGEX_CALLS, Reach, STRING_STREAMS, TRANSLATED_LANG_ACCESS,

@@ -130,6 +130,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let class_file = lowering.class_file_names(&types);
         let notes = lowering.notes.take();
         let annotation_classes = lowering.annotation_classes.take();
+        let module_labels = Default::default();
         let class = Class {
             name,
             types,
@@ -140,6 +141,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             notes,
             annotation_classes,
             shared_strings: false,
+            module_labels,
         };
         Ok((class, lowering.real.clone(), failed))
     })

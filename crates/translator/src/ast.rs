@@ -302,6 +302,10 @@ pub struct Class {
     /// Every string is a `java::JStr`, a shared text with an identity, as the program compares
     /// strings by reference where only their identity decides (`analysis::string_identity`).
     pub shared_strings: bool,
+    /// The module and class loader of each package of a named module, as HotSpot names them with
+    /// a class in a `ClassCastException` ("module java.base of loader 'bootstrap'"). A package
+    /// that is not here is in the unnamed module of the system class loader.
+    pub module_labels: std::collections::HashMap<String, String>,
 }
 
 /// An assumption of the translation at a place of the program: the method (index into

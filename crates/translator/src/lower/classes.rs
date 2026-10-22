@@ -334,7 +334,9 @@ impl<'t> Lowering<'t> {
         if interfaces.is_empty() {
             return Ok(ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)]));
         }
-        Ok(ExprKind::ArrayLit(interfaces))
+        // A `Class[]` may be an `Object[]` (`covariant`), whose elements convert to `Object`.
+        let element = self.covariant_array(Type::array(Type::JavaClass)).element();
+        Ok(ExprKind::ArrayLit(interfaces.into_iter().map(|i| self.convert(i, element)).collect()))
     }
 
     /// `T.class`, a class literal as a value.
