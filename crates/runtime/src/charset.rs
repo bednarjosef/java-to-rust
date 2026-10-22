@@ -83,6 +83,13 @@ impl Charset {
             .map(|&(_, charset)| charset)
     }
 
+    /// The charset that `forName(name)` finds, without failing: `None` where the name is not
+    /// one of a charset that the runtime has. The translator finds the charset of a constant name
+    /// with it.
+    pub fn known(name: &str) -> Option<Charset> {
+        Charset::lookup(name)
+    }
+
     /// `name()`: the canonical name, which `toString()` gives too.
     pub fn name(self) -> &'static str {
         match self {

@@ -506,7 +506,8 @@ impl<'t> Lowering<'t> {
             {
                 Ok(Type::class(ENUM))
             }
-            "java.nio.charset.Charset" => Ok(Type::Charset),
+            // The JDK's classes of the standard charsets too (`charsets::STANDARD_CHARSET_CLASSES`).
+            _ if charsets::is_charset_type(name) => Ok(Type::Charset),
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),

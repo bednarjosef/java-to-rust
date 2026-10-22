@@ -141,6 +141,13 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     // JDK's code of `Charset` looks charsets up among all of them.
     "java.nio.charset.Charset",
     "java.nio.charset.StandardCharsets",
+    // The JDK's classes of the charsets the runtime has (`lower/charsets.rs`).
+    "sun.nio.cs.ISO_8859_1",
+    "sun.nio.cs.US_ASCII",
+    "sun.nio.cs.UTF_16",
+    "sun.nio.cs.UTF_16BE",
+    "sun.nio.cs.UTF_16LE",
+    "sun.nio.cs.UTF_8",
     "sun.util.logging.PlatformLogger",
 ];
 
