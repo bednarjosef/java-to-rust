@@ -693,11 +693,56 @@ pub const TRANSLATED_PROPERTIES: JdkMethod =
 /// The methods of `JavaLangAccess` that are the translator's static methods of the same name and
 /// type in `TRANSLATED_LANG_ACCESS_CLASS` (`java/overlay/jdk/internal/access/`), as
 /// `SharedSecrets.getJavaLangAccess()` is null in a translated program (see `lower.rs`).
-pub const TRANSLATED_LANG_ACCESS: &[&str] =
-    &["countPositives", "countNonZeroAscii", "uncheckedNewStringWithLatin1Bytes", "inflateBytesToChars"];
+pub const TRANSLATED_LANG_ACCESS: &[&str] = &[
+    "countPositives",
+    "countNonZeroAscii",
+    "uncheckedNewStringWithLatin1Bytes",
+    "inflateBytesToChars",
+    "uncheckedNewStringOrThrow",
+    "uncheckedGetBytesOrThrow",
+];
 
 /// The class of `TRANSLATED_LANG_ACCESS`.
 pub const TRANSLATED_LANG_ACCESS_CLASS: &str = "jdk.internal.access.TranslatedLangAccess";
+
+/// Static methods of the JDK whose calls are calls of a static method of the translator's
+/// (`java/overlay`) with the same type, by the JDK's method and the translator's class and name
+/// (see `lower.rs`). Reachability goes to the translator's method, and not into the JDK's.
+pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
+    // The default file system, whose provider a property could name and reflection create (the
+    // property is not set in a translated program, see `lower::system`), and which the JDK finds
+    // by the URI `file:///` (`sun/nio/fs/TranslatedFiles.java`).
+    (
+        (
+            "java.nio.file.FileSystems.DefaultFileSystemHolder",
+            "defaultFileSystem",
+            "()java.nio.file.FileSystem",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "defaultFileSystem"),
+    ),
+    // The first mismatch of two arrays, which the JDK finds reading memory at offsets from the
+    // arrays' bases; the translator's leaves every element to its callers' loops
+    // (`jdk/internal/util/TranslatedArraysSupport.java`).
+    (
+        (
+            "jdk.internal.util.ArraysSupport",
+            "vectorizedMismatch",
+            "(java.lang.Object,long,java.lang.Object,long,int,int)int",
+        ),
+        ("jdk.internal.util.TranslatedArraysSupport", "vectorizedMismatch"),
+    ),
+];
+
+/// The translator's class and method that a call of the JDK's method `(owner, name, signature)`
+/// calls instead (`REDIRECTED_CALLS`), where a variable-arity parameter is written as an array
+/// (javac writes `T...`).
+pub fn redirected_call(owner: &str, name: &str, signature: &str) -> Option<(&'static str, &'static str)> {
+    let signature = signature.replace("...", "[]");
+    REDIRECTED_CALLS
+        .iter()
+        .find(|((o, n, s), _)| (*o, *n, *s) == (owner, name, &*signature))
+        .map(|(_, to)| *to)
+}
 
 /// A method of the JDK, by class, name and javac's type of it.
 pub type JdkMethod = (&'static str, &'static str, &'static str);
@@ -1493,6 +1538,11 @@ impl<'t> Walk<'t> {
             "METHOD" if owner == "java.lang.System" && name == "getProperties" => {
                 let (class, method, signature) = TRANSLATED_PROPERTIES;
                 self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
+            // The translator's methods that replace some of the JDK's (`REDIRECTED_CALLS`).
+            "METHOD" if let Some((class, to)) = redirected_call(&owner, &name, text(symbol, "type")) => {
+                let signature = text(symbol, "type").to_string();
+                self.work.push(Item::Method((class.into(), to.into(), signature)));
             }
             // The translator's code for what `JavaLangAccess` does (see `lower.rs`).
             "METHOD"

@@ -204,6 +204,7 @@ impl<'a> Gen<'a> {
             | Native::FileSeek
             | Native::FileSetLength => self.file_native(native, args, id),
             Native::FileSystem(name) => self.file_system_native(name, args, ty, id),
+            Native::Unix(name) => self.unix_native(name, args, ty),
             // The lowering drops its statement; anywhere else it is the unit it returns.
             Native::Nothing => Code::atom("()"),
             Native::CdsConfigStatus => call(self, "cds_config_status", vec![]),

@@ -269,7 +269,9 @@ class Thread {
     public String toString() {
         String groupName = "";
         if (!started || isAlive()) {
-            groupName = group != null ? group.getName() : "main";
+            // Read once, so that the test covers the call.
+            ThreadGroup g = group;
+            groupName = g != null ? g.getName() : "main";
         }
         return "Thread[#" + tid + "," + name + "," + priority + "," + groupName + "]";
     }
