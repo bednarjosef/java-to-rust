@@ -3270,7 +3270,10 @@ fn a_method_of_a_constant_body_that_overrides_nothing_is_a_method_of_the_enum() 
             public static void main(String[] args) { System.out.println(Op.TWICE.apply(4)); }
         }",
     );
-    assert_contains(&rust, &["AOp::Twice => {\n                self.twice(a)", "fn twice(self, x: i32) -> i32 {"]);
+    assert_contains(
+        &rust,
+        &["AOp::Twice => {\n                self.twice(a)", "fn twice(self, x: i32) -> i32 {"],
+    );
     // Two of one name and signature would be two methods that the calls cannot tell apart.
     let error = java_to_rust::translate(
         "public class A {
@@ -5360,4 +5363,39 @@ fn an_analysis_error_names_its_file_where_another_file_has_code_at_its_position(
         piece["errors"].as_array().expect("errors").len()
     };
     assert_eq!((errors("p.Fine"), errors("p.Rank")), (0, 1));
+}
+
+#[test]
+fn a_string_constant_compared_with_what_a_method_returns_is_compared_as_text_with_a_note() {
+    let java = "public class A {
+        static final String ALL = \".*\";
+        static String pattern(String s) { return s.equals(\"*\") ? ALL : s.replace(\".\", \"\\\\.\"); }
+        static String direct(String s) { if (s.isEmpty()) { return ALL; } return s + \"!\"; }
+        public static void main(String[] args) {
+            String p = direct(args.length > 0 ? args[0] : \"\");
+            System.out.println(p == ALL);
+            System.out.println(direct(\"x\") != ALL);
+        }
+    }";
+    let (rust, notes) = java_to_rust::translate_with_notes(java).expect("translates");
+    assert_contains(&rust, &["java::println!(\"{}\", p == String::from(A_ALL));"]);
+    let messages: Vec<String> =
+        notes.iter().map(|n| format!("{}:{}: {}", n.pos.line, n.pos.column, n.message)).collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages[0].starts_with(
+            "7:32: `==` on strings compared as text: assumes that no string that `A.direct` computes"
+        ),
+        "{messages:?}"
+    );
+    // A string that the method does not return as the constant itself is still rejected.
+    let error = java_to_rust::translate(
+        "public class A {
+            static final String ALL = \".*\";
+            static String other(String s) { return s + \"!\"; }
+            public static void main(String[] args) { System.out.println(other(\"x\") == ALL); }
+        }",
+    )
+    .expect_err("the method never returns the constant");
+    assert!(error.to_string().contains("== on strings compares references"), "{error}");
 }

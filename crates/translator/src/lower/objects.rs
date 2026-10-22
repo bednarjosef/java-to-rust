@@ -73,6 +73,7 @@ impl<'t> Lowering<'t> {
             catch_panics: false,
             stubbing: Cell::new(false),
             stubbed: Default::default(),
+            notes: Default::default(),
             body_methods: Default::default(),
             body_helpers: Default::default(),
             annotation_types: Default::default(),

@@ -120,7 +120,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let raised = lowering.raised_objects(&types, &methods);
         let name = first.str("simpleName").to_string();
         let class_file = lowering.class_file_names(&types);
-        let class = Class { name, types, methods, hierarchy, raised, class_file };
+        let notes = lowering.notes.take();
+        let class = Class { name, types, methods, hierarchy, raised, class_file, notes };
         Ok((class, lowering.real.clone(), failed))
     })
 }
@@ -223,7 +224,8 @@ impl<'t> Lowering<'t> {
     /// the program's comparison of two of them is lowered that way too: constant expressions
     /// (literals, constant variables and their concatenations, which the JVM shares), the result
     /// of `intern()`, and a conditional of those. Any other string may be a copy with the same
-    /// text, and is rejected.
+    /// text, and is rejected, but for a constant compared with what a method returns that returns
+    /// it on some path, which is compared as text with a note (`constant_or_computed`).
     /// Whether the string `node` is one that Java interns: a constant expression, the result of
     /// `intern()`, a conditional of two such, or a call of a method that no other method
     /// overrides and that only returns such, followed `depth` calls deep.
@@ -265,6 +267,79 @@ impl<'t> Lowering<'t> {
         }
     }
 
+    /// Whether `node`, `a == b` of two strings, compares a constant with what a method returns
+    /// that returns that constant on some path and computes the string on the others (javac's
+    /// `MatchingUtils`: `pattern == allMatchesString`): the method is one that no other overrides,
+    /// called on that side or as the value of a local set once from the call. Compared as text,
+    /// this is wrong only if a string that the method computes has the constant's text, which the
+    /// translation assumes it does not: the note that says so, for the program's code.
+    fn constant_or_computed(&self, node: Node<'t>) -> Option<String> {
+        let (left, right) = (node.get("leftOperand")?, node.get("rightOperand")?);
+        let (constant, other) = match (switch::constant_text(left), switch::constant_text(right)) {
+            (Some(c), None) => (c, right),
+            (None, Some(c)) => (c, left),
+            _ => return None,
+        };
+        let call = match other.kind() {
+            "METHOD_INVOCATION" => other,
+            "IDENTIFIER" => self.set_once_from_call(other.str("name"))?,
+            _ => return None,
+        };
+        let symbol = call.symbol()?;
+        let m = self.method_index(&symbol)?;
+        let declaration = self.methods[m].node;
+        let fixed = symbol.is_static
+            || declaration.has_flag("PRIVATE")
+            || declaration.has_flag("FINAL")
+            || self.types[self.methods[m].owner].node.has_flag("FINAL");
+        let body = declaration.get("body")?;
+        let mut returns = Vec::new();
+        fn collect<'t>(n: Node<'t>, out: &mut Vec<Option<Node<'t>>>) {
+            match n.kind() {
+                "RETURN" => out.push(n.get("expression")),
+                "LAMBDA_EXPRESSION" | "CLASS" | "ENUM" | "RECORD" | "INTERFACE" => {}
+                _ => charsets::children(n).into_iter().for_each(|c| collect(c, out)),
+            }
+        }
+        collect(body, &mut returns);
+        let returns_constant =
+            returns.iter().any(|r| r.and_then(switch::constant_text).is_some_and(|c| c == constant));
+        (fixed && returns_constant).then(|| {
+            format!(
+                "`==` on strings compared as text: assumes that no string that `{}.{}` computes has the \
+                 text {constant:?} of the constant it returns",
+                symbol.owner, symbol.name
+            )
+        })
+    }
+
+    /// The call that local `name` of the method being lowered is set from: its one declaration's
+    /// initializer, where the method declares one local of that name and assigns it nowhere else.
+    fn set_once_from_call(&self, name: &str) -> Option<Node<'t>> {
+        let method = self.methods[self.method_ctx.get()?].node.get("body")?;
+        let (mut declarations, mut assigned) = (Vec::new(), false);
+        fn walk<'t>(n: Node<'t>, name: &str, declarations: &mut Vec<Node<'t>>, assigned: &mut bool) {
+            match n.kind() {
+                "VARIABLE" if n.str("name") == name => declarations.push(n),
+                "ASSIGNMENT" | "PLUS_ASSIGNMENT"
+                    if n.get("variable")
+                        .is_some_and(|v| v.kind() == "IDENTIFIER" && v.str("name") == name) =>
+                {
+                    *assigned = true
+                }
+                _ => {}
+            }
+            charsets::children(n).into_iter().for_each(|c| walk(c, name, declarations, assigned));
+        }
+        walk(method, name, &mut declarations, &mut assigned);
+        match (&declarations[..], assigned) {
+            ([declaration], false) => {
+                declaration.get("initializer").filter(|i| i.kind() == "METHOD_INVOCATION")
+            }
+            _ => None,
+        }
+    }
+
     fn library_string_comparison(
         &self,
         node: Node<'t>,
@@ -277,7 +352,11 @@ impl<'t> Lowering<'t> {
             .iter()
             .all(|side| node.get(side).is_some_and(|n| self.interned(n, 3)));
         if !library && !both_interned {
-            return error(node.pos(), "== on strings compares references; not supported yet");
+            let Some(message) = self.constant_or_computed(node) else {
+                return error(node.pos(), "== on strings compares references; not supported yet");
+            };
+            let method = self.method_ctx.get();
+            self.notes.borrow_mut().push(crate::ast::Note { method, pos: node.pos(), message });
         }
         let equal = ExprKind::Builtin(Builtin::ObjectsEquals, vec![left, right]);
         Ok(match op {
@@ -379,6 +458,8 @@ struct Lowering<'t> {
     rejected_classes: RefCell<std::collections::BTreeMap<usize, Error>>,
     /// The methods that are a census's stubs.
     stubbed: RefCell<std::collections::BTreeSet<usize>>,
+    /// What lowering assumed (see `ast::Note`).
+    notes: RefCell<Vec<crate::ast::Note>>,
     /// The methods of enums that only the bodies of their constants declare, each implementing a
     /// method of an interface that the enum leaves to it (see `constant_bodies::body_methods`).
     body_methods: std::collections::HashSet<usize>,

@@ -107,7 +107,11 @@ never freed.
   `newDecoder()`/`newEncoder()` give the JDK's own coders of the six charsets
   (`java/overlay/sun/nio/cs/TranslatedCoders.java`).
 - `==` on strings is rejected, except where Java's sharing makes identity equal to equal text:
-  both sides constants, `intern()` calls, or methods that return only such strings.
+  both sides constants, `intern()` calls, or methods that return only such strings. A
+  constant compared with a call of a method that no other overrides and that returns that
+  constant on some path (or with a local set once from such a call) is compared as text, with
+  a note printed at translation: this is wrong only if a string that the method computes has
+  the constant's text.
 
 ## Classes and objects
 

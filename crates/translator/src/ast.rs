@@ -291,6 +291,17 @@ pub struct Class {
     pub raised: Vec<Expr>,
     /// What the class files name that lowering knows from javac's tree.
     pub class_file: ClassFileNames,
+    /// What the translation assumed where Java's meaning depends on something it does not
+    /// follow, which the translator prints when it translates.
+    pub notes: Vec<Note>,
+}
+
+/// An assumption of the translation at a place of the program: the method (index into
+/// `Class::methods`) whose code it is in, the position, and what is assumed.
+pub struct Note {
+    pub method: Option<usize>,
+    pub pos: Pos,
+    pub message: String,
 }
 
 /// What the class files that javac writes name, where lowering knows it from javac's tree: the
