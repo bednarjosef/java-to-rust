@@ -42,9 +42,15 @@ public class FormatFailuresCaught {
         System.out.println(trace("%s and %s", "x", "y"));
         System.out.println(trace("%s and %s", "x"));
         print("%d%%", 7);
-        print("%2$s", 7);
+        print("%d %s and more", 7);
         print("%z", 7);
-        print("%c", 0x110000);
+        print("<%c>", 0x110000);
+        try {
+            Object[] parts = {"a", "b"};
+            System.out.format("%s, %s, %s.", parts);
+        } catch (IllegalArgumentException e) {
+            System.out.println(" format: " + e.getMessage());
+        }
         try {
             System.out.println("%d".formatted("text"));
         } catch (RuntimeException e) {

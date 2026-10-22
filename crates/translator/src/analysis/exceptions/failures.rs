@@ -41,6 +41,15 @@ fn constant_pattern(class: &Class, builtin: &Builtin, args: &[Expr]) -> bool {
     }
 }
 
+/// Whether `String.format` with `args` (the format first) may throw: unless its format is a
+/// literal that fits its arguments' types, which then never throws; the arguments in an
+/// `Object[]` are as many as the array has.
+pub(in crate::analysis) fn format_may_fail(args: &[Expr]) -> bool {
+    !matches!(&args[0].kind, ExprKind::Str(format)
+        if !args[1..].iter().any(|a| matches!(a.ty, Type::Array(_)))
+            && java_runtime::format::never_fails(format, &format_samples(&args[1..])))
+}
+
 /// An argument of the runtime's `format` of each argument's kind, as the code generator passes
 /// it (`format_arg`), with any value.
 fn format_samples(args: &[Expr]) -> Vec<java_runtime::format::Arg<'static>> {
@@ -394,31 +403,22 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Native(Native::ArrayCopy) => &["java.lang.ArrayIndexOutOfBoundsException"],
         // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
         Builtin::Arrays(op) if op.ranged() => &["java.lang.ArrayIndexOutOfBoundsException"],
-        // A literal format that fits its arguments' types never throws; the arguments in an
-        // `Object[]` are as many as the array has.
-        Builtin::Format => match &args[0].kind {
-            ExprKind::Str(format)
-                if !args[1..].iter().any(|a| matches!(a.ty, Type::Array(_)))
-                    && java_runtime::format::never_fails(format, &format_samples(&args[1..])) =>
-            {
-                &[]
-            }
-            // What the runtime's `format` raises (`format.rs`); a format it does not support ends
-            // the program.
-            _ => &[
-                "java.util.DuplicateFormatFlagsException",
-                "java.util.FormatFlagsConversionMismatchException",
-                "java.util.IllegalFormatArgumentIndexException",
-                "java.util.IllegalFormatCodePointException",
-                "java.util.IllegalFormatConversionException",
-                "java.util.IllegalFormatFlagsException",
-                "java.util.IllegalFormatPrecisionException",
-                "java.util.IllegalFormatWidthException",
-                "java.util.MissingFormatArgumentException",
-                "java.util.MissingFormatWidthException",
-                "java.util.UnknownFormatConversionException",
-            ],
-        },
+        Builtin::Format if !format_may_fail(args) => &[],
+        // What the runtime's `format` raises (`format.rs`); a format it does not support ends the
+        // program.
+        Builtin::Format => &[
+            "java.util.DuplicateFormatFlagsException",
+            "java.util.FormatFlagsConversionMismatchException",
+            "java.util.IllegalFormatArgumentIndexException",
+            "java.util.IllegalFormatCodePointException",
+            "java.util.IllegalFormatConversionException",
+            "java.util.IllegalFormatFlagsException",
+            "java.util.IllegalFormatPrecisionException",
+            "java.util.IllegalFormatWidthException",
+            "java.util.MissingFormatArgumentException",
+            "java.util.MissingFormatWidthException",
+            "java.util.UnknownFormatConversionException",
+        ],
         // A zero divisor.
         Builtin::Unsigned(UnsignedOp::Divide | UnsignedOp::Remainder, _) => {
             let nonzero = matches!(args[1].kind, ExprKind::Int(v) if v != 0)

@@ -3345,10 +3345,8 @@ fn format_arguments_keep_their_java_types() {
     );
     assert_contains(
         &rust,
-        &[
-            "java::print!(\"{}\", java::format(\"%d %s %.2f%n\", &[java::Arg::Long(big), java::Arg::Str(\"x\"), \
-           java::Arg::Double(1.5)]));",
-        ],
+        &["java::print_format(\"%d %s %.2f%n\", &[java::Arg::Long(big), java::Arg::Str(\"x\"), \
+           java::Arg::Double(1.5)]);"],
     );
 }
 

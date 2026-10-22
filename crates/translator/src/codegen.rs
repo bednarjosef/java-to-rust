@@ -178,6 +178,7 @@ fn generate_with(
         traits: std::collections::BTreeSet::new(),
         ctor_result: None,
         printing: false,
+        printing_format: false,
         guarded: false,
         steady: None,
         annotations: Vec::new(),
@@ -330,6 +331,9 @@ struct Gen<'a> {
     ctor_result: Option<&'static str>,
     /// Whether the text being formatted is printed.
     printing: bool,
+    /// Whether the next `String.format` is `printf`'s, which prints the text itself (see
+    /// `java::print_format`).
+    printing_format: bool,
     /// Whether the statement being emitted also borrows an object mutably (see `conflicts`).
     guarded: bool,
     /// What the statement being emitted does to the plain objects it names, where it is known

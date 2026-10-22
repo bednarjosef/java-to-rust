@@ -593,6 +593,7 @@ impl<'a> Gen<'a> {
 
     /// `String.format(format, args...)` as `java::format`, each argument as a `java::Arg`.
     pub(super) fn format_builtin(&mut self, args: &'a [Expr]) -> Code {
+        let printing = std::mem::take(&mut self.printing_format);
         let format = self.text_ref(&args[0]);
         // The arguments in an `Object[]`, by their text (see `java::format_objects`).
         if let [_, array] = args
@@ -606,7 +607,7 @@ impl<'a> Gen<'a> {
                 self.rejected.push(Error { pos: array.pos, message: message.to_string() });
             }
             let slice = self.slice_of(array);
-            let f = self.runtime("format_objects");
+            let f = self.runtime(if printing { "print_format_objects" } else { "format_objects" });
             // Elements that are never null are not `Option`s.
             let text = if self.nullable_element(*element) {
                 "o.as_ref().map(|o| o.to_string())"
@@ -617,7 +618,7 @@ impl<'a> Gen<'a> {
             return Code::atom(format!("{f}({format}, &{texts})"));
         }
         let values: Vec<String> = args[1..].iter().map(|a| self.format_arg(a)).collect();
-        let f = self.runtime("format");
+        let f = self.runtime(if printing { "print_format" } else { "format" });
         Code::atom(format!("{f}({format}, &[{}])", values.join(", ")))
     }
 
