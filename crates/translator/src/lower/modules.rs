@@ -78,9 +78,18 @@ impl<'t> Lowering<'t> {
             };
             self.synth(array, pos, ret)
         };
-        // The arguments in locals, read by the `switch`es.
+        // The arguments in locals, read by the `switch`es. A null finds nothing, as a name that
+        // no module nor resource has, `/`: `n != null ? n : "/"`, which the `switch` need not
+        // check for null.
         let names: Vec<String> = (0..args.len()).map(|i| self.fresh_name(&format!("module_{i}"))).collect();
-        let var = |i: usize| self.synth(ExprKind::Var(names[i].clone()), pos, Type::String);
+        let var = |i: usize| {
+            let v = || self.synth(ExprKind::Var(names[i].clone()), pos, Type::String);
+            let null = self.synth(ExprKind::Null, pos, Type::Null);
+            let cond =
+                self.synth(ExprKind::Binary(BinOp::Ne, Box::new(v()), Box::new(null)), pos, Type::Boolean);
+            let kind = ExprKind::Conditional(Box::new(cond), Box::new(v()), Box::new(string("/")));
+            self.synth(kind, pos, Type::String)
+        };
         let switch = |selector: Expr, cases: Vec<(Vec<String>, Expr)>, default: Expr| {
             let mut cases: Vec<Case> = cases
                 .into_iter()

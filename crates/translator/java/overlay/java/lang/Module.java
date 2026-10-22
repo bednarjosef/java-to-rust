@@ -94,23 +94,29 @@ public final class Module {
         boolean open = false;
         for (String d : declared) {
             String[] w = d.split(" ");
-            switch (w[0]) {
-                case "open" -> open = true;
-                case "requires" -> requires.add(w[1]);
-                case "transitive" -> {
-                    requires.add(w[1]);
-                    transitive.add(w[1]);
+            // (A chain of `equals` on the words, not a `switch`: the switch's temporary has a
+            // slot that only javac's code generator knows, which a `NullPointerException`'s
+            // message would name.)
+            String what = w[0];
+            if ("open".equals(what)) {
+                open = true;
+            } else if ("requires".equals(what)) {
+                requires.add(w[1]);
+            } else if ("transitive".equals(what)) {
+                requires.add(w[1]);
+                transitive.add(w[1]);
+            } else if ("package".equals(what)) {
+                packages.add(w.length > 1 ? w[1] : "");
+            } else if ("exports".equals(what) || "opens".equals(what)) {
+                Set<String> to = new HashSet<>();
+                for (int i = 2; i < w.length; i++) {
+                    to.add(w[i]);
                 }
-                case "package" -> packages.add(w.length > 1 ? w[1] : "");
-                case "exports", "opens" -> {
-                    Set<String> to = new HashSet<>();
-                    for (int i = 2; i < w.length; i++) {
-                        to.add(w[i]);
-                    }
-                    (w[0].equals("exports") ? exports : opens).put(w[1], to);
-                }
-                case "uses" -> uses.add(w[1]);
-                default -> throw new InternalError("a module declares " + d);
+                ("exports".equals(what) ? exports : opens).put(w[1], to);
+            } else if ("uses".equals(what)) {
+                uses.add(w[1]);
+            } else {
+                throw new InternalError("a module declares " + d);
             }
         }
         this.open = open;
@@ -439,7 +445,7 @@ public final class Module {
     }
 
     public Module addUses(Class<?> service) {
-        Objects.requireNonNull(service);
+        nonNull(service);
         implAddUses(service);
         return this;
     }
@@ -451,7 +457,7 @@ public final class Module {
     }
 
     public boolean canUse(Class<?> service) {
-        Objects.requireNonNull(service);
+        nonNull(service);
         if (!isNamed()) {
             return true;
         }
@@ -538,4 +544,11 @@ public final class Module {
 
     /** Whether the root of the module {@code module} ("" the unnamed one) holds the file {@code name}. */
     private static native boolean holds0(String module, String name);
+
+    // `Objects.requireNonNull` of a class, which would hold it as an `Object`.
+    private static void nonNull(Class<?> c) {
+        if (c == null) {
+            throw new NullPointerException();
+        }
+    }
 }

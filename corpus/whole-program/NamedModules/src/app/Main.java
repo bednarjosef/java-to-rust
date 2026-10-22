@@ -8,6 +8,14 @@ public class Main {
     interface Unused {
     }
 
+    // As javac's file manager loads the services that its plugins and processors provide.
+    static class Manager {
+        <S> ServiceLoader<S> loader(Class<S> service) {
+            getClass().getModule().addUses(service);
+            return ServiceLoader.load(service, getClass().getClassLoader());
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         Module app = Main.class.getModule();
         System.out.println(app.isNamed() + " " + app.getName() + " " + app);
@@ -38,6 +46,9 @@ public class Main {
         System.out.println(ModuleLayer.boot().findModule("java.base").get() == base);
         System.out.println(ModuleLayer.boot().findModule("no.such.module").isPresent());
         System.out.println(ModuleLayer.boot().modules().contains(app) + " " + (app.getLayer() == ModuleLayer.boot()));
+        java.util.Set<String> names = ModuleLayer.boot().modules().stream().map(Module::getName)
+                .collect(java.util.stream.Collectors.toSet());
+        System.out.println(names.contains("app") + " " + names.contains("java.base"));
         System.out.println(ModuleLayer.boot().parents().size() + " " + ModuleLayer.empty().modules().isEmpty());
         System.out.println(Class.forName(app, "app.data.Point") == Point.class);
         System.out.println(Class.forName(base, "app.data.Point") == null);
@@ -49,6 +60,7 @@ public class Main {
         for (Greeter g : ServiceLoader.load(Greeter.class)) {
             System.out.println(g.greet("module"));
         }
+        System.out.println(new Manager().loader(Unused.class).findFirst().isPresent());
         try {
             ServiceLoader.load(Runnable.class);
         } catch (java.util.ServiceConfigurationError e) {

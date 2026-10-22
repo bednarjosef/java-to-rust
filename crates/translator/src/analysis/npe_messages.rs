@@ -260,12 +260,12 @@ impl Messages<'_> {
                         return;
                     }
                     // `new String(bytes, ..)` of a null array, which fails in the JDK's
-                    // constructor, unless a charset that may be null fails first.
+                    // constructor, unless a charset name that may be null fails first (a
+                    // `Charset` never is null).
                     Builtin::String(StringOp::FromBytes)
-                        if args[1..].iter().all(|a| {
-                            !matches!(a.ty, Type::Charset | Type::String)
-                                || matches!(a.kind, ExprKind::Static { .. } | ExprKind::Str(_))
-                        }) =>
+                        if args[1..]
+                            .iter()
+                            .all(|a| a.ty != Type::String || matches!(a.kind, ExprKind::Str(_))) =>
                     {
                         let message = "Cannot read the array length because \"bytes\" is null";
                         out.insert(args[0].id, Some(message.to_string()));
@@ -588,9 +588,12 @@ impl Messages<'_> {
             Type::String => "String".to_string(),
             Type::JavaClass => "java.lang.Class".to_string(),
             // A parameter declared `Object`, or of a type variable whose erasure is `Object`, as
-            // javac erases it in the descriptor too.
+            // javac erases it in the descriptor too: also one of a Rust generic, whose type
+            // variables have no bounds (`lower::real_generics`).
             Type::Class(..)
-                if self.class.class_index(ty).is_some_and(|t| is_object(&self.class.types[t])) =>
+                if self.class.class_index(ty).is_some_and(|t| {
+                    is_object(&self.class.types[t]) || self.class.types[t].kind == TypeKind::Param
+                }) =>
             {
                 "Object".to_string()
             }

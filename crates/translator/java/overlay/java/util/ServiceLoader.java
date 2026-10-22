@@ -40,7 +40,8 @@ public final class ServiceLoader<S> implements Iterable<S> {
     private boolean checked;
 
     private ServiceLoader(Class<S> service, ClassLoader loader) {
-        this.service = Objects.requireNonNull(service);
+        nonNull(service);
+        this.service = service;
         this.loader = loader;
         reload();
     }
@@ -71,7 +72,7 @@ public final class ServiceLoader<S> implements Iterable<S> {
      * also checks that the caller can access the service's class, which javac checked.)
      */
     private static void checkUses(Module callerModule, Class<?> service) {
-        Objects.requireNonNull(service);
+        nonNull(service);
         if (!callerModule.canUse(service)) {
             throw new ServiceConfigurationError(service.getName() + ": " + callerModule
                     + " does not declare `uses`");
@@ -175,4 +176,11 @@ public final class ServiceLoader<S> implements Iterable<S> {
 
     /** An object of the provider class {@code type}, made by its {@code provider()} or constructor. */
     private static native Object create0(Class<?> type);
+
+    // `Objects.requireNonNull` of a class, which would hold it as an `Object`.
+    private static void nonNull(Class<?> c) {
+        if (c == null) {
+            throw new NullPointerException();
+        }
+    }
 }
