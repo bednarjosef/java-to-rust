@@ -2,8 +2,7 @@
 // for, as in a text block: letter escapes, octal escapes of one to three digits (a first digit
 // above 3 takes at most two, so `\400` is a space and a `0`), `\s`, a backslash before a line end
 // (a `\r\n` is one terminator, dropped with the backslash), and a doubled backslash. A malformed
-// escape throws IllegalArgumentException; the last one here is not caught, so the program ends
-// with exit code 1.
+// escape throws IllegalArgumentException, caught here and its message printed.
 public class TranslatedEscapes {
     // The translation as its length and code points, so that invisible characters show.
     static void show(String label, String s) {
@@ -15,7 +14,11 @@ public class TranslatedEscapes {
     }
 
     static void translate(String label, String s) {
-        show(label, s.translateEscapes());
+        try {
+            show(label, s.translateEscapes());
+        } catch (IllegalArgumentException e) {
+            System.out.println(label + " threw " + e.getMessage());
+        }
     }
 
     public static void main(String[] args) {
@@ -28,7 +31,10 @@ public class TranslatedEscapes {
         translate("doubled", "\\\\n");
         translate("tail", "ab\\\n");
         translate("tabs", "\\t\\t\\s");
-        // A backslash before `u` is no escape: this throws, and nothing catches it.
+        // A backslash before `u` is no escape, so these throw, and the catch prints the message.
         translate("unicode", "x\\" + "u0041");
+        translate("letter", "\\q");
+        translate("trailing", "ab\\");
+        System.out.println("done");
     }
 }
