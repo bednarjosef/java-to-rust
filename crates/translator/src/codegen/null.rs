@@ -509,7 +509,7 @@ impl<'a> Gen<'a> {
 
     /// Treats the possibly-null `name` as a non-null `&str` from here on; returns it if it was not
     /// already, for `unnarrow`.
-    fn narrow(&mut self, name: &str) -> Option<String> {
+    pub(super) fn narrow(&mut self, name: &str) -> Option<String> {
         self.borrowed.insert(name.to_string()).then(|| name.to_string())
     }
 

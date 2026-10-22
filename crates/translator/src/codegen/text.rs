@@ -576,6 +576,9 @@ impl<'a> Gen<'a> {
             Type::String => (suffixed("str"), self.str_ref(x)),
             Type::Char => (suffixed("char"), self.char_arg(x)),
             Type::Array(_) => (suffixed("chars"), self.slice_of(x)),
+            Type::Enum(_) if self.enum_maybe_null(x) => {
+                (suffixed("str"), self.nullable_enum_text(x))
+            }
             Type::StringBuilder if self.nullable(x) => {
                 let option = self.builder_option(x);
                 let text = format!("&{}({option}).to_string()", self.runtime("or_null"));
