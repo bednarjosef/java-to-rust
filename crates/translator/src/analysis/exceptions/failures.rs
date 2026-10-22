@@ -402,6 +402,29 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
     }
 }
 
+/// Whether `array[index]` is a row of a table of an enum in table form (`lower/enum_tables.rs`):
+/// `fOfConstants[e.ordinal()]` of a constant `e` of that enum, or `fOfConstants[constantOrdinal]`
+/// in one of its constant builders. A table has a row for each constant, so neither index is
+/// ever out of its bounds.
+fn table_row(class: &Class, m: usize, array: &Expr, index: &Expr) -> bool {
+    let ExprKind::Static { class: t, name } = &array.kind else { return false };
+    let decl = &class.types[*t];
+    if decl.kind != TypeKind::Enum || crate::lower::tabled_field(name).is_none() {
+        return false;
+    }
+    match &index.kind {
+        ExprKind::Builtin(Builtin::EnumOrdinal, args) => {
+            matches!(args.first().map(|a| a.ty), Some(Type::Enum(e)) if e == decl.name)
+        }
+        ExprKind::Var(name) => {
+            name == crate::lower::TABLE_ORDINAL
+                && class.methods.get(m).is_some_and(|method| method.class == *t)
+                && class.builds_constants(m)
+        }
+        _ => false,
+    }
+}
+
 /// The failures of the runtime that evaluating `x` itself (not its operands) may raise, by
 /// standard class name, with what raises them in words, whether the generator has their checked
 /// form, and the expression that the checked form is written for: `x`, or for a
@@ -450,11 +473,11 @@ pub(super) fn runtime_failures(
                 out.push(("java.lang.ArithmeticException", "this division", true, x.id));
             }
         }
-        ExprKind::Index(array, _) => {
+        ExprKind::Index(array, index) => {
             if null(array) {
                 out.push((NPE, "this array access", true, array.id));
             }
-            if !facts.in_bounds.contains(&x.id) {
+            if !facts.in_bounds.contains(&x.id) && !table_row(class, m, array, index) {
                 out.push((INDEX, "this array access", true, x.id));
             }
         }
@@ -770,13 +793,13 @@ pub(super) fn runtime_failures(
         },
         _ => {}
     }
-    if let ExprKind::Assign { target: Place::Index(array, _), .. }
-    | ExprKind::IncDec { target: Place::Index(array, _), .. } = &x.kind
+    if let ExprKind::Assign { target: Place::Index(array, index), .. }
+    | ExprKind::IncDec { target: Place::Index(array, index), .. } = &x.kind
     {
         if null(array) {
             out.push((NPE, "this array access", true, array.id));
         }
-        if !facts.in_bounds.contains(&x.id) {
+        if !facts.in_bounds.contains(&x.id) && !table_row(class, m, array, index) {
             out.push((INDEX, "this array access", true, x.id));
         }
     }
