@@ -67,6 +67,7 @@ mod translate_escapes;
 mod unix;
 mod unsigned;
 mod vm;
+pub mod wtf8;
 pub use allocator::{Allocator, release_thread_cache};
 pub use arguments::main_args;
 pub use boxed::*;
@@ -138,6 +139,7 @@ pub use unsigned::{
     try_parse_unsigned,
 };
 pub use vm::*;
+pub use wtf8::{JString, Wtf8};
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
 pub struct Double(pub f64);
