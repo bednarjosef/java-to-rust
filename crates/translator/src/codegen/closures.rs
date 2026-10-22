@@ -327,6 +327,9 @@ impl<'a> Gen<'a> {
             }
         }
         let body = &self.class.methods[body_method].body;
+        // A body that never runs (`unreachable!`) would make the closure's type `!`.
+        let never = matches!(&body[..], [Stmt::Expr(e)] if matches!(e.kind, ExprKind::Builtin(Builtin::NoObject { .. }, _)));
+        let ret = if ret.is_empty() && never { " -> ()".to_string() } else { ret };
         self.stmts(body, true);
         self.bound_params = None;
         if self.throwing && self.class.methods[m].ret == Type::Void && exceptions::completes_all(body) {

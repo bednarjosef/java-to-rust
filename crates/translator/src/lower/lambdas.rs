@@ -20,11 +20,10 @@
 //! (`NestKind::Lambda`): what a lambda captures is found by `captures` as for a local class, held
 //! in the fields of its object and passed to its constructor by the expression that creates it,
 //! and `this`, or a member of the enclosing class named without it, is the enclosing instance,
-//! held in the field `outer` (see `inner`). A bound method reference's receiver is its capture:
-//! a local, `this`, or a final field read through it. Any other receiver (`a.b()::c`, a field
-//! that is not final) is evaluated once, where the reference is created, as Java does: into a
-//! synthetic local of the creating code, checked for null there, which the class captures (see
-//! `plan_receivers`).
+//! held in the field `outer` (see `inner`). A bound method reference's receiver other than
+//! `this` (`p::toString`, `a.b()::c`) is evaluated once, where the reference is created, as Java
+//! does: into a synthetic local of the creating code, checked for null there, which the class
+//! captures (see `plan_receivers`).
 
 use super::inner::NestKind;
 use super::*;
@@ -50,10 +49,6 @@ pub(super) struct LambdaInfo<'t> {
     /// holds the receiver's value, and the receiver.
     pub receiver: Option<(&'t str, Node<'t>)>,
 }
-
-/// The kinds of javac's symbols of local variables.
-const LOCAL_KINDS: &[&str] =
-    &["LOCAL_VARIABLE", "PARAMETER", "EXCEPTION_PARAMETER", "BINDING_VARIABLE", "RESOURCE_VARIABLE"];
 
 impl<'t> Lowering<'t> {
     /// Declares the lambdas and method references in the code of `member`, a member of class
@@ -141,18 +136,13 @@ impl<'t> Lowering<'t> {
 
     /// Gives each method reference whose receiver is computed (see `computed_receiver`) a
     /// synthetic local for the receiver's value, which its call reads: the code that creates the
-    /// reference evaluates the receiver into it, and the class captures it. Runs once every class
-    /// is declared, which telling a final field needs. An error comes with the index of the class
-    /// it is in.
+    /// reference evaluates the receiver into it and checks it for null, and the class captures
+    /// it. An error comes with the index of the class it is in.
     pub(super) fn plan_receivers(&mut self) -> Result<(), (usize, Error)> {
         let mut taken: Vec<(*const Value, HashSet<&'t str>)> = Vec::new();
         for i in 0..self.lambdas.len() {
             let l = &self.lambdas[i];
-            let Some(qualifier) =
-                computed_receiver(l.node.0, &|owner, name| self.is_final_field(owner, name))
-            else {
-                continue;
-            };
+            let Some(qualifier) = computed_receiver(l.node.0) else { continue };
             let (node, member, class) = (l.node, l.member, l.class);
             // A name that the member's code does not use, nor the reference's parameters.
             let at = match taken.iter().position(|(m, _)| std::ptr::eq(*m, member.0)) {
@@ -387,16 +377,6 @@ impl<'t> Lowering<'t> {
         Ok((descriptor.str("name"), params, ret, body, overridden))
     }
 
-    /// Whether `owner.name` is a final field of the program.
-    fn is_final_field(&self, owner: &str, name: &str) -> bool {
-        self.type_index(owner).is_some_and(|t| {
-            self.types[t]
-                .node
-                .list("members")
-                .any(|m| m.kind() == "VARIABLE" && m.str("name") == name && m.has_flag("FINAL"))
-        })
-    }
-
     /// The body of a lambda whose body is the expression `e`: it returns its value, converted to
     /// the method's return type, or evaluates it when the method returns nothing.
     fn tail(&self, e: Expr, ret: Type) -> Vec<Stmt> {
@@ -487,13 +467,11 @@ impl<'t> Lowering<'t> {
     }
 }
 
-/// The receiver of a bound method reference (`node`) that the reference cannot take as a
-/// capture: one other than a string literal, a local, `this`, `System.out`, `System.err` or a
-/// field that `final_field(owner, name)` says is final, read on `this` or a class. javac
-/// evaluates the receiver once, where the reference is; the translation evaluates a capture's
-/// value there too, and a final field gives the same value on every read. `None` for every
-/// other node.
-pub fn computed_receiver<'t>(node: &'t Value, final_field: &dyn Fn(&str, &str) -> bool) -> Option<&'t Value> {
+/// The receiver of a bound method reference (`node`) that is not `this`, `super`, a class, a
+/// string literal or a class literal: javac evaluates it once, where the reference is, and checks
+/// it for null there (`Objects.requireNonNull`, whose exception has no message), and so does the
+/// translation. `None` for every other node.
+pub fn computed_receiver(node: &Value) -> Option<&Value> {
     let node = Node(node);
     if node.kind() != "MEMBER_REFERENCE" || node.str("mode") != "INVOKE" {
         return None;
@@ -501,27 +479,14 @@ pub fn computed_receiver<'t>(node: &'t Value, final_field: &dyn Fn(&str, &str) -
     let qualifier = Node(&node.0["qualifierExpression"]);
     let is_type =
         |n: Node| n.symbol().is_some_and(|s| matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD"));
-    let field = |n: Node| {
-        n.symbol().filter(|s| s.kind == "FIELD").is_some_and(|s| {
-            (s.owner == "java.lang.System" && matches!(s.name, "out" | "err")) || final_field(s.owner, s.name)
-        })
-    };
     let takes = match qualifier.kind() {
         "STRING_LITERAL" => true,
         _ if is_type(qualifier) => true,
         // `super::m` and `Outer.super::m` call the method on the enclosing object, as a lambda's
         // `super.m()` does.
-        "IDENTIFIER" => {
-            matches!(qualifier.str("name"), "this" | "super")
-                || qualifier.symbol().is_some_and(|s| LOCAL_KINDS.contains(&s.kind))
-                || field(qualifier)
-        }
+        "IDENTIFIER" => matches!(qualifier.str("name"), "this" | "super"),
         // A class literal is a constant, and never null.
-        "MEMBER_SELECT" if matches!(qualifier.str("identifier"), "super" | "class") => true,
-        "MEMBER_SELECT" => {
-            let on = Node(&qualifier.0["expression"]);
-            field(qualifier) && ((on.kind() == "IDENTIFIER" && on.str("name") == "this") || is_type(on))
-        }
+        "MEMBER_SELECT" => matches!(qualifier.str("identifier"), "super" | "class"),
         _ => false,
     };
     (!takes).then_some(qualifier.0)

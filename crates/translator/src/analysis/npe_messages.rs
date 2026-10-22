@@ -201,8 +201,9 @@ impl Messages<'_> {
                 return;
             }
             // The JVM gives no message for the null receiver of an unbound method reference
-            // (`String::length`), which the class it makes for the reference dereferences.
-            if self.reference_receiver(object) {
+            // (`String::length`), which the class it makes for the reference dereferences; a
+            // bound one's receiver, checked where the reference was made, is never null.
+            if self.reference_receiver(object) || self.checked_receiver(object) {
                 out.insert(object.id, None);
                 return;
             }
@@ -982,6 +983,14 @@ impl Messages<'_> {
             && !method.is_ctor
             && object.pos == method.pos
             && matches!(&object.kind, ExprKind::Var(name) if method.params.first().is_some_and(|p| &p.name == name))
+    }
+
+    /// Whether `object` is the receiver of a bound method reference that the class of the
+    /// reference holds (`Capture::checked`).
+    fn checked_receiver(&self, object: &Expr) -> bool {
+        let ExprKind::Field { object: on, name } = &object.kind else { return false };
+        let decl = &self.class.types[self.method.class];
+        matches!(on.kind, ExprKind::This) && decl.captures.iter().any(|c| c.checked && &c.field == name)
     }
 
     /// The binary name of a class of the JDK that `ty` is, when it is certain.

@@ -478,6 +478,9 @@ pub struct Capture {
     /// The field that holds it, declared by the class or by a superclass that captures it too.
     pub field: String,
     pub ty: Type,
+    /// The receiver of a bound method reference, which the code that creates the reference
+    /// checks for null (`lower::lambdas`): never null in the class's code.
+    pub checked: bool,
 }
 
 /// Where a class is declared.

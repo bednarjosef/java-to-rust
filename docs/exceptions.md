@@ -480,7 +480,8 @@ the field it is, a string `switch`'s temporary and a for-each loop's iterator as
 the slots javac would give (`javac::jdk_temps`), in an argument too, and a null locale of
 `toLowerCase(Locale)`,
 for which the JDK's code throws an exception without a message. The receiver of an unbound method reference has no message, as the
-JVM's hidden frame gives none. The translator's own `java.lang` classes (`Standard.java`) have no
+JVM's hidden frame gives none; a bound one's, checked where the reference is created, is never
+null in the reference's class. The translator's own `java.lang` classes (`Standard.java`) have no
 known message from their code; where the JDK's code has a dereference that may fail, they throw
 the JDK's message themselves. The overlays of `java.lang` (`Module`, `ModuleLayer`,
 `TranslatedModules`, `TranslatedProperties`) get the messages of their own code.
@@ -502,7 +503,7 @@ local declared in a `finally` (javac copies the block, each copy with its own sl
 instance initializer (copied into every constructor), of a JDK local the translation may have
 renamed, of the enclosing instance of a nested class, a dereference in the code of `java.lang`,
 a failure of the runtime without the checked form (an unboxing the code does not write as a
-call, a library call given null), a dereference in the body of a method reference's class, and a
+call, a library call given null), any other dereference in the body of a method reference's class, and a
 field of a field of an enclosing instance.
 
 ## Differences from Java

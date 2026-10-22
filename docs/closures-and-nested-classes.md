@@ -374,10 +374,10 @@ gets the same conversions and library mappings and javac's referent symbol picks
 | constructor `ArrayList::new` | `new ArrayList<>(a)`, the overload javac resolved |
 | array constructor `int[]::new` | `new int[a]` |
 
-A bound receiver that is a local, `this`, or a final field is captured as it is. Any other
-receiver (`a.b()::c`, a field that is not final) is evaluated once where the reference is
-created, into a synthetic local of the creating code that is checked for null there, as Java
-does, and that the class captures (`plan_receivers`).
+A bound receiver other than `this` (a local, a field, `a.b()`) is evaluated once where the
+reference is created, into a synthetic local of the creating code that is checked for null
+there, as javac's `Objects.requireNonNull` does (its exception has no message), and that the
+class captures (`plan_receivers`).
 
 `super.m()` and `super::m` in a lambda run on the object of the class whose code holds the
 lambda, as javac's synthetic method does. Any other use of `super` in a lambda (including

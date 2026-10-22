@@ -223,11 +223,17 @@ impl<'t> Lowering<'t> {
     /// The captures of class `t`, as the declaration lists them.
     pub(super) fn captures_of(&self, t: usize) -> Result<Vec<Capture>, Error> {
         let Some(nested) = self.nesting(t) else { return Ok(Vec::new()) };
+        let receiver = self.lambda_of_type(t).and_then(|l| l.receiver).map(|(name, _)| name);
         nested
             .captures
             .iter()
             .map(|c| {
-                Ok(Capture { name: c.name.to_string(), field: c.field.clone(), ty: self.capture_type(c)? })
+                Ok(Capture {
+                    name: c.name.to_string(),
+                    field: c.field.clone(),
+                    ty: self.capture_type(c)?,
+                    checked: receiver == Some(c.name),
+                })
             })
             .collect()
     }
