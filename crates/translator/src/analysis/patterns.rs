@@ -146,12 +146,6 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                 s,
                 &mut |e| {
                     visit_expr(e, &mut |x| match &x.kind {
-                        // A builder is an `Rc`, which an `Object` that threads may share cannot hold.
-                        ExprKind::Cast(Type::Class(name, _), inner)
-                            if *name == OBJECT && inner.ty == Type::StringBuilder && facts.threaded =>
-                        {
-                            found.push((x.pos, "a `StringBuilder` as an `Object` in a program with threads"));
-                        }
                         ExprKind::Binary(BinOp::Eq | BinOp::Ne, l, r)
                             if holds_values
                                 && may_be_value(l)

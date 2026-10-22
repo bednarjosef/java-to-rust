@@ -45,15 +45,14 @@ impl<'t> Lowering<'t> {
         Ok(Some(ExprKind::Builtin(Builtin::Native(native), std::mem::take(args))))
     }
 
-    /// Rejects a monitor of what has no identity in the translation: a string, a box, a
-    /// `StringBuilder` or an array, which are values or `Rc`s without a lock.
+    /// Rejects a monitor of what has no identity in the translation: a string, a box or an
+    /// array, which are values or `Rc`s without a lock. A builder has its cell's monitor.
     pub(super) fn check_lock(&self, node: Node<'t>, lock: &Expr) -> Result<(), Error> {
         let what = match lock.ty {
             Type::String => "a string",
             Type::Boxed(_) => "a box",
-            Type::StringBuilder => "a `StringBuilder`",
             Type::Array(_) => "an array",
-            Type::Class(..) => return Ok(()),
+            Type::Class(..) | Type::StringBuilder => return Ok(()),
             _ => "a value",
         };
         unsupported(node, &format!("the monitor of {what}"))

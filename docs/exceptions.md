@@ -604,6 +604,10 @@ Decisions that changed during the implementation, step by step.
 - **A literal pattern that compiles** makes `split`, `matches`, `replaceAll` and
   `replaceFirst` (with a literal replacement) calls that never throw
   (`java_runtime::regex::never_fails`), so a handler around them does not block the program.
+  A replacement that is not such a literal may throw `IllegalArgumentException` (a dangling
+  escape, a malformed reference) or `IndexOutOfBoundsException` (a group the pattern lacks),
+  which a `catch` sees with Java's message; a pattern that is not a literal may also throw
+  `PatternSyntaxException`, which is not a standard class, so catching it is rejected.
 - **Still rejected**, with "catching the `X` that this ... may throw": a null dereference
   (`NullPointerException`, whose checked form would wrap every `non_null`), an array creation
   with a negative size, a `ClassCastException` of a downcast, the library calls that may fail

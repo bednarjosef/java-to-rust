@@ -32,9 +32,11 @@ pub(super) fn observed(class: &Class) -> bool {
 
 impl Facts {
     /// Whether the monitor of an object of type `ty` is kept: the program observes monitors, or
-    /// threads may share the object.
+    /// threads may share the object. Any builder of a program with threads may be shared.
     pub fn kept_monitor(&self, class: &Class, ty: Type) -> bool {
-        self.monitors || class.class_index(ty).is_some_and(|t| self.kept_monitor_of(t))
+        self.monitors
+            || ty == Type::StringBuilder && self.threaded
+            || class.class_index(ty).is_some_and(|t| self.kept_monitor_of(t))
     }
 
     /// Whether the monitors of the objects of class `t` are kept.
@@ -150,7 +152,7 @@ pub(super) fn class_monitors(class: &Class, facts: &Facts) -> HashSet<usize> {
 
 /// Rejects a kept monitor of what has none in the translation: a string, a box or an array (a
 /// value or an `Rc` without a lock), a Java enum's constant (a plain value), or a class's
-/// monitor other than a class literal's. The first of each method is reported.
+/// monitor other than a class literal's. A builder has its cell's monitor. The first of each method is reported.
 pub(super) fn check(class: &Class, facts: &Facts) -> Result<(), Vec<Error>> {
     if !facts.monitors && !facts.threaded {
         return Ok(());
@@ -175,11 +177,10 @@ pub(super) fn check(class: &Class, facts: &Facts) -> Result<(), Vec<Error>> {
                                 ExprKind::Builtin(Builtin::ClassLiteral(_), _) => "the class of a value",
                                 _ => "a class that is not a class literal",
                             },
-                            Type::Class(..) => return,
+                            Type::Class(..) | Type::StringBuilder => return,
                             Type::Enum(_) => "an enum constant",
                             Type::String => "a string",
                             Type::Boxed(_) => "a box",
-                            Type::StringBuilder => "a `StringBuilder`",
                             Type::Array(_) => "an array",
                             _ => "a value",
                         };

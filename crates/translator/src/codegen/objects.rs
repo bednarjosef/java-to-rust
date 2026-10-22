@@ -111,7 +111,8 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Double | Type::Float => "0.0",
         Type::Boolean => "false",
         Type::String => "String::new()",
-        Type::StringBuilder => "java::StringBuilder::new()",
+        // A `java::StringBuilder`, or a `java::SharedStringBuilder` in a program with threads.
+        Type::StringBuilder => "Default::default()",
         Type::JavaClass => "java::Class::OBJECT",
         Type::Boxed(_) | Type::Class(..) => "None",
         // A charset is never null, so its field starts as a placeholder; lowering rejects a
