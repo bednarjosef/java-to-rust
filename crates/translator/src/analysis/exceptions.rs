@@ -34,6 +34,7 @@
 //! around the call are not looked for in its own code. The JDK's static initializers run on the
 //! JDK's own constants and flags, and so none of the program's code: one lets out nothing.
 
+mod comparable;
 mod conditions;
 mod entry;
 mod failures;
