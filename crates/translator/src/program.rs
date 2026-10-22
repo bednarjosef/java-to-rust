@@ -265,6 +265,16 @@ fn load(
         let start = std::time::Instant::now();
         new = session.load(&rounds.missing()).map_err(javac_error)?;
         javac += start.elapsed();
+        if crate::timings::enabled() {
+            // Each round as it ends, for a program whose loading takes long.
+            let received = session.received as f64 / 1e6;
+            eprintln!(
+                "timing: round {round}: {} units, {} more asked for, {received:.0} MB of trees{}",
+                trees.len(),
+                new.len(),
+                crate::timings::memory()
+            );
+        }
         if new.is_empty() {
             break;
         }

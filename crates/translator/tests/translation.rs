@@ -3100,7 +3100,7 @@ fn a_census_that_keeps_going_rejects_the_code_that_javac_reports_errors_in() {
             ),
             (
                 "p/Other.java",
-                "package p;\nclass Other {\n    static int fine() { return 4; }\n    static void bad() { System.out.println(missing()); }\n}\n",
+                "package p;\nclass Other {\n    @Missing\n    static int fine() { return 4; }\n    static void bad() { System.out.println(missing()); }\n}\n",
             ),
             (
                 "p/Broken.java",
@@ -3116,13 +3116,13 @@ fn a_census_that_keeps_going_rejects_the_code_that_javac_reports_errors_in() {
     program.keep_going = true;
     let census = census(&program);
     // The method, the field's initializer and the class that have the errors are rejected; the
-    // rest translates.
+    // rest translates, `fine` too, whose annotation is missing: annotations are left out.
     assert_contains(
         &census.report,
         &[
             "javac reports a compile error (compiler.err.cant.resolve.location)",
             "at p/Main.java:3:",
-            "at p/Other.java:4:",
+            "at p/Other.java:5:",
             "at p/Broken.java:2:",
         ],
     );

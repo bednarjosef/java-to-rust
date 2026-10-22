@@ -115,6 +115,10 @@ public class JavaTree {
                 files.add(new File(args.get(i)));
             }
         }
+        if (keepGoing) {
+            // javac reports the first 100 errors by default, and goes on silently past the rest.
+            options.addAll(List.of("-Xmaxerrs", Integer.toString(Integer.MAX_VALUE)));
+        }
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         StandardJavaFileManager fileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8);
@@ -353,7 +357,9 @@ public class JavaTree {
      * and that piece is marked too, as code of its own. The trees print the mark as
      * {@code "javacError": CODE}, with javac's code of the error (such as
      * {@code compiler.err.cant.resolve.location}). An error outside every class, such as one of an
-     * import, marks nothing: the code that uses what it names has errors of its own.
+     * import, marks nothing: the code that uses what it names has errors of its own. Nor does an
+     * error in an annotation, such as one whose class is missing (a decompiled library's
+     * compile-only annotations, which the translation leaves out anyway).
      */
     private void markErrors(List<Diagnostic<? extends JavaFileObject>> errors) {
         if (errors == null) {
@@ -362,9 +368,16 @@ public class JavaTree {
         List<Tree> pieces = new ArrayList<>();
         // The field initializers, which are pieces of their own when they are lambdas too.
         Set<Tree> initializers = Collections.newSetFromMap(new IdentityHashMap<>());
+        List<Tree> annotations = new ArrayList<>();
         new TreePathScanner<Void, Void>() {
             private boolean member() {
                 return getCurrentPath().getParentPath().getLeaf() instanceof ClassTree;
+            }
+
+            @Override
+            public Void visitAnnotation(AnnotationTree tree, Void unused) {
+                annotations.add(tree);
+                return null;
             }
 
             @Override
@@ -404,11 +417,12 @@ public class JavaTree {
         }.scan(unit, null);
         for (Diagnostic<? extends JavaFileObject> error : errors) {
             long at = error.getPosition();
+            if (annotations.stream().anyMatch(a -> within(a, at))) {
+                continue;
+            }
             List<Tree> around = new ArrayList<>();
             for (Tree piece : pieces) {
-                long start = positions.getStartPosition(unit, piece);
-                long end = positions.getEndPosition(unit, piece);
-                if (start != Diagnostic.NOPOS && start <= at && (end == Diagnostic.NOPOS || at <= end)) {
+                if (within(piece, at)) {
                     around.add(piece);
                 }
             }
@@ -423,6 +437,13 @@ public class JavaTree {
                 }
             }
         }
+    }
+
+    /** Whether the position {@code at} is in the text of {@code tree}. */
+    private boolean within(Tree tree, long at) {
+        long start = positions.getStartPosition(unit, tree);
+        long end = positions.getEndPosition(unit, tree);
+        return start != Diagnostic.NOPOS && start <= at && (end == Diagnostic.NOPOS || at <= end);
     }
 
     /** Getters of each node interface, in declaration order, without those of Tree itself. */
