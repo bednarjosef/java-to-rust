@@ -67,5 +67,5 @@ fn a_range_of_a_null_program_sequence_is_a_range_of_null() {
             }
         }",
     );
-    assert!(rust.contains("None => { let builder: &java::StringBuilder = &sb; builder.append_range(\"null\", 1, 3); builder.clone() }"), "{rust}");
+    assert!(rust.contains("None => match &sb { held_ => { let builder: &java::StringBuilder = held_; builder.append_range(\"null\", 1, 3); builder.clone() } }"), "{rust}");
 }
