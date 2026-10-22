@@ -1337,12 +1337,15 @@ impl<'a> Gen<'a> {
                 temp.push('_');
             }
             // A string that may be null, read from a borrowed object, is borrowed from the
-            // borrow's guard, which ends with the `let`: the string is copied out first.
+            // borrow's guard, which ends with the `let`: the string is copied out first. One that
+            // a call returns (`self.nullable_text()?`) is a temporary that ends there too: it is
+            // kept first.
             if let Some(owned) = text.strip_suffix(".as_deref()")
-                && owned.contains(".borrow()")
+                && (owned.contains(".borrow()") || owned.ends_with([')', '?']))
             {
                 let value = format!("{temp}_value");
-                lines.push(format!("let {value} = {owned}.clone();"));
+                let copy = if owned.contains(".borrow()") { ".clone()" } else { "" };
+                lines.push(format!("let {value} = {owned}{copy};"));
                 lines.push(format!("let {temp} = {value}.as_deref();"));
                 names.extend([value, temp.clone()]);
                 bound.push(temp);
