@@ -66,15 +66,24 @@ pub(super) fn needs_clone(ty: Type) -> bool {
 
 /// The Rust name of a class: its name in its package without the dots (`Outer.Inner` is
 /// `OuterInner`), after the path of its
-/// module when that is not the module being written (see `modules`).
+/// module when that is not the module being written (see `modules`). A name that the generated
+/// code uses for Rust's own types (`STD_NAMES`), such as javac's class `Option`, takes a `_`.
 pub(super) fn struct_name(name: &str) -> String {
     // A type variable of a Rust generic is the Rust type parameter.
     if let Some((_, var)) = name.rsplit_once('#') {
         return var.to_string();
     }
     let (path, local) = modules::split(name);
-    path + &local.replace('.', "")
+    let local = local.replace('.', "");
+    match STD_NAMES.contains(&local.as_str()) {
+        true => format!("{path}{local}_"),
+        false => path + &local,
+    }
 }
+
+/// The names of Rust's own types and values that the generated code writes without a path.
+const STD_NAMES: [&str; 13] =
+    ["Option", "Some", "None", "Result", "Ok", "Err", "String", "Vec", "Box", "Rc", "RefCell", "Cell", "Ref"];
 
 /// The thread-local cell, or the `const`, that holds static field `field` of class `decl`. Two
 /// statics whose names differ only in case (`SEED` and `seed`) would get the same name: the later
