@@ -1420,6 +1420,28 @@ pub fn text_objects(x: &Expr) -> Vec<&Expr> {
             | Builtin::Native(Native::IdentityHash | Native::SystemIdentityHash),
             _,
         ) => Vec::new(),
+        // A copy, comparison, hash, clone or null check of an object, a fill or sort of an array,
+        // `Unsafe`'s memory and atomic updates: none of them makes the object's text. Of the
+        // natives, only `System.err`'s `print` does.
+        ExprKind::Builtin(
+            Builtin::ObjectClone
+            | Builtin::ObjectsEquals
+            | Builtin::ObjectsHashCode
+            | Builtin::NullChecked
+            | Builtin::Unmatched
+            | Builtin::RawMemory { .. }
+            | Builtin::ElementUpdate(_)
+            | Builtin::ByteView { .. }
+            | Builtin::ArraysFill
+            | Builtin::ArraysSort,
+            _,
+        ) => Vec::new(),
+        ExprKind::Builtin(Builtin::Native(native), _) if !matches!(native, Native::ErrPrint { .. }) => {
+            Vec::new()
+        }
+        // A range of a `CharSequence` that a builder appends is read with its `length` and
+        // `charAt` (`codegen::char_sequence`), or is a string's or a builder's.
+        ExprKind::Builtin(Builtin::Builder(BuilderOp::Append), args) if args.len() == 4 => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
             [&**l, &**r].into_iter().filter(is_object).collect()
