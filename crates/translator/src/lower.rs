@@ -142,6 +142,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             annotation_classes,
             shared_strings: false,
             module_labels,
+            thread_statics: None,
         };
         Ok((class, lowering.real.clone(), failed))
     })
