@@ -672,7 +672,20 @@ impl<'a> Gen<'a> {
         if !never_runs {
             self.written.insert(index);
         }
-        if never_runs {
+        // A census's stub that names its rejection ends the program with it (`Builtin::NoObject`).
+        let stub_message = match &m.body[..] {
+            [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, args), .. })] => {
+                match &args[..] {
+                    [Expr { kind: ExprKind::Str(message), .. }] => Some(message),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(message) = stub_message {
+            let call = format!("{}({})", self.runtime("not_translated"), code::rust_string(message));
+            self.line(&call);
+        } else if never_runs {
             self.line(&no_object(&self.class.types[m.class].name));
         } else if m.is_ctor {
             self.constructor(m);

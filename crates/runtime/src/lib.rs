@@ -299,6 +299,15 @@ pub fn exit(code: i32) -> ! {
     std::process::exit(code)
 }
 
+/// Ends a trial translation (`--census` with an output) where it reaches code that the
+/// translator rejected: `message` names the rejection and where it is. The exit status is 70
+/// (`EX_SOFTWARE`), which no Java program's uncaught exception gives.
+pub fn not_translated(message: &str) -> ! {
+    drain_stdout();
+    eprintln!("not translated: {message}");
+    std::process::exit(70)
+}
+
 /// Ends the program the way an uncaught Java exception of the standard class `class` does.
 pub fn throw(class: &str, message: &str) -> ! {
     catching::raise(class, message);

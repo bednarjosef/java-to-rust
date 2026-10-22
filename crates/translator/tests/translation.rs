@@ -3100,6 +3100,31 @@ fn the_census_reports_every_rejection_not_only_the_first() {
 }
 
 #[test]
+fn a_census_that_writes_its_translation_ends_the_program_in_rejected_code() {
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![census_sources("census_written")],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let census = census(&program);
+    assert_eq!(census.json["totals"]["program"]["rejected"], 3);
+    let rust = census.modules.expect("a translation").one_file();
+    // The methods that lowering, an analysis and the generator reject each end the program with
+    // the rejection; `fine` translates.
+    assert_contains(
+        &rust,
+        &[
+            "java::not_translated(\"p.Other.process: type `java.lang.ProcessBuilder` not supported yet (line 4)\")",
+            "java::not_translated(\"p.Other.split: catching the `PatternSyntaxException`",
+            "java::not_translated(\"p.Other.same: == on strings compares references; not supported yet (line 12)\")",
+            "java::println!(\"fine\")",
+        ],
+    );
+    assert_lacks(&rust, &["unreachable!"]);
+}
+
+#[test]
 fn a_census_that_keeps_going_rejects_the_code_that_javac_reports_errors_in() {
     let dir = write_sources(
         "census_keep_going",

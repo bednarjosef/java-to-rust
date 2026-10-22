@@ -373,6 +373,12 @@ struct Lowering<'t> {
     catch_panics: bool,
     /// Whether the method being lowered is a census's stub of one that lowering rejected.
     stubbing: Cell<bool>,
+    /// The rejection that the stub being lowered stands for, which its body names (`never`).
+    stub_message: RefCell<Option<String>>,
+    /// In a census whose translation is written (`census_lower_program`), a rejected field
+    /// initializer or initializer block becomes code that ends the program with the rejection's
+    /// message, where a census otherwise leaves it out.
+    ends_rejected: bool,
     /// In a census, the classes whose declaration lowering rejected (one that extends or
     /// implements a class that is not translated), with the error: such a class extends and
     /// implements none of those, and all of its code is rejected with it (see `census`).

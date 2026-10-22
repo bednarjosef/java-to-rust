@@ -72,6 +72,8 @@ impl<'t> Lowering<'t> {
             census: None,
             catch_panics: false,
             stubbing: Cell::new(false),
+            stub_message: Default::default(),
+            ends_rejected: false,
             stubbed: Default::default(),
             body_methods: Default::default(),
             annotation_types: Default::default(),
@@ -231,10 +233,12 @@ impl<'t> Lowering<'t> {
         } else {
             match init.map(|i| self.expr(i)).transpose() {
                 Ok(init) => init.map(|i| self.convert(i, ty)),
-                // In a census, a rejected initializer leaves the field at its default value.
+                // In a census, a rejected initializer leaves the field at its default value, or
+                // ends the program where the census writes its translation.
                 Err(e) => {
+                    let stub = self.rejected_initializer(self.current.get(), &e, node.pos(), ty);
                     self.reject(self.current.get(), e)?;
-                    None
+                    stub
                 }
             }
         };

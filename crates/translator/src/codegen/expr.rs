@@ -724,6 +724,10 @@ impl<'a> Gen<'a> {
             }
             Builtin::MainArgs => self.main_args(ty),
             Builtin::StringArrayOf | Builtin::ObjectArrayOf => self.array_conversion(builtin, &args[0], ty),
+            // A census's stub of rejected code, with the rejection's message (`Builtin::NoObject`).
+            Builtin::NoObject { .. } if let [Expr { kind: ExprKind::Str(message), .. }] = args => {
+                Code::atom(format!("{}({})", self.runtime("not_translated"), code::rust_string(message)))
+            }
             Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
             Builtin::InitializeClass { class } => match self.init_call(class) {
                 Some(init) => Code::atom(format!("{{ {init} }}")),
