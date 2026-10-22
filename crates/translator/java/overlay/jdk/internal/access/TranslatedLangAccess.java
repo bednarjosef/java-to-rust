@@ -86,4 +86,20 @@ final class TranslatedLangAccess {
         }
         return bytes;
     }
+
+    /**
+     * The character at {@code index} of {@code bytes}, two bytes per character in the order of the
+     * platform the translation runs on, little-endian (the JDK's {@code StringUTF16.getChar}).
+     */
+    static char uncheckedGetUTF16Char(byte[] bytes, int index) {
+        int i = index << 1;
+        return (char) ((bytes[i] & 0xff) | ((bytes[i + 1] & 0xff) << 8));
+    }
+
+    /** Sets the character at {@code index} of {@code bytes}, as {@link #uncheckedGetUTF16Char} reads it. */
+    static void uncheckedPutCharUTF16(byte[] bytes, int index, int ch) {
+        int i = index << 1;
+        bytes[i] = (byte) ch;
+        bytes[i + 1] = (byte) (ch >> 8);
+    }
 }

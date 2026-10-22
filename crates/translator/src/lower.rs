@@ -1130,6 +1130,12 @@ impl<'t> Lowering<'t> {
                 });
                 return Ok(ExprKind::Call { name: "currentThread".to_string(), args, resolved });
             }
+            // Any other method of the JVM's `JavaLangAccess`, whose object is null in a
+            // translated program: rejected where it can run, rather than a `NullPointerException`
+            // there. The branches for virtual threads never run (`program::FALSE_INSTANCE_CALLS`).
+            ("jdk.internal.access.JavaLangAccess", name) => {
+                return unsupported(node, &format!("`JavaLangAccess.{name}`, which the JVM gives,"));
+            }
             (
                 "java.lang.StringBuilder"
                 | "java.lang.StringBuffer"
