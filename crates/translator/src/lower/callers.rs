@@ -83,32 +83,22 @@ impl<'t> Lowering<'t> {
         query
     }
 
-    /// Why method `m`, which asks for its caller, cannot be passed it: it is not static, or it is
-    /// the program's `main`, which nothing in it calls. `None` when it can.
-    fn caller_unpassed(&self, m: usize) -> Option<&'static str> {
-        let node = self.methods[m].node;
-        if !node.has_flag("STATIC") {
-            return Some("a method that is not static");
+    /// The parameter `caller$class` of method `m` (`node`) when it asks for its caller; rejects a
+    /// method that is not static, or is the program's `main`, which nothing in it calls.
+    pub(super) fn caller_param(
+        &self,
+        m: usize,
+        node: Node<'t>,
+        is_main: bool,
+    ) -> Result<Option<Param>, Error> {
+        if self.caller_sensitive(m).is_none() {
+            return Ok(None);
         }
-        let params: Vec<Node> = node.list("parameters").collect();
-        let is_main = node.str("name") == "main"
-            && node.get("returnType").is_some_and(|r| r.java_type() == "void")
-            && matches!(&params[..], [p] if p.symbol().is_some_and(|s| s.ty == "java.lang.String[]"))
-            && self.entry.is_none_or(|entry| entry == self.methods[m].owner);
-        is_main.then_some("`main`")
-    }
-
-    /// Whether calls of method `m` pass it the class that calls it: it asks for its caller, and
-    /// can be passed it.
-    fn passes_caller(&self, m: usize) -> bool {
-        self.caller_sensitive(m).is_some() && self.caller_unpassed(m).is_none()
-    }
-
-    /// The parameter `caller$class` of method `m` when it asks for its caller and can be passed
-    /// it. A method that cannot is declared as it is, and its question is rejected where it asks
-    /// (`caller_class`), so that the rest of the program is still translated (and counted).
-    pub(super) fn caller_param(&self, m: usize) -> Option<Param> {
-        self.passes_caller(m).then(|| Param { name: CALLER_PARAM.to_string(), ty: Type::JavaClass })
+        if !node.has_flag("STATIC") || is_main {
+            let what = if is_main { "`main`" } else { "a method that is not static" };
+            return unsupported(node, &format!("asking for the caller (`getCallerClass`) in {what}"));
+        }
+        Ok(Some(Param { name: CALLER_PARAM.to_string(), ty: Type::JavaClass }))
     }
 
     /// `Reflection.getCallerClass()` or `walker.getCallerClass()`: the parameter `caller$class` of
@@ -132,9 +122,6 @@ impl<'t> Lowering<'t> {
         let Some(m) = asking else {
             return unsupported(node, &format!("{what} outside the body of a static method"));
         };
-        if let Some(why) = self.caller_unpassed(m) {
-            return unsupported(node, &format!("asking for the caller (`getCallerClass`) in {why}"));
-        }
         if query == CallerQuery::Walker {
             let receiver = select.get("expression").filter(|_| select.kind() == "MEMBER_SELECT");
             if !receiver.is_some_and(|r| self.retains_classes(r, self.methods[m].owner)) {
@@ -184,10 +171,7 @@ impl<'t> Lowering<'t> {
     /// literal of the class whose code makes the call (`node`). A method reference to a method
     /// that walks the stack is rejected (see the module's comment).
     pub(super) fn caller_arg(&self, node: Node<'t>, resolved: Option<usize>) -> Result<Option<Expr>, Error> {
-        let Some(query) = resolved.filter(|&m| self.passes_caller(m)).and_then(|m| self.caller_sensitive(m))
-        else {
-            return Ok(None);
-        };
+        let Some(query) = resolved.and_then(|m| self.caller_sensitive(m)) else { return Ok(None) };
         let current = self.current.get();
         let reference = self.lambda_of_type(current).is_some_and(|l| l.node.kind() == "MEMBER_REFERENCE");
         if reference && query == CallerQuery::Walker {
