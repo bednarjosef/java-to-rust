@@ -468,7 +468,9 @@ back, an element with its index when that is a constant (an `int` constant field
 javac writes as its value), a local or a call, an enum's `ordinal()` among them (`[...]` otherwise),
 no `because` for the value of `c ? a : b`, no message for a pattern switch's
 `Objects.requireNonNull`, and an assigned value followed back to its source
-(`(s = a).next` fails `because "a" is null`).
+(`(s = a).next` fails `because "a" is null`). A call is named as javac wrote it where the
+translation answers it with code of its own: `c.getModule()` as `java.lang.Class.getModule()`
+(`program::MODULE_CALLS`), and an enum's `toString()` as the enum's.
 
 **The JDK's code** is taken to be compiled with local names, as the JDK is, so its messages name
 its locals (`because "original" is null`), by their Java names where lowering renamed them

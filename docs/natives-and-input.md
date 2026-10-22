@@ -155,6 +155,9 @@ an operand of `&&`, and the lowering lowers only the other branch:
   false. It guards the pinning of virtual threads (`ReferenceQueue.poll` and other code under a
   lock).
 - `FALSE_INSTANCE_CALLS`: `Thread.isVirtual()`; there are no virtual threads.
+- A constant variable that is `false`, named by its simple name (`private final boolean
+  crtDebug = false;` in javac's `CRTable`): javac writes no code for the branch either, so the
+  messages of its null dereferences, which `BytecodeNames` finds no code for, are not needed.
 - `Boolean.getBoolean(key)` is `false` for every key (`lower/system.rs`): the JVM sets none of its
   own properties to `"true"`, only `-D` does, and a translation has no `System.setProperty` for
   it. A key whose evaluation has effects is still evaluated.

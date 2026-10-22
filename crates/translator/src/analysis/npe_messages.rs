@@ -365,10 +365,13 @@ impl Messages<'_> {
                     _ => None,
                 };
                 if let Some(method) = enum_method {
-                    let call = match self.jdk {
+                    // `EnumName` is `toString()` too, where the enum does not declare it.
+                    let named = |method| match self.jdk {
                         true => self.named_call(x, method).flatten(),
                         false => self.call(x.pos, method),
                     };
+                    let call =
+                        named(method).or_else(|| (method == "name").then(|| named("toString")).flatten());
                     add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
                     if let (Builtin::EnumCompareTo, Some(other)) = (builtin, args.get(1)) {
                         let failure = "Cannot invoke \"Object.getClass()\" because \"other\" is null";
@@ -797,7 +800,21 @@ impl Messages<'_> {
     fn called(&self, e: &Expr) -> Option<String> {
         match &e.kind {
             ExprKind::MethodCall { name, .. } => self.call(e.pos, name).or_else(|| self.jdk_call(e)),
-            ExprKind::Call { name, .. } => self.call(e.pos, name).or_else(|| {
+            ExprKind::Call { name, resolved, .. } => self.call(e.pos, name).or_else(|| {
+                // A call of `Class` or `ClassLoader` that the translator's module code answers
+                // (`program::MODULE_CALLS`), named as the JDK's method it stands for.
+                let modules = resolved.is_some_and(|r| {
+                    self.class.types[self.class.methods[r].class].name == crate::program::TRANSLATED_MODULES
+                });
+                if let Some(((class, jdk_name, signature), _)) =
+                    crate::program::MODULE_CALLS.iter().find(|(_, (to, _))| modules && to == name)
+                {
+                    let params = signature.trim_start_matches('(').split(')').next().unwrap_or_default();
+                    return match self.jdk {
+                        false => self.call(e.pos, jdk_name),
+                        true => Some(format!("{class}.{jdk_name}({params})")),
+                    };
+                }
                 // A static method of the JDK, as lowering found javac names it.
                 let named = self.jdk.then(|| self.named_call(e, name).flatten()).flatten();
                 named.or_else(|| self.jdk_static_call(e))

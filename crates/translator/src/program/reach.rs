@@ -793,7 +793,8 @@ fn stub_null_test(condition: &Value, equal: bool) -> bool {
 }
 
 /// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
-/// branch can run: it reads one of the `FALSE_FLAGS` or calls one of the `FALSE_CALLS` or
+/// branch can run: it reads one of the `FALSE_FLAGS` or a constant variable that is `false` by its
+/// simple name (whose branch javac writes no code for), or calls one of the `FALSE_CALLS` or
 /// `FALSE_INSTANCE_CALLS`, or, when the program's streams are all
 /// `sequential` (see `sequential.rs`), it is a pipeline's `isParallel()` or a test whether one
 /// of its nodes has children (`getChildCount() > 0`); alone, or as the first
@@ -808,8 +809,12 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
         }
         "IDENTIFIER" | "MEMBER_SELECT" => {
             let symbol = &condition["symbol"];
+            // A constant variable that is `false`, named by its simple name: javac writes no
+            // code for the branch (`private final boolean debug = false;`).
+            let false_constant =
+                text(condition, "kind") == "IDENTIFIER" && text(symbol, "constant") == "false";
             text(symbol, "kind") == "FIELD"
-                && FALSE_FLAGS.contains(&(text(symbol, "owner"), text(symbol, "name")))
+                && (false_constant || FALSE_FLAGS.contains(&(text(symbol, "owner"), text(symbol, "name"))))
         }
         "METHOD_INVOCATION" => {
             let symbol = &condition["symbol"];

@@ -5,13 +5,16 @@ import java.util.List;
 // The messages of nulls in nested code: a constructor that uses `this` as a value (so its class
 // builds whole objects) reading its enclosing instance's field, a class whose superclass has an
 // enclosing instance of another class, an element at a constant index, a static of the
-// enclosing class, an element at an enum's ordinal, and a for-each variable in a lambda.
+// enclosing class, an element at an enum's ordinal, an enum's `toString()`, a for-each variable
+// in a lambda, and code under a constant `false`, which javac writes no code for.
 public class NullMessagesOfNestedCode {
     Object types = null;
     Handler handler;
     NullMessagesOfNestedCode log = null;
     Object[] stackItem = new Object[5];
     static Object home = null;
+    private final boolean debug = false;
+    Phase phase;
 
     interface Codes {
         int OBJECTcode = 4;
@@ -79,6 +82,17 @@ public class NullMessagesOfNestedCode {
         });
     }
 
+    int traced(Sym s) {
+        if (debug) {
+            System.out.println(s.owner.hashCode());
+        }
+        return s.owner.hashCode();
+    }
+
+    String phaseName() {
+        return phase.toString() + phase.name();
+    }
+
     static void run(Runnable r) {
         try {
             r.run();
@@ -98,5 +112,7 @@ public class NullMessagesOfNestedCode {
         List<Sym> list = new ArrayList<>();
         list.add(null);
         run(() -> owners(List.of(list), "s"));
+        run(() -> o.traced(new Sym()));
+        run(() -> System.out.println(o.phaseName()));
     }
 }

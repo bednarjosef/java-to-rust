@@ -12,7 +12,7 @@ mod survey;
 pub use census::{Census, census_program};
 pub use modules::Contents as ModuleContents;
 pub use reach::{
-    CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind,
+    CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind, MODULE_CALLS,
     PRINT_FORMATTED, REGEX_CALLS, Reach, STRING_STREAMS, TRANSLATED_LANG_ACCESS,
     TRANSLATED_LANG_ACCESS_CLASS, TRANSLATED_MODULES, TRANSLATED_NESTED, TRANSLATED_PROPERTIES,
     TRANSLATED_SEGMENTS, UNSET_PROPERTIES, caller_query, charset_coder, charset_coding, class_bound,
