@@ -1107,8 +1107,8 @@ worker ends), `ExitFromWorker.java` (`System.exit(3)` from a thread), `Interrupt
 - **Rejected where the monitor would be kept**: `synchronized` on a string, a box, an array or
   a Java enum's constant (values, or `Rc`s without a lock), and `wait`, `notify` or `holdsLock`
   on them anywhere. A `StringBuilder`'s monitor is its cell's: the lock of a
-  `java::SharedStringBuilder`, or the address of a `java::StringBuilder`'s `Rc`. `synchronized (this)` in a constructor keeps no
-  monitor: no other thread has the object yet.
+  `java::SharedStringBuilder`, or the address of a `java::StringBuilder`'s `Rc`.
+  `synchronized (this)` in a constructor keeps no monitor: no other thread has the object yet.
 - **A lock read through another object** is taken out of it before the thread waits for its
   monitor (`java::enter(&{ this.borrow().lock.clone() })`), so that the thread does not hold the
   first object's data lock while it waits; the same holds for `wait` and `notify`.
