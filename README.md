@@ -307,8 +307,9 @@ A small subset, end to end:
   (`StackWalker.getInstance(RETAIN_CLASS_REFERENCE).getCallerClass()`, as logging libraries name a
   logger after it, or `Reflection.getCallerClass()` in the JDK's `@CallerSensitive` methods such as
   `ResourceBundle.getBundle`) gets that class from each call as a parameter more, since the
-  translator knows which class every call is in (`lower/callers.rs`). Asking anywhere else, and
-  walking the stack's frames (`StackWalker.walk`), is rejected.
+  translator knows which class every call is in (`lower/callers.rs`). Asking anywhere else (an
+  instance method, `main`, a lambda) is rejected where the question is asked, and so is walking
+  the stack's frames (`StackWalker.walk`).
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
   and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
   `super(message)`, `super(message, cause)`, fields, and overrides of `getMessage` and `toString`)
@@ -836,8 +837,12 @@ translation cannot match are rejected: `sun.java.command` (the command line) and
 `Integer.getInteger` and `Long.getLong` read a property the same way and decode it as
 `Integer.decode` does, giving the default (or null) when it is unset or no number.
 `Runtime.version().feature()` is the release of the JDK the translator ran with
-(`java.specification.version`); a `Runtime.Version` itself is still rejected. Preview features are
-off, and there is no security manager, so the `jrt:` file system's permission check does nothing;
+(`java.specification.version`). `Runtime.version()` itself parses `java.runtime.version` once
+(`java/overlay/java/lang/TranslatedRuntime.java`) into the JDK's `Runtime.Version`, which is
+translated from its sources although `Runtime` is the runtime's; its `parse` matches a regular
+expression. Preview features are off, and there is no security manager: `SecurityManager` is a
+type whose only value is null, so `System.getSecurityManager()` is null and a test of a
+manager against null decides its branch, and the `jrt:` file system's permission check does nothing;
 `SecurityProperties.includedInExceptions` reads the JDK's `conf/security/java.security`. The memory
 figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
 JVM's, and `gc()` does nothing, as `System.gc()` does. `Runtime.halt` flushes the output and exits without shutdown
