@@ -495,10 +495,18 @@ pub fn inflate_init(nowrap: bool) -> i64 {
 }
 
 /// `Inflater.inflateBytesBytes`: the result packs the bytes read (bits 0 to 30), the bytes
-/// written (31 to 61), `finished` (bit 62) and `needDict` (bit 63), as Java unpacks it.
-pub fn inflate_bytes(addr: i64, input: &[i8], output: &mut [i8]) -> Result<i64, Failure> {
+/// written (31 to 61), `finished` (bit 62) and `needDict` (bit 63), as Java unpacks it. The
+/// output is the array from `out_off` for `out_len` bytes; the input is copied by the caller.
+pub fn inflate_bytes(
+    addr: i64,
+    input: &[i8],
+    output: &mut [i8],
+    out_off: i32,
+    out_len: i32,
+) -> Result<i64, Failure> {
     let mut table = streams();
     let stream = table.get_mut(&addr).expect("Inflater used after end");
+    let output = &mut output[out_off as usize..(out_off + out_len) as usize];
     let progress = stream
         .inflate(input, output)
         .map_err(|message| Failure { class: DATA_FORMAT, message: message.to_string() })?;
@@ -528,9 +536,10 @@ pub fn inflate_end(addr: i64) {
 
 /// `Inflater.setDictionary`, which throws `IllegalArgumentException` (with no message, as zlib
 /// gives none) when the dictionary is not the one the header asks for.
-pub fn inflate_set_dictionary(addr: i64, dict: &[i8]) -> Result<(), crate::Exception> {
+pub fn inflate_set_dictionary(addr: i64, dict: &[i8], off: i32, len: i32) -> Result<(), crate::Exception> {
     let mut table = streams();
     let stream = table.get_mut(&addr).expect("Inflater used after end");
+    let dict = &dict[off as usize..(off + len) as usize];
     stream.set_dictionary(dict).map_err(|()| crate::Exception::bare("java.lang.IllegalArgumentException"))
 }
 
