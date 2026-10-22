@@ -178,10 +178,10 @@ fn lingers(x: &Expr) -> bool {
     }
 }
 
-/// Rejects a value that threads may share and that has no shared form yet: a `StringBuilder`, or
-/// a box whose identity the program observes, in a static or in a field of a shared class. Both
-/// are `Rc`s, which rustc would reject in a value another thread may hold. Every such field is
-/// reported.
+/// Rejects a value that threads may share and that has no shared form yet: a box whose identity
+/// the program observes, in a static or in a field of a shared class. It is an `Rc`, which rustc
+/// would reject in a value another thread may hold. Every such field is reported. (A builder has
+/// a shared form, `java::SharedStringBuilder`.)
 pub(super) fn check(class: &Class, facts: &Facts) -> Result<(), Vec<Error>> {
     let unshareable = |ty: Type| {
         let mut ty = ty;
@@ -189,7 +189,6 @@ pub(super) fn check(class: &Class, facts: &Facts) -> Result<(), Vec<Error>> {
             ty = *element;
         }
         match ty {
-            Type::StringBuilder => Some("a `StringBuilder`"),
             Type::Boxed(_) if facts.faithful_boxes.contains(&ty) => Some("a box compared by identity"),
             _ => None,
         }

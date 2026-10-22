@@ -71,16 +71,18 @@ pub fn tree(source: &str) -> Result<Value, Error> {
 }
 
 /// Runs javac once on all the files of a program, with `sourcepath` (the roots that classes are
-/// loaded from by package) as its source path, and `module_info` the only `module-info.java` on
-/// it that javac sees (see `JavaTree`'s `oneModule`), and returns
+/// loaded from by package) as its source path, `module_info` the only `module-info.java` on it
+/// that javac sees (see `JavaTree`'s `oneModule`), and the files of the source path that a patch
+/// in `patches` names read as patched (see `java/JdkPatch.java`), and returns
 /// `{"units": [{"file": ..., "tree": ...}]}`: the files given, then the units javac loaded from
 /// the source path. A compile error is returned with the file it is in.
 pub fn program_tree(
     files: &[PathBuf],
     sourcepath: &[PathBuf],
     module_info: Option<&Path>,
+    patches: Option<&Path>,
 ) -> Result<Value, (Option<String>, Error)> {
-    let output = program_command(files, sourcepath, module_info)?
+    let output = program_command(files, sourcepath, module_info, patches)?
         .output()
         .map_err(|e| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")))?;
     if !output.status.success() {
@@ -94,6 +96,22 @@ pub fn program_tree(
     Ok(tree)
 }
 
+/// Applies every patch under `patches` (see `java/JdkPatch.java`) to the file of the same path in
+/// the first of `roots` that has it, writing the patched files under `out` when it is given, and
+/// returns why any patch was refused.
+pub fn check_patches(patches: &Path, roots: &[PathBuf], out: Option<&Path>) -> Result<(), String> {
+    let mut command = java("JdkPatch", &[]);
+    command.arg(patches).args(roots);
+    if let Some(out) = out {
+        command.arg("--out").arg(out);
+    }
+    let output = command.output().map_err(|e| format!("cannot run `java` (a JDK must be on PATH): {e}"))?;
+    match output.status.success() {
+        true => Ok(()),
+        false => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+    }
+}
+
 fn fail(message: String) -> (Option<String>, Error) {
     (None, Error { pos: Pos::default(), message })
 }
@@ -103,6 +121,7 @@ fn program_command(
     files: &[PathBuf],
     sourcepath: &[PathBuf],
     module_info: Option<&Path>,
+    patches: Option<&Path>,
 ) -> Result<Command, (Option<String>, Error)> {
     let mut command = java_tree();
     command.arg("--program");
@@ -112,6 +131,9 @@ fn program_command(
     }
     if let Some(module_info) = module_info {
         command.arg("--module-info").arg(module_info);
+    }
+    if let Some(patches) = patches {
+        command.arg("--patches").arg(patches);
     }
     command.args(files);
     Ok(command)
@@ -169,18 +191,19 @@ pub struct Session {
 }
 
 impl Session {
-    /// Starts javac on the program's files, with `sourcepath` as its source path and
-    /// `module_info` as in `program_tree`, and returns their units, in the order given. A compile
-    /// error is returned with the file it is in; with `keep_going` (for a census), javac goes on
-    /// past compile errors instead, which it prints to standard error, and marks the piece of
-    /// code that each is in with `"javacError"` (see `JavaTree.markErrors`).
+    /// Starts javac on the program's files, with `sourcepath`, `module_info` and `patches` as in
+    /// `program_tree`, and returns their units, in the order given. A compile error is returned
+    /// with the file it is in; with `keep_going` (for a census), javac goes on past compile errors
+    /// instead, which it prints to standard error, and marks the piece of code that each is in
+    /// with `"javacError"` (see `JavaTree.markErrors`).
     pub fn start(
         files: &[PathBuf],
         sourcepath: &[PathBuf],
         module_info: Option<&Path>,
+        patches: Option<&Path>,
         keep_going: bool,
     ) -> Result<(Session, Vec<Value>), (Option<String>, Error)> {
-        let mut command = program_command(files, sourcepath, module_info)?;
+        let mut command = program_command(files, sourcepath, module_info, patches)?;
         if keep_going {
             command.arg("--keep-going");
         }

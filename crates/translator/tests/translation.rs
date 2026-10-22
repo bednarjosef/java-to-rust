@@ -4207,11 +4207,19 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
         } }",
     );
     assert_contains(&rust, &["java::or_break!(java::catching(|| "]);
-    // One whose class is not known is not.
-    let err = reject(
+    // So does a replacement's, of the classes the runtime raises for it.
+    let rust = translate(
         "class A { public static void main(String[] a) {
             try { System.out.println(\"a,b\".replaceAll(\",\", a[0])); }
             catch (RuntimeException e) { System.out.println(\"bad replacement\"); }
+        } }",
+    );
+    assert_contains(&rust, &["java::catching(|| "]);
+    // One whose class is not known is not.
+    let err = reject(
+        "class A { public static void main(String[] a) {
+            try { System.out.println(String.format(a[0], 1)); }
+            catch (RuntimeException e) { System.out.println(\"bad format\"); }
         } }",
     );
     assert!(

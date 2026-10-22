@@ -149,13 +149,24 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             // `new String(ascii, hibyte)` copies the whole array.
             StringOp::FromHighByte if args.len() == 2 => &[],
             StringOp::FromHighByte => &[SIOOBE],
-            // A malformed pattern, and a bad group in a replacement, unless it is a constant
-            // without references to groups and escapes.
+            // A malformed pattern, and a bad replacement, unless it is a constant without
+            // references to groups and escapes: a dangling escape or a malformed reference
+            // (`IllegalArgumentException`), or a group the pattern lacks
+            // (`IndexOutOfBoundsException`), as `java::regex`'s `parse_replacement` raises them.
             StringOp::ReplaceAll | StringOp::ReplaceFirst
                 if !crate::analysis::constants::text(class, &args[2])
                     .is_some_and(|r| !r.contains(['$', '\\'])) =>
             {
-                &["?"]
+                let pattern = crate::analysis::constants::text(class, &args[1]);
+                if pattern.is_some_and(|p| java_runtime::regex::never_fails(p, None)) {
+                    &["java.lang.IllegalArgumentException", "java.lang.IndexOutOfBoundsException"]
+                } else {
+                    &[
+                        "java.util.regex.PatternSyntaxException",
+                        "java.lang.IllegalArgumentException",
+                        "java.lang.IndexOutOfBoundsException",
+                    ]
+                }
             }
             StringOp::ReplaceAll | StringOp::ReplaceFirst | StringOp::Matches | StringOp::Split => {
                 &["java.util.regex.PatternSyntaxException"]

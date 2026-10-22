@@ -1,5 +1,6 @@
 //! Compiles `java/JavaTree.java`, the program that runs javac on the input and prints its typed
-//! syntax tree, into the build directory; `javac.rs` runs it from there. Then prints the tree of
+//! syntax tree (with `java/JdkPatch.java`, which applies the translator's patches of library
+//! classes), into the build directory; `javac.rs` runs it from there. Then prints the tree of
 //! `java/Standard.java`, the standard exception classes that lowering adds to the programs that
 //! use them, as `standard.json` in the build directory, and the tree of `java/Functional.java`,
 //! the JDK's functional interfaces for programs translated without the JDK's sources, as
@@ -20,6 +21,7 @@ const JAVAC_PACKAGES: [&str; 5] = ["api", "code", "tree", "util", "jvm"];
 fn main() {
     println!("cargo:rerun-if-changed=java/JavaTree.java");
     println!("cargo:rerun-if-changed=java/BytecodeNames.java");
+    println!("cargo:rerun-if-changed=java/JdkPatch.java");
     println!("cargo:rerun-if-changed=java/Standard.java");
     println!("cargo:rerun-if-changed=java/Functional.java");
     println!("cargo:rerun-if-changed=java/Threads.java");
@@ -32,10 +34,13 @@ fn main() {
         javac.args(["--add-exports", &format!("jdk.compiler/com.sun.tools.javac.{package}=ALL-UNNAMED")]);
     }
     let status = javac
-        .args(["java/JavaTree.java", "java/BytecodeNames.java"])
+        .args(["java/JavaTree.java", "java/BytecodeNames.java", "java/JdkPatch.java"])
         .status()
         .expect("building the translator needs javac (a JDK, version 21 or newer) on PATH");
-    assert!(status.success(), "javac failed to compile java/JavaTree.java and java/BytecodeNames.java");
+    assert!(
+        status.success(),
+        "javac failed to compile the translator's Java (java/JavaTree.java and the classes it uses)"
+    );
     for (source, json, with) in [
         ("java/Standard.java", "standard.json", None),
         ("java/Functional.java", "functional.json", None),

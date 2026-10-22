@@ -386,7 +386,7 @@ impl<'a> Gen<'a> {
     /// A builder that may be null as an `Option<&java::StringBuilder>`.
     pub(super) fn builder_option(&mut self, e: &'a Expr) -> String {
         match &e.kind {
-            ExprKind::Null => format!("None::<&{}>", self.runtime("StringBuilder")),
+            ExprKind::Null => format!("None::<&{}>", self.builder_type()),
             _ => format!("{}.as_ref()", self.object_place(e)),
         }
     }
@@ -434,7 +434,7 @@ impl<'a> Gen<'a> {
     /// A builder method as it is called; a chaining method gives the `&Self` it returns, which
     /// `builtin` clones where the builder is used as a value.
     pub(super) fn builder_call(&mut self, id: ExprId, op: BuilderOp, args: &'a [Expr]) -> Code {
-        let ty = self.runtime("StringBuilder");
+        let ty = self.builder_type();
         if op == BuilderOp::New {
             return Code::atom(match args.first() {
                 None => format!("{ty}::new()"),

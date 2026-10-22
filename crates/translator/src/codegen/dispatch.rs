@@ -1702,11 +1702,14 @@ impl<'a> Gen<'a> {
         if variants.is_empty() || !self.facts.kept_monitor_of(t) {
             return;
         }
+        // A builder's handle has its cell's monitor (`java::Builder`'s `HasMonitor`).
         let handles: Vec<bool> = variants
             .iter()
             .map(|&c| {
                 let payload = self.payload(c);
-                payload.starts_with("Rc<") || payload.starts_with("Arc<java::Locked<")
+                payload.starts_with("Rc<")
+                    || payload.starts_with("Arc<java::Locked<")
+                    || matches!(payload.as_str(), "java::StringBuilder" | "java::SharedStringBuilder")
             })
             .collect();
         if !handles.contains(&true) {

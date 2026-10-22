@@ -156,12 +156,17 @@ pub(super) fn rust_type(ty: Type) -> &'static str {
         Type::Float => "f32",
         Type::Boolean => "bool",
         Type::String => "String",
-        Type::StringBuilder => "java::StringBuilder",
         Type::Charset => "java::Charset",
         Type::JavaClass => "java::Class",
         Type::Void => "()",
-        // A boxed type is named by `Gen::ty_name`, which knows whether its identity is observed.
-        Type::Array(_) | Type::Class(..) | Type::Enum(_) | Type::Null | Type::Boxed(_) => {
+        // A boxed type is named by `Gen::ty_name`, which knows whether its identity is observed,
+        // and a builder too, which knows whether the program has threads.
+        Type::Array(_)
+        | Type::Class(..)
+        | Type::Enum(_)
+        | Type::Null
+        | Type::Boxed(_)
+        | Type::StringBuilder => {
             unreachable!("lowering rejects {ty}")
         }
     }

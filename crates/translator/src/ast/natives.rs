@@ -160,7 +160,7 @@ pub enum Native {
     /// whose `File` arguments are their paths (`java_runtime::fs`).
     FileSystem(&'static str),
     /// A native of the translator's `sun.nio.fs.UnixNativeDispatcher`
-    /// (`java/overlay/sun/nio/fs/UnixNativeDispatcher.java`) by its name (`open0`, `stat0`, ...):
+    /// (`java/patches/sun/nio/fs/UnixNativeDispatcher.java`) by its name (`open0`, `stat0`, ...):
     /// a system call of `java.nio.file` on the bytes of a path, which records its `errno` rather
     /// than failing (`java_runtime::unix`, `UNIX_CALLS`).
     Unix(&'static str),
@@ -210,7 +210,7 @@ pub enum Native {
     /// (`java::allocate_native`, see the runtime's `native_memory`).
     AllocateNative,
     /// The system's page size, `UnsafeConstants.PAGE_SIZE` of the translator's
-    /// (`java/overlay/jdk/internal/misc/UnsafeConstants.java`).
+    /// (`java/patches/jdk/internal/misc/UnsafeConstants.java`).
     PageSize,
     /// `Unsafe.reallocateMemory0(address, bytes)`.
     ReallocateNative,
