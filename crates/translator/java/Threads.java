@@ -42,9 +42,11 @@ class Thread {
     // The thread's context class loader: what was set, the parent's when the thread was made, and
     // for the main thread the application's (`ClassLoader` below).
     private ClassLoader contextClassLoader;
-    // The thread's scoped-value bindings, which the JDK's `ScopedValue` keeps in the thread:
-    // `Thread.class` while it has bound none (the JDK's `NEW_THREAD_BINDINGS`), as a new thread
-    // starts. A thread inherits no bindings, as a thread that no `StructuredTaskScope` starts.
+    // The thread's scoped-value bindings, which the JDK's `ScopedValue` keeps in the thread. A
+    // new thread has none, as a thread that no `StructuredTaskScope` starts. They start unknown
+    // (null), where the JDK's start as `Thread.class` (`NEW_THREAD_BINDINGS`, none); the first
+    // read finds none (`findScopedValueBindings`) and sets them, and so reads the same. (A field
+    // that the constructors set would be every program's.)
     private Object scopedValueBindings;
     // The thread's cache of the scoped values it read last, which the JVM keeps for each thread
     // and `ScopedValue` fills and clears; empty (null) when the thread starts.
@@ -71,7 +73,6 @@ class Thread {
         this.priority = parent.priority;
         this.group = parent.group;
         this.contextClassLoader = parent.contextClassLoader;
-        this.scopedValueBindings = Thread.class;
     }
 
     public Thread(ThreadGroup group, Runnable task) {
@@ -106,7 +107,6 @@ class Thread {
         this.tid = tid;
         this.priority = 5;
         this.contextClassLoader = ClassLoader.getSystemClassLoader();
-        this.scopedValueBindings = Thread.class;
     }
 
     private static String checkName(String name) {
@@ -336,8 +336,8 @@ class Thread {
     }
 
     // The JVM walks the stack for the bindings of a `ScopedValue.Carrier.runWith` when a thread's
-    // are unknown (null). They are never unknown here: nothing but `setScopedValueBindings` sets
-    // them, and `ScopedValue` sets them only to bindings. `ScopedValue` reads null as none.
+    // are unknown (null). Here they are unknown only before the thread first reads them, when no
+    // `runWith` has set any: none, which `ScopedValue` reads null as.
     static Object findScopedValueBindings() {
         return null;
     }
