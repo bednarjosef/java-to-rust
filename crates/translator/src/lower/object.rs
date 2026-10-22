@@ -580,10 +580,14 @@ impl<'t> Lowering<'t> {
             debug_assert_eq!(types.len(), s.decl);
             types.push(decl(CHAR_SEQUENCE, "", TypeKind::Interface, vec![at.decl]));
         }
-        // The arrays that become `Object`s, each named after its type (`int[]`), and the
-        // `StringBuilder`s.
+        // The arrays that become `Object`s, each named after its type (`int[]`), the
+        // `StringBuilder`s and the classes.
         for &ty in self.object_arrays.borrow().iter() {
-            let name = if ty == Type::StringBuilder { STRING_BUILDER.to_string() } else { ty.to_string() };
+            let name = match ty {
+                Type::StringBuilder => STRING_BUILDER.to_string(),
+                Type::JavaClass => CLASS_VALUE.to_string(),
+                _ => ty.to_string(),
+            };
             let mut implements = vec![at.decl];
             if ty == Type::StringBuilder {
                 implements.extend(at.char_sequence.map(|s| s.decl));
@@ -593,11 +597,11 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// Notes that arrays of type `ty`, if it is an array type, or `StringBuilder`s become
+    /// Notes that arrays of type `ty`, if it is an array type, `StringBuilder`s or classes become
     /// `Object`s.
     pub(super) fn note_object_array(&self, ty: Type) {
         let mut arrays = self.object_arrays.borrow_mut();
-        if matches!(ty, Type::Array(_) | Type::StringBuilder) && !arrays.contains(&ty) {
+        if matches!(ty, Type::Array(_) | Type::StringBuilder | Type::JavaClass) && !arrays.contains(&ty) {
             arrays.push(ty);
         }
     }

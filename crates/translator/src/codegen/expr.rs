@@ -462,9 +462,14 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({option})", self.runtime("null_enum")))
             }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
-            // string, a builder, a box or an array.
+            // string, a builder, a box, an array or a class.
             ExprKind::Cast(
-                to @ (Type::Enum(_) | Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_)),
+                to @ (Type::Enum(_)
+                | Type::String
+                | Type::StringBuilder
+                | Type::Boxed(_)
+                | Type::Array(_)
+                | Type::JavaClass),
                 value,
             ) if matches!(value.ty, Type::Class(..)) => self.checked_class_cast(e.id, *to, value),
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),

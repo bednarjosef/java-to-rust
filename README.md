@@ -291,7 +291,11 @@ A small subset, end to end:
   its binary name with those of `x`'s class and of every class and interface above it, which the
   generator writes out for each class `x` may be of; a failed `cast` throws Java's
   `ClassCastException` (`Cannot cast java.lang.String to Main$Dog`), which a `catch` sees.
-  `Class.forName` of a constant name is that class, and of a computed one a `switch` over the
+  A class held as an `Object` (a key of a `Map<Class<?>, V>`, an element of a `List<Object>`,
+  a sentinel `static final Object NONE = Thread.class`) is the same value in `Object`'s `Class`
+  variant: Java has one object for each class, so `==`, `equals`, `hashCode` and
+  `System.identityHashCode` are the value's, and `instanceof Class` and a cast back test the
+  variant. `Class.forName` of a constant name is that class, and of a computed one a `switch` over the
   binary names of the classes that code can find by name; a name that is not in the translation
   throws Java's `ClassNotFoundException`, which says so. Reflection over the program's classes
   goes through a table of their members that the translation builds in, only for the classes and
