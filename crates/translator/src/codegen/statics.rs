@@ -4,11 +4,13 @@
 //! `<clinit>` once, and every static method, constructor and access from another class calls it
 //! first, as Java initializes a class on first use.
 //!
-//! A program that starts threads has one copy of each static for the process, read and written
-//! with the same text: a primitive is a `java::Atomic` (`X.get()`, `X.set(v)`, which acquire and
-//! release), anything else a `java::Locked` (`X.with_borrow(..)`, `X.with_borrow_mut(..)`), inside
-//! a `LazyLock` when its initializer is not a constant; an eager class's flag is a
-//! `java::ClassInit`, which makes another thread wait while one runs the initialization.
+//! In a program that starts threads, the statics that the started threads' code may touch
+//! (`Facts::process_statics`, by class) have one copy for the process, read and written with the
+//! same text: a primitive is a `java::Atomic` (`X.get()`, `X.set(v)`, which acquire and release),
+//! anything else a `java::Locked` (`X.with_borrow(..)`, `X.with_borrow_mut(..)`), inside a
+//! `LazyLock` when its initializer is not a constant; such an eager class's flag is a
+//! `java::ClassInit`, which makes another thread wait while one runs the initialization. The other
+//! classes' statics stay thread-local cells, which only the main thread uses.
 
 use super::*;
 
@@ -78,9 +80,10 @@ impl<'a> Gen<'a> {
             return;
         }
         self.gap();
-        if self.facts.threaded {
-            return self.process_statics(&eager, cells);
-        }
+        let process = |t: &usize| self.facts.process_statics(*t);
+        let (process_eager, eager): (Vec<usize>, Vec<usize>) = eager.into_iter().partition(process);
+        let (process_cells, cells): (Vec<_>, Vec<_>) = cells.into_iter().partition(|(t, _)| process(t));
+        self.process_statics(&process_eager, process_cells);
         let mut items = Vec::new();
         for &t in &eager {
             items.push(format!(
@@ -132,7 +135,7 @@ impl<'a> Gen<'a> {
         (cell, ty, init, constant)
     }
 
-    /// The statics of a program with threads, one for the process (see the module's
+    /// The statics that are the process's, one copy each (see the module's
     /// documentation).
     fn process_statics(&mut self, eager: &[usize], cells: Vec<(usize, &'a Field)>) {
         for &t in eager {
@@ -156,10 +159,11 @@ impl<'a> Gen<'a> {
 
     /// At the start of an `init` function: returns if initialization has started, else records
     /// that it has, so that a use during initialization, from the same thread, sees the class as
-    /// initialized, as Java does. With threads, another thread's initialization is waited for,
-    /// and `init_done` ends the function.
-    pub(super) fn init_guard(&mut self, class: &str) {
-        if self.facts.threaded {
+    /// initialized, as Java does. When its statics are the process's, another thread's
+    /// initialization is waited for, and `init_done` ends the function.
+    pub(super) fn init_guard(&mut self, t: usize) {
+        let class = &self.class.types[t].name;
+        if self.facts.process_statics(t) {
             self.line(&format!("if !{}.start() {{", flag(class)));
             self.line("    return;");
             self.line("}");
@@ -171,9 +175,10 @@ impl<'a> Gen<'a> {
         self.line(&format!("{}.set(true);", flag(class)));
     }
 
-    /// At the end of an `init` function in a program with threads: the initialization is done,
-    /// for the threads that wait for it.
-    pub(super) fn init_done(&mut self, class: &str) {
+    /// At the end of the `init` function of a class whose statics are the process's: the
+    /// initialization is done, for the threads that wait for it.
+    pub(super) fn init_done(&mut self, t: usize) {
+        let class = &self.class.types[t].name;
         self.line(&format!("{}.finish();", flag(class)));
     }
 

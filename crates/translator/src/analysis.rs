@@ -56,6 +56,16 @@ pub(crate) use string_identity::{Made, made, value_of_operand};
 pub use threads::array_family;
 pub use whole_objects::whole_objects;
 
+/// The types whose statics a thread that the program starts may touch (`Class::thread_statics`),
+/// for a translation that does not keep only the methods that can run (a whole program's does,
+/// and finds these on the way): `None` when the program starts no thread, or that is not known.
+pub fn thread_statics(class: &Class) -> Option<HashSet<usize>> {
+    if !threads::threaded(class) {
+        return None;
+    }
+    live_methods::live_methods(class).ok()?.thread_statics
+}
+
 #[derive(Default)]
 pub struct Facts {
     /// Whether the program starts a thread (see `threads`).
@@ -66,6 +76,9 @@ pub struct Facts {
     /// The classes, by type index, whose objects two threads may reach: `Arc`s, with a
     /// `java::Locked` unless immutable.
     pub thread_shared: HashSet<usize>,
+    /// The types whose statics the started threads' code may touch (`Class::thread_statics`),
+    /// `None` when not known; see `Facts::process_statics`.
+    pub thread_statics: Option<HashSet<usize>>,
     /// Whether two threads may reach a `StringBuilder`, whose builders are then all
     /// `java::SharedStringBuilder`s (see `threads::shares_builders`).
     pub shared_builders: bool,
@@ -339,9 +352,10 @@ fn representation(class: &Class, facts: &mut Facts) {
     facts.threaded = threads::threaded(class);
     facts.interrupts = threads::interrupts(class);
     if facts.threaded {
-        facts.thread_shared = threads::thread_shared(class);
-        facts.shared_builders = threads::shares_builders(class, &facts.thread_shared);
-        facts.shared_arrays = threads::shared_arrays(class, &facts.thread_shared);
+        facts.thread_statics = class.thread_statics.clone();
+        facts.thread_shared = threads::thread_shared(class, facts);
+        facts.shared_builders = threads::shares_builders(class, facts);
+        facts.shared_arrays = threads::shared_arrays(class, facts);
         facts.long_methods = threads::long_methods(class, &facts.thread_shared);
     }
     facts.monitors = monitors::observed(class);

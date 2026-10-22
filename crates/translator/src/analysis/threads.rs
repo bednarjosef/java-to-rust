@@ -7,11 +7,17 @@
 //! and the objects that may be reached from two threads are `Arc<java::Locked<..>>` (or `Arc<..>`
 //! when immutable).
 //!
+//! Which statics a started thread may touch is decided by the methods it runs: those that the
+//! walk of `live_methods` finds from what the runtime runs on the thread (`Class::thread_statics`).
+//! The statics of those types are one copy for the process; every other static stays a
+//! thread-local cell, which only the main thread uses (`Facts::process_statics`). When the walk
+//! cannot tell, every static is the process's.
+//!
 //! Which objects two threads may reach is decided by type: a thread reaches its `Thread` object
-//! and the statics, and from an object, whatever its fields may hold. So the classes of the
-//! `Thread` family and the types of the statics are shared, and so are the types of the fields of
-//! a shared class, with every class of the family of a shared class (the enum of a family holds
-//! all of its classes the same way). A class that no thread can reach keeps its `Rc`.
+//! and the statics it may touch, and from an object, whatever its fields may hold. So the classes
+//! of the `Thread` family and the types of those statics are shared, and so are the types of the
+//! fields of a shared class, with every class of the family of a shared class (the enum of a
+//! family holds all of its classes the same way). A class that no thread can reach keeps its `Rc`.
 //!
 //! The data lock of a shared object is held only while its fields are read or written: a method
 //! that borrows its object (`&self`, `&mut self`) holds the lock for the whole call, so in a
@@ -54,16 +60,28 @@ pub(super) fn handles_uncaught(class: &Class) -> bool {
     })
 }
 
+impl Facts {
+    /// Whether the statics of type `t` are one copy for the process (a `java::Atomic`, a
+    /// `java::Locked`, a `java::ClassInit` flag) rather than thread-local cells: in a program that
+    /// starts a thread, those that its threads' code may touch (`Class::thread_statics`), and all
+    /// of them when that is not known.
+    pub fn process_statics(&self, t: usize) -> bool {
+        self.threaded && self.thread_statics.as_ref().is_none_or(|touched| touched.contains(&t))
+    }
+}
+
 /// The classes, by type index, whose objects two threads may reach in a threaded program.
-pub(super) fn thread_shared(class: &Class) -> HashSet<usize> {
+pub(super) fn thread_shared(class: &Class, facts: &Facts) -> HashSet<usize> {
     let h = &class.hierarchy;
     let mut work = Vec::new();
     if let Some(thread) = class.type_index("java.lang.Thread") {
         work.push(thread);
     }
-    for decl in &class.types {
-        for f in &decl.statics {
-            types_of(class, f.ty, &mut work);
+    for (t, decl) in class.types.iter().enumerate() {
+        if facts.process_statics(t) {
+            for f in &decl.statics {
+                types_of(class, f.ty, &mut work);
+            }
         }
     }
     // The objects that become values of each type, as the representation's `flows` finds them
@@ -103,7 +121,8 @@ pub(super) fn thread_shared(class: &Class) -> HashSet<usize> {
 /// `CharSequence` that is shared (the runtime class of builders is shared). Builders are decided
 /// by type, as classes are: then every builder is a `java::SharedStringBuilder`, else every one
 /// stays a `java::StringBuilder`, whose monitor is the address of its `Rc`.
-pub(super) fn shares_builders(class: &Class, shared: &HashSet<usize>) -> bool {
+pub(super) fn shares_builders(class: &Class, facts: &Facts) -> bool {
+    let shared = &facts.thread_shared;
     fn holds(ty: Type) -> bool {
         match ty {
             Type::StringBuilder => true,
@@ -113,7 +132,7 @@ pub(super) fn shares_builders(class: &Class, shared: &HashSet<usize>) -> bool {
         }
     }
     class.types.iter().enumerate().any(|(t, decl)| {
-        decl.statics.iter().any(|f| holds(f.ty))
+        facts.process_statics(t) && decl.statics.iter().any(|f| holds(f.ty))
             || shared.contains(&t)
                 && (decl.fields.iter().any(|f| holds(f.ty))
                     || decl.captures.iter().any(|c| holds(c.ty))
@@ -126,7 +145,8 @@ pub(super) fn shares_builders(class: &Class, shared: &HashSet<usize>) -> bool {
 /// of `Object` that is shared (the runtime class of its type is shared). The arrays of those
 /// families are `java::SharedArray`s; every other array stays a `java::Array`, even in a program
 /// with threads. An array's rows are of its family, so a `SharedArray` never holds an `Array`.
-pub(super) fn shared_arrays(class: &Class, shared: &HashSet<usize>) -> HashSet<Type> {
+pub(super) fn shared_arrays(class: &Class, facts: &Facts) -> HashSet<Type> {
+    let shared = &facts.thread_shared;
     fn holds(ty: Type, out: &mut HashSet<Type>) {
         match ty {
             Type::Array(element) => {
@@ -139,7 +159,9 @@ pub(super) fn shared_arrays(class: &Class, shared: &HashSet<usize>) -> HashSet<T
     }
     let mut out = HashSet::new();
     for (t, decl) in class.types.iter().enumerate() {
-        decl.statics.iter().for_each(|f| holds(f.ty, &mut out));
+        if facts.process_statics(t) {
+            decl.statics.iter().for_each(|f| holds(f.ty, &mut out));
+        }
         if shared.contains(&t) {
             decl.fields.iter().for_each(|f| holds(f.ty, &mut out));
             decl.captures.iter().for_each(|c| holds(c.ty, &mut out));
@@ -259,7 +281,8 @@ pub(super) fn check(class: &Class, facts: &Facts) -> Result<(), Vec<Error>> {
     let mut errors = Vec::new();
     for (t, decl) in class.types.iter().enumerate() {
         let fields = if facts.thread_shared.contains(&t) { &decl.fields[..] } else { &[] };
-        for f in decl.statics.iter().chain(fields) {
+        let statics = if facts.process_statics(t) { &decl.statics[..] } else { &[] };
+        for f in statics.iter().chain(fields) {
             if let Some(what) = unshareable(f.ty) {
                 errors.push(Error {
                     pos: f.pos,

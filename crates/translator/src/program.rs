@@ -188,6 +188,7 @@ fn narrow(
             live.unresolved.len()
         );
     }
+    class.thread_statics = live.thread_statics.clone();
     analysis::live_methods::prune(class, &live);
     (running, live.unresolved)
 }
