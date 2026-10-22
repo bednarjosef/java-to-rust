@@ -1,8 +1,12 @@
 package sun.nio.cs;
 
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CharsetEncoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -63,5 +67,34 @@ public final class TranslatedCoders {
             return new UTF_16LE.Encoder(cs);
         }
         throw new UnsupportedOperationException("an encoder of " + cs);
+    }
+
+    /** {@code cs.decode(bb)}, which replaces malformed input and never fails on it. */
+    public static CharBuffer decode(Charset cs, ByteBuffer bb) {
+        try {
+            return newDecoder(cs)
+                .onMalformedInput(CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(CodingErrorAction.REPLACE)
+                .decode(bb);
+        } catch (CharacterCodingException x) {
+            throw new Error(x);
+        }
+    }
+
+    /** {@code cs.encode(cb)}, which replaces malformed input and never fails on it. */
+    public static ByteBuffer encode(Charset cs, CharBuffer cb) {
+        try {
+            return newEncoder(cs)
+                .onMalformedInput(CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(CodingErrorAction.REPLACE)
+                .encode(cb);
+        } catch (CharacterCodingException x) {
+            throw new Error(x);
+        }
+    }
+
+    /** {@code cs.encode(str)}, which is {@code encode(CharBuffer.wrap(str))}. */
+    public static ByteBuffer encode(Charset cs, String str) {
+        return encode(cs, CharBuffer.wrap(str));
     }
 }

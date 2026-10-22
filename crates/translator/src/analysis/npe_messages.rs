@@ -285,6 +285,11 @@ impl Messages<'_> {
                 if let Some(method) = charset {
                     return add(&args[0], self.call(x.pos, method).map(|m| format!("Cannot invoke \"{m}\"")));
                 }
+                // `o.getClass()` of a null, alone or compared or named, which javac calls as
+                // `Object`'s whatever the object's type, in the JDK's code too.
+                if let Builtin::GetClass | Builtin::ClassName { .. } = builtin {
+                    return add(&args[0], Some("Cannot invoke \"Object.getClass()\"".to_string()));
+                }
                 // An enum's own methods, of an enum that may be null. A null argument of
                 // `compareTo` fails in `Enum.compareTo`, the JDK's code (`-g`, so its local has
                 // its name).
@@ -324,6 +329,10 @@ impl Messages<'_> {
                             _ => "Cannot read the array length",
                         };
                         out.insert(args[0].id, Some(format!("{failure} because \"original\" is null")));
+                    }
+                    // `valueOf` of a null name, which `Enum.valueOf` rejects with its own message.
+                    Builtin::EnumValueOf => {
+                        out.insert(args[0].id, Some("Name is null".to_string()));
                     }
                     // `new StringBuilder(s)` of a null string, which fails in the JDK's
                     // constructor.

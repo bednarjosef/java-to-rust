@@ -312,11 +312,17 @@ impl<'t> Lowering<'t> {
 
     /// The class of the program whose instance a member of `owner` named in the code of class
     /// `class` belongs to: `owner` itself, or for a method of `java.lang.Enum` (`name()`,
-    /// `ordinal()`) the innermost enum around the code.
+    /// `ordinal()`) or a member of an enum constant's body (which javac gives no owner) the
+    /// innermost enum around the code.
     fn member_owner(&self, class: usize, owner: &str) -> Option<usize> {
-        if owner != "java.lang.Enum" {
+        if owner != "java.lang.Enum" && !owner.is_empty() {
             return self.type_index(owner);
         }
+        self.enclosing_enum(class)
+    }
+
+    /// The innermost enum around the code of class `class`, itself included.
+    pub(super) fn enclosing_enum(&self, class: usize) -> Option<usize> {
         let mut at = class;
         while self.types[at].node.kind() != "ENUM" {
             at = self.nesting(at)?.enclosing;

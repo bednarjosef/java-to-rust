@@ -26,10 +26,10 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The class of `object` where its type says it and reading it has no effects: the object
-    /// is a struct, not an enum of classes.
+    /// The class of `object` where its type says it and reading it has no effects and cannot
+    /// fail: the object is a struct, not an enum of classes.
     fn known_class(&self, object: &Expr) -> Option<usize> {
-        if has_effects(object) || self.enum_of(object).is_some() {
+        if has_effects(object) || self.object_may_fail(object) || self.enum_of(object).is_some() {
             return None;
         }
         self.struct_class(object)
@@ -39,10 +39,10 @@ impl<'a> Gen<'a> {
     fn has_class(&mut self, object: &'a Expr, c: usize, same: bool) -> Code {
         let Some(t) = self.enum_of(object) else {
             let is = self.struct_class(object) == Some(c);
-            return self.after_effects(object, if is == same { "true" } else { "false" });
+            return self.after_object(object, if is == same { "true" } else { "false" });
         };
         if !self.enum_variants(t).contains(&c) {
-            return self.after_effects(object, if same { "false" } else { "true" });
+            return self.after_object(object, if same { "false" } else { "true" });
         }
         let (obj, variant) = (self.object(object), self.variant(t, c));
         let not = if same { "" } else { "!" };
@@ -54,7 +54,7 @@ impl<'a> Gen<'a> {
         let Some(t) = self.enum_of(object) else {
             let c = self.struct_class(object).expect("an object has a class");
             let name = rust_string(&self.java_class_name(c, false));
-            return self.after_effects(object, &name);
+            return self.after_object(object, &name);
         };
         let obj = self.object(object);
         let arms: Vec<String> = self
@@ -66,13 +66,35 @@ impl<'a> Gen<'a> {
         Code::new(super::class_values::variant_match(&obj, &arms), LOWEST)
     }
 
-    /// `value`, once `object` has run when it has effects.
-    fn after_effects(&mut self, object: &'a Expr, value: &str) -> Code {
+    /// `value`, once `object` has run where it has effects or may fail: a null throws
+    /// `NullPointerException`, as do the objects it reads, in the checked form where a `catch`
+    /// sees it.
+    pub(super) fn after_object(&mut self, object: &'a Expr, value: &str) -> Code {
+        if self.nullable(object) {
+            let check = self.null_check(object).text;
+            return Code::new(format!("{{ {check}; {value} }}"), LOWEST);
+        }
         if has_effects(object) {
             let text = self.expr(object).text;
             return Code::new(format!("{{ {text}; {value} }}"), LOWEST);
         }
+        if self.object_may_fail(object) {
+            let text = self.expr(object).text;
+            return Code::new(format!("{{ let _ = {text}; {value} }}"), LOWEST);
+        }
         Code::atom(value)
+    }
+
+    /// Whether `object` is null or holds an operation whose failure a `catch` or a `finally`
+    /// sees.
+    fn object_may_fail(&self, object: &Expr) -> bool {
+        let mut fails = self.nullable(object);
+        visit_expr(object, &mut |x| {
+            fails |= self.facts.null_checked.contains_key(&x.id)
+                || self.facts.catching.contains_key(&x.id)
+                || self.facts.raising.contains(&x.id)
+        });
+        fails
     }
 }
 
