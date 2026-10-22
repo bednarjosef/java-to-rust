@@ -2416,22 +2416,6 @@ impl<'a> Gen<'a> {
     /// How the `Display` of the enum of `t` shows an object of class `c` bound to `o`, whose
     /// `toString` is method `i`; and whether it uses `o`.
     fn display_arm(&mut self, t: usize, c: usize, i: usize) -> (String, bool) {
-        let immutable = self.facts.immutable.contains(&self.class.types[c].name);
-        let (path, displays) = match self.homes[i] {
-            Home::Class(_) => (String::new(), self.displays(i)),
-            Home::Fields(d) => (hierarchy::base_path(self.facts, self.class, c, d), self.displays(i)),
-            _ => (String::new(), false),
-        };
-        let path = path.trim_end_matches('.');
-        if displays {
-            let shown = match (immutable, path.is_empty()) {
-                (true, true) => "&**o".to_string(),
-                (true, false) => format!("&o.{path}"),
-                (false, true) => "&*o.borrow()".to_string(),
-                (false, false) => format!("&o.borrow().{path}"),
-            };
-            return (format!("fmt::Display::fmt({shown}, f)"), true);
-        }
         let (mut text, uses) = self.arm_call(t, c, i, "");
         // Where the runtime makes the text, what a `toString` throws ends the program (see
         // `analysis::exceptions`); the generator's own text calls it (`try_text`).

@@ -1134,7 +1134,7 @@ impl<'a> Gen<'a> {
         }
         if has_return {
             let ret = self.runtime("Completion::Return");
-            let void = self.ret == Type::Void && !self.display;
+            let void = self.ret == Type::Void;
             self.line(&format!("{ret}({}) => {{", if void { "_" } else { "value" }));
             self.indent += 1;
             self.return_stmt((!void).then(|| "value".to_string()));
@@ -1170,9 +1170,6 @@ impl<'a> Gen<'a> {
 
     /// The type of the value that a `return` inside a `try` with a `finally` gives back.
     fn completion_value(&mut self) -> String {
-        if self.display {
-            return "fmt::Result".to_string();
-        }
         // A constructor's `return` carries nothing: the object is returned after the `finally`.
         if self.ctor_result.is_some() {
             return "()".to_string();

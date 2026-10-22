@@ -165,8 +165,8 @@ impl<'a> Gen<'a> {
             }
             _ => {}
         });
-        // An object is formatted through its `Display`, which runs its `toString` when the text is
-        // formatted, after every operand; that is Java's order only when no operand has effects.
+        // An object given as it is runs its `toString` when the string is built, after every
+        // operand; that is Java's order only when no operand has effects.
         let lazy = !self.effects_besides_text(e);
         let outer = std::mem::replace(&mut self.lazy_text, lazy);
         let formatting = std::mem::replace(&mut self.formatting, true);
@@ -182,12 +182,6 @@ impl<'a> Gen<'a> {
         match &e.kind {
             // An object shows the string its `toString` returns.
             _ if matches!(e.ty, Type::Class(..)) => out.push(Part::Text(self.object_text(e))),
-            // `x.toString()` shows `x` like concatenating it does.
-            ExprKind::MethodCall { receiver, resolved: Some(_), args, is_super: false, .. }
-                if args.is_empty() && self.target(e).is_some_and(|t| self.displays(t)) =>
-            {
-                out.push(Part::Arg(self.object_text(receiver)))
-            }
             // An enum is a `java::Piece` of the string its `toString` returns; a charset prints
             // through its `Display`, which is its name.
             _ if matches!(e.ty, Type::Enum(_)) => out.push(Part::Text(self.expr(e))),
@@ -282,11 +276,6 @@ impl<'a> Gen<'a> {
     /// Whether an expression has effects other than the `toString` calls of objects it shows.
     fn effects_besides_text(&self, e: &Expr) -> bool {
         match &e.kind {
-            ExprKind::MethodCall { receiver, resolved: Some(_), args, is_super: false, .. }
-                if args.is_empty() && self.target(e).is_some_and(|t| self.displays(t)) =>
-            {
-                self.effects_besides_text(receiver)
-            }
             ExprKind::Binary(BinOp::Add, l, r) if e.ty == Type::String => {
                 self.effects_besides_text(l) || self.effects_besides_text(r)
             }

@@ -188,7 +188,6 @@ fn generate_with(
         int_receiver: false,
         double_receiver: false,
         this_form: ThisForm::Shared,
-        display: false,
         lazy_text: false,
         formatting: false,
         chars: false,
@@ -343,11 +342,9 @@ struct Gen<'a> {
     double_receiver: bool,
     /// How `this` is written in the code being generated.
     this_form: ThisForm,
-    /// Whether the method being written is a `toString` written as `Display::fmt`, whose returns
-    /// write to the formatter `f`.
-    display: bool,
-    /// Whether the text being formatted shows objects through `Display`, when they are formatted
-    /// rather than converted to a `String` first (see `parts`).
+    /// Whether the concatenation being written takes objects, enums and builders as they are, as
+    /// `java::Piece`s whose text is made when the string is built, rather than converted to a
+    /// string first (see `parts`).
     lazy_text: bool,
     /// Whether the code being written is an operand of a string concatenation.
     formatting: bool,
@@ -624,7 +621,6 @@ impl<'a> Gen<'a> {
         if let Err(panic) = written {
             self.out.truncate(start);
             self.indent = indent;
-            self.display = false;
             // Its code is not written, so what it dereferences is not looked for.
             self.written.remove(&index);
             WRITING.with(|w| w.set(outer));
@@ -647,7 +643,6 @@ impl<'a> Gen<'a> {
         let on_enum = matches!(self.homes[index], Home::Enum(_)) && !m.is_ctor;
         let borrows =
             !m.is_static && !m.is_ctor && !on_enum && (is_enum || self.facts.self_methods.contains(&index));
-        self.display = borrows && !is_enum && self.displays(index);
         self.this_form = match () {
             _ if on_enum => ThisForm::Enum,
             _ if borrows => ThisForm::SelfRef,
@@ -700,14 +695,10 @@ impl<'a> Gen<'a> {
         if never_runs {
             self.line("#[allow(unused_variables)]");
         }
-        if self.display {
-            self.line("fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {");
-        } else {
-            let fn_name =
-                if m.name == "<clinit>" { statics::init_name(name) } else { self.fn_names[index].clone() };
-            let generics = self.type_params(&m.type_params).0;
-            self.line(&format!("{}fn {fn_name}{generics}({}){ret} {{", self.vis(), params.join(", ")));
-        }
+        let fn_name =
+            if m.name == "<clinit>" { statics::init_name(name) } else { self.fn_names[index].clone() };
+        let generics = self.type_params(&m.type_params).0;
+        self.line(&format!("{}fn {fn_name}{generics}({}){ret} {{", self.vis(), params.join(", ")));
         self.indent += 1;
         if m.name == "<clinit>" {
             // A rewritten `<clinit>` keeps its own state, which is its guard (`lower/clinit_errors.rs`).
@@ -764,7 +755,6 @@ impl<'a> Gen<'a> {
         }
         self.indent -= 1;
         self.line("}");
-        self.display = false;
         self.resolve_annotations(start);
         if let Err(e) = exceptions::check_closures(&self.out[start..]) {
             self.closures.push(Error { pos: m.pos, ..e });
@@ -781,9 +771,6 @@ impl<'a> Gen<'a> {
         // Static methods are free functions, in the value namespace that locals share; instance
         // methods and constructors are reached through their type or object.
         let mut used: HashSet<String> = HashSet::from(["java".to_string()]);
-        if self.display {
-            used.insert("f".into());
-        }
         // A constructor builds its object in `obj` (`objects.rs`), which a parameter such as
         // `CleanerImpl.PhantomCleanableRef`'s `obj` must not shadow.
         if m.is_ctor {
