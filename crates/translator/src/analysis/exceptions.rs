@@ -1341,9 +1341,7 @@ fn expr_points(
         expr_points(class, facts, m, selector, frames, safe, out);
         let mut nested = frames.to_vec();
         for case in cases {
-            for s in &case.body {
-                stmt_points(class, facts, m, s, &mut nested, safe, out);
-            }
+            block_points(class, facts, m, &case.body, &mut nested, safe, out);
         }
         return;
     }

@@ -36,6 +36,7 @@ use std::cell::{Cell, RefCell};
 
 mod annotation_objects;
 mod annotation_presence;
+mod argument_order;
 mod arrays;
 mod boxing;
 mod by_name;
@@ -68,6 +69,7 @@ mod switch;
 mod sync;
 mod system;
 mod varargs;
+pub(crate) use argument_order::RECEIVER;
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
@@ -563,6 +565,7 @@ impl<'t> Lowering<'t> {
         let mut method = method?;
         local_names::distinct_locals(&mut method);
         self.share_element_reads(&mut method);
+        self.arguments_before_receivers(&mut method);
         Ok(method)
     }
 

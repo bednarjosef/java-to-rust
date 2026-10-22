@@ -28,7 +28,7 @@ mod indexing;
 pub mod live_methods;
 mod monitors;
 mod moves;
-mod npe_messages;
+pub(crate) mod npe_messages;
 mod nullness;
 mod object_values;
 mod objects;
