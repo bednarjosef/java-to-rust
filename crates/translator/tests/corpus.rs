@@ -30,6 +30,7 @@ use std::time::Instant;
 
 use java_cache::JavaCache;
 use java_to_rust::check_cache;
+use java_to_rust::output::{Layout, SourceFile};
 use parallel::parallel;
 use rust_cache::{RustCache, Stored};
 
@@ -177,22 +178,51 @@ fn java_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The Rust source of a program, or why it does not translate.
-fn rust_source(p: &Program) -> Result<String, String> {
-    let translated: Result<String, String> = match &p.main {
-        None => {
-            java_to_rust::translate(&std::fs::read_to_string(&p.java).unwrap()).map_err(|e| e.to_string())
-        }
+/// The Rust sources of a program, or why it does not translate: a single file is one `main.rs`, a
+/// project has a file per package, as the translator writes its crate.
+fn rust_source(p: &Program) -> Result<Vec<SourceFile>, String> {
+    let translated: Result<Vec<SourceFile>, String> = match &p.main {
+        None => java_to_rust::translate(&std::fs::read_to_string(&p.java).unwrap())
+            .map(|text| vec![SourceFile { path: "main.rs".into(), text }])
+            .map_err(|e| e.to_string()),
         Some(main) => {
             let program = java_to_rust::Program {
                 main: main.clone(),
                 sources: vec![p.java.clone()],
                 ..Default::default()
             };
-            java_to_rust::translate_program(&program).map_err(|e| e.to_string())
+            java_to_rust::translate_program_modules(&program)
+                .map(|tree| tree.files(Layout::FilePerModule))
+                .map_err(|e| e.to_string())
         }
     };
     translated.map_err(|e| format!("translation failed: {e}"))
+}
+
+/// Writes a program's files as the sources of its binary: `src/bin/<name>.rs` for one file,
+/// `src/bin/<name>/` with its `main.rs` for several.
+fn write_sources(bin_dir: &Path, name: &str, files: &[SourceFile]) {
+    let (single, dir) = (bin_dir.join(format!("{name}.rs")), bin_dir.join(name));
+    if let [file] = files {
+        let _ = std::fs::remove_dir_all(&dir);
+        write_if_changed(&single, &file.text);
+        return;
+    }
+    let _ = std::fs::remove_file(&single);
+    for file in files {
+        let path = dir.join(&file.path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_if_changed(&path, &file.text);
+    }
+}
+
+/// The text of a program's files, which decides its run: a single file's text, or each file's
+/// after its path.
+fn sources_text(files: &[SourceFile]) -> String {
+    match files {
+        [file] => file.text.clone(),
+        _ => files.iter().map(|f| format!("{}\n{}", f.path.display(), f.text)).collect(),
+    }
 }
 
 /// Builds the binaries of `names` with one cargo call, which compiles the runtime once and the
@@ -271,7 +301,7 @@ fn diff(java: &str, rust: &str) -> String {
 /// (`rust_cache`) is not run; otherwise the run is returned, to be stored if it matched.
 fn check(
     p: &Program,
-    translation: &Result<String, String>,
+    translation: &Result<Vec<SourceFile>, String>,
     build: &Build,
     stored: Option<&Run>,
     expected: &Run,
@@ -348,11 +378,16 @@ fn corpus_matches_java() {
     );
     write_if_changed(&work.join("Cargo.toml"), &cargo_toml);
     // A source of a program that left the corpus must not be built as one of the binaries.
-    let sources: Vec<String> = programs.iter().map(|p| format!("{}.rs", p.name)).collect();
+    let sources: Vec<String> =
+        programs.iter().flat_map(|p| [format!("{}.rs", p.name), p.name.clone()]).collect();
     for entry in std::fs::read_dir(&bin_dir).unwrap() {
         let path = entry.unwrap().path();
         if !sources.contains(&path.file_name().unwrap().to_string_lossy().into_owned()) {
-            std::fs::remove_file(path).unwrap();
+            if path.is_dir() {
+                std::fs::remove_dir_all(path).unwrap();
+            } else {
+                std::fs::remove_file(path).unwrap();
+            }
         }
     }
     // Java's results and the runs of unchanged translations are kept in the checks' cache.
@@ -372,15 +407,15 @@ fn corpus_matches_java() {
         let translate = s.spawn(|| {
             let translations = parallel(programs.len(), |i| rust_source(&programs[i]));
             let translated = start.elapsed();
-            for (p, rust) in programs.iter().zip(&translations) {
-                if let Ok(rust) = rust {
-                    write_if_changed(&bin_dir.join(format!("{}.rs", p.name)), rust);
+            for (p, files) in programs.iter().zip(&translations) {
+                if let Ok(files) = files {
+                    write_sources(&bin_dir, &p.name, files);
                 }
             }
             let keys: Vec<Option<String>> = programs
                 .iter()
                 .zip(&translations)
-                .map(|(p, t)| t.as_ref().ok().and_then(|rust| rust_cache.key(p, rust)))
+                .map(|(p, t)| t.as_ref().ok().and_then(|files| rust_cache.key(p, &sources_text(files))))
                 .collect();
             let stored: Vec<Option<Stored>> =
                 keys.iter().map(|k| k.as_ref().and_then(|k| rust_cache.load(k))).collect();

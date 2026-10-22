@@ -745,11 +745,32 @@ whole programs" in docs/performance.md). A source or library root may be a modul
 every root as part of one module, `java.base` when the JDK's sources are a library and the
 unnamed module otherwise, and reads each class from its source (`program/modules.rs`). A
 package of a module whose sources are not given is an error that names the module to pass as
-`--library`. Packages become
-nested modules in one output file (`com.example.util` is `mod com { pub(crate) mod example
-{ pub(crate) mod util { .. } } }`); a class of another package is named by its path from the crate
-root, such as `crate::com::example::util::Counter::new(..)`, and items in packages are
-`pub(crate)`. A program without packages is written like a single file.
+`--library`.
+
+Each package becomes a Rust module (`com.example.util` is `com::example::util`), and the
+generator makes them as a tree of modules with their items (`output.rs`), which a layout writes.
+`--crate` writes a file per package, at the package's path:
+
+```
+src/main.rs                     the crate root: `fn main`, `Object`, `Throwable`, the standard
+                                exceptions, the unnamed package; declares the modules
+src/com/example/app.rs          the package com.example.app, with its nested and inner classes
+src/com/example/util.rs
+src/java_/util.rs               the JDK's java.util (`java` is the runtime crate's name)
+src/java_/util/function.rs
+```
+
+A package without classes of its own (`com`, `com.example`) is no file: `main.rs` declares the
+modules inside it inline (`mod com { pub(crate) mod example { pub(crate) mod app; .. } }`).
+Printed or written with `-o`, the same modules are inline modules of one file, and a program
+with no package or one is one file in every layout, as a translated single file is. A class of
+another package is named through a `use` line of its module (`use crate::com::example::util;`,
+then `util::Counter::new(..)`), or by its path from the crate root
+(`crate::java_::util::Optional`) when two modules have the same name; the crate root's items
+are named through `use crate::Object;` and the like. Items in packages are `pub(crate)`.
+`--modules-json FILE` also writes the modules and the classes and packages each item names (with
+`--census`, of the translation with every rejected piece stubbed), the data for planning a split
+into crates ([docs/several-crates.md](docs/several-crates.md)).
 
 Reachability dispatches calls as Java does: javac lists the methods each method overrides, and a
 call of an instance method also reaches its overriders in every class that an instantiated class
@@ -979,6 +1000,7 @@ run. Building the translator needs `javac` (JDK 21 or newer) on PATH.
 cargo run -p java-to-rust -- Program.java                 # print the Rust translation
 cargo run -p java-to-rust -- Program.java --crate out/    # write a Cargo project
 cargo run -p java-to-rust -- --main com.example.Main --source src/ [--library jdk-src/] [-o out.rs | --crate out/]
+                                                          # --crate: a file per package, -o: one file
 cargo run -p java-to-rust -- --census --main Main --source src/ --library jdk-src/java.base
 cargo run -p java-to-rust -- --survey --main Main --source src/ --library jdk-src/java.base
 cargo test                                                # needs a JDK: runs corpus/ on both
@@ -988,7 +1010,8 @@ The corpus test runs every program in `corpus/` with `java`, translates and buil
 overflow checks on (so a wrong "cannot overflow" fact panics), and compares standard output and
 exit code. Java's runs, translation and the Cargo build run in parallel, one thread per CPU. All
 the Rust programs are one Cargo project under `target/tmp/corpus`, kept between runs, so a program
-is rebuilt only when its translation changes. Java's results and the runs of unchanged
+is rebuilt only when its translation changes; a project of several packages is a binary of its
+own directory there (`src/bin/<name>/main.rs` and a file per package), as `--crate` writes it. Java's results and the runs of unchanged
 translations are kept in the checks' cache (see "How the checks are cached" above), so a warm run
 starts no JVM and builds only the programs whose translation changed. `CORPUS_JAVA_FRESH=1` runs
 every program on Java and stores the results anew, for when the cache is doubted; only a run that
@@ -1002,8 +1025,9 @@ as its command-line arguments, on `java` and as the translated binary alike.
 
 - [docs/architecture.md](docs/architecture.md): how the translator is built (the pipeline, the
   size of each stage) and the four changes that come before the plans below: a representation
-  plan between the analyses and the generator, a generator that produces items with module paths,
-  snapshot tests, and failures turned into rejections per method.
+  plan between the analyses and the generator, a generator that produces items with module paths
+  (done: a tree of modules and its layouts), snapshot tests, and failures turned into rejections
+  per method.
 
 - [docs/lists-and-streams.md](docs/lists-and-streams.md): `ArrayList` as a `Vec` and sequential
   streams as Rust iterators, after the object model, lambdas and for-each over `Iterable` land.
@@ -1020,6 +1044,9 @@ as its command-line arguments, on `java` and as the translated binary alike.
   translator's scale, output in several crates, reading build tools, dependencies' sources,
   generated sources, resources and tests, the library coverage they lean on, and working
   through their blockers.
+- [docs/several-crates.md](docs/several-crates.md): splitting a translation into several crates:
+  why the hierarchies' enums and Java's package cycles keep most code in one crate, how to find
+  the groups that can be split off, and what a split would buy for javac.
 - [docs/reflection-and-plugins.md](docs/reflection-and-plugins.md): why the translation stays
   closed-world, and how code reached by name still runs: a reflection table built from constant
   names, `ServiceLoader` lists and a recording run on the JVM; plugins translated with the
