@@ -364,6 +364,26 @@ impl Messages<'_> {
                         out.insert(args[args.len() - 1].id, Some(SEARCH_NULL_KEY.to_string()));
                         out.insert(x.id, Some(SEARCH_NULL_ELEMENT.to_string()));
                     }
+                    // A boxed argument of `Math`'s methods in the JDK's code, which the lowering
+                    // passes as it is: javac unboxes it with the boxed class's method.
+                    Builtin::Native(Native::Math { .. }) if self.jdk => {
+                        for arg in args.iter().filter(|a| matches!(a.ty, Type::Boxed(_))) {
+                            let action =
+                                format!("Cannot invoke \"java.lang.{}.{}Value()\"", arg.ty, arg.ty.unboxed());
+                            if let Some(message) = self.message(&action, arg) {
+                                out.insert(arg.id, Some(message));
+                            }
+                        }
+                    }
+                    // `a.clone()` of a null array, a call that the class file names by the array's
+                    // descriptor: `[I.clone()`.
+                    Builtin::Arrays(ArraysOp::Clone) => {
+                        let action =
+                            self.descriptor(args[0].ty).map(|d| format!("Cannot invoke \"{d}.clone()\""));
+                        if let Some(message) = action.and_then(|a| self.message(&a, &args[0])) {
+                            out.insert(args[0].id, Some(message));
+                        }
+                    }
                     // `Arrays.fill` and `Arrays.sort` of a null array, which the JDK's code asks for
                     // its length (`-g`, so the parameter has its name).
                     Builtin::ArraysFill
@@ -439,21 +459,7 @@ impl Messages<'_> {
     /// The message of a `switch` on an enum that is null, of enum `name`: javac's switch asks for
     /// its `ordinal()`, named by the enum's binary name.
     fn enum_switch(&self, name: &str, selector: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
-        let Some(t) = self.class.type_index(name) else { return };
-        let decl = &self.class.types[t];
-        if !matches!(decl.origin, Origin::Member) {
-            return;
-        }
-        let Some(rest) = (match decl.package.as_str() {
-            "" => Some(decl.name.as_str()),
-            package => decl.name.strip_prefix(package).and_then(|r| r.strip_prefix('.')),
-        }) else {
-            return;
-        };
-        let binary = match decl.package.as_str() {
-            "" => rest.replace('.', "$"),
-            package => format!("{package}.{}", rest.replace('.', "$")),
-        };
+        let Some(binary) = self.class.type_index(name).and_then(|t| self.binary_name(t)) else { return };
         if let Some(message) = self.message(&format!("Cannot invoke \"{binary}.ordinal()\""), selector) {
             out.insert(selector.id, Some(message));
         }
@@ -468,7 +474,11 @@ impl Messages<'_> {
         // The JDK's temps are the walk of its slots (`jdk_switch_temps`), or else the slot that
         // is certain (`jdk_switch_slot`).
         let local = self.names.get(self.outermost, selector.pos, NameKind::Temp, "s$").map(str::to_string);
+        // In the code of a lambda, javac's method for the body has that local in its table of
+        // locals, as `s0$`, for each `switch`.
+        let lambda = matches!(self.class.types[self.method.class].origin, Origin::Lambda { .. });
         let local = match self.jdk {
+            true if lambda => local.or_else(|| Some("s0$".to_string())),
             true => local.or_else(|| self.jdk_switch_slot(selector).map(|slot| format!("<local{slot}>"))),
             false => local,
         };
@@ -482,8 +492,9 @@ impl Messages<'_> {
     /// code, which the class file's table of locals leaves out (it is synthetic), where it is
     /// certain: the first slot after the parameters, when the method declares no local before
     /// the `switch` and has nothing else of javac's own there (another `switch`, a `try`, a
-    /// for-each). Not for the code of a lambda, nor a constructor that javac gives parameters of
-    /// its own (an enum's, or one of a class with an enclosing instance or captured locals).
+    /// for-each). Not for the code of a lambda (see `string_switch`), nor a constructor that javac
+    /// gives parameters of its own (an enum's, or one of a class with an enclosing instance or
+    /// captured locals).
     fn jdk_switch_slot(&self, selector: &Expr) -> Option<usize> {
         let method = self.method;
         let decl = &self.class.types[method.class];
@@ -580,6 +591,11 @@ impl Messages<'_> {
             // JVM follows back to where the value came from.
             ExprKind::Assign { op: None, target: Place::Var(_), value } => return self.source(value, detail),
             ExprKind::Var(name) if self.jdk => self.jdk_local(name)?,
+            // `i++` or `--i` of an `int` local: `iinc` and a load of the local, which the JVM
+            // shows by its name.
+            ExprKind::IncDec { target: Place::Var(name), .. } if self.jdk && e.ty == Type::Int => {
+                self.jdk_local(name)?
+            }
             ExprKind::Var(_) => self.names.get(self.outermost, e.pos, NameKind::Local, "")?.to_string(),
             // A static field of the JDK's, by the class that javac names it by where lowering noted
             // it (`Class::class_file`), else by its class's binary name: `java.util.Locale.ROOT`.
@@ -757,6 +773,28 @@ impl Messages<'_> {
         }))
     }
 
+    /// The descriptor of type `ty` as the JVM shows an array's class in a message: `[I`,
+    /// `[[Ljava.lang.String;`, when that is certain.
+    fn descriptor(&self, ty: Type) -> Option<String> {
+        let class = |name: &str| Some(format!("L{};", self.binary_name(self.class.type_index(name)?)?));
+        Some(match ty {
+            Type::Int => "I".to_string(),
+            Type::Long => "J".to_string(),
+            Type::Double => "D".to_string(),
+            Type::Float => "F".to_string(),
+            Type::Byte => "B".to_string(),
+            Type::Short => "S".to_string(),
+            Type::Char => "C".to_string(),
+            Type::Boolean => "Z".to_string(),
+            Type::Array(element) => format!("[{}", self.descriptor(*element)?),
+            Type::String => "Ljava.lang.String;".to_string(),
+            Type::Boxed(_) => format!("Ljava.lang.{ty};"),
+            Type::JavaClass => "Ljava.lang.Class;".to_string(),
+            Type::Class(name, _) | Type::Enum(name) => class(name)?,
+            _ => return None,
+        })
+    }
+
     /// A type in javac's names as the JVM shows it in a message: a primitive as it is, an array
     /// with `[]`, `Object` and `String` by their simple names, and another class by its binary
     /// name, when that is certain.
@@ -833,6 +871,27 @@ impl Messages<'_> {
         let rest = decl.name.strip_prefix(&package)?.strip_prefix('.')?;
         let name = format!("{package}.{}", rest.replace('.', "$"));
         (name != "java.lang.Object" && name != "java.lang.String").then_some(name)
+    }
+
+    /// The binary name of class `t`, a member class of the program or the JDK:
+    /// `com.example.Outer$Inner`.
+    fn binary_name(&self, t: usize) -> Option<String> {
+        let decl = &self.class.types[t];
+        if is_object(decl) {
+            return Some("java.lang.Object".to_string());
+        }
+        if super::exceptions::from_jdk(decl) || decl.package.is_empty() && decl.name.starts_with("java.") {
+            return self.java_class_at(t);
+        }
+        if !matches!(decl.origin, Origin::Member) {
+            return None;
+        }
+        Some(match decl.package.as_str() {
+            "" => decl.name.replace('.', "$"),
+            package => {
+                format!("{package}.{}", decl.name.strip_prefix(package)?.strip_prefix('.')?.replace('.', "$"))
+            }
+        })
     }
 
     /// A parameter's type as the JVM shows it in a method, when it is certain.
