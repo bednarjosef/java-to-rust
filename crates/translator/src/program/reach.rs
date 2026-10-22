@@ -196,6 +196,9 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
 /// reflection table (`reflection.rs`), and so is `InvocationTargetException`, which wraps the
 /// exceptions of what they call (`java/Standard.java`).
 pub const TRANSLATED_ANYWAY: &[&str] = &[
+    // An action that `AccessController.doPrivileged` runs, which the translator's runs directly
+    // (`REDIRECTED_CALLS`): a plain interface.
+    "java.security.PrivilegedAction",
     "java.lang.reflect.Array",
     "java.lang.reflect.InvocationTargetException",
     "java.lang.reflect.Modifier",
@@ -852,6 +855,12 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
     (
         ("java.lang.Runtime", "version", "()java.lang.Runtime.Version"),
         ("java.lang.TranslatedRuntime", "version"),
+    ),
+    // An action run with the caller's privileges, which, with no security manager, is running it
+    // (`java/lang/TranslatedAccessController.java`).
+    (
+        ("java.security.AccessController", "doPrivileged", "<T>(java.security.PrivilegedAction<T>)T"),
+        ("java.lang.TranslatedAccessController", "doPrivileged"),
     ),
     // The default file system, whose provider a property could name and reflection create (the
     // property is not set in a translated program, see `lower::system`), and which the JDK finds
