@@ -35,16 +35,16 @@ impl<'a> Gen<'a> {
                 }
             }
             Native::InflateBytes => {
-                let addr = self.value(&args[1], Type::Long).text;
-                let [in_off, in_len, out_off, out_len] = self.hoisted_ints(args, [3, 4, 6, 7]);
+                let addr = self.value(&args[0], Type::Long).text;
+                let [in_off, in_len, out_off, out_len] = self.hoisted_ints(args, [2, 3, 5, 6]);
                 // The input is copied: the output may be the same array, which cannot be borrowed
                 // twice.
-                let source = self.slice_of(&args[2]);
+                let source = self.slice_of(&args[1]);
                 let input = self.temp("input");
                 self.line(&format!(
                     "let {input} = ({source})[{in_off} as usize..({in_off} + {in_len}) as usize].to_vec();"
                 ));
-                let output = self.array_arg(&args[5], true);
+                let output = self.array_arg(&args[4], true);
                 self.fallible(id, "inflate_bytes", vec![addr, format!("&{input}"), output, out_off, out_len])
             }
             _ => unreachable!("not a native of java.util.zip.Inflater: {native:?}"),
