@@ -9,6 +9,7 @@ mod element_reads;
 mod enum_tables;
 mod enums;
 mod exceptions;
+mod file_channels;
 mod foreach;
 mod functional;
 mod generic_args;
@@ -1129,6 +1130,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.file_system_call(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.file_channel_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(kind) = self.library_call(node, &symbol, receiver, &args)? {

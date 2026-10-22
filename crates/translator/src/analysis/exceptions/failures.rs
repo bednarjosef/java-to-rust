@@ -349,8 +349,13 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::InflateAdler
             | Native::InflateReset
             | Native::InflateEnd
-            | Native::NoPendingReferences,
+            | Native::NoPendingReferences
+            | Native::TransferUnsupported
+            | Native::UnmapFile
+            | Native::AllocationGranularity,
         ) => &[],
+        // A file that cannot be read for the mapping fails with an `IOException` (`file_channels.rs`).
+        Builtin::Native(Native::MapFile) => &["java.io.IOException"],
         // A read or write outside the array, or of memory outside the heap, ends the program.
         Builtin::RawMemory { .. } => &[],
         // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).
