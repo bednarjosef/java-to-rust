@@ -51,7 +51,7 @@ pub type ServiceProvider = (String, String, bool);
 /// The service providers that the roots declare, in the order that `ServiceLoader` finds them:
 /// those of the modules' `provides S with P1, P2;`, then those of the files
 /// `META-INF/services/S`, one provider per line, `#` starting a comment, root by root (see
-/// `java/overlay/java/util/ServiceLoader.java`).
+/// `java/patches/java/util/ServiceLoader.java`).
 pub fn service_providers<'a>(roots: impl IntoIterator<Item = &'a PathBuf> + Clone) -> Vec<ServiceProvider> {
     let mut out: Vec<ServiceProvider> = Vec::new();
     let mut add = |service: &str, provider: &str, modular: bool| {
@@ -97,7 +97,7 @@ pub fn service_providers<'a>(roots: impl IntoIterator<Item = &'a PathBuf> + Clon
 }
 
 /// What a module declares and what its root holds, which the translation's `java.lang.Module`
-/// answers with (`java/overlay/java/lang/Module.java`, `lower/modules.rs`). The unnamed module,
+/// answers with (`java/patches/java/lang/Module.java`, `lower/modules.rs`). The unnamed module,
 /// whose name is empty, holds the roots without a `module-info.java`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Contents {

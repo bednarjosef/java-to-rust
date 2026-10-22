@@ -1,5 +1,5 @@
 //! The modules of a translation with the JDK's sources, which the translator's `java.lang.Module`
-//! answers with (`java/overlay/java/lang/Module.java`): those of the program's roots and the
+//! answers with (`java/patches/java/lang/Module.java`): those of the program's roots and the
 //! libraries' (`program::modules::contents`, `Reach::modules`).
 //!
 //! `c.getModule()`, `c.getClassLoader()` and `loader.getUnnamedModule()` call the static methods
