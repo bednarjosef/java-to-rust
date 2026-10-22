@@ -137,6 +137,10 @@ impl<'a> Gen<'a> {
     fn narrowed_source(&self, name: &str, ty: Type) -> String {
         match ty {
             Type::Array(_) => format!("{}.clone()", self.local(name)),
+            // A shared string is bound as the object, a `&java::JStr`.
+            Type::String if super::shared_strings() && !self.borrowed_optional.contains(name) => {
+                format!("{}.as_ref()", self.local(name))
+            }
             _ => self.option_source(name, ty),
         }
     }
@@ -275,7 +279,7 @@ impl<'a> Gen<'a> {
     pub(super) fn append_optional(&mut self, name: &str, value: &'a Expr) -> String {
         let mut parts = vec![Part::Arg(Code::atom(format!("{name}.as_deref().unwrap_or(\"null\")")))];
         self.parts(value, &mut parts);
-        let text = self.format("format!", parts).text;
+        let text = self.concat(parts).text;
         format!("{name} = Some({text})")
     }
 
@@ -542,6 +546,11 @@ impl<'a> Gen<'a> {
                     && let ExprKind::Str(text) = &other.kind
                     && !self.nullable(e)
                 {
+                    if super::shared_strings() {
+                        let source = self.narrowed_source(name, ty);
+                        let literal = self.string_literal(&rust_string(text));
+                        return Some(Code::atom(format!("{source}.cloned().unwrap_or_else(|| {literal})")));
+                    }
                     let source = self.option_source(name, ty);
                     return Some(Code::atom(format!(
                         "{source}.unwrap_or({}).to_string()",

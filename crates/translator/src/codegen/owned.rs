@@ -173,8 +173,23 @@ impl<'a> Gen<'a> {
             }
         }
         if !effects.windows(2).all(|w| w[0] < w[1]) {
-            for &i in &effects {
-                bound[i] = Some(bind(self, i, values[i].expect("has a value"), &mut taken));
+            // The values before the last of them in Java's order are computed first too, in that
+            // order: one left in the literal would run after the locals, and its move or clone of
+            // a variable after a later value's. A number or a boolean moves nothing.
+            let assigned: Vec<usize> = leading.iter().map(|&(i, _)| i).collect();
+            let java_order =
+                (0..fields.len()).filter(|i| !assigned.contains(i)).chain(assigned.iter().copied());
+            let last = *effects.last().expect("unordered effects");
+            for i in java_order {
+                if bound[i].is_none()
+                    && let Some(value) = values[i]
+                    && (effects.contains(&i) || !(fields[i].ty.is_numeric() || fields[i].ty == Type::Boolean))
+                {
+                    bound[i] = Some(bind(self, i, value, &mut taken));
+                }
+                if i == last {
+                    break;
+                }
             }
         }
         // A field read in one value must not hold its borrow while a later value borrows mutably.

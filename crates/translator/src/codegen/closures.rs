@@ -337,6 +337,13 @@ impl<'a> Gen<'a> {
         self.restore(saved);
         let moving = if moving { "move " } else { "" };
         let body = self.braced(&text);
+        // A body that only ends the program, as no object of the lambda's class is created, would
+        // make the closure return `!`, which is no `Fn()`.
+        let never = matches!(
+            &self.class.methods[body_method].body[..],
+            [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, _), .. })]
+        );
+        let ret = if never && ret.is_empty() { " -> ()".to_string() } else { ret };
         (prelude, format!("{moving}|{}|{ret} {body}", params.join(", ")))
     }
 

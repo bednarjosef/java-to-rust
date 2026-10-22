@@ -84,6 +84,16 @@ impl JavaElement for String {
     }
 }
 
+impl JavaElement for crate::JStr {
+    fn java_cmp(&self, other: &Self) -> Ordering {
+        compare_strings(self, other)
+    }
+
+    fn java_hash(&self) -> i32 {
+        string_hash(self)
+    }
+}
+
 /// A string that may be null: comparing a null throws `NullPointerException`, as Java's
 /// `compareTo` does, while `equals` and `hashCode` accept it.
 impl<T: JavaElement> JavaElement for Option<T> {

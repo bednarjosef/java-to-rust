@@ -340,6 +340,35 @@ may call) may be anything. Where comparing the values gives Java's answer, they 
 A box compared by identity as its own type (`Integer a == b`) is a shared `java::Boxed`
 object for that kind throughout the program (`analysis/boxing.rs`, `Facts::faithful_boxes`).
 
+`==` on two strings in the program's own code is decided by where each side's strings come from
+(`analysis/string_identity.rs`). The analysis follows the strings backward through locals,
+parameters, returns, fields, statics and array elements, through the program and the library
+code that a whole program translates, to their sources: an interned string (a literal or
+constant, `intern()`, an enum constant's name, a class's name, a canonical charset name), a new
+one (`new String`, a concatenation that is not constant, a builder's or `String.format`'s text
+that is not empty, a number's text), or one that Java keeps for a key (a system property,
+`System.lineSeparator()`, an environment variable, a class's simple or canonical name). The
+JDK's methods that return their receiver when nothing changes (`substring` of all of it, `trim`,
+`strip`, the case mappings, `replace`, `concat("")`, `repeat(1)`, `split` without a match) and
+`String.valueOf(o)` and `o.toString()` lead to what they may return. A string from a library
+call that the analysis does not follow rejects the comparison, naming the call. The comparison
+is then:
+
+- by text where both sides can only be interned strings;
+- `a == null && b == null` where no string can be on both sides: one side only interned and the
+  other only new, or a side that is only ever null;
+- otherwise by the objects at run time. Every string of the program is then a `java::JStr`, an
+  `Arc<str>` compared by address (`java::same_str`), and the program-wide switch
+  (`Class::shared_strings`) makes each place that makes a string make the object Java makes: a
+  literal is interned once (`java::interned_literal`), a new string is new, a method that may
+  return its receiver returns it when Java's would (`java::kept` and its siblings, with the
+  receiver held in a local), and what Java keeps per key is kept per key (`java::per_key`). A
+  class's simple name is kept by its text, so two classes of the same simple name share one, and
+  an environment variable by its value. A string held as an `Object` is compared the same way.
+
+Setting `JAVA_TO_RUST_SHARED_STRINGS` for a translation shares every program's strings, which
+checks the generator's shared strings against the corpus.
+
 ### 1.7 Object
 
 `java.lang.Object` is a synthetic interface type of the program, `OBJECT` (`lower/object.rs`),
@@ -657,3 +686,41 @@ A call may run any member of an override group, so the analyses treat the group 
   are rejected.
 - A class with subclasses that needs the whole-object constructor form, whose enclosing
   instance or captured locals a `super(..)` computes, is rejected (1.4).
+
+## 4. Plan: strings as WTF-8
+
+Not built yet. Today a translated string is a Rust `String` (or a shared `java::JStr`, an
+`Arc<str>`, see 1.6), which cannot hold a lone UTF-16 surrogate: one becomes `?` when it is
+stored (`runtime/src/string.rs`), which `known-failures/LoneSurrogateCompareTo.java`, the
+strings fuzzer's seeds 18, 51 and 396 and four javac cases (`scripts/javac-check/known-differences`)
+show. The plan stores every string as WTF-8, so that a string holds exactly Java's code units
+while normal text stays plain UTF-8 at no cost:
+
+- **The bytes.** WTF-8 is UTF-8 that also encodes a lone surrogate in UTF-8's 3-byte form
+  (`ED A0..BF ..`). A surrogate pair is always its 4-byte character, never two 3-byte halves, so
+  each Java string has exactly one encoding and equality and hashing stay byte comparisons. Text
+  without lone surrogates is byte for byte its UTF-8.
+- **The types** (`runtime/src/wtf8.rs`). `java::Wtf8` is the unsized string slice, a
+  `[u8]` that holds WTF-8, with the `str`-like methods the generator and the runtime use;
+  `java::JString` is the plain owned string (a `Vec<u8>`), and `java::JStr` the shared one
+  (an `Arc` of the same bytes); both deref to `Wtf8`. A `&str` converts to a `&Wtf8` for free;
+  a `&Wtf8` converts back to a `&str` after a check for lone surrogates, which the runtime folds
+  into the ASCII checks it already makes.
+- **Joining.** Appending text that starts with a low surrogate to text that ends with a high one
+  joins the two into their 4-byte character, as Java's UTF-16 shows them as one pair: a check of
+  the six bytes at the seam, in `JString`'s append and in concatenation (`java::concat!`, whose
+  parts are written as they are rather than through `format!`, which would show a lone surrogate
+  as `?`).
+- **Code units.** `charAt`, `substring` and the other unit-indexed methods keep their ASCII fast
+  paths; their other path decodes WTF-8 to units exactly and encodes a lone surrogate back
+  rather than `?` (`from_units`). A builder already holds UTF-16 units, so its `toString` becomes
+  exact.
+- **Output.** Printing encodes as Java's UTF-8 `PrintStream` does: a lone surrogate prints `?`.
+- **The generator.** `rust_type(String)` is `java::JString`, or `java::JStr` where strings are
+  shared; the runtime's string functions take `&Wtf8`; a literal is a `&'static Wtf8` view of
+  its UTF-8; a Java `char` that is a surrogate becomes its 3-byte form in a string.
+
+Steps, each keeping `scripts/check.sh` green: (1) the runtime types and their operations, with
+unit tests, unused; (2) the generator and the runtime's string functions switched over, with
+the corpus also run with `JAVA_TO_RUST_SHARED_STRINGS`; (3) the lone-surrogate cases above moved
+into the corpus, off `known-differences`, and javac timed before and after.

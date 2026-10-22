@@ -215,6 +215,7 @@ pub(super) fn default_value(ty: Type) -> Option<&'static str> {
         Type::Int | Type::Long | Type::Byte | Type::Short | Type::Char => "0",
         Type::Double | Type::Float => "0.0",
         Type::Boolean => "false",
+        Type::String if super::shared_strings() => "java::JStr::default()",
         Type::String => "String::new()",
         _ => return None,
     })
@@ -710,7 +711,11 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line(&format!("fn from(e: java::Exception) -> {name} {{"));
         self.indent += 1;
-        self.line("let raised_message = e.message.clone().unwrap_or_default();");
+        // A message the runtime made is a new string.
+        match super::shared_strings() {
+            true => self.line("let raised_message = java::JStr::new(e.message.clone().unwrap_or_default());"),
+            false => self.line("let raised_message = e.message.clone().unwrap_or_default();"),
+        }
         self.line("match e.class {");
         self.indent += 1;
         let outer = self.method;

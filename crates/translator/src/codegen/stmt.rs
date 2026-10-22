@@ -438,7 +438,9 @@ impl<'a> Gen<'a> {
                 self.line(&format!("{};", code.text));
             }
             _ => {
+                let discarded = self.discarded.replace(e.id);
                 let code = self.expr(e);
+                self.discarded = discarded;
                 self.line(&format!("{};", code.text));
             }
         }

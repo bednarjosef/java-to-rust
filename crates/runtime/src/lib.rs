@@ -57,6 +57,7 @@ mod preconditions;
 mod random;
 pub mod regex;
 mod scalb;
+mod shared_string;
 mod statics;
 pub mod string;
 mod system;
@@ -66,6 +67,7 @@ mod translate_escapes;
 mod unix;
 mod unsigned;
 mod vm;
+pub mod wtf8;
 pub use allocator::{Allocator, release_thread_cache};
 pub use arguments::main_args;
 pub use boxed::*;
@@ -124,6 +126,7 @@ pub use preconditions::*;
 pub use random::*;
 pub use regex::{matches_all, replace_all, replace_first, split};
 pub use scalb::*;
+pub use shared_string::*;
 pub use statics::*;
 pub use string::*;
 pub use system::*;
@@ -136,6 +139,7 @@ pub use unsigned::{
     try_parse_unsigned,
 };
 pub use vm::*;
+pub use wtf8::{JString, Wtf8};
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
 pub struct Double(pub f64);

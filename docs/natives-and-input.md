@@ -108,9 +108,9 @@ The natives of the runtime's own classes (`System.arraycopy`, `Object.hashCode`,
 `availableProcessors`, `String.intern`) are in `runtime/src/natives.rs`; the checked copy between
 arrays of two classes, when one side is a plain `Vec`, is `try_copy_refs` in
 `runtime/src/copy_refs.rs`. The identity hash is derived from the object's address, which an `Rc` never changes: stable for the object's life and
-different on every run, as in Java. `String.intern()` is the string itself: strings are values,
-and `==` on two strings stays rejected in the program's own code unless Java interns both sides
-(constants, `intern()` calls, methods returning only those).
+different on every run, as in Java. `String.intern()` is the string itself where strings are
+values, and the interned object of its text where the program compares strings by reference
+(see [object-model.md](object-model.md), section 1.6).
 
 `Set.of` and `Map.of` iterate in a different order on every run, in Java too: with the CDS seed
 0, `ImmutableCollections` seeds its order from `System.nanoTime()`. Their output cannot be
@@ -239,11 +239,12 @@ A translated program is closed: it knows all its classes. So:
 - `JavaLangAccess.join`, which `StringJoiner` calls, is the runtime's `join_range`; the
   `JavaLangAccess` methods in `TRANSLATED_LANG_ACCESS` are the translator's own static methods,
   since `SharedSecrets.getJavaLangAccess()` is null in a translation.
-- `==` on strings in library code is value equality (`Lowering::library_string_comparison`). The
+- `==` on strings in library code is value equality (`Lowering::string_comparison`). The
   JDK compares by reference only strings it interned, locale parts and canonical charset names,
   or as a shortcut before comparing characters, where value equality gives the JVM's answer. It
   would be wrong only where the library keeps a `new String(..)` as a marker to tell apart; none
-  of the reached code does. The program's own `==` on strings stays rejected.
+  of the reached code does. The program's own `==` on strings is decided by where its strings
+  come from ([object-model.md](object-model.md), section 1.6).
 - `toUpperCase(locale)` and `toLowerCase(locale)` are the root locale's mapping, which is every
   language's but Turkish, Azeri and Lithuanian; for those three the program ends with a message
   (`java_runtime::string::uppercase_in`).

@@ -155,13 +155,18 @@ impl<'a> Gen<'a> {
                 call(self, f, parts)
             }
             StringOp::Split => {
-                let s = self.text_ref(&args[0]);
+                // A shared string's parts are new strings, or the string itself where it is not
+                // split.
+                let (s, split) = match super::shared_strings() {
+                    true => (self.shared_ref(&args[0]), "split_kept"),
+                    false => (self.text_ref(&args[0]), "split"),
+                };
                 let regex = self.text_ref(&args[1]);
                 let limit = match args.get(2) {
                     Some(limit) => self.int_arg(limit),
                     None => "0".to_string(),
                 };
-                let parts = call(self, "split", vec![s, regex, limit]).text;
+                let parts = call(self, split, vec![s, regex, limit]).text;
                 let parts = if self.nullable_element(Type::String) {
                     format!("{parts}.into_iter().map(Some).collect()")
                 } else {
@@ -264,10 +269,14 @@ impl<'a> Gen<'a> {
                 let object = self.class.type_index(OBJECT).expect("lowering adds `Object` for `lines`");
                 let string = self.class.type_of(Type::String).expect("a runtime class of `Object`");
                 let variant = self.variant(object, string);
+                let line = match super::shared_strings() {
+                    true => format!("{}(line)", self.runtime("new_or_empty")),
+                    false => "line".to_string(),
+                };
                 let line = if self.nullable_element(Type::class(OBJECT)) {
-                    format!("Some({variant}(line))")
+                    format!("Some({variant}({line}))")
                 } else {
-                    format!("{variant}(line)")
+                    format!("{variant}({line})")
                 };
                 Code::atom(format!(
                     "{}({lines}.into_iter().map(|line| {line}).collect())",
@@ -325,6 +334,13 @@ impl<'a> Gen<'a> {
                         call(self, "new_string", vec![bytes, charset])
                     }
                 }
+            }
+            // A shared string is the object itself, which throws on null.
+            StringOp::Identity | StringOp::ToString | StringOp::Intern
+                if self.nullable(&args[0]) && super::shared_strings() =>
+            {
+                let option = self.expr(&args[0]).at(ATOM);
+                Code::atom(self.dereference(&[args[0].id], &option))
             }
             StringOp::Identity | StringOp::ToString | StringOp::Intern if self.nullable(&args[0]) => {
                 Code::atom(format!("{}.to_string()", self.deref(&args[0])))

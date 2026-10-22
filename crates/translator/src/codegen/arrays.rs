@@ -423,12 +423,12 @@ impl<'a> Gen<'a> {
             let shown = format!("{}({old}.as_deref())", self.runtime("or_null"));
             let mut parts = vec![Part::Arg(Code::atom(shown))];
             self.parts(rhs, &mut parts);
-            return format!("Some({})", self.format("format!", parts).text);
+            return format!("Some({})", self.concat(parts).text);
         }
         if ty == Type::String {
             let mut parts = vec![Part::Arg(Code::atom(old))];
             self.parts(rhs, &mut parts);
-            return self.format("format!", parts).text;
+            return self.concat(parts).text;
         }
         // As in `assignment`: the operation is computed in the promoted type, then cast back.
         let result = crate::types::binary_type(op, ty, rhs.ty).expect("checked");

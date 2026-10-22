@@ -124,16 +124,21 @@ impl<'a> Gen<'a> {
             self.line("}");
         }
         self.gap();
-        self.line(&format!("{}fn enum_name(self) -> String {{", self.vis()));
+        // Where strings are shared, a constant's name is the interned literal of its declaration.
+        let shared = super::shared_strings();
+        let text = if shared { self.runtime("JStr") } else { "String".to_string() };
+        self.line(&format!("{}fn enum_name(self) -> {text} {{", self.vis()));
         self.indent += 1;
-        self.line("let name: &str = match self {");
+        self.line(&format!("let name: {} = match self {{", if shared { &text } else { "&str" }));
         self.indent += 1;
         for c in constants {
-            self.line(&format!("{name}::{} => {},", variant_name(&c.name), rust_string(&c.name)));
+            let literal = rust_string(&c.name);
+            let literal = if shared { self.string_literal(&literal) } else { literal };
+            self.line(&format!("{name}::{} => {literal},", variant_name(&c.name)));
         }
         self.indent -= 1;
         self.line("};");
-        self.line("name.to_string()");
+        self.line(if shared { "name" } else { "name.to_string()" });
         self.indent -= 1;
         self.line("}");
         self.gap();

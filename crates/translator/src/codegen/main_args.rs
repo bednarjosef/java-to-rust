@@ -15,6 +15,12 @@ impl<'a> Gen<'a> {
 
     /// `args`, a `Vec<String>`, as a `Vec` of the elements of the array type `ty`.
     pub(super) fn string_vec_as(&mut self, ty: Type, args: String) -> String {
+        // Each string a new object where the program's strings are shared.
+        let args = if super::shared_strings() {
+            format!("{args}.into_iter().map({}).collect::<Vec<_>>()", self.runtime("JStr::new"))
+        } else {
+            args
+        };
         // A `String[]` that is an `Object[]` (see `lower::covariant`).
         if element(ty) != Type::String {
             let each = self.string_as_object("s");

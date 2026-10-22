@@ -33,6 +33,7 @@ pub fn translate(java: &str) -> Result<String, Error> {
 pub fn translate_with_notes(java: &str) -> Result<(String, Vec<ast::Note>), Error> {
     let mut class = lower::lower(&javac::tree(java)?)?;
     let notes = std::mem::take(&mut class.notes);
+    analysis::string_identity(&mut class).map_err(|mut errors| errors.remove(0))?;
     analysis::whole_objects(&mut class)?;
     let mut facts = analysis::analyze(&class)?;
     // A `catch` reads the message of a `NullPointerException`: it names the class file's code.

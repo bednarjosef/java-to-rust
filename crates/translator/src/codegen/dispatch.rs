@@ -39,6 +39,9 @@ pub(super) enum Need {
     Display(usize),
     /// `nullable_text()`: what the object's `toString` returns, null as `None`, or its exception.
     NullableText(usize),
+    /// `shared_text()`, where strings are shared: the string that the object's `toString`
+    /// returns, which does not throw.
+    SharedText(usize),
     /// `as_<t>()` on the enum of `s`: the object as a value of type `t` if it is one, as
     /// `(s, t)`.
     Narrow(usize, usize),
@@ -82,7 +85,7 @@ impl<'a> Gen<'a> {
             | Need::CastSource(t) => {
                 needs.insert(Need::Enum(t));
             }
-            Need::NullableText(t) => {
+            Need::NullableText(t) | Need::SharedText(t) => {
                 needs.insert(Need::Enum(t));
                 needs.insert(Need::Display(t));
             }
@@ -1128,7 +1131,15 @@ impl<'a> Gen<'a> {
             }
             return Code::atom(match (throws, self.enum_text_throws(t)) {
                 (true, true) => format!("{obj}.try_text()"),
+                (true, false) if super::shared_strings() => {
+                    self.need(Need::SharedText(t));
+                    format!("Ok::<_, {}>({obj}.shared_text())", self.throwable_type())
+                }
                 (true, false) => format!("Ok::<_, {}>({obj}.to_string())", self.throwable_type()),
+                (false, _) if super::shared_strings() => {
+                    self.need(Need::SharedText(t));
+                    format!("{obj}.shared_text()")
+                }
                 (false, _) => format!("{obj}.to_string()"),
             });
         }
@@ -1319,6 +1330,9 @@ impl<'a> Gen<'a> {
             self.display_impl(t, &variants);
             if self.enum_text_throws(t) {
                 self.try_text_impl(t, &variants);
+            }
+            if self.wanted.contains(&Need::SharedText(t)) {
+                self.shared_text_impl(t, &variants);
             }
         }
         if self.wanted.contains(&Need::NullableText(t)) {
@@ -1619,6 +1633,12 @@ impl<'a> Gen<'a> {
             let thrown = self.runtime("throw_exception");
             format!("{}(o, {start}, {end}).unwrap_or_else(|e| {thrown}(e))", self.runtime("try_substring"))
         };
+        // A shared string's `substring` of all of it is the string itself.
+        let text = match (super::shared_strings(), builder) {
+            (true, true) => format!("{}({text})", self.runtime("new_or_empty")),
+            (true, false) => format!("{}(o, {text})", self.runtime("kept")),
+            (false, _) => text,
+        };
         let char_sequence = method.class;
         let string =
             self.class.type_of(Type::String).filter(|&s| self.enum_variants(char_sequence).contains(&s));
@@ -1867,6 +1887,10 @@ impl<'a> Gen<'a> {
         if self.enum_text_throws(t) {
             return Code::atom(self.passed_on(Code::atom(format!("{obj}.try_text()"))));
         }
+        if super::shared_strings() {
+            self.need(Need::SharedText(t));
+            return Code::atom(format!("{obj}.shared_text()"));
+        }
         Code::atom(format!("{obj}.to_string()"))
     }
 
@@ -2059,10 +2083,15 @@ impl<'a> Gen<'a> {
             self.indent += 1;
             for &c in variants {
                 let v = self.variant(t, c);
-                let same = self.same_variant(c);
+                let mut same = self.same_variant(c);
                 // A `Boolean` or a `Byte` is one of `valueOf`'s cached objects, the same object
-                // exactly when the values are equal (see `analysis::boxing`).
+                // exactly when the values are equal (see `analysis::boxing`). Shared strings are
+                // compared as objects.
                 let unkept = match self.runtime_of(c) {
+                    Some(Type::String) if super::shared_strings() => {
+                        same = format!("{}(a, b)", self.runtime("same_str"));
+                        false
+                    }
                     Some(Type::String) => true,
                     Some(ty @ Type::Boxed(b)) => {
                         !matches!(*b, Type::Boolean | Type::Byte) && !self.faithful_box(ty)
@@ -2188,13 +2217,15 @@ impl<'a> Gen<'a> {
         self.gap();
         self.line(&format!("impl {name} {{"));
         self.indent += 1;
-        self.line(&format!("pub(crate) fn try_text(&self) -> Result<String, {throwable}> {{"));
+        let text = if super::shared_strings() { self.runtime("JStr") } else { "String".to_string() };
+        self.line(&format!("pub(crate) fn try_text(&self) -> Result<{text}, {throwable}> {{"));
         self.indent += 1;
         self.match_arms(t, variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
             Some(i) if g.facts.throwing.contains(&i) => {
                 let (call, uses) = g.arm_call(t, c, i, "");
                 if g.facts.nullable_returns.contains(&i) {
-                    (format!("{call}.map(|text| text.unwrap_or_else(|| \"null\".to_string()))"), uses)
+                    let null = g.string_literal("\"null\"");
+                    (format!("{call}.map(|text| text.unwrap_or_else(|| {null}))"), uses)
                 } else {
                     (call, uses)
                 }
@@ -2203,7 +2234,16 @@ impl<'a> Gen<'a> {
                 let i = g.hash_index(c).expect("a hashCode that throws");
                 let (call, uses) = g.arm_call(t, c, i, "");
                 let text = g.default_text(c, "hash".to_string());
+                let text = if super::shared_strings() {
+                    format!("{}({text})", g.runtime("JStr::new"))
+                } else {
+                    text
+                };
                 (format!("{call}.map(|hash| {text})"), uses)
+            }
+            _ if super::shared_strings() => {
+                let (text, uses) = g.shared_arm(t, c);
+                (format!("Ok({text})"), uses)
             }
             _ => ("Ok(self.to_string())".to_string(), false),
         });
@@ -2213,16 +2253,60 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
+    /// `shared_text()`, where the program's strings are shared: the string that `toString`
+    /// returns for an object of the enum of `t` whose `toString` does not throw.
+    fn shared_text_impl(&mut self, t: usize, variants: &[usize]) {
+        let name = struct_name(&self.class.types[t].name);
+        let jstr = self.runtime("JStr");
+        self.gap();
+        self.line(&format!("impl {name} {{"));
+        self.indent += 1;
+        self.line(&format!("pub(crate) fn shared_text(&self) -> {jstr} {{"));
+        self.indent += 1;
+        self.match_arms(t, variants, &|g: &mut Self, c| g.shared_arm(t, c));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// The string that `toString` returns for an object of class `c`, a variant of the enum of `t`
+    /// bound to `o`, whose `toString` does not throw, where the program's strings are shared: the
+    /// string itself, what the program's `toString` returns, an enum constant's interned name, or a
+    /// new string of its text.
+    fn shared_arm(&mut self, t: usize, c: usize) -> (String, bool) {
+        match self.runtime_of(c) {
+            Some(Type::String) => return ("o.clone()".to_string(), true),
+            Some(_) => return (format!("{}(self.to_string())", self.runtime("JStr::new")), false),
+            None => {}
+        }
+        match hierarchy::to_string_impl(self.class, c) {
+            Some(i) => {
+                let (call, uses) = self.arm_call(t, c, i, "");
+                if self.facts.nullable_returns.contains(&i) {
+                    let null = self.string_literal("\"null\"");
+                    return (format!("{call}.unwrap_or_else(|| {null})"), uses);
+                }
+                (call, uses)
+            }
+            None if self.class.types[c].kind == TypeKind::Enum => {
+                (format!("{}(self.to_string())", self.runtime("interned_text")), false)
+            }
+            None => (format!("{}(self.to_string())", self.runtime("JStr::new")), false),
+        }
+    }
+
     /// `nullable_text()`: what `toString` returns for an object of the enum of `t`, its null as
     /// `None`, or its exception; where an implementation may return null, the `Display` shows "null".
     /// In a program without exceptions (no `Throwable`) it is the `Option` alone.
     fn nullable_text_impl(&mut self, t: usize, variants: &[usize]) {
         let name = struct_name(&self.class.types[t].name);
         let fallible = self.has_throwable();
+        let text = if super::shared_strings() { self.runtime("JStr") } else { "String".to_string() };
         let ret = if fallible {
-            format!("Result<Option<String>, {}>", self.throwable_type())
+            format!("Result<Option<{text}>, {}>", self.throwable_type())
         } else {
-            "Option<String>".to_string()
+            format!("Option<{text}>")
         };
         self.gap();
         self.line(&format!("impl {name} {{"));
@@ -2242,6 +2326,10 @@ impl<'a> Gen<'a> {
                 (call, uses)
             }
             _ if throws => ("self.try_text().map(Some)".to_string(), false),
+            _ if super::shared_strings() => {
+                let (text, uses) = g.shared_arm(t, c);
+                (ok(format!("Some({text})")), uses)
+            }
             _ => (ok("Some(self.to_string())".to_string()), false),
         });
         self.indent -= 1;

@@ -202,7 +202,7 @@ pub(super) fn never_runs(method: &Method) -> bool {
 }
 
 /// The largest id of an expression of the program.
-fn largest_id(class: &Class) -> usize {
+pub(super) fn largest_id(class: &Class) -> usize {
     let mut max = 0;
     let mut see = |e: &Expr| visit_expr(e, &mut |x| max = max.max(x.id));
     for method in &class.methods {

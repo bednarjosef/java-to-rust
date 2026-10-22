@@ -378,6 +378,7 @@ impl<'a> Gen<'a> {
         let attempts = std::mem::take(&mut self.attempts);
         let throwing = std::mem::replace(&mut self.throwing, false);
         let text = self.value(&args[0], Type::String).text;
+        let text = if super::shared_strings() { format!("String::from({text})") } else { text };
         self.attempts = attempts;
         self.throwing = throwing;
         let (set, pending) = (self.runtime("set_trace_hook"), self.runtime("set_pending_uncaught"));
@@ -390,7 +391,8 @@ impl<'a> Gen<'a> {
     /// A thread's name as a `String`, which `Thread` checks is not null.
     fn thread_name(&mut self, name: &'a Expr) -> String {
         let text = self.value(name, Type::String).text;
-        if self.nullable(name) { format!("{}({text})", self.runtime("non_null")) } else { text }
+        let text = if self.nullable(name) { format!("{}({text})", self.runtime("non_null")) } else { text };
+        if super::shared_strings() { format!("String::from({text})") } else { text }
     }
 
     /// `System.identityHashCode(e)` of a value of the enum of `t` (`Object`, an interface, a

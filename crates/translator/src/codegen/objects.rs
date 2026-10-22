@@ -119,6 +119,7 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Int | Type::Long | Type::Byte | Type::Short | Type::Char => "0",
         Type::Double | Type::Float => "0.0",
         Type::Boolean => "false",
+        Type::String if super::shared_strings() => "java::JStr::default()",
         Type::String => "String::new()",
         // A `java::StringBuilder`, or a `java::SharedStringBuilder` in a program with threads.
         Type::StringBuilder => "Default::default()",
@@ -856,16 +857,18 @@ impl<'a> Gen<'a> {
             return (self.null_text(index, call), false);
         }
         if self.facts.nullable_returns.contains(&index) {
-            return (format!("{call}.map(|text| text.unwrap_or_else(|| String::from(\"null\")))"), true);
+            let null = self.string_literal("\"null\"");
+            return (format!("{call}.map(|text| text.unwrap_or_else(|| {null}))"), true);
         }
         (call, true)
     }
 
     /// The text that `call`, a call of `toString` method `index`, gives: `"null"` where it
     /// returns null, as `String.valueOf` shows it.
-    fn null_text(&self, index: usize, call: String) -> String {
+    fn null_text(&mut self, index: usize, call: String) -> String {
         if self.facts.nullable_returns.contains(&index) {
-            format!("{call}.unwrap_or_else(|| String::from(\"null\"))")
+            let null = self.string_literal("\"null\"");
+            format!("{call}.unwrap_or_else(|| {null})")
         } else {
             call
         }
@@ -1571,11 +1574,16 @@ impl<'a> Gen<'a> {
                 let old = Slot::Static { cell: cell.clone(), plain: false }.read(true);
                 // A static that may be null shows as `null` and is written as `Some`.
                 let nullable = self.place_nullable(target);
-                let old =
-                    if nullable { format!("{old}.unwrap_or_else(|| String::from(\"null\"))") } else { old };
+                let old = match nullable {
+                    true if super::shared_strings() => {
+                        format!("{}({old}.as_deref())", self.runtime("or_null"))
+                    }
+                    true => format!("{old}.unwrap_or_else(|| String::from(\"null\"))"),
+                    false => old,
+                };
                 let mut parts = vec![Part::Arg(Code::atom(old))];
                 self.parts(value, &mut parts);
-                let text = self.format("format!", parts).text;
+                let text = self.concat(parts).text;
                 let text = if nullable { format!("Some({text})") } else { text };
                 lines.push(format!("{cell}.set({text});"));
             }
@@ -1707,13 +1715,16 @@ impl<'a> Gen<'a> {
                 // as `Some`: the text is never null.
                 let old = if self.place_nullable(place) {
                     wrap = true;
-                    format!("{old}.unwrap_or_else(|| String::from(\"null\"))")
+                    match super::shared_strings() {
+                        true => format!("{}({old}.as_deref())", self.runtime("or_null")),
+                        false => format!("{old}.unwrap_or_else(|| String::from(\"null\"))"),
+                    }
                 } else {
                     old
                 };
                 let mut parts = vec![Part::Arg(Code::atom(old))];
                 self.parts(value, &mut parts);
-                lines.push(format!("let {new} = {};", self.format("format!", parts).text));
+                lines.push(format!("let {new} = {};", self.concat(parts).text));
                 new.clone()
             }
             Update::Compound(op, value) => {
@@ -1848,7 +1859,8 @@ impl<'a> Gen<'a> {
     /// `toString(Locale, Messages)` of `Formattable` too).
     pub(super) fn displays(&self, index: usize) -> bool {
         let m = &self.class.methods[index];
-        if self.class.types[m.class].kind == TypeKind::Enum {
+        // A shared string is the object that the method returns, which `Display` would not keep.
+        if self.class.types[m.class].kind == TypeKind::Enum || super::shared_strings() {
             return false;
         }
         let runs = match self.homes[index] {

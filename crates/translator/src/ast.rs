@@ -299,6 +299,9 @@ pub struct Class {
     /// The annotation types (`@interface`) whose class literals the code has, by binary name:
     /// a `java::Class` of each, which `isAnnotation()`. The types themselves are left out.
     pub annotation_classes: std::collections::BTreeSet<String>,
+    /// Every string is a `java::JStr`, a shared text with an identity, as the program compares
+    /// strings by reference where only their identity decides (`analysis::string_identity`).
+    pub shared_strings: bool,
     /// The module and class loader of each package of a named module, as HotSpot names them with
     /// a class in a `ClassCastException` ("module java.base of loader 'bootstrap'"). A package
     /// that is not here is in the unnamed module of the system class loader.
@@ -905,6 +908,19 @@ pub enum Builtin {
     /// `Objects.equals(a, b)` on two strings, boxes of one kind, or objects; for objects a third
     /// argument is the call `a.equals(b)` that runs when `a` is not null.
     ObjectsEquals,
+    /// `[a, b]`: `a == b` of two strings in the program's own code, which compares references.
+    /// `analysis::string_identity` replaces each one with what decides it.
+    StringSame,
+    /// `[receiver, arguments.., text]`: the string that the `String` method `op` of the receiver
+    /// returns, whose text is `text` (the call of `op` on the same values), where every string is
+    /// shared (`analysis::string_identity`): the receiver itself where the JDK returns it, else a
+    /// new string or the interned `""` (`java::kept`). The receiver and the arguments are locals.
+    Kept(StringOp),
+    /// `String.valueOf(x)` of a string or an object, and `toString()` of a `CharSequence`: the
+    /// string itself, the literal `"null"`, or what `x.toString()` returns. The argument is the
+    /// concatenation `"" + x`, its text where the program's strings are not shared, which
+    /// `analysis::string_identity` leaves in its place.
+    ValueOf,
     /// `Objects.hashCode(o)` on a string, a box, an enum or an object; for an object a second
     /// argument is the call `o.hashCode()` that runs when `o` is not null.
     ObjectsHashCode,
