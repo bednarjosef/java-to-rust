@@ -1141,7 +1141,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The type of `Object`, when the program uses it.
-    fn object_index(&self) -> Option<usize> {
+    pub(super) fn object_index(&self) -> Option<usize> {
         self.class.types.iter().position(|d| d.kind == TypeKind::Interface && d.name == OBJECT)
     }
 

@@ -156,7 +156,9 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Bits(..) => &[],
         Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => &[],
         Builtin::Unsigned(UnsignedOp::Compare | UnsignedOp::ToString | UnsignedOp::Widen, _) => &[],
-        // Overflow, and bounds the wrong way round.
+        // Overflow, and bounds the wrong way round. `ceilDivExact` also throws for a zero divisor,
+        // which `runtime_failures` declares as the checked form.
+        Builtin::Native(Native::Math { name: "ceilDivExact", .. }) => &[],
         Builtin::Native(Native::Math { name, .. }) if name.ends_with("Exact") => {
             &["java.lang.ArithmeticException"]
         }
@@ -234,6 +236,9 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::DescriptorHandle
             | Native::DescriptorAppend
             | Native::FullFence
+            // A copy outside the arrays, or of memory outside the heap, ends the program
+            // (`java::copy_memory`), as the translation cannot go on with it.
+            | Native::CopyMemory { .. }
             | Native::Crc32Update
             | Native::InflateInit
             | Native::InflateAdler
@@ -241,6 +246,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::InflateEnd
             | Native::NoPendingReferences,
         ) => &[],
+        // A read or write outside the array, or of memory outside the heap, ends the program.
+        Builtin::RawMemory { .. } => &[],
         // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).
         Builtin::Native(Native::Unix(_)) => &[],
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
@@ -514,9 +521,17 @@ pub(super) fn runtime_failures(
                 }
             }
             // A zero divisor throws, as in a division.
-            Builtin::Native(Native::Math { name: "floorDiv" | "floorMod", .. }) => {
+            Builtin::Native(Native::Math { name: "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod", .. }) => {
                 let constant = matches!(args[1].kind, ExprKind::Int(v) if v != 0)
                     || matches!(args[1].kind, ExprKind::Long(v) if v != 0);
+                if !constant {
+                    out.push(("java.lang.ArithmeticException", "this division", true, x.id));
+                }
+            }
+            // `MIN_VALUE / -1` overflows too, so only another constant divisor is known to pass.
+            Builtin::Native(Native::Math { name: "ceilDivExact", .. }) => {
+                let constant = matches!(args[1].kind, ExprKind::Int(v) if v != 0 && v != -1)
+                    || matches!(args[1].kind, ExprKind::Long(v) if v != 0 && v != -1);
                 if !constant {
                     out.push(("java.lang.ArithmeticException", "this division", true, x.id));
                 }
@@ -599,6 +614,8 @@ pub(super) fn runtime_failures(
                     if null(&args[1]) {
                         out.push((NPE, "this call", true, args[1].id));
                     }
+                } else if let Builtin::Native(Native::CopyMemory { .. }) | Builtin::RawMemory { .. } = builtin {
+                    // A null base is an address outside the heap, which ends the program.
                 } else if !takes_null && checked.iter().any(null) {
                     let receiver = !checked[1..].iter().any(null);
                     out.push((NPE, "this call", receiver, if receiver { args[0].id } else { x.id }));

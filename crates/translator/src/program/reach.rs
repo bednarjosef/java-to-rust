@@ -228,6 +228,10 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ),
     ("jdk.internal.loader.BootLoader", "loadLibrary", "(java.lang.String)void"),
     ("java.security.SecureRandom", "getSeed", "(int)byte[]"),
+    // Preview features are off in a plain run, and there is no security manager to check the
+    // `jrt:` file system's callers (`lower/system.rs`).
+    ("jdk.internal.misc.PreviewFeatures", "isPreviewEnabled", "()boolean"),
+    ("jdk.internal.jrtfs.JrtFileSystemProvider", "checkPermission", "()void"),
 ];
 
 /// A method, by class, name and javac's signature.

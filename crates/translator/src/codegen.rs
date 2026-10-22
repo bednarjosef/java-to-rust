@@ -10,6 +10,7 @@ use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
 mod boxing;
+mod ceil_div;
 mod chains;
 mod char_sequence;
 mod character;

@@ -101,6 +101,7 @@ impl<'t> Lowering<'t> {
             ("java.lang.Runtime", "freeMemory") if on_runtime => Native::FreeMemory,
             ("java.lang.Runtime", "maxMemory") if on_runtime => Native::MaxMemory,
             ("java.lang.Runtime", "gc") if on_runtime => Native::Gc,
+            ("java.lang.System", "gc") if symbol.ty == "()void" => Native::Gc,
             ("java.lang.Runtime", "halt") if on_runtime => Native::Halt,
             ("java.lang.Thread", "sleep") if matches!(args.first(), Some(a) if matches!(a.ty, Type::Long | Type::Int)) => {
                 Native::Sleep { nanos: args.len() == 2 }
