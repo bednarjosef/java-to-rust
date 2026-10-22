@@ -12,9 +12,18 @@ fn object_checked(object: &Expr) -> bool {
 }
 
 /// Whether a `System.arraycopy` has an array of objects as its source, which may be an array of
-/// another type than the destination (the `Object`-typed copy of `codegen/natives.rs`).
+/// another type than the destination (the `Object`-typed copy of `codegen/natives.rs`), or an
+/// array of classes whose element type differs from the destination's, and is not `Object`
+/// (`codegen/arraycopy_classes.rs`).
 fn object_copy(args: &[Expr]) -> bool {
-    matches!(args.first().map(|a| &a.ty), Some(Type::Class(name, _)) if *name == OBJECT)
+    match (args.first().map(|a| &a.ty), args.get(2).map(|a| &a.ty)) {
+        (Some(Type::Class(name, _)), _) => *name == OBJECT,
+        (Some(Type::Array(s)), Some(Type::Array(d))) => match (&**s, &**d) {
+            (Type::Class(..), Type::Class(name, _)) => s != d && *name != OBJECT,
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Whether every object that a value of type `s` may be (`Facts::flows`, which decides the
@@ -466,6 +475,21 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
             &["java.lang.ArrayIndexOutOfBoundsException", "java.lang.ArrayStoreException"]
         }
         Builtin::Native(Native::ArrayCopy) => &["java.lang.ArrayIndexOutOfBoundsException"],
+        // A null class or array, a negative length, `void` or what is not an array, an index
+        // outside the array, and a value that the array cannot hold (`Gen::reflect_array`).
+        Builtin::Native(Native::ReflectNewArray) => &[
+            "java.lang.NullPointerException",
+            "java.lang.NegativeArraySizeException",
+            "java.lang.IllegalArgumentException",
+        ],
+        Builtin::Native(Native::ReflectArrayLength) => {
+            &["java.lang.NullPointerException", "java.lang.IllegalArgumentException"]
+        }
+        Builtin::Native(Native::ReflectArraySet) => &[
+            "java.lang.NullPointerException",
+            "java.lang.IllegalArgumentException",
+            "java.lang.ArrayIndexOutOfBoundsException",
+        ],
         // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
         Builtin::Arrays(op) if op.ranged() => &["java.lang.ArrayIndexOutOfBoundsException"],
         Builtin::Format if !format_may_fail(class, args) => &[],
@@ -773,6 +797,13 @@ pub(super) fn runtime_failures(
                 // checked form returns the mismatch (`codegen/dispatch.rs`).
                 if object_copy(args) {
                     out.push(("java.lang.ArrayStoreException", "this call of the library", true, x.id));
+                }
+            }
+            // Each failure of `java.lang.reflect.Array`'s natives has the checked form, a null
+            // argument among them.
+            Builtin::Native(Native::ReflectNewArray | Native::ReflectArrayLength | Native::ReflectArraySet) => {
+                for &failure in library_failure(class, m, builtin, args) {
+                    out.push((failure, "this call of the library", true, x.id));
                 }
             }
             // The string is dereferenced first (a null one is the checked `NullPointerException`),

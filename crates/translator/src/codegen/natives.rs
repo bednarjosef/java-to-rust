@@ -11,6 +11,9 @@ impl<'a> Gen<'a> {
         match native {
             Native::Math { name, strict } => self.math(name, strict, args, ty, id),
             Native::ArrayCopy => self.array_copy(args, id),
+            Native::ReflectNewArray => self.reflect_new_array(args, id),
+            Native::ReflectArrayLength => self.reflect_array_length(args, id),
+            Native::ReflectArraySet => self.reflect_array_set(args, id),
             Native::DoubleToLongBits => {
                 let x = self.value(&args[0], Type::Double).text;
                 call(self, "double_to_long_bits", vec![x])
@@ -607,6 +610,9 @@ impl<'a> Gen<'a> {
         };
         if matches!(src.ty, Type::Class(name, _) if name == OBJECT) {
             return self.object_array_copy(args, id);
+        }
+        if let Some(code) = self.checked_class_copy(args, id) {
+            return code;
         }
         let plain_name = |g: &Self, e: &Expr| match &e.kind {
             ExprKind::Var(name) if g.plain(name).is_some() => Some(name.clone()),

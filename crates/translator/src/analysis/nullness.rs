@@ -71,6 +71,11 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 {
                     elements.push(x.ty.element());
                 }
+                // A copy of `System.arraycopy` stores the source's nulls in the destination.
+                ExprKind::Builtin(Builtin::Native(Native::ArrayCopy), args) if matches!((args[0].ty, args[2].ty), (Type::Array(s), Type::Array(_)) if facts.nullable_elements.contains(s)) =>
+                {
+                    elements.push(args[2].ty.element());
+                }
                 // An atomic update of an element compares the element with its expected value.
                 ExprKind::Builtin(Builtin::ElementUpdate(_), args)
                     if args.len() == 2 && maybe_null(facts, m, &args[0]) =>
@@ -79,6 +84,16 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 }
                 ExprKind::ArrayLit(items) if items.iter().any(|item| maybe_null(facts, m, item)) => {
                     elements.push(x.ty.element());
+                }
+                // `Array.newArray` makes an array of any of the array classes that are `Object`s,
+                // with null references, and `Array.set` may store null in any of them.
+                ExprKind::Builtin(Builtin::Native(Native::ReflectNewArray), _) => {
+                    elements.extend(reflect_elements(class));
+                }
+                ExprKind::Builtin(Builtin::Native(Native::ReflectArraySet), args)
+                    if maybe_null(facts, m, &args[2]) =>
+                {
+                    elements.extend(reflect_elements(class));
                 }
                 // `Arrays.fill` stores its value in every element of the range.
                 ExprKind::Builtin(Builtin::ArraysFill | Builtin::Arrays(ArraysOp::FillRange), args)
@@ -149,6 +164,15 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 }
             }
         }
+        // A parameter that its method sets to a value that may be null (`moment =
+        // moment.plus(days)`) is an `Option`, in every method of its group as below.
+        for (m, name) in &vars {
+            if let Some(i) =
+                class.methods.get(*m).and_then(|method| method.params.iter().position(|p| &p.name == name))
+            {
+                params.push((*m, i));
+            }
+        }
         facts.nullable_vars.extend(vars);
         facts.nullable_vars.extend(declared);
         // The methods of an override group share their parameters' and return value's nullness,
@@ -182,6 +206,16 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
     // initializer: its cell is an `Option` that is read as it is.
     let nullable = facts.nullable_statics.clone();
     facts.placeholder_statics.retain(|key| !nullable.contains(key));
+}
+
+/// The element types of references of the array classes that are `Object`s, which
+/// `java.lang.reflect.Array`'s natives make and store into.
+fn reflect_elements(class: &Class) -> Vec<Type> {
+    (0..class.types.len())
+        .filter_map(|c| class.array_of(c))
+        .map(|array| array.element())
+        .filter(|&element| nullable_type(element))
+        .collect()
 }
 
 /// The locals and parameters that the code of `method` reads.

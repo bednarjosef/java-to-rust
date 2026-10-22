@@ -194,7 +194,7 @@ pub fn prune(class: &mut Class, live: &LiveMethods) -> usize {
 }
 
 /// Whether the body of `method` already never runs: a stub's, or a dormant method's.
-fn never_runs(method: &Method) -> bool {
+pub(super) fn never_runs(method: &Method) -> bool {
     matches!(
         method.body.as_slice(),
         [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, _), .. })]

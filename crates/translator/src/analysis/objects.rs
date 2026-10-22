@@ -152,9 +152,21 @@ impl Scans {
             return false;
         }
         // The code that runs on objects of the class: the instance methods and constructors of
-        // the class and of its superclasses. The constructors among them build its objects.
-        let runs_on =
-            || chain.iter().flat_map(|&c| &self.by_class[c]).filter(|&&m| !class.methods[m].is_static);
+        // the class and of its superclasses, and the default methods of its interfaces that it
+        // does not override (`DirectiveVisitor.visit` passes `this` on). The constructors among
+        // them build its objects.
+        let defaults = supertypes
+            .iter()
+            .filter(|&&s| class.types[s].kind == TypeKind::Interface)
+            .flat_map(|&s| &self.by_class[s])
+            .filter(|&&m| !class.methods[m].is_abstract && h.implementation(m, t) == Some(m));
+        let runs_on = || {
+            chain
+                .iter()
+                .flat_map(|&c| &self.by_class[c])
+                .chain(defaults.clone())
+                .filter(|&&m| !class.methods[m].is_static)
+        };
         if runs_on().any(|&m| !self.methods[m].this_writes.is_empty() && !class.methods[m].is_ctor) {
             return false;
         }

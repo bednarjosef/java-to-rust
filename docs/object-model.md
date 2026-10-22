@@ -288,7 +288,10 @@ or its subclass does not initialize the class again (`codegen/statics.rs::init_c
   pattern.
 - A downcast `(Circle) s` is `java::cast(s.as_circle(), "Circle")`, which returns the value or
   throws `ClassCastException` (`java::cast_failed`: "cannot be cast to class ..."; the message
-  names only the target class). A cast whose operand's class is known and not below the target
+  names only the target class), except a downcast of an enum whose classes are all in `java.base`
+  (strings, boxes, standard classes), which names both classes as HotSpot does (`java::cast_from`,
+  `codegen/class_cast.rs`).
+  A cast whose operand's class is known and not below the target
   always fails, and is written as that failure. A cast or test to a supertype is the implicit
   upcast.
 - A cast of a value that may be null to a Java enum is an `Option` of the enum, as any enum
@@ -473,7 +476,9 @@ existed:
   `T extends Comparable<T>`), looked up in the method and then its class and the classes it is
   nested in. A type variable hides a class of the same name.
 - A parameterized type is its class; `? extends X` and `capture#1 of ? extends X` are `X`; `?`
-  and `? super X` are `Object`. javac writes an inner class of a generic class with the outer's
+  and `? super X` are `Object`. A capture of those has its type variable's bound, so
+  `JavaTree` writes it as a capture of `? extends` the bound's erasure (`ChronoLocalDateTime<?>`'s
+  `toLocalDate()` is a `ChronoLocalDate`). javac writes an inner class of a generic class with the outer's
   type arguments (`EnumMap<K,V>.EntryIterator`); those are dropped first
   (`without_outer_args`).
 - Members are declared with erased types. A use whose type javac substituted (a call's result, a
@@ -525,7 +530,12 @@ and a `String[]` and an `Object[]` are copied element by element, where an eleme
 `String` throws `ArrayStoreException` after the elements before it are stored. Other mismatches
 throw `ArrayStoreException` with HotSpot's message for them ("arraycopy: type mismatch: can not copy
 int[] into long[]", "arraycopy: source type java.lang.String is not an array"). A pair of arrays of
-another element class is rejected at translation.
+two other element classes is copied as HotSpot copies it (`codegen::arraycopy_classes`): when the
+source's class is a subtype of the destination's, every element is stored; otherwise each element is
+checked as it is stored, where null always passes and a non-null element must be an instance of the
+destination's class. The first element that fails throws `ArrayStoreException` after the elements
+before it are stored (`runtime::try_copy_refs`). The message names the two element classes by their
+static types, since a typed array holds no runtime class of its own.
 
 A value read back out of an erased container is a cast from `Object` that may be null, so an
 enum read back is an `Option` of the enum.

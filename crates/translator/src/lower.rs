@@ -37,6 +37,7 @@ use std::cell::{Cell, RefCell};
 mod annotation_objects;
 mod annotation_presence;
 mod argument_order;
+mod arraycopy_classes;
 mod arrays;
 mod boxing;
 mod by_name;
@@ -290,10 +291,16 @@ struct Lowering<'t> {
     /// The array types whose arrays become `Object`s or are cast back from them: each is a
     /// runtime class beside `Object` (see `object::object_types`).
     object_arrays: std::cell::RefCell<Vec<Type>>,
+    /// The expressions that erasure's checked cast of a generic member's value wraps (see
+    /// `generics::erased_use`), by id.
+    erased_casts: RefCell<std::collections::HashSet<ExprId>>,
     /// The class that names each static field read, and the methods of `String` that calls name
     /// (see `Class::class_file`).
     static_qualifiers: RefCell<std::collections::HashMap<(String, Pos, String), Option<String>>>,
     calls: RefCell<std::collections::HashMap<(String, Pos, String), Option<CallName>>>,
+    /// The binary name of the anonymous class of the enum constant's body whose method is being
+    /// lowered (`constant_bodies`), which javac names that body's own methods by (`note_call`).
+    body_class: RefCell<Option<String>>,
     /// The atomic updates of fields through `Unsafe` that the code makes, each a method that
     /// lowering adds to the field's class (see `handles`).
     field_updates: RefCell<Vec<handles::FieldUpdateMethod>>,
@@ -709,6 +716,15 @@ impl<'t> Lowering<'t> {
                 {
                     Stmt::Expr(*assign)
                 }
+                // The checked cast that erasure gives a generic method's result (`erased_use`):
+                // Java casts only a value that it uses, and this one is dropped. javac's
+                // `translate(tree.def);` in `Lower.visitNewClass` gets back the block that
+                // replaces an anonymous class's declaration, not the declaration.
+                Expr { kind: ExprKind::Cast(_, call), .. }
+                    if matches!(call.kind, ExprKind::MethodCall { .. } | ExprKind::Call { .. }) =>
+                {
+                    Stmt::Expr(*call)
+                }
                 e => Stmt::Expr(e),
             },
             // Reachability skipped the other branch (`program::live_branch`).
@@ -872,10 +888,13 @@ impl<'t> Lowering<'t> {
                 // A cast between the program's types, up, down or across: `Cast` converts as the
                 // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
                 // `Integer` and unboxes. `(C) super.clone()` in `C` is the copy itself, which has
-                // `C`'s type: it is not converted to `Object` and back.
+                // `C`'s type: it is not converted to `Object` and back. So does `(long) n` on a
+                // `Number` or a `Comparable`, which may hold a box.
+                let holds_boxes = matches!(value.ty, Type::Class(name, _)
+                    if name == OBJECT || name == NUMBER || name == COMPARABLE);
                 if Self::is_clone(&value) {
                     self.cast_clone(value, ty)
-                } else if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
+                } else if holds_boxes && (ty.is_numeric() || ty == Type::Boolean) {
                     let boxed = self.synth(
                         ExprKind::Cast(Type::boxed(ty), Box::new(value)),
                         node.pos(),

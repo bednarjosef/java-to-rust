@@ -54,7 +54,8 @@ impl<'t> Lowering<'t> {
                         .collect();
                     return Ok(Some(Builtin::Native(Native::ArrayCopy)));
                 }
-                if !matches!(src, Type::Array(_)) || src != dest {
+                let same = src == dest || super::arraycopy_classes::class_elements(src, dest);
+                if !matches!(src, Type::Array(_)) || !same {
                     return unsupported(node, "`System.arraycopy` between arrays of different types");
                 }
                 Native::ArrayCopy
@@ -157,6 +158,14 @@ impl<'t> Lowering<'t> {
                     Some(Native::InstallUncaught) => {
                         self.uncaught_dispatch(node, args);
                         Native::InstallUncaught
+                    }
+                    // The array and the value are `Object`s, as an array is where it is one.
+                    Some(native @ (Native::ReflectArrayLength | Native::ReflectArraySet)) => {
+                        let all = std::mem::take(args).into_iter().enumerate();
+                        *args = all
+                            .map(|(i, a)| if i != 1 { self.convert(a, Type::class(OBJECT)) } else { a })
+                            .collect();
+                        native
                     }
                     Some(native) => native,
                     // A whole program is rejected only where the native can run.

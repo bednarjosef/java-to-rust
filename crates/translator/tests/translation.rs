@@ -5040,7 +5040,7 @@ fn a_string_array_passed_as_an_array_of_a_type_variable_is_an_object_array() {
         &[
             "fn first(xs: &[Object]) -> Object {",
             "let s: Vec<Object> = vec![Object::String(String::from(\"a\"))];",
-            "java::cast(first(&s).as_string(), \"java.lang.String\")",
+            "java::cast_from(object.as_string(), \"java.lang.String\", || match &object { Object::String(_) => \"java.lang.String\" })",
         ],
     );
 }
@@ -5463,11 +5463,11 @@ fn static_fields_of_stub_classes_are_rejected() {
         &[
             (
                 "app/Main.java",
-                "package app;\nimport sun.security.util.SignatureFileVerifier;\npublic class Main {\n    static SignatureFileVerifier held;\n    public static void main(String[] a) { System.out.println(SignatureFileVerifier.LIMIT + (held.isOk() ? 1 : 0)); }\n}\n",
+                "package app;\nimport sun.security.pkcs.PKCS7;\npublic class Main {\n    static PKCS7 held;\n    public static void main(String[] a) { System.out.println(PKCS7.LIMIT + (held.isOk() ? 1 : 0)); }\n}\n",
             ),
             (
-                "lib/sun/security/util/SignatureFileVerifier.java",
-                "package sun.security.util;\npublic class SignatureFileVerifier {\n    public static final int LIMIT = Integer.getInteger(\"limit\", 16);\n    public boolean isOk() { return true; }\n}\n",
+                "lib/sun/security/pkcs/PKCS7.java",
+                "package sun.security.pkcs;\npublic class PKCS7 {\n    public static final int LIMIT = Integer.getInteger(\"limit\", 16);\n    public boolean isOk() { return true; }\n}\n",
             ),
         ],
     );
@@ -5479,26 +5479,110 @@ fn static_fields_of_stub_classes_are_rejected() {
     };
     let error = java_to_rust::translate_program(&program).expect_err("a static field of a stub");
     assert!(
-        error.to_string().contains(
-            "a static field of `sun.security.util.SignatureFileVerifier` (security) not supported yet"
-        ),
+        error
+            .to_string()
+            .contains("a static field of `sun.security.pkcs.PKCS7` (security) not supported yet"),
         "{error}"
     );
 }
 
 #[test]
-fn copies_between_arrays_of_other_classes_are_rejected() {
-    // Only `String` and `Object` elements have a check written here, so a copy from a `Box[]` to
-    // an `Object[]` is rejected, not translated with a message HotSpot may not give.
-    let error = java_to_rust::translate(
-        "public class Main {\n    static class Box {}\n    public static void main(String[] a) {\n        Object src = new Box[1];\n        Object dest = new Object[1];\n        System.arraycopy(src, 0, dest, 0, 1);\n    }\n}\n",
-    )
-    .expect_err("a copy between arrays of another class");
-    assert!(
-        error
-            .to_string()
-            .contains("`System.arraycopy` from [LMain$Box; to [Ljava.lang.Object; not supported yet"),
-        "{error}"
+fn a_copy_from_a_subclass_array_into_an_object_array_stores_each_element_as_it_is() {
+    let rust = translate(
+        "public class Main {
+            static class Box {}
+            public static void main(String[] args) {
+                Box[] boxes = {new Box(), new Box()};
+                Object[] objects = new Object[3];
+                System.arraycopy(boxes, 0, objects, 1, 2);
+                System.out.println(objects[2]);
+            }
+        }",
+    );
+    // Every element is a `Box`, so the copy has no check: each one is converted and stored.
+    assert_contains(
+        &rust,
+        &[
+            "java::try_copy_refs(&boxes, src_pos, &mut objects, dest_pos, length, |e: &Rc<MainBox>| -> Result<Option<Rc<MainBox>>, &'static str> { match e { x => Ok(Some(x.clone())), } })",
+        ],
+    );
+    assert!(!rust.contains("arraycopy: type mismatch"), "{rust}");
+}
+
+#[test]
+fn an_object_array_with_a_foreign_element_copied_into_a_box_array_stops_at_it() {
+    let rust = translate(
+        "public class Main {
+            static class Box {}
+            public static void main(String[] args) {
+                Object[] mixed = {new Box(), \"text\", new Box()};
+                Box[] partial = new Box[3];
+                try {
+                    System.arraycopy(mixed, 0, partial, 0, 3);
+                } catch (ArrayStoreException e) {
+                    System.out.println(e.getMessage());
+                }
+            }
+        }",
+    );
+    // The check is per element: a `Box` or null passes, and the first other element throws after
+    // the ones before it are stored. The message names the source's static element type.
+    assert_contains(
+        &rust,
+        &[
+            "Object::Box(x) => Ok(Some(x.clone())), ",
+            "_ => Err(\"arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, Main$Box\"), ",
+        ],
+    );
+}
+
+#[test]
+fn a_null_copied_into_an_array_of_another_class_is_stored_there() {
+    let rust = translate(
+        "public class Main {
+            static class Box {}
+            static class Plain {}
+            public static void main(String[] args) {
+                Box[] holes = new Box[2];
+                Plain[] filled = {new Plain()};
+                System.arraycopy(holes, 0, filled, 0, 1);
+                System.out.println(filled[0] == null);
+            }
+        }",
+    );
+    // The source holds nulls, so the destination's elements may be null too: it is an `Option`
+    // array, and a null passes the check.
+    assert_contains(
+        &rust,
+        &[
+            "let mut filled: Vec<Option<Rc<MainPlain>>>",
+            "|e: &Option<Rc<MainBox>>| -> Result<Option<Rc<MainPlain>>, &'static str> { match e { None => Ok(None), _ => Err(",
+        ],
+    );
+}
+
+#[test]
+fn a_copy_between_unrelated_classes_names_the_type_mismatch() {
+    let rust = translate(
+        "public class Main {
+            static class Box {}
+            static class Plain {}
+            public static void main(String[] args) {
+                Box[] boxes = {null, new Box()};
+                Plain[] plains = new Plain[2];
+                try {
+                    System.arraycopy(boxes, 0, plains, 0, 2);
+                } catch (ArrayStoreException e) {
+                    System.out.println(e.getMessage());
+                }
+            }
+        }",
+    );
+    // An unrelated pair stores nulls and fails on the first other element, with HotSpot's text for
+    // a pair that has no common subclass.
+    assert_contains(
+        &rust,
+        &["_ => Err(\"arraycopy: type mismatch: can not copy Main$Box[] into Main$Plain[]\"), "],
     );
 }
 
