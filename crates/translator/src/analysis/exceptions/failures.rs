@@ -398,9 +398,16 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | CodePointOp::NumericValue
             | CodePointOp::Digit,
         ) => &[],
-        // A name that is not a charset: `UnsupportedCharsetException`, `IllegalCharsetNameException`
-        // or, for null, `IllegalArgumentException`. Not checked, so a catch of it is rejected.
-        Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported) => &["?"],
+        // A name that is not a charset's, or a malformed one, or for null an
+        // `IllegalArgumentException` (`charset.rs`).
+        Builtin::Charset(CharsetOp::ForName) => &[
+            "java.nio.charset.UnsupportedCharsetException",
+            "java.nio.charset.IllegalCharsetNameException",
+            "java.lang.IllegalArgumentException",
+        ],
+        Builtin::Charset(CharsetOp::IsSupported) => {
+            &["java.nio.charset.IllegalCharsetNameException", "java.lang.IllegalArgumentException"]
+        }
         Builtin::Charset(_) => &[],
         // What an object's `toString` throws is a point of its own (`text_objects`).
         Builtin::ObjectText => &[],

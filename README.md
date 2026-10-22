@@ -508,7 +508,7 @@ array, passed to and returned from methods, compared with `==`, `!=` and `equals
 `name()`, `displayName()`, `toString()` and `hashCode()`. `Charset.forName` and `isSupported`
 resolve aliases and letter case as Java does (`utf8`, `latin1`, `ASCII`). An unknown or malformed
 name throws `UnsupportedCharsetException` or `IllegalCharsetNameException` with Java's message,
-which here ends the program uncaught with exit code 1, since the translation cannot catch them.
+which a `catch` sees as in Java.
 `Charset.defaultCharset()` is UTF-8, as Java answers from version 18 on (JEP 400). The runtime
 knows only the six charsets above, so `forName` rejects other names, such as `windows-1252`, that
 Java supports. A `Charset` may be null as a reference may (a field or a parameter given null,

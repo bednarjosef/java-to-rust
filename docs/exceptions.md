@@ -624,6 +624,9 @@ Decisions that changed during the implementation, step by step.
   as it prints (an argument missing or of the wrong kind), as Java does (`java::print_format`);
   a format that does not parse prints nothing, in both. The `printf` of a `PrintStream` object
   formats its text before the stream prints it, so one whose format may fail is rejected.
+  `Charset.forName` and `isSupported` raise `UnsupportedCharsetException` and
+  `IllegalCharsetNameException` (standard classes too, with the name as the message) and, for a
+  null name, `IllegalArgumentException`, which a `catch` sees as javac's BaseFileManager needs.
 - **Still rejected**, with "catching the `X` that this ... may throw": a null dereference
   (`NullPointerException`, whose checked form would wrap every `non_null`), an array creation
   with a negative size, a `ClassCastException` of a downcast, the library calls that may fail
