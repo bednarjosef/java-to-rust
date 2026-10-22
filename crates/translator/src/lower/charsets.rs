@@ -2,36 +2,91 @@
 //! and the methods of a charset are `Builtin::Charset` expressions, and `==` on two charsets is
 //! `Builtin::Charset(Equals)`. A charset is never null, so a null sink is rejected here, before
 //! lowering: converting a value cannot report an error.
+//!
+//! The JDK's classes of the standard charsets (`sun.nio.cs.UTF_8` and the others of
+//! `STANDARD_CHARSET_CLASSES`), which extend `Charset`, are the runtime's charsets too: their
+//! `INSTANCE`, and a new object of one, is the charset, and their types are `Type::Charset`.
+//! Reachability does not enter them (`program::RUNTIME_CLASSES`). Any other subclass of
+//! `Charset` is still rejected, as extending a class of the runtime.
 
 use super::*;
 
 const CHARSET: &str = "java.nio.charset.Charset";
+
+/// The JDK's classes of the charsets that the runtime has, with the charset of each.
+const STANDARD_CHARSET_CLASSES: &[(&str, CharsetOp)] = &[
+    ("sun.nio.cs.UTF_8", CharsetOp::Utf8),
+    ("sun.nio.cs.US_ASCII", CharsetOp::UsAscii),
+    ("sun.nio.cs.ISO_8859_1", CharsetOp::Latin1),
+    ("sun.nio.cs.UTF_16", CharsetOp::Utf16),
+    ("sun.nio.cs.UTF_16BE", CharsetOp::Utf16Be),
+    ("sun.nio.cs.UTF_16LE", CharsetOp::Utf16Le),
+];
+
+/// The constant of the runtime's `charset`.
+fn constant(charset: java_runtime::Charset) -> CharsetOp {
+    match charset {
+        java_runtime::Charset::Utf8 => CharsetOp::Utf8,
+        java_runtime::Charset::UsAscii => CharsetOp::UsAscii,
+        java_runtime::Charset::Latin1 => CharsetOp::Latin1,
+        java_runtime::Charset::Utf16 => CharsetOp::Utf16,
+        java_runtime::Charset::Utf16Be => CharsetOp::Utf16Be,
+        java_runtime::Charset::Utf16Le => CharsetOp::Utf16Le,
+    }
+}
+
+/// The charset of one of `STANDARD_CHARSET_CLASSES`.
+fn standard_class(name: &str) -> Option<CharsetOp> {
+    STANDARD_CHARSET_CLASSES.iter().find(|(class, _)| *class == name).map(|(_, op)| *op)
+}
+
+/// Whether `name` is the type of a charset: `Charset` or the class of a standard charset.
+pub(super) fn is_charset_type(name: &str) -> bool {
+    name == CHARSET || standard_class(name).is_some()
+}
 
 /// Whether a comparison has a charset operand, which makes it a charset comparison.
 pub(super) fn compares_charsets(node: Node) -> bool {
     ["leftOperand", "rightOperand"].into_iter().any(|side| node.get(side).is_some_and(is_charset))
 }
 
-/// Whether `node` is a `StandardCharsets` constant or a call of a `Charset` method.
+/// Whether `node` is a `StandardCharsets` constant, a call of a `Charset` method, or the
+/// `INSTANCE` or a new object of a standard charset's class.
 pub(super) fn is_charset_op(node: Node) -> bool {
     let Some(symbol) = node.symbol() else { return false };
     match node.kind() {
-        "METHOD_INVOCATION" => symbol.kind == "METHOD" && symbol.owner == CHARSET,
+        "METHOD_INVOCATION" => symbol.kind == "METHOD" && is_charset_type(symbol.owner),
         "IDENTIFIER" | "MEMBER_SELECT" => {
-            symbol.kind == "FIELD" && symbol.owner == "java.nio.charset.StandardCharsets"
+            symbol.kind == "FIELD"
+                && (symbol.owner == "java.nio.charset.StandardCharsets"
+                    || (symbol.name == "INSTANCE" && standard_class(symbol.owner).is_some()))
         }
+        "NEW_CLASS" => standard_class(symbol.owner).is_some(),
         _ => false,
     }
 }
 
 fn is_charset(node: Node) -> bool {
-    node.java_type() == CHARSET
+    is_charset_type(node.java_type())
 }
 
 impl<'t> Lowering<'t> {
     /// A `StandardCharsets` constant or a `Charset` method call, as its `Builtin::Charset`.
     pub(super) fn charset_op(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let Some(symbol) = node.symbol() else { return unsupported(node, "this charset") };
+        if node.kind() == "NEW_CLASS"
+            && node.list("arguments").next().is_none()
+            && node.get("classBody").is_none()
+        {
+            let op = standard_class(symbol.owner).expect("a standard charset's class");
+            return Ok(ExprKind::Builtin(Builtin::Charset(op), Vec::new()));
+        }
+        if node.kind() == "NEW_CLASS" {
+            return unsupported(node, "this charset");
+        }
+        if let Some(op) = standard_class(symbol.owner).filter(|_| node.kind() != "METHOD_INVOCATION") {
+            return Ok(ExprKind::Builtin(Builtin::Charset(op), Vec::new()));
+        }
         if node.kind() != "METHOD_INVOCATION" {
             let op = match symbol.name {
                 "UTF_8" => CharsetOp::Utf8,
@@ -65,7 +120,15 @@ impl<'t> Lowering<'t> {
         if operands.iter().any(|n| is_charset(*n) && may_be_null(*n)) {
             return unsupported(node, "a `null` charset");
         }
-        let operands = operands.into_iter().map(|n| self.expr(n)).collect::<Result<_, _>>()?;
+        let operands: Vec<Expr> = operands.into_iter().map(|n| self.expr(n)).collect::<Result<_, _>>()?;
+        // `forName` of a constant name of a charset the runtime has, such as the value of a
+        // property that the translation fixes (`lower::system`), is that charset, which cannot fail.
+        if op == CharsetOp::ForName
+            && let [Expr { kind: ExprKind::Str(name), .. }] = &operands[..]
+            && let Some(charset) = java_runtime::Charset::known(name)
+        {
+            return Ok(ExprKind::Builtin(Builtin::Charset(constant(charset)), Vec::new()));
+        }
         Ok(ExprKind::Builtin(Builtin::Charset(op), operands))
     }
 
@@ -111,7 +174,7 @@ fn check_tree<'t>(node: Node<'t>, returns: &'t str) -> Result<(), Error> {
 
 fn check_sink(node: Node, returns: &str) -> Result<(), Error> {
     match node.kind() {
-        "VARIABLE" if node.symbol().is_some_and(|s| s.ty == CHARSET) => {
+        "VARIABLE" if node.symbol().is_some_and(|s| is_charset_type(s.ty)) => {
             if node.get("initializer").is_some_and(may_be_null) {
                 return null_charset(node);
             }
@@ -125,7 +188,7 @@ fn check_sink(node: Node, returns: &str) -> Result<(), Error> {
         {
             return null_charset(node);
         }
-        "RETURN" if returns == CHARSET && node.get("expression").is_some_and(may_be_null) => {
+        "RETURN" if is_charset_type(returns) && node.get("expression").is_some_and(may_be_null) => {
             return null_charset(node);
         }
         "METHOD_INVOCATION" | "NEW_CLASS" => {
@@ -138,7 +201,7 @@ fn check_sink(node: Node, returns: &str) -> Result<(), Error> {
                     } else {
                         params.get(i).copied()
                     };
-                    if param == Some(CHARSET) && may_be_null(arg) {
+                    if param.is_some_and(is_charset_type) && may_be_null(arg) {
                         return null_charset(arg);
                     }
                 }

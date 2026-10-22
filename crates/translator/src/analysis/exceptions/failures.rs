@@ -105,7 +105,6 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         },
         Builtin::Builder(
             BuilderOp::New
-            | BuilderOp::Append
             | BuilderOp::Reverse
             | BuilderOp::IndexOf
             | BuilderOp::LastIndexOf
@@ -114,6 +113,9 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | BuilderOp::IsEmpty
             | BuilderOp::CompareTo,
         ) => None,
+        // A range of the appended text (`args` has the builder first) out of its bounds.
+        Builtin::Builder(BuilderOp::Append) if args.len() == 4 => Some("java.lang.IndexOutOfBoundsException"),
+        Builtin::Builder(BuilderOp::Append) => None,
         // A negative count, an invalid code point.
         Builtin::Builder(BuilderOp::AppendCodePoint | BuilderOp::Repeat) => {
             Some("java.lang.IllegalArgumentException")
@@ -151,6 +153,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         // A negative time (and an interrupt, which `runtime_failures` adds in a program that
         // interrupts).
         Builtin::Native(Native::Sleep { .. }) => Some("java.lang.IllegalArgumentException"),
+        // A negative count.
+        Builtin::Native(Native::SecureSeed) => Some("java.lang.IllegalArgumentException"),
         // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail, but for
         // the interrupt of `join0`, which `runtime_failures` adds.
         Builtin::Native(
@@ -212,8 +216,11 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::DescriptorHandle
             | Native::DescriptorAppend
             | Native::FullFence
-            | Native::Crc32Update,
+            | Native::Crc32Update
+            | Native::NoPendingReferences,
         ) => None,
+        // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).
+        Builtin::Native(Native::Unix(_)) => None,
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
         // of a closed descriptor does nothing.
         Builtin::Native(Native::FileOpenRead | Native::FileOpenWrite | Native::FileOpenRandom) => {
@@ -308,8 +315,19 @@ pub(super) fn runtime_failures(
     const NPE: &str = "java.lang.NullPointerException";
     const INDEX: &str = "java.lang.ArrayIndexOutOfBoundsException";
     let tested = |e: &Expr| is_tested(e, safe);
+    // A static that is never null where it is read, as it is or as the value of an assignment.
+    fn initialized(facts: &Facts, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Static { class, name } => facts.initialized_statics.contains(&(*class, name.clone())),
+            ExprKind::Assign { op: None, target: Place::Var(_), value } => initialized(facts, value),
+            ExprKind::Cast(to, value) if to.is_reference() => initialized(facts, value),
+            _ => false,
+        }
+    }
+    let initialized = |e: &Expr| initialized(facts, e);
     let null = |e: &Expr| {
-        (m != usize::MAX && !tested(e) && maybe_null(facts, m, e)) || matches!(e.kind, ExprKind::Null)
+        (m != usize::MAX && !tested(e) && !initialized(e) && maybe_null(facts, m, e))
+            || matches!(e.kind, ExprKind::Null)
     };
     let mut out = Vec::new();
     match &x.kind {
@@ -433,7 +451,10 @@ pub(super) fn runtime_failures(
                 | BoxedOp::Logical(_),
                 _,
             ) => {}
-            Builtin::MonitorEnter => out.push((NPE, "this synchronized", true, args[0].id)),
+            // Only a lock that may be null throws, as a dereference does: the code generator
+            // checks no other (`codegen::sync`).
+            Builtin::MonitorEnter if null(&args[0]) => out.push((NPE, "this synchronized", true, args[0].id)),
+            Builtin::MonitorEnter => {}
             // A class name that is not in the translation (`lower::by_name`).
             Builtin::UnknownClass => out.push(("java.lang.ClassNotFoundException", "this class name", false, x.id)),
             // A class that is not the object's; a `catch` sees it through `java::catching`.
@@ -515,7 +536,10 @@ pub(super) fn runtime_failures(
                     matches!(e.ty, Type::Null | Type::String | Type::StringBuilder | Type::Boxed(_))
                 };
                 let writes_null = match builtin {
-                    Builtin::Builder(BuilderOp::Append) => args.len() == 2 && text(&args[1]),
+                    Builtin::Builder(BuilderOp::Append) => {
+                        args.len() == 2 && text(&args[1])
+                            || args.len() == 4 && (text(&args[1]) || matches!(args[1].ty, Type::Class(c, _) if c == CHAR_SEQUENCE))
+                    }
                     Builtin::Builder(BuilderOp::Insert) => args.len() == 3 && text(&args[2]),
                     _ => false,
                 };
@@ -569,8 +593,10 @@ pub(super) fn runtime_failures(
                                     | Native::FileSeek
                                     | Native::FileSetLength
                                     | Native::FileSystem(_)
+                                    | Native::SecureSeed
                             )
-                    ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })));
+                    ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })))
+                        || (matches!(builtin, Builtin::Builder(BuilderOp::Append)) && args.len() == 4);
                     out.push((failure, "this call of the library", checked, x.id));
                 }
                 if let Builtin::Arrays(op) = builtin

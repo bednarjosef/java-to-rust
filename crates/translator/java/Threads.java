@@ -269,7 +269,9 @@ class Thread {
     public String toString() {
         String groupName = "";
         if (!started || isAlive()) {
-            groupName = group != null ? group.getName() : "main";
+            // Read once, so that the test covers the call.
+            ThreadGroup g = group;
+            groupName = g != null ? g.getName() : "main";
         }
         return "Thread[#" + tid + "," + name + "," + priority + "," + groupName + "]";
     }
@@ -480,7 +482,15 @@ class ThreadGroup implements Thread.UncaughtExceptionHandler {
     }
 
     public ThreadGroup(ThreadGroup parent, String name) {
-        this(parent, name, parent.maxPriority);
+        this(parent, name, maxPriority(parent));
+    }
+
+    // The JDK's constructor reads `parent.maxPriority`, and a null parent fails as it does there.
+    private static int maxPriority(ThreadGroup parent) {
+        if (parent == null) {
+            throw new NullPointerException("Cannot read field \"maxPriority\" because \"parent\" is null");
+        }
+        return parent.maxPriority;
     }
 
     static ThreadGroup mainGroup() {

@@ -14,8 +14,9 @@ pub use reach::{
     TRANSLATED_LANG_ACCESS, TRANSLATED_LANG_ACCESS_CLASS, TRANSLATED_PROPERTIES, UNSET_PROPERTIES,
     caller_query, class_bound, class_for_name, class_name, component_array, computed_for_name,
     created_by_name, direct_stream_call, field_offset_named, is_ensure_initialized, literal_class,
-    live_branch, lookup, module_for_name, standard_stream_field, stream_of_call, unsafe_field_access,
-    unsafe_field_update, unset_property_ifs, untranslated, writes_string_array,
+    live_branch, lookup, module_for_name, recreated_exception, redirected_call, standard_stream_field,
+    stream_of_call, unsafe_field_access, unsafe_field_update, unset_property_ifs, untranslated,
+    writes_string_array,
 };
 pub use survey::Survey;
 
@@ -52,7 +53,9 @@ impl fmt::Display for ProgramError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.file {
             Some(file) => write!(f, "{file}:{}", self.error),
-            None => write!(f, "{}", self.error.message),
+            None if self.error.pos == Pos::default() => write!(f, "{}", self.error.message),
+            // A position whose file is not known, such as one that several of the JDK's files have.
+            None => write!(f, "{}", self.error),
         }
     }
 }
@@ -302,12 +305,18 @@ fn locate(units: &[&Value], class: &crate::ast::Class, pos: Pos) -> Option<Strin
         if !here {
             continue;
         }
-        // The unit that declares the class, or the class that it is nested in.
-        let name = &decl.name;
+        // The unit that declares the class, or the class that it is nested in; for the class of
+        // a lambda, a local or an anonymous class, the class whose code has it.
+        let name = match &decl.origin {
+            crate::ast::Origin::Lambda { binary, .. }
+            | crate::ast::Origin::Local { binary, .. }
+            | crate::ast::Origin::Anonymous { binary, .. } => binary.split('$').next().unwrap_or_default(),
+            _ => decl.name.as_str(),
+        };
         let unit = units.iter().find(|u| {
             u["tree"]["typeDecls"].as_array().into_iter().flatten().any(|d| {
                 let top = class_name(d);
-                name == &top || name.strip_prefix(top.as_str()).is_some_and(|r| r.starts_with(['.', '$']))
+                name == top || name.strip_prefix(top.as_str()).is_some_and(|r| r.starts_with(['.', '$']))
             })
         });
         files.insert(unit.and_then(|u| u["file"].as_str())?);

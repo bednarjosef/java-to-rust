@@ -149,6 +149,13 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     // JDK's code of `Charset` looks charsets up among all of them.
     "java.nio.charset.Charset",
     "java.nio.charset.StandardCharsets",
+    // The JDK's classes of the charsets the runtime has (`lower/charsets.rs`).
+    "sun.nio.cs.ISO_8859_1",
+    "sun.nio.cs.US_ASCII",
+    "sun.nio.cs.UTF_16",
+    "sun.nio.cs.UTF_16BE",
+    "sun.nio.cs.UTF_16LE",
+    "sun.nio.cs.UTF_8",
     "sun.util.logging.PlatformLogger",
 ];
 
@@ -213,6 +220,9 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Blocker", "begin", "()boolean"),
     ("jdk.internal.misc.Blocker", "begin", "(boolean)boolean"),
     ("jdk.internal.misc.Blocker", "end", "(boolean)void"),
+    // A translated program has no native library to load (`lower/libraries.rs`).
+    ("jdk.internal.loader.BootLoader", "loadLibrary", "(java.lang.String)void"),
+    ("java.security.SecureRandom", "getSeed", "(int)byte[]"),
 ];
 
 /// A method, by class, name and javac's signature.
@@ -270,9 +280,7 @@ pub fn field_offset_named(node: &Value) -> Option<(String, String)> {
         && let [field] = &args[..]
     {
         let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
-        let class = text(&node["methodSelect"]["expression"], "javaType");
-        let class = class.strip_prefix("java.lang.Class<")?.strip_suffix('>')?;
-        return Some((strip_arguments(class), field.to_string()));
+        return Some((class_named(&node["methodSelect"]["expression"])?, field.to_string()));
     }
     if text(symbol, "owner") != "jdk.internal.misc.Unsafe"
         || !matches!(text(symbol, "name"), "objectFieldOffset" | "staticFieldOffset")
@@ -291,7 +299,16 @@ pub fn field_offset_named(node: &Value) -> Option<(String, String)> {
         _ => return None,
     };
     let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
-    Some((literal_class(class)?, field.to_string()))
+    Some((class_named(class)?, field.to_string()))
+}
+
+/// The class that the expression `node` of type `Class<C>` is: a class literal, or a value of
+/// that exact type, as `ForkJoinPool`'s local `Class<ForkJoinPool> klass` that finds its fields.
+fn class_named(node: &Value) -> Option<String> {
+    literal_class(node).or_else(|| {
+        let class = text(node, "javaType").strip_prefix("java.lang.Class<")?.strip_suffix('>')?;
+        (!class.starts_with('?')).then(|| strip_arguments(class))
+    })
 }
 
 /// The methods that lowering replaces whatever their signature, as `REPLACED_METHODS`: the
@@ -600,6 +617,41 @@ pub fn unset_property_ifs(block: &Value) -> Vec<&Value> {
     statements.iter().filter(|s| text(s, "kind") == "IF" && never(&s["condition"], &is_unset)).collect()
 }
 
+/// The variable whose exception the `try` statement `node` replaces with a new one of the same
+/// class, as `ForkJoinTask.getException` does by reflection for an exception that another thread
+/// threw: it finds the public constructors of `ex.getClass()` (two `Constructor` locals, a loop
+/// over `getConstructors()`, then an `if` that calls the one of a `Throwable`, else the one
+/// without parameters and `initCause`). `lower::recreate` writes it without reflection.
+pub fn recreated_exception(node: &Value) -> Option<&str> {
+    if text(node, "kind") != "TRY"
+        || node["resources"].as_array().is_some_and(|r| !r.is_empty())
+        || !node["finallyBlock"].is_null()
+    {
+        return None;
+    }
+    let statements = node["block"]["statements"].as_array()?;
+    let kinds: Vec<&str> = statements.iter().map(|s| text(s, "kind")).collect();
+    if kinds != ["VARIABLE", "VARIABLE", "ENHANCED_FOR_LOOP", "IF"]
+        || !statements[..2]
+            .iter()
+            .all(|v| text(&v["symbol"], "type").starts_with("java.lang.reflect.Constructor"))
+    {
+        return None;
+    }
+    let all = &statements[2]["expression"];
+    let get_class = &all["methodSelect"]["expression"];
+    let exception = &get_class["methodSelect"]["expression"];
+    let called = |call: &Value, owner: &str, name: &str| {
+        text(call, "kind") == "METHOD_INVOCATION"
+            && (text(&call["symbol"], "owner"), text(&call["symbol"], "name")) == (owner, name)
+    };
+    (called(all, "java.lang.Class", "getConstructors")
+        && called(get_class, "java.lang.Object", "getClass")
+        && text(exception, "kind") == "IDENTIFIER"
+        && text(exception, "javaType") == "java.lang.Throwable")
+        .then(|| text(exception, "name"))
+}
+
 /// The only branch of an `if` statement or a `?:` that can run, when its condition is never true
 /// (`never_true`: the `else` branch, `Null` for an `if` without one) or always true (a test that
 /// one of the `ARCHIVED_FIELDS` is null: the `then` branch).
@@ -732,11 +784,99 @@ pub const TRANSLATED_PROPERTIES: JdkMethod =
 /// The methods of `JavaLangAccess` that are the translator's static methods of the same name and
 /// type in `TRANSLATED_LANG_ACCESS_CLASS` (`java/overlay/jdk/internal/access/`), as
 /// `SharedSecrets.getJavaLangAccess()` is null in a translated program (see `lower.rs`).
-pub const TRANSLATED_LANG_ACCESS: &[&str] =
-    &["countPositives", "countNonZeroAscii", "uncheckedNewStringWithLatin1Bytes", "inflateBytesToChars"];
+pub const TRANSLATED_LANG_ACCESS: &[&str] = &[
+    "countPositives",
+    "countNonZeroAscii",
+    "uncheckedNewStringWithLatin1Bytes",
+    "inflateBytesToChars",
+    "start",
+    "uncheckedNewStringOrThrow",
+    "uncheckedGetBytesOrThrow",
+];
 
 /// The class of `TRANSLATED_LANG_ACCESS`.
 pub const TRANSLATED_LANG_ACCESS_CLASS: &str = "jdk.internal.access.TranslatedLangAccess";
+
+/// Static methods of the JDK whose calls are calls of a static method of the translator's
+/// (`java/overlay`) with the same type, by the JDK's method and the translator's class and name
+/// (see `lower.rs`). Reachability goes to the translator's method, and not into the JDK's.
+pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
+    // The default file system, whose provider a property could name and reflection create (the
+    // property is not set in a translated program, see `lower::system`), and which the JDK finds
+    // by the URI `file:///` (`sun/nio/fs/TranslatedFiles.java`).
+    (
+        (
+            "java.nio.file.FileSystems.DefaultFileSystemHolder",
+            "defaultFileSystem",
+            "()java.nio.file.FileSystem",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "defaultFileSystem"),
+    ),
+    // The first mismatch of two arrays, which the JDK finds reading memory at offsets from the
+    // arrays' bases; the translator's leaves every element to its callers' loops
+    // (`jdk/internal/util/TranslatedArraysSupport.java`).
+    (
+        (
+            "jdk.internal.util.ArraysSupport",
+            "vectorizedMismatch",
+            "(java.lang.Object,long,java.lang.Object,long,int,int)int",
+        ),
+        ("jdk.internal.util.TranslatedArraysSupport", "vectorizedMismatch"),
+    ),
+    // A file's bytes, which the JDK reads through a channel and `ByteBuffer`s; the translator's
+    // read `Files.newInputStream` (`sun/nio/fs/TranslatedFiles.java`).
+    (
+        ("java.nio.file.Files", "readAllBytes", "(java.nio.file.Path)byte[]"),
+        ("sun.nio.fs.TranslatedFiles", "readAllBytes"),
+    ),
+    // A file's text, which the JDK copies the bytes of for a `Path` of another module, found by
+    // `Class.getModule`.
+    (
+        (
+            "java.nio.file.Files",
+            "readString",
+            "(java.nio.file.Path,java.nio.charset.Charset)java.lang.String",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "readString"),
+    ),
+    (
+        (
+            "java.nio.file.Files",
+            "writeString",
+            "(java.nio.file.Path,java.lang.CharSequence,java.nio.charset.Charset,java.nio.file.OpenOption[])java.nio.file.Path",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "writeString"),
+    ),
+    // A reader and a writer of a file, which the JDK makes with a `CharsetDecoder` and a
+    // `CharsetEncoder`; the translator's with the `Charset`.
+    (
+        (
+            "java.nio.file.Files",
+            "newBufferedReader",
+            "(java.nio.file.Path,java.nio.charset.Charset)java.io.BufferedReader",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "newBufferedReader"),
+    ),
+    (
+        (
+            "java.nio.file.Files",
+            "newBufferedWriter",
+            "(java.nio.file.Path,java.nio.charset.Charset,java.nio.file.OpenOption[])java.io.BufferedWriter",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "newBufferedWriter"),
+    ),
+];
+
+/// The translator's class and method that a call of the JDK's method `(owner, name, signature)`
+/// calls instead (`REDIRECTED_CALLS`), where a variable-arity parameter is written as an array
+/// (javac writes `T...`).
+pub fn redirected_call(owner: &str, name: &str, signature: &str) -> Option<(&'static str, &'static str)> {
+    let signature = signature.replace("...", "[]");
+    REDIRECTED_CALLS
+        .iter()
+        .find(|((o, n, s), _)| (*o, *n, *s) == (owner, name, &*signature))
+        .map(|(_, to)| *to)
+}
 
 /// A method of the JDK, by class, name and javac's type of it.
 pub type JdkMethod = (&'static str, &'static str, &'static str);
@@ -996,6 +1136,10 @@ struct Walk<'t> {
     /// Whether reachable code finds a class by a name it computes, `Class.forName(name)`, which
     /// initializes every class that it can find (`by_name.rs`).
     finds_named: bool,
+    /// Whether reachable code makes a new exception of an exception's class
+    /// (`recreated_exception`): each exception class whose objects are created has the
+    /// constructor that does it.
+    recreates: bool,
     /// The parameters, by method and position, that a method gives `ensureInitialized`, and the
     /// class literals that reachable code passes to each parameter (`initialize.rs`).
     initializing: HashSet<(MethodKey, usize)>,
@@ -1336,12 +1480,51 @@ impl<'t> Walk<'t> {
         if !self.reach.instantiated.insert(class.clone()) {
             return;
         }
+        if self.recreates {
+            self.recreatable(&class);
+        }
         self.live(class.clone());
         let decl = self.classes[&class].0;
         self.initializers(decl, &class, false);
         // Library code calls these on any object, as string conversion calls `toString`.
         for (name, signature) in OBJECT_METHODS {
             self.work.push(Item::Method((class.clone(), name.to_string(), signature.to_string())));
+        }
+    }
+
+    /// Reachable code makes a new exception of an exception's class (`recreated_exception`).
+    fn recreates_exceptions(&mut self) {
+        if std::mem::replace(&mut self.recreates, true) {
+            return;
+        }
+        let classes: Vec<String> = self.reach.instantiated.iter().cloned().collect();
+        for class in classes {
+            self.recreatable(&class);
+        }
+    }
+
+    /// The constructor that makes a new exception of class `class` from another
+    /// (`recreated_exception`): its public one of a `Throwable`, else its public one without
+    /// parameters (and `initCause`, a standard method).
+    fn recreatable(&mut self, class: &str) {
+        let mut work = vec![class.to_string()];
+        let mut throwable = false;
+        while let Some(c) = work.pop() {
+            if c == "java.lang.Throwable" || crate::lower::standard_subclass(&c, "java.lang.Throwable") {
+                throwable = true;
+                break;
+            }
+            work.extend(self.supertypes.get(&c).cloned().unwrap_or_default());
+        }
+        if !throwable {
+            return;
+        }
+        for signature in ["(java.lang.Throwable)void", "()void"] {
+            let key = (class.to_string(), "<init>".to_string(), signature.to_string());
+            if self.methods.get(&key).is_some_and(|m| has_flag(m, "PUBLIC")) {
+                self.work.push(Item::Method(key));
+                return;
+            }
         }
     }
 
@@ -1504,6 +1687,9 @@ impl<'t> Walk<'t> {
                 }
                 self.reflective(value);
                 self.reflection_scan(value);
+                if recreated_exception(value).is_some() {
+                    self.recreates_exceptions();
+                }
                 if let Some(field) = field_offset_named(value) {
                     self.work.push(Item::Field(field));
                 }
@@ -1568,6 +1754,11 @@ impl<'t> Walk<'t> {
             "METHOD" if owner == "java.lang.System" && name == "getProperties" => {
                 let (class, method, signature) = TRANSLATED_PROPERTIES;
                 self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
+            // The translator's methods that replace some of the JDK's (`REDIRECTED_CALLS`).
+            "METHOD" if let Some((class, to)) = redirected_call(&owner, &name, text(symbol, "type")) => {
+                let signature = text(symbol, "type").to_string();
+                self.work.push(Item::Method((class.into(), to.into(), signature)));
             }
             // The translator's code for what `JavaLangAccess` does (see `lower.rs`).
             "METHOD"

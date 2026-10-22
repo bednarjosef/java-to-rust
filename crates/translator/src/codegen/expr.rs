@@ -413,7 +413,10 @@ impl<'a> Gen<'a> {
                     None => Update::Assign(value),
                     Some(op) => Update::Compound(*op, value),
                 };
-                self.update(target, e.ty, how, e.id, false)
+                // The write of `Unsafe.putReference` and its kind is a void call (`lower::handles`):
+                // its value has the field's type.
+                let ty = if e.ty == Type::Void { value.ty } else { e.ty };
+                self.update(target, ty, how, e.id, false)
             }
             ExprKind::IncDec {
                 target: target @ (Place::Field { .. } | Place::Static { .. }),
@@ -774,10 +777,10 @@ impl<'a> Gen<'a> {
             Builtin::String(op) => self.string_builtin(op, args, id),
             // A chained call gives `&Self`; as a value, the builder is another handle to it.
             Builtin::Builder(op) if op.chains() => {
-                let code = self.builder_call(op, args);
+                let code = self.builder_call(id, op, args);
                 Code::atom(format!("{}.clone()", code.text))
             }
-            Builtin::Builder(op) => self.builder_call(op, args),
+            Builtin::Builder(op) => self.builder_call(id, op, args),
             Builtin::Format => self.format_builtin(args),
             Builtin::ObjectsEquals => self.objects_equals(args),
             Builtin::NullChecked => self.null_checked(args),

@@ -102,6 +102,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     if class.type_index("java.lang.Throwable").is_none() {
         return Ok(());
     }
+    facts.initialized_statics = initialized_statics(class, facts);
     let mut errors = Vec::new();
     let mut reject = |pos: Pos, message: &str| errors.push(Error { pos, message: message.to_string() });
     let h = &class.hierarchy;
@@ -613,9 +614,27 @@ fn proved(cond: &Expr, when: bool) -> Vec<(&str, String)> {
     }
     let mut out: Vec<(&str, String)> =
         non_null_names(cond, when).into_iter().map(|v| (v, v.to_string())).collect();
+    let mut parts = Vec::new();
+    super::nullness::conjuncts(cond, &mut parts);
+    // A test of an assignment's value, `(k = e.getKey()) != null`, tests the variable too.
+    match &parts[..] {
+        [test] if !when => {
+            if let Some((v, false)) = assigned_null_test(test) {
+                out.push((v, v.to_string()));
+            }
+        }
+        _ if when => {
+            for (k, part) in parts.iter().enumerate() {
+                if let Some((v, true)) = assigned_null_test(part)
+                    && !parts[k + 1..].iter().any(|later| assigns(later, v))
+                {
+                    out.push((v, v.to_string()));
+                }
+            }
+        }
+        _ => {}
+    }
     if when {
-        let mut parts = Vec::new();
-        super::nullness::conjuncts(cond, &mut parts);
         for (k, part) in parts.iter().enumerate() {
             if let ExprKind::InstanceOf { value, ty, .. } = &part.kind
                 && let ExprKind::Var(v) = &value.kind
@@ -631,19 +650,192 @@ fn proved(cond: &Expr, when: bool) -> Vec<(&str, String)> {
     out
 }
 
+/// `(v = e) == null` or `(v = e) != null`: the variable and whether the test is true when it is
+/// not null.
+fn assigned_null_test(e: &Expr) -> Option<(&str, bool)> {
+    let ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) = &e.kind else { return None };
+    let assigned = match (&l.kind, &r.kind) {
+        (ExprKind::Assign { op: None, target: Place::Var(v), .. }, ExprKind::Null)
+        | (ExprKind::Null, ExprKind::Assign { op: None, target: Place::Var(v), .. }) => v,
+        _ => return None,
+    };
+    Some((assigned, *op == BinOp::Ne))
+}
+
+/// The statics that are never null where code reads them (`Facts::initialized_statics`): each
+/// one that the leading assignments of its class's `<clinit>` set to a value that is not null and
+/// that nothing else assigns. Code of another thread that reads it waits until the class is
+/// initialized; code of the initializing thread runs after that assignment, or else during the
+/// values of it and the assignments before it, which `reads_static` shows never read it.
+fn initialized_statics(class: &Class, facts: &Facts) -> HashSet<(usize, String)> {
+    let mut leading = Vec::new();
+    for (m, method) in class.methods.iter().enumerate() {
+        if method.name != "<clinit>" {
+            continue;
+        }
+        let mut before: Vec<&Expr> = Vec::new();
+        let mut first = Vec::new();
+        // A `<clinit>` that keeps the state of its class's initialization (`lower::clinit_errors`)
+        // runs its own statements in a `try` after it: a use of the class after a failure throws
+        // before it reads the class's statics.
+        let body = match &method.body[..] {
+            [Stmt::If { .. }, Stmt::If { .. }, Stmt::Expr(_), Stmt::Try { body, .. }]
+                if crate::lower::rewritten_clinit(&class.types[method.class]) =>
+            {
+                body
+            }
+            body => body,
+        };
+        leading_statements(body, &mut first);
+        for s in first {
+            let (c, name, value) = match s {
+                Stmt::Expr(Expr {
+                    kind: ExprKind::Assign { op: None, target: Place::Static { class: c, name }, value },
+                    ..
+                }) => (*c, name, value),
+                // Other expressions and locals' values, which run before what follows.
+                Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::If { cond: e, .. } => {
+                    before.push(e);
+                    continue;
+                }
+                _ => continue,
+            };
+            before.push(value);
+            if c == method.class && !maybe_null(facts, m, value) && !reads_static(class, &before, c, name) {
+                leading.push((c, name.clone()));
+            }
+        }
+    }
+    let mut writes: std::collections::HashMap<(usize, String), usize> = std::collections::HashMap::new();
+    for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::Assign { target: Place::Static { class: c, name }, .. }
+                        | ExprKind::IncDec { target: Place::Static { class: c, name }, .. } = &x.kind
+                        {
+                            *writes.entry((*c, name.clone())).or_default() += 1;
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    leading.into_iter().filter(|key| writes.get(key) == Some(&1)).collect()
+}
+
+/// The statements that start `stmts` and, unless one throws, all run one after the other, up to
+/// the first other statement: expressions, declarations of locals, `if (..) throw ..;`, and the
+/// statements of blocks and of `try` blocks whose `catch`es all throw. Whether all of `stmts` are
+/// such. A static initializer that throws leaves its class not initialized, and its statics unread.
+fn leading_statements<'s>(stmts: &'s [Stmt], out: &mut Vec<&'s Stmt>) -> bool {
+    fn throws(s: &Stmt) -> bool {
+        match s {
+            Stmt::Throw(_) => true,
+            Stmt::Block(stmts) => stmts.last().is_some_and(throws),
+            _ => false,
+        }
+    }
+    for s in stmts {
+        match s {
+            Stmt::Block(inner) | Stmt::Try { body: inner, finally: None, .. } if !matches!(s, Stmt::Try { catches, .. } if !catches.iter().all(|c| c.body.last().is_some_and(throws))) => {
+                if !leading_statements(inner, out) {
+                    return false;
+                }
+            }
+            Stmt::Expr(_) | Stmt::Local { .. } => out.push(s),
+            Stmt::If { then, otherwise: None, .. } if throws(then) => out.push(s),
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Whether evaluating `roots` may read the static `name` of class `c`: whether it, or a method
+/// or static initializer that it may run, transitively, reads it. A walk too long to follow says
+/// it may.
+fn reads_static(class: &Class, roots: &[&Expr], c: usize, name: &str) -> bool {
+    const LIMIT: usize = 2000;
+    let clinits: std::collections::HashMap<usize, usize> = (class.methods.iter().enumerate())
+        .filter(|(_, m)| m.name == "<clinit>")
+        .map(|(i, m)| (m.class, i))
+        .collect();
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut work: Vec<usize> = Vec::new();
+    let mut reads = false;
+    let mut look = |e: &Expr, work: &mut Vec<usize>| {
+        visit_expr(e, &mut |x| {
+            if let ExprKind::Static { class: d, name: n } = &x.kind
+                && *d == c
+                && n == name
+            {
+                reads = true;
+            }
+            work.extend(class.callees(x));
+            // The first use of another class runs its static initializer, and its superclasses'.
+            let mut used = match &x.kind {
+                ExprKind::Static { class: d, .. } | ExprKind::New { class: d, .. } => Some(*d),
+                ExprKind::Call { resolved: Some(r), .. } => Some(class.methods[*r].class),
+                _ => None,
+            };
+            while let Some(d) = used {
+                work.extend(clinits.get(&d));
+                used = class.types[d].extends;
+            }
+        })
+    };
+    for root in roots {
+        look(root, &mut work);
+    }
+    while let Some(m) = work.pop() {
+        if !seen.insert(m) {
+            continue;
+        }
+        if seen.len() > LIMIT {
+            return true;
+        }
+        for s in &class.methods[m].body {
+            let mut found = Vec::new();
+            visit_stmt(s, &mut |e| look(e, &mut found), &mut |_| {});
+            work.extend(found);
+        }
+    }
+    reads
+}
+
 /// Whether `e` is a variable that `safe` knows not null, or a cast of one.
 fn is_tested(e: &Expr, safe: &[String]) -> bool {
     match &e.kind {
         ExprKind::Var(v) => safe.contains(v),
         // A cast of a reference keeps its null.
         ExprKind::Cast(to, value) if to.is_reference() => is_tested(value, safe),
-        // So does an assignment to a field, whose value is the assigned one (`(current = e).next`).
-        ExprKind::Assign { op: None, target: Place::Field { .. } | Place::Static { .. }, value }
-            if !matches!(e.ty, Type::Boxed(_)) =>
-        {
-            is_tested(value, safe)
-        }
+        // So does an assignment, whose value is the assigned one (`(current = e).next`).
+        ExprKind::Assign {
+            op: None,
+            target: Place::Field { .. } | Place::Static { .. } | Place::Var(_),
+            value,
+        } if !matches!(e.ty, Type::Boxed(_)) => is_tested(value, safe),
         _ => false,
+    }
+}
+
+/// Whether `value` is not null: the nullness analysis knows it, or `safe` does.
+fn non_null(facts: &Facts, m: usize, value: &Expr, safe: &[String]) -> bool {
+    !maybe_null(facts, m, value) || is_tested(value, safe)
+}
+
+/// Whether the statement `s`, when it completes, has last set `v` to a value that is not null:
+/// it ends with `v = value;`, or it never completes.
+fn sets_non_null(facts: &Facts, m: usize, s: &Stmt, v: &str, safe: &[String]) -> bool {
+    match s {
+        Stmt::Block(stmts) => stmts.last().is_some_and(|last| sets_non_null(facts, m, last, v, safe)),
+        Stmt::Expr(Expr { kind: ExprKind::Assign { op: None, target: Place::Var(t), value }, .. }) => {
+            t == v && non_null(facts, m, value, safe)
+        }
+        s => leaves(s),
     }
 }
 
@@ -680,6 +872,20 @@ fn block_points(
             // A local set to a value known not null, such as `Point p = (Point) o;`.
             Stmt::Local { name, init: Some(init), .. } if is_tested(init, &safe) && !assigned(name) => {
                 safe.push(name.clone());
+            }
+            // `v = value;`, a value that is not null.
+            Stmt::Expr(Expr {
+                kind: ExprKind::Assign { op: None, target: Place::Var(v), value }, ..
+            }) if non_null(facts, m, value, &safe) && !assigned(v) => {
+                safe.push(v.clone());
+            }
+            // `if (v == null) v = value;`, which leaves `v` not null either way.
+            Stmt::If { cond, then, otherwise: None } => {
+                for (v, fact) in proved(cond, false) {
+                    if !assigned(v) && sets_non_null(facts, m, then, v, &safe) {
+                        safe.push(fact);
+                    }
+                }
             }
             _ => {}
         }
@@ -758,11 +964,10 @@ fn stmt_points(
                 ExprKind::Cast(_, inner) => inner,
                 _ => e,
             };
-            // A value that may be null throws a `NullPointerException` instead, by `throw` itself,
-            // unless an enclosing condition tested it.
-            if matches!(thrown.kind, ExprKind::Null)
-                || (maybe_null(facts, m, thrown) && !is_tested(thrown, safe))
-            {
+            // A value that may be null throws a `NullPointerException` instead when it is null, by
+            // `throw` itself, unless an enclosing condition tested it; `null` itself, only that.
+            let null = matches!(thrown.kind, ExprKind::Null);
+            if null || (maybe_null(facts, m, thrown) && !is_tested(thrown, safe)) {
                 let raise =
                     Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: thrown.id };
                 out.push(Point {
@@ -772,7 +977,8 @@ fn stmt_points(
                     frames: frames.clone(),
                     known: Vec::new(),
                 });
-            } else if let Some(t) = class.class_index(thrown.ty) {
+            }
+            if !null && let Some(t) = class.class_index(thrown.ty) {
                 out.push(Point {
                     raise: Raise::Throw(t),
                     pos: e.pos,

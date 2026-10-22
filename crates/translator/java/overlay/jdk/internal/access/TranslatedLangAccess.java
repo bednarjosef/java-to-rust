@@ -1,9 +1,13 @@
 package jdk.internal.access;
 
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.MalformedInputException;
 import java.nio.charset.StandardCharsets;
+import java.nio.charset.UnmappableCharacterException;
 
 /**
- * The methods of {@code JavaLangAccess} that the JDK's {@code java.io} calls on
+ * The methods of {@code JavaLangAccess} that the JDK's {@code java.io} and {@code java.nio.file} call on
  * {@code SharedSecrets.getJavaLangAccess()}, which the JVM sets as it starts and a translated
  * program never has: each call of one of them is a call of the method of the same name here (see
  * {@code lower.rs}), which does what {@code String}'s own code does for it.
@@ -44,5 +48,47 @@ final class TranslatedLangAccess {
         for (int i = 0; i < len; i++) {
             dst[dstOff + i] = (char) (src[srcOff + i] & 0xff);
         }
+    }
+
+    /**
+     * Starts {@code thread} in {@code container}, as {@code ForkJoinPool}'s threads are started.
+     * Containers only list their threads for monitoring tools, and track only virtual threads,
+     * which a translated program does not have: the thread is started on its own. A null thread
+     * fails as the JDK's {@code thread.start(container)} does.
+     */
+    static void start(Thread thread, jdk.internal.vm.ThreadContainer container) {
+        if (thread == null) {
+            throw new NullPointerException(
+                    "Cannot invoke \"java.lang.Thread.start(jdk.internal.vm.ThreadContainer)\" because \"thread\" is null");
+        }
+        thread.start();
+    }
+
+    /**
+     * The string of the bytes in {@code cs}, or a {@code MalformedInputException} where they are
+     * not a string in it. The runtime's decoding replaces what is malformed, and bytes that are a
+     * string in a standard charset are the bytes of that string again, so a decoding whose bytes
+     * differ replaced something. The exception's length is 1, which is Java's for the usual
+     * malformed byte of UTF-8 and ASCII, but may differ from Java's for a longer sequence.
+     */
+    static String uncheckedNewStringOrThrow(byte[] bytes, Charset cs) throws CharacterCodingException {
+        String s = new String(bytes, cs);
+        if (!java.util.Arrays.equals(s.getBytes(cs), bytes)) {
+            throw new MalformedInputException(1);
+        }
+        return s;
+    }
+
+    /**
+     * The bytes of the string in {@code cs}, or an {@code UnmappableCharacterException} where a
+     * character has none: the runtime's encoding replaces such a character, so the bytes are not
+     * the string again.
+     */
+    static byte[] uncheckedGetBytesOrThrow(String s, Charset cs) throws CharacterCodingException {
+        byte[] bytes = s.getBytes(cs);
+        if (!new String(bytes, cs).equals(s)) {
+            throw new UnmappableCharacterException(1);
+        }
+        return bytes;
     }
 }

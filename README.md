@@ -847,9 +847,35 @@ and `end` does nothing, as without virtual threads. `jdk.internal.util.ByteArray
 (`java/overlay/jdk/internal/util/ByteArray.java`), which shifts bytes where the JDK's uses
 `VarHandle` views, and the `JavaLangAccess` methods that the data streams call on
 `SharedSecrets` (`countPositives`, `countNonZeroAscii`, `uncheckedNewStringWithLatin1Bytes`,
-`inflateBytesToChars`) are its static methods of the same name
-(`java/overlay/jdk/internal/access/TranslatedLangAccess.java`). `java.nio.file` is not translated
-yet.
+`inflateBytesToChars`, and `uncheckedNewStringOrThrow` and `uncheckedGetBytesOrThrow` for
+`java.nio.file`) are its static methods of the same name
+(`java/overlay/jdk/internal/access/TranslatedLangAccess.java`).
+
+`java.nio.file` (`Files`, `Path`, `Paths`, directory streams, attributes) is the JDK's code over
+the translator's `sun.nio.fs.UnixNativeDispatcher` (`java/overlay/sun/nio/fs`), whose natives
+take paths as byte arrays, where the JDK's take addresses of native memory, and are `std::fs` and
+libc (`unix.rs`): `stat`, `lstat`, `fstat` (the attributes come back as an array of numbers that
+the translator's `UnixFileAttributes` copies), `open`, `close`, `mkdir`, `rmdir`, `unlink`,
+`rename`, `link`, `symlink`, `readlink`, `realpath`, `getcwd`, `access`, `chmod`, `chown`,
+`utimensat`, `opendir`, `readdir`, `closedir`, `getpwuid`, `getgrgid` and `strerror`, with the
+system's errors as the JDK's `UnixException`s, and so its exceptions and messages. The default
+file system is the platform's directly (`FileSystems.getDefault()` does not look for another
+provider). A file's bytes are read and written by the translator's streams on the runtime's
+descriptor table (`UnixFileInputStream`, `UnixFileOutputStream`), which `Files.newInputStream`,
+`newOutputStream`, `readAllBytes`, `readString`, `write`, `writeString`, `readAllLines`,
+`newBufferedReader` and `newBufferedWriter` use; `Files.newByteChannel` and
+`FileChannel.open` give the translator's `UnixFileChannel`, which copies between `ByteBuffer`s
+and arrays. What differs from Java: calls relative to an open directory (`openat`, `fstatat`,
+`unlinkat`, `SecureDirectoryStream`) fail with `ENOSYS`, as on a system without them; there are
+no extended attributes, so no DOS or user-defined attribute views (`getFileAttributeView` gives
+null); a reader or writer of `Files` replaces malformed or unmappable characters where the JDK's
+throws; the names of temporary files come from a `java.util.Random`, not a `SecureRandom`
+(`TempFileHelper.java`); the translator's `InvalidPathException` and `DirectoryIteratorException`
+do not check their arguments, and `Util.toString` gives null for null, where the JDK's throw
+(only the JDK's own callers reach them, which never pass null); memory-mapped files, file locks
+and asynchronous file channels throw `UnsupportedOperationException`; and `statvfs` (a file
+store's space), the mount table, `getpwnam` and `getgrnam`, and the extended-attribute natives
+are rejected.
 
 A native method of a translated JDK class is never lowered itself (javac marks it `native`); a
 call of one becomes the runtime function that `ast/natives.rs` names for its class, name and

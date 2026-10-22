@@ -608,6 +608,13 @@ lowered. `java.lang.Thread`:
   accessors, and a new thread copies nothing from its parent: `InheritableThreadLocal` is
   rejected. `ForkJoinWorkerThread`'s constructor `(ThreadGroup, Runnable, String, long,
   boolean)` is `(ThreadGroup, Runnable, String)`.
+- Thread containers: `SharedThreadContainer.start` reaches `JavaLangAccess.start(thread,
+  container)`, which is the translator's `TranslatedLangAccess.start`, a plain `thread.start()`.
+  A container only lists its threads for monitoring tools and tracks virtual threads.
+- `ForkJoinTask.getException`, for an exception that a task threw in another thread, makes a new
+  one of its class by reflection, with the original as its cause. The translation tests the
+  exception's class against each exception class of the program that reflection could use and
+  calls the constructor that reflection would choose (`lower/recreate.rs`).
 
 Rejected, each with a message naming it: virtual threads (`Thread.ofVirtual`,
 `startVirtualThread`, `Executors.newVirtualThreadPerTaskExecutor`), `Thread.Builder`,

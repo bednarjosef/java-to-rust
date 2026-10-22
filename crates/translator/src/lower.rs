@@ -48,12 +48,14 @@ mod initializers;
 mod inner;
 mod java_arrays;
 mod java_objects;
+mod libraries;
 mod local_types;
 mod natives;
 mod patterns;
 mod primitives;
 mod program;
 mod prologues;
+mod recreate;
 mod reflection;
 mod switch;
 mod sync;
@@ -508,7 +510,8 @@ impl<'t> Lowering<'t> {
             {
                 Ok(Type::class(ENUM))
             }
-            "java.nio.charset.Charset" => Ok(Type::Charset),
+            // The JDK's classes of the standard charsets too (`charsets::STANDARD_CHARSET_CLASSES`).
+            _ if charsets::is_charset_type(name) => Ok(Type::Charset),
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
@@ -835,7 +838,7 @@ impl<'t> Lowering<'t> {
                     } else {
                         (left, right)
                     };
-                    ExprKind::Binary(op, Box::new(left), Box::new(right))
+                    self.binary_before_assignment(node, op, left, right)
                 }
             }
         };
@@ -853,6 +856,32 @@ impl<'t> Lowering<'t> {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
         Ok(Expr { kind, pos: node.pos(), ty, id })
+    }
+
+    /// `left op right`, where `right` may assign the variable that `left` reads, as in
+    /// `a == (a = next(a))`: Java reads `left` first, so its value is kept in a local before
+    /// `right` runs.
+    fn binary_before_assignment(&self, node: Node<'t>, op: BinOp, left: Expr, right: Expr) -> ExprKind {
+        let read = match &left.kind {
+            ExprKind::Cast(_, inner) => inner,
+            _ => &left,
+        };
+        let ExprKind::Var(name) = &read.kind else {
+            return ExprKind::Binary(op, Box::new(left), Box::new(right));
+        };
+        if !assigns(&right, name) {
+            return ExprKind::Binary(op, Box::new(left), Box::new(right));
+        }
+        let (pos, ty) = (node.pos(), left.ty);
+        let copy = self.fresh_name("left");
+        let var = self.synth(ExprKind::Var(copy.clone()), pos, ty);
+        let binary = ExprKind::Binary(op, Box::new(var), Box::new(right));
+        let result = self.synth(binary, pos, self.ty(node, node.java_type()).unwrap_or(Type::Boolean));
+        let block = vec![Stmt::Local { ty, name: copy, init: Some(left), pos }, Stmt::Yield(result)];
+        ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        }
     }
 
     fn number<T: std::str::FromStr>(&self, node: Node) -> Result<T, Error> {
@@ -965,10 +994,30 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.system_property_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
+        // The translator's method in place of the JDK's (`program::REDIRECTED_CALLS`).
+        if symbol.is_static
+            && let Some((class, to)) = crate::program::redirected_call(symbol.owner, symbol.name, symbol.ty)
+        {
+            let resolved = self
+                .methods
+                .iter()
+                .position(|m| self.types[m.owner].javac == class && m.name == to && m.sig == symbol.ty);
+            if resolved.is_none() {
+                return unsupported(
+                    node,
+                    &format!("`{}.{}` outside a whole program", symbol.owner, symbol.name),
+                );
+            }
+            let args = self.convert_generic_args(node, resolved, args)?;
+            return Ok(ExprKind::Call { name: to.to_string(), args, resolved });
+        }
         if let Some(kind) = self.descriptor_call(node, &symbol, receiver, &mut args)? {
             return Ok(kind);
         }
         if let Some(kind) = self.file_system_call(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.library_call(node, &symbol, &args)? {
             return Ok(kind);
         }
         if let Some(kind) = self.blocker_call(node, &symbol, &mut args)? {
@@ -1065,6 +1114,7 @@ impl<'t> Lowering<'t> {
                 if resolved.is_none() {
                     return unsupported(node, &format!("`JavaLangAccess.{name}` outside a whole program"));
                 }
+                let args = self.convert_args(resolved, args)?;
                 return Ok(ExprKind::Call { name: name.to_string(), args, resolved });
             }
             // There are no virtual threads: a thread's carrier is the thread itself
@@ -1085,6 +1135,9 @@ impl<'t> Lowering<'t> {
                 _,
             ) => {
                 return self.builder_call(node, &symbol, receiver, args);
+            }
+            ("java.lang.Byte" | "java.lang.Short", "compareUnsigned") if args.len() == 2 => {
+                return Ok(self.small_compare_unsigned(node, &symbol, args));
             }
             (owner, name) if unsigned::is_unsigned_method(owner, name) => {
                 self.unsigned_call(node, &symbol, &args)?
