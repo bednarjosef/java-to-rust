@@ -170,8 +170,9 @@ Design: [object-model.md](object-model.md).
 ## Enums and records
 
 - An **enum** is a `Copy` Rust `enum`. Fields with constant values per constant are accessors
-  that `match` on `self`; an enum whose constructor does more keeps its fields in tables indexed
-  by ordinal, filled by its static initialization. Constant bodies override methods as a
+  that `match` on `self`; an enum whose constructor does more (calls, `this(..)`, null or computed
+  arguments) keeps its fields in tables indexed by ordinal, filled by running its constructors in
+  its static initialization, as Java does. Constant bodies override methods as a
   `match self`. `valueOf` of an unknown name throws `IllegalArgumentException` with Java's
   message. An enum value that may be null is an `Option` of the enum. Using a constant does not
   initialize the enum by itself, unlike Java; reading its fields or calling its methods does.

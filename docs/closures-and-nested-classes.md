@@ -334,9 +334,11 @@ those methods translate and capture the constant as `this`
 
 A body may declare fields of type `int`, `long`, `double`, `float`, `char`, `boolean` or
 `String`: each becomes a field of the enum whose value for a constant is that body's
-initializer, or the zero of its type for the others. Enum fields are recomputed on each read,
-so the initializer must be a constant. Rejected in a body: blocks, member classes, static
-fields, fields of other types, initializers that are not constants, methods that override a
+initializer, or the zero of its type for the others. Where the enum's fields are recomputed on
+each read the initializer must be a constant; where they are tables (an enum whose constructor
+runs code, `lower/enum_tables.rs`) it runs right after the constant's constructor, with the
+constant as `this`. Rejected in a body: blocks, member classes, static fields, fields of other
+types, initializers that are not constants in an enum without tables, methods that override a
 method of `Object` that the enum does not declare, and methods that override nothing of one
 name and signature in two bodies.
 

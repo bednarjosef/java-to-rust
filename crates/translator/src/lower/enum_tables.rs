@@ -6,8 +6,10 @@
 //! constructor becomes the static method `initShapeConstant(constantOrdinal, ..)` (for an enum `Shape`) that fills the
 //! constant's row; the enum's `<clinit>` creates the tables and calls it for each constant, in
 //! order, before its other static initializers; and every read or write of `e.f` becomes
-//! `fOfConstants[e.ordinal()]`. An enum that fits the pure form keeps it, so its fields stay
-//! `match`es on the constant.
+//! `fOfConstants[e.ordinal()]`. The fields that a constant's body declares are tables too, which
+//! the body's initializers fill right after the constant's constructor, as Java's constructor of
+//! the body's class runs them after the enum's. An enum that fits the pure form keeps it, so its
+//! fields stay `match`es on the constant.
 
 use super::*;
 
@@ -33,6 +35,7 @@ impl<'t> Lowering<'t> {
         index: usize,
         types: &mut [TypeDecl],
         methods: &mut Vec<Method>,
+        bodies: Vec<Vec<Field>>,
     ) -> Result<(), Error> {
         self.current.set(index);
         self.in_ctor.set(false);
@@ -77,8 +80,9 @@ impl<'t> Lowering<'t> {
             creates.push(Stmt::Expr(self.synth(assign, field.pos, array)));
             types[index].statics.push(Field { name, ty: array, init: None, constant: false, pos: field.pos });
         }
-        let names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
-        let has_fields: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
+        // Each field's type, a field of a constant's body's too.
+        let has_fields: std::collections::HashMap<String, Type> =
+            fields.iter().map(|f| (f.name.clone(), f.ty)).collect();
         // The field initializers, which every constructor that does not call `this(..)` runs
         // first: a static method of their own.
         let initializers: Vec<(String, Expr)> =
@@ -161,19 +165,43 @@ impl<'t> Lowering<'t> {
                 });
             }
         }
-        // The constants, built in order before the rest of the static initialization.
+        // The constants, built in order before the rest of the static initialization, each
+        // followed by the initializers of its body's fields, where `this` is the constant.
+        let mut bodies = bodies.into_iter();
         for (ordinal, member) in
             self.types[index].node.list("members").filter(|m| enums::is_enum_constant(*m)).enumerate()
         {
+            let body_fields = bodies.next().unwrap_or_default();
             let init = member.child("initializer")?;
             let args: Vec<Expr> = init.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
-            let Some(ctor) = init.symbol().and_then(|s| self.enum_constructor(index, &s)) else {
+            let Some(symbol) = init.symbol() else { return unsupported(member, "this enum constant") };
+            let Some(ctor) = self.enum_constructor(index, &symbol) else {
                 return unsupported(member, "this enum constant");
             };
+            // A varargs constructor's trailing arguments are packed into their array.
+            let args = self.packed_args(init, &symbol, args)?;
             let mut args = self.convert_args(Some(ctor), args)?;
             args.insert(0, self.synth(ExprKind::Int(ordinal as i32), member.pos(), Type::Int));
             let call = ExprKind::Call { name: builder.clone(), args, resolved: Some(ctor) };
             creates.push(Stmt::Expr(self.synth(call, member.pos(), Type::Void)));
+            for field in body_fields {
+                let Some(value) = field.init else { continue };
+                let (pos, ty) = (field.pos, field.ty);
+                let this = self.synth(ExprKind::EnumConstant { class: index, ordinal }, pos, enum_ty);
+                let target = Place::Field { object: Box::new(this), name: field.name };
+                let mut init = Stmt::Expr(self.synth(
+                    ExprKind::Assign { op: None, target, value: Box::new(value) },
+                    pos,
+                    ty,
+                ));
+                rewrite_stmt(&mut init, &mut |e| {
+                    if matches!(e.kind, ExprKind::This) {
+                        e.kind = ExprKind::EnumConstant { class: index, ordinal };
+                    }
+                });
+                rewrite_stmt(&mut init, &mut |e| self.table_access(e, index, &has_fields));
+                creates.push(init);
+            }
         }
         // A `<clinit>` that keeps the state of its class's initialization runs its statements in
         // a `try` (`lower/clinit_errors.rs`), which the constants are built in too, so that their
@@ -216,9 +244,10 @@ impl<'t> Lowering<'t> {
     }
 
     /// `e.f` and `e.f = v` of a field `f` of enum `index` as `fOfConstants[e.ordinal()]`.
-    fn table_access(&self, e: &mut Expr, index: usize, fields: &std::collections::HashSet<&str>) {
+    fn table_access(&self, e: &mut Expr, index: usize, fields: &std::collections::HashMap<String, Type>) {
         let on_enum = |object: &Expr, name: &str| {
-            matches!(object.ty, Type::Enum(n) if self.enum_index(n) == Some(index)) && fields.contains(name)
+            matches!(object.ty, Type::Enum(n) if self.enum_index(n) == Some(index))
+                && fields.contains_key(name)
         };
         let row = |object: Expr, name: &str, ty: Type| {
             let pos = object.pos;
@@ -238,7 +267,7 @@ impl<'t> Lowering<'t> {
                 if let Place::Field { object, name } = target
                     && on_enum(object, name)
                 {
-                    let ty = self.enum_field_type(index, name);
+                    let ty = fields[name.as_str()];
                     let object =
                         std::mem::replace(object.as_mut(), self.synth(ExprKind::Null, pos, Type::Null));
                     let (array, ordinal) = row(object, &name.clone(), ty);
@@ -247,16 +276,6 @@ impl<'t> Lowering<'t> {
             }
             _ => {}
         }
-    }
-
-    /// The type of field `name` of enum `index`, from its declaration.
-    fn enum_field_type(&self, index: usize, name: &str) -> Type {
-        self.types[index]
-            .node
-            .list("members")
-            .find(|m| m.kind() == "VARIABLE" && m.str("name") == name)
-            .and_then(|m| self.ty(m, m.symbol().map_or("", |s| s.ty)).ok())
-            .unwrap_or(Type::Int)
     }
 
     /// In a constructor become a constant builder: `this`'s ordinal as the `constantOrdinal`
