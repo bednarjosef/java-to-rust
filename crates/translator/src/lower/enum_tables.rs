@@ -171,28 +171,42 @@ impl<'t> Lowering<'t> {
             let call = ExprKind::Call { name: builder.clone(), args, resolved: Some(ctor) };
             creates.push(Stmt::Expr(self.synth(call, member.pos(), Type::Void)));
         }
+        // A `<clinit>` that keeps the state of its class's initialization runs its statements in
+        // a `try` (`lower/clinit_errors.rs`), which the constants are built in too, so that their
+        // failure is the class's.
         match methods.iter().position(|m| m.class == index && m.name == "<clinit>") {
+            Some(clinit) if rewritten_clinit(&types[index]) => {
+                let Some(Stmt::Try { body, .. }) = methods[clinit].body.last_mut() else {
+                    return error(pos, "an enum's rewritten static initializer without its `try`");
+                };
+                creates.append(body);
+                *body = creates;
+            }
             Some(clinit) => {
                 let rest = std::mem::take(&mut methods[clinit].body);
                 creates.extend(rest);
                 methods[clinit].body = creates;
             }
-            None => methods.push(Method {
-                name: "<clinit>".to_string(),
-                params: Vec::new(),
-                ret: Type::Void,
-                body: creates,
-                is_main: false,
-                is_static: true,
-                is_ctor: false,
-                class: index,
-                pos,
-                is_abstract: false,
-                is_synchronized: false,
-                overrides: Vec::new(),
-                type_params: Vec::new(),
-                jdk_code: false,
-            }),
+            None => {
+                let mut clinit = Method {
+                    name: "<clinit>".to_string(),
+                    params: Vec::new(),
+                    ret: Type::Void,
+                    body: creates,
+                    is_main: false,
+                    is_static: true,
+                    is_ctor: false,
+                    class: index,
+                    pos,
+                    is_abstract: false,
+                    is_synchronized: false,
+                    overrides: Vec::new(),
+                    type_params: Vec::new(),
+                    jdk_code: false,
+                };
+                self.guard_clinit(index, &mut clinit, &mut types[index], methods.as_slice());
+                methods.push(clinit);
+            }
         }
         Ok(())
     }
