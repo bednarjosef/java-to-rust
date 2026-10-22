@@ -117,6 +117,7 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Builder(BuilderOp::Append) if args.len() == 4 => &["java.lang.IndexOutOfBoundsException"],
         Builtin::Builder(
             BuilderOp::New
+            | BuilderOp::Append
             | BuilderOp::Reverse
             | BuilderOp::IndexOf
             | BuilderOp::LastIndexOf
@@ -612,7 +613,10 @@ pub(super) fn runtime_failures(
                                     | Native::SecureSeed
                             )
                     ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })))
-                        || (matches!(builtin, Builtin::Builder(BuilderOp::Append)) && args.len() == 4);
+                        // A range of a text, not of a `char[]`, has the checked form.
+                        || (matches!(builtin, Builtin::Builder(BuilderOp::Append))
+                            && args.len() == 4
+                            && !matches!(args[1].ty, Type::Array(_)));
                     for &failure in failures {
                         out.push((failure, "this call of the library", checked, x.id));
                     }
