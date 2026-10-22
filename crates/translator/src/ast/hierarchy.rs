@@ -441,6 +441,19 @@ impl Class {
             | ExprKind::New { ctor: Some(m), .. }
             | ExprKind::ThisCall { resolved: Some(m), .. }
             | ExprKind::SuperInit { resolved: Some(m), .. } => vec![*m],
+            // A builder's `append(s, start, end)` asks `s` for its `length` and its `charAt`
+            // of each index (`codegen::char_sequence`).
+            ExprKind::Builtin(Builtin::Builder(BuilderOp::Append), args)
+                if args.len() == 4 && matches!(args[1].ty, Type::Class(c, _) if c == CHAR_SEQUENCE) =>
+            {
+                let Some(t) = self.type_index(CHAR_SEQUENCE) else { return Vec::new() };
+                let read = |m: &Method| {
+                    !m.is_static && matches!((m.name.as_str(), m.params.len()), ("length", 0) | ("charAt", 1))
+                };
+                let methods = self.hierarchy.methods_of(t).iter().copied();
+                let methods = methods.filter(|&m| self.methods[m].class == t && read(&self.methods[m]));
+                methods.flat_map(|m| self.hierarchy.targets(m, t)).collect()
+            }
             _ => Vec::new(),
         }
     }

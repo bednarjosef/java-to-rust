@@ -246,7 +246,8 @@ Threads are real platform threads. `Thread` (subclassed or given a `Runnable`), 
 `sleep`, names, ids, priorities, daemon threads, interrupts, uncaught-exception handlers and
 thread groups behave as Java's; `java.lang.Thread` is `crates/translator/java/Threads.java` over
 the runtime's natives (`thread.rs`). In a program that can start a thread, the objects threads
-may share are `Arc<java::Locked<C>>` (`Arc<C>` when immutable), arrays are `java::SharedArray`,
+may share are `Arc<java::Locked<C>>` (`Arc<C>` when immutable), arrays that threads may reach are
+`java::SharedArray`,
 and statics are process-wide; a program without threads translates exactly as before.
 `synchronized`, `wait`, `notify`, `notifyAll` and `holdsLock` are Java's, kept only where the
 program can tell. In a whole program `java.util.concurrent` (atomics, `ConcurrentHashMap`,

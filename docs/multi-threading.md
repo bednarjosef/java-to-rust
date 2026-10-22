@@ -161,10 +161,15 @@ gap (section 7). In a single-threaded program `volatile` is nothing.
 
 ### 2.2 Arrays and builders
 
-In a threaded program every array that is not a plain `Vec` (see the array analysis) is a
-`java::SharedArray<T>`, an `Arc<java::Locked<Vec<T>>>`; the runtime's array functions take either
-form through the `Elements<T>` trait (`crates/runtime/src/array.rs`). This is decided for the
-whole program, not per array (section 7).
+In a threaded program an array that is not a plain `Vec` (see the array analysis) is a
+`java::SharedArray<T>`, an `Arc<java::Locked<Vec<T>>>`, when two threads may reach arrays of its
+family, and a `java::Array<T>` otherwise. The family is the type of the innermost elements, so
+`int[]` and `int[][]` are decided together and a `SharedArray` never holds an `Array`. A family is
+shared by the same rule as builders below: a static holds such an array, or a field or capture of
+a shared class does, or such an array becomes a shared `Object` (`analysis/threads.rs`,
+`shared_arrays`). In a whole program the JDK's statics hold arrays of the common families (`int`,
+`char`, `byte`, `String`, `Object`), so those stay shared there. The runtime's array functions take
+either form through the `Elements<T>` trait (`crates/runtime/src/array.rs`).
 
 A `StringBuilder` is a `java::SharedStringBuilder` (its units in an `Arc<java::Locked<..>>`,
 whose monitor is that lock) when two threads may reach builders: a static holds one, or a field
@@ -463,10 +468,10 @@ orders it at least as the plain, opaque, acquire, release and volatile modes ask
 
 ## 7. Not done, and plans
 
-- **Per-site sharing.** Sharing is decided per class, arrays for the whole program, and
-  builders for the whole program. With the points-to analysis of thorough mode, sharing would be
-  decided per allocation site; a class with both shared and thread-local sites would get two
-  structs, and arrays no other thread reaches would stay `Rc`s. The escape analysis should then
+- **Per-site sharing.** Sharing is decided per class, arrays per element family and
+  builders by type. With the points-to analysis of thorough mode, sharing would be decided per
+  allocation site; a class with both shared and thread-local sites would get two structs, and an
+  array of a shared family that no other thread reaches would stay a `java::Array`. The escape analysis should then
   be a client of a "heap edges" interface so that only the edge provider changes.
 - **Main-only statics.** A static that only main-thread code touches could stay thread-local;
   this needs the set of methods each thread runs.

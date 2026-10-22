@@ -121,6 +121,46 @@ pub(super) fn shares_builders(class: &Class, shared: &HashSet<usize>) -> bool {
     })
 }
 
+/// The arrays that two threads may reach, by `array_family`: a static or a field or capture of a
+/// shared class holds one (in another array or as a type argument too), or one becomes a value
+/// of `Object` that is shared (the runtime class of its type is shared). The arrays of those
+/// families are `java::SharedArray`s; every other array stays a `java::Array`, even in a program
+/// with threads. An array's rows are of its family, so a `SharedArray` never holds an `Array`.
+pub(super) fn shared_arrays(class: &Class, shared: &HashSet<usize>) -> HashSet<Type> {
+    fn holds(ty: Type, out: &mut HashSet<Type>) {
+        match ty {
+            Type::Array(element) => {
+                out.insert(array_family(ty));
+                holds(*element, out);
+            }
+            Type::Class(_, args) => args.iter().for_each(|&a| holds(a, out)),
+            _ => {}
+        }
+    }
+    let mut out = HashSet::new();
+    for (t, decl) in class.types.iter().enumerate() {
+        decl.statics.iter().for_each(|f| holds(f.ty, &mut out));
+        if shared.contains(&t) {
+            decl.fields.iter().for_each(|f| holds(f.ty, &mut out));
+            decl.captures.iter().for_each(|c| holds(c.ty, &mut out));
+            if let Some(ty @ Type::Array(_)) = class.shared_of(t) {
+                holds(ty, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// The family of the array type `ty`: the type of its innermost elements, without type
+/// arguments. `int[]` and `int[][]` are of one family, `int`.
+pub fn array_family(ty: Type) -> Type {
+    match ty {
+        Type::Array(element) => array_family(*element),
+        Type::Class(name, _) => Type::Class(name, &[]),
+        other => other,
+    }
+}
+
 /// The classes that a value of type `ty` may be an object of.
 fn types_of(class: &Class, ty: Type, out: &mut Vec<usize>) {
     match ty {

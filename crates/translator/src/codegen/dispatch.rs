@@ -488,7 +488,7 @@ impl<'a> Gen<'a> {
             (true, false) => format!("{}({optional})", self.runtime("non_null")),
         };
         let slice = self.slice_of(e);
-        let maker = self.array_maker("from_vec");
+        let maker = self.array_maker("from_vec", ty);
         Code::atom(format!("{maker}(({slice}).iter().map(|s| {each}).collect::<Vec<_>>())"))
     }
 
@@ -1434,8 +1434,8 @@ impl<'a> Gen<'a> {
         let place = if self.facts.borrowed_objects.contains(&(r, 0)) { other } else { format!("&{other}") };
         let same = match self.runtime_of(c).map(Type::unboxed) {
             Some(Type::Double | Type::Float) => "o.to_bits() == b.to_bits()",
-            // Arrays are `Arc`s in a program with threads, as `array_identity` compares them.
-            Some(Type::Array(_)) if self.facts.threaded => "Arc::ptr_eq(o, b)",
+            // A `java::SharedArray` is an `Arc`, as `array_identity` compares them.
+            Some(ty @ Type::Array(_)) if self.shared_array_type(ty) => "Arc::ptr_eq(o, b)",
             Some(Type::Array(_)) => "Rc::ptr_eq(o, b)",
             Some(Type::StringBuilder) => "o.same(b)",
             // A box whose identity is kept (`java::Boxed`) compares the values it holds.
@@ -1674,7 +1674,9 @@ impl<'a> Gen<'a> {
                     _ if faithful => &same_box,
                     _ if floating && self.holds_value(c) => &same_bits,
                     _ if self.holds_value(c) && !array => "a == b",
-                    _ if self.facts.thread_shared.contains(&c) || array && self.facts.threaded => {
+                    _ if self.facts.thread_shared.contains(&c)
+                        || array && self.runtime_of(c).is_some_and(|ty| self.shared_array_type(ty)) =>
+                    {
                         "Arc::ptr_eq(a, b)"
                     }
                     _ => "Rc::ptr_eq(a, b)",
