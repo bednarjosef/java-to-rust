@@ -100,6 +100,16 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<String, Vec<Error>> 
 thread_local! {
     /// The position of the method being written, which a census stubs when the generator panics.
     static WRITING: std::cell::Cell<Option<Pos>> = const { std::cell::Cell::new(None) };
+    /// Whether a panic while writing a method is an error of that method (`catch_panics`).
+    static CATCHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes a panic while the generator writes a method, from now on in this thread (until
+/// `catch_panics(false)`), an error at the method that names the panic, and the generator goes on
+/// with the other methods. A census does this, so that it finds every method that makes the
+/// generator panic in one run of it.
+pub fn catch_panics(on: bool) {
+    CATCHING.with(|c| c.set(on));
 }
 
 /// The position of the method that the generator was writing when it panicked, if it was writing
@@ -554,6 +564,24 @@ impl<'a> Gen<'a> {
     }
 
     fn method(&mut self, index: usize) {
+        if !CATCHING.with(|c| c.get()) {
+            return self.write_method(index);
+        }
+        let (start, indent, outer) = (self.out.len(), self.indent, WRITING.with(|w| w.get()));
+        let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.write_method(index)));
+        if let Err(panic) = written {
+            self.out.truncate(start);
+            self.indent = indent;
+            self.display = false;
+            // Its code is not written, so what it dereferences is not looked for.
+            self.written.remove(&index);
+            WRITING.with(|w| w.set(outer));
+            let message = format!("the translator panicked: {}", crate::lower::panic_message(&*panic));
+            self.rejected.push(Error { pos: self.class.methods[index].pos, message });
+        }
+    }
+
+    fn write_method(&mut self, index: usize) {
         let m = &self.class.methods[index];
         let outer = WRITING.with(|w| w.replace(Some(m.pos)));
         self.enter_method(index);

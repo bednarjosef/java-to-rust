@@ -15,9 +15,9 @@
 //! is at that position, in any file (or drops the field initializer there), and the analyses and
 //! the generator run again. The generator and the analysis of exceptions report every error they
 //! find, which are stubbed together; the other analyses report their first. A panic while the
-//! generator writes a method stubs the method. So every error recorded is one that a translation
-//! of the program would report once the code before it translated. An error that no
-//! stub can take away ends the census there, with its place: the pieces it did not get to are
+//! generator writes a method is an error of the method, found with the others. So every error
+//! recorded is one that a translation of the program would report once the code before it
+//! translated. An error that no stub can take away ends the census there, with its place: the pieces it did not get to are
 //! counted as they stand. An error that lowering met outside any unit's code is placed in the
 //! unit that alone has code at its line and column.
 //!
@@ -137,14 +137,19 @@ fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Reje
             let facts = crate::timings::phase("census: analyses", || {
                 analysis::analyze_tolerating(class, &tolerated)
             })?;
-            crate::timings::phase("census: generator", || codegen::generate_all(class, &facts)).map(drop)
+            codegen::catch_panics(true);
+            let generated =
+                crate::timings::phase("census: generator", || codegen::generate_all(class, &facts));
+            codegen::catch_panics(false);
+            generated.map(drop)
         },
     ];
     for (index, pass) in passes.into_iter().enumerate() {
         loop {
             // A stub can lead the translator where a translation never goes. A panic while the
-            // generator writes a method stubs the method; any other ends the census as an error
-            // does, with what it found so far.
+            // generator writes a method is an error of the method, which is stubbed with the
+            // generator's other errors (`codegen::catch_panics`); any other panic ends the census
+            // as an error does, with what it found so far.
             let errors = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pass(class))) {
                 Ok(Ok(())) => break,
                 Ok(Err(errors)) => errors,
