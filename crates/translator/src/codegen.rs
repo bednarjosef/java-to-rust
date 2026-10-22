@@ -201,6 +201,7 @@ fn generate_with(
         optional_yield: false,
         attempt_count: 0,
         try_assigned: HashSet::new(),
+        unset_locals: HashMap::new(),
         dereferenced: HashSet::new(),
         checked_cast: None,
         catching_now: HashSet::new(),
@@ -383,6 +384,9 @@ struct Gen<'a> {
     /// The current method's locals declared without a value that a `try` block assigns (see
     /// `exceptions::try_assigned`).
     try_assigned: HashSet<String>,
+    /// The locals of `try_assigned` declared so far without a value to start as, by their types:
+    /// a `try` block that sets one carries its value out (see `exceptions::carried_out`).
+    unset_locals: HashMap<String, Type>,
     /// The objects of `Facts::null_checked` whose checked dereference has been written, and the
     /// casts of `Facts::raising` whose checked form has; and everything in a `catch` clause that
     /// is not written, which needs neither.
@@ -475,8 +479,10 @@ impl<'a> Gen<'a> {
         self.finallies.clear();
         self.attempt_count = 0;
         self.try_assigned = exceptions::try_assigned(self.facts, &m.body);
+        self.unset_locals.clear();
+        let starts = |ty: Type| self.try_start(ty).is_some();
         let optional = |ty: Type, name: &str| self.optional_var(index, ty, name);
-        if let Some(e) = exceptions::check_try_assigned(&m.body, &self.try_assigned, optional) {
+        if let Some(e) = exceptions::check_try_assigned(&m.body, &self.try_assigned, starts, optional) {
             self.rejected.push(e);
         }
         self.name_locals(m);
