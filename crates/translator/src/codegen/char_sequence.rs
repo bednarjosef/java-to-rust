@@ -36,7 +36,8 @@ impl<'a> Gen<'a> {
             return Code::atom("unreachable!()".to_string());
         }
         let t = self.type_of(s.ty).expect("a CharSequence has an enum");
-        let sequence = self.class.type_index(CHAR_SEQUENCE).expect("a program with a CharSequence has its type");
+        let sequence =
+            self.class.type_index(CHAR_SEQUENCE).expect("a program with a CharSequence has its type");
         let length = self.char_sequence_method(sequence, "length", 0);
         let char_at = self.char_sequence_method(sequence, "charAt", 1);
         let (length_throws, char_throws) =
