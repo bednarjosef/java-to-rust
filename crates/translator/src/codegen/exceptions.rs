@@ -226,6 +226,7 @@ pub(super) fn check_try_assigned(
             if let Stmt::Local { ty, name, init: None, pos } = s
                 && assigned.contains(name)
                 && default_value(*ty).is_none()
+                && !matches!(ty, Type::Array(_))
                 && !optional(*ty, name)
                 && found.is_none()
             {
@@ -747,6 +748,9 @@ impl<'a> Gen<'a> {
         }
         if !self.facts.live_tries.contains(&id) {
             // Nothing that the body throws is caught here.
+            for catch in catches {
+                self.not_written(&catch.body);
+            }
             self.line("{");
             self.indent += 1;
             self.stmts(body, false);
@@ -788,6 +792,14 @@ impl<'a> Gen<'a> {
         }
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// Notes the statements of a `catch` clause that is not written: their dereferences and
+    /// operations need no checked form (see `check_dereferences`).
+    fn not_written(&mut self, stmts: &[Stmt]) {
+        for s in stmts {
+            visit_stmt(s, &mut |e| visit_expr(e, &mut |x| _ = self.dereferenced.insert(x.id)), &mut |_| {});
+        }
     }
 
     /// A local for the result of a `try` block, distinct from the method's locals.
