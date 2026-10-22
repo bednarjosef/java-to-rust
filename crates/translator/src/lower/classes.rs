@@ -297,6 +297,12 @@ impl<'t> Lowering<'t> {
     /// `T.class`, a class literal as a value.
     pub(super) fn class_literal(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let named = node.child("expression")?;
+        // An annotation type's, whose binary name is its name where no class declares it.
+        let name = named.java_type();
+        if self.annotation_types.contains(name) && !self.nested_annotation_types.contains(name) {
+            self.annotation_classes.borrow_mut().insert(name.to_string());
+            return Ok(ExprKind::Builtin(Builtin::ClassLiteral(Type::class(name)), Vec::new()));
+        }
         let ty = self.ty(named, named.java_type())?;
         if !ty.is_reference() && !ty.is_numeric() && !matches!(ty, Type::Boolean | Type::Void | Type::Enum(_))
         {

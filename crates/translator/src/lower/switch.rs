@@ -272,6 +272,17 @@ fn wrap(v: i64, ty: &str) -> Option<i64> {
 }
 
 /// Whether `node` is a constant expression of type `String`, which Java interns.
+/// The text of `node`, a constant expression of type `String`; `None` for any other.
+pub(super) fn constant_text(node: Node) -> Option<String> {
+    if node.java_type() != "java.lang.String" {
+        return None;
+    }
+    match fold(node)? {
+        Folded::Text(s) => Some(s),
+        _ => None,
+    }
+}
+
 pub(super) fn constant_string(node: Node) -> bool {
     node.java_type() == "java.lang.String" && matches!(fold(node), Some(Folded::Text(_)))
 }

@@ -243,7 +243,7 @@ Rejected:
 - a class with subclasses whose constructor uses `this` as a value or calls an overridable
   method (the whole-object construction of `analysis/whole_objects.rs`, whose zero object is
   built with the enclosing instance and captured locals) when a `super(..)` computes them
-  rather than passing on its constructor's parameters;
+  other than as its constructor's parameters or fields of them;
 - an enclosing instance needed in static code (javac rejects it too);
 - `Outer.this` or `Outer.super` from an inner class that itself extends `Outer`: the search for
   the enclosing instance stops at the first subclass of `Outer`, which is then `this`.
@@ -327,7 +327,8 @@ override that the object model dispatches to.
 A constant with a body (`PLUS { int apply(int a, int b) { .. } }`) is an anonymous subclass of the
 enum; since an enum is a Rust `enum`, `lower/constant_bodies.rs` turns its overrides into arms of
 a `match` on `self` in the enum's method. A body may override the enum's methods, or the
-methods of an interface the enum leaves to its constants. Lambdas and method references in
+methods of an interface the enum leaves to its constants; a method that overrides nothing is a
+method of the enum, which only that body's code calls. Lambdas and method references in
 those methods translate and capture the constant as `this`
 (`corpus/whole-program/LambdasInConstantBodies.java`).
 
@@ -335,8 +336,9 @@ A body may declare fields of type `int`, `long`, `double`, `float`, `char`, `boo
 `String`: each becomes a field of the enum whose value for a constant is that body's
 initializer, or the zero of its type for the others. Enum fields are recomputed on each read,
 so the initializer must be a constant. Rejected in a body: blocks, member classes, static
-fields, fields of other types, initializers that are not constants, and methods that override
-none of the enum's.
+fields, fields of other types, initializers that are not constants, methods that override a
+method of `Object` that the enum does not declare, and methods that override nothing of one
+name and signature in two bodies.
 
 ## 4. Lambdas, method references and functional interfaces
 

@@ -30,7 +30,8 @@ impl<'t> Lowering<'t> {
     /// none of the enum's own, as one that implements an interface's: the constants that do not
     /// override it run the interface's default method (`interface_default`), which Java requires
     /// when the interface's is abstract. It is declared with the first body's declaration, for its
-    /// signature.
+    /// signature. A method that implements no interface's is a helper of its body, declared as a
+    /// method of the enum with the body's code (`body_helpers`).
     pub(super) fn body_methods(&mut self, class: usize) {
         let constants: Vec<Node<'t>> =
             self.types[class].node.list("members").filter(|m| is_enum_constant(*m)).collect();
@@ -45,11 +46,18 @@ impl<'t> Lowering<'t> {
                 let of_interface = overrides.into_iter().flatten().any(|o| {
                     !matches!(o["owner"].as_str(), None | Some("java.lang.Object" | "java.lang.Enum"))
                 });
-                if declared || member.has_flag("STATIC") || !of_interface {
+                let overrides_none = overrides.is_none_or(|o| o.is_empty());
+                if declared || member.has_flag("STATIC") || !of_interface && !overrides_none {
                     continue;
                 }
                 self.methods.push(MethodInfo { owner: class, node: member, name, sig });
-                self.body_methods.insert(self.methods.len() - 1);
+                if of_interface {
+                    self.body_methods.insert(self.methods.len() - 1);
+                } else {
+                    // A method that overrides nothing, which only its body's code calls: a method
+                    // of the enum, which those calls resolve to (`constant_body_call`).
+                    self.body_helpers.insert(self.methods.len() - 1);
+                }
             }
         }
     }
@@ -319,6 +327,17 @@ impl<'t> Lowering<'t> {
                         "a method of an enum constant's body that overrides none of the enum's",
                     );
                 };
+                // A helper is a method of its own; one of the same name and signature in another
+                // body would be a second method that its calls cannot tell apart.
+                if self.body_helpers.contains(&base) {
+                    if !std::ptr::eq(self.methods[base].node.0, member.0) {
+                        return unsupported(
+                            member,
+                            "methods of one name and signature that override nothing in two enum constants' bodies",
+                        );
+                    }
+                    continue;
+                }
                 let Some(block) = member.get("body") else {
                     return unsupported(member, "methods without a body");
                 };

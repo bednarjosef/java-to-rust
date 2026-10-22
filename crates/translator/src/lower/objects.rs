@@ -73,7 +73,11 @@ impl<'t> Lowering<'t> {
             catch_panics: false,
             stubbing: Cell::new(false),
             stubbed: Default::default(),
+            notes: Default::default(),
+            annotation_classes: Default::default(),
+            nested_annotation_types: Default::default(),
             body_methods: Default::default(),
+            body_helpers: Default::default(),
             annotation_types: Default::default(),
             rejected_classes: Default::default(),
             callers: Default::default(),
@@ -127,6 +131,7 @@ impl<'t> Lowering<'t> {
                 // Does nothing when the program runs (see `annotation_types`).
                 "ANNOTATION_TYPE" => {
                     self.annotation_types.insert(crate::program::class_name(member.0));
+                    self.nested_annotation_types.insert(crate::program::class_name(member.0));
                 }
                 "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
                     // Named after its outer class once that is named (see `inner::name_nested`).

@@ -101,6 +101,9 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     locate(&trees, rejections.iter_mut().filter(|r| r.anchor.is_none()).chain(&mut fatal));
     let scan = survey::scan(&units.iter().collect::<Vec<_>>(), &reach, program, &files);
     let unit_files = survey::unit_files(&units.iter().collect::<Vec<_>>(), program, &files);
+    if let Some(class) = &class {
+        super::print_notes(class, &unit_files);
+    }
     drop(trees);
     drop((units, reach));
     let mut modules = None;
