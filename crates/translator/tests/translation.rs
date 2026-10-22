@@ -3212,12 +3212,13 @@ fn the_census_rejects_a_class_whose_declaration_is_rejected_with_its_code_and_go
 
 #[test]
 fn a_census_stubs_the_code_whose_null_pointer_message_is_not_certain() {
-    // `len` assigns its parameter, which the JVM may name either way; `main`'s message is certain.
+    // `len` reads its parameter in a `finally` block whose copies name it differently, one after
+    // the write and one before; `main`'s message is certain.
     let dir = write_sources(
         "census_messages",
         &[(
             "Main.java",
-            "public class Main {\n    static int len(String s, boolean b) {\n        if (b) s = null;\n        return s.length();\n    }\n    public static void main(String[] args) {\n        String t = args.length > 3 ? \"a\" : null;\n        try { System.out.println(t.length() + len(t, false)); }\n        catch (NullPointerException e) { System.out.println(e.getMessage()); }\n    }\n}\n",
+            "public class Main {\n    static int len(String s, boolean b) {\n        try { if (b) s = null; } finally { System.out.print(s.length()); }\n        return 0;\n    }\n    public static void main(String[] args) {\n        String t = args.length > 3 ? \"a\" : null;\n        try { System.out.println(t.length() + len(t, false)); }\n        catch (NullPointerException e) { System.out.println(e.getMessage()); }\n    }\n}\n",
         )],
     );
     let program = java_to_rust::Program {
@@ -3231,14 +3232,14 @@ fn a_census_stubs_the_code_whose_null_pointer_message_is_not_certain() {
         &census.report,
         &[
             "  Program: 2 pieces; 1 (50.0%) translate, 1 rejected.",
-            "       1  the message of the `NullPointerException` of this dereference not supported yet\n          at Main.java:4:16\n",
+            "       1  the message of the `NullPointerException` of this dereference not supported yet\n          at Main.java:3:61\n",
         ],
     );
     let rust = census.modules.expect("a translation").one_file();
     assert_contains(
         &rust,
         &[
-            "java::not_translated(\"Main.len: the message of the `NullPointerException` of this dereference not supported yet (line 4)\")",
+            "java::not_translated(\"Main.len: the message of the `NullPointerException` of this dereference not supported yet (line 3)\")",
             "Cannot invoke \\\"String.length()\\\" because \\\"<local1>\\\" is null",
         ],
     );
@@ -4275,15 +4276,18 @@ fn the_message_of_a_null_dereference_is_javas_or_rejected_and_a_created_ones_is_
     };
     let rust = java_to_rust::translate(&program("return a.next.v;", "e.getMessage()")).unwrap();
     assert!(rust.contains(r#"Cannot read field \"v\" because \"<parameter1>.next\" is null"#), "{rust}");
-    // A parameter that its method assigns is `<localN>` or `<parameterN>` by the path that ran.
-    let err = java_to_rust::translate(&program("a = a.next; return a.v;", "e.getMessage()"))
-        .unwrap_err()
-        .to_string();
+    // A parameter that its method assigns is a local once the bytecode before it wrote it.
+    let rust = java_to_rust::translate(&program("a = a.next; return a.v;", "e.getMessage()")).unwrap();
+    assert!(rust.contains(r#"Cannot read field \"v\" because \"<local0>\" is null"#), "{rust}");
+    // A `finally` block is copied to the end of its `try`, after the write, and to the handler of
+    // any exception, before it: the copies name the parameter differently.
+    let in_finally = "try { a = a.next; } finally { System.out.print(a.v); } return 0;";
+    let err = java_to_rust::translate(&program(in_finally, "e.getMessage()")).unwrap_err().to_string();
     assert!(
         err.contains("the message of the `NullPointerException` of this dereference not supported yet"),
         "{err}"
     );
-    let rust = java_to_rust::translate(&program("a = a.next; return a.v;", "\"caught\""))
+    let rust = java_to_rust::translate(&program(in_finally, "\"caught\""))
         .expect("a catch that does not read the message");
     assert!(!rust.contains("try_non_null_message"), "{rust}");
 }

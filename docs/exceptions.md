@@ -450,7 +450,14 @@ JDK has too (javac's `jdk.compiler`) compiles as part of that module (`--patch-m
 unnamed module may not hold its packages. A lambda's body is a method whose first
 parameters are its captures; a local or anonymous class reads a captured local as
 `this.val$x`; javac's own locals are named too (the `s$` of a string `switch`, the iterator
-`i$` of a for-each loop, whose calls start at the collection as javac's do). The rest of the
+`i$` of a for-each loop, whose calls start at the collection as javac's do). A parameter that
+its method assigns is `<parameterN>` until the JVM sees it written: HotSpot walks the bytecode
+once, in order, carrying what it has seen forward along each jump, and stops at the failing
+instruction. So a write counts only where a forward path from the method's start reaches the
+read: not one that only the next round of a loop brings (a loop is left from its condition,
+before its body), and not one before a `try` in its `catch`, as an exception handler starts
+with nothing written. `BytecodeNames` follows the lowered code in the order of javac's code
+generator to tell which. The rest of the
 message follows the JVM's rules (`analysis/npe_messages.rs`): a field chain up to five steps
 back, an element with its index when that is a constant, a local or a call (`[...]` otherwise),
 no `because` for the value of `c ? a : b`, no message for a pattern switch's
@@ -488,8 +495,9 @@ returns a constant (the translator's `Thread.isVirtual()`) is never taken.
 **Checked against Java 26** (`CHECKED_JAVA` in `javac/bytecode_names.rs`). With another Java the
 texts may differ, and a program whose `catch` reads one is not translated.
 
-**Rejected** where a `catch` may read a message that is not certain: a dereference of a parameter
-its method assigns (the JVM names it `<localN>` or `<parameterN>` depending on the path), of a
+**Rejected** where a `catch` may read a message that is not certain: a dereference in a
+`finally` block of a parameter its method assigns, where the block's copies (at the end of the
+`try`, and in the handler of any exception) name it differently, of a
 local declared in a `finally` (javac copies the block, each copy with its own slots) or in an
 instance initializer (copied into every constructor), of a JDK local the translation may have
 renamed, of the enclosing instance of a nested class, a dereference in the code of `java.lang`,
