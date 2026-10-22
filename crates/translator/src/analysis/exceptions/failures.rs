@@ -105,7 +105,6 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         },
         Builtin::Builder(
             BuilderOp::New
-            | BuilderOp::Append
             | BuilderOp::Reverse
             | BuilderOp::IndexOf
             | BuilderOp::LastIndexOf
@@ -114,6 +113,9 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | BuilderOp::IsEmpty
             | BuilderOp::CompareTo,
         ) => None,
+        // A range of the appended text (`args` has the builder first) out of its bounds.
+        Builtin::Builder(BuilderOp::Append) if args.len() == 4 => Some("java.lang.IndexOutOfBoundsException"),
+        Builtin::Builder(BuilderOp::Append) => None,
         // A negative count, an invalid code point.
         Builtin::Builder(BuilderOp::AppendCodePoint | BuilderOp::Repeat) => {
             Some("java.lang.IllegalArgumentException")
@@ -522,7 +524,10 @@ pub(super) fn runtime_failures(
                     matches!(e.ty, Type::Null | Type::String | Type::StringBuilder | Type::Boxed(_))
                 };
                 let writes_null = match builtin {
-                    Builtin::Builder(BuilderOp::Append) => args.len() == 2 && text(&args[1]),
+                    Builtin::Builder(BuilderOp::Append) => {
+                        args.len() == 2 && text(&args[1])
+                            || args.len() == 4 && (text(&args[1]) || matches!(args[1].ty, Type::Class(c, _) if c == CHAR_SEQUENCE))
+                    }
                     Builtin::Builder(BuilderOp::Insert) => args.len() == 3 && text(&args[2]),
                     _ => false,
                 };
@@ -578,7 +583,8 @@ pub(super) fn runtime_failures(
                                     | Native::FileSystem(_)
                                     | Native::SecureSeed
                             )
-                    ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })));
+                    ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })))
+                        || (matches!(builtin, Builtin::Builder(BuilderOp::Append)) && args.len() == 4);
                     out.push((failure, "this call of the library", checked, x.id));
                 }
                 if let Builtin::Arrays(op) = builtin

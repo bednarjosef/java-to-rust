@@ -765,10 +765,10 @@ impl<'a> Gen<'a> {
             Builtin::String(op) => self.string_builtin(op, args, id),
             // A chained call gives `&Self`; as a value, the builder is another handle to it.
             Builtin::Builder(op) if op.chains() => {
-                let code = self.builder_call(op, args);
+                let code = self.builder_call(id, op, args);
                 Code::atom(format!("{}.clone()", code.text))
             }
-            Builtin::Builder(op) => self.builder_call(op, args),
+            Builtin::Builder(op) => self.builder_call(id, op, args),
             Builtin::Format => self.format_builtin(args),
             Builtin::ObjectsEquals => self.objects_equals(args),
             Builtin::NullChecked => self.null_checked(args),

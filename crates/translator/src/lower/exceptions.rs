@@ -85,6 +85,8 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StringBuilder#offsetByCodePoints",
             "java.lang.AbstractStringBuilder#getChars",
             "java.lang.StringBuilder#getChars",
+            "java.lang.StringBuilder#append",
+            "java.lang.StringBuffer#append",
         ],
     ),
     // A call, a field access, an array access or a switch on a reference that may be null.

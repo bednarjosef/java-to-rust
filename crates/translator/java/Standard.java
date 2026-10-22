@@ -317,6 +317,10 @@ class LinkageError extends Error {
     public LinkageError() {
     }
 
+    public LinkageError(String message) {
+        super(message);
+    }
+
     public LinkageError(String message, Throwable cause) {
         super(message, cause);
     }
@@ -793,6 +797,12 @@ class MissingResourceException extends RuntimeException {
 
     public MissingResourceException(String s, String className, String key) {
         super(s);
+        this.className = className;
+        this.key = key;
+    }
+
+    MissingResourceException(String message, String className, String key, Throwable cause) {
+        super(message, cause);
         this.className = className;
         this.key = key;
     }
