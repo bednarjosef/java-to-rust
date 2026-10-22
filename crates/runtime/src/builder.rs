@@ -142,6 +142,37 @@ impl StringBuilder {
         Ok(self.append_chars(&units[start as usize..end as usize]))
     }
 
+    /// `sb.append(s, start, end)` of a `CharSequence` that a program class implements, where
+    /// `length` and `char_at` are its methods. `length` runs once and the range is checked on it;
+    /// then `char_at` runs for each index in order. The units are taken before the builder
+    /// changes, so a failure leaves the builder as it was, as Java's `append` does.
+    pub fn try_append_seq_range<E: From<crate::Exception>>(
+        &self,
+        start: i32,
+        end: i32,
+        length: Result<i32, E>,
+        mut char_at: impl FnMut(i32) -> Result<u16, E>,
+    ) -> Result<&Self, E> {
+        let len = length?;
+        if start < 0 || start > end || end > len {
+            let message = format!("Range [{start}, {end}) out of bounds for length {len}");
+            return Err(crate::Exception::new("java.lang.IndexOutOfBoundsException", message).into());
+        }
+        let units = (start..end).map(&mut char_at).collect::<Result<Vec<u16>, E>>()?;
+        Ok(self.append_chars(&units))
+    }
+
+    /// `append_seq_range` where the program does not observe the failure.
+    pub fn append_seq_range<E: From<crate::Exception> + std::fmt::Display + 'static>(
+        &self,
+        start: i32,
+        end: i32,
+        length: Result<i32, E>,
+        char_at: impl FnMut(i32) -> Result<u16, E>,
+    ) -> &Self {
+        self.try_append_seq_range(start, end, length, char_at).unwrap_or_else(crate::uncaught)
+    }
+
     fn check_offset(&self, offset: i32, len: usize) {
         if offset < 0 || offset as usize > len {
             out_of_bounds(format!("offset {offset}, length {len}"));
