@@ -17,6 +17,7 @@ mod channels;
 mod char_sequence;
 mod character;
 mod charsets;
+mod class_cast;
 mod class_values;
 mod classes;
 mod closures;
