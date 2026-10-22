@@ -167,8 +167,9 @@ Design: [object-model.md](object-model.md).
   `match self`. `valueOf` of an unknown name throws `IllegalArgumentException` with Java's
   message. An enum value that may be null is an `Option` of the enum. Using a constant does not
   initialize the enum by itself, unlike Java; reading its fields or calling its methods does.
-  Rejected in a constant's body: static fields, blocks and member classes, and fields whose name
-  or type clashes with the enum's.
+  A body's methods that override nothing are methods of the enum. Rejected in a constant's body:
+  static fields, blocks and member classes, and fields whose name or type clashes with the
+  enum's.
 - A **record** is a class with the members Java gives it (written into javac's tree by
   `javac/records.rs`): canonical or compact constructor, accessors, `toString`, `equals` and
   `hashCode`. A `switch` with patterns (`case Circle c when ..`, `case null`, record patterns,

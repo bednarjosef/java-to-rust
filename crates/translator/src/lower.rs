@@ -382,6 +382,9 @@ struct Lowering<'t> {
     /// The methods of enums that only the bodies of their constants declare, each implementing a
     /// method of an interface that the enum leaves to it (see `constant_bodies::body_methods`).
     body_methods: std::collections::HashSet<usize>,
+    /// The methods of enums that a constant's body declares and that override nothing, which only
+    /// that body's code calls (see `constant_bodies::body_methods`).
+    body_helpers: std::collections::HashSet<usize>,
     /// The annotation types (`@interface`) that were left out, by javac's name: an annotation
     /// does nothing when the program runs, but a value of one is not translated.
     annotation_types: std::collections::HashSet<String>,

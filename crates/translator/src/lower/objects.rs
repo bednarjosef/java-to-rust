@@ -74,6 +74,7 @@ impl<'t> Lowering<'t> {
             stubbing: Cell::new(false),
             stubbed: Default::default(),
             body_methods: Default::default(),
+            body_helpers: Default::default(),
             annotation_types: Default::default(),
             rejected_classes: Default::default(),
             callers: Default::default(),

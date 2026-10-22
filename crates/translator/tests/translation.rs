@@ -3259,6 +3259,34 @@ fn enum_constant_bodies_become_arms_of_the_enum_method() {
 }
 
 #[test]
+fn a_method_of_a_constant_body_that_overrides_nothing_is_a_method_of_the_enum() {
+    let rust = translate(
+        "public class A {
+            enum Op {
+                TWICE { int apply(int a) { return twice(a); } private int twice(int x) { return 2 * x; } },
+                SAME { int apply(int a) { return a; } };
+                abstract int apply(int a);
+            }
+            public static void main(String[] args) { System.out.println(Op.TWICE.apply(4)); }
+        }",
+    );
+    assert_contains(&rust, &["AOp::Twice => {\n                self.twice(a)", "fn twice(self, x: i32) -> i32 {"]);
+    // Two of one name and signature would be two methods that the calls cannot tell apart.
+    let error = java_to_rust::translate(
+        "public class A {
+            enum Op {
+                TWICE { int apply(int a) { return f(a); } private int f(int x) { return 2 * x; } },
+                SAME { int apply(int a) { return f(a); } private int f(int x) { return x; } };
+                abstract int apply(int a);
+            }
+            public static void main(String[] args) { System.out.println(Op.TWICE.apply(4)); }
+        }",
+    )
+    .expect_err("two helpers of one name and signature");
+    assert!(error.to_string().contains("methods of one name and signature that override nothing"), "{error}");
+}
+
+#[test]
 fn an_enum_field_with_a_method_of_its_name_gets_another_accessor() {
     let rust = translate(
         "public class A {
