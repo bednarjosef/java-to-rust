@@ -487,6 +487,11 @@ impl<'a> Gen<'a> {
         self.ty_name(Type::class("java.lang.Throwable"))
     }
 
+    /// Whether the program has exceptions: `Throwable` is among its classes.
+    pub(super) fn has_throwable(&self) -> bool {
+        self.class.type_index("java.lang.Throwable").is_some()
+    }
+
     /// The runtime's function `name` that ends the program with an uncaught exception, which
     /// shows the exception through its `Display`.
     pub(super) fn uncaught(&mut self, name: &str) -> String {
