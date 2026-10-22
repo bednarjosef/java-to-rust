@@ -67,6 +67,7 @@ something a translated program does not have.
 | `FileDescriptor.getHandle(fd)` | `java::fd_handle(fd)` | -1 (Windows handles only) |
 | `FileDescriptor.getAppend(fd)` | `java::fd_append(fd)` | the descriptor's `O_APPEND` (from `/proc/self/fdinfo`, `false` where missing); `true` for a descriptor that is not open, as Java reads `fcntl`'s -1 |
 | `FileInputStream`, `FileOutputStream`, `RandomAccessFile`, `FileDescriptor` natives (`open0`, `read0`, `readBytes`, `available0`, `skip0`, `write`, `seek0`, `close0`, ...) | `fd.rs` | a descriptor table of the process; 0, 1 and 2 are the standard streams |
+| `sun.nio.ch.UnixFileDispatcherImpl` natives (`read0`, `pread0`, `write0`, `pwrite0`, `seek0`, `size0`, `truncate0`, `available0`, `isOther0`, `setDirect0`, `release0`); `FileDispatcherImpl.init0`, `IOUtil.iovMax`, `IOUtil.writevMax`, `NativeThread.init`, `current0`, `signal0` | `file_channel.rs` | the channel natives of `FileChannelImpl`, on the descriptor table: `read0` and `pread0` give -1 at the end of the file; `seek0` with -1 gives the position; `setDirect0` always fails with an `IOException` ("Operation not supported": the standard library cannot set `O_DIRECT` on an open file); `release0` does nothing (no lock is taken, as `lock0` is not implemented); `signal0` does nothing (no translated thread is blocked in a native call to wake); `current0` is never 0 |
 | `UnixFileSystem` natives (`FILE_SYSTEM`) | `fs.rs` | `File`'s attributes, listing, creating, renaming, deleting; not `getSpace0` |
 | the translator's `sun.nio.fs.UnixNativeDispatcher` (`UNIX_CALLS`) | `unix.rs` | the system calls of `java.nio.file`, recording `errno` rather than failing |
 | the translator's `java.net.TranslatedNet` (`NET_CALLS`) | `net.rs` | the C library's name service |
@@ -102,6 +103,11 @@ compared with one recorded run.
   (`toArray(T[])`, `TimSort`'s work arrays) is lowered to a new array of `n` nulls of `a`'s type
   without it (`lower::arrays::component_array`, `program::component_array`); any other call of
   `Array.newInstance` reaches the native and is rejected where it can run.
+- `FileChannelImpl` (the channel of `RandomAccessFile.getChannel()` and `FileInputStream.getChannel()`)
+  reaches the channel natives above, but its path stops before them: `AbstractInterruptibleChannel`
+  calls `JavaLangAccess.blockedOn`, and `InnocuousThread` uses a field offset as a value. So no
+  program reaches them yet. `FileChannel.open` and `Files.newByteChannel` do not use
+  `FileChannelImpl` at all: they use the overlay `UnixFileChannel` (`java/overlay/sun/nio/fs`).
 - Stack walking (`StackTraceElement.initStackTraceElements`, `StackStreamFactory`), class
   definition and module natives, sockets, `statvfs`, and every native not in the table.
 

@@ -39,6 +39,7 @@ mod by_name;
 mod callers;
 mod captures;
 mod census;
+mod channels;
 mod charsets;
 mod classes;
 mod clinit_errors;
@@ -1129,6 +1130,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.file_system_call(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.channel_native_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(kind) = self.library_call(node, &symbol, receiver, &args)? {

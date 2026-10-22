@@ -357,6 +357,10 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Native(Native::Unix(_)) => &[],
         // So do the name service calls of `java.net` (`java_runtime::net`).
         Builtin::Native(Native::Net(_)) => &[],
+        // The natives of a file channel fail with an `IOException` where the JVM's do (`file_channel.rs`).
+        Builtin::Native(Native::Channel(call)) => {
+            if call.fails { &["java.io.IOException"] } else { &[] }
+        }
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
         // of a closed descriptor does nothing.
         Builtin::Native(Native::FileOpenRead | Native::FileOpenWrite | Native::FileOpenRandom) => {
