@@ -101,7 +101,7 @@ program where such a lookup can happen, so they can be checked before the progra
 - **Names outside the translation** throw Java's own exception, which code can catch, with a
   message that says so: `ClassNotFoundException: com.foo.Bar, which is not in the translation`,
   and `NoSuchMethodException` or `NoSuchFieldException` for a member the table does not hold.
-- **`ServiceLoader`** is the translator's own (`java/overlay/java/util/ServiceLoader.java`). It
+- **`ServiceLoader`** is the JDK's, rewritten by the translator's patch (`java/patches/java/util/ServiceLoader.java`). It
   finds the providers that the `provides` clauses of the roots' `module-info.java` files and
   their `META-INF/services` files declare, in that order (`program/modules.rs`,
   `service_providers`; kept in `Reach::services`). A provider is made lazily, by its public
@@ -112,7 +112,7 @@ program where such a lookup can happen, so they can be checked before the progra
   `getParent` and `getClassLoader()` of a class. `loadClass` goes through the `forName` table.
   `getResource`, `getResources` and `getResourceAsStream` find nothing; javac does not need them
   (its one use is `Class.getResource` behind the hidden `-XDshowClass` option).
-  `URLClassLoader` is the translator's own (`java/overlay/java/net/URLClassLoader.java`). It
+  `URLClassLoader` is patched by the translator (`java/patches/java/net/URLClassLoader.java`). It
   finds what its parent finds and nothing of its own. A class or resource that is in one of its
   directories, or a class asked of it while it has a jar file among its URLs, fails loudly:
   "code that is not in the translation cannot run". A `ServiceLoader` over it fails the same

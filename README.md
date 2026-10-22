@@ -879,7 +879,7 @@ figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausi
 JVM's, and `gc()` does nothing, as `System.gc()` does. `Runtime.halt` flushes the output and exits without shutdown
 hooks. Scoped values are the JDK's `ScopedValue` over the translator's `Thread`, which keeps a
 thread's bindings and its cache of values read, as the JVM does; a new thread has no bindings.
-The operation of a binding runs directly (`java/overlay/jdk/internal/vm/ScopedValueContainer.java`),
+The operation of a binding runs directly (`java/patches/jdk/internal/vm/ScopedValueContainer.java`),
 as the JDK's runs it when no `StructuredTaskScope`, a preview API, is open. `onSpinWait` and
 `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
 thread's record, which an interrupt wakes. The runtime's
@@ -900,7 +900,7 @@ rejected. A file stream's `FileCleanable.register` does nothing, since nothing i
 collected: a stream the program never closes stays open until it ends. `Blocker.begin` is `false`
 and `end` does nothing, as without virtual threads. `jdk.internal.util.ByteArray`, which
 `RandomAccessFile` and the data streams use to pack numbers, is the translator's own
-(`java/overlay/jdk/internal/util/ByteArray.java`), which shifts bytes where the JDK's uses
+(`java/patches/jdk/internal/util/ByteArray.java`), which shifts bytes where the JDK's uses
 `VarHandle` views, and the `JavaLangAccess` methods that the data streams call on
 `SharedSecrets` (`countPositives`, `countNonZeroAscii`, `uncheckedNewStringWithLatin1Bytes`,
 `inflateBytesToChars`, and `uncheckedNewStringOrThrow` and `uncheckedGetBytesOrThrow` for
@@ -908,7 +908,7 @@ and `end` does nothing, as without virtual threads. `jdk.internal.util.ByteArray
 (`java/overlay/jdk/internal/access/TranslatedLangAccess.java`).
 
 `java.nio.file` (`Files`, `Path`, `Paths`, directory streams, attributes) is the JDK's code over
-the translator's `sun.nio.fs.UnixNativeDispatcher` (`java/overlay/sun/nio/fs`), whose natives
+the translator's patch of `sun.nio.fs.UnixNativeDispatcher` (`java/patches/sun/nio/fs`), whose natives
 take paths as byte arrays, where the JDK's take addresses of native memory, and are `std::fs` and
 libc (`unix.rs`): `stat`, `lstat`, `fstat` (the attributes come back as an array of numbers that
 the translator's `UnixFileAttributes` copies), `open`, `close`, `mkdir`, `rmdir`, `unlink`,
@@ -937,7 +937,7 @@ The `jrt:` file system, through which javac reads the classes of the JDK, is the
 (`jdk.internal.jrtfs`) over the image file `lib/modules` of the JDK in `java.home`; it is among
 the installed providers (`FileSystemProvider.installedProviders`, which the JDK finds with a
 `ServiceLoader`, gives the default provider and the jrt one: `TranslatedFiles.java`). The
-translator's image reader (`java/overlay/jdk/internal/jimage/BasicImageReader.java`) reads the
+translator's image reader (`java/patches/jdk/internal/jimage/BasicImageReader.java`) reads the
 index of the image into an array once, and each resource into an array of its own, through a
 `FileChannel`, where the JDK's maps the file into memory. What differs from Java: a compressed
 image (`jlink --compress`) and a JDK of exploded modules, as it is built, throw
