@@ -393,13 +393,18 @@ impl<'a> Gen<'a> {
             self.enum_value(selector).text
         } else if selector.ty != Type::String {
             self.value(selector, selector.ty).typed()
+        } else if self.nullable(selector) && super::shared_strings() {
+            // The text of the `&JStr` that throws on null.
+            let option = format!("{}.as_ref()", self.expr(selector).at(ATOM));
+            format!("{}.as_str()", self.dereference(&[selector.id], &option))
         } else if self.nullable(selector) {
             // `deref` is a `&str` that throws on null.
             self.deref(selector)
         } else if let ExprKind::Var(name) = &selector.kind
             && self.borrowed.contains(name)
         {
-            self.local(name)
+            // A borrowed shared string is a `&JStr`.
+            if super::shared_strings() { format!("{}.as_str()", self.local(name)) } else { self.local(name) }
         } else if let ExprKind::Var(name) = &selector.kind {
             format!("{}.as_str()", self.local(name))
         } else {

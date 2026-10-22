@@ -335,6 +335,13 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
+            // A shared string is the object itself, which throws on null.
+            StringOp::Identity | StringOp::ToString | StringOp::Intern
+                if self.nullable(&args[0]) && super::shared_strings() =>
+            {
+                let option = self.expr(&args[0]).at(ATOM);
+                Code::atom(self.dereference(&[args[0].id], &option))
+            }
             StringOp::Identity | StringOp::ToString | StringOp::Intern if self.nullable(&args[0]) => {
                 Code::atom(format!("{}.to_string()", self.deref(&args[0])))
             }
