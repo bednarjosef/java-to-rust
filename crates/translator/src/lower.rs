@@ -414,6 +414,9 @@ struct Lowering<'t> {
     /// (see `Class::class_file`).
     static_qualifiers: RefCell<std::collections::HashMap<(String, Pos, String), Option<String>>>,
     calls: RefCell<std::collections::HashMap<(String, Pos, String), Option<CallName>>>,
+    /// The binary name of the anonymous class of the enum constant's body whose method is being
+    /// lowered (`constant_bodies`), which javac names that body's own methods by (`note_call`).
+    body_class: RefCell<Option<String>>,
     /// The atomic updates of fields through `Unsafe` that the code makes, each a method that
     /// lowering adds to the field's class (see `handles`).
     field_updates: RefCell<Vec<handles::FieldUpdateMethod>>,

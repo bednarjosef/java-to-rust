@@ -590,6 +590,11 @@ public class JavaTree {
         if (declaration && e instanceof TypeElement t && (e.getKind() == ElementKind.CLASS || e.getKind() == ElementKind.ENUM)) {
             inherits(t, out);
         }
+        // An anonymous class's binary name, which the class file names its methods by.
+        if (declaration && e instanceof TypeElement t && t.getNestingKind() == NestingKind.ANONYMOUS) {
+            out.append(",\"binary\":");
+            string(elements.getBinaryName(t).toString(), out);
+        }
         // The value of a constant variable, as text: javac's compile-time constant.
         if (e instanceof VariableElement v && v.getConstantValue() != null) {
             Object c = v.getConstantValue();
