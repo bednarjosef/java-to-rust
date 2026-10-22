@@ -187,7 +187,8 @@ impl<'a> Gen<'a> {
             }
             StringOp::Concat => {
                 let (a, b) = (self.text_ref(&args[0]), self.text_ref(&args[1]));
-                Code::atom(format!("[{a}, {b}].concat()"))
+                // Each side is `&String` or `&str` (`text_ref`), and an array holds one type.
+                Code::atom(format!("[{a} as &str, {b} as &str].concat()"))
             }
             StringOp::ToCharArray => {
                 let s = self.text_ref(&args[0]);

@@ -4,8 +4,8 @@
 use super::*;
 
 impl<'a> Gen<'a> {
-    /// A native of `Inflater`. `inflateBytesBytes` is an instance method, so its receiver is
-    /// `args[0]`; the runtime keeps the stream by its handle and does not need the receiver.
+    /// A native of `Inflater`. They are instance methods, but the receiver is not passed: `args[0]`
+    /// is the handle that `init` returned, which the runtime keeps the stream by.
     pub(super) fn inflate_native(&mut self, native: Native, args: &'a [Expr], id: ExprId) -> Code {
         match native {
             Native::InflateInit => {
@@ -25,27 +25,44 @@ impl<'a> Gen<'a> {
                 let addr = self.value(&args[0], Type::Long).text;
                 let dict = self.array_arg(&args[1], false);
                 let [off, len] = self.hoisted_ints(args, [2, 3]);
-                let call =
-                    format!("{}({addr}, {dict}, {off}, {len})", self.runtime("inflate_set_dictionary"));
-                if self.facts.raising.contains(&id) {
-                    Code::atom(self.passed_on(Code::atom(call)))
-                } else {
-                    let throw = self.runtime("throw_exception");
-                    Code::atom(format!("{call}.unwrap_or_else(|e| {throw}(e))"))
-                }
+                let f = self.runtime("inflate_set_dictionary");
+                self.dictionary(id, format!("{f}({addr}, {dict}, {off}, {len})"))
+            }
+            Native::InflateSetDictionaryBuffer => {
+                let addr = self.value(&args[0], Type::Long).text;
+                let buffer = self.value(&args[1], Type::Long).text;
+                let [len] = self.hoisted_ints(args, [2]);
+                let f = self.runtime("inflate_set_dictionary_buffer");
+                self.dictionary(id, format!("{f}({addr}, {buffer}, {len})"))
             }
             Native::InflateBytes => {
                 let addr = self.value(&args[0], Type::Long).text;
                 let [in_off, in_len, out_off, out_len] = self.hoisted_ints(args, [2, 3, 5, 6]);
-                // The input is copied: the output may be the same array, which cannot be borrowed
-                // twice.
-                let source = self.slice_of(&args[1]);
-                let input = self.temp("input");
-                self.line(&format!(
-                    "let {input} = ({source})[{in_off} as usize..({in_off} + {in_len}) as usize].to_vec();"
-                ));
+                let input = self.input_copy(&args[1], &in_off, &in_len);
                 let output = self.array_arg(&args[4], true);
                 self.fallible(id, "inflate_bytes", vec![addr, format!("&{input}"), output, out_off, out_len])
+            }
+            Native::InflateBytesBuffer => {
+                let addr = self.value(&args[0], Type::Long).text;
+                let [in_off, in_len] = self.hoisted_ints(args, [2, 3]);
+                let input = self.input_copy(&args[1], &in_off, &in_len);
+                let output = self.value(&args[4], Type::Long).text;
+                let [out_len] = self.hoisted_ints(args, [5]);
+                self.fallible(id, "inflate_bytes_buffer", vec![addr, format!("&{input}"), output, out_len])
+            }
+            Native::InflateBufferBytes => {
+                let addr = self.value(&args[0], Type::Long).text;
+                let input = self.value(&args[1], Type::Long).text;
+                let [in_len, out_off, out_len] = self.hoisted_ints(args, [2, 4, 5]);
+                let output = self.array_arg(&args[3], true);
+                self.fallible(id, "inflate_buffer_bytes", vec![addr, input, in_len, output, out_off, out_len])
+            }
+            Native::InflateBufferBuffer => {
+                let addr = self.value(&args[0], Type::Long).text;
+                let input = self.value(&args[1], Type::Long).text;
+                let [in_len, out_len] = self.hoisted_ints(args, [2, 4]);
+                let output = self.value(&args[3], Type::Long).text;
+                self.fallible(id, "inflate_buffer_buffer", vec![addr, input, in_len, output, out_len])
             }
             _ => unreachable!("not a native of java.util.zip.Inflater: {native:?}"),
         }
@@ -53,5 +70,24 @@ impl<'a> Gen<'a> {
 
     fn runtime_call(&mut self, f: &str, args: Vec<String>) -> Code {
         Code::atom(format!("{}({})", self.runtime(f), args.join(", ")))
+    }
+
+    /// The input bytes of `inflateBytesBytes` or `inflateBytesBuffer`, copied into a temporary,
+    /// which it returns: the output may be the same array, which cannot be borrowed twice.
+    fn input_copy(&mut self, input: &'a Expr, off: &str, len: &str) -> String {
+        let source = self.slice_of(input);
+        let copy = self.temp("input");
+        self.line(&format!("let {copy} = ({source})[{off} as usize..({off} + {len}) as usize].to_vec();"));
+        copy
+    }
+
+    /// `setDictionary` and its buffer form: the runtime's `Result` is raised as an
+    /// `IllegalArgumentException` where a `catch` may see it (`Facts::raising`), else uncaught.
+    fn dictionary(&mut self, id: ExprId, call: String) -> Code {
+        if self.facts.raising.contains(&id) {
+            return Code::atom(self.passed_on(Code::atom(call)));
+        }
+        let throw = self.runtime("throw_exception");
+        Code::atom(format!("{call}.unwrap_or_else(|e| {throw}(e))"))
     }
 }

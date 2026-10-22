@@ -228,18 +228,48 @@ pub enum Native {
     NoPendingReferences,
     /// `SecureRandom.getSeed(numBytes)`: seed bytes from the operating system (`random.rs`).
     SecureSeed,
-    /// `Inflater`'s natives (`inflate.rs`): `init(nowrap)`, then `inflateBytesBytes`, `getAdler`,
-    /// `reset`, `end` and `setDictionary` on the handle that `init` returned.
+    /// `Inflater`'s natives (`inflate.rs`): `init(nowrap)`, then `inflateBytesBytes` and its buffer
+    /// forms (`inflateBytesBuffer`, `inflateBufferBytes`, `inflateBufferBuffer`), `getAdler`,
+    /// `reset`, `end`, and `setDictionary` with its buffer form, on the handle that `init` returned.
     InflateInit,
     InflateBytes,
+    InflateBytesBuffer,
+    InflateBufferBytes,
+    InflateBufferBuffer,
     InflateAdler,
     InflateReset,
     InflateEnd,
     InflateSetDictionary,
+    InflateSetDictionaryBuffer,
     /// `TimeZone.getSystemTimeZoneID(javaHome)`: the zone's name, or `null` (`time_zone.rs`).
     SystemTimeZoneId,
     /// `TimeZone.getSystemGMTOffsetID()`: the local offset from UTC as `GMT+hh:mm`.
     SystemGmtOffsetId,
+}
+
+impl Native {
+    /// A native of `java.io`'s streams, `FileDescriptor` or `UnixFileSystem`.
+    pub fn is_java_io(self) -> bool {
+        matches!(
+            self,
+            Native::FileOpenRead
+                | Native::FileOpenWrite
+                | Native::FileOpenRandom
+                | Native::FileRead
+                | Native::FileReadBytes
+                | Native::FileAvailable
+                | Native::FileSkip
+                | Native::FileClose
+                | Native::FileWrite
+                | Native::FileWriteBytes
+                | Native::FileIsRegular
+                | Native::FileLength
+                | Native::FilePosition
+                | Native::FileSeek
+                | Native::FileSetLength
+                | Native::FileSystem(_)
+        )
+    }
 }
 
 /// The native methods of translated JDK classes that the runtime implements and whose calls
@@ -307,11 +337,23 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long") => {
             Native::InflateBytes
         }
+        ("java.util.zip.Inflater", "inflateBytesBuffer", "(long,byte[],int,int,long,int)long") => {
+            Native::InflateBytesBuffer
+        }
+        ("java.util.zip.Inflater", "inflateBufferBytes", "(long,long,int,byte[],int,int)long") => {
+            Native::InflateBufferBytes
+        }
+        ("java.util.zip.Inflater", "inflateBufferBuffer", "(long,long,int,long,int)long") => {
+            Native::InflateBufferBuffer
+        }
         ("java.util.zip.Inflater", "getAdler", "(long)int") => Native::InflateAdler,
         ("java.util.zip.Inflater", "reset", "(long)void") => Native::InflateReset,
         ("java.util.zip.Inflater", "end", "(long)void") => Native::InflateEnd,
         ("java.util.zip.Inflater", "setDictionary", "(long,byte[],int,int)void") => {
             Native::InflateSetDictionary
+        }
+        ("java.util.zip.Inflater", "setDictionaryBuffer", "(long,long,int)void") => {
+            Native::InflateSetDictionaryBuffer
         }
         ("java.lang.ref.Reference", "hasReferencePendingList", "()boolean") => Native::NoPendingReferences,
         ("java.lang.Thread", "nextThreadNum", "()int") => Native::ThreadNumber,
@@ -539,6 +581,22 @@ mod tests {
         assert_eq!(
             found("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long"),
             Some(Native::InflateBytes)
+        );
+        assert_eq!(
+            found("java.util.zip.Inflater", "inflateBytesBuffer", "(long,byte[],int,int,long,int)long"),
+            Some(Native::InflateBytesBuffer)
+        );
+        assert_eq!(
+            found("java.util.zip.Inflater", "inflateBufferBytes", "(long,long,int,byte[],int,int)long"),
+            Some(Native::InflateBufferBytes)
+        );
+        assert_eq!(
+            found("java.util.zip.Inflater", "inflateBufferBuffer", "(long,long,int,long,int)long"),
+            Some(Native::InflateBufferBuffer)
+        );
+        assert_eq!(
+            found("java.util.zip.Inflater", "setDictionaryBuffer", "(long,long,int)void"),
+            Some(Native::InflateSetDictionaryBuffer)
         );
         // Another overload, or another class's method of the same name, is not the native.
         assert_eq!(found("java.util.zip.CRC32", "update", "(byte[],int,int)void"), None);

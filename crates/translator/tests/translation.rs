@@ -3599,6 +3599,9 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             static { initialize(); }
             private static native void initialize();
             public static native long getNanoTimeAdjustment(long offsetInSeconds);
+            // The translator's patch replaces it (java/patches/jdk/internal/misc/VM.java), so the
+            // stand-in has it too.
+            public static native String[] getRuntimeArguments();
         }",
     ),
     (
