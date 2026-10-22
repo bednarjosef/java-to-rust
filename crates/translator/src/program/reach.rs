@@ -188,8 +188,13 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
 /// `Arrays.copyOf` and `Collection.toArray` need of it, not reflection. `Modifier` tests the bits
 /// of a member's modifiers. `Method`, `Field` and `Constructor` are the translator's own, over the
 /// reflection table (`reflection.rs`), and so is `InvocationTargetException`, which wraps the
-/// exceptions of what they call (`java/Standard.java`).
+/// exceptions of what they call (`java/Standard.java`). `TypeDescriptor` is the interface of
+/// descriptors that `java.lang.constant`'s `ClassDesc` and `MethodTypeDesc` implement, plain
+/// methods over the descriptor strings.
 pub const TRANSLATED_ANYWAY: &[&str] = &[
+    "java.lang.invoke.TypeDescriptor",
+    "java.lang.invoke.TypeDescriptor.OfField",
+    "java.lang.invoke.TypeDescriptor.OfMethod",
     "java.lang.reflect.Array",
     "java.lang.reflect.InvocationTargetException",
     "java.lang.reflect.Modifier",
