@@ -538,7 +538,8 @@ argument that is another enum's constant or a static method's result, as the JDK
 `fOfConstants` indexed by ordinal, the constructor is a function `init_shape_constant(ordinal, ..)` (for an enum `Shape`)
 that fills a constant's row, and the enum's static initialization builds every constant, in
 order, before its other static initializers (an exception there is Java's
-`ExceptionInInitializerError`). A read of `e.f` is `fOfConstants[e.ordinal()]`, and the enum's
+`ExceptionInInitializerError`, and where a `catch` observes it, the first use throws it and
+every later use `NoClassDefFoundError`, as for any static initializer). A read of `e.f` is `fOfConstants[e.ordinal()]`, and the enum's
 methods initialize it first. Unlike Java, using a constant (`Shape.SQUARE`, `values()`, a
 `switch`) does not initialize the enum by itself; reading its fields or calling its methods does.
 
