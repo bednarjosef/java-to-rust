@@ -242,6 +242,31 @@ pub enum Native {
     SystemGmtOffsetId,
 }
 
+impl Native {
+    /// A native of `java.io`'s streams, `FileDescriptor` or `UnixFileSystem`.
+    pub fn is_java_io(self) -> bool {
+        matches!(
+            self,
+            Native::FileOpenRead
+                | Native::FileOpenWrite
+                | Native::FileOpenRandom
+                | Native::FileRead
+                | Native::FileReadBytes
+                | Native::FileAvailable
+                | Native::FileSkip
+                | Native::FileClose
+                | Native::FileWrite
+                | Native::FileWriteBytes
+                | Native::FileIsRegular
+                | Native::FileLength
+                | Native::FilePosition
+                | Native::FileSeek
+                | Native::FileSetLength
+                | Native::FileSystem(_)
+        )
+    }
+}
+
 /// The native methods of translated JDK classes that the runtime implements and whose calls
 /// become a `Native` of their arguments as they are, by class, name and javac's signature. (The
 /// stream natives of `java.io`, which take their object's descriptor, are lowered on their own.)
