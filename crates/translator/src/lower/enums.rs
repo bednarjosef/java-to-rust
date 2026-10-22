@@ -5,6 +5,7 @@
 //! assigned elsewhere, `null` enum values) is rejected.
 
 use super::*;
+use std::collections::HashMap;
 
 /// Whether a member is one of an enum's constants (`RED`, `PLANET(3.0)`).
 pub(super) fn is_enum_constant(node: Node) -> bool {
@@ -154,7 +155,12 @@ impl<'t> Lowering<'t> {
     }
 
     /// Checks an enum's members and constructors against what the translation supports.
-    pub(super) fn check_enum(&self, index: usize, methods: &[Method]) -> Result<(), Error> {
+    pub(super) fn check_enum(
+        &self,
+        index: usize,
+        methods: &[Method],
+        writes: &mut EnumFieldWrites,
+    ) -> Result<(), Error> {
         // A census's stub of a constructor sets no field: the enum keeps its fields in tables.
         let stubs = self.stubbed.borrow();
         if let Some(&stub) =
@@ -164,26 +170,8 @@ impl<'t> Lowering<'t> {
         }
         let ty = Type::enum_type(&self.types[index].name);
         // A field that is not final is still one value per constant if only the constructor sets it.
-        for m in methods.iter().filter(|m| !(m.is_ctor && m.class == index)) {
-            let mut assigned = None;
-            for stmt in &m.body {
-                visit_stmt(
-                    stmt,
-                    &mut |e| {
-                        visit_expr(e, &mut |x| match &x.kind {
-                            ExprKind::Assign { target: Place::Field { object, .. }, .. }
-                            | ExprKind::IncDec { target: Place::Field { object, .. }, .. }
-                                if object.ty == ty =>
-                            {
-                                assigned = assigned.or(Some(x.pos));
-                            }
-                            _ => {}
-                        })
-                    },
-                    &mut |_| {},
-                );
-            }
-            if let Some(pos) = assigned {
+        for m in (0..methods.len()).filter(|&m| !(methods[m].is_ctor && methods[m].class == index)) {
+            if let Some(pos) = writes.first(methods, m, ty) {
                 return error(pos, "assigning an enum field outside its constructor not supported yet");
             }
         }
@@ -378,4 +366,55 @@ pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
         Some(pos) => error(pos, "null enums not supported yet"),
         None => Ok(()),
     }
+}
+
+/// For each method, where it first assigns a field through a value of each enum type, worked out
+/// once for the method instead of once for every enum that `check_enum` checks.
+#[derive(Default)]
+pub(super) struct EnumFieldWrites {
+    of: Vec<Option<HashMap<Type, Pos>>>,
+}
+
+impl EnumFieldWrites {
+    /// Where method `m` first assigns a field through a value of type `ty`.
+    fn first(&mut self, methods: &[Method], m: usize, ty: Type) -> Option<Pos> {
+        if self.of.len() <= m {
+            self.of.resize(m + 1, None);
+        }
+        let pos = self.of[m].get_or_insert_with(|| field_writes(&methods[m])).get(&ty).copied();
+        debug_assert_eq!(pos, field_writes(&methods[m]).get(&ty).copied(), "a method changed unnoticed");
+        pos
+    }
+
+    /// Forgets what the methods of class `class` assign, as they changed.
+    pub(super) fn forget(&mut self, methods: &[Method], class: usize) {
+        for (m, writes) in self.of.iter_mut().enumerate() {
+            if methods.get(m).is_some_and(|method| method.class == class) {
+                *writes = None;
+            }
+        }
+    }
+}
+
+/// Where `method` first assigns a field through a value of each enum type.
+fn field_writes(method: &Method) -> HashMap<Type, Pos> {
+    let mut first = HashMap::new();
+    for stmt in &method.body {
+        visit_stmt(
+            stmt,
+            &mut |e| {
+                visit_expr(e, &mut |x| match &x.kind {
+                    ExprKind::Assign { target: Place::Field { object, .. }, .. }
+                    | ExprKind::IncDec { target: Place::Field { object, .. }, .. }
+                        if matches!(object.ty, Type::Enum(_)) =>
+                    {
+                        first.entry(object.ty).or_insert(x.pos);
+                    }
+                    _ => {}
+                })
+            },
+            &mut |_| {},
+        );
+    }
+    first
 }
