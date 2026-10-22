@@ -30,6 +30,8 @@ mod exact;
 mod exception;
 mod fd;
 pub mod fdlibm;
+mod file_channel;
+mod file_channels;
 mod float;
 mod float_parse;
 pub mod format;
@@ -81,6 +83,8 @@ pub use code_point_chars::*;
 pub use exact::*;
 pub use exception::*;
 pub use fd::*;
+pub use file_channel::*;
+pub use file_channels::*;
 pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
 pub use format::{Arg, format, format_objects, print_format, print_format_objects};
@@ -103,7 +107,10 @@ pub use monitor::*;
 pub use native_memory::*;
 pub use natives::*;
 pub use net::*;
-pub use null::{Handle, OrNull, non_null, or_null, same, try_non_null, try_non_null_message};
+pub use null::{
+    Handle, OrNull, SameObject, non_null, or_null, same, same_object, try_non_null, try_non_null_message,
+    unkept_identity,
+};
 pub use out::{
     Out, drain_stdout, eprint_chars, eprintln_chars, err, err_flush, flush, out, print_chars, println_chars,
     standard_close, standard_flush, standard_write, standard_write_bytes, write_byte,

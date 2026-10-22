@@ -125,7 +125,9 @@ never freed.
 - An object parameter that a method only uses (fields, calls, comparison, printing) is a
   borrowed `&Rc<..>`. Methods of shared classes borrow their object
   (`p.borrow_mut().set(2)`) when nothing they run can reach the object another way.
-- `==` on objects is identity: `Rc::ptr_eq`, or `java::same` where either side may be null.
+- `==` on objects is identity: `Rc::ptr_eq`, or `java::same` where either side may be null. Two
+  `Object`s that may both be strings or boxes are compared at run time, and equal ones end the
+  program, as the translation does not keep their identity.
 - `super.clone()` of `Object` is a shallow copy of the runtime class, a `match` on the variant in
   a class tree; a class that is not `Cloneable` throws `CloneNotSupportedException`. `clone` of
   an object other than `this` is rejected.

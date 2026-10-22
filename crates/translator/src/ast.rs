@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{LazyLock, Mutex};
 
+mod channels;
 mod charsets;
 mod code_point;
 mod counting;
@@ -13,6 +14,7 @@ mod java_arrays;
 mod natives;
 mod strings;
 mod unsigned;
+pub use channels::*;
 pub use charsets::*;
 pub use code_point::*;
 pub use counting::*;
