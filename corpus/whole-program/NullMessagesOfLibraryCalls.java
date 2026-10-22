@@ -1,8 +1,11 @@
 // The messages of the NullPointerExceptions of calls that the translation writes itself: toString
 // of an Object or an interface, an enum's own methods, case in a null locale (the JDK's code
-// throws one without a message), a String of null code points and EnumSet.of a null.
+// throws one without a message), a String of null code points, EnumSet.of a null, and the JDK's
+// call on a value of a type variable (`K extends Comparable`), named by the variable's bound.
+import java.util.AbstractMap;
 import java.util.EnumSet;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 public class NullMessagesOfLibraryCalls {
@@ -43,7 +46,9 @@ public class NullMessagesOfLibraryCalls {
                 case 5 -> System.out.println("Abc".toUpperCase(locale(which)));
                 case 6 -> System.out.println(new String(points(which), 0, 1));
                 case 7 -> System.out.println(EnumSet.of(TimeUnit.SECONDS, (TimeUnit) null));
-                default -> System.out.println(color(which).compareTo(Color.RED));
+                case 8 -> System.out.println(color(which).compareTo(Color.RED));
+                default -> System.out.println(Map.Entry.<String, Integer>comparingByKey()
+                        .compare(new AbstractMap.SimpleEntry<>(null, 1), new AbstractMap.SimpleEntry<>("a", 2)));
             }
         } catch (NullPointerException e) {
             System.out.println(which + ": " + e.getMessage());
@@ -51,7 +56,7 @@ public class NullMessagesOfLibraryCalls {
     }
 
     public static void main(String[] args) {
-        for (int i = 0; i < 9; i++) {
+        for (int i = 0; i < 10; i++) {
             run(i);
         }
     }

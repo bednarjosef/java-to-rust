@@ -149,7 +149,8 @@ pub fn jdk_temps(trees: &[&Value]) -> JdkTemps {
 /// `switch`'s two. Each of javac's own is declared before the expression that it holds runs, as
 /// a variable is. A `switch` expression's string is in the next slot whatever is on the stack
 /// (javac declares it in a `LetExpr` around the `switch`). A `switch` in code whose slots this
-/// does not follow is left out: in a constructor, initializer or lambda, in a `finally` block or
+/// does not follow is left out: in a constructor that javac gives parameters of its own (an
+/// enum's, or an inner, local or anonymous class's), an initializer or a lambda, in a `finally` block or
 /// a try-with-resources, in a method with patterns, in an expression whose own temps javac
 /// declares (a compound assignment, an increment), and in the cases of a `switch` expression
 /// with a `try`, whose stack javac keeps in variables.
@@ -158,18 +159,20 @@ fn unit_temps(unit: &Value) -> JdkTemps {
     for class in unit["typeDecls"].as_array().into_iter().flatten() {
         let Some(name) = class["symbol"]["type"].as_str() else { continue };
         let outermost = name.split('<').next().unwrap_or_default().to_string();
-        classes(class, &outermost, &mut out);
+        let plain = class["kind"].as_str() != Some("ENUM");
+        classes(class, &outermost, plain, &mut out);
     }
     out
 }
 
-/// The temps of the methods of `class` and of the classes in it.
-fn classes(class: &Value, outermost: &str, out: &mut JdkTemps) {
+/// The temps of the methods of `class` and of the classes in it; of its constructors too where
+/// they are `plain`, with no parameters of javac's own.
+fn classes(class: &Value, outermost: &str, plain: bool, out: &mut JdkTemps) {
     for member in class["members"].as_array().into_iter().flatten() {
         match member["kind"].as_str() {
             Some("METHOD") => {
                 let symbol = &member["symbol"];
-                if member["name"].as_str() == Some("<init>") || has_patterns(&member["body"]) {
+                if member["name"].as_str() == Some("<init>") && !plain || has_patterns(&member["body"]) {
                     continue;
                 }
                 let mut slots = SwitchSlots { outermost, out: &mut *out, next: 0 };
@@ -181,7 +184,10 @@ fn classes(class: &Value, outermost: &str, out: &mut JdkTemps) {
                 }
                 slots.statement(&member["body"]);
             }
-            Some("CLASS" | "INTERFACE" | "ENUM" | "RECORD") => classes(member, outermost, out),
+            Some(kind @ ("CLASS" | "INTERFACE" | "ENUM" | "RECORD")) => {
+                let plain = kind != "ENUM" && member["symbol"]["static"].as_bool() == Some(true);
+                classes(member, outermost, plain, out)
+            }
             _ => {}
         }
     }
@@ -194,7 +200,7 @@ fn nested_classes(v: &Value, outermost: &str, out: &mut JdkTemps, top: bool) {
     match v {
         Value::Object(fields) => {
             if !top && matches!(v["kind"].as_str(), Some("CLASS" | "INTERFACE" | "ENUM" | "RECORD")) {
-                return classes(v, outermost, out);
+                return classes(v, outermost, false, out);
             }
             for (key, value) in fields {
                 if top && key == "members" {

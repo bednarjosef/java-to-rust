@@ -369,7 +369,17 @@ impl<'t> Lowering<'t> {
                         && !receiver.contains([' ', '&', '?'])
                         && !receiver.starts_with("capture")
                         && !receiver.ends_with(']');
-                    (named && class).then(|| receiver.to_string())
+                    // A type variable, by its erasure where that is the method's class (elsewhere
+                    // javac may cast the receiver to another class first).
+                    let var = !receiver.is_empty()
+                        && receiver.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+                    match (named, class, var) {
+                        (true, true, _) => Some(receiver.to_string()),
+                        (true, false, true) => self
+                            .var_erasure_name(receiver, self.current.get(), self.method_ctx.get())
+                            .filter(|erasure| erasure == symbol.owner),
+                        _ => None,
+                    }
                 }),
                 // A method of an enum constant's body, which javac gives no owner
                 // (`constant_body_call`), by the body's anonymous class.
@@ -383,13 +393,19 @@ impl<'t> Lowering<'t> {
             self.types[m.owner].javac == symbol.owner && m.name == symbol.name && m.sig == symbol.ty
         });
         let param = |ty: &str| {
-            erased(ty).or_else(|| {
-                let m = callee?;
-                let var = ty.trim_end_matches("...").trim_end_matches("[]");
-                let dims = ty[var.len()..].matches("[]").count() + usize::from(ty.ends_with("..."));
-                let erasure = self.var_erasure_name(var, self.methods[m].owner, Some(m))?;
-                Some(erasure + &"[]".repeat(dims))
-            })
+            erased(ty)
+                .or_else(|| {
+                    let m = callee?;
+                    let var = ty.trim_end_matches("...").trim_end_matches("[]");
+                    let dims = ty[var.len()..].matches("[]").count() + usize::from(ty.ends_with("..."));
+                    let erasure = self.var_erasure_name(var, self.methods[m].owner, Some(m))?;
+                    Some(erasure + &"[]".repeat(dims))
+                })
+                // `Enum<E extends Enum<E>>` is the translator's own class, whose methods lowering
+                // does not have: its `compareTo(E)` is `compareTo(java.lang.Enum)`.
+                .or_else(|| {
+                    (symbol.owner == "java.lang.Enum" && ty == "E").then(|| "java.lang.Enum".to_string())
+                })
         };
         let params =
             method_params(symbol.ty).and_then(|p| p.iter().map(|t| param(t)).collect::<Option<Vec<_>>>());
