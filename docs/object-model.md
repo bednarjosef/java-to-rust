@@ -62,9 +62,13 @@ enum, `Rep::Enum`) and `Home` (where a method's body is emitted: a class's `impl
 struct, an enum, a free function, or nowhere for an abstract method).
 
 `codegen/dispatch.rs` writes the enums. Each item of an enum (`base()`, `base_mut()`, a
-dispatcher, a body on the enum, a `to_x()` or `as_x()` conversion, `Display`) is a `Need`, and
-is written only when some code uses it: the generator writes the program again with the items
-asked for until no new one is asked for (two or three passes), so an enum has no dead code.
+dispatcher, a body on the enum, a `to_x()` or `as_x()` conversion, `Display`, and the methods
+that answer for the object's class: `runtime_class()`, `runtime_class_name()`,
+`runtime_type_names()` and `object_identity_hash()`) is a `Need`, and is written only when some
+code uses it: the generator writes the program again with the items asked for until no new one
+is asked for (two or three passes), so an enum has no dead code. A `match` over every variant is
+written once, in such a method, and not at each use: `Object`'s enum has a variant for every
+class whose objects the program creates (javac's has thousands).
 
 Terms:
 
@@ -102,7 +106,9 @@ Naming:
 - A variant is named after its class's simple name (`Shape::Circle`), with the outer classes'
   names when two variants of one enum would share one. Runtime variants are `String`,
   `Integer`, ..., `IntArray`, `StringBuilder` and so on.
-- Accessors are `base()` and `base_mut()`; conversions `to_<type>()` and `as_<type>()`.
+- Accessors are `base()` and `base_mut()`; conversions `to_<type>()` and `as_<type>()`. A Java
+  method whose name would be `base`, `base_mut`, `clone` or one of the class methods above gets
+  a suffix (`base_2`, `clone_2`).
 - An inherited body that a subclass overrides is emitted under `<m>_in_<declaring class>`
   (`to_string_in_shape`, `withdraw_in_account`) so that `super` calls reach it; a method that
   nothing below overrides keeps its own name.

@@ -42,6 +42,15 @@ pub(super) enum Need {
     /// `as_<t>()` on the enum of `s`: the object as a value of type `t` if it is one, as
     /// `(s, t)`.
     Narrow(usize, usize),
+    /// `runtime_class()`: the `java::Class` of the object's class (see `class_values`).
+    RuntimeClass(usize),
+    /// `runtime_class_name()`: the binary name of the object's class.
+    RuntimeClassName(usize),
+    /// `runtime_type_names()`: the binary names of the object's class and of every class and
+    /// interface above it (see `class_values::instance_names`).
+    RuntimeTypeNames(usize),
+    /// `object_identity_hash()`: `System.identityHashCode` of the object.
+    IdentityHash(usize),
 }
 
 /// How a value of one class type becomes a value of another, in a cast or an `instanceof`.
@@ -60,7 +69,14 @@ impl<'a> Gen<'a> {
     pub(super) fn need(&self, need: Need) {
         let mut needs = self.needs.borrow_mut();
         match need {
-            Need::Base(t) | Need::BaseMut(t) | Need::Dispatch(t, _) | Need::Display(t) => {
+            Need::Base(t)
+            | Need::BaseMut(t)
+            | Need::Dispatch(t, _)
+            | Need::Display(t)
+            | Need::RuntimeClass(t)
+            | Need::RuntimeClassName(t)
+            | Need::RuntimeTypeNames(t)
+            | Need::IdentityHash(t) => {
                 needs.insert(Need::Enum(t));
             }
             Need::NullableText(t) => {
@@ -1059,6 +1075,7 @@ impl<'a> Gen<'a> {
         if self.wanted.contains(&Need::NullableText(t)) {
             self.nullable_text_impl(t, &variants);
         }
+        self.class_value_impls(t, &variants);
         self.raised_impl(t);
         self.chain_enum_items(t, &variants);
     }
@@ -1965,6 +1982,41 @@ impl<'a> Gen<'a> {
         });
         self.indent -= 1;
         self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// The methods of the enum of `t` that answer for the object's class, each written once here
+    /// rather than as a `match` over every variant wherever it is used: `Object`'s enum has a
+    /// variant for every class that the program creates, and javac's has thousands.
+    fn class_value_impls(&mut self, t: usize, variants: &[usize]) {
+        let wanted = |need: Need| self.wanted.contains(&need);
+        let methods = [
+            (Need::RuntimeClass(t), "runtime_class", "java::Class"),
+            (Need::RuntimeClassName(t), "runtime_class_name", "&'static str"),
+            (Need::RuntimeTypeNames(t), "runtime_type_names", "&'static [&'static str]"),
+            (Need::IdentityHash(t), "object_identity_hash", "i32"),
+        ];
+        let methods: Vec<_> = methods.into_iter().filter(|&(need, ..)| wanted(need)).collect();
+        if methods.is_empty() {
+            return;
+        }
+        let name = struct_name(&self.class.types[t].name);
+        self.gap();
+        self.line(&format!("impl {name} {{"));
+        self.indent += 1;
+        for (need, method, ret) in methods {
+            self.line(&format!("pub(crate) fn {method}(&self) -> {ret} {{"));
+            self.indent += 1;
+            self.match_arms(t, variants, &|g: &mut Self, c| match need {
+                Need::RuntimeClass(_) => (g.decl_class(c), false),
+                Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
+                Need::RuntimeTypeNames(_) => (g.names_list(c), false),
+                _ => (g.value_hash(c, "o"), true),
+            });
+            self.indent -= 1;
+            self.line("}");
+        }
         self.indent -= 1;
         self.line("}");
     }
