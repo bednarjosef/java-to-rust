@@ -570,7 +570,7 @@ fn erased(ty: &str) -> Option<String> {
         Some(element) => (element, true),
         None => (ty, false),
     };
-    let base = ty.split('<').next().unwrap_or(ty);
+    let base = ty.split('<').next().unwrap_or(ty).trim_end_matches("[]");
     let rest = &ty[base.len()..];
     let rest = rest.rsplit_once('>').map_or(rest, |(_, after)| after);
     let dims = rest.matches("[]").count() + usize::from(varargs);

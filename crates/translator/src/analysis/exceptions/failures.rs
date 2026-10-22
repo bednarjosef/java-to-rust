@@ -757,8 +757,10 @@ pub(super) fn runtime_failures(
                         | Builtin::ArraysToString
                         | Builtin::Arrays(ArraysOp::Equals | ArraysOp::HashCode | ArraysOp::DeepToString)
                         | Builtin::Boxed(BoxedOp::Equals, _)
-                        // A null string is the `NumberFormatException` of `parse_radix`.
+                        // A null string is the `NumberFormatException` of `parse_radix` and
+                        // `parse_unsigned`.
                         | Builtin::Bits(BitsOp::ParseRadix, _)
+                        | Builtin::Unsigned(UnsignedOp::Parse, _)
                         | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported | CharsetOp::Equals)
                         | Builtin::Native(Native::SystemIdentityHash)
                         // The expected and the new element of an atomic update may be null.
