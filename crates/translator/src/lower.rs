@@ -621,6 +621,22 @@ impl<'t> Lowering<'t> {
             let (first, last) = self.synthetic_params(info.owner)?;
             first.into_iter().chain(params).chain(last).collect()
         } else if is_ctor {
+            // A declared parameter named as the enclosing instance's (an anonymous
+            // `new ClassType(outer, ..) { .. }` takes its superclass's parameter names) is renamed.
+            let mut params = params;
+            if self.nesting(info.owner).is_some_and(|n| n.outer)
+                && let Some(p) = params.iter_mut().find(|p| p.name == inner::OUTER)
+            {
+                let renamed = format!("{}_arg", inner::OUTER);
+                p.name = renamed.clone();
+                for stmt in &mut body {
+                    enum_tables::rewrite_stmt(stmt, &mut |e| {
+                        if matches!(&e.kind, ExprKind::Var(v) if v == inner::OUTER) {
+                            e.kind = ExprKind::Var(renamed.clone());
+                        }
+                    });
+                }
+            }
             self.constructor_prologue(node, info.owner, &mut body)?;
             self.run_initializer_blocks(info.owner, &mut body)?;
             self.start_constructor(info.owner, &mut body)?;
