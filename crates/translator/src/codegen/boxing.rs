@@ -141,7 +141,8 @@ impl<'a> Gen<'a> {
                 } else {
                     format!("Some({})", self.str_ref(&args[0]))
                 };
-                let function = if matches!(kind, Type::Short | Type::Byte) { "decode_small" } else { "decode" };
+                let function =
+                    if matches!(kind, Type::Short | Type::Byte) { "decode_small" } else { "decode" };
                 let code = self.may_fail(id, function, &format!("::<{}>", rust_type(kind)), &text);
                 self.box_code_if_boxed(code, kind, ty)
             }

@@ -219,7 +219,10 @@ mod tests {
             ("08", "For input string: \"8\" under radix 8"),
             ("0x80000000", "For input string: \"80000000\" under radix 16"),
         ] {
-            assert_eq!(message(try_decode::<i32>(Some(bad))), format!("java.lang.NumberFormatException: {text}"));
+            assert_eq!(
+                message(try_decode::<i32>(Some(bad))),
+                format!("java.lang.NumberFormatException: {text}")
+            );
         }
         assert_eq!(
             message(try_decode_small::<i16>(Some("-0x80000000"))),

@@ -257,7 +257,9 @@ impl<'t> Lowering<'t> {
                     );
                 };
                 if let Some(key) = self.constant_text(node.list("arguments").next()) {
-                    return Ok(Some(properties.get(&key).map_or(ExprKind::Null, |v| ExprKind::Str(v.clone()))));
+                    return Ok(Some(
+                        properties.get(&key).map_or(ExprKind::Null, |v| ExprKind::Str(v.clone())),
+                    ));
                 }
                 let pos = node.pos();
                 let mut keys: Vec<&String> = properties.keys().collect();
@@ -266,7 +268,8 @@ impl<'t> Lowering<'t> {
                 for key in keys {
                     let label = self.synth(ExprKind::Str(key.clone()), pos, Type::String);
                     let value = self.synth(ExprKind::Str(properties[key].clone()), pos, Type::String);
-                    cases.push(Case { labels: vec![CaseLabel::Value(label)], body: vec![Stmt::Yield(value)] });
+                    cases
+                        .push(Case { labels: vec![CaseLabel::Value(label)], body: vec![Stmt::Yield(value)] });
                 }
                 let null = self.synth(ExprKind::Null, pos, Type::Null);
                 cases.push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Yield(null)] });
@@ -371,12 +374,18 @@ impl<'t> Lowering<'t> {
     /// key is.
     fn computed_property(&self, node: Node<'t>, args: &mut [Expr]) -> Result<ExprKind, Error> {
         let Some(jdk) = jdk_properties() else {
-            return unsupported(node, "`System.getProperty` without a `java` on the path to read the JDK's values from");
+            return unsupported(
+                node,
+                "`System.getProperty` without a `java` on the path to read the JDK's values from",
+            );
         };
         if let Some(default) = args.get(1)
             && !matches!(default.kind, ExprKind::Str(_) | ExprKind::Null | ExprKind::Var(_))
         {
-            return unsupported(node, "a default of `System.getProperty` that is not a literal or a variable");
+            return unsupported(
+                node,
+                "a default of `System.getProperty` that is not a literal or a variable",
+            );
         }
         let pos = node.pos();
         let mut keys: Vec<&str> = jdk.keys().map(String::as_str).chain(KEYS.iter().copied()).collect();
