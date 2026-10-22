@@ -109,9 +109,13 @@ impl<'a> Gen<'a> {
                 let kind = if has_continue(body) { Loop::DoWhile(cond) } else { Loop::Plain };
                 self.line("loop {");
                 self.loop_body(kind, body, &[]);
-                self.indent += 1;
-                self.exit_unless(cond);
-                self.indent -= 1;
+                // `while (true)` never leaves, so the loop is an expression of any type, as
+                // Rust's `loop` without a `break` is.
+                if !matches!(cond.kind, ExprKind::Bool(true)) {
+                    self.indent += 1;
+                    self.exit_unless(cond);
+                    self.indent -= 1;
+                }
                 self.line("}");
             }
             Stmt::For { init, cond, update, body } => self.for_loop(init, cond.as_ref(), update, body),
