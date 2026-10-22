@@ -713,8 +713,10 @@ normal text stays plain UTF-8 at no cost:
   `const { java::wtf8_bytes(b"..") }`: its WTF-8 bytes, checked when Rust compiles the program;
   a `case` label folded from such literals matches the same bytes. The runtime's
   string functions take `&Wtf8` and return `JString`; a function that needs a `&str` (a
-  regular expression, a format string, a path) checks for lone surrogates first: a path or a
-  number to parse turns one into `?` as Java does, a pattern ends the program loudly.
+  pattern, a format string, a path) checks for lone surrogates first: a path or a number to
+  parse turns one into `?` as Java does, a pattern ends the program loudly. A regular
+  expression matches the code points of its input, a lone surrogate being one of its own, as
+  Java's `Pattern` does.
 - **Joining.** Appending text that starts with a low surrogate to text that ends with a high
   one joins the two into their 4-byte character, as Java's UTF-16 shows them as one pair: a
   check of the bytes at the seam, in `JString`'s pushes. A concatenation is `java::concat!` (and
