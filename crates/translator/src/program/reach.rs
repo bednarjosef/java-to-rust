@@ -621,6 +621,20 @@ pub type JdkMethod = (&'static str, &'static str, &'static str);
 /// tell the languages with their own case mapping (see `lower::strings`).
 pub const LOCALE_LANGUAGE: JdkMethod = ("java.util.Locale", "getLanguage", "()java.lang.String");
 
+/// What `String.format(locale, format, args...)` runs, as the JDK's does: `new
+/// Formatter(locale).format(format, args).toString()`, each called on what the one before
+/// returns (see `lower::strings`). So do `printf` and `format` of a `PrintStream` with a locale.
+pub const FORMAT_IN_LOCALE: [JdkMethod; 3] = [
+    ("java.util.Formatter", "<init>", "(java.util.Locale)void"),
+    ("java.util.Formatter", "format", "(java.lang.String,java.lang.Object[])java.util.Formatter"),
+    ("java.util.Formatter", "toString", "()java.lang.String"),
+];
+
+/// Whether a method's javac type is that of a formatting method with a locale first.
+pub fn formats_in_locale(signature: &str) -> bool {
+    signature.starts_with("(java.util.Locale,java.lang.String,")
+}
+
 /// The methods of `String` that stream with the JDK's methods (see `lower::strings`), and those
 /// methods, each called on what the one before returns. `chars()` streams the string's UTF-16 code
 /// units as an `int[]`. `lines()` streams its lines, an `Object[]` of strings, through an iterator,
@@ -1379,6 +1393,13 @@ impl<'t> Walk<'t> {
         }
     }
 
+    /// Reaches what a formatting with a locale runs (`FORMAT_IN_LOCALE`).
+    fn format_in_locale(&mut self) {
+        for (class, method, signature) in FORMAT_IN_LOCALE {
+            self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+        }
+    }
+
     fn symbol(&mut self, symbol: &Value) {
         let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
         match text(symbol, "kind") {
@@ -1402,6 +1423,16 @@ impl<'t> Walk<'t> {
             "METHOD" if owner == "java.io.PrintStream" && matches!(name.as_str(), "printf" | "format") => {
                 let (class, method, signature) = PRINT_FORMATTED;
                 self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+                if formats_in_locale(text(symbol, "type")) {
+                    self.format_in_locale();
+                }
+            }
+            "METHOD"
+                if owner == "java.lang.String"
+                    && name == "format"
+                    && formats_in_locale(text(symbol, "type")) =>
+            {
+                self.format_in_locale();
             }
             "METHOD" | "CONSTRUCTOR" => {
                 self.stub_method(symbol);
