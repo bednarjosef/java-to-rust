@@ -5,6 +5,22 @@
 use super::*;
 
 impl<'a> Gen<'a> {
+    /// Whether `l == r` or `l != r` compares enums or boxes of which one may be null, which are
+    /// `Option`s: `None` equals `None`, and a value equals `Some` of itself. Such a comparison is
+    /// written by `expr`, not flipped by `negate`, which would leave out the `Some`.
+    pub(super) fn optional_equality(&self, l: &Expr, r: &Expr) -> bool {
+        (matches!((l.ty, r.ty), (Type::Enum(_), Type::Enum(_)))
+            || matches!(l.ty, Type::Boxed(_)) && r.ty == l.ty)
+            && (self.nullable(l) || self.nullable(r))
+    }
+
+    /// `l == r` or `l != r` for `optional_equality`, with each side as an `Option`.
+    pub(super) fn optional_equality_code(&mut self, op: BinOp, l: &'a Expr, r: &'a Expr) -> Code {
+        let (a, b) = (self.optional_to(l, l.ty), self.optional_to(r, r.ty));
+        let symbol = if op == BinOp::Eq { "==" } else { "!=" };
+        Code::new(format!("{} {symbol} {}", a.at(CMP + 1), b.at(CMP + 1)), CMP)
+    }
+
     /// `t != null ? t : E.C` (or `t == null ? E.C : t`) for a nullable enum `t`, whose type is the
     /// enum: `if let Some(t) = t { t } else { E::C }`. `None` for any other conditional.
     pub(super) fn enum_conditional(

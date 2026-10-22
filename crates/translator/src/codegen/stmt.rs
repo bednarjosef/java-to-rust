@@ -339,6 +339,11 @@ impl<'a> Gen<'a> {
     pub(super) fn negate(&mut self, cond: &'a Expr) -> String {
         match &cond.kind {
             ExprKind::Unary(UnOp::Not, inner) => return self.condition(inner),
+            // An enum or box that may be null is an `Option`, which the flip must keep `Some`.
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if self.optional_equality(l, r) => {
+                let flipped = if *op == BinOp::Eq { BinOp::Ne } else { BinOp::Eq };
+                return self.optional_equality_code(flipped, l, r).text;
+            }
             ExprKind::Binary(op, l, r)
                 if op.is_comparison()
                     && !l.ty.is_floating()

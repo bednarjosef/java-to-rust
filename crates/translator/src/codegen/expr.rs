@@ -368,14 +368,8 @@ impl<'a> Gen<'a> {
             // Enums of which one may be null (`analysis::nullness`): `Option`s, equal when both
             // are null or both are the same constant. So are two boxes of a kind whose equal
             // values are one object (`Boolean` and `Byte`, see `analysis::boxing`).
-            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
-                if (matches!((l.ty, r.ty), (Type::Enum(_), Type::Enum(_)))
-                    || matches!(l.ty, Type::Boxed(_)) && r.ty == l.ty)
-                    && (self.nullable(l) || self.nullable(r)) =>
-            {
-                let (a, b) = (self.optional_to(l, l.ty), self.optional_to(r, r.ty));
-                let symbol = if *op == BinOp::Eq { "==" } else { "!=" };
-                Code::new(format!("{} {symbol} {}", a.at(CMP + 1), b.at(CMP + 1)), CMP)
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if self.optional_equality(l, r) => {
+                self.optional_equality_code(*op, l, r)
             }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if bool_test(l, r).is_some() => {
                 self.bool_comparison(*op, l, r)
