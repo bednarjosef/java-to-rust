@@ -375,7 +375,7 @@ impl<'a> Gen<'a> {
             {
                 let (a, b) = (self.optional_to(l, l.ty), self.optional_to(r, r.ty));
                 let symbol = if *op == BinOp::Eq { "==" } else { "!=" };
-                Code::new(format!("{} {symbol} {}", a.at(CMP + 1), b.at(CMP + 1)), CMP)
+                infix(symbol, CMP, &a, &b)
             }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if bool_test(l, r).is_some() => {
                 self.bool_comparison(*op, l, r)

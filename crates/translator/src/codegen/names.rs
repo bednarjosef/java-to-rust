@@ -190,6 +190,9 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
         // `getEntry` and JarFile's own, of a JarFile that no code creates).
         let same_struct = |home: Home, c: usize| matches!(home, Home::Class(d) | Home::Fields(d) if d == c);
         let shadowed = match homes[i] {
+            // A constructor's name already holds its class (`construct_error_string`), and its
+            // calls name it so.
+            _ if m.is_ctor => false,
             Home::Class(c) | Home::Fields(c) => {
                 c != m.class
                     && (0..class.methods.len())
