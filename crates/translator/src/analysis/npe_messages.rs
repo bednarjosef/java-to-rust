@@ -395,9 +395,12 @@ impl Messages<'_> {
         if selector.ty != Type::String {
             return;
         }
+        // The JDK's temps are the walk of its slots (`jdk_switch_temps`), or else the slot that
+        // is certain (`jdk_switch_slot`).
+        let local = self.names.get(self.outermost, selector.pos, NameKind::Temp, "s$").map(str::to_string);
         let local = match self.jdk {
-            true => self.jdk_switch_slot(selector).map(|slot| format!("<local{slot}>")),
-            false => self.names.get(self.outermost, selector.pos, NameKind::Temp, "s$").map(str::to_string),
+            true => local.or_else(|| self.jdk_switch_slot(selector).map(|slot| format!("<local{slot}>"))),
+            false => local,
         };
         if let Some(local) = local {
             let message = format!("Cannot invoke \"String.hashCode()\" because \"{local}\" is null");
