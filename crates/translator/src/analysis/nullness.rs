@@ -24,6 +24,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             facts.nullable_returns.len(),
             facts.nullable_fields.len(),
             facts.nullable_statics.len(),
+            facts.placeholder_statics.len(),
             facts.nullable_elements.len(),
         );
         let mut elements = Vec::new();
@@ -170,6 +171,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             facts.nullable_returns.len(),
             facts.nullable_fields.len(),
             facts.nullable_statics.len(),
+            facts.placeholder_statics.len(),
             facts.nullable_elements.len(),
         );
         if before == after {
@@ -314,7 +316,11 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
             true
         }
         ExprKind::Field { object, name } => facts.field_nullable(object.ty, name),
-        ExprKind::Static { class, name } => facts.nullable_statics.contains(&(*class, name.clone())),
+        ExprKind::Static { class, name } => {
+            let key = (*class, name.clone());
+            facts.nullable_statics.contains(&key)
+                || facts.early_static_reads.contains(&e.id) && facts.placeholder_statics.contains(&key)
+        }
         // An array type; a lowering that indexes a value of another type gives what may be null.
         ExprKind::Index(array, _) => match array.ty {
             Type::Array(element) => facts.nullable_elements.contains(element),

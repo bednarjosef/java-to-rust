@@ -580,7 +580,10 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   (locals, parameters across calls, return values, fields and static fields). Only those are
   `Option<String>` or `Option<Rc<..>>`; the others stay `String`, `&str` or `Rc<..>`. A field is
   not null when every constructor sets it, before anything can read it, to a value that is not
-  null. A null check narrows the value in the branch where it is not null
+  null. A read of a static that may run while its class's initialization is under way, before
+  the initializer sets it (`static final Node accept = new Node();` in `java.util.regex.Pattern`,
+  whose constructor reads `Pattern.accept`), may be null wherever its value goes
+  (`analysis/early_reads.rs`). A null check narrows the value in the branch where it is not null
   (`if let Some(s) = s.as_deref()`, `if let Some(n) = n.as_ref()`, or
   `let Some(s) = s.as_deref() else { .. }` after an early return), so no unwrap is repeated.
   Dereferencing null throws `NullPointerException` through `java::non_null`, and printing or
