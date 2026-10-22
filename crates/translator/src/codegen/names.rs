@@ -38,10 +38,16 @@ pub(super) fn snake_case(name: &str) -> String {
 }
 
 /// The Rust name of the field `name` of the class `decl`: `snake_case`, but `base_` for `base`
-/// in a subclass, whose struct may hold its superclass's fields as `base`.
+/// in a subclass, whose struct may hold its superclass's fields as `base`. Fields whose names
+/// differ only in case (javac's `Names.module` and `Names.Module`) are numbered after the first.
 pub(super) fn field_name(decl: &TypeDecl, name: &str) -> String {
     let field = snake_case(name);
-    if field == "base" && decl.extends.is_some() { "base_".to_string() } else { field }
+    let field = if field == "base" && decl.extends.is_some() { "base_".to_string() } else { field };
+    let mut same = decl.fields.iter().filter(|f| snake_case(&f.name) == snake_case(name));
+    match same.position(|f| f.name == name) {
+        Some(n) if n > 0 => format!("{field}_{}", n + 1),
+        _ => field,
+    }
 }
 
 pub(super) fn unique(base: String, used: &mut HashSet<String>) -> String {
