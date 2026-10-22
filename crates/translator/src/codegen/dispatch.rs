@@ -2011,7 +2011,24 @@ impl<'a> Gen<'a> {
     /// (`java::unkept_monitor`): `synchronized (LOCK)` on an `Object` that is a plain object
     /// keeps its monitor although the type's other values have none.
     fn monitor_impl(&mut self, t: usize, variants: &[usize]) {
-        if variants.is_empty() || !self.facts.kept_monitor_of(t) {
+        if !self.facts.kept_monitor_of(t) {
+            return;
+        }
+        let (has, of) = (self.runtime("HasMonitor"), self.runtime("MonitorOf"));
+        let name = struct_name(&self.class.types[t].name);
+        // A type with no objects (`synchronized (lock)` on a `FileLock` of a channel that no
+        // code makes): there is no monitor to give.
+        if variants.is_empty() {
+            self.gap();
+            self.line(&format!("impl {has} for {name} {{"));
+            self.indent += 1;
+            self.line(&format!("fn monitor(&self) -> {of}<'_> {{"));
+            self.indent += 1;
+            self.line("match *self {}");
+            self.indent -= 1;
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
             return;
         }
         // A builder's handle has its cell's monitor (`java::Builder`'s `HasMonitor`).
@@ -2027,8 +2044,6 @@ impl<'a> Gen<'a> {
         if !handles.contains(&true) {
             return;
         }
-        let name = struct_name(&self.class.types[t].name);
-        let (has, of) = (self.runtime("HasMonitor"), self.runtime("MonitorOf"));
         self.gap();
         self.line(&format!("impl {has} for {name} {{"));
         self.indent += 1;
