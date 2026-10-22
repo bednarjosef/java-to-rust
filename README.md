@@ -350,11 +350,13 @@ A small subset, end to end:
   `finally` first. A static initializer or a static field initializer that throws ends an uncaught
   program with `ExceptionInInitializerError`; where a `catch` of it, of `Error` or of `Throwable`
   observes it, the first use throws it and every later use throws `NoClassDefFoundError`. A
-  constructor or an instance field initializer that throws returns a `Result`, as a method does.
+  constructor or an instance field initializer that throws returns a `Result`, as a method does,
+  an exception's constructor too: what it throws goes on from the `new` in place of the exception
+  being built.
   Rejected for now, by name: try-with-resources over a library type (an `AutoCloseable` variable or
   lambda), catching or letting a `finally` see a null dereference, a negative array size, a failed
-  cast or a failure of the library other than these, a `toString`, a constructor of an exception or
-  an enum that throws something a caller catches (the JDK's own `toString`s throw only for bugs,
+  cast or a failure of the library other than these, a `toString`, a constructor of an enum that
+  throws something a caller catches (the JDK's own `toString`s throw only for bugs,
   such as a collection changed while it is shown, and those end the program even where a caller
   would catch them), and a `finally` that sees a static initializer's
   failure in a program that catches none of those classes. The design is in
@@ -538,7 +540,8 @@ argument that is another enum's constant or a static method's result, as the JDK
 `fOfConstants` indexed by ordinal, the constructor is a function `init_shape_constant(ordinal, ..)` (for an enum `Shape`)
 that fills a constant's row, and the enum's static initialization builds every constant, in
 order, before its other static initializers (an exception there is Java's
-`ExceptionInInitializerError`). A read of `e.f` is `fOfConstants[e.ordinal()]`, and the enum's
+`ExceptionInInitializerError`, and where a `catch` observes it, the first use throws it and
+every later use `NoClassDefFoundError`, as for any static initializer). A read of `e.f` is `fOfConstants[e.ordinal()]`, and the enum's
 methods initialize it first. Unlike Java, using a constant (`Shape.SQUARE`, `values()`, a
 `switch`) does not initialize the enum by itself; reading its fields or calling its methods does.
 
@@ -879,6 +882,9 @@ literals or constants: `sun.java.command` (the command line) and `user.timezone`
 `TimeZone` runs). A key that code computes is a `switch` over the keys of a plain run, in which
 those two are unset, as they are in `System.getProperties()`. In a whole program `System.getProperties()` is a
 `Properties` of the keys of a plain run, made once (`java/overlay/java/lang/TranslatedProperties.java`).
+`File.separator` and `File.pathSeparator` (and their `char` forms) are the constants `/` and `:`,
+as the runtime's `file.separator` and `path.separator` are, so that a pattern made of one is
+known to compile.
 `System.getenv(name)` reads the environment the program runs in, as Java does (`system.rs`): null
 for a variable that is unset or a name that no variable can have. `System.getenv()`, the whole
 environment as a map, is not translated yet.

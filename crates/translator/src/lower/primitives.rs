@@ -20,6 +20,15 @@ impl<'t> Lowering<'t> {
     /// `None` for any other field.
     pub(super) fn constant_field(&self, node: Node) -> Option<ExprKind> {
         let symbol = node.symbol().filter(|s| s.kind == "FIELD" && s.is_static)?;
+        // The separators of `File`, which are the platform's, as the runtime's `file.separator`
+        // and `path.separator` are: a translated program runs on Unix.
+        match (symbol.owner, symbol.name) {
+            ("java.io.File", "separator") => return Some(ExprKind::Str("/".to_string())),
+            ("java.io.File", "pathSeparator") => return Some(ExprKind::Str(":".to_string())),
+            ("java.io.File", "separatorChar") => return Some(ExprKind::Char(u16::from(b'/'))),
+            ("java.io.File", "pathSeparatorChar") => return Some(ExprKind::Char(u16::from(b':'))),
+            _ => {}
+        }
         let integer = |min: i64, max: i64| match symbol.name {
             "MIN_VALUE" => Some(min),
             "MAX_VALUE" => Some(max),

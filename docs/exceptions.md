@@ -50,7 +50,7 @@ signature. Everything else is decided here.
    throws is not `Display` then; the dispatching enum of classes under a common type gets
    `try_text`, which returns the exception. Elsewhere the text is `Display`, which cannot return
    an exception, so what the `toString` throws ends the program there: the text of an enum's
-   constant, the message of an exception (whose constructor cannot throw yet), and `printf`,
+   constant, and `printf`,
    which makes all its text before it prints, where Java prints the text before each argument
    first. So does what the `hashCode` throws that `Object`'s `toString` shows
    for a class without a `toString` of its own (`Collections.ReverseComparator2`'s, which asks
@@ -648,9 +648,12 @@ Decisions that changed during the implementation, step by step.
   analysis does not count as a `ClassCastException`. A deviation: with heap pollution (a raw or
   unchecked use that puts a value of another class in a generic place) Java's cast fails, and
   the translation's then ends the program instead of reaching a `catch`.
-- **Still rejected**: a constructor of an exception class that throws (the exception's object is
-  built where it is thrown, and by the `From` impl of step 5, neither of which can fail), a
-  constructor of an enum that throws (its constants are built where the enum is initialized,
+- **A constructor of an exception class that throws** returns a `Result` as any constructor
+  does: `throw new Fatal(d)` whose `d.toString()` fails throws that failure in place of the
+  `Fatal` (`features/ThrowingExceptionConstructors.java`). Only the constructors that the `From`
+  impl of step 5 builds the runtime's exceptions with must not throw, since that impl cannot fail;
+  they are the standard classes' constructors from a message, which run no code of the program.
+- **Still rejected**: a constructor of an enum that throws (its constants are built where the enum is initialized,
   outside any `try`), and a `toString` that throws something a caller catches (`Display::fmt`
   cannot carry the exception). An instance field initializer that throws is step 8.
 
