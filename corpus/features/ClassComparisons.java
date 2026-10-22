@@ -85,6 +85,14 @@ public class ClassComparisons {
         return new Point(0, 0);
     }
 
+    // A class tested for null, then used as one that is not.
+    static Class<?> sameOrNull(Class<?> c, Class<?> other) {
+        if (c == null) {
+            return null;
+        }
+        return c == other ? c : null;
+    }
+
     public static void main(String[] args) {
         // The object is made once, whatever its class.
         boolean d = make(true).getClass() == Dog.class;
@@ -108,5 +116,14 @@ public class ClassComparisons {
         Object other = new Money(250);
         System.out.println(m.equals(other) + " " + m.equals(p) + " " + m.equals(new Money(1)));
         System.out.println(m.getClass() == Money.class && !m.getClass().equals(Point.class));
+        System.out.println(sameOrNull(Dog.class, Dog.class) + " " + sameOrNull(Dog.class, Cat.class) + " "
+                + sameOrNull(null, Dog.class));
+        // The descriptors that class files write, and the component of an array's class.
+        Class<?>[] described = { String.class, int.class, int[][].class, Point[].class, Dog.class, boolean.class };
+        for (Class<?> type : described) {
+            System.out.print(type.descriptorString() + " ");
+        }
+        System.out.println(int[].class.componentType() + " " + String.class.componentType() + " "
+                + (Point[].class.componentType() == Point.class));
     }
 }

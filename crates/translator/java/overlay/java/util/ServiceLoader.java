@@ -2,6 +2,7 @@ package java.util;
 
 import java.util.function.Supplier;
 import java.util.stream.Stream;
+import jdk.internal.reflect.Reflection;
 
 /**
  * The translator's {@code ServiceLoader}, which replaces the JDK's in a translation with the
@@ -17,7 +18,8 @@ import java.util.stream.Stream;
  * {@link #reload()} forgets them, while a {@link Provider}'s {@code get()} makes a new one. A class
  * loader that would load code from outside the translation, such as a {@code URLClassLoader}
  * over a directory with providers of the service, fails loudly when it is first iterated
- * ({@code check}); one over nothing finds no more than the translation has. A module layer is not in the translation, so
+ * ({@code check}); one over nothing finds no more than the translation has. A named module that loads a service must
+ * declare that it uses it, as in Java. A module layer is not in the translation, so
  * {@link #load(ModuleLayer, Class)} throws.
  */
 public final class ServiceLoader<S> implements Iterable<S> {
@@ -38,26 +40,43 @@ public final class ServiceLoader<S> implements Iterable<S> {
     private boolean checked;
 
     private ServiceLoader(Class<S> service, ClassLoader loader) {
-        this.service = Objects.requireNonNull(service);
+        nonNull(service);
+        this.service = service;
         this.loader = loader;
         reload();
     }
 
     public static <S> ServiceLoader<S> load(Class<S> service, ClassLoader loader) {
+        checkUses(Reflection.getCallerClass().getModule(), service);
         return new ServiceLoader<>(service, loader);
     }
 
     // `ResourceBundle`'s, for a named module's bundles: the translation's providers too.
     static <S> ServiceLoader<S> load(Class<S> service, ClassLoader loader, Module callerModule) {
+        checkUses(callerModule, service);
         return new ServiceLoader<>(service, loader);
     }
 
     public static <S> ServiceLoader<S> load(Class<S> service) {
+        checkUses(Reflection.getCallerClass().getModule(), service);
         return new ServiceLoader<>(service, null);
     }
 
     public static <S> ServiceLoader<S> loadInstalled(Class<S> service) {
+        checkUses(Reflection.getCallerClass().getModule(), service);
         return new ServiceLoader<>(service, null);
+    }
+
+    /**
+     * Java's check that a named module that loads a service declares that it uses it. (Java
+     * also checks that the caller can access the service's class, which javac checked.)
+     */
+    private static void checkUses(Module callerModule, Class<?> service) {
+        nonNull(service);
+        if (!callerModule.canUse(service)) {
+            throw new ServiceConfigurationError(service.getName() + ": " + callerModule
+                    + " does not declare `uses`");
+        }
     }
 
     public static <S> ServiceLoader<S> load(ModuleLayer layer, Class<S> service) {
@@ -157,4 +176,11 @@ public final class ServiceLoader<S> implements Iterable<S> {
 
     /** An object of the provider class {@code type}, made by its {@code provider()} or constructor. */
     private static native Object create0(Class<?> type);
+
+    // `Objects.requireNonNull` of a class, which would hold it as an `Object`.
+    private static void nonNull(Class<?> c) {
+        if (c == null) {
+            throw new NullPointerException();
+        }
+    }
 }

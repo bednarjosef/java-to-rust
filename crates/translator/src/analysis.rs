@@ -720,7 +720,9 @@ impl NonAscii {
                     | StringOp::Repeat
                     | StringOp::Concat
                     | StringOp::Replace
-                    | StringOp::Identity,
+                    | StringOp::Identity
+                    | StringOp::ToString
+                    | StringOp::Intern,
                 ),
                 args,
             ) => args.iter().all(|a| self.ascii(class, m, a)),
