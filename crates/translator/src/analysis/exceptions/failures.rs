@@ -391,10 +391,10 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Native(Native::ArrayCopy) => &["java.lang.ArrayIndexOutOfBoundsException"],
         // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
         Builtin::Arrays(op) if op.ranged() => &["java.lang.ArrayIndexOutOfBoundsException"],
-        // A literal format that fits its arguments' types never throws; the arguments in an
+        // A constant format that fits its arguments' types never throws; the arguments in an
         // `Object[]` are as many as the array has.
-        Builtin::Format => match &args[0].kind {
-            ExprKind::Str(format)
+        Builtin::Format => match crate::analysis::constants::text(class, &args[0]) {
+            Some(format)
                 if !args[1..].iter().any(|a| matches!(a.ty, Type::Array(_)))
                     && java_runtime::format::never_fails(format, &format_samples(&args[1..])) =>
             {
