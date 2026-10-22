@@ -50,6 +50,7 @@ mod java_arrays;
 mod java_objects;
 mod libraries;
 mod local_types;
+mod modules;
 mod natives;
 mod patterns;
 mod primitives;
@@ -946,6 +947,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.system_log(node, &symbol, select)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.module_call(node, &symbol, select)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.class_call(node, &symbol, select)? {
             return Ok(kind);
         }
@@ -1029,6 +1033,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.reflection_native(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.module_native(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {

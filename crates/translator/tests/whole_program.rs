@@ -121,12 +121,28 @@ fn run_java(p: &Program, classes: &Path, cache: &Path) -> Run {
         std::fs::create_dir_all(to.parent().unwrap()).unwrap();
         std::fs::copy(resource, to).unwrap();
     }
-    let java = Command::new("java").arg("-cp").arg(classes).arg(&p.main).stdin(stdin_of(p)).output();
+    let mut java = Command::new("java");
+    match module_name(&p.sources) {
+        // A source root with a `module-info.java` is a named module, which runs from the module path.
+        Some(module) => java.arg("--module-path").arg(classes).arg("-m").arg(format!("{module}/{}", p.main)),
+        None => java.arg("-cp").arg(classes).arg(&p.main),
+    };
+    let java = java.stdin(stdin_of(p)).output();
     let result = run(java.expect("running `java` failed"));
     if let (Some(key), Some(code)) = (key, result.code) {
         check_cache::store(cache, &key, format!("{code}\n{}", result.stdout).as_bytes());
     }
     result
+}
+
+/// The name of the module that the source root `sources` declares in its `module-info.java`, if
+/// it has one: the word after `module`, past the comments of its first lines.
+fn module_name(sources: &Path) -> Option<String> {
+    let source = std::fs::read_to_string(sources.join("module-info.java")).ok()?;
+    let code: Vec<&str> = source.lines().filter(|l| !l.trim_start().starts_with("//")).collect();
+    let words: Vec<&str> = code.iter().flat_map(|l| l.split_whitespace()).collect();
+    let at = words.iter().position(|w| *w == "module")?;
+    Some(words.get(at + 1)?.trim_end_matches('{').to_string())
 }
 
 /// What decides a program's run on Java: the Java version, the main class, the sources with

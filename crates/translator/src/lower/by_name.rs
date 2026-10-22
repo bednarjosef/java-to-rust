@@ -217,19 +217,41 @@ impl<'t> Lowering<'t> {
         Ok(self.synth(ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new()), node.pos(), Type::JavaClass))
     }
 
-    /// `Class.forName(module, name)`: the class of the program with that name, which the module
-    /// does not change, as the program's classes are all one module's, or `null` (see the
-    /// module's comment). The module must be `X.class.getModule()`, which has no effects.
+    /// `Class.forName(module, name)`: the class of the program with that name, or `null` (see
+    /// the module's comment), if it is in the module. With the JDK's sources, the translator's
+    /// `TranslatedModules.inModule(module, class)` tells (`lower/modules.rs`); without them, the
+    /// program's classes are all one module's, and the module must be `X.class.getModule()`,
+    /// which has no effects.
     pub(super) fn module_for_name(&self, node: Node<'t>, name: Option<String>) -> Result<ExprKind, Error> {
         let mut arguments = node.list("arguments");
         let module = arguments.next().expect("forName has a module");
         let name_node = arguments.next().expect("forName has a name");
+        let (in_module, signature) = crate::program::IN_MODULE;
+        if let Some(resolved) = self.translated_modules(in_module, signature) {
+            let module = self.expr(module)?;
+            let class = self.class_in_module(node, name, name_node)?;
+            let class = self.synth(class, node.pos(), Type::JavaClass);
+            let args = self.convert_generic_args(node, Some(resolved), vec![module, class])?;
+            return Ok(ExprKind::Call { name: in_module.to_string(), args, resolved: Some(resolved) });
+        }
         let of_literal = module.kind() == "METHOD_INVOCATION"
             && module.symbol().is_some_and(|s| (s.owner, s.name) == ("java.lang.Class", "getModule"))
             && module.child("methodSelect")?.get("expression").is_some_and(super::classes::is_literal);
         if !of_literal {
             return unsupported(node, "`Class.forName` in a module other than a class literal's");
         }
+        self.class_in_module(node, name, name_node)
+    }
+
+    /// The class of the program that `Class.forName(module, name)` finds by the name, if the
+    /// module has it: that of a name spelled out, or one of the locale data found by name for a
+    /// name that code computes (`Reach::found_by_name`), or `null`.
+    fn class_in_module(
+        &self,
+        node: Node<'t>,
+        name: Option<String>,
+        name_node: Node<'t>,
+    ) -> Result<ExprKind, Error> {
         let pos = node.pos();
         if let Some(name) = name {
             return Ok(match self.type_index(&name) {

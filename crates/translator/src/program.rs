@@ -9,14 +9,15 @@ mod reach;
 mod survey;
 
 pub use census::{Census, census_program};
+pub use modules::Contents as ModuleContents;
 pub use reach::{
-    CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, LOCALE_LANGUAGE, Lookup, LookupKind, PRINT_FORMATTED, Reach,
-    STRING_STREAMS, TRANSLATED_LANG_ACCESS, TRANSLATED_LANG_ACCESS_CLASS, TRANSLATED_PROPERTIES,
-    UNSET_PROPERTIES, caller_query, class_bound, class_for_name, class_name, component_array,
-    computed_for_name, created_by_name, direct_stream_call, field_offset_named, is_ensure_initialized,
-    literal_class, live_branch, lookup, module_for_name, recreated_exception, redirected_call,
-    standard_stream_field, stream_of_call, unsafe_field_access, unsafe_field_update, unset_property_ifs,
-    untranslated, writes_string_array,
+    CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind,
+    PRINT_FORMATTED, Reach, STRING_STREAMS, TRANSLATED_LANG_ACCESS, TRANSLATED_LANG_ACCESS_CLASS,
+    TRANSLATED_MODULES, TRANSLATED_PROPERTIES, UNSET_PROPERTIES, caller_query, class_bound, class_for_name,
+    class_name, component_array, computed_for_name, created_by_name, direct_stream_call, field_offset_named,
+    is_ensure_initialized, literal_class, live_branch, lookup, module_call, module_for_name,
+    recreated_exception, redirected_call, standard_stream_field, stream_of_call, unsafe_field_access,
+    unsafe_field_update, unset_property_ifs, untranslated, writes_string_array,
 };
 pub use survey::Survey;
 
@@ -246,7 +247,11 @@ fn load(program: &Program, string_array_writes: bool) -> Result<(Vec<Value>, Rea
         }
     }
     walks += rounds.restarts();
-    let reach = rounds.finish();
+    let mut reach = rounds.finish();
+    if !program.libraries.is_empty() {
+        let roots = program.sources.iter().chain(&program.libraries);
+        reach.modules = modules::contents(roots, Some(std::path::Path::new(OVERLAY)));
+    }
     let changing: Vec<usize> = changing.iter().map(|&(index, _, _)| index).collect();
     let mut units = given.into_values();
     for index in changing {
