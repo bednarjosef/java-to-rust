@@ -54,6 +54,40 @@ public class InnerSuperConstructorCallsOverride {
         }
     }
 
+    // An inner class of another class, whose enclosing instance a subclass passes as a field of
+    // its own (`holder.super(..)`), as javac's ArgumentAttr.ArgumentType extends DeferredType.
+    static class Holder {
+        int base = 100;
+
+        abstract class Deferred {
+            final String text;
+
+            Deferred(int k) {
+                text = show(k);
+            }
+
+            abstract String show(int k);
+        }
+    }
+
+    final Holder holder = new Holder();
+
+    abstract class Argument extends Holder.Deferred {
+        Argument(int k) {
+            holder.super(k);
+        }
+    }
+
+    class Paren extends Argument {
+        Paren() {
+            super(1);
+        }
+
+        String show(int k) {
+            return "paren " + (k + total + holder.base);
+        }
+    }
+
     Base anonymous(int k) {
         return new Base(k) {
             String describe() {
@@ -102,5 +136,6 @@ public class InnerSuperConstructorCallsOverride {
             System.out.println(b.label + " / " + b.extra);
         }
         System.out.println(locals("p", 4));
+        System.out.println(outer.new Paren().text);
     }
 }
