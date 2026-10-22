@@ -842,7 +842,7 @@ impl<'a> Gen<'a> {
 
     /// The name of the method of the enum of `t` that a call of `resolved` calls: the body
     /// itself when every variant runs the one the enum has, else the dispatcher.
-    fn dispatch_name(&self, t: usize, resolved: usize) -> String {
+    pub(super) fn dispatch_name(&self, t: usize, resolved: usize) -> String {
         let h = &self.class.hierarchy;
         if let [only] = self.enum_targets(t, resolved)[..]
             && self.homes[only] == Home::Enum(t)

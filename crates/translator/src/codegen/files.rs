@@ -115,15 +115,20 @@ impl<'a> Gen<'a> {
         Code::atom(format!("{}({})", self.runtime(f), values.join(", ")))
     }
 
-    /// A native of the translator's `UnixNativeDispatcher` (`Native::Unix`), as a call of the
-    /// runtime's function (`ast::UNIX_CALLS`). A path is the runtime's `&[i8]`; the `long[]` that
+    /// A native of the translator's `UnixNativeDispatcher` (`Native::Unix`) or `TranslatedNet`
+    /// (`Native::Net`), as a call of the runtime's function that `calls` names (`ast::UNIX_CALLS`,
+    /// `ast::NET_CALLS`). A path, a host name or an address is the runtime's `&[i8]`; the `long[]` that
     /// `stat0` and `fstat0` fill, and the buffer that `readBytes` reads into, are borrowed
     /// mutably. A `byte[]` that the function returns becomes a new array.
-    pub(super) fn unix_native(&mut self, name: &str, args: &'a [Expr], ty: Type) -> Code {
-        let f = crate::ast::UNIX_CALLS.iter().find(|(n, _)| *n == name).map(|(_, f)| *f);
-        let f = f.unwrap_or_else(|| {
-            unreachable!("not a native of `UnixNativeDispatcher` the runtime implements: {name}")
-        });
+    pub(super) fn unix_native(
+        &mut self,
+        calls: &[(&str, &str)],
+        name: &str,
+        args: &'a [Expr],
+        ty: Type,
+    ) -> Code {
+        let f = calls.iter().find(|(n, _)| *n == name).map(|(_, f)| *f);
+        let f = f.unwrap_or_else(|| unreachable!("not a native the runtime implements: {name}"));
         let mut values = Vec::new();
         for (i, arg) in args.iter().enumerate() {
             values.push(match arg.ty {

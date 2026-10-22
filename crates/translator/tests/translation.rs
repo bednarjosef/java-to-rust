@@ -1944,11 +1944,18 @@ fn system_natives_go_through_the_runtime() {
             "java::available_processors()",
         ],
     );
-    let err = java_to_rust::translate(
+    // `System.getenv(name)` reads the environment the program runs in; the whole environment as a
+    // map is not translated.
+    let out = java_to_rust::translate(
         "class A { public static void main(String[] a) { System.out.println(System.getenv(\"HOME\")); } }",
     )
+    .unwrap();
+    assert!(out.contains("java::getenv(\"HOME\")"), "{out}");
+    let err = java_to_rust::translate(
+        "class A { public static void main(String[] a) { Object env = System.getenv(); } }",
+    )
     .unwrap_err();
-    assert!(err.to_string().contains("System.getenv` is not supported"), "{err}");
+    assert!(err.to_string().contains("`System.getenv()`, the whole environment"), "{err}");
 }
 
 #[test]
