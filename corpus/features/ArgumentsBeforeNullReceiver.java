@@ -96,6 +96,14 @@ public class ArgumentsBeforeNullReceiver {
         } catch (NullPointerException e) {
             System.out.println("caught " + e.getMessage() + ", b is now " + (b != null));
         }
+        // A local that is first a new object, then null.
+        Box later = new Box();
+        later = none();
+        try {
+            later.add(effect("later"));
+        } catch (NullPointerException e) {
+            System.out.println("caught " + e.getMessage());
+        }
         // Quiet arguments: nothing to compute first.
         Box c = args.length > 5 ? new Box() : null;
         int n = 2;
