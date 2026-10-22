@@ -795,6 +795,12 @@ impl JoinItem for String {
     }
 }
 
+impl JoinItem for crate::JStr {
+    fn text(&self) -> &str {
+        self
+    }
+}
+
 impl JoinItem for &str {
     fn text(&self) -> &str {
         self

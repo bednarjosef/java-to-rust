@@ -641,6 +641,17 @@ pub fn replace_first(s: &str, regex: &str, replacement: &str) -> String {
     replace(s, regex, replacement, false)
 }
 
+/// Whether `regex` matches somewhere in `s`, as `Matcher.find` from the start.
+pub fn finds(s: &str, regex: &str) -> bool {
+    let regex = compiled(regex);
+    let mut found = false;
+    matches(&regex, s, |_| {
+        found = true;
+        false
+    });
+    found
+}
+
 /// `s.matches(regex)`: whether the whole string matches.
 pub fn matches_all(s: &str, regex: &str) -> bool {
     let regex = compiled(regex);
