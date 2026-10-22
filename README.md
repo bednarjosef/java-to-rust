@@ -757,7 +757,11 @@ security and class loading (`Module`, `ModuleLayer`, `jdk.internal.loader`; `UNT
 `ResourceBundle` is translated, and `ServiceLoader`, `ClassLoader` and `URLClassLoader` are the
 translator's own, over the translation's classes). Library code
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
-`comparableClassFor` and parallel streams reach threads, so the boundary is needed. A program that
+`comparableClassFor` and parallel streams reach threads, so the boundary is needed. An
+untranslated class that is the type of a variable (the `ObjectInputStream` of
+`TreeMap.buildFromSorted`, the `ObjectInputStream.GetField` of a `readObject`) is a class without
+objects, so the variable is only ever null and a call on it throws a `NullPointerException`, as
+Java does with that null (`program/reach/stubs.rs`). A program that
 puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints the count).
 Annotations reach nothing, and neither does the code that Java Flight Recorder's flags guard
 (`jfrTracing` in `Throwable` and the file streams, which only JFR sets, by reflection), or the

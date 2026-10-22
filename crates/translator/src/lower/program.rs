@@ -189,9 +189,8 @@ fn lower_into<'t>(
     // The classes that are not translated but are types of variables, which are only ever null.
     for (class, methods) in &reach.stubs {
         lowering.declare_stub(class, methods).map_err(|e| (None, e))?;
-        let package = class.rsplit_once('.').map_or("", |(package, _)| package);
         unit_of.resize(lowering.types.len(), usize::MAX);
-        packages.resize(lowering.types.len(), package.to_string());
+        packages.resize(lowering.types.len(), super::stubs::stub_package(class));
     }
     // The standard exception classes that reachable code uses; they belong to no unit.
     let mut reachable = Vec::new();
