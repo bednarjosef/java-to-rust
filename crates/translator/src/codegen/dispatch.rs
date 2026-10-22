@@ -271,7 +271,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The binary name of type `t`, as the JVM shows it: `shapes.Outer$Inner`.
-    fn binary_name(&self, t: usize) -> String {
+    pub(super) fn binary_name(&self, t: usize) -> String {
         let decl = &self.class.types[t];
         if let Some(array) = self.class.array_of(t) {
             return self.descriptor(array);
@@ -522,29 +522,15 @@ impl<'a> Gen<'a> {
             [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
         let (s, d) = (self.object(src), self.object(dest));
         let checked = self.facts.raising.contains(&id);
-        let copy = self.runtime(if checked { "try_arraycopy" } else { "arraycopy" });
-        // The checked form returns the exception as the copy's `Err`, the unchecked one throws it.
-        let mismatch = if checked {
-            format!(
-                "Err({}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"))",
-                self.runtime("Exception::new")
-            )
-        } else {
-            format!(
-                "{}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\")",
-                self.runtime("throw")
-            )
-        };
         // Names that no local of the method has, as `src` and `dest` may read one.
         let [p, q, n] = ["src_pos", "dest_pos", "length"].map(|base| self.temp(base));
-        let mut arms = Vec::new();
-        if let Some(t) = self.object_index() {
-            for c in self.enum_variants(t).into_iter().filter(|&c| self.class.array_of(c).is_some()) {
-                let variant = self.variant(t, c);
-                arms.push(format!("({variant}(src), {variant}(dest)) => {copy}(src, {p}, dest, {q}, {n}),"));
+        let arms = match self.object_index() {
+            Some(t) => {
+                let variants = self.enum_variants(t);
+                self.object_copy_arms(t, &variants, src.pos, checked, [p.as_str(), q.as_str(), n.as_str()])
             }
-        }
-        arms.push(format!("_ => {mismatch},"));
+            None => vec!["_ => unreachable!(),".to_string()],
+        };
         let code = Code::atom(format!(
             "{{ let ({p}, {q}, {n}) = ({}, {}, {}); match (&{s}, &{d}) {{ {} }} }}",
             ints[0],

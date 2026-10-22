@@ -4973,7 +4973,7 @@ fn an_arraycopy_between_objects_matches_the_types_of_their_arrays() {
             "let (src_pos, dest_pos, length_2) = (0, 0, length); match (&src, &dest) {",
             "(Object::IntArray(src), Object::IntArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
             "(Object::LongArray(src), Object::LongArray(dest)) => java::arraycopy(src, src_pos, dest, dest_pos, length_2),",
-            "_ => java::throw(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"),",
+            "(Object::IntArray(_), Object::LongArray(_)) => java::throw(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch: can not copy int[] into long[]\"),",
         ],
     );
 }
@@ -5489,6 +5489,22 @@ fn static_fields_of_stub_classes_are_rejected() {
         error.to_string().contains(
             "a static field of `sun.security.util.SignatureFileVerifier` (security) not supported yet"
         ),
+        "{error}"
+    );
+}
+
+#[test]
+fn copies_between_arrays_of_other_classes_are_rejected() {
+    // Only `String` and `Object` elements have a check written here, so a copy from a `Box[]` to
+    // an `Object[]` is rejected, not translated with a message HotSpot may not give.
+    let error = java_to_rust::translate(
+        "public class Main {\n    static class Box {}\n    public static void main(String[] a) {\n        Object src = new Box[1];\n        Object dest = new Object[1];\n        System.arraycopy(src, 0, dest, 0, 1);\n    }\n}\n",
+    )
+    .expect_err("a copy between arrays of another class");
+    assert!(
+        error
+            .to_string()
+            .contains("`System.arraycopy` from [LMain$Box; to [Ljava.lang.Object; not supported yet"),
         "{error}"
     );
 }
