@@ -16,8 +16,10 @@ public class ComputedProperties {
         return Security.getProperty(key);
     }
 
+    // Whether a value is set, which is the same wherever the program runs, where the values of
+    // `user.dir` and `java.home` are not.
     static String describe(String value) {
-        return value == null ? "unset" : value.length() + " chars";
+        return value == null ? "unset" : "set";
     }
 
     public static void main(String[] args) {
@@ -27,7 +29,9 @@ public class ComputedProperties {
                     + describe(property(key, "default")));
         }
         System.out.println(property("java.class.path") + " " + property("file.encoding")
-                + " " + property("user.dir").equals(System.getProperty("user.dir")));
+                + " " + property("user.dir").equals(System.getProperty("user.dir"))
+                + " " + property("user.dir").startsWith("/")
+                + " " + property("file.separator").equals("/") + " " + property("line.separator").length());
         for (String key : new String[] {"networkaddress.cache.negative.ttl", "networkaddress.cache.ttl", "jdk.includeInExceptions", "securerandom.source", "no.such.key"}) {
             System.out.println(key + " = " + security(key));
         }
