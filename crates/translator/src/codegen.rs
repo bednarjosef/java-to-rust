@@ -153,6 +153,7 @@ fn generate_with(
         variant_lists: Default::default(),
         checked_value_ofs: Default::default(),
         group_names,
+        shared_names: HashSet::new(),
         live: live.clone(),
         runs: running_types(class, facts),
         wanted: wanted.clone(),
@@ -207,6 +208,7 @@ fn generate_with(
         closures: Vec::new(),
         chains: chains::Chains::default(),
     };
+    g.shared_names = g.shared_names();
     g.chains = g.find_chains();
     let header = match modules {
         Some(_) => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
@@ -270,6 +272,9 @@ struct Gen<'a> {
     checked_value_ofs: std::cell::OnceCell<HashSet<&'static str>>,
     /// The name of each override group (by group id): the name of its dispatchers.
     group_names: HashMap<usize, String>,
+    /// The simple names of types, and those names with the outer classes, that more than one
+    /// type has: the conversions to such a type's enum are named with more (`as_name`).
+    shared_names: HashSet<String>,
     /// Which classes have a struct (see `live_types`).
     live: Vec<bool>,
     /// Which classes' instance methods can run (see `running_types`).

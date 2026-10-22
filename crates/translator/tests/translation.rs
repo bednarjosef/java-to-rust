@@ -4140,6 +4140,8 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
         &rust,
         &["java::or_break!(java::try_non_null(s(a.len() as i32).as_deref()), 'attempt).len()"],
     );
+    // A program's own exception constructor that throws stays rejected: only the JDK's are taken
+    // to throw for bugs alone (`URISyntaxException`'s tests of its arguments).
     let err = reject(
         "class Bad extends RuntimeException {
             Bad(int x) { super(\"bad\"); if (x < 0) throw new IllegalStateException(\"negative\"); }

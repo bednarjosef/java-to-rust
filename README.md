@@ -783,7 +783,11 @@ security and class loading (`Module`, `ModuleLayer`, `jdk.internal.loader`; `UNT
 `ResourceBundle` is translated, and `ServiceLoader`, `ClassLoader` and `URLClassLoader` are the
 translator's own, over the translation's classes). Library code
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
-`comparableClassFor` and parallel streams reach threads, so the boundary is needed. A program that
+`comparableClassFor` and parallel streams reach threads, so the boundary is needed. An
+untranslated class that is the type of a variable (the `ObjectInputStream` of
+`TreeMap.buildFromSorted`, the `ObjectInputStream.GetField` of a `readObject`) is a class without
+objects, so the variable is only ever null and a call on it throws a `NullPointerException`, as
+Java does with that null (`program/reach/stubs.rs`). A program that
 puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints the count).
 Annotations reach nothing, and neither does the code that Java Flight Recorder's flags guard
 (`jfrTracing` in `Throwable` and the file streams, which only JFR sets, by reflection), or the
@@ -928,6 +932,21 @@ do not check their arguments, and `Util.toString` gives null for null, where the
 and asynchronous file channels throw `UnsupportedOperationException`; and `statvfs` (a file
 store's space), the mount table, `getpwnam` and `getgrnam`, and the extended-attribute natives
 are rejected.
+
+The `jrt:` file system, through which javac reads the classes of the JDK, is the JDK's own
+(`jdk.internal.jrtfs`) over the image file `lib/modules` of the JDK in `java.home`; it is among
+the installed providers (`FileSystemProvider.installedProviders`, which the JDK finds with a
+`ServiceLoader`, gives the default provider and the jrt one: `TranslatedFiles.java`). The
+translator's image reader (`java/overlay/jdk/internal/jimage/BasicImageReader.java`) reads the
+index of the image into an array once, and each resource into an array of its own, through a
+`FileChannel`, where the JDK's maps the file into memory. What differs from Java: a compressed
+image (`jlink --compress`) and a JDK of exploded modules, as it is built, throw
+`UnsupportedOperationException`; the `toString` of a jrt file's attributes, which formats times
+with `%tc`, throws the same; and a failure of the image's reader is thrown as it is, not given as
+the reason of an `InvalidPathException`. `URI` decodes its escaped octets as UTF-8 itself
+(`java/overlay/java/net/TranslatedURI.java`), and `jdk.internal.util.Exceptions`, which puts the
+input and the index into a `URISyntaxException`, reads its categories of detail without waiting
+for the JVM's boot and fills only `%s` in its messages, refusing any other conversion.
 
 A native method of a translated JDK class is never lowered itself (javac marks it `native`); a
 call of one becomes the runtime function that `ast/natives.rs` names for its class, name and

@@ -529,6 +529,15 @@ pub const FALSE_FLAGS: &[(&str, &str)] = &[
 /// `ReferenceQueue.poll` and other code under a lock do.
 pub const FALSE_CALLS: &[(&str, &str)] = &[("jdk.internal.vm.ContinuationSupport", "isSupported")];
 
+/// Instance methods without parameters that return `false` in every translated program, called
+/// on a receiver that reading has no effects: there are no virtual threads, so
+/// `Thread.isVirtual()` is false, and the branches that would park, unpark or ask a virtual
+/// thread (through the JVM's `JavaLangAccess`) never run. The receiver is not read, which differs
+/// from Java only where it is null, where Java would throw a `NullPointerException`; the JDK
+/// tests it first (`LockSupport.unpark`) or has the current thread (`Thread.currentThread()`,
+/// which is never null).
+pub const FALSE_INSTANCE_CALLS: &[(&str, &str)] = &[("java.lang.Thread", "isVirtual")];
+
 /// Static fields that only the class data sharing archive sets, through the native
 /// `CDS.initializeFromArchive` at the start of their class's static initializer, which then tests
 /// each against null once to build the value itself when the archive had none. The runtime's
@@ -723,7 +732,8 @@ fn stub_null_test(condition: &Value, equal: bool) -> bool {
 }
 
 /// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
-/// branch can run: it reads one of the `FALSE_FLAGS` or calls one of the `FALSE_CALLS`, or, when the program's streams are all
+/// branch can run: it reads one of the `FALSE_FLAGS` or calls one of the `FALSE_CALLS` or
+/// `FALSE_INSTANCE_CALLS`, or, when the program's streams are all
 /// `sequential` (see `sequential.rs`), it is a pipeline's `isParallel()` or a test whether one
 /// of its nodes has children (`getChildCount() > 0`); alone, or as the first
 /// operand of `&&`, or as the second after one that only computes a value (the lowering drops the
@@ -742,7 +752,12 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
         }
         "METHOD_INVOCATION" => {
             let symbol = &condition["symbol"];
-            let false_call = FALSE_CALLS.contains(&(text(symbol, "owner"), text(symbol, "name")))
+            let method = (text(symbol, "owner"), text(symbol, "name"));
+            let receiver = &condition["methodSelect"]["expression"];
+            let false_call = (FALSE_CALLS.contains(&method)
+                || FALSE_INSTANCE_CALLS.contains(&method)
+                    && receiver.is_object()
+                    && !reading_has_effects(receiver))
                 && text(symbol, "type") == "()boolean";
             false_call || (sequential && sequential::is_parallel_test(condition))
         }
@@ -750,6 +765,16 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
         "GREATER_THAN" => sequential && sequential::has_children_test(condition),
         _ => false,
     }
+}
+
+/// Whether reading the receiver `value` of one of the `FALSE_INSTANCE_CALLS` has effects:
+/// `Thread.currentThread()` has none (`LockSupport.park` asks it whether it is virtual).
+fn reading_has_effects(value: &Value) -> bool {
+    let symbol = &value["symbol"];
+    let current_thread = text(value, "kind") == "METHOD_INVOCATION"
+        && (text(symbol, "owner"), text(symbol, "name"), text(symbol, "type"))
+            == ("java.lang.Thread", "currentThread", "()java.lang.Thread");
+    !current_thread && has_effects(value)
 }
 
 /// The branch of an `if` statement or a `?:` that can run when its condition is never true.
@@ -846,6 +871,8 @@ pub const TRANSLATED_LANG_ACCESS: &[&str] = &[
     "start",
     "uncheckedNewStringOrThrow",
     "uncheckedGetBytesOrThrow",
+    "uncheckedGetUTF16Char",
+    "uncheckedPutCharUTF16",
 ];
 
 /// The class of `TRANSLATED_LANG_ACCESS`.
@@ -931,6 +958,22 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
             "(java.nio.file.Path,java.nio.charset.Charset,java.nio.file.OpenOption[])java.io.BufferedWriter",
         ),
         ("sun.nio.fs.TranslatedFiles", "newBufferedWriter"),
+    ),
+    // The installed file-system providers, which the JDK loads with `ServiceLoader`; the
+    // translator's are those of `java.base`.
+    (
+        (
+            "java.nio.file.spi.FileSystemProvider",
+            "loadInstalledProviders",
+            "()java.util.List<java.nio.file.spi.FileSystemProvider>",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "loadInstalledProviders"),
+    ),
+    // The escaped octets of a URI's part decoded as UTF-8, which the JDK decodes with a
+    // `CharsetDecoder` (`java/net/TranslatedURI.java`).
+    (
+        ("java.net.URI", "decode", "(java.lang.String,boolean)java.lang.String"),
+        ("java.net.TranslatedURI", "decode"),
     ),
 ];
 

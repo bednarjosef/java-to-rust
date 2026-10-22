@@ -203,7 +203,36 @@ impl<'a> Gen<'a> {
 
     /// The name of the conversion to the enum of `t`: `to_shape`.
     pub(super) fn to_name(&self, t: usize) -> String {
-        format!("to_{}", snake_case(&self.simple_name(t)).trim_end_matches('_'))
+        format!("to_{}", snake_case(&self.distinct_name(t)).trim_end_matches('_'))
+    }
+
+    /// The name of type `t` in the names of its conversions: its simple name, or with its outer
+    /// classes when another type has that simple name too (`ImageReaderNode` and
+    /// `ConcurrentHashMapNode`), or with its package as well when that is shared too.
+    fn distinct_name(&self, t: usize) -> String {
+        let simple = self.simple_name(t);
+        if !self.shared_names.contains(&simple) || self.class.array_of(t).is_some() {
+            return simple;
+        }
+        let in_package = self.in_package_name(t);
+        if !self.shared_names.contains(&in_package) {
+            return in_package;
+        }
+        self.full_variant_name(t)
+    }
+
+    /// The simple names, and the names with outer classes, that more than one type has.
+    pub(super) fn shared_names(&self) -> HashSet<String> {
+        let mut seen = HashSet::new();
+        let mut shared = HashSet::new();
+        for t in (0..self.class.types.len()).filter(|&t| self.class.array_of(t).is_none()) {
+            for name in [self.simple_name(t), format!("{}\0", self.in_package_name(t))] {
+                if !seen.insert(name.clone()) {
+                    shared.insert(name.trim_end_matches('\0').to_string());
+                }
+            }
+        }
+        shared
     }
 
     /// The simple name of type `t`, which names its variants and conversions: `Circle` for
@@ -221,7 +250,7 @@ impl<'a> Gen<'a> {
 
     /// The name of the checked conversion to type `t`: `as_circle`.
     fn as_name(&self, t: usize) -> String {
-        format!("as_{}", snake_case(&self.simple_name(t)).trim_end_matches('_'))
+        format!("as_{}", snake_case(&self.distinct_name(t)).trim_end_matches('_'))
     }
 
     /// The binary name of type `t`, as the JVM shows it: `shapes.Outer$Inner`.
@@ -784,7 +813,13 @@ impl<'a> Gen<'a> {
         let m = &self.class.methods[resolved];
         if m.name == "toString" && m.params.is_empty() {
             self.need(Need::Display(t));
-            return Code::atom(format!("{}.to_string()", self.object(receiver)));
+            let text = format!("{}.to_string()", self.object(receiver));
+            // A `toString` that an implementation may return null from is an `Option` where its
+            // value is used (`nullness`); the `Display` shows such a null as "null".
+            if self.facts.nullable_returns.contains(&resolved) {
+                return Code::atom(format!("Some({text})"));
+            }
+            return Code::atom(text);
         }
         let name = self.dispatch_name(t, resolved);
         let obj = self.object(receiver);
