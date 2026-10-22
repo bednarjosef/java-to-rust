@@ -236,6 +236,9 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::DescriptorHandle
             | Native::DescriptorAppend
             | Native::FullFence
+            // A copy outside the arrays, or of memory outside the heap, ends the program
+            // (`java::copy_memory`), as the translation cannot go on with it.
+            | Native::CopyMemory { .. }
             | Native::Crc32Update
             | Native::InflateInit
             | Native::InflateAdler
@@ -243,6 +246,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::InflateEnd
             | Native::NoPendingReferences,
         ) => &[],
+        // A read or write outside the array, or of memory outside the heap, ends the program.
+        Builtin::RawMemory { .. } => &[],
         // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).
         Builtin::Native(Native::Unix(_)) => &[],
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
@@ -609,6 +614,8 @@ pub(super) fn runtime_failures(
                     if null(&args[1]) {
                         out.push((NPE, "this call", true, args[1].id));
                     }
+                } else if let Builtin::Native(Native::CopyMemory { .. }) | Builtin::RawMemory { .. } = builtin {
+                    // A null base is an address outside the heap, which ends the program.
                 } else if !takes_null && checked.iter().any(null) {
                     let receiver = !checked[1..].iter().any(null);
                     out.push((NPE, "this call", receiver, if receiver { args[0].id } else { x.id }));

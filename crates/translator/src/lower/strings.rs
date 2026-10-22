@@ -525,11 +525,16 @@ impl<'t> Lowering<'t> {
         }))
     }
 
-    /// A bit or radix method of `Integer` or `Long`; `None` for any other method.
+    /// A bit or radix method of `Integer` or `Long`, or `reverseBytes` of `Short` or
+    /// `Character`; `None` for any other method.
     pub(super) fn bits_call(&self, symbol: &Symbol, args: &[Expr]) -> Option<Builtin> {
         let kind = match symbol.owner {
             "java.lang.Integer" => Type::Int,
             "java.lang.Long" => Type::Long,
+            "java.lang.Short" | "java.lang.Character" if (symbol.name, args.len()) == ("reverseBytes", 1) => {
+                let kind = if symbol.owner == "java.lang.Short" { Type::Short } else { Type::Char };
+                return symbol.is_static.then_some(Builtin::Bits(BitsOp::ReverseBytes, kind));
+            }
             _ => return None,
         };
         let op = match (symbol.name, args.len()) {
