@@ -231,6 +231,7 @@ mod tests {
 
     #[test]
     fn a_notified_thread_wakes_with_the_monitor() {
+        crate::locked::begin_threads();
         let queue = Arc::new(Locked::new(Vec::new()));
         let consumer = {
             let queue = queue.clone();
@@ -261,6 +262,7 @@ mod tests {
 
     #[test]
     fn each_notify_wakes_a_waiter_that_a_later_one_cannot_take() {
+        crate::locked::begin_threads();
         // Several consumers, one `notify` per item: a waiter that comes late must not take the
         // notification meant for one that waited before it, or both would wait for ever.
         let queue = Arc::new(Locked::new((Vec::new(), 0)));
