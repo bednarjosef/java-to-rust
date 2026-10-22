@@ -72,6 +72,11 @@ something a translated program does not have.
 | the translator's `sun.nio.fs.UnixNativeDispatcher` (`UNIX_CALLS`) | `unix.rs` | the system calls of `java.nio.file`, recording `errno` rather than failing |
 | the translator's `java.net.TranslatedNet` (`NET_CALLS`) | `net.rs` | the C library's name service |
 | `Unsafe.allocateMemory0`, `reallocateMemory0`, `freeMemory0`, `setMemory0`, `copyMemory0`, `copySwapMemory0`; `UnsafeConstants.pageSize0` | `native_memory.rs`, `java::copy_memory` | memory outside the heap by address, for direct buffers |
+| `FileDispatcherImpl.transferTo0`, `transferFrom0` | `file_channels.rs`: `UNSUPPORTED_CASE` | the JDK's `transferToArbitraryChannel` (or its `transferFrom` twin) copies through buffers at the same positions and counts, so `Files.copy` and `FileChannel.transferTo`/`transferFrom` give Java's bytes and positions; `copy_file_range` is not used |
+| `UnixFileDispatcherImpl.map0(fd, prot, position, length, isSync)` | `file_channels.rs`, lowered with the descriptor's number (`lower/file_channels.rs`) | a read-only (`MAP_RO`) or private (`MAP_PV`) mapping is a block of memory outside the heap holding the file's bytes from `position` (zeros past the end of the file), taken when the map is made. Later writes to the file are not seen, and writes to a private mapping do not reach the file, as in Java. A read-write or synchronous mapping ends the program with a message |
+| `UnixFileDispatcherImpl.unmap0(address, length)` | `file_channels.rs` | frees the block; 0 |
+| `UnixFileDispatcherImpl.allocationGranularity0()` | `file_channels.rs` | the page size (4096), which `FileChannelImpl` aligns mapping positions to |
+| `MappedMemoryUtils.force0`, `Unsafe.writeback0`, `writebackPreSync0`, `writebackPostSync0` | nothing (statement dropped) | exact because no mapping is writable or synchronous, so there is nothing to write back |
 | `Unsafe.fullFence()` (and `loadFence`, `storeFence`) | a full fence | |
 | `Unsafe.park`, `unpark` | `thread.rs` | `LockSupport`'s permits |
 | `CRC32.update`, `updateBytes0` | `java::crc32_update`, `crc32_update_bytes` | zlib's CRC-32 |
@@ -109,7 +114,8 @@ compared with one recorded run.
   program reaches them yet. `FileChannel.open` and `Files.newByteChannel` do not use
   `FileChannelImpl` at all: they use the overlay `UnixFileChannel` (`java/overlay/sun/nio/fs`).
 - Stack walking (`StackTraceElement.initStackTraceElements`, `StackStreamFactory`), class
-  definition and module natives, sockets, `statvfs`, and every native not in the table.
+  definition and module natives, sockets, `statvfs`, `MappedMemoryUtils.isLoaded0`, `load0` and
+  `unload0` (`MappedByteBuffer.isLoaded`, `load`, `unload`), and every native not in the table.
 
 ## The reachability boundary
 

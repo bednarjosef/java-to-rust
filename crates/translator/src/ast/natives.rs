@@ -249,6 +249,16 @@ pub enum Native {
     SystemTimeZoneId,
     /// `TimeZone.getSystemGMTOffsetID()`: the local offset from UTC as `GMT+hh:mm`.
     SystemGmtOffsetId,
+    /// `FileDispatcherImpl.transferTo0` and `transferFrom0`: the runtime answers
+    /// `IOStatus.UNSUPPORTED_CASE`, so the JDK copies through buffers instead (`file_channels.rs`).
+    TransferUnsupported,
+    /// `UnixFileDispatcherImpl.map0(fd, prot, position, length, isSync)`: a block outside the heap
+    /// with the file's bytes (`file_channels.rs`). Its descriptor is lowered to its number.
+    MapFile,
+    /// `UnixFileDispatcherImpl.unmap0(address, length)`: frees the block that `MapFile` made.
+    UnmapFile,
+    /// `UnixFileDispatcherImpl.allocationGranularity0()`: the page size.
+    AllocationGranularity,
 }
 
 impl Native {
@@ -332,6 +342,32 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("jdk.internal.misc.UnsafeConstants", "pageSize0", "()int") => Native::PageSize,
         ("jdk.internal.misc.Unsafe", "reallocateMemory0", "(long,long)long") => Native::ReallocateNative,
         ("jdk.internal.misc.Unsafe", "freeMemory0", "(long)void") => Native::FreeNative,
+        // A transfer is copied by the JDK's own fallback, and a mapping by `MapFile`, which
+        // `lower/file_channels.rs` lowers with the descriptor's number.
+        (
+            "sun.nio.ch.FileDispatcherImpl",
+            "transferTo0",
+            "(java.io.FileDescriptor,long,long,java.io.FileDescriptor,boolean)long",
+        ) => Native::TransferUnsupported,
+        (
+            "sun.nio.ch.FileDispatcherImpl",
+            "transferFrom0",
+            "(java.io.FileDescriptor,java.io.FileDescriptor,long,long,boolean)long",
+        ) => Native::TransferUnsupported,
+        ("sun.nio.ch.UnixFileDispatcherImpl", "allocationGranularity0", "()long") => {
+            Native::AllocationGranularity
+        }
+        (
+            "sun.nio.ch.UnixFileDispatcherImpl",
+            "map0",
+            "(java.io.FileDescriptor,int,long,long,boolean)long",
+        ) => Native::MapFile,
+        ("sun.nio.ch.UnixFileDispatcherImpl", "unmap0", "(long,long)int") => Native::UnmapFile,
+        // Nothing is written back: no mapping is writable or synchronous (`file_channels.rs`).
+        ("java.nio.MappedMemoryUtils", "force0", "(java.io.FileDescriptor,long,long)void") => Native::Nothing,
+        ("jdk.internal.misc.Unsafe", "writeback0", "(long)void") => Native::Nothing,
+        ("jdk.internal.misc.Unsafe", "writebackPreSync0", "()void") => Native::Nothing,
+        ("jdk.internal.misc.Unsafe", "writebackPostSync0", "()void") => Native::Nothing,
         ("jdk.internal.misc.Unsafe", "setMemory0", "(java.lang.Object,long,long,byte)void") => {
             Native::SetMemory
         }
@@ -585,6 +621,37 @@ mod tests {
         assert_eq!(found("java.io.FileDescriptor", "getHandle", "(int)long"), Some(Native::DescriptorHandle));
         assert_eq!(found("java.io.FileInputStream", "initIDs", "()void"), Some(Native::Nothing));
         assert_eq!(found("java.nio.MappedMemoryUtils", "registerNatives", "()void"), Some(Native::Nothing));
+        assert_eq!(
+            found(
+                "sun.nio.ch.FileDispatcherImpl",
+                "transferTo0",
+                "(java.io.FileDescriptor,long,long,java.io.FileDescriptor,boolean)long"
+            ),
+            Some(Native::TransferUnsupported)
+        );
+        assert_eq!(
+            found(
+                "sun.nio.ch.UnixFileDispatcherImpl",
+                "map0",
+                "(java.io.FileDescriptor,int,long,long,boolean)long"
+            ),
+            Some(Native::MapFile)
+        );
+        assert_eq!(
+            found("sun.nio.ch.UnixFileDispatcherImpl", "unmap0", "(long,long)int"),
+            Some(Native::UnmapFile)
+        );
+        assert_eq!(
+            found("sun.nio.ch.UnixFileDispatcherImpl", "allocationGranularity0", "()long"),
+            Some(Native::AllocationGranularity)
+        );
+        assert_eq!(
+            found("java.nio.MappedMemoryUtils", "force0", "(java.io.FileDescriptor,long,long)void"),
+            Some(Native::Nothing)
+        );
+        assert_eq!(found("jdk.internal.misc.Unsafe", "writeback0", "(long)void"), Some(Native::Nothing));
+        assert_eq!(found("jdk.internal.misc.Unsafe", "writebackPreSync0", "()void"), Some(Native::Nothing));
+        assert_eq!(found("jdk.internal.misc.Unsafe", "writebackPostSync0", "()void"), Some(Native::Nothing));
         assert_eq!(found("java.util.zip.CRC32", "update", "(int,int)int"), Some(Native::Crc32Update));
         assert_eq!(
             found("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int"),

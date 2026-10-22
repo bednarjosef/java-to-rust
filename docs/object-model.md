@@ -241,7 +241,8 @@ Java's order holds on the finished object, and the analyses and generator need n
   own field initializers, then its body;
 - `new C(..)` of a class with subclasses calls a static `new<Name>`, which builds the zero
   object and calls its `construct<Name>`. The enclosing instance and captured locals of the zero
-  object are the constructor's parameters that its `this(..)` and `super(..)` pass them on in.
+  object are the constructor's parameters, or fields of them (`holder.super(..)`), that its
+  `this(..)` and `super(..)` pass on.
 
 Field initializers of these classes run after the superclass's part (in a method
 `initializeFields` when several constructors run them), so a method that the superclass's
@@ -250,7 +251,7 @@ constructor calls sees the subclass's fields unset, as in Java; an object field 
 the same.
 
 Rejected: a class with subclasses that needs the whole-object form, whose enclosing instance
-or captured locals a `super(..)` computes rather than passes on as a parameter (`new
+or captured locals a `super(..)` computes other than as a parameter or a field of one (`new
 A().super()`): "constructors of a class with subclasses that use `this` as a value or call
 overridable methods, in a class with an enclosing instance or captured locals that a
 constructor does not pass on as they are".

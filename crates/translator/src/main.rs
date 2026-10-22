@@ -10,7 +10,8 @@ use std::process::ExitCode;
 const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs> | --crate <directory>]
        java-to-rust [--timings] --main <package.Class> [--source <root>]... [--library <root>]... [<File.java>]...
                     [-o <output.rs> | --crate <directory> | --survey [--survey-json <file>]
-                     | --census [--census-json <file>] [--keep-going]] [--modules-json <file>]";
+                     | --census [--census-json <file>] [--keep-going] [-o <output.rs> | --crate <directory>]]
+                    [--modules-json <file>]";
 
 /// The stack that translation runs on: the trees of real code, and the recursion over them, can
 /// be deeper than the main thread's stack allows.
@@ -82,8 +83,10 @@ fn emit(output: Option<(&str, &str)>, input: &str, files: &[SourceFile]) -> Resu
 /// `--survey` prints what the reachable code uses instead (`--survey-json` also writes it as JSON
 /// to a file), and `--census` what the translator rejects in it, past every rejection
 /// (`--census-json` also writes it as JSON); with `--keep-going`, a census goes on past javac's
-/// compile errors, and rejects the code that they are in. `--modules-json` writes the modules of the
-/// translation (of a census: with every rejected piece stubbed) and what their items name
+/// compile errors, and rejects the code that they are in; with `-o` or `--crate`, a census writes its
+/// translation too, a trial one in which each rejected piece of code ends the program with the
+/// rejection (`Program::ends_rejected`). `--modules-json` writes the modules of the translation (of
+/// a census: with every rejected piece stubbed) and what their items name
 /// (`output::ModuleTree::dependencies`).
 fn run_program(args: &[String]) -> Result<(), String> {
     let mut program = java_to_rust::Program::default();
@@ -124,6 +127,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
         return Err(format!("--keep-going is only for a census\n{USAGE}"));
     }
     if census {
+        program.ends_rejected = output.is_some();
         let census = java_to_rust::census_program(&program).map_err(|e| e.to_string())?;
         print!("{}", census.report);
         if let Some(path) = census_json {
@@ -132,6 +136,12 @@ fn run_program(args: &[String]) -> Result<(), String> {
         }
         if let (Some(path), Some(tree)) = (modules_json, &census.modules) {
             write_dependencies(&path, tree)?;
+        }
+        if let Some((flag, path)) = &output {
+            let Some(tree) = &census.modules else {
+                return Err("the census ended early, so it has no translation to write".to_string());
+            };
+            emit(Some((flag, path.as_str())), &crate_name(&program.main), &tree.files(layout(flag)))?;
         }
         return Ok(());
     }
@@ -148,13 +158,19 @@ fn run_program(args: &[String]) -> Result<(), String> {
     if let Some(path) = modules_json {
         write_dependencies(&path, &tree)?;
     }
-    let name = program.main.rsplit('.').next().unwrap_or("translated").to_string();
-    let layout = if output.as_ref().is_some_and(|(flag, _)| *flag == "--crate") {
-        Layout::FilePerModule
-    } else {
-        Layout::OneFile
-    };
+    let name = crate_name(&program.main);
+    let layout = output.as_ref().map_or(Layout::OneFile, |(flag, _)| layout(flag));
     emit(output.as_ref().map(|(flag, path)| (*flag, path.as_str())), &name, &tree.files(layout))
+}
+
+/// The name of a whole program's project: its main class's simple name.
+fn crate_name(main: &str) -> String {
+    main.rsplit('.').next().unwrap_or("translated").to_string()
+}
+
+/// A whole program's project (`--crate`) has a file per package; one file (`-o`) is one file.
+fn layout(flag: &str) -> Layout {
+    if flag == "--crate" { Layout::FilePerModule } else { Layout::OneFile }
 }
 
 /// Writes the modules of a translation and what their items name, as JSON, to `path`.

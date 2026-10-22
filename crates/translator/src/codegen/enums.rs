@@ -6,7 +6,9 @@
 
 use super::*;
 
-/// The Rust variant for an enum constant: `RED` is `Red`, and `VERY_BIG` is `VeryBig`.
+/// The Rust variant for an enum constant: `RED` is `Red`, and `VERY_BIG` is `VeryBig`. A word
+/// that starts with a digit keeps its underscore, as `JDK1_2` and `JDK12` of javac's `Source` are
+/// `Jdk1_2` and `Jdk12`.
 pub(super) fn variant_name(constant: &str) -> String {
     // `SELF` would be `Self`, Rust's keyword.
     if constant == "SELF" {
@@ -14,10 +16,12 @@ pub(super) fn variant_name(constant: &str) -> String {
     }
     constant
         .split('_')
-        .map(|word| {
+        .enumerate()
+        .map(|(i, word)| {
             let lower = word.to_lowercase();
             let mut chars = lower.chars();
             match chars.next() {
+                Some(first) if first.is_ascii_digit() && i > 0 => format!("_{lower}"),
                 Some(first) => first.to_uppercase().chain(chars).collect(),
                 None => String::new(),
             }

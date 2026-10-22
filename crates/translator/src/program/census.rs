@@ -68,7 +68,8 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     std::panic::set_hook(Box::new(|_| {}));
     let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     // The program's files are the first units (`load`).
-    let lower = || lower::census_lower_program(&trees, files.len(), &reach, &program.main);
+    let lower =
+        || lower::census_lower_program(&trees, files.len(), &reach, &program.main, program.ends_rejected);
     let lowered = phase("lower", || std::panic::catch_unwind(lower));
     let lowered = lowered.unwrap_or_else(|panic| {
         let message = format!("the translator panicked: {}", lower::panic_message(&*panic));
@@ -101,11 +102,16 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     locate(&trees, rejections.iter_mut().filter(|r| r.anchor.is_none()).chain(&mut fatal));
     let scan = survey::scan(&units.iter().collect::<Vec<_>>(), &reach, program, &files);
     let unit_files = survey::unit_files(&units.iter().collect::<Vec<_>>(), program, &files);
+    if let Some(class) = &class {
+        super::print_notes(class, &unit_files);
+    }
     drop(trees);
     drop((units, reach));
     let mut modules = None;
     if let Some(mut class) = class {
-        fatal = phase("analyze", || analyse(&mut class, &lowered.units, &mut rejections, &mut modules));
+        fatal = phase("analyze", || {
+            analyse(&mut class, &lowered.units, &mut rejections, &mut modules, program.ends_rejected)
+        });
     }
     std::panic::set_hook(hook);
     let tally = Tally::new(&scan.pieces, &unit_files, rejections, fatal);
@@ -123,9 +129,10 @@ fn analyse(
     units: &[Option<usize>],
     rejections: &mut Vec<Rejection>,
     modules: &mut Option<ModuleTree>,
+    ends_rejected: bool,
 ) -> Option<Rejection> {
     let generated: std::cell::RefCell<Option<ModuleTree>> = Default::default();
-    let mut stubs = Stubs { next_id: next_id(class) + 1, stubbed: HashSet::new() };
+    let mut stubs = Stubs { next_id: next_id(class) + 1, stubbed: HashSet::new(), ends_rejected };
     // `whole_objects` changes the program only when it passes: an error of it that no stub takes
     // away is recorded, and the census goes on without it. An error of a check of the analyses
     // that only rejects (as of a field's type) that no stub takes away is recorded too, and the
@@ -225,6 +232,9 @@ struct Stubs {
     next_id: usize,
     /// The methods that are stubs already.
     stubbed: HashSet<usize>,
+    /// The translation is written (`Program::ends_rejected`): a rejected field initializer becomes
+    /// a stub that ends the program, rather than being left out.
+    ends_rejected: bool,
 }
 
 impl Stubs {
@@ -242,6 +252,11 @@ impl Stubs {
             return rejection;
         }
         let in_unit = |t: usize| known.is_none() || units.get(t).copied().flatten() == known;
+        // The names of the classes, which the stubs' messages name the code by.
+        let names: Vec<String> = match self.ends_rejected {
+            true => class.types.iter().map(|d| d.name.clone()).collect(),
+            false => vec![String::new(); class.types.len()],
+        };
         let at = |e: &Expr| {
             let mut here = false;
             visit_expr(e, &mut |x| here |= x.pos.same_place(pos));
@@ -271,7 +286,9 @@ impl Stubs {
             if method.is_abstract {
                 abstracts.push(index);
             } else if self.stubbed.insert(index) {
-                self.never(method);
+                let message =
+                    stub_message(&format!("{}.{}", names[method.class], method.name), &rejection.error);
+                self.never(method, message);
                 if rejection.anchor.is_none() {
                     rejection.unit = units.get(method.class).copied().flatten();
                     rejection.anchor = Some(method.pos);
@@ -289,8 +306,11 @@ impl Stubs {
                 }
                 // A constant's value is a literal that nothing rejects, though its position may
                 // be that of an error in another file.
-                if !field.constant && field.init.as_ref().is_some_and(at) {
-                    field.init = None;
+                if !field.constant && field.init.as_ref().is_some_and(|i| at(i) && !is_stub(i)) {
+                    field.init = self.ends_rejected.then(|| {
+                        let message = stub_message(&names[t], &rejection.error);
+                        self.expr(Builtin::NoObject { class: t }, Some(message), field.pos, field.ty)
+                    });
                     if rejection.anchor.is_none() {
                         rejection.unit = units.get(t).copied().flatten();
                         rejection.anchor = Some(field.pos);
@@ -306,8 +326,10 @@ impl Stubs {
                     continue;
                 }
                 let method = &mut class.methods[index];
+                let message =
+                    stub_message(&format!("{}.{}", names[method.class], method.name), &rejection.error);
                 method.is_abstract = false;
-                self.never(method);
+                self.never(method, message);
                 class.hierarchy.make_concrete(index);
                 rejection.unit = units.get(method.class).copied().flatten();
                 rejection.anchor = Some(method.pos);
@@ -316,13 +338,36 @@ impl Stubs {
         rejection
     }
 
-    /// Makes the body of `method` one that never runs.
-    fn never(&mut self, method: &mut Method) {
-        let never = ExprKind::Builtin(Builtin::NoObject { class: method.class }, Vec::new());
-        method.body =
-            vec![Stmt::Expr(Expr { kind: never, pos: method.pos, ty: Type::Void, id: self.next_id })];
-        self.next_id += 1;
+    /// Makes the body of `method` one that never runs, or where the translation is written, one
+    /// that ends the program with `message`.
+    fn never(&mut self, method: &mut Method, message: String) {
+        let message = self.ends_rejected.then_some(message);
+        let never = self.expr(Builtin::NoObject { class: method.class }, message, method.pos, Type::Void);
+        method.body = vec![Stmt::Expr(never)];
     }
+
+    /// A new expression of `builtin` with a string argument `message`, if there is one.
+    fn expr(&mut self, builtin: Builtin, message: Option<String>, pos: Pos, ty: Type) -> Expr {
+        let mut args = Vec::new();
+        if let Some(message) = message {
+            args.push(Expr { kind: ExprKind::Str(message), pos, ty: Type::String, id: self.next_id });
+            self.next_id += 1;
+        }
+        let expr = Expr { kind: ExprKind::Builtin(builtin, args), pos, ty, id: self.next_id };
+        self.next_id += 1;
+        expr
+    }
+}
+
+/// What a census's stub says where it runs: the code it stands for, named by `name` (its class,
+/// or its method), and the rejection with its line.
+fn stub_message(name: &str, error: &Error) -> String {
+    format!("{name}: {} (line {})", error.message, error.pos.line)
+}
+
+/// Whether `e` is a census's stub (`Stubs::expr`).
+fn is_stub(e: &Expr) -> bool {
+    matches!(e.kind, ExprKind::Builtin(Builtin::NoObject { .. }, _))
 }
 
 /// The calls that lowering left without the method they call, which the analyses take to be

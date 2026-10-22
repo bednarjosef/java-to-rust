@@ -70,11 +70,12 @@ impl<'t> Lowering<'t> {
         let named: Vec<&Contents> = reach.modules.iter().filter(|m| !m.name.is_empty()).collect();
         let ret = self.ty(node, symbol.ty.rsplit(')').next().unwrap_or_default())?;
         let string = |s: &str| self.synth(ExprKind::Str(s.to_string()), pos, Type::String);
+        // A `String[]`, which is an `Object[]` where arrays of strings are covariant (`covariant`).
         let strings = |lines: Vec<String>| {
             let array = if lines.is_empty() {
                 ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)])
             } else {
-                ExprKind::ArrayLit(lines.iter().map(|l| string(l)).collect())
+                ExprKind::ArrayLit(lines.iter().map(|l| self.convert(string(l), ret.element())).collect())
             };
             self.synth(array, pos, ret)
         };

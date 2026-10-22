@@ -31,6 +31,7 @@ mod exception;
 mod fd;
 pub mod fdlibm;
 mod file_channel;
+mod file_channels;
 mod float;
 mod float_parse;
 pub mod format;
@@ -83,6 +84,7 @@ pub use exact::*;
 pub use exception::*;
 pub use fd::*;
 pub use file_channel::*;
+pub use file_channels::*;
 pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
 pub use format::{Arg, format, format_objects, print_format, print_format_objects};
@@ -303,6 +305,15 @@ pub fn exit(code: i32) -> ! {
     // What `System.out` still buffers is lost, as Java loses it.
     drain_stdout();
     std::process::exit(code)
+}
+
+/// Ends a trial translation (`--census` with an output) where it reaches code that the
+/// translator rejected: `message` names the rejection and where it is. The exit status is 70
+/// (`EX_SOFTWARE`), which no Java program's uncaught exception gives.
+pub fn not_translated(message: &str) -> ! {
+    drain_stdout();
+    eprintln!("not translated: {message}");
+    std::process::exit(70)
 }
 
 /// Ends the program the way an uncaught Java exception of the standard class `class` does.
