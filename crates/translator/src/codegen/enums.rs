@@ -288,7 +288,7 @@ impl<'a> Gen<'a> {
         self.need(Need::CastSource(t));
         let (source, failed) = (self.runtime("CastSource"), self.runtime("cast_failed"));
         let base = self.runtime("BASE");
-        format!("other => {failed}({source}::cast_class(other), (\"java.lang.Enum\", {base}))")
+        format!("other => {failed}({source}::cast_class(&other), (\"java.lang.Enum\", {base}))")
     }
 
     /// An enum's builtin on an `Enum` that is an `Object` (of the enum of type `t`): a `match`

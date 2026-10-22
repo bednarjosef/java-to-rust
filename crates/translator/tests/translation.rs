@@ -4754,7 +4754,7 @@ fn bounded_type_variables_erase_to_the_bound() {
             "fn max(a: Comparable, b: Comparable) -> Comparable {",
             "enum Comparable {\n    Point(Rc<Point>),\n    String(String),\n}",
             "Comparable::Point(o) => o.compare_to(other),",
-            "Comparable::String(o) => match &other { Comparable::String(b) => java::compare_to(o, b), b => java::cast_failed(java::CastSource::cast_class(b), (\"java.lang.String\", java::BASE)) },",
+            "Comparable::String(o) => match &other { Comparable::String(b) => java::compare_to(o, b), b => java::cast_failed(java::CastSource::cast_class(&b), (\"java.lang.String\", java::BASE)) },",
         ],
     );
 }

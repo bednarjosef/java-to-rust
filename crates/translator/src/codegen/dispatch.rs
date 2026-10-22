@@ -387,7 +387,7 @@ impl<'a> Gen<'a> {
         let (from, binding) = match self.enum_of(value) {
             Some(s) => {
                 self.need(Need::CastSource(s));
-                (format!("{}::cast_class(o)", self.runtime("CastSource")), "o")
+                (format!("{}::cast_class(&o)", self.runtime("CastSource")), "o")
             }
             None => (self.cast_class(self.value_class(value)), "_"),
         };
@@ -1735,7 +1735,7 @@ impl<'a> Gen<'a> {
         }
         // Any other object fails the cast to `c` that `compareTo` makes; null fails first.
         self.need(Need::CastSource(e));
-        let from = format!("{}::cast_class(b)", self.runtime("CastSource"));
+        let from = format!("{}::cast_class(&b)", self.runtime("CastSource"));
         let fail = failed(self, from);
         if optional {
             let other = format!("{}(b.as_ref())", self.runtime("non_null"));
