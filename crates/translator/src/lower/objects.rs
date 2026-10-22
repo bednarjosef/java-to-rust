@@ -150,6 +150,7 @@ impl<'t> Lowering<'t> {
         }
         if node.kind() == "ENUM" {
             self.body_methods(index);
+            self.declare_body_lambdas(index)?;
         }
         Ok(())
     }
