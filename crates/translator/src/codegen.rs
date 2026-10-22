@@ -114,10 +114,17 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
     let modules = modules::enter(class);
     let homes: Vec<Home> = (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect();
     let (fn_names, group_names) = method_names(class, &homes);
+    let static_fn_names =
+        (0..fn_names.len()).filter(|&i| class.methods[i].is_static).map(|i| fn_names[i].clone()).collect();
     let mut g = Gen {
         class,
         facts,
         fn_names,
+        static_fn_names,
+        variant_names: Default::default(),
+        reps: Default::default(),
+        variant_lists: Default::default(),
+        checked_value_ofs: Default::default(),
         group_names,
         live: live.clone(),
         runs: running_types(class, facts),
@@ -252,6 +259,15 @@ struct Gen<'a> {
     facts: &'a Facts,
     /// Where each method is emitted (see `analysis::hierarchy`).
     homes: Vec<Home>,
+    /// The names of the static methods, which are free functions in the namespace of locals.
+    static_fn_names: HashSet<String>,
+    /// The names of the variants of the enum of each type (see `dispatch::variant`), once made.
+    variant_names: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashMap<usize, String>>>>,
+    /// How the values of each type are represented, and the variants of its enum, once found.
+    reps: std::cell::RefCell<HashMap<usize, hierarchy::Rep>>,
+    variant_lists: std::cell::RefCell<HashMap<usize, std::rc::Rc<Vec<usize>>>>,
+    /// The enums whose `valueOf` a `catch` or `finally` sees fail (see `enums::checked_value_of`).
+    checked_value_ofs: std::cell::OnceCell<HashSet<&'static str>>,
     /// The name of each override group (by group id): the name of its dispatchers.
     group_names: HashMap<usize, String>,
     /// Which classes have a struct (see `live_types`).
@@ -647,18 +663,14 @@ impl<'a> Gen<'a> {
         collect_locals(&m.body, &mut java_names);
         // Static methods are free functions, in the value namespace that locals share; instance
         // methods and constructors are reached through their type or object.
-        let mut used: HashSet<String> = (0..self.fn_names.len())
-            .filter(|&i| self.class.methods[i].is_static)
-            .map(|i| self.fn_names[i].clone())
-            .collect();
-        used.insert("java".into());
+        let mut used: HashSet<String> = HashSet::from(["java".to_string()]);
         if self.display {
             used.insert("f".into());
         }
         self.locals.clear();
         for name in java_names {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.locals.entry(name) {
-                let rust = unique(snake_case(entry.key()), &mut used);
+                let rust = unique_beside(snake_case(entry.key()), &mut used, &self.static_fn_names);
                 entry.insert(rust);
             }
         }

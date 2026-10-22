@@ -22,6 +22,8 @@ thread_local! {
 struct Context {
     /// The package of every class, by qualified name.
     packages: HashMap<String, String>,
+    /// The path of each package's module (`path`).
+    paths: HashMap<String, String>,
     /// The package whose module is being written; `None` before any item is written, when names
     /// are made without a path (such as the type suffixes of overloaded methods).
     current: Option<String>,
@@ -44,13 +46,14 @@ pub(super) fn enter(class: &Class) -> Option<Scope> {
     }
     // A runtime value's class is the runtime's, whatever its name: the JDK's `Character`, which
     // is translated for its static members, is the box's class too.
-    let packages = class
+    let packages: HashMap<String, String> = class
         .types
         .iter()
         .filter(|t| t.kind != TypeKind::Runtime)
         .map(|t| (t.name.clone(), t.package.clone()))
         .collect();
-    CONTEXT.with_borrow_mut(|c| *c = Some(Context { packages, current: None }));
+    let paths = packages.values().map(|p| (p.clone(), path(p))).collect();
+    CONTEXT.with_borrow_mut(|c| *c = Some(Context { packages, paths, current: None }));
     Some(Scope)
 }
 
@@ -84,7 +87,7 @@ pub(super) fn split(name: &str) -> (String, &str) {
         };
         let local = if package.is_empty() { name } else { &name[package.len() + 1..] };
         match &c.current {
-            Some(current) if current != package => (path(package), local),
+            Some(current) if current != package => (c.paths[package].clone(), local),
             _ => (String::new(), local),
         }
     })
@@ -278,5 +281,10 @@ impl<'a> Gen<'a> {
     pub(super) fn module_types(&self) -> impl Iterator<Item = &'a TypeDecl> + use<'a> {
         let class: &'a Class = self.class;
         class.types.iter().filter(|t| here(t))
+    }
+
+    /// `module_types`, by index.
+    pub(super) fn module_type_indexes(&self) -> Vec<usize> {
+        (0..self.class.types.len()).filter(|&t| here(&self.class.types[t])).collect()
     }
 }

@@ -4,13 +4,13 @@
 //! and a subtype's enum converts with `to_<supertype>()`.
 
 use super::*;
-use crate::analysis::hierarchy::{self, Rep};
+use crate::analysis::hierarchy::Rep;
 
 impl<'a> Gen<'a> {
     /// The representation of the class type that method `index` returns, if it returns one.
     fn ret_rep(&self, index: usize) -> Option<Rep> {
         let ty = self.class.methods[index].ret;
-        self.class.class_index(ty).map(|t| hierarchy::rep(self.class, self.facts, t))
+        self.class.class_index(ty).map(|t| self.rep(t))
     }
 
     /// Whether methods `a` and `b` return values of one representation, so that a value that one
