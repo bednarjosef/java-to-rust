@@ -218,10 +218,6 @@ impl<'a> Gen<'a> {
                 parts.extend(args[1..].iter().map(|a| self.int_arg(a)));
                 call(self, f, parts)
             }
-            StringOp::TranslateEscapes => {
-                let s = self.text_ref(&args[0]);
-                self.may_fail(id, "translate_escapes", "", &s)
-            }
             StringOp::ContentEquals => {
                 let (a, b) = (self.text_ref(&args[0]), self.text_ref(&args[1]));
                 call(self, "content_equals", vec![a, b])

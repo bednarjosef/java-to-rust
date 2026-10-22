@@ -186,7 +186,6 @@ impl<'t> Lowering<'t> {
             "offsetByCodePoints" => StringOp::OffsetByCodePoints,
             "regionMatches" => StringOp::RegionMatches,
             "stripIndent" => StringOp::StripIndent,
-            "translateEscapes" => StringOp::TranslateEscapes,
             // A `CharSequence` is compared by its text, which its `toString()` gives.
             "contentEquals" if matches!(args[0].ty, Type::Class(..)) => {
                 let x = args.pop().expect("one argument");

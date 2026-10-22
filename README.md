@@ -434,9 +434,7 @@ A small subset, end to end:
     `Character` (`getType`, `isTitleCase`, `UnicodeScript`, `UnicodeBlock`, ...) is the JDK's,
     translated with its `CharacterData` tables.
   - `String`: searching, slicing, case, trimming, replacing, comparing, `split`, `replaceAll`,
-    `matches`, `join`, `repeat`, `stripIndent`, `translateEscapes` (whose failure for an escape
-    Java does not have, as `repeat`'s for a negative count, a `catch` sees), `hashCode`,
-    `toCharArray`, `valueOf` and `new String(char[])`,
+    `matches`, `join`, `repeat`, `hashCode`, `toCharArray`, `valueOf` and `new String(char[])`,
     and `String.valueOf(char[])` and `valueOf(char[], offset, count)` (which throw as Java does
     for a bad offset or count; a null array throws `NullPointerException`, which a `catch` cannot
     see yet).
