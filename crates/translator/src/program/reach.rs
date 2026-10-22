@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod by_name;
 mod initialize;
+mod reflection;
 mod sequential;
 mod stubs;
 
@@ -18,6 +19,7 @@ pub use by_name::{
     class_bound, class_for_name, computed_for_name, created_by_name, locale_data_classes, module_for_name,
 };
 pub use initialize::{is_ensure_initialized, literal_class};
+pub use reflection::{Kind as LookupKind, Lookup, lookup};
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
 /// constructor) and javac's signature, such as `(int)void`.
@@ -75,6 +77,12 @@ pub struct Reach {
     pub named: BTreeSet<String>,
     /// The locale data classes that a computed `Class.forName(module, name)` finds.
     pub found_by_name: BTreeSet<String>,
+    /// The providers that `ServiceLoader` finds of each service that reachable code loads, in
+    /// its order, each with whether a module declares it (`reflection.rs`).
+    pub services: BTreeMap<String, Vec<(String, bool)>>,
+    /// The members that reflection looks up by name, as (the class it looks in, the member's
+    /// name), `<init>` for constructors (`reflection.rs`).
+    pub reflected: BTreeSet<(String, String)>,
 }
 
 impl Reach {
@@ -154,11 +162,12 @@ pub const RUNTIME_CLASSES: &[&str] = &[
 /// What is not translated, by the prefix of qualified class names, with the feature it is:
 /// reachability stops there, as at the runtime's classes, and the survey counts its use. Library
 /// code reaches these on paths that only its data rules out, such as `TreeMap.addAll` reading
-/// from a stream that is null there. Class and resource loading finds classes and data by name
-/// (`ServiceLoader` the providers), which is reflection in all but name: a closed-world
-/// translation knows its classes. `ResourceBundle` is translated: the locale data it finds by
-/// name are the classes of the program. (`java.lang.Module` is a prefix of `java.lang.ModuleLayer`
-/// too.)
+/// from a stream that is null there. Class and resource loading finds classes and data by name,
+/// which is reflection in all but name: a closed-world translation knows its classes. Some is
+/// translated all the same: `ResourceBundle`, whose locale data found by name are the classes of
+/// the program, and `ServiceLoader`, whose providers are those the sources declare (the
+/// translator's, `java/overlay/java/util/ServiceLoader.java`). (`java.lang.Module` is a prefix of
+/// `java.lang.ModuleLayer` too.)
 pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.io.ObjectInputStream", "serialization"),
     ("java.io.ObjectOutputStream", "serialization"),
@@ -167,7 +176,6 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.lang.invoke.", "reflection"),
     ("java.lang.reflect.", "reflection"),
     ("java.security.", "security"),
-    ("java.util.ServiceLoader", "class loading"),
     ("jdk.internal.loader.", "class loading"),
     ("jdk.internal.reflect.", "reflection"),
     ("sun.security.", "security"),
@@ -176,10 +184,17 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
 /// Classes under a prefix of `UNTRANSLATED` that are translated all the same:
 /// `java.lang.reflect.Array` creates arrays of a component type and measures them, which is what
 /// `Arrays.copyOf` and `Collection.toArray` need of it, not reflection. `Modifier` tests the bits
-/// of a member's modifiers, and `InvocationTargetException` is an exception like any other,
-/// which code that creates an object from a `Class` value catches (`by_name.rs`).
-pub const TRANSLATED_ANYWAY: &[&str] =
-    &["java.lang.reflect.Array", "java.lang.reflect.InvocationTargetException", "java.lang.reflect.Modifier"];
+/// of a member's modifiers. `Method`, `Field` and `Constructor` are the translator's own, over the
+/// reflection table (`reflection.rs`), and so is `InvocationTargetException`, which wraps the
+/// exceptions of what they call (`java/Standard.java`).
+pub const TRANSLATED_ANYWAY: &[&str] = &[
+    "java.lang.reflect.Array",
+    "java.lang.reflect.InvocationTargetException",
+    "java.lang.reflect.Modifier",
+    "java.lang.reflect.Method",
+    "java.lang.reflect.Field",
+    "java.lang.reflect.Constructor",
+];
 
 /// Methods of translated classes whose calls the lowering replaces with the runtime's code
 /// (`lower/natives.rs`), so that reachability does not enter them, as with the runtime's classes.
@@ -955,6 +970,8 @@ pub struct Rounds<'t> {
     stays_sequential: bool,
     /// The locale data classes of the libraries (`Walk::locale_data`).
     locale_data: Vec<String>,
+    /// The service providers of the sources (`Walk::providers`).
+    providers: Vec<super::modules::ServiceProvider>,
     /// The walk without the assumption, made once it fails, and then kept up too.
     parallel: Option<Walk<'t>>,
     /// How many times a walk started again (`Walk::stale`).
@@ -972,6 +989,7 @@ impl<'t> Rounds<'t> {
             check: sequential::Index::default(),
             stays_sequential: true,
             locale_data: Vec::new(),
+            providers: Vec::new(),
             parallel: None,
             restarts: 0,
             string_array_writes: false,
@@ -989,6 +1007,13 @@ impl<'t> Rounds<'t> {
     /// classes of the libraries (`by_name::locale_data_classes`).
     pub fn with_locale_data(mut self, classes: Vec<String>) -> Rounds<'t> {
         self.locale_data = classes;
+        self
+    }
+
+    /// Reachability in which `ServiceLoader` finds these service providers, in its order
+    /// (`modules::service_providers`).
+    pub fn with_providers(mut self, providers: Vec<super::modules::ServiceProvider>) -> Rounds<'t> {
+        self.providers = providers;
         self
     }
 
@@ -1014,7 +1039,8 @@ impl<'t> Rounds<'t> {
             }
             None => {
                 let walk =
-                    Walk::start(&self.units, &self.main, true, self.string_array_writes, &self.locale_data)?;
+                    Walk::start(&self.units, &self.main, true, self.string_array_writes, &self.locale_data)?
+                        .with_providers(&self.providers);
                 self.sequential.insert(walk)
             }
         };
@@ -1029,7 +1055,8 @@ impl<'t> Rounds<'t> {
             }
             None if !self.stays_sequential => {
                 let walk =
-                    Walk::start(&self.units, &self.main, false, self.string_array_writes, &self.locale_data)?;
+                    Walk::start(&self.units, &self.main, false, self.string_array_writes, &self.locale_data)?
+                        .with_providers(&self.providers);
                 self.parallel = Some(walk);
             }
             None => {}
@@ -1130,6 +1157,18 @@ struct Walk<'t> {
     /// class literals that reachable code passes to each parameter (`initialize.rs`).
     initializing: HashSet<(MethodKey, usize)>,
     class_arguments: HashMap<(MethodKey, usize), BTreeSet<String>>,
+    /// The lookups of members by name of reachable code, its string literals and the classes
+    /// of its class literals, and the lookups made so far, by class and name (`reflection.rs`).
+    lookups: BTreeSet<Lookup>,
+    strings: HashSet<String>,
+    class_literals: HashSet<String>,
+    reflected_keys: HashSet<(String, String)>,
+    /// The service providers of the sources, and the services that
+    /// `ServiceLoader.load` of reachable code loads: by a class literal, or `None` for a
+    /// `Class` value, which may be any service whose class literal reachable code has
+    /// (`reflection.rs`).
+    providers: Vec<super::modules::ServiceProvider>,
+    service_loads: BTreeSet<Option<String>>,
 }
 
 impl<'t> Walk<'t> {
@@ -1179,6 +1218,7 @@ impl<'t> Walk<'t> {
             overriders: std::mem::take(&mut self.overriders),
             sequential,
             locale_data: std::mem::take(&mut self.locale_data),
+            providers: std::mem::take(&mut self.providers),
             ..Walk::default()
         };
         self.reach.sequential = sequential;
@@ -1299,12 +1339,18 @@ impl<'t> Walk<'t> {
     }
 
     fn run(&mut self) {
-        while let Some(item) = self.work.pop() {
-            match item {
-                Item::Class(class) => self.class(class),
-                Item::Init(class) => self.init(class),
-                Item::Method(key) => self.method(key),
-                Item::Field(key) => self.field(key),
+        loop {
+            while let Some(item) = self.work.pop() {
+                match item {
+                    Item::Class(class) => self.class(class),
+                    Item::Init(class) => self.init(class),
+                    Item::Method(key) => self.method(key),
+                    Item::Field(key) => self.field(key),
+                }
+            }
+            // What reflection's lookups find among the classes found so far (`reflection.rs`).
+            if !self.reflect() {
+                break;
             }
         }
     }
@@ -1653,6 +1699,7 @@ impl<'t> Walk<'t> {
                     self.work.push(if initialize { Item::Init(class) } else { Item::Class(class) });
                 }
                 self.reflective(value);
+                self.reflection_scan(value);
                 if recreated_exception(value).is_some() {
                     self.recreates_exceptions();
                 }
@@ -2097,25 +2144,26 @@ mod tests {
 
     #[test]
     fn class_loading_is_not_translated_and_reflect_array_is() {
-        assert_eq!(untranslated("java.util.ServiceLoader"), Some("class loading"));
+        assert_eq!(untranslated("java.util.ServiceLoader"), None);
         assert_eq!(untranslated("java.util.ResourceBundle.Control"), None);
         assert_eq!(untranslated("java.lang.ModuleLayer"), Some("class loading"));
         assert_eq!(untranslated("jdk.internal.loader.BootLoader"), Some("class loading"));
-        assert_eq!(untranslated("java.lang.reflect.Method"), Some("reflection"));
+        assert_eq!(untranslated("java.lang.reflect.Proxy"), Some("reflection"));
+        assert_eq!(untranslated("java.lang.reflect.Method"), None);
         assert_eq!(untranslated("java.lang.reflect.Array"), None);
         assert_eq!(untranslated("java.lang.reflect.Modifier"), None);
         assert_eq!(untranslated("java.util.ArrayList"), None);
-        // Reachability stops at the loader, and goes into `Array`.
+        // Reachability stops at the module layer, and goes into `Array`.
         let unit = json!({"typeDecls": [
-            class("Main", &[("main", vec![call("java.util.ServiceLoader", "load"), call("java.lang.reflect.Array", "newInstance")])]),
-            class("java.util.ServiceLoader", &[("load", vec![call("Provider", "run")])]),
+            class("Main", &[("main", vec![call("java.lang.ModuleLayer", "boot"), call("java.lang.reflect.Array", "newInstance")])]),
+            class("java.lang.ModuleLayer", &[("boot", vec![call("Provider", "run")])]),
             class("java.lang.reflect.Array", &[("newInstance", vec![call("Other", "run")])]),
             class("Provider", &[("run", vec![])]),
             class("Other", &[("run", vec![])]),
         ]});
         let reach = reach(&[&unit], "Main").unwrap();
         let method = |class: &str| (class.to_string(), "run".to_string(), "()void".to_string());
-        assert!(!reach.classes.contains("java.util.ServiceLoader"), "{reach:?}");
+        assert!(!reach.classes.contains("java.lang.ModuleLayer"), "{reach:?}");
         assert!(!reach.methods.contains(&method("Provider")), "{reach:?}");
         assert!(reach.classes.contains("java.lang.reflect.Array"), "{reach:?}");
         assert!(reach.methods.contains(&method("Other")), "{reach:?}");

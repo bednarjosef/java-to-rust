@@ -281,13 +281,24 @@ A small subset, end to end:
   `Dog.class.getName()` a constant. Any other class is a value, a `java::Class` that is `Copy`
   and equal by binary name: `x.getClass()` of an object, string, box, array or enum constant,
   class literals (`int[].class`, `String.class`, `Dog.class`), and `getName`, `getSimpleName`,
-  `getSuperclass`, `getComponentType`, `isArray`, `isInterface`, `isPrimitive`, `isEnum`,
-  `toString`, `hashCode` and `equals`. `isInstance(x)` and `cast(x)` of any class value compare
+  `getCanonicalName`, `getPackageName`, `getSuperclass`, `getComponentType`, `getEnumConstants`,
+  `isArray`, `isInterface`, `isPrimitive`, `isEnum`, `isAnnotation`, `toString`, `hashCode` and
+  `equals`; `getInterfaces` of a class literal, and `isAssignableFrom` of a class literal of a
+  class or interface of the program. `isInstance(x)` and `cast(x)` of any class value compare
   its binary name with those of `x`'s class and of every class and interface above it, which the
   generator writes out for each class `x` may be of; a failed `cast` throws Java's
   `ClassCastException` (`Cannot cast java.lang.String to Main$Dog`), which a `catch` sees.
-  Reflection (`getDeclaredFields`, `newInstance`, ...) is rejected, as are a record with an array component (its text would be the array's identity) and
-  a generic record in a record pattern. An accessor written in the record runs at each use of a
+  `Class.forName` of a constant name is that class, and of a computed one a `switch` over the
+  binary names of the classes that code can find by name; a name that is not in the translation
+  throws Java's `ClassNotFoundException`, which says so. Reflection over the program's classes
+  goes through a table of their members that the translation builds in, only for the classes and
+  names that lookups of reachable code can find (`getMethod`, `getField`, `getConstructor`,
+  `newInstance` and their relatives; `Method.invoke`, `Field.get` and `set`,
+  `Constructor.newInstance`; `lower/reflection.rs`), and `ServiceLoader` finds the providers that
+  `module-info.java` and `META-INF/services` declare (see
+  [docs/reflection-and-plugins.md](docs/reflection-and-plugins.md)). Rejected are a record with
+  an array component (its text would be the array's identity) and a generic record in a record
+  pattern. An accessor written in the record runs at each use of a
   pattern variable that names a component, not once.
 - **The class of a method's caller**: a static method that asks for the class that called it
   (`StackWalker.getInstance(RETAIN_CLASS_REFERENCE).getCallerClass()`, as logging libraries name a
@@ -730,9 +741,11 @@ call of an instance method also reaches its overriders in every class that an in
 is, extends or implements. It stops at the classes that the runtime provides (`String`,
 `StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`; `RUNTIME_CLASSES`),
 whose sources reach deep into the JVM, and at what is not
-translated: reflection (but not `java.lang.reflect.Array`, which is array code), method handles,
-serialization, security and class loading (`Module`, `ResourceBundle`, `ServiceLoader`,
-`jdk.internal.loader`; `UNTRANSLATED`). Library code
+translated: reflection (but not `java.lang.reflect.Array`, which is array code, nor `Method`,
+`Field` and `Constructor`, which the reflection table is), method handles, serialization,
+security and class loading (`Module`, `ModuleLayer`, `jdk.internal.loader`; `UNTRANSLATED`;
+`ResourceBundle` is translated, and `ServiceLoader`, `ClassLoader` and `URLClassLoader` are the
+translator's own, over the translation's classes). Library code
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
 `comparableClassFor` and parallel streams reach threads, so the boundary is needed. A program that
 puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints the count).

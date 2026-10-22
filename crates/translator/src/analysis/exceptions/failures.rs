@@ -441,7 +441,6 @@ pub(super) fn runtime_failures(
             | Builtin::Exit
             | Builtin::MainArgs
             | Builtin::NoObject { .. }
-            | Builtin::UnknownClass
             | Builtin::MissingResource
             | Builtin::InitializeClass { .. }
             | Builtin::ClassName { .. }
@@ -486,6 +485,8 @@ pub(super) fn runtime_failures(
             // checks no other (`codegen::sync`).
             Builtin::MonitorEnter if null(&args[0]) => out.push((NPE, "this synchronized", true, args[0].id)),
             Builtin::MonitorEnter => {}
+            // A class name that is not in the translation (`lower::by_name`).
+            Builtin::UnknownClass => out.push(("java.lang.ClassNotFoundException", "this class name", false, x.id)),
             // A class that is not the object's; a `catch` sees it through `java::catching`.
             Builtin::ClassCheck => out.push(("java.lang.ClassCastException", "this cast", false, x.id)),
             // An object of a class that is not `Cloneable` refuses to be copied.

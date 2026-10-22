@@ -1547,11 +1547,11 @@ fn objects_created_from_a_class_name_are_of_the_classes_that_code_names() {
         &[
             "\"app.Circle\" => {",
             "Rc::new(Circle::new());",
-            "java::throw_uncaught(format!(\"java.lang.ClassNotFoundException: {} is not a class of the translated program\"",
+            "java::throw(\"java.lang.ClassNotFoundException\", &format!(\"{}, which is not in the translation\"",
         ],
     );
-    // No code names `Square`, so no name can create one.
-    assert_lacks(&rust, &["Square", "square"]);
+    // No code names `Square`, so no name can create one; and no reflection is needed.
+    assert_lacks(&rust, &["Square", "square", "Constructor"]);
 }
 
 #[test]

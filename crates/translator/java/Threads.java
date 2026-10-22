@@ -353,16 +353,113 @@ class Thread {
     static native void printUncaught0(String name, Throwable e);
 }
 
-// `java.lang.ClassLoader` as no more than a value that a thread keeps as its context class loader:
-// the application's loader, which `getSystemClassLoader` returns. Loading classes and resources,
-// and loaders of the program's own, are rejected (this class has none of those members).
+// `java.lang.ClassLoader` over the translation's classes. A translated program is closed: the
+// application's loader, which `getSystemClassLoader` returns and which loads the program's
+// classes, finds a class by name as `Class.forName` does, and its parent, the platform's loader,
+// finds nothing of its own. A loader of the program's own (`java.net.URLClassLoader`, or a
+// subclass) asks its parent first and then its `findClass`, which finds nothing unless it
+// overrides it: defining a class from bytes is code that is not in the translation, and is not
+// here. `getClassLoader()` of a class is `of(c)`: null for the JDK's base classes, as Java's
+// bootstrap loader is, the platform's for the APIs of `java.compiler`, the application's for
+// any other. Resources are not in the translation either: a loader finds none.
 class ClassLoader {
-    private static final ClassLoader SYSTEM = new ClassLoader();
+    private static final ClassLoader PLATFORM = new ClassLoader("platform", null, false);
+    private static final ClassLoader SYSTEM = new ClassLoader("app", PLATFORM, true);
 
-    private ClassLoader() {
+    private final String name;
+    private final ClassLoader parent;
+    // Whether it loads the translation's classes.
+    private final boolean translated;
+
+    private ClassLoader(String name, ClassLoader parent, boolean translated) {
+        this.name = name;
+        this.parent = parent;
+        this.translated = translated;
+    }
+
+    protected ClassLoader(String name, ClassLoader parent) {
+        this(name, parent, false);
+    }
+
+    protected ClassLoader(ClassLoader parent) {
+        this(null, parent, false);
+    }
+
+    protected ClassLoader() {
+        this(null, SYSTEM, false);
     }
 
     public static ClassLoader getSystemClassLoader() {
+        return SYSTEM;
+    }
+
+    public static ClassLoader getPlatformClassLoader() {
+        return PLATFORM;
+    }
+
+    public final ClassLoader getParent() {
+        return parent;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public Class<?> loadClass(String name) throws ClassNotFoundException {
+        return loadClass(name, false);
+    }
+
+    protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+        if (parent != null) {
+            try {
+                return parent.loadClass(name, false);
+            } catch (ClassNotFoundException e) {
+                // Then this loader's own.
+            }
+        }
+        return findClass(name);
+    }
+
+    protected Class<?> findClass(String name) throws ClassNotFoundException {
+        if (translated) {
+            return Class.forName(name, false, null);
+        }
+        throw new ClassNotFoundException(name);
+    }
+
+    public java.net.URL getResource(String name) {
+        return null;
+    }
+
+    public java.io.InputStream getResourceAsStream(String name) {
+        return null;
+    }
+
+    public static java.net.URL getSystemResource(String name) {
+        return null;
+    }
+
+    public static java.io.InputStream getSystemResourceAsStream(String name) {
+        return null;
+    }
+
+    public String toString() {
+        return name == null ? "java.lang.ClassLoader" : "java.lang.ClassLoader[" + name + "]";
+    }
+
+    // `c.getClassLoader()`.
+    static ClassLoader of(Class<?> c) {
+        while (c.isArray()) {
+            c = c.getComponentType();
+        }
+        String n = c.getName();
+        if (c.isPrimitive() || n.startsWith("java.") || n.startsWith("sun.") || n.startsWith("jdk.internal.")) {
+            return null;
+        }
+        if (n.startsWith("javax.tools.") || n.startsWith("javax.annotation.processing.")
+                || n.startsWith("javax.lang.model.")) {
+            return PLATFORM;
+        }
         return SYSTEM;
     }
 }

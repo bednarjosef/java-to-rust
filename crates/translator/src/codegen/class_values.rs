@@ -160,7 +160,9 @@ impl<'a> Gen<'a> {
             ClassOp::IsEnum => "is_enum",
             ClassOp::ToString => "to_string",
             ClassOp::HashCode => "hash_code",
-            ClassOp::DesiredAssertionStatus => {
+            ClassOp::GetCanonicalName => "get_canonical_name",
+            ClassOp::GetPackageName => "get_package_name",
+            ClassOp::DesiredAssertionStatus | ClassOp::IsAnnotation => {
                 return Code::new(format!("{{ let _ = {class}; false }}"), LOWEST);
             }
             ClassOp::Equals => {

@@ -71,9 +71,6 @@ impl<'t> Lowering<'t> {
             return Ok(Some(self.computed_for_name(node)?));
         }
         let Some(receiver) = receiver else { return Ok(None) };
-        if symbol.owner == "java.lang.reflect.Constructor" {
-            return Ok(Some(self.constructor_call(node, symbol, receiver)?));
-        }
         // `equals`, `hashCode` and `toString` of a class are `Object`'s.
         let of_class = |ty: &str| ty == "java.lang.Class" || ty.starts_with("java.lang.Class<");
         let owner = symbol.owner == "java.lang.Class"
@@ -99,19 +96,21 @@ impl<'t> Lowering<'t> {
             // when the JDK is built and are not in its source: the program ends when it reads one
             // (`Builtin::MissingResource`).
             ("isAssignableFrom", [class]) if is_literal(receiver) => {
-                return Ok(Some(self.is_assignable_from(node, receiver, *class)?));
-            }
-            // A constructor without parameters is its class (`lower::by_name`).
-            ("getConstructor" | "getDeclaredConstructor", []) => return Ok(Some(self.expr(receiver)?.kind)),
-            ("newInstance", []) => {
-                let class = self.expr(receiver)?;
-                return Ok(Some(self.new_instance(node, class, receiver.java_type())?));
+                let class = self.expr(*class)?;
+                return Ok(Some(self.is_assignable_from(node, receiver, class)?));
             }
             ("isInstance", [x]) => {
                 let (class, x) = (self.expr(receiver)?, self.expr(*x)?);
                 return Ok(Some(ExprKind::Builtin(Builtin::ClassIsInstance, vec![class, x])));
             }
             ("cast", [x]) => return Ok(Some(self.class_cast(node, receiver, *x)?)),
+            ("getInterfaces", []) if is_literal(receiver) && self.named_class(receiver) => {
+                return Ok(Some(self.literal_interfaces(node, receiver)?));
+            }
+            ("getEnumConstants", []) => {
+                let class = self.expr(receiver)?;
+                return Ok(Some(self.class_enum_constants(node, class)?));
+            }
             ("getResourceAsStream", [name]) => {
                 let class = receiver.java_type();
                 let class =
@@ -120,6 +119,11 @@ impl<'t> Lowering<'t> {
                 return Ok(Some(ExprKind::Builtin(Builtin::MissingResource, vec![class, self.expr(*name)?])));
             }
             _ => {}
+        }
+        if !symbol.is_static
+            && let Some(kind) = self.reflection_lookup(node, symbol, receiver)?
+        {
+            return Ok(Some(kind));
         }
         let op = match (symbol.name, args.len()) {
             ("getName", 0) => ClassOp::GetName,
@@ -133,6 +137,9 @@ impl<'t> Lowering<'t> {
             ("toString", 0) => ClassOp::ToString,
             ("hashCode", 0) => ClassOp::HashCode,
             ("desiredAssertionStatus", 0) => ClassOp::DesiredAssertionStatus,
+            ("getCanonicalName", 0) => ClassOp::GetCanonicalName,
+            ("getPackageName", 0) => ClassOp::GetPackageName,
+            ("isAnnotation", 0) => ClassOp::IsAnnotation,
             ("equals", 1) => ClassOp::Equals,
             _ => return unsupported(node, &format!("`Class.{}` (reflection)", symbol.name)),
         };
@@ -188,52 +195,22 @@ impl<'t> Lowering<'t> {
         })
     }
 
-    /// A call of a `Constructor` without parameters, which is its class (`lower::by_name`):
-    /// `getModifiers()`, `setAccessible(flag)`, which does nothing but evaluate the flag, and
-    /// `newInstance()` with no arguments or a `null` array of them.
-    fn constructor_call(
-        &self,
-        node: Node<'t>,
-        symbol: &Symbol,
-        receiver: Node<'t>,
-    ) -> Result<ExprKind, Error> {
-        let args: Vec<Node<'t>> = node.list("arguments").collect();
-        let null_array = |arg: &Node<'t>| {
-            let arg = if arg.kind() == "TYPE_CAST" { arg.get("expression") } else { Some(*arg) };
-            arg.is_some_and(|arg| arg.kind() == "NULL_LITERAL")
-        };
-        match (symbol.name, args.as_slice()) {
-            ("getModifiers", []) => {
-                let class = self.expr(receiver)?;
-                self.constructor_modifiers(node, class, receiver.java_type())
-            }
-            ("setAccessible", [flag]) => Ok(self.expr(*flag)?.kind),
-            ("newInstance", []) => {
-                let class = self.expr(receiver)?;
-                self.new_instance(node, class, receiver.java_type())
-            }
-            ("newInstance", [arg]) if null_array(arg) => {
-                let class = self.expr(receiver)?;
-                self.new_instance(node, class, receiver.java_type())
-            }
-            _ => unsupported(node, &format!("`Constructor.{}` (reflection)", symbol.name)),
-        }
-    }
-
     /// The constants of the enum class `cls`, which `EnumMap.getKeyUniverse(cls)` and
-    /// `EnumSet.getUniverse(cls)` get from the JVM: `cls == A.class ? new Enum[] {A.X, ..} : ..
-    /// : null`, over the program's enums.
+    /// `EnumSet.getUniverse(cls)` get from the JVM (see `class_enum_constants`).
     fn enum_universe(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let arg = node.list("arguments").next().expect("the universe of a class");
         let class = self.expr(arg)?;
-        let ExprKind::Var(name) = &class.kind else {
-            return unsupported(arg, "the constants of this class");
-        };
+        self.class_enum_constants(node, class)
+    }
+
+    /// `cls.getEnumConstants()`, and the constants that `EnumMap` and `EnumSet` get: `{ Class c_ =
+    /// cls; c_ == A.class ? new Enum[] {A.X, ..} : .. : null }`, over the program's enums, and the
+    /// array of the enum's constants directly for a class literal.
+    fn class_enum_constants(&self, node: Node<'t>, class: Expr) -> Result<ExprKind, Error> {
         let array = self.ty(node, node.java_type())?;
         let element = array.element();
         let pos = node.pos();
-        let (mut chain, mut chain_ty) = (ExprKind::Null, Type::Null);
-        for e in (0..self.types.len()).rev().filter(|&t| self.types[t].node.kind() == "ENUM") {
+        let constants = |e: usize| {
             let ty = Type::enum_type(&self.types[e].name);
             let constants = (0..self.enum_constant_names(e).count())
                 .map(|ordinal| {
@@ -241,17 +218,63 @@ impl<'t> Lowering<'t> {
                     self.convert(constant, element)
                 })
                 .collect();
+            self.synth(ExprKind::ArrayLit(constants), pos, array)
+        };
+        if let ExprKind::Builtin(Builtin::ClassLiteral(ty), _) = &class.kind {
+            return Ok(match ty {
+                Type::Enum(name) => match self.types.iter().position(|t| t.name == *name) {
+                    Some(e) => constants(e).kind,
+                    None => ExprKind::Null,
+                },
+                _ => ExprKind::Null,
+            });
+        }
+        let name = self.fresh_name("class");
+        let (mut chain, mut chain_ty) = (ExprKind::Null, Type::Null);
+        for e in (0..self.types.len()).rev().filter(|&t| self.types[t].node.kind() == "ENUM") {
+            let ty = Type::enum_type(&self.types[e].name);
             let literal =
                 self.synth(ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new()), pos, Type::JavaClass);
             let var = self.synth(ExprKind::Var(name.clone()), pos, Type::JavaClass);
             let test =
                 self.synth(ExprKind::Binary(BinOp::Eq, Box::new(var), Box::new(literal)), pos, Type::Boolean);
-            let values = self.synth(ExprKind::ArrayLit(constants), pos, array);
             let rest = self.synth(chain, pos, chain_ty);
             chain_ty = array;
-            chain = ExprKind::Conditional(Box::new(test), Box::new(values), Box::new(rest));
+            chain = ExprKind::Conditional(Box::new(test), Box::new(constants(e)), Box::new(rest));
         }
-        Ok(chain)
+        let body = vec![
+            Stmt::Local { ty: Type::JavaClass, name, init: Some(class), pos },
+            Stmt::Yield(self.synth(chain, pos, chain_ty)),
+        ];
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+        })
+    }
+
+    /// `X.class.getInterfaces()` of a class `X` of the program: a new array of the class literals
+    /// of the interfaces it implements, or extends, in the order it names them. An interface that
+    /// the translation has no class for (`Serializable`, a marker that lowering leaves out) is
+    /// rejected rather than left out.
+    fn literal_interfaces(&self, node: Node<'t>, literal: Node<'t>) -> Result<ExprKind, Error> {
+        let class = self.literal_class(literal)?;
+        let pos = node.pos();
+        let mut interfaces = Vec::new();
+        for clause in self.types[class].node.list("implementsClause") {
+            let raw = super::captures::raw(clause.java_type());
+            let ty = match self.ty(clause, &raw) {
+                Ok(ty @ (Type::Class(..) | Type::Enum(_))) => ty,
+                _ => {
+                    return unsupported(node, &format!("`getInterfaces` of a class that implements `{raw}`"));
+                }
+            };
+            let literal = ExprKind::Builtin(Builtin::ClassLiteral(ty), Vec::new());
+            interfaces.push(self.synth(literal, pos, Type::JavaClass));
+        }
+        if interfaces.is_empty() {
+            return Ok(ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)]));
+        }
+        Ok(ExprKind::ArrayLit(interfaces))
     }
 
     /// `T.class`, a class literal as a value.

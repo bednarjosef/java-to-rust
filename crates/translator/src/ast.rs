@@ -698,8 +698,8 @@ pub enum Builtin {
         class: usize,
     },
     /// The default of a creation from a class name (`lower::by_name`): the name, its argument,
-    /// is of no class of the translated program, and the program ends with a
-    /// `ClassNotFoundException` that nothing catches.
+    /// is of no class of the translated program, which throws a `ClassNotFoundException` that
+    /// says so, through `java::catching`.
     UnknownClass,
     /// `[class, name]`: `Class.getResourceAsStream(name)`. A translated program has no resources
     /// (the JDK's data files are not in its source), so the program ends with an `InternalError`
@@ -872,12 +872,18 @@ pub enum ClassOp {
     Equals,
     /// `desiredAssertionStatus()`: assertions are off, as in a JVM started without `-ea`.
     DesiredAssertionStatus,
+    /// `getCanonicalName()`, `null` for a local or anonymous class.
+    GetCanonicalName,
+    GetPackageName,
+    /// `isAnnotation()`: false, as a translation has no class values of annotation types (their
+    /// class literals are rejected, and no object's class is one).
+    IsAnnotation,
 }
 
 impl ClassOp {
     /// Whether the result can be `null`.
     pub fn nullable(self) -> bool {
-        matches!(self, ClassOp::GetSuperclass | ClassOp::GetComponentType)
+        matches!(self, ClassOp::GetSuperclass | ClassOp::GetComponentType | ClassOp::GetCanonicalName)
     }
 }
 
