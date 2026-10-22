@@ -425,7 +425,7 @@ pub fn try_byte_view_set<V: ByteView>(
 /// `a[i] op= ...` where the program observes the exceptions of the index or of `f` (a division
 /// by zero).
 pub fn try_update<T: Clone>(
-    a: &Array<T>,
+    a: &impl Elements<T>,
     i: i32,
     f: impl FnOnce(T) -> Result<T, Exception>,
 ) -> Result<T, Exception> {
@@ -436,7 +436,7 @@ pub fn try_update<T: Clone>(
 
 /// `a[i]++` and the like where the program observes the exceptions: returns the old element.
 pub fn try_post_update<T: Clone>(
-    a: &Array<T>,
+    a: &impl Elements<T>,
     i: i32,
     f: impl FnOnce(T) -> Result<T, Exception>,
 ) -> Result<T, Exception> {
