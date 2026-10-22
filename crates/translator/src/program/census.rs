@@ -218,7 +218,9 @@ impl Stubs {
         }
         for (t, decl) in class.types.iter_mut().enumerate() {
             for field in decl.fields.iter_mut().chain(&mut decl.statics) {
-                if field.init.as_ref().is_some_and(at) {
+                // A constant's value is a literal that nothing rejects, though its position may
+                // be that of an error in another file.
+                if !field.constant && field.init.as_ref().is_some_and(at) {
                     field.init = None;
                     if rejection.anchor.is_none() {
                         rejection.unit = units.get(t).copied().flatten();
