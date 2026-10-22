@@ -295,10 +295,11 @@ impl<'a> Gen<'a> {
             None if self.try_assigned.contains(name) => {
                 // Rust cannot tell that a `try` block or its `catch` clauses assign it before it is
                 // read, as Java can: it starts as the value Java would give a field.
+                // The `try` assigns it after that value, so it is `mut` though Java assigns it once.
                 let ty_text = self.ty_name(ty);
                 let value = self.try_start(ty).unwrap_or_else(|| "todo!()".to_string());
                 self.line("#[allow(unused_assignments)]");
-                self.line(&format!("let {mutable}{rust}: {ty_text} = {value};"));
+                self.line(&format!("let mut {rust}: {ty_text} = {value};"));
             }
             None => {
                 let ty_text = self.ty_name(ty);

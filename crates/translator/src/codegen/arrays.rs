@@ -120,9 +120,24 @@ impl<'a> Gen<'a> {
         if let Some(path) = self.plain_path(array) {
             return self.plain_index(path, id, index, element(array.ty));
         }
-        let handle = self.handle(array);
+        // A field's array is borrowed where it is, which a method that the index calls may not
+        // borrow mutably (`table[nextIndex()]` in IdentityHashMap's iterators): its handle is
+        // taken first, as Java evaluates the array before the index.
+        let calls = |e: &Expr| {
+            let mut found = false;
+            visit_expr(e, &mut |x| {
+                found |= matches!(x.kind, ExprKind::MethodCall { .. } | ExprKind::Call { .. })
+            });
+            found
+        };
+        let bound = matches!(array.kind, ExprKind::Field { .. }) && calls(index);
+        let (binding, handle) = self.write_handle(array, bound);
         let i = self.value(index, Type::Int).text;
-        self.may_fail(id, "get", "", &format!("{handle}, {i}"))
+        let get = self.may_fail(id, "get", "", &format!("{handle}, {i}"));
+        match binding {
+            Some(binding) => Code::atom(format!("{{ {binding} {} }}", get.text)),
+            None => get,
+        }
     }
 
     /// `a.length`.

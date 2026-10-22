@@ -51,6 +51,12 @@ impl Code {
         Code::new(text, ATOM)
     }
 
+    /// Code that never gives a value (`unreachable!`, a throw), whose type `!` a local declared
+    /// with it can't call methods on: the local's type is written.
+    pub(super) fn never(text: impl Into<String>) -> Code {
+        Code { untyped: true, ..Code::atom(text) }
+    }
+
     pub(super) fn literal(literal: Literal) -> Code {
         let (text, negative) = match literal {
             Literal::Int(i32::MIN) => ("i32::MIN".to_string(), false),

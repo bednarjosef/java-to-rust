@@ -433,9 +433,10 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// An identifier: a field, `this`, or a local variable or parameter.
+    /// An identifier: a field, `this`, or a local variable or parameter. `super` too, as the
+    /// object of a field it selects (`super.alive`), which is `this`'s.
     pub(super) fn name(&self, node: Node<'t>) -> Result<ExprKind, Error> {
-        if node.str("name") == "this" {
+        if matches!(node.str("name"), "this" | "super") {
             // In a lambda, the object of the code that holds it.
             if let Some(holder) = self.lambda_this(node) {
                 return Ok(holder?.kind);
