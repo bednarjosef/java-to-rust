@@ -1749,7 +1749,7 @@ impl<'a> Gen<'a> {
             // string's or a box's as a `Result` that the `?` of `compare_to` passes on, where the
             // group gives a `Result`. Otherwise (an enum's, or a group of only `i32`s) it is
             // thrown, which a `java::catching` around the call turns into the exception a
-            // `catch` sees.
+            // `catch` sees. Any other class still fails the cast.
             let other = match self.runtime_of(c) {
                 Some(ty) if self.facts.throwing.contains(&r) => {
                     let message = compare_null_message(ty.unboxed());
@@ -1764,7 +1764,7 @@ impl<'a> Gen<'a> {
                     };
                     let throw =
                         format!("{}(\"java.lang.NullPointerException\", {message:?})", self.runtime("throw"));
-                    format!("{{ {throw} }}")
+                    format!("{{ let Some(b) = b.as_ref() else {{ {throw} }}; {fail} }}")
                 }
             };
             return format!("match {place} {{ {pattern} => {compare}, b => {other} }}");
