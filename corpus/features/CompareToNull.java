@@ -11,6 +11,8 @@ public class CompareToNull {
         }
     }
 
+    enum Color { RED, GREEN }
+
     static int order(Comparable c, Object o) {
         return c.compareTo(o);
     }
@@ -46,6 +48,12 @@ public class CompareToNull {
             System.out.println(order("b", null));
         } catch (NullPointerException e) {
             System.out.println("raw string " + e.getClass().getName() + " " + e.getMessage());
+        }
+        Comparable color = Color.RED;
+        try {
+            System.out.println(color.compareTo(null));
+        } catch (NullPointerException e) {
+            System.out.println("enum " + e.getClass().getName() + " " + e.getMessage());
         }
         System.out.println(order(new Version(1), new Version(2)));
     }
