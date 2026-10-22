@@ -436,6 +436,31 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
     }
 }
 
+/// Whether `array[index]` is a row of a table of an enum in table form (`lower/enum_tables.rs`):
+/// `fOfConstants[e.ordinal()]` of a constant `e` of that enum, or `fOfConstants[constantOrdinal]`
+/// in one of its constant builders. The enum's initialization makes its tables before it builds
+/// its constants, so a table that a constant's row is read from is never null, even while the
+/// initialization runs; and a table has a row for each constant, so neither index is ever out
+/// of its bounds.
+fn table_row(class: &Class, m: usize, array: &Expr, index: &Expr) -> bool {
+    let ExprKind::Static { class: t, name } = &array.kind else { return false };
+    let decl = &class.types[*t];
+    if decl.kind != TypeKind::Enum || crate::lower::tabled_field(name).is_none() {
+        return false;
+    }
+    match &index.kind {
+        ExprKind::Builtin(Builtin::EnumOrdinal, args) => {
+            matches!(args.first().map(|a| a.ty), Some(Type::Enum(e)) if e == decl.name)
+        }
+        ExprKind::Var(name) => {
+            name == crate::lower::TABLE_ORDINAL
+                && class.methods.get(m).is_some_and(|method| method.class == *t)
+                && class.builds_constants(m)
+        }
+        _ => false,
+    }
+}
+
 /// The failures of the runtime that evaluating `x` itself (not its operands) may raise, by
 /// standard class name, with what raises them in words, whether the generator has their checked
 /// form, and the expression that the checked form is written for: `x`, or for a
@@ -484,11 +509,12 @@ pub(super) fn runtime_failures(
                 out.push(("java.lang.ArithmeticException", "this division", true, x.id));
             }
         }
-        ExprKind::Index(array, _) => {
-            if null(array) {
+        ExprKind::Index(array, index) => {
+            let row = table_row(class, m, array, index);
+            if null(array) && !row {
                 out.push((NPE, "this array access", true, array.id));
             }
-            if !facts.in_bounds.contains(&x.id) {
+            if !facts.in_bounds.contains(&x.id) && !row {
                 out.push((INDEX, "this array access", true, x.id));
             }
         }
@@ -738,6 +764,19 @@ pub(super) fn runtime_failures(
                 | Builtin::RawMemory { .. } = builtin
                 {
                     // A null base is an address outside the heap, which ends the program.
+                } else if let Builtin::Arrays(ArraysOp::BinarySearch | ArraysOp::BinarySearchRange) = builtin {
+                    // The array is dereferenced with the checked form, and so is a key that may
+                    // be null, which fails where it is compared with an element; where elements
+                    // may be null, comparing either fails in the search (`Gen::arrays_op`).
+                    let key = &args[args.len() - 1];
+                    if null(&args[0]) {
+                        out.push((NPE, "this call", true, args[0].id));
+                    }
+                    if facts.nullable_elements.contains(&args[0].ty.element()) {
+                        out.push((NPE, "this call", true, x.id));
+                    } else if null(key) {
+                        out.push((NPE, "this call", true, key.id));
+                    }
                 } else if !takes_null && checked.iter().any(null) {
                     let receiver = !checked[1..].iter().any(null);
                     out.push((NPE, "this call", receiver, if receiver { args[0].id } else { x.id }));
@@ -806,13 +845,14 @@ pub(super) fn runtime_failures(
         },
         _ => {}
     }
-    if let ExprKind::Assign { target: Place::Index(array, _), .. }
-    | ExprKind::IncDec { target: Place::Index(array, _), .. } = &x.kind
+    if let ExprKind::Assign { target: Place::Index(array, index), .. }
+    | ExprKind::IncDec { target: Place::Index(array, index), .. } = &x.kind
     {
-        if null(array) {
+        let row = table_row(class, m, array, index);
+        if null(array) && !row {
             out.push((NPE, "this array access", true, array.id));
         }
-        if !facts.in_bounds.contains(&x.id) {
+        if !facts.in_bounds.contains(&x.id) && !row {
             out.push((INDEX, "this array access", true, x.id));
         }
     }

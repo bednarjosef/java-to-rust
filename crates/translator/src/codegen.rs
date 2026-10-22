@@ -384,7 +384,8 @@ struct Gen<'a> {
     /// `exceptions::try_assigned`).
     try_assigned: HashSet<String>,
     /// The objects of `Facts::null_checked` whose checked dereference has been written, and the
-    /// casts of `Facts::raising` whose checked form has.
+    /// casts of `Facts::raising` whose checked form has; and everything in a `catch` clause that
+    /// is not written, which needs neither.
     dereferenced: HashSet<ExprId>,
     /// The cast of `Facts::raising` that `class_cast` is writing, in the checked form.
     checked_cast: Option<ExprId>,

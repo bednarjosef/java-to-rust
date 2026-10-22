@@ -171,6 +171,11 @@ impl<'a> Gen<'a> {
         match self.enum_to_string(index) {
             // The path names the enum's own method: on `&self`, `ToString::to_string` would be
             // found first, which is this `Display`.
+            // A `toString` that may return null shows "null", as Java's string conversion does.
+            Some(m) if self.facts.nullable_returns.contains(&m) => self.line(&format!(
+                "f.write_str(Self::{}(*self).as_deref().unwrap_or(\"null\"))",
+                self.fn_names[m]
+            )),
             Some(m) => self.line(&format!("f.write_str(&Self::{}(*self))", self.fn_names[m])),
             None => self.line("write!(f, \"{}\", self.enum_name())"),
         }

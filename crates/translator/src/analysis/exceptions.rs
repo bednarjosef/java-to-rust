@@ -170,9 +170,16 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 && crate::lower::rewritten_clinit(&class.types[method.class])
         })
         .collect();
+    // The classes whose objects a `throw` of a value of type `t` throws: those under `t` that are
+    // `Throwable`s, since a value of a type variable or of `Object` (as the JDK's generic code
+    // throws, `throw (X) e`) is one all the same.
+    let throwable = class.type_index("java.lang.Throwable");
+    let thrown = |t: usize| -> Vec<usize> {
+        h.concretes(t).into_iter().filter(|&c| throwable.is_some_and(|w| h.is_subtype(c, w))).collect()
+    };
     let raised = |p: &Point, escapes: &[BTreeSet<Kind>]| -> BTreeSet<Kind> {
         match &p.raise {
-            Raise::Throw(t) => h.concretes(*t).into_iter().map(Kind::Class).collect(),
+            Raise::Throw(t) => thrown(*t).into_iter().map(Kind::Class).collect(),
             Raise::Call(callees) => callees.iter().flat_map(|&c| escapes[c].iter().cloned()).collect(),
             Raise::Runtime { class, .. } => BTreeSet::from([Kind::Runtime(class)]),
             Raise::Text(_) => BTreeSet::new(),
@@ -189,7 +196,6 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // (`URISyntaxException(input, reason, index)` throws for a null input or an index below -1),
     // and which the JDK's code that throws them never gives such arguments.
     let jdk: Vec<bool> = class.methods.iter().map(|m| from_jdk(&class.types[m.class])).collect();
-    let throwable = class.type_index("java.lang.Throwable");
     let bugs_only: Vec<bool> = class
         .methods
         .iter()
@@ -224,9 +230,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             .map(|ps| {
                 ps.iter()
                     .map(|p| match &p.raise {
-                        Raise::Throw(t) => {
-                            h.concretes(*t).into_iter().map(|c| number(Kind::Class(c))).collect()
-                        }
+                        Raise::Throw(t) => thrown(*t).into_iter().map(|c| number(Kind::Class(c))).collect(),
                         Raise::Runtime { class, .. } => Bits::from_iter([number(Kind::Runtime(class))]),
                         Raise::Call(_) | Raise::Text(_) => Bits::default(),
                     })
@@ -289,6 +293,12 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             }
             if !jdk[m] {
                 program = out.clone();
+            }
+            // A static initializer of the JDK runs none of the program's code (see `bugs_only`),
+            // also one that keeps its failures as exceptions (`guarded`): the program's exceptions
+            // that its calls seem to reach through interfaces never escape it.
+            if jdk[m] && initializer[m] {
+                program = Bits::default();
             }
             if bugs_only[m] {
                 if initializer[m] {

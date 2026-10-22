@@ -181,6 +181,62 @@ pub fn binary_search_all<T: JavaElement>(a: &impl Elements<T>, key: T) -> i32 {
     binary_search_range(a, 0, len(a), key)
 }
 
+/// `Arrays.binarySearch(a, key)` of a key that may be null: `None` where Java compares a null
+/// key with an element, which fails in the element's `compareTo` (the caller throws that
+/// `NullPointerException`); an empty array has nothing to compare it with.
+pub fn binary_search_all_nullable<T: JavaElement>(a: &impl Elements<T>, key: Option<T>) -> Option<i32> {
+    binary_search_range_nullable(a, 0, len(a), key)
+}
+
+/// `Arrays.binarySearch(a, from, to, key)` of a key that may be null, as
+/// `binary_search_all_nullable`: the range is checked first.
+pub fn binary_search_range_nullable<T: JavaElement>(
+    a: &impl Elements<T>,
+    from: i32,
+    to: i32,
+    key: Option<T>,
+) -> Option<i32> {
+    match key {
+        Some(key) => Some(binary_search_range(a, from, to, key)),
+        None => {
+            let r = range(a.items().len(), from, to);
+            r.is_empty().then(|| -(r.start as i32) - 1)
+        }
+    }
+}
+
+/// `Arrays.binarySearch(a, key)`, or of `range` (`from`, `to`), over elements that may be null,
+/// where a catch sees the `NullPointerException` of comparing a null: Java's, with `null_element`
+/// as the message where the element compared is null (the JDK calls its `compareTo`), and
+/// `null_key` where the key is (the element's `compareTo` reads it). The range is checked first.
+pub fn try_binary_search<T: JavaElement>(
+    a: &impl Elements<Option<T>>,
+    range: Option<(i32, i32)>,
+    key: Option<T>,
+    null_element: &'static str,
+    null_key: &'static str,
+) -> Result<i32, crate::Exception> {
+    let items = a.items();
+    let r = match range {
+        Some((from, to)) => self::range(items.len(), from, to),
+        None => 0..items.len(),
+    };
+    let (mut low, mut high) = (r.start as i64, r.end as i64 - 1);
+    let npe = |message| Err(crate::Exception::new("java.lang.NullPointerException", message));
+    while low <= high {
+        let mid = (low + high) >> 1;
+        let (Some(element), Some(key)) = (&items[mid as usize], &key) else {
+            return npe(if items[mid as usize].is_none() { null_element } else { null_key });
+        };
+        match element.java_cmp(key) {
+            Ordering::Less => low = mid + 1,
+            Ordering::Greater => high = mid - 1,
+            Ordering::Equal => return Ok(mid as i32),
+        }
+    }
+    Ok(-(low as i32) - 1)
+}
+
 /// `Arrays.binarySearch(a, from, to, key)`, with Java's algorithm, so that the same index is found
 /// among equal elements.
 pub fn binary_search_range<T: JavaElement>(a: &impl Elements<T>, from: i32, to: i32, key: T) -> i32 {

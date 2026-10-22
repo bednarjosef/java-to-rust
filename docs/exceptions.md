@@ -829,7 +829,11 @@ Decisions that changed during the implementation, step by step.
   of the Java that runs the program, which the corpus and `targets/` already assume.
   `Arrays.copyOf` of a null array has the text of the JDK's code (`Cannot invoke
   "Object.getClass()"` for an array of objects, `Cannot read the array length` for one of
-  primitives). The classes of `java.lang` that a program gets are the translator's own
+  primitives). `Arrays.binarySearch` has the JDK's too: of a null array `Cannot read the array
+  length because "a" is null`, of a null key compared with a string `Cannot read field "value"
+  because "anotherString" is null` (none on an empty range, which compares nothing), and of a
+  null element `Cannot invoke "java.lang.Comparable.compareTo(Object)" because "midVal" is
+  null`. The classes of `java.lang` that a program gets are the translator's own
   (`java/Standard.java`), so a message from their code is not known; where the JDK's code has a
   dereference that may fail, theirs throws the JDK's message itself (`ThreadGroup`'s
   `parent.maxPriority`, `JavaLangAccess.start`'s `thread.start(container)`). A call of the JDK's

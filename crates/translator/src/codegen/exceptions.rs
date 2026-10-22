@@ -213,8 +213,8 @@ pub(super) fn default_value(ty: Type) -> Option<&'static str> {
 }
 
 /// A local of the method that `try_assigned` names (`assigned`) whose type has no
-/// `default_value` and that is not an `Option` (`optional`), which starts as `None`: not supported
-/// yet.
+/// `default_value`, that is not an array (which starts empty) and that is not an `Option`
+/// (`optional`), which starts as `None`: not supported yet.
 pub(super) fn check_try_assigned(
     body: &[Stmt],
     assigned: &HashSet<String>,
@@ -226,6 +226,7 @@ pub(super) fn check_try_assigned(
             if let Stmt::Local { ty, name, init: None, pos } = s
                 && assigned.contains(name)
                 && default_value(*ty).is_none()
+                && !matches!(ty, Type::Array(_))
                 && !optional(*ty, name)
                 && found.is_none()
             {
@@ -747,6 +748,9 @@ impl<'a> Gen<'a> {
         }
         if !self.facts.live_tries.contains(&id) {
             // Nothing that the body throws is caught here.
+            for catch in catches {
+                self.not_written(&catch.body);
+            }
             self.line("{");
             self.indent += 1;
             self.stmts(body, false);
@@ -790,6 +794,14 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
+    /// Notes the statements of a `catch` clause that is not written: their dereferences and
+    /// operations need no checked form (see `check_dereferences`).
+    fn not_written(&mut self, stmts: &[Stmt]) {
+        for s in stmts {
+            visit_stmt(s, &mut |e| visit_expr(e, &mut |x| _ = self.dereferenced.insert(x.id)), &mut |_| {});
+        }
+    }
+
     /// A local for the result of a `try` block, distinct from the method's locals.
     fn result_name(&self, label: &str) -> String {
         let mut used: HashSet<String> = self.locals.values().cloned().collect();
@@ -816,7 +828,9 @@ impl<'a> Gen<'a> {
                 })
                 .collect();
             // A clause that nothing the body throws reaches is not written.
-            if !matched.is_empty() {
+            if matched.is_empty() {
+                self.not_written(&catch.body);
+            } else {
                 covered.extend(&matched);
                 arms.push((catch, matched));
             }
