@@ -117,7 +117,6 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Builder(BuilderOp::Append) if args.len() == 4 => &["java.lang.IndexOutOfBoundsException"],
         Builtin::Builder(
             BuilderOp::New
-            | BuilderOp::Append
             | BuilderOp::Reverse
             | BuilderOp::IndexOf
             | BuilderOp::LastIndexOf
@@ -232,6 +231,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::Crc32Update
             | Native::NoPendingReferences,
         ) => &[],
+        // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).
+        Builtin::Native(Native::Unix(_)) => &[],
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
         // of a closed descriptor does nothing.
         Builtin::Native(Native::FileOpenRead | Native::FileOpenWrite | Native::FileOpenRandom) => {
@@ -552,7 +553,10 @@ pub(super) fn runtime_failures(
                     matches!(e.ty, Type::Null | Type::String | Type::StringBuilder | Type::Boxed(_))
                 };
                 let writes_null = match builtin {
-                    Builtin::Builder(BuilderOp::Append) => args.len() == 2 && text(&args[1]),
+                    Builtin::Builder(BuilderOp::Append) => {
+                        args.len() == 2 && text(&args[1])
+                            || args.len() == 4 && (text(&args[1]) || matches!(args[1].ty, Type::Class(c, _) if c == CHAR_SEQUENCE))
+                    }
                     Builtin::Builder(BuilderOp::Insert) => args.len() == 3 && text(&args[2]),
                     _ => false,
                 };
@@ -607,7 +611,8 @@ pub(super) fn runtime_failures(
                                     | Native::FileSystem(_)
                                     | Native::SecureSeed
                             )
-                    ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })));
+                    ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })))
+                        || (matches!(builtin, Builtin::Builder(BuilderOp::Append)) && args.len() == 4);
                     for &failure in failures {
                         out.push((failure, "this call of the library", checked, x.id));
                     }

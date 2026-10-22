@@ -1,6 +1,7 @@
 //! Lowering of the unsigned methods of `Integer` and `Long` (`divideUnsigned`, `toUnsignedString`,
 //! `parseUnsignedInt` and the like) and of the unsigned views of `Integer`, `Byte` and `Short`
-//! (`toUnsignedLong`, `toUnsignedInt`). All of them are static.
+//! (`toUnsignedLong`, `toUnsignedInt`), and `compareUnsigned` of `Byte` and `Short`. All of them
+//! are static.
 
 use super::*;
 
@@ -57,5 +58,26 @@ impl<'t> Lowering<'t> {
             _ => Type::Short,
         };
         Ok(Builtin::Unsigned(op, kind))
+    }
+
+    /// `Byte.compareUnsigned(x, y)` or `Short`'s: `toUnsignedInt(x) - toUnsignedInt(y)`, which is
+    /// what the JDK computes.
+    pub(super) fn small_compare_unsigned(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        args: Vec<Expr>,
+    ) -> ExprKind {
+        let kind = if symbol.owner == "java.lang.Byte" { Type::Byte } else { Type::Short };
+        let pos = node.pos();
+        let mut widened = args.into_iter().map(|a| {
+            Box::new(self.synth(
+                ExprKind::Builtin(Builtin::Unsigned(UnsignedOp::Widen, kind), vec![a]),
+                pos,
+                Type::Int,
+            ))
+        });
+        let (x, y) = (widened.next().expect("two arguments"), widened.next().expect("two arguments"));
+        ExprKind::Binary(BinOp::Sub, x, y)
     }
 }

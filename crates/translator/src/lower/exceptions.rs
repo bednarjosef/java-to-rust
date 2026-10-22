@@ -94,8 +94,10 @@ const RAISED: &[(&str, &[&str])] = &[
             // A range of the characters or the text to append outside them.
             "java.lang.AbstractStringBuilder#append(char[],int,int)java.lang.AbstractStringBuilder",
             "java.lang.StringBuilder#append(char[],int,int)java.lang.StringBuilder",
+            "java.lang.StringBuffer#append(char[],int,int)java.lang.StringBuffer",
             "java.lang.AbstractStringBuilder#append(java.lang.CharSequence,int,int)java.lang.AbstractStringBuilder",
             "java.lang.StringBuilder#append(java.lang.CharSequence,int,int)java.lang.StringBuilder",
+            "java.lang.StringBuffer#append(java.lang.CharSequence,int,int)java.lang.StringBuffer",
         ],
     ),
     // A call, a field access, an array access or a switch on a reference that may be null.

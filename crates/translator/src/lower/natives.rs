@@ -411,6 +411,9 @@ impl<'t> Lowering<'t> {
     /// does nothing (`REPLACED_METHODS`), as nothing is collected that way in a translated
     /// program. A stream that the program never closes stays open until the program ends. Its
     /// argument is the stream's `fd` field or a parameter, which reads nothing else.
+    ///
+    /// And a native of the translator's `UnixNativeDispatcher` that the runtime implements
+    /// (`ast::UNIX_CALLS`), with its arguments as they are.
     pub(super) fn file_system_call(
         &self,
         node: Node<'t>,
@@ -422,6 +425,12 @@ impl<'t> Lowering<'t> {
                 return unsupported(node, "`FileCleanable.register` of anything but a variable or a field");
             }
             return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::Nothing), Vec::new())));
+        }
+        if symbol.native
+            && symbol.owner == crate::ast::UNIX_DISPATCHER
+            && let Some(name) = crate::ast::unix_call(symbol.name)
+        {
+            return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::Unix(name)), std::mem::take(args))));
         }
         if !symbol.native || symbol.owner != "java.io.UnixFileSystem" || symbol.name == "initIDs" {
             return Ok(None);

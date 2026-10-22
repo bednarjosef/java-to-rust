@@ -417,7 +417,7 @@ impl<'a> Gen<'a> {
             ExprKind::Builtin(Builtin::Builder(op), args)
                 if op.chains() && !self.facts.catching.contains_key(&e.id) =>
             {
-                let code = self.builder_call(*op, args);
+                let code = self.builder_call(e.id, *op, args);
                 self.line(&format!("{};", code.text));
             }
             _ => {

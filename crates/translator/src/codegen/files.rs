@@ -115,6 +115,35 @@ impl<'a> Gen<'a> {
         Code::atom(format!("{}({})", self.runtime(f), values.join(", ")))
     }
 
+    /// A native of the translator's `UnixNativeDispatcher` (`Native::Unix`), as a call of the
+    /// runtime's function (`ast::UNIX_CALLS`). A path is the runtime's `&[i8]`; the `long[]` that
+    /// `stat0` and `fstat0` fill, and the buffer that `readBytes` reads into, are borrowed
+    /// mutably. A `byte[]` that the function returns becomes a new array.
+    pub(super) fn unix_native(&mut self, name: &str, args: &'a [Expr], ty: Type) -> Code {
+        let f = crate::ast::UNIX_CALLS.iter().find(|(n, _)| *n == name).map(|(_, f)| *f);
+        let f = f.unwrap_or_else(|| {
+            unreachable!("not a native of `UnixNativeDispatcher` the runtime implements: {name}")
+        });
+        let mut values = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            values.push(match arg.ty {
+                Type::Array(_) => {
+                    let written = arg.ty.element() == Type::Long || (name == "readBytes" && i == 1);
+                    self.array_arg(arg, written)
+                }
+                Type::Boolean => self.value(arg, Type::Boolean).text,
+                Type::Long => self.value(arg, Type::Long).text,
+                _ => self.value(arg, Type::Int).text,
+            });
+        }
+        let call = format!("{}({})", self.runtime(f), values.join(", "));
+        if matches!(ty, Type::Array(_)) {
+            let array = format!("{}({call})", self.array_maker("from_vec"));
+            return Code::atom(array);
+        }
+        Code::atom(call)
+    }
+
     /// The natives of the stream under `System.out` and `System.err` (`Native::StandardWrite`
     /// and the others), which the runtime's `out` implements; they cannot fail.
     pub(super) fn standard_native(&mut self, native: Native, args: &'a [Expr]) -> Code {
