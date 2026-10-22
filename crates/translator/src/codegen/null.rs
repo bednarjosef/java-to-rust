@@ -618,7 +618,8 @@ impl<'a> Gen<'a> {
                 }
                 None => self.value(part, Type::Boolean),
             };
-            texts.push(code.at(AND + 1));
+            // A block would end a `match` arm or a statement that it starts.
+            texts.push(code.left_at(AND + 1));
         }
         texts.join(" && ")
     }

@@ -69,7 +69,7 @@ mod switch;
 mod sync;
 mod system;
 mod varargs;
-pub(crate) use argument_order::RECEIVER;
+pub(crate) use argument_order::{RECEIVER, held_local, ordered_call};
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;

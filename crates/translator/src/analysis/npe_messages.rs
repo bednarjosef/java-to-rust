@@ -680,11 +680,12 @@ impl Messages<'_> {
         Some(Source::Shown(shown))
     }
 
-    /// The receiver that `e` reads, where it is a local that holds one; else `e`.
+    /// The receiver that `e` reads, where it is a local that holds one, or the call of a block that
+    /// computes the call's arguments first; else `e`.
     fn held<'e>(&'e self, e: &'e Expr) -> &'e Expr {
         match &e.kind {
             ExprKind::Var(name) => self.receivers.get(name.as_str()).copied().unwrap_or(e),
-            _ => e,
+            _ => crate::lower::ordered_call(e).unwrap_or(e),
         }
     }
 

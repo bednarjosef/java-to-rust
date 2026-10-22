@@ -23,10 +23,27 @@ use std::collections::HashSet;
 pub(crate) const RECEIVER: &str = "receiver$";
 const ARGUMENT: &str = "argument$";
 
+/// Whether `name` is a local that holds a call's receiver or argument.
+pub(crate) fn held_local(name: &str) -> bool {
+    name.starts_with(RECEIVER) || name.starts_with(ARGUMENT)
+}
+
+/// The call or store of a block that the rewrite made (see the module's comment), which computes
+/// its arguments first; `None` for any other expression.
+pub(crate) fn ordered_call(e: &Expr) -> Option<&Expr> {
+    let ExprKind::Switch { selector, cases } = &e.kind else { return None };
+    let ([case], ExprKind::Int(0)) = (&cases[..], &selector.kind) else { return None };
+    let (Stmt::Yield(call) | Stmt::Expr(call), held) = case.body.split_last()? else { return None };
+    let holds = |s: &Stmt| matches!(s, Stmt::Local { name, .. } if held_local(name));
+    (matches!(case.labels[..], [CaseLabel::Default]) && !held.is_empty() && held.iter().all(holds))
+        .then_some(call)
+}
+
 impl<'t> Lowering<'t> {
     /// Rewrites the calls of `method` whose arguments may have effects (see the module's comment).
     pub(super) fn arguments_before_receivers(&self, method: &mut Method) {
         let mut names: HashSet<String> = method.params.iter().map(|p| p.name.clone()).collect();
+        let mut operands = HashSet::new();
         for stmt in &method.body {
             visit_stmt(
                 stmt,
@@ -35,6 +52,8 @@ impl<'t> Lowering<'t> {
                         ExprKind::Var(name) | ExprKind::InstanceOf { binding: Some(name), .. } => {
                             names.insert(name.clone());
                         }
+                        // A store that a builtin makes itself (`ElementUpdate`), which stays one.
+                        ExprKind::Builtin(_, args) => operands.extend(args.iter().map(|a| a.id)),
                         _ => {}
                     })
                 },
@@ -50,13 +69,21 @@ impl<'t> Lowering<'t> {
             }
         };
         for stmt in &mut method.body {
-            rewrite_stmt(stmt, &mut |e| self.argument_order(e, &mut fresh));
+            rewrite_stmt(stmt, &mut |e| self.argument_order(e, &operands, &mut fresh));
         }
     }
 
-    fn argument_order(&self, e: &mut Expr, fresh: &mut dyn FnMut(&str) -> String) {
+    fn argument_order(
+        &self,
+        e: &mut Expr,
+        operands: &HashSet<ExprId>,
+        fresh: &mut dyn FnMut(&str) -> String,
+    ) {
         if let ExprKind::Assign { op: None, target: Place::Index(..), .. } = &e.kind {
-            return self.store_order(e, fresh);
+            if !operands.contains(&e.id) {
+                self.store_order(e, fresh);
+            }
+            return;
         }
         let (receiver, args) = match &mut e.kind {
             ExprKind::MethodCall { receiver, args, is_super: false, .. } => (&mut **receiver, &mut args[..]),
@@ -69,7 +96,7 @@ impl<'t> Lowering<'t> {
         if !may_be_null(receiver) {
             return;
         }
-        let Some(last) = args.iter().rposition(|a| !quiet(a)) else { return };
+        let Some(last) = args.iter().rposition(|a| !self.quiet(a)) else { return };
         let (pos, ty) = (e.pos, e.ty);
         let mut body = Vec::new();
         let assigned = |name: &str| args[..=last].iter().any(|a| assigns(a, name));
@@ -79,7 +106,7 @@ impl<'t> Lowering<'t> {
             body.push(self.hold(receiver, name, pos));
         }
         for arg in &mut args[..=last] {
-            if !literal(arg) {
+            if !self.literal(arg) {
                 let name = fresh(ARGUMENT);
                 body.push(self.hold(arg, name, pos));
             }
@@ -97,7 +124,7 @@ impl<'t> Lowering<'t> {
     /// index out of its bounds, once the value is computed.
     fn store_order(&self, e: &mut Expr, fresh: &mut dyn FnMut(&str) -> String) {
         let ExprKind::Assign { target: Place::Index(array, index), value, .. } = &mut e.kind else { return };
-        if !may_be_null(array) || quiet(value) {
+        if !may_be_null(array) || self.quiet(value) {
             return;
         }
         let (pos, ty) = (e.pos, e.ty);
@@ -106,7 +133,7 @@ impl<'t> Lowering<'t> {
         if !matches!(&array.kind, ExprKind::Var(name) if !assigned(name)) {
             body.push(self.hold(array, fresh(RECEIVER), pos));
         }
-        if !literal(index) {
+        if !self.literal(index) {
             body.push(self.hold(index, fresh(ARGUMENT), pos));
         }
         body.push(self.hold(value, fresh(ARGUMENT), pos));
@@ -145,38 +172,46 @@ fn may_be_null(e: &Expr) -> bool {
     !matches!(e.kind, ExprKind::This | ExprKind::New { .. } | ExprKind::Str(_))
 }
 
-/// A literal, which reads nothing.
-fn literal(e: &Expr) -> bool {
-    matches!(
-        e.kind,
-        ExprKind::Int(_)
+impl<'t> Lowering<'t> {
+    /// A literal, or a constant static field, which Java's class file holds as a literal: it
+    /// reads nothing and initializes no class.
+    fn literal(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Int(_)
             | ExprKind::Long(_)
             | ExprKind::Double(_)
             | ExprKind::Float(_)
             | ExprKind::Char(_)
             | ExprKind::Bool(_)
             | ExprKind::Str(_)
-            | ExprKind::Null
-    )
-}
-
-/// Whether evaluating `e` has no effect and cannot throw: a literal, a local, `this`, and
-/// arithmetic or comparisons of those that cannot divide by zero.
-fn quiet(e: &Expr) -> bool {
-    match &e.kind {
-        _ if literal(e) => true,
-        ExprKind::Var(_) | ExprKind::This => true,
-        ExprKind::Unary(_, x) => quiet(x) && (x.ty.is_numeric() || x.ty == Type::Boolean),
-        ExprKind::Binary(op, a, b) => {
-            let primitive = |t: Type| t.is_numeric() || t == Type::Boolean;
-            !matches!(op, BinOp::Div | BinOp::Rem)
-                && primitive(a.ty)
-                && primitive(b.ty)
-                && quiet(a)
-                && quiet(b)
+            | ExprKind::Null => true,
+            ExprKind::Static { class, name } => self.types.get(*class).is_some_and(|t| {
+                t.node
+                    .list("members")
+                    .any(|m| m.kind() == "VARIABLE" && m.str("name") == name && Lowering::is_constant(m))
+            }),
+            _ => false,
         }
-        ExprKind::Cast(to, x) => quiet(x) && to.is_numeric() && x.ty.is_numeric(),
-        _ => false,
+    }
+
+    /// Whether evaluating `e` has no effect and cannot throw: a literal, a local, `this`, and
+    /// arithmetic or comparisons of those that cannot divide by zero.
+    fn quiet(&self, e: &Expr) -> bool {
+        match &e.kind {
+            _ if self.literal(e) => true,
+            ExprKind::Var(_) | ExprKind::This => true,
+            ExprKind::Unary(_, x) => self.quiet(x) && (x.ty.is_numeric() || x.ty == Type::Boolean),
+            ExprKind::Binary(op, a, b) => {
+                let primitive = |t: Type| t.is_numeric() || t == Type::Boolean;
+                !matches!(op, BinOp::Div | BinOp::Rem)
+                    && primitive(a.ty)
+                    && primitive(b.ty)
+                    && self.quiet(a)
+                    && self.quiet(b)
+            }
+            ExprKind::Cast(to, x) => self.quiet(x) && to.is_numeric() && x.ty.is_numeric(),
+            _ => false,
+        }
     }
 }
 

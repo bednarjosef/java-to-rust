@@ -13,6 +13,10 @@ public class ArgumentsBeforeNullReceiver {
             return s;
         }
 
+        Box find(int x) {
+            return next;
+        }
+
         void put(int x, int y) {
             v = x + y;
         }
@@ -64,6 +68,12 @@ public class ArgumentsBeforeNullReceiver {
         Box outer = new Box();
         try {
             outer.next.put(effect("first"), effect("second"));
+        } catch (NullPointerException e) {
+            System.out.println("caught " + e.getMessage());
+        }
+        // The null that the call returns, once its argument is computed.
+        try {
+            System.out.println(outer.find(effect("find")).v);
         } catch (NullPointerException e) {
             System.out.println("caught " + e.getMessage());
         }
