@@ -503,8 +503,22 @@ impl<'t> Lowering<'t> {
             methods.push(clinit);
         }
         let mut writes = enums::EnumFieldWrites::default();
-        for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
-            let finished = self.finish_enum(index, types, methods, &mut writes);
+        let enum_indices: Vec<usize> =
+            (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM").collect();
+        // Every enum's constant bodies come first: a body's method may read another enum's fields,
+        // and that enum's tables must rewrite the read, so the methods must all exist before any
+        // enum takes its form.
+        let made: Vec<Result<Vec<Vec<Field>>, Error>> = enum_indices
+            .iter()
+            .map(|&index| {
+                self.constant_bodies(index, methods).and_then(|()| {
+                    writes.forget(methods, index);
+                    self.constant_body_fields(index)
+                })
+            })
+            .collect();
+        for (index, bodies) in enum_indices.into_iter().zip(made) {
+            let finished = self.finish_enum(index, types, methods, bodies, &mut writes);
             // The enum's own methods may have changed.
             writes.forget(methods, index);
             if let Err(e) = finished {
@@ -519,17 +533,16 @@ impl<'t> Lowering<'t> {
         Ok(())
     }
 
-    /// The constant bodies and the constants of enum `index`.
+    /// The constants of enum `index`, with its constant bodies' fields `bodies` (see `finish_types`).
     fn finish_enum(
         &self,
         index: usize,
         types: &mut [TypeDecl],
         methods: &mut Vec<Method>,
+        bodies: Result<Vec<Vec<Field>>, Error>,
         writes: &mut enums::EnumFieldWrites,
     ) -> Result<(), Error> {
-        self.constant_bodies(index, methods)?;
-        writes.forget(methods, index);
-        let bodies = self.constant_body_fields(index)?;
+        let bodies = bodies?;
         let own_fields = types[index].fields.len();
         let pure = self.check_enum(index, methods, writes).and_then(|()| {
             self.add_body_fields(&bodies, &mut types[index].fields)?;
