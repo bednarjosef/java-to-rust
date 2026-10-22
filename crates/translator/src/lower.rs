@@ -988,10 +988,13 @@ impl<'t> Lowering<'t> {
                 // A cast between the program's types, up, down or across: `Cast` converts as the
                 // implicit upcasts do, and checks a downcast. `(int) o` on an `Object` casts to
                 // `Integer` and unboxes. `(C) super.clone()` in `C` is the copy itself, which has
-                // `C`'s type: it is not converted to `Object` and back.
+                // `C`'s type: it is not converted to `Object` and back. So does `(long) n` on a
+                // `Number` or a `Comparable`, which may hold a box.
+                let holds_boxes = matches!(value.ty, Type::Class(name, _)
+                    if name == OBJECT || name == NUMBER || name == COMPARABLE);
                 if Self::is_clone(&value) {
                     self.cast_clone(value, ty)
-                } else if Self::is_object(value.ty) && (ty.is_numeric() || ty == Type::Boolean) {
+                } else if holds_boxes && (ty.is_numeric() || ty == Type::Boolean) {
                     let boxed = self.synth(
                         ExprKind::Cast(Type::boxed(ty), Box::new(value)),
                         node.pos(),
