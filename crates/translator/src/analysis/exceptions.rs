@@ -36,6 +36,7 @@
 
 mod entry;
 mod failures;
+use failures::format_may_fail;
 mod field_inits;
 pub(super) mod guards;
 
@@ -101,6 +102,38 @@ struct Seen {
     all: bool,
 }
 
+/// Rejects a `printf` or `format` of a `PrintStream` object whose format may fail. The text is
+/// formatted before the stream's `formattedText` prints it (`lower::strings`), so a specifier
+/// that fails as it prints would leave nothing printed, where Java's `Formatter` has written the
+/// text before it to the stream. (`System.out.printf` prints that text, see
+/// `java::print_format`.)
+fn printf_of_streams(class: &Class, reject: &mut impl FnMut(Pos, &str)) {
+    let (owner, name, _) = crate::program::PRINT_FORMATTED;
+    for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::MethodCall { resolved: Some(r), args, .. } = &x.kind
+                            && class.methods[*r].name == name
+                            && class.types[class.methods[*r].class].name == owner
+                            && let ExprKind::Builtin(Builtin::Format, format) = &args[0].kind
+                            && format_may_fail(format)
+                        {
+                            reject(
+                                x.pos,
+                                "`printf` of a `PrintStream` object with a format that may fail not supported yet",
+                            );
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+}
+
 /// Every error found, in the order of the code; the first is the one a translation reports.
 pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>> {
     if class.type_index("java.lang.Throwable").is_none() {
@@ -110,6 +143,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     facts.initialized_statics = initialized_statics(class, facts);
     let mut errors = Vec::new();
     let mut reject = |pos: Pos, message: &str| errors.push(Error { pos, message: message.to_string() });
+    printf_of_streams(class, &mut reject);
     let h = &class.hierarchy;
     let mut points: Vec<Vec<Point>> =
         (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
