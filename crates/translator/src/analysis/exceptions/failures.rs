@@ -463,6 +463,21 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             &["java.lang.ArrayIndexOutOfBoundsException", "java.lang.ArrayStoreException"]
         }
         Builtin::Native(Native::ArrayCopy) => &["java.lang.ArrayIndexOutOfBoundsException"],
+        // A null class or array, a negative length, `void` or what is not an array, an index
+        // outside the array, and a value that the array cannot hold (`Gen::reflect_array`).
+        Builtin::Native(Native::ReflectNewArray) => &[
+            "java.lang.NullPointerException",
+            "java.lang.NegativeArraySizeException",
+            "java.lang.IllegalArgumentException",
+        ],
+        Builtin::Native(Native::ReflectArrayLength) => {
+            &["java.lang.NullPointerException", "java.lang.IllegalArgumentException"]
+        }
+        Builtin::Native(Native::ReflectArraySet) => &[
+            "java.lang.NullPointerException",
+            "java.lang.IllegalArgumentException",
+            "java.lang.ArrayIndexOutOfBoundsException",
+        ],
         // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
         Builtin::Arrays(op) if op.ranged() => &["java.lang.ArrayIndexOutOfBoundsException"],
         Builtin::Format if !format_may_fail(class, args) => &[],
@@ -767,6 +782,13 @@ pub(super) fn runtime_failures(
                 // checked form returns the mismatch (`codegen/dispatch.rs`).
                 if object_copy(args) {
                     out.push(("java.lang.ArrayStoreException", "this call of the library", true, x.id));
+                }
+            }
+            // Each failure of `java.lang.reflect.Array`'s natives has the checked form, a null
+            // argument among them.
+            Builtin::Native(Native::ReflectNewArray | Native::ReflectArrayLength | Native::ReflectArraySet) => {
+                for &failure in library_failure(class, builtin, args) {
+                    out.push((failure, "this call of the library", true, x.id));
                 }
             }
             // The string is dereferenced first (a null one is the checked `NullPointerException`),

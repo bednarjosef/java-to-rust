@@ -158,6 +158,14 @@ impl<'t> Lowering<'t> {
                         self.uncaught_dispatch(node, args);
                         Native::InstallUncaught
                     }
+                    // The array and the value are `Object`s, as an array is where it is one.
+                    Some(native @ (Native::ReflectArrayLength | Native::ReflectArraySet)) => {
+                        let all = std::mem::take(args).into_iter().enumerate();
+                        *args = all
+                            .map(|(i, a)| if i != 1 { self.convert(a, Type::class(OBJECT)) } else { a })
+                            .collect();
+                        native
+                    }
                     Some(native) => native,
                     // A whole program is rejected only where the native can run.
                     None if self.reach.is_some() => {

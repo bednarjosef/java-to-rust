@@ -80,6 +80,16 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 ExprKind::ArrayLit(items) if items.iter().any(|item| maybe_null(facts, m, item)) => {
                     elements.push(x.ty.element());
                 }
+                // `Array.newArray` makes an array of any of the array classes that are `Object`s,
+                // with null references, and `Array.set` may store null in any of them.
+                ExprKind::Builtin(Builtin::Native(Native::ReflectNewArray), _) => {
+                    elements.extend(reflect_elements(class));
+                }
+                ExprKind::Builtin(Builtin::Native(Native::ReflectArraySet), args)
+                    if maybe_null(facts, m, &args[2]) =>
+                {
+                    elements.extend(reflect_elements(class));
+                }
                 // `Arrays.fill` stores its value in every element of the range.
                 ExprKind::Builtin(Builtin::ArraysFill | Builtin::Arrays(ArraysOp::FillRange), args)
                     if args.last().is_some_and(|v| maybe_null(facts, m, v)) =>
@@ -191,6 +201,16 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
     // initializer: its cell is an `Option` that is read as it is.
     let nullable = facts.nullable_statics.clone();
     facts.placeholder_statics.retain(|key| !nullable.contains(key));
+}
+
+/// The element types of references of the array classes that are `Object`s, which
+/// `java.lang.reflect.Array`'s natives make and store into.
+fn reflect_elements(class: &Class) -> Vec<Type> {
+    (0..class.types.len())
+        .filter_map(|c| class.array_of(c))
+        .map(|array| array.element())
+        .filter(|&element| nullable_type(element))
+        .collect()
 }
 
 /// The locals and parameters that the code of `method` reads.

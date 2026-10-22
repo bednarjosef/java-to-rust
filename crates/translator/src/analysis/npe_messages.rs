@@ -217,6 +217,16 @@ impl Messages<'_> {
                     }
                 }
             }
+            // `java.lang.reflect.Array`'s natives of a null class or array, which the JVM's C code
+            // throws without a message (`Gen::reflect_result`).
+            ExprKind::Builtin(
+                Builtin::Native(
+                    Native::ReflectNewArray | Native::ReflectArrayLength | Native::ReflectArraySet,
+                ),
+                _,
+            ) => {
+                out.insert(x.id, None);
+            }
             ExprKind::Assign { op: None, target: Place::Field { object, .. }, value } if matches!(&value.kind, ExprKind::Builtin(Builtin::Native(n), _) if n.is_java_io()) =>
             {
                 out.insert(object.id, None);

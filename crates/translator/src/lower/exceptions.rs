@@ -92,6 +92,7 @@ const RAISED: &[(&str, &[&str])] = &[
             "ARRAY_ACCESS",
             "java.lang.Character#toChars",
             "java.lang.System#arraycopy",
+            "java.lang.reflect.Array#set",
             // A range outside the array (`ArraysOp::ranged`).
             "java.util.Arrays#fill",
             "java.util.Arrays#sort",
@@ -101,7 +102,10 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.CharSequence#getChars",
         ],
     ),
-    ("java.lang.NegativeArraySizeException", &["NEW_ARRAY", "java.util.Arrays#copyOf"]),
+    (
+        "java.lang.NegativeArraySizeException",
+        &["NEW_ARRAY", "java.util.Arrays#copyOf", "java.lang.reflect.Array#newArray"],
+    ),
     // A copy between arrays of objects whose types differ (`failures.rs`, `codegen/dispatch.rs`).
     ("java.lang.ArrayStoreException", &["java.lang.System#arraycopy"]),
     // `super.clone()` of an object whose class is not `Cloneable`.
@@ -148,6 +152,10 @@ const RAISED: &[(&str, &[&str])] = &[
         &[
             "enum#valueOf",
             "java.lang.Enum#valueOf",
+            // `void` or what is not an array, and a value that the array cannot hold.
+            "java.lang.reflect.Array#newArray",
+            "java.lang.reflect.Array#getLength",
+            "java.lang.reflect.Array#set",
             "java.lang.Character#toChars",
             "java.lang.Character#toString",
             // An invalid code point of `new String(codePoints, offset, count)`.
@@ -314,7 +322,14 @@ const RAISED_WHEN_INTERRUPTED: &[(&str, &[&str])] = &[
 
 /// The classes of `RAISED` that the runtime may raise without a message as well, which are built
 /// with the constructor without arguments then, so that `getMessage()` is null.
-const BARE: &[&str] = &["java.lang.InterruptedException", "java.lang.IndexOutOfBoundsException"];
+/// (`java.lang.reflect.Array`'s natives throw the last three so.)
+const BARE: &[&str] = &[
+    "java.lang.InterruptedException",
+    "java.lang.IndexOutOfBoundsException",
+    "java.lang.IllegalArgumentException",
+    "java.lang.ArrayIndexOutOfBoundsException",
+    "java.lang.NullPointerException",
+];
 
 /// The package of the standard class with this simple name.
 fn package_of(simple: &str) -> &'static str {

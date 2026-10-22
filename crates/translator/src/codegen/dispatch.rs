@@ -546,6 +546,196 @@ impl<'a> Gen<'a> {
         Code::atom(self.passed_on(code))
     }
 
+    /// The arrays that become `Object`s: the variant of `Object` of each, with its type.
+    fn object_arrays(&self) -> Vec<(String, Type)> {
+        let Some(t) = self.object_index() else { return Vec::new() };
+        let mut out = Vec::new();
+        for c in self.enum_variants(t) {
+            if let Some(array) = self.class.array_of(c) {
+                out.push((self.variant(t, c), array));
+            }
+        }
+        out
+    }
+
+    /// A value that may be null, as an owned `Option` of it.
+    fn owned_option(&mut self, e: &'a Expr) -> String {
+        let text = self.expr(e).text;
+        if self.nullable(e) { text } else { format!("Some({text})") }
+    }
+
+    /// `code`, the `Result` of a native of `java.lang.reflect.Array`, passed on where a handler
+    /// sees its failure (`facts.raising`, `null_checked`), else thrown where it fails.
+    fn reflect_result(&mut self, code: Code, id: ExprId) -> Code {
+        if self.facts.raising.contains(&id) || self.facts.null_checked.contains_key(&id) {
+            // The checked form raises the `NullPointerException` of a null argument too.
+            self.dereferenced.insert(id);
+            return Code::atom(self.passed_on(code));
+        }
+        let throw = self.runtime("throw_exception");
+        Code::atom(format!("{}.unwrap_or_else(|e| {throw}(e))", code.at(ATOM)))
+    }
+
+    /// `Array.newArray(componentType, length)`: a new array of the component type among the
+    /// arrays that become `Object`s, found by the type's name. `void` has no arrays (an
+    /// `IllegalArgumentException`); a type of which the program makes no array as an `Object`
+    /// ends the program, as no value of the translation can be that array.
+    pub(super) fn reflect_new_array(&mut self, args: &'a [Expr], id: ExprId) -> Code {
+        let [class, length] = args else { unreachable!("newArray has two arguments") };
+        let class_text = self.owned_option(class);
+        let length = self.value(length, Type::Int).text;
+        let exception = self.runtime("Exception");
+        let non_null = self.runtime("try_non_null");
+        let object = self.ty_name(Type::class(OBJECT));
+        let [c, n] = ["component", "length"].map(|base| self.temp(base));
+        let mut arms = Vec::new();
+        for (variant, array) in self.object_arrays() {
+            let element = array.element();
+            let name = rust_string(&self.type_class_name(element));
+            let zero = self.element_zero(element);
+            let filled =
+                self.runtime(if self.shared_array_type(array) { "try_shared_filled" } else { "try_filled" });
+            arms.push(format!("{name} => {filled}({n}, {zero}).map({variant}),"));
+        }
+        arms.push(format!("\"void\" => Err({exception}::bare(\"java.lang.IllegalArgumentException\")),"));
+        let missing = self.runtime("not_translated");
+        arms.push(format!(
+            "name => {missing}(&format!(\"`Array.newInstance` of `{{name}}`, of which the program makes no array as an object\")),"
+        ));
+        let code = Code::atom(format!(
+            "{{ let ({c}, {n}) = ({class_text}, {length}); (|| -> Result<{object}, {exception}> {{ \
+             match {non_null}({c})?.get_name().as_str() {{ {} }} }})() }}",
+            arms.join(" ")
+        ));
+        self.reflect_result(code, id)
+    }
+
+    /// `Array.getLength(array)`.
+    pub(super) fn reflect_array_length(&mut self, args: &'a [Expr], id: ExprId) -> Code {
+        let [array] = args else { unreachable!("getLength has one argument") };
+        let array_text = self.owned_option(array);
+        let exception = self.runtime("Exception");
+        let non_null = self.runtime("try_non_null");
+        let len = self.runtime("len");
+        let a = self.temp("array");
+        let mut arms: Vec<String> = self
+            .object_arrays()
+            .into_iter()
+            .map(|(variant, _)| format!("{variant}(a) => Ok({len}(a)),"))
+            .collect();
+        arms.push(format!(
+            "_ => Err({exception}::new(\"java.lang.IllegalArgumentException\", \"Argument is not an array\")),"
+        ));
+        let code = Code::atom(format!(
+            "{{ let {a} = {array_text}; (|| -> Result<i32, {exception}> {{ match {non_null}({a}.as_ref())? {{ {} }} }})() }}",
+            arms.join(" ")
+        ));
+        self.reflect_result(code, id)
+    }
+
+    /// `Array.set(array, index, value)`, checked in the JVM's order: a null array, one that is
+    /// not an array, a null for a primitive element, an index outside the array, then a value
+    /// that the element cannot hold (a box of a primitive that does not widen to it, or an object
+    /// of another class).
+    pub(super) fn reflect_array_set(&mut self, args: &'a [Expr], id: ExprId) -> Code {
+        let [array, index, value] = args else { unreachable!("set has three arguments") };
+        let array_text = self.owned_option(array);
+        let index = self.value(index, Type::Int).text;
+        let value_text = self.owned_option(value);
+        let exception = self.runtime("Exception");
+        let non_null = self.runtime("try_non_null");
+        let (len, set) = (self.runtime("len"), self.runtime("try_set"));
+        let [a, i, v] = ["array", "index", "value"].map(|base| self.temp(base));
+        let fail = |message: &str| match message {
+            "" => format!("return Err({exception}::bare(\"java.lang.IllegalArgumentException\"))"),
+            _ => {
+                format!("return Err({exception}::new(\"java.lang.IllegalArgumentException\", \"{message}\"))")
+            }
+        };
+        let bounds = format!(
+            "if {i} < 0 || {i} >= {len}(a) {{ return Err({exception}::bare(\"java.lang.ArrayIndexOutOfBoundsException\")); }}"
+        );
+        let object = self.object_index();
+        let mut arms = Vec::new();
+        for (variant, array) in self.object_arrays() {
+            let element = array.element();
+            let stored = if element.is_numeric() || element == Type::Boolean {
+                let mut sources = Vec::new();
+                for &source in widening_sources(element) {
+                    let boxed = Type::boxed(source);
+                    let Some(c) = self.class.type_of(boxed) else { continue };
+                    let Some(source_variant) = object.and_then(|o| self.variant_of(o, c)) else { continue };
+                    let read = if self.faithful_box(boxed) { "**b" } else { "*b" };
+                    let read = if source == element {
+                        read.to_string()
+                    } else {
+                        format!("{read} as {}", rust_type(element))
+                    };
+                    sources.push(format!("{source_variant}(b) => {read},"));
+                }
+                sources.push(format!("_ => {},", fail("argument type mismatch")));
+                format!(
+                    "{{ let Some(given) = {v}.as_ref() else {{ {} }}; {bounds} match given {{ {} }} }}",
+                    fail(""),
+                    sources.join(" ")
+                )
+            } else {
+                let mismatch = fail("array element type mismatch");
+                let narrowed = match (element, object) {
+                    (Type::Class(name, _), _) if name == OBJECT => {
+                        Some("Some(o) => Some(o.clone()),".to_string())
+                    }
+                    (_, Some(o)) => match self.class.type_of(element) {
+                        Some(t) if !self.passing(o, t).is_empty() => {
+                            self.need(Need::Narrow(o, t));
+                            let enum_name = struct_name(&self.class.types[o].name);
+                            let name = self.as_name(t);
+                            Some(format!(
+                                "Some(o) => match {enum_name}::{name}(o) {{ Some(x) => Some(x), None => {mismatch} }},"
+                            ))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let narrowed = narrowed.unwrap_or_else(|| format!("Some(_) => {mismatch},"));
+                let reference = format!("match {v}.as_ref() {{ None => None, {narrowed} }}");
+                // An array whose elements are never null (`analysis::nullness`), as no null is
+                // stored in it.
+                let reference = match self.nullable_element(element) {
+                    true => reference,
+                    false => format!("{}({reference})", self.runtime("non_null")),
+                };
+                format!("{{ {bounds} {reference} }}")
+            };
+            arms.push(format!("{variant}(a) => {{ let element = {stored}; {set}(a, {i}, element) }}"));
+        }
+        arms.push(format!("_ => {{ {}; }}", fail("Argument is not an array")));
+        let code = Code::atom(format!(
+            "{{ let ({a}, {i}, {v}) = ({array_text}, {index}, {value_text}); (|| -> Result<(), {exception}> {{ \
+             match {non_null}({a}.as_ref())? {{ {} }} }})() }}",
+            arms.join(" ")
+        ));
+        self.reflect_result(code, id)
+    }
+
+    /// The name of the class of type `ty`, as `Class.getName()` gives it: `int`,
+    /// `java.lang.String`, `[I`.
+    fn type_class_name(&self, ty: Type) -> String {
+        match ty {
+            _ if ty.is_numeric() || ty == Type::Boolean => ty.to_string(),
+            Type::Array(_) => self.descriptor(ty),
+            Type::JavaClass => CLASS_VALUE.to_string(),
+            _ => {
+                let descriptor = self.descriptor(ty);
+                match descriptor.strip_prefix('L').and_then(|d| d.strip_suffix(';')) {
+                    Some(name) => name.to_string(),
+                    None => descriptor,
+                }
+            }
+        }
+    }
+
     /// The JVM's name of an array class, as `getClass().getName()` gives it: `[I`,
     /// `[Ljava.lang.String;`, `[[Lshapes.Point;`.
     fn descriptor(&self, ty: Type) -> String {
@@ -2017,4 +2207,20 @@ fn absent(g: &Gen, c: usize) -> String {
 fn capitalized(name: &str) -> String {
     let mut chars = name.chars();
     chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+}
+
+/// The primitive types whose boxes `Array.set` widens to an element of type `ty`, `ty` first.
+fn widening_sources(ty: Type) -> &'static [Type] {
+    match ty {
+        Type::Short => &[Type::Short, Type::Byte],
+        Type::Int => &[Type::Int, Type::Short, Type::Byte, Type::Char],
+        Type::Long => &[Type::Long, Type::Int, Type::Short, Type::Byte, Type::Char],
+        Type::Float => &[Type::Float, Type::Long, Type::Int, Type::Short, Type::Byte, Type::Char],
+        Type::Double => {
+            &[Type::Double, Type::Float, Type::Long, Type::Int, Type::Short, Type::Byte, Type::Char]
+        }
+        Type::Byte => &[Type::Byte],
+        Type::Char => &[Type::Char],
+        _ => &[Type::Boolean],
+    }
 }
