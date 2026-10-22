@@ -435,6 +435,9 @@ impl<'a> Gen<'a> {
             return Code::atom(match args.first() {
                 None => format!("{ty}::new()"),
                 Some(n) if n.ty == Type::Int => format!("{ty}::with_capacity({})", self.int_arg(n)),
+                Some(s) if matches!(s.ty, Type::Class(..)) => {
+                    format!("{ty}::from_text({})", self.copied_text(s))
+                }
                 Some(s) => format!("{ty}::from_text({})", self.text_ref(s)),
             });
         }

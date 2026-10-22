@@ -21,13 +21,8 @@ impl<'a> Gen<'a> {
         match e.ty {
             Type::String | Type::StringBuilder if !self.nullable(e) => self.text_ref(e),
             Type::Class(..) => {
-                let plain = self.type_of(e.ty).is_some_and(|t| {
-                    self.enum_variants(t)
-                        .into_iter()
-                        .all(|c| matches!(self.runtime_of(c), Some(Type::String | Type::StringBuilder)))
-                });
-                if !plain {
-                    let message = "appending a range of a `CharSequence` that a program class implements";
+                let message = "appending a range of a `CharSequence` that a program class implements";
+                if !self.plain_sequence(e) {
                     self.rejected.push(Error { pos: e.pos, message: message.to_string() });
                     return "\"\"".to_string();
                 }
@@ -35,5 +30,30 @@ impl<'a> Gen<'a> {
             }
             _ => format!("&{}", self.text_of(e)),
         }
+    }
+
+    /// The text that `new StringBuilder(seq)` copies, as a `&str`. Java's constructor asks `seq`
+    /// for its length, so a null `seq` throws `NullPointerException` rather than giving "null".
+    /// A `CharSequence` with a program class among its variants is rejected, as `range_text` does.
+    pub(super) fn copied_text(&mut self, e: &'a Expr) -> String {
+        if !self.plain_sequence(e) {
+            let message = "creating a builder from a `CharSequence` that a program class implements";
+            self.rejected.push(Error { pos: e.pos, message: message.to_string() });
+            return "\"\"".to_string();
+        }
+        let t = self.type_of(e.ty).expect("a CharSequence has an enum");
+        self.need(Need::Display(t));
+        let obj = self.object(e);
+        format!("&{obj}.to_string()")
+    }
+
+    /// Whether the `CharSequence` `e` holds only strings and builders: no program class is one of
+    /// its variants, so its text is the text of the string or builder it holds.
+    fn plain_sequence(&self, e: &Expr) -> bool {
+        self.type_of(e.ty).is_some_and(|t| {
+            self.enum_variants(t)
+                .into_iter()
+                .all(|c| matches!(self.runtime_of(c), Some(Type::String | Type::StringBuilder)))
+        })
     }
 }
