@@ -92,10 +92,11 @@ program where such a lookup can happen, so they can be checked before the progra
   (`java/Reflection.java`). Each holds a slot in the table, and `Method.invoke`, `Field.get` and
   `set` (with their typed forms) and `Constructor.newInstance` are a `switch` over the slots,
   each case a direct call, read or write. Arguments are checked and unboxed as Java does: a wrong
-  type is an `IllegalArgumentException` and a null receiver a `NullPointerException`. Two
-  things differ from Java: an exception of the called code is not wrapped in an
-  `InvocationTargetException`, and a final field is not written (an `IllegalAccessException`,
-  since the analyses rely on final fields keeping their value). Generic methods, and members
+  type is an `IllegalArgumentException` and a null receiver a `NullPointerException`, and an
+  exception of the called code is wrapped in an `InvocationTargetException` (by
+  `Class.newInstance` it is thrown as it is, as in Java). One thing differs from Java: a final
+  field is never written, even after `setAccessible(true)`; `set` throws
+  `IllegalAccessException`, since the analyses rely on final fields keeping their value. Generic methods, and members
   whose types do not box to and from `Object`, are not in the table.
 - **Names outside the translation** throw Java's own exception, which code can catch, with a
   message that says so: `ClassNotFoundException: com.foo.Bar, which is not in the translation`,
@@ -157,7 +158,6 @@ annotations, and method handles.
 - **The module system** (`Module`, `ModuleLayer`), as above.
 - **Members of the runtime's classes** (`String`, the boxes, `Object`, ...) are not in the
   table: a lookup on `String.class` finds nothing. `Modifier` is not translated in a single file.
-- **`InvocationTargetException`** wrapping, as above.
 
 ### 2. Plugins and processors chosen when translating
 

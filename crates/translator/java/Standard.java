@@ -772,6 +772,35 @@ class IllegalAccessException extends ReflectiveOperationException {
     }
 }
 
+// The exception of a method or constructor that reflection calls, which Java gives as the
+// cause: `getCause()` and `getTargetException()` are it, and the message is null.
+class InvocationTargetException extends ReflectiveOperationException {
+    private final Throwable target;
+
+    protected InvocationTargetException() {
+        super((String) null, null);
+        this.target = null;
+    }
+
+    public InvocationTargetException(Throwable target) {
+        super((String) null, target);
+        this.target = target;
+    }
+
+    public InvocationTargetException(Throwable target, String s) {
+        super(s, target);
+        this.target = target;
+    }
+
+    public Throwable getTargetException() {
+        return target;
+    }
+
+    public Throwable getCause() {
+        return target;
+    }
+}
+
 class InstantiationException extends ReflectiveOperationException {
     public InstantiationException() {
     }

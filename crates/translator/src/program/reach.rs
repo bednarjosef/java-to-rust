@@ -184,10 +184,9 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
 /// Classes under a prefix of `UNTRANSLATED` that are translated all the same:
 /// `java.lang.reflect.Array` creates arrays of a component type and measures them, which is what
 /// `Arrays.copyOf` and `Collection.toArray` need of it, not reflection. `Modifier` tests the bits
-/// of a member's modifiers, and `InvocationTargetException` is an exception like any other,
-/// which code that creates an object from a `Class` value catches (`by_name.rs`). `Method`,
-/// `Field` and `Constructor` are the translator's own, over the reflection table
-/// (`reflection.rs`).
+/// of a member's modifiers. `Method`, `Field` and `Constructor` are the translator's own, over the
+/// reflection table (`reflection.rs`), and so is `InvocationTargetException`, which wraps the
+/// exceptions of what they call (`java/Standard.java`).
 pub const TRANSLATED_ANYWAY: &[&str] = &[
     "java.lang.reflect.Array",
     "java.lang.reflect.InvocationTargetException",

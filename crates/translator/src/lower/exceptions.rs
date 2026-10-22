@@ -34,6 +34,7 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("EOFException", "java.io"),
     ("UnsupportedEncodingException", "java.io"),
     ("UncheckedIOException", "java.io"),
+    ("InvocationTargetException", "java.lang.reflect"),
     ("Method", "java.lang.reflect"),
     ("Field", "java.lang.reflect"),
     ("Constructor", "java.lang.reflect"),

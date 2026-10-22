@@ -350,42 +350,86 @@ impl<'t> Lowering<'t> {
             self.unboxed(node, value, ty)
         };
         match (&entry.member, native) {
-            (Member::Method(m), "invoke0") => {
-                let info = &self.methods[*m];
-                let params = self.param_types(*m)?;
-                let args: Vec<Expr> =
-                    params.iter().enumerate().map(|(i, ty)| argument(2, i, *ty)).collect::<Result<_, _>>()?;
-                let ret = self.return_type(node, *m)?;
-                let name = info.name.to_string();
-                let call = if info.node.has_flag("STATIC") {
-                    let mut args = args;
-                    args.extend(self.caller_arg(node, Some(*m))?);
-                    ExprKind::Call { name, args, resolved: Some(*m) }
+            (Member::Method(m), "invoke0" | "newInstance0") => {
+                let m = *m;
+                let info = &self.methods[m];
+                let creates = native == "newInstance0";
+                // The receiver (`invoke0` of an instance method) and the `Object[]` of arguments.
+                let (receiver, array) = if creates { (None, 1) } else { (Some(1), 2) };
+                let receiver = receiver.filter(|_| !info.node.has_flag("STATIC"));
+                let params = self.param_types(m)?;
+                // `Method.invoke` and `Constructor.newInstance` checked the receiver and the
+                // arguments before (`Constructor.arguments`): a primitive's is not null. Each is
+                // tested again, `if (r != null && a0 != null ..)`, so that the call runs where
+                // they are known not null, and only an exception of the member itself reaches the
+                // template's `catch`, which wraps it in an `InvocationTargetException`.
+                let mut body = Vec::new();
+                let mut tested: Vec<Expr> = Vec::new();
+                let mut args = Vec::new();
+                if !params.is_empty() {
+                    tested.push(var(array));
+                }
+                for (i, ty) in params.iter().enumerate() {
+                    if Self::is_object(*ty) || !(ty.is_numeric() || *ty == Type::Boolean) {
+                        args.push(argument(array, i, *ty)?);
+                        continue;
+                    }
+                    let name = self.fresh_name(&format!("argument_{i}"));
+                    let at = self.synth(ExprKind::Int(i as i32), pos, Type::Int);
+                    let element =
+                        self.synth(ExprKind::Index(Box::new(var(array)), Box::new(at)), pos, object);
+                    body.push(Stmt::Local { ty: object, name: name.clone(), init: Some(element), pos });
+                    tested.push(self.synth(ExprKind::Var(name.clone()), pos, object));
+                    let local = self.synth(ExprKind::Var(name), pos, object);
+                    args.push(self.unboxed(node, local, *ty)?);
+                }
+                let call = if creates {
+                    let class = info.owner;
+                    let created = ExprKind::New { class, args, ctor: Some(m) };
+                    self.convert(self.synth(created, pos, self.self_type(class)), object)
                 } else {
-                    let receiver = self.unboxed(node, var(1), self.self_type(info.owner))?;
-                    ExprKind::MethodCall {
-                        receiver: Box::new(receiver),
-                        name,
-                        args,
-                        resolved: Some(*m),
-                        is_super: false,
+                    let ret = self.return_type(node, m)?;
+                    let name = info.name.to_string();
+                    let call = match receiver {
+                        None => {
+                            let mut args = args;
+                            args.extend(self.caller_arg(node, Some(m))?);
+                            ExprKind::Call { name, args, resolved: Some(m) }
+                        }
+                        Some(r) => {
+                            tested.push(var(r));
+                            let receiver = self.unboxed(node, var(r), self.self_type(info.owner))?;
+                            let receiver = Box::new(receiver);
+                            ExprKind::MethodCall { receiver, name, args, resolved: Some(m), is_super: false }
+                        }
+                    };
+                    let call = self.synth(call, pos, ret);
+                    if ret == Type::Void {
+                        body.push(Stmt::Expr(call));
+                        self.synth(ExprKind::Null, pos, Type::Null)
+                    } else {
+                        self.convert(call, object)
                     }
                 };
-                let call = self.synth(call, pos, ret);
-                Ok(Some(if ret == Type::Void {
-                    vec![Stmt::Expr(call), Stmt::Yield(self.synth(ExprKind::Null, pos, Type::Null))]
-                } else {
-                    vec![Stmt::Yield(self.convert(call, object))]
-                }))
-            }
-            (Member::Method(m), "newInstance0") => {
-                let class = self.methods[*m].owner;
-                let params = self.param_types(*m)?;
-                let args: Vec<Expr> =
-                    params.iter().enumerate().map(|(i, ty)| argument(1, i, *ty)).collect::<Result<_, _>>()?;
-                let created = ExprKind::New { class, args, ctor: Some(*m) };
-                let created = self.synth(created, pos, self.self_type(class));
-                Ok(Some(vec![Stmt::Yield(self.convert(created, object))]))
+                let null = || self.synth(ExprKind::Null, pos, Type::Null);
+                let not_null = |e: Expr| {
+                    self.synth(ExprKind::Binary(BinOp::Ne, Box::new(e), Box::new(null())), pos, Type::Boolean)
+                };
+                let cond = tested.into_iter().map(not_null).reduce(|a, b| {
+                    self.synth(ExprKind::Binary(BinOp::And, Box::new(a), Box::new(b)), pos, Type::Boolean)
+                });
+                // The call after the locals, under the test.
+                let at = body.iter().position(|s| !matches!(s, Stmt::Local { .. })).unwrap_or(body.len());
+                let mut guarded: Vec<Stmt> = body.split_off(at);
+                guarded.push(Stmt::Yield(call));
+                match cond {
+                    None => body.extend(guarded),
+                    Some(cond) => {
+                        body.push(Stmt::If { cond, then: Box::new(Stmt::Block(guarded)), otherwise: None });
+                        body.push(Stmt::Yield(null()));
+                    }
+                }
+                Ok(Some(body))
             }
             (Member::Field(class, decl), "get0" | "set0") => {
                 let decl = *decl;

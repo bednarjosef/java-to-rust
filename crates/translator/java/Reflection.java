@@ -7,9 +7,12 @@
 // the natives `table0`, `invoke0`, `get0`, `set0` and `newInstance0` are written by lowering for
 // each program: the table's members, and a `switch` over the slots that calls the member of each.
 // A lookup by a name that is not in the table throws Java's exception, with a message that says
-// so. Two deviations: an exception that the member throws is not wrapped in an
-// `InvocationTargetException`, and a final field is never set.
+// so. An exception that the member throws is wrapped in an `InvocationTargetException`, as in
+// Java, except by `Class.newInstance`, which throws it as it is. One deviation: a final field is
+// never set, even after `setAccessible(true)`: `set` throws `IllegalAccessException`.
 package reflection;
+
+import java.lang.reflect.InvocationTargetException;
 
 final class Method {
     // The table, made once.
@@ -75,7 +78,7 @@ final class Method {
         return true;
     }
 
-    public Object invoke(Object obj, Object... args) throws IllegalAccessException {
+    public Object invoke(Object obj, Object... args) throws IllegalAccessException, InvocationTargetException {
         Object[] arguments = Constructor.arguments(parameterTypes, args);
         if ((modifiers & 8) == 0) {
             if (obj == null) {
@@ -85,7 +88,13 @@ final class Method {
                 throw new IllegalArgumentException("object is not an instance of declaring class");
             }
         }
-        return invoke0(slot, obj, arguments);
+        Object result;
+        try {
+            result = invoke0(slot, obj, arguments);
+        } catch (Throwable t) {
+            throw new InvocationTargetException(t);
+        }
+        return result;
     }
 
     public boolean equals(Object o) {
@@ -416,12 +425,29 @@ final class Constructor<T> {
 
     // The slot of a constructor of an abstract class is -1: there is nothing to create.
     @SuppressWarnings("unchecked")
-    public T newInstance(Object... initargs) throws InstantiationException, IllegalAccessException {
+    public T newInstance(Object... initargs)
+            throws InstantiationException, IllegalAccessException, InvocationTargetException {
         Object[] arguments = arguments(parameterTypes, initargs);
         if (slot < 0) {
             throw new InstantiationException(null);
         }
-        return (T) newInstance0(slot, arguments);
+        Object made;
+        try {
+            made = newInstance0(slot, arguments);
+        } catch (Throwable t) {
+            throw new InvocationTargetException(t);
+        }
+        return (T) made;
+    }
+
+    // The object that this constructor without parameters creates, whose exception goes on as
+    // it is (`Class.newInstance`).
+    @SuppressWarnings("unchecked")
+    T create() throws InstantiationException {
+        if (slot < 0) {
+            throw new InstantiationException(null);
+        }
+        return (T) newInstance0(slot, new Object[0]);
     }
 
     public boolean equals(Object o) {
@@ -474,7 +500,7 @@ final class Constructor<T> {
     // `c.newInstance()`: the object that the constructor without parameters creates.
     static Object newInstanceOf(Class<?> c) throws InstantiationException, IllegalAccessException {
         try {
-            return find(c, new Class<?>[0], true).newInstance();
+            return find(c, new Class<?>[0], true).create();
         } catch (NoSuchMethodException e) {
             throw new InstantiationException(c.getName() + MISSING);
         }

@@ -1,10 +1,12 @@
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
 // Reflection by name over the program's classes: a class found by a computed name, its
 // constructors, methods and fields looked up by name and called, read and written, inherited
-// methods that dispatch to an override, and the exceptions of a name that is not there.
+// methods that dispatch to an override, the exceptions of a name that is not there, and those of
+// the code called, which reflection wraps (but `Class.newInstance` does not).
 public class ReflectionTable {
     public static class Greeter {
         public String greeting = "hello";
@@ -30,6 +32,15 @@ public class ReflectionTable {
             return 2 * x;
         }
 
+        public final int limit = 3;
+
+        public static int fail(int x) {
+            if (x > 0) {
+                throw new IllegalStateException("bad " + x);
+            }
+            return 1 / x;
+        }
+
         private long secret() {
             return 42L;
         }
@@ -42,6 +53,12 @@ public class ReflectionTable {
     public static class LoudGreeter extends Greeter {
         public String greet(String name) {
             return super.greet(name).toUpperCase();
+        }
+    }
+
+    public static class Broken {
+        public Broken() {
+            throw new UnsupportedOperationException("not made");
         }
     }
 
@@ -126,5 +143,33 @@ public class ReflectionTable {
             System.out.println("not a shape");
         }
         System.out.println(Class.forName("ReflectionTable$Square").asSubclass(Shape.class).getSimpleName());
+
+        Method fail = c.getMethod("fail", int.class);
+        for (int x : new int[] {3, 0}) {
+            try {
+                fail.invoke(null, x);
+            } catch (InvocationTargetException e) {
+                System.out.println("wrapped " + e.getCause() + " " + (e.getTargetException() == e.getCause())
+                        + " " + e.getMessage());
+            }
+        }
+        Class<?> broken = Class.forName(args.length > 1 ? args[1] : "ReflectionTable$Broken");
+        try {
+            broken.getConstructor().newInstance();
+        } catch (InvocationTargetException e) {
+            System.out.println("constructor wrapped " + e.getCause().getMessage());
+        }
+        try {
+            broken.newInstance();
+        } catch (UnsupportedOperationException e) {
+            System.out.println("not wrapped " + e.getMessage());
+        }
+        Field limit = c.getField("limit");
+        System.out.println(limit.get(made));
+        try {
+            limit.set(made, 4);
+        } catch (IllegalAccessException e) {
+            System.out.println("final field");
+        }
     }
 }
