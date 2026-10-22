@@ -54,7 +54,8 @@ impl<'t> Lowering<'t> {
                         .collect();
                     return Ok(Some(Builtin::Native(Native::ArrayCopy)));
                 }
-                if !matches!(src, Type::Array(_)) || src != dest {
+                let same = src == dest || super::arraycopy_classes::class_elements(src, dest);
+                if !matches!(src, Type::Array(_)) || !same {
                     return unsupported(node, "`System.arraycopy` between arrays of different types");
                 }
                 Native::ArrayCopy

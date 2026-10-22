@@ -37,6 +37,7 @@ use std::cell::{Cell, RefCell};
 mod annotation_objects;
 mod annotation_presence;
 mod argument_order;
+mod arraycopy_classes;
 mod arrays;
 mod boxing;
 mod by_name;
