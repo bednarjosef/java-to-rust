@@ -846,11 +846,17 @@ translation cannot match are rejected: `sun.java.command` (the command line) and
 translated from its sources although `Runtime` is the runtime's; its `parse` matches a regular
 expression. Preview features are off, and there is no security manager: `SecurityManager` is a
 type whose only value is null, so `System.getSecurityManager()` is null and a test of a
-manager against null decides its branch, and the `jrt:` file system's permission check does nothing;
+manager against null decides its branch, `AccessController.doPrivileged` of a `PrivilegedAction`
+runs the action (`java/overlay/java/lang/TranslatedAccessController.java`), and the `jrt:` file
+system's permission check does nothing;
 `SecurityProperties.includedInExceptions` reads the JDK's `conf/security/java.security`. The memory
 figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
 JVM's, and `gc()` does nothing, as `System.gc()` does. `Runtime.halt` flushes the output and exits without shutdown
-hooks. `onSpinWait` and `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
+hooks. Scoped values are the JDK's `ScopedValue` over the translator's `Thread`, which keeps a
+thread's bindings and its cache of values read, as the JVM does; a new thread has no bindings.
+The operation of a binding runs directly (`java/overlay/jdk/internal/vm/ScopedValueContainer.java`),
+as the JDK's runs it when no `StructuredTaskScope`, a preview API, is open. `onSpinWait` and
+`yield` are the platform's, and `Thread.sleep` (both forms) waits on the
 thread's record, which an interrupt wakes. The runtime's
 descriptor table (`fd.rs`) backs the `FileInputStream`, `FileOutputStream` and `FileDescriptor`
 natives (`open0`, `read0`, `readBytes`, `available0`, `skip0`, `length0`, `position0`,

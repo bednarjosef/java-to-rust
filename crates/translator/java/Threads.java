@@ -42,6 +42,13 @@ class Thread {
     // The thread's context class loader: what was set, the parent's when the thread was made, and
     // for the main thread the application's (`ClassLoader` below).
     private ClassLoader contextClassLoader;
+    // The thread's scoped-value bindings, which the JDK's `ScopedValue` keeps in the thread:
+    // `Thread.class` while it has bound none (the JDK's `NEW_THREAD_BINDINGS`), as a new thread
+    // starts. A thread inherits no bindings, as a thread that no `StructuredTaskScope` starts.
+    private Object scopedValueBindings;
+    // The thread's cache of the scoped values it read last, which the JVM keeps for each thread
+    // and `ScopedValue` fills and clears; empty (null) when the thread starts.
+    private Object[] scopedValueCache;
 
     public Thread() {
         this((Runnable) null, genName());
@@ -64,6 +71,7 @@ class Thread {
         this.priority = parent.priority;
         this.group = parent.group;
         this.contextClassLoader = parent.contextClassLoader;
+        this.scopedValueBindings = Thread.class;
     }
 
     public Thread(ThreadGroup group, Runnable task) {
@@ -98,6 +106,7 @@ class Thread {
         this.tid = tid;
         this.priority = 5;
         this.contextClassLoader = ClassLoader.getSystemClassLoader();
+        this.scopedValueBindings = Thread.class;
     }
 
     private static String checkName(String name) {
@@ -316,6 +325,33 @@ class Thread {
     // program has set a handler: `uncaught0()` is that exception (see `lower/natives.rs`).
     private static void dispatchUncaught() {
         currentThread().dispatchUncaughtException(uncaught0());
+    }
+
+    static Object scopedValueBindings() {
+        return currentThread().scopedValueBindings;
+    }
+
+    static void setScopedValueBindings(Object bindings) {
+        currentThread().scopedValueBindings = bindings;
+    }
+
+    // The JVM walks the stack for the bindings of a `ScopedValue.Carrier.runWith` when a thread's
+    // are unknown (null). They are never unknown here: nothing but `setScopedValueBindings` sets
+    // them, and `ScopedValue` sets them only to bindings. `ScopedValue` reads null as none.
+    static Object findScopedValueBindings() {
+        return null;
+    }
+
+    static Object[] scopedValueCache() {
+        return currentThread().scopedValueCache;
+    }
+
+    static void setScopedValueCache(Object[] cache) {
+        currentThread().scopedValueCache = cache;
+    }
+
+    // The JVM makes the bindings visible to a stack walk; there is none here.
+    static void ensureMaterializedForStackWalk(Object bindings) {
     }
 
     private static native int nextThreadNum();
