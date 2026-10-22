@@ -607,8 +607,13 @@ impl<'a> Gen<'a> {
             }
             let slice = self.slice_of(array);
             let f = self.runtime("format_objects");
-            let texts =
-                format!("{slice}.iter().map(|o| o.as_ref().map(|o| o.to_string())).collect::<Vec<_>>()");
+            // Elements that are never null are not `Option`s.
+            let text = if self.nullable_element(*element) {
+                "o.as_ref().map(|o| o.to_string())"
+            } else {
+                "Some(o.to_string())"
+            };
+            let texts = format!("{slice}.iter().map(|o| {text}).collect::<Vec<_>>()");
             return Code::atom(format!("{f}({format}, &{texts})"));
         }
         let values: Vec<String> = args[1..].iter().map(|a| self.format_arg(a)).collect();
