@@ -970,8 +970,8 @@ fn reads_static(class: &Class, roots: &[&Expr], c: usize, name: &str) -> bool {
 fn is_tested(e: &Expr, safe: &[String]) -> bool {
     match &e.kind {
         ExprKind::Var(v) => safe.contains(v),
-        // A cast of a reference keeps its null.
-        ExprKind::Cast(to, value) if to.is_reference() => is_tested(value, safe),
+        // A cast of a reference keeps its null, to an enum too.
+        ExprKind::Cast(to, value) if to.is_reference() || matches!(to, Type::Enum(_)) => is_tested(value, safe),
         // So does an assignment, whose value is the assigned one (`(current = e).next`).
         ExprKind::Assign {
             op: None,
