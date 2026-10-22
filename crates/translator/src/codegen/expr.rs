@@ -839,7 +839,7 @@ impl<'a> Gen<'a> {
             Builtin::Builder(op) => self.builder_call(id, op, args),
             Builtin::Format => self.format_builtin(args),
             Builtin::ObjectsEquals => self.objects_equals(args),
-            Builtin::NullChecked => self.null_checked(args),
+            Builtin::NullChecked => self.null_checked(args, ty),
             Builtin::Unmatched => self.unmatched(args),
             Builtin::ObjectsHashCode => self.objects_hash_code(args),
             Builtin::Bits(op, kind) => self.bits_builtin(op, kind, args, id),
