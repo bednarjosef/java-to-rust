@@ -215,6 +215,9 @@ impl<'a> Gen<'a> {
                 let offset = self.value(&args[0], Type::Long).text;
                 call(self, "nano_time_adjustment", vec![offset])
             }
+            // The javaHome argument is dropped: it is a property read, and `time_zone.rs` does not use it.
+            Native::SystemTimeZoneId => call(self, "system_time_zone_id", vec![]),
+            Native::SystemGmtOffsetId => call(self, "system_gmt_offset_id", vec![]),
             Native::ArrayBaseOffset => call(self, "array_base_offset", vec![]),
             Native::ArrayIndexScale(element) => call(self, "array_index_scale", vec![rust_string(element)]),
             Native::DescriptorHandle | Native::DescriptorAppend => {

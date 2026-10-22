@@ -227,6 +227,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::CdsRandomSeed
             | Native::ContinuationsSupported
             | Native::NanoTimeAdjustment
+            | Native::SystemTimeZoneId
+            | Native::SystemGmtOffsetId
             | Native::ArrayBaseOffset
             | Native::ArrayIndexScale(_)
             | Native::DescriptorHandle

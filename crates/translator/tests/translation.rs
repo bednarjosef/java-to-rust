@@ -5106,3 +5106,32 @@ fn seeds_come_from_the_operating_system() {
     assert_contains(&rust, &["or_throw(java::try_secure_seed(16))"]);
     assert_lacks(&rust, &["SecureRandom"]);
 }
+
+#[test]
+fn a_builder_made_from_a_char_sequence_copies_its_text_and_rejects_program_classes() {
+    let rust = translate(
+        "public class Main {
+            public static void main(String[] a) {
+                CharSequence text = \"abc\";
+                CharSequence nothing = null;
+                System.out.println(new StringBuilder(text).append(new StringBuffer(nothing)));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::StringBuilder::from_text(&text.to_string())",
+            "java::StringBuilder::from_text(&java::non_null(nothing.as_ref()).to_string())",
+        ],
+    );
+    let program = "package app;\npublic class Main implements CharSequence {\n    public int length() { return 0; }\n    public char charAt(int i) { return 'x'; }\n    public CharSequence subSequence(int s, int e) { return this; }\n    public String toString() { return \"\"; }\n    public static void main(String[] a) {\n        CharSequence s = new Main();\n        System.out.println(new StringBuilder(s));\n    }\n}\n";
+    let dir = write_sources("builder-from-program-class", &[("app/Main.java", program)]);
+    let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+    let error =
+        java_to_rust::translate_program(&program).expect_err("a program class as a CharSequence").to_string();
+    assert!(
+        error.contains("creating a builder from a `CharSequence` that a program class implements"),
+        "{error}"
+    );
+}

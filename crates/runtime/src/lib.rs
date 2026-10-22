@@ -52,6 +52,7 @@ mod statics;
 pub mod string;
 mod system;
 mod thread;
+mod time_zone;
 mod unix;
 mod unsigned;
 mod vm;
@@ -101,6 +102,7 @@ pub use statics::*;
 pub use string::*;
 pub use system::*;
 pub use thread::*;
+pub use time_zone::*;
 pub use unix::*;
 pub use unsigned::{
     compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,
