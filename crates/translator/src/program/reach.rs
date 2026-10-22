@@ -176,6 +176,8 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.lang.invoke.", "reflection"),
     ("java.lang.reflect.", "reflection"),
     ("java.security.", "security"),
+    // There is no security manager (`System.getSecurityManager()` is null, see `lower::system`).
+    ("java.lang.SecurityManager", "security"),
     ("jdk.internal.loader.", "class loading"),
     ("jdk.internal.reflect.", "reflection"),
     ("sun.security.", "security"),
@@ -668,7 +670,28 @@ pub fn live_branch(node: &Value, sequential: bool) -> Option<&Value> {
     if never_true(condition, sequential) {
         return Some(else_branch(node));
     }
-    archived_null_test(condition, true).then(|| then_branch(node))
+    (archived_null_test(condition, true) || stub_null_test(condition, true)).then(|| then_branch(node))
+}
+
+/// Whether `condition` is `x == null` (`equal`) or `x != null` of a value `x` of a stub's type
+/// (`stubs`), which is only ever null, and which it reads without effects: a variable, or
+/// `System.getSecurityManager()`. So `if (sm != null)` skips what a security manager would check.
+fn stub_null_test(condition: &Value, equal: bool) -> bool {
+    let kind = if equal { "EQUAL_TO" } else { "NOT_EQUAL_TO" };
+    let only_null = |v: &Value| {
+        let read = match text(v, "kind") {
+            "IDENTIFIER" => text(&v["symbol"], "kind") != "METHOD",
+            "METHOD_INVOCATION" => {
+                (text(&v["symbol"], "owner"), text(&v["symbol"], "name"))
+                    == ("java.lang.System", "getSecurityManager")
+            }
+            _ => false,
+        };
+        read && stubs::is_stub(text(v, "javaType"))
+    };
+    let null = |v: &Value| text(v, "kind") == "NULL_LITERAL";
+    let (left, right) = (&condition["leftOperand"], &condition["rightOperand"]);
+    text(condition, "kind") == kind && (only_null(left) && null(right) || null(left) && only_null(right))
 }
 
 /// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
@@ -695,7 +718,7 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
                 && text(symbol, "type") == "()boolean";
             false_call || (sequential && sequential::is_parallel_test(condition))
         }
-        "NOT_EQUAL_TO" => archived_null_test(condition, false),
+        "NOT_EQUAL_TO" => archived_null_test(condition, false) || stub_null_test(condition, false),
         "GREATER_THAN" => sequential && sequential::has_children_test(condition),
         _ => false,
     }
@@ -1792,6 +1815,10 @@ impl<'t> Walk<'t> {
                 for (class, method, signature) in *methods {
                     self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
                 }
+            }
+            // The security manager, which is null: its type is a stub's (see `stubs`).
+            "METHOD" if owner == "java.lang.System" && name == "getSecurityManager" => {
+                self.stub_type("java.lang.SecurityManager");
             }
             // The translator's properties (see `lower::system`).
             "METHOD" if owner == "java.lang.System" && name == "getProperties" => {

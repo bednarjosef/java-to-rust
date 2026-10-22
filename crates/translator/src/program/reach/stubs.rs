@@ -39,7 +39,7 @@ impl Walk<'_> {
 
 /// Whether the type `ty` is a class that is not translated and can be a stub: not generic, not
 /// an array, and in a package rather than nested in another class.
-fn is_stub(ty: &str) -> bool {
+pub(super) fn is_stub(ty: &str) -> bool {
     let Some((package, _)) = ty.rsplit_once('.') else { return false };
     !ty.contains(['<', '[', '?', ' '])
         && package.split('.').all(|part| part.starts_with(|c: char| c.is_lowercase()))
