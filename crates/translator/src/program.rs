@@ -13,7 +13,7 @@ pub use census::{Census, census_program};
 pub use reach::{
     CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, LOCALE_LANGUAGE, Lookup, LookupKind, PRINT_FORMATTED, Reach,
     STRING_STREAMS, TRANSLATED_LANG_ACCESS, TRANSLATED_LANG_ACCESS_CLASS, TRANSLATED_PROPERTIES,
-    UNSET_PROPERTIES, caller_query, class_bound, class_for_name, class_name, component_array,
+    UNSET_PROPERTIES, caller_query, charset_coder, class_bound, class_for_name, class_name, component_array,
     computed_for_name, created_by_name, direct_stream_call, field_offset_named, is_ensure_initialized,
     literal_class, live_branch, lookup, module_for_name, recreated_exception, redirected_call,
     standard_stream_field, stream_of_call, unsafe_field_access, unsafe_field_update, unset_property_ifs,

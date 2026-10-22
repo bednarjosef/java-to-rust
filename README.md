@@ -502,6 +502,11 @@ compared with null, printed as `null`); using a null one throws `NullPointerExce
 Java's message where a method of the charset is called. Only an array of charsets that would hold
 null is rejected. Encoding replaces unmappable characters as Java does,
 and decoding replaces malformed input as Java's `String` does (`crates/runtime/src/charset.rs`).
+In a whole program, `newDecoder()` and `newEncoder()` of a charset give the JDK's own
+`CharsetDecoder` and `CharsetEncoder` of the six charsets, which decode and encode between
+buffers, report or replace malformed and unmappable input, and throw as Java's do: their classes
+are copied from the JDK's sources into `java/overlay/sun/nio/cs/TranslatedCoders.java`
+(`scripts/generate-charset-coders.py`).
 
 #### Enums
 
