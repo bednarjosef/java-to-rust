@@ -101,7 +101,7 @@ impl<'t> Lowering<'t> {
             }
             ("isInstance", [x]) => {
                 let (class, x) = (self.expr(receiver)?, self.expr(*x)?);
-                return Ok(Some(ExprKind::Builtin(Builtin::ClassIsInstance, vec![class, x])));
+                return Ok(Some(self.class_is_instance(class, x)));
             }
             ("cast", [x]) => return Ok(Some(self.class_cast(node, receiver, *x)?)),
             ("getInterfaces", []) if is_literal(receiver) && self.named_class(receiver) => {
@@ -189,6 +189,23 @@ impl<'t> Lowering<'t> {
         if is_literal(receiver) && matches!(value.kind, ExprKind::Null) {
             return Ok(ExprKind::Cast(to, Box::new(value)));
         }
+        // An object that may be an annotation (`annotation_objects`): `{ Class c = ..; T v = ..;
+        // if (!(v is an annotation of c)) check(c, v); yield (to) v; }`.
+        let (class_local, value_local) = (self.fresh_name("class"), self.fresh_name("cast"));
+        let class_var = self.synth(ExprKind::Var(class_local.clone()), pos, Type::JavaClass);
+        let value_var = self.synth(ExprKind::Var(value_local.clone()), pos, value.ty);
+        if let Some(test) = self.annotation_object_test(&class_var, &value_var) {
+            let check = ExprKind::Builtin(Builtin::ClassCheck, vec![class_var, self.copy(&value_var)]);
+            let check = Stmt::Expr(self.synth(check, pos, Type::Void));
+            let not = self.synth(ExprKind::Unary(UnOp::Not, Box::new(test)), pos, Type::Boolean);
+            let body = vec![
+                Stmt::Local { ty: Type::JavaClass, name: class_local, init: Some(class), pos },
+                Stmt::Local { ty: value.ty, name: value_local, init: Some(value), pos },
+                Stmt::If { cond: not, then: Box::new(check), otherwise: None },
+                Stmt::Yield(self.convert(value_var, to)),
+            ];
+            return Ok(block_of(self, pos, body));
+        }
         let (ty, mut block, name) = match &value.kind {
             ExprKind::Var(name) => (value.ty, Vec::new(), Some(name.clone())),
             ExprKind::Null => (value.ty, Vec::new(), None),
@@ -213,6 +230,29 @@ impl<'t> Lowering<'t> {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
             cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
         })
+    }
+
+    /// `class.isInstance(x)`, which for an object that may be an annotation also asks whether it
+    /// is one of that class (`annotation_objects`): `{ Class c = ..; Object v = ..; yield
+    /// (v is an annotation of c) || c.isInstance(v); }`.
+    pub(super) fn class_is_instance(&self, class: Expr, x: Expr) -> ExprKind {
+        let pos = x.pos;
+        let (class_local, value_local) = (self.fresh_name("class"), self.fresh_name("object"));
+        let class_var = self.synth(ExprKind::Var(class_local.clone()), pos, Type::JavaClass);
+        let value_var = self.synth(ExprKind::Var(value_local.clone()), pos, x.ty);
+        let Some(test) = self.annotation_object_test(&class_var, &value_var) else {
+            return ExprKind::Builtin(Builtin::ClassIsInstance, vec![class, x]);
+        };
+        let plain = ExprKind::Builtin(Builtin::ClassIsInstance, vec![class_var, value_var]);
+        let plain = self.synth(plain, pos, Type::Boolean);
+        let either =
+            self.synth(ExprKind::Binary(BinOp::Or, Box::new(test), Box::new(plain)), pos, Type::Boolean);
+        let body = vec![
+            Stmt::Local { ty: Type::JavaClass, name: class_local, init: Some(class), pos },
+            Stmt::Local { ty: x.ty, name: value_local, init: Some(x), pos },
+            Stmt::Yield(either),
+        ];
+        block_of(self, pos, body)
     }
 
     /// The constants of the enum class `cls`, which `EnumMap.getKeyUniverse(cls)` and
@@ -402,4 +442,12 @@ fn is_get_class(node: Node) -> bool {
 /// Whether `node` is a class literal, `Point.class`.
 pub(super) fn is_literal(node: Node) -> bool {
     node.kind() == "MEMBER_SELECT" && node.str("identifier") == "class"
+}
+
+/// `switch (0) { default -> { body } }`, a block as an expression.
+fn block_of(lowering: &Lowering, pos: Pos, body: Vec<Stmt>) -> ExprKind {
+    ExprKind::Switch {
+        selector: Box::new(lowering.synth(ExprKind::Int(0), pos, Type::Int)),
+        cases: vec![Case { labels: vec![CaseLabel::Default], body }],
+    }
 }

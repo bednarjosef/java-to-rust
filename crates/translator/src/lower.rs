@@ -34,6 +34,7 @@ use crate::value::Value;
 use objects::{MethodInfo, TypeInfo};
 use std::cell::{Cell, RefCell};
 
+mod annotation_objects;
 mod annotation_presence;
 mod arrays;
 mod boxing;
@@ -1256,6 +1257,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.module_native(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.annotation_members_native(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(kind) = self.processor_annotations_native(node, &symbol, &mut args)? {
