@@ -165,6 +165,9 @@ enum Source {
 impl Messages<'_> {
     /// The messages of the dereferences that expression `x` makes itself, by object.
     fn expr(&self, x: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
+        if let ExprKind::Conditional(cond, ..) = &x.kind {
+            self.condition(cond, out);
+        }
         let mut add = |object: &Expr, action: Option<String>| {
             // A message that the expression above gave (a native's).
             if out.contains_key(&object.id) {
@@ -546,6 +549,12 @@ impl Messages<'_> {
         if let Stmt::Switch { selector, .. } = s {
             self.switch(selector, out);
         }
+        if let Stmt::If { cond, .. } | Stmt::While { cond, .. } | Stmt::DoWhile { cond, .. } = s {
+            self.condition(cond, out);
+        }
+        if let Stmt::For { cond: Some(cond), .. } = s {
+            self.condition(cond, out);
+        }
         if let Stmt::Throw(e) = s {
             // The value is converted to `Throwable`, a cast that the class file does not have.
             let thrown = match &e.kind {
@@ -554,6 +563,17 @@ impl Messages<'_> {
             };
             if let Some(message) = self.message("Cannot throw exception", thrown) {
                 out.insert(thrown.id, Some(message));
+            }
+        }
+    }
+
+    /// The message of the unboxing of a `Boolean` condition, which a `catch` may see: the
+    /// condition of `if`, `while` and the like, and of `?:` (`Gen::condition`).
+    fn condition(&self, cond: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
+        if matches!(cond.ty, Type::Boxed(_)) && cond.ty.unboxed() == Type::Boolean {
+            let action = "Cannot invoke \"java.lang.Boolean.booleanValue()\"";
+            if let Some(message) = self.message(action, cond) {
+                out.insert(cond.id, Some(message));
             }
         }
     }

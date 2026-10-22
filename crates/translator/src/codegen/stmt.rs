@@ -330,7 +330,8 @@ impl<'a> Gen<'a> {
 
     /// The condition of an `if` or `while`, which may not start with a block in Rust.
     pub(super) fn condition(&mut self, cond: &'a Expr) -> String {
-        let code = self.expr(cond);
+        // A `Boolean` is unboxed, which throws on a null (`boxing_value`).
+        let code = self.value(cond, cond.ty.unboxed());
         if code.text.starts_with('{') { format!("({})", code.text) } else { code.text }
     }
 
@@ -358,7 +359,7 @@ impl<'a> Gen<'a> {
             }
             _ => {}
         }
-        format!("!{}", self.expr(cond).at(UNARY))
+        format!("!{}", self.value(cond, cond.ty.unboxed()).at(UNARY))
     }
 
     /// An expression evaluated for its effect, as a statement.
