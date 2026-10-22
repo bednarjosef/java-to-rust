@@ -10,7 +10,7 @@ use std::process::ExitCode;
 const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs> | --crate <directory>]
        java-to-rust [--timings] --main <package.Class> [--source <root>]... [--library <root>]... [<File.java>]...
                     [-o <output.rs> | --crate <directory> | --survey [--survey-json <file>]
-                     | --census [--census-json <file>]] [--modules-json <file>]";
+                     | --census [--census-json <file>] [--keep-going]] [--modules-json <file>]";
 
 /// The stack that translation runs on: the trees of real code, and the recursion over them, can
 /// be deeper than the main thread's stack allows.
@@ -47,6 +47,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
                 | "--survey-json"
                 | "--census"
                 | "--census-json"
+                | "--keep-going"
                 | "--modules-json"
         )
     }) {
@@ -80,7 +81,8 @@ fn emit(output: Option<(&str, &str)>, input: &str, files: &[SourceFile]) -> Resu
 /// only read from when the program uses them, and other arguments are single source files.
 /// `--survey` prints what the reachable code uses instead (`--survey-json` also writes it as JSON
 /// to a file), and `--census` what the translator rejects in it, past every rejection
-/// (`--census-json` also writes it as JSON). `--modules-json` writes the modules of the
+/// (`--census-json` also writes it as JSON); with `--keep-going`, a census goes on past javac's
+/// compile errors, and rejects the code that they are in. `--modules-json` writes the modules of the
 /// translation (of a census: with every rejected piece stubbed) and what their items name
 /// (`output::ModuleTree::dependencies`).
 fn run_program(args: &[String]) -> Result<(), String> {
@@ -105,6 +107,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
                 survey_json = Some(value()?);
             }
             "--census" => census = true,
+            "--keep-going" => program.keep_going = true,
             "--modules-json" => modules_json = Some(value()?),
             "--census-json" => {
                 census = true;
@@ -116,6 +119,9 @@ fn run_program(args: &[String]) -> Result<(), String> {
     }
     if program.main.is_empty() {
         return Err(format!("--main is required for a program\n{USAGE}"));
+    }
+    if program.keep_going && !census {
+        return Err(format!("--keep-going is only for a census\n{USAGE}"));
     }
     if census {
         let census = java_to_rust::census_program(&program).map_err(|e| e.to_string())?;

@@ -169,13 +169,20 @@ pub struct Session {
 impl Session {
     /// Starts javac on the program's files, with `sourcepath` as its source path and
     /// `module_info` as in `program_tree`, and returns their units, in the order given. A compile
-    /// error is returned with the file it is in.
+    /// error is returned with the file it is in; with `keep_going` (for a census), javac goes on
+    /// past compile errors instead, which it prints to standard error, and marks the piece of
+    /// code that each is in with `"javacError"` (see `JavaTree.markErrors`).
     pub fn start(
         files: &[PathBuf],
         sourcepath: &[PathBuf],
         module_info: Option<&Path>,
+        keep_going: bool,
     ) -> Result<(Session, Vec<Value>), (Option<String>, Error)> {
-        let mut child = program_command(files, sourcepath, module_info)?
+        let mut command = program_command(files, sourcepath, module_info)?;
+        if keep_going {
+            command.arg("--keep-going");
+        }
+        let mut child = command
             .arg("--serve")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -185,10 +192,17 @@ impl Session {
         crate::timings::javac_process(Some(child.id()));
         let input = child.stdin.take();
         let output = BufReader::new(child.stdout.take().expect("stdout is piped"));
-        let mut stderr = child.stderr.take().expect("stderr is piped");
+        let mut stderr = BufReader::new(child.stderr.take().expect("stderr is piped"));
         let errors = std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
+            let mut line = Vec::new();
+            while stderr.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
+                // The errors that javac goes on past are passed on as they come.
+                if keep_going {
+                    let _ = std::io::stderr().write_all(&line);
+                }
+                bytes.append(&mut line);
+            }
             bytes
         });
         let mut session =

@@ -42,6 +42,10 @@ pub struct Program {
     /// Library roots, such as the JDK's own sources: javac reads a file from them only when the
     /// program uses one of its classes, and only what is reachable from `main` is translated.
     pub libraries: Vec<PathBuf>,
+    /// For a census only: javac's compile errors do not stop it, and the census rejects the piece
+    /// of code that each is in, the method, initializer or class (see `javac::Session::start`).
+    /// For code that is known to have some, such as a decompiler's output.
+    pub keep_going: bool,
 }
 
 /// A translation error with the file it is in, when it is in one.
@@ -88,7 +92,7 @@ pub fn translate_program_modules(program: &Program) -> Result<ModuleTree, Progra
 /// `translate_program`, with `Reach::string_array_writes` or without.
 fn translate_reached(program: &Program, string_array_writes: bool) -> Result<ModuleTree, ProgramError> {
     use crate::timings::phase;
-    let (units, reach) = load(program, string_array_writes)?;
+    let (units, reach) = load(program, string_array_writes, false)?;
     // The program's files are the first units (`load`).
     let program_units = source_files(program)?.len();
     let lowered = {
@@ -186,14 +190,21 @@ fn narrow(
 /// Each round walks only what its units add (`reach::Rounds`), over the units with their records
 /// complete (`javac::Records`). Which members a record gets depends on every unit, so when a new
 /// unit changes those of a unit walked before, the round walks all of them again.
-fn load(program: &Program, string_array_writes: bool) -> Result<(Vec<Value>, Reach), ProgramError> {
+///
+/// With `keep_going`, javac goes on past compile errors (`Program::keep_going`).
+fn load(
+    program: &Program,
+    string_array_writes: bool,
+    keep_going: bool,
+) -> Result<(Vec<Value>, Reach), ProgramError> {
     let files = source_files(program)?;
     let modules = modules::modules(program.sources.iter().chain(&program.libraries));
     let javac_error = |(file, error)| modules::explain(ProgramError { file, error }, &modules);
     let (mut javac, mut reaching) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     let start = std::time::Instant::now();
     let (mut session, mut new) =
-        javac::Session::start(&files, &sourcepath(program), modules::kept(&modules)).map_err(javac_error)?;
+        javac::Session::start(&files, &sourcepath(program), modules::kept(&modules), keep_going)
+            .map_err(javac_error)?;
     javac += start.elapsed();
     // The units as javac gave them, and the copies of those whose records were completed.
     let (given, completed) = (Store::default(), Store::default());

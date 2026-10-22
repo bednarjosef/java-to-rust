@@ -3090,6 +3090,52 @@ fn the_census_reports_every_rejection_not_only_the_first() {
 }
 
 #[test]
+fn a_census_that_keeps_going_rejects_the_code_that_javac_reports_errors_in() {
+    let dir = write_sources(
+        "census_keep_going",
+        &[
+            (
+                "p/Main.java",
+                "package p;\npublic class Main {\n    static int count = Gone.value;\n    public static void main(String[] a) {\n        System.out.println(Other.fine() + count);\n        Other.bad();\n        Runnable r = () -> System.out.println(Other.fine());\n        r.run();\n        new Broken().run();\n    }\n}\n",
+            ),
+            (
+                "p/Other.java",
+                "package p;\nclass Other {\n    static int fine() { return 4; }\n    static void bad() { System.out.println(missing()); }\n}\n",
+            ),
+            (
+                "p/Broken.java",
+                "package p;\nclass Broken extends Unknown {\n    void run() { System.out.println(1); }\n}\n",
+            ),
+        ],
+    );
+    let mut program =
+        java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    // Without it, the first compile error stops the census.
+    let error = java_to_rust::census_program(&program).err().expect("the sources have compile errors");
+    assert!(error.to_string().contains("cannot find symbol"), "{error}");
+    program.keep_going = true;
+    let census = census(&program);
+    // The method, the field's initializer and the class that have the errors are rejected; the
+    // rest translates.
+    assert_contains(
+        &census.report,
+        &[
+            "javac reports a compile error (compiler.err.cant.resolve.location)",
+            "at p/Main.java:3:",
+            "at p/Other.java:4:",
+            "at p/Broken.java:2:",
+        ],
+    );
+    let pieces = census.json["pieces"].as_array().expect("pieces");
+    let errors = |name: &str| {
+        let piece =
+            pieces.iter().find(|p| p["name"] == name).unwrap_or_else(|| panic!("no {name} in {pieces:?}"));
+        piece["errors"].as_array().expect("errors").len()
+    };
+    assert_eq!((errors("fine"), errors("main"), errors("bad")), (0, 0, 1));
+}
+
+#[test]
 fn the_census_rejects_a_class_whose_declaration_is_rejected_with_its_code_and_goes_on() {
     let dir = write_sources(
         "census_class",
