@@ -22,8 +22,8 @@ impl Huffman {
         count[0] = 0;
         let max = (1..16).rev().find(|&len| count[len] > 0).unwrap_or(0);
         let mut left: i32 = 1;
-        for len in 1..16 {
-            left = (left << 1) - i32::from(count[len]);
+        for &c in &count[1..] {
+            left = (left << 1) - i32::from(c);
             if left < 0 {
                 return None;
             }
