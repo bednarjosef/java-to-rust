@@ -317,10 +317,10 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
-            StringOp::Identity if self.nullable(&args[0]) => {
+            StringOp::Identity | StringOp::ToString | StringOp::Intern if self.nullable(&args[0]) => {
                 Code::atom(format!("{}.to_string()", self.deref(&args[0])))
             }
-            StringOp::Identity => self.expr(&args[0]),
+            StringOp::Identity | StringOp::ToString | StringOp::Intern => self.expr(&args[0]),
             StringOp::EqualsOther => {
                 // Never equal; the receiver still throws when it is null, after the argument runs.
                 let (receiver, other) = (&args[0], &args[1]);

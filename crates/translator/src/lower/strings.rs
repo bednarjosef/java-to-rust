@@ -201,7 +201,8 @@ impl<'t> Lowering<'t> {
             }
             "chars" | "lines" if args.is_empty() => return self.string_stream(node, name, receiver),
             "hashCode" => StringOp::HashCode,
-            "toString" | "intern" => StringOp::Identity,
+            "toString" => StringOp::ToString,
+            "intern" => StringOp::Intern,
             "equals" => StringOp::EqualsOther,
             "valueOf" | "copyValueOf" if args.first().is_some_and(|a| a.ty == Type::array(Type::Char)) => {
                 StringOp::FromChars
