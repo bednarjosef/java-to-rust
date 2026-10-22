@@ -873,6 +873,9 @@ literals or constants: `sun.java.command` (the command line) and `user.timezone`
 `TimeZone` runs). A key that code computes is a `switch` over the keys of a plain run, in which
 those two are unset, as they are in `System.getProperties()`. In a whole program `System.getProperties()` is a
 `Properties` of the keys of a plain run, made once (`java/overlay/java/lang/TranslatedProperties.java`).
+`File.separator` and `File.pathSeparator` (and their `char` forms) are the constants `/` and `:`,
+as the runtime's `file.separator` and `path.separator` are, so that a pattern made of one is
+known to compile.
 `System.getenv(name)` reads the environment the program runs in, as Java does (`system.rs`): null
 for a variable that is unset or a name that no variable can have. `System.getenv()`, the whole
 environment as a map, is not translated yet.
