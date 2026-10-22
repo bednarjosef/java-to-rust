@@ -37,8 +37,8 @@ From the lightest to the heaviest:
    whose body must be different.
 3. **An overlay class.** A whole class of ours that the JDK does not have, in
    `crates/translator/java/overlay/`: the targets of redirects (`TranslatedFiles`,
-   `TranslatedURI`), the objects behind `System.out` and `System.in` (`StandardOutput`), and
-   classes that patches use (`sun/nio/fs/UnixFileChannel.java`). The overlay directory is on
+   `TranslatedNet`, `TranslatedCoders`), the objects behind `System.out` and `System.in`
+   (`StandardOutput`), and classes that patches use (`sun/nio/fs/UnixFileChannel.java`). The overlay directory is on
    javac's source path before the JDK's sources. It holds no file at a path the JDK has: a
    change to a JDK class is a patch.
 
@@ -148,6 +148,8 @@ skipped. The error names the patch's file and line, and the JDK's file:
 |---|---|
 | `java/io/PrintStream.java` | encodes text itself with `String.getBytes` instead of through a `StreamEncoder` |
 | `java/io/InputStreamReader.java`, `OutputStreamWriter.java` | decode and encode the common charsets themselves instead of through `StreamDecoder` and `StreamEncoder` |
+| `java/net/InetAddress.java`, `Inet4AddressImpl.java`, `Inet6AddressImpl.java` | names looked up by the system through `TranslatedNet`; no hosts file and no resolver of the program's own |
+| `java/net/URI.java` | decodes escaped octets with `new String(bytes, UTF_8)` instead of a `CharsetDecoder` |
 | `java/net/URLClassLoader.java` | finds only what its parent finds; code from its URLs fails loudly |
 | `java/nio/file/DirectoryIteratorException.java`, `InvalidPathException.java` | constructors that do not throw |
 | `java/nio/file/TempFileHelper.java` | names from `java.util.Random` instead of `SecureRandom` |
@@ -158,6 +160,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `jdk/internal/util/ByteArray.java` | shifts bytes instead of using array views |
 | `jdk/internal/util/Exceptions.java` | `%s` formatting of its own, and no wait for `VM.isBooted` |
 | `jdk/internal/vm/ScopedValueContainer.java` | runs the operation directly |
+| `sun/nio/cs/UTF_8.java` and the other standard charsets | their nested `Decoder` and `Encoder` can be made by `TranslatedCoders`, the coders of a charset that is the runtime's value |
 | `sun/nio/fs/*.java` | system calls through the runtime (`UnixNativeDispatcher`), channels and streams of our own, no extended attributes |
 
 ## Checks
@@ -167,15 +170,17 @@ skipped. The error names the patch's file and line, and the JDK's file:
 
 - a file of `java/overlay` has the path of a JDK file (a change to a JDK class is a patch);
 - a patch names a path the JDK does not have;
-- a file shares more than 12 distinct lines with the JDK's file of the same path.
+- a file shares more than 12 distinct lines with the JDK's file of the same path, or, for a
+  class of our own, with any JDK file of its package.
 
 Lines that say nothing on their own are not counted: blank lines, package and import lines,
 lines of only brackets, the bare lines of comments, lines under 16 characters (`return true;`,
 `} else {`), and in a patch the class's line and the declarations after the markers, which name
 the JDK's members. With those rules the patches share at most 11 lines each (short idioms such as
 `throw new NoSuchElementException();`), while the whole-file copies they replaced shared 14 to
-182. `scripts/check.sh` runs the check when `JAVA_BASE_SOURCES` is set; `--verbose` lists the
+987 (`InetAddress`), and the generated `TranslatedCoders` 241 with `UTF_8.java` alone. `scripts/check.sh` runs the check when `JAVA_BASE_SOURCES` is set; `--verbose` lists the
 shared lines of every file.
 
-The check compares a file with the JDK file of the same path only: code copied from another JDK
-class would not be caught by it, so a patch's review still asks where its code came from.
+A class of our own (a file of `java/overlay` at a path the JDK does not have) is compared with
+each JDK file of its package instead. Code copied from a JDK class of another package would not be
+caught, so a review still asks where new code came from.

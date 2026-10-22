@@ -162,8 +162,24 @@ pub const RUNTIME_CLASSES: &[&str] = &[
 /// Classes nested in one of the `RUNTIME_CLASSES` that are translated from the JDK's sources all
 /// the same, as they are plain code over the JDK's other classes: `Runtime.Version`, a version
 /// string parsed and compared (`JarFile`'s and `ModulePath`'s release), with the pattern it
-/// parses with.
-pub const TRANSLATED_NESTED: &[&str] = &["java.lang.Runtime.Version", "java.lang.Runtime.VersionPattern"];
+/// parses with; and the decoder and encoder of each standard charset, which the translator's
+/// `newDecoder` and `newEncoder` make (`CHARSET_CODERS`).
+pub const TRANSLATED_NESTED: &[&str] = &[
+    "java.lang.Runtime.Version",
+    "java.lang.Runtime.VersionPattern",
+    "sun.nio.cs.ISO_8859_1.Decoder",
+    "sun.nio.cs.ISO_8859_1.Encoder",
+    "sun.nio.cs.US_ASCII.Decoder",
+    "sun.nio.cs.US_ASCII.Encoder",
+    "sun.nio.cs.UTF_16.Decoder",
+    "sun.nio.cs.UTF_16.Encoder",
+    "sun.nio.cs.UTF_16BE.Decoder",
+    "sun.nio.cs.UTF_16BE.Encoder",
+    "sun.nio.cs.UTF_16LE.Decoder",
+    "sun.nio.cs.UTF_16LE.Encoder",
+    "sun.nio.cs.UTF_8.Decoder",
+    "sun.nio.cs.UTF_8.Encoder",
+];
 
 /// What is not translated, by the prefix of qualified class names, with the feature it is:
 /// reachability stops there, as at the runtime's classes, and the survey counts its use. Library
@@ -882,7 +898,7 @@ pub const TRANSLATED_LANG_ACCESS_CLASS: &str = "jdk.internal.access.TranslatedLa
 
 /// The translator's `newDecoder` and `newEncoder` of a charset, by the name of the charset's
 /// method: a charset is the runtime's value (`lower::charsets`), whose coders are the JDK's,
-/// made by `java/overlay/sun/nio/cs/TranslatedCoders.java`.
+/// made by `java/overlay/sun/nio/cs/TranslatedCoders.java` (see `TRANSLATED_NESTED`).
 pub const CHARSET_CODERS: &[(&str, JdkMethod)] = &[
     (
         "newDecoder",
@@ -1010,12 +1026,6 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
     (
         ("java.net.NetworkInterface", "getByName0", "(java.lang.String)java.net.NetworkInterface"),
         ("java.net.TranslatedNet", "getByName0"),
-    ),
-    // The escaped octets of a URI's part decoded as UTF-8, which the JDK decodes with a
-    // `CharsetDecoder` (`java/net/TranslatedURI.java`).
-    (
-        ("java.net.URI", "decode", "(java.lang.String,boolean)java.lang.String"),
-        ("java.net.TranslatedURI", "decode"),
     ),
 ];
 

@@ -6,11 +6,12 @@ Usage: scripts/check-jdk-copies.py JAVA_BASE_SOURCES [--verbose]
 The translator's patches of JDK classes (crates/translator/java/patches) and its own classes
 (crates/translator/java/overlay) must hold only code written for this repository (see
 docs/jdk-overlays.md). For each such file, this compares its lines with those of the JDK's file of
-the same path, and fails when:
+the same path (for a class of our own, which the JDK does not have, with each JDK file of its
+package), and fails when:
 
 - an overlay file has the path of a JDK file: a change to a JDK class is a patch, so overlay/
   holds only classes the JDK does not have;
-- a file shares more than MAX_SHARED lines with the JDK's file of the same path.
+- a file shares more than MAX_SHARED lines with one of those JDK files.
 
 Lines that say nothing on their own are not counted: blank lines, package and import lines,
 lines of only brackets and punctuation, the bare lines of comments (`/**`, `*`, `*/`), lines
@@ -82,23 +83,31 @@ def main():
                 path = os.path.join(directory, name)
                 relative = os.path.relpath(path, base)
                 theirs = os.path.join(jdk, relative)
-                if not os.path.isfile(theirs):
-                    if kind == "patches":
-                        failures.append(f"patches/{relative}: the JDK has no file {relative} to patch")
+                if os.path.isfile(theirs):
+                    if kind == "overlay":
+                        failures.append(f"overlay/{relative}: the JDK has this class; change it with a patch in patches/")
+                    compared = [theirs]
+                elif kind == "patches":
+                    failures.append(f"patches/{relative}: the JDK has no file {relative} to patch")
                     continue
-                if kind == "overlay":
-                    failures.append(f"overlay/{relative}: the JDK has this class; change it with a patch in patches/")
-                jdk_lines = set(counted(read(theirs), False))
-                shared = sorted(set(counted(read(path), kind == "patches")) & jdk_lines)
-                if verbose or len(shared) > MAX_SHARED:
-                    print(f"{kind}/{relative}: {len(shared)} lines shared with the JDK's file")
-                    for line in shared:
-                        print(f"    {line}")
-                if len(shared) > MAX_SHARED:
-                    failures.append(
-                        f"{kind}/{relative}: {len(shared)} lines are the JDK's (at most {MAX_SHARED}): "
-                        "keep only the changes, with @Edit for a few changed lines"
-                    )
+                else:
+                    # A class of our own: compared with each JDK file of its package.
+                    package = os.path.dirname(theirs)
+                    names = sorted(os.listdir(package)) if os.path.isdir(package) else []
+                    compared = [os.path.join(package, n) for n in names if n.endswith(".java")]
+                ours = set(counted(read(path), kind == "patches"))
+                for other in compared:
+                    shared = sorted(ours & set(counted(read(other), False)))
+                    name = os.path.relpath(other, jdk)
+                    if verbose or len(shared) > MAX_SHARED:
+                        print(f"{kind}/{relative}: {len(shared)} lines shared with the JDK's {name}")
+                        for line in shared:
+                            print(f"    {line}")
+                    if len(shared) > MAX_SHARED:
+                        failures.append(
+                            f"{kind}/{relative}: {len(shared)} lines are the JDK's {name} (at most "
+                            f"{MAX_SHARED}): keep only the changes, with @Edit for a few changed lines"
+                        )
     for failure in failures:
         print(failure)
     return 1 if failures else 0

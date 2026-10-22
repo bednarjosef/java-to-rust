@@ -512,9 +512,9 @@ null is rejected. Encoding replaces unmappable characters as Java does,
 and decoding replaces malformed input as Java's `String` does (`crates/runtime/src/charset.rs`).
 In a whole program, `newDecoder()` and `newEncoder()` of a charset give the JDK's own
 `CharsetDecoder` and `CharsetEncoder` of the six charsets, which decode and encode between
-buffers, report or replace malformed and unmappable input, and throw as Java's do: their classes
-are copied from the JDK's sources into `java/overlay/sun/nio/cs/TranslatedCoders.java`
-(`scripts/generate-charset-coders.py`).
+buffers, report or replace malformed and unmappable input, and throw as Java's do: they are the
+JDK's nested classes of those charsets, translated from the JDK's sources and made by
+`java/overlay/sun/nio/cs/TranslatedCoders.java` (see docs/jdk-overlays.md).
 
 #### Enums
 
@@ -921,7 +921,7 @@ and `end` does nothing, as without virtual threads. `jdk.internal.util.ByteArray
 (`java/overlay/jdk/internal/access/TranslatedLangAccess.java`).
 
 `InetAddress` looks names up through the system's name service, as the JVM's natives do: the
-JDK's `InetAddress`, `Inet4AddressImpl` and `Inet6AddressImpl` (`java/overlay/java/net`) call the
+JDK's `InetAddress`, `Inet4AddressImpl` and `Inet6AddressImpl` (patched: `java/patches/java/net`) call the
 translator's `java.net.TranslatedNet`, whose natives are libc's `getaddrinfo`, `getnameinfo`,
 `gethostname` and `getifaddrs` on the bytes of names and addresses (`net.rs`), and which makes the
 JDK's address objects of what they give, with the JDK's `UnknownHostException`s. Whether IPv4
@@ -968,7 +968,7 @@ image (`jlink --compress`) and a JDK of exploded modules, as it is built, throw
 `UnsupportedOperationException`; the `toString` of a jrt file's attributes, which formats times
 with `%tc`, throws the same; and a failure of the image's reader is thrown as it is, not given as
 the reason of an `InvalidPathException`. `URI` decodes its escaped octets as UTF-8 itself
-(`java/overlay/java/net/TranslatedURI.java`), and `jdk.internal.util.Exceptions`, which puts the
+(patched: `java/patches/java/net/URI.java`), and `jdk.internal.util.Exceptions`, which puts the
 input and the index into a `URISyntaxException`, reads its categories of detail without waiting
 for the JVM's boot and fills only `%s` in its messages, refusing any other conversion.
 
