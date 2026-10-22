@@ -525,9 +525,15 @@ impl<'a> Gen<'a> {
         let copy = self.runtime(if checked { "try_arraycopy" } else { "arraycopy" });
         // The checked form returns the exception as the copy's `Err`, the unchecked one throws it.
         let mismatch = if checked {
-            format!("Err({}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"))", self.runtime("Exception::new"))
+            format!(
+                "Err({}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"))",
+                self.runtime("Exception::new")
+            )
         } else {
-            format!("{}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\")", self.runtime("throw"))
+            format!(
+                "{}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\")",
+                self.runtime("throw")
+            )
         };
         // Names that no local of the method has, as `src` and `dest` may read one.
         let [p, q, n] = ["src_pos", "dest_pos", "length"].map(|base| self.temp(base));

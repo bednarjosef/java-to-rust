@@ -5486,7 +5486,9 @@ fn static_fields_of_stub_classes_are_rejected() {
     };
     let error = java_to_rust::translate_program(&program).expect_err("a static field of a stub");
     assert!(
-        error.to_string().contains("a static field of `sun.security.util.SignatureFileVerifier` (security) not supported yet"),
+        error.to_string().contains(
+            "a static field of `sun.security.util.SignatureFileVerifier` (security) not supported yet"
+        ),
         "{error}"
     );
 }
