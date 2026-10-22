@@ -94,8 +94,11 @@ impl<'a> Gen<'a> {
         let base_part = base.map(|b| {
             let values = inits.iter().flatten().copied().chain(leading.iter().map(|&(_, v)| v));
             // A borrow in `super(...)` (the enclosing instance's enclosing instance, read through
-            // the `outer` parameter) lasts to the end of the literal, which may move what it borrows.
-            let borrows = b.contains(".borrow()") && !leading.is_empty();
+            // the `outer` parameter, or a field of a parameter's superclass through `base()`, as
+            // javac's `new AssignItem(lhs)` reads `lhs.typecode`) lasts to the end of the literal,
+            // which may move what it borrows.
+            let borrows =
+                [".borrow()", ".base()", ".base_mut()"].iter().any(|r| b.contains(r)) && !leading.is_empty();
             if sequential || borrows || values.into_iter().any(has_effects) {
                 let temp = self.temp("base");
                 self.line(&format!("let {temp} = {b};"));
