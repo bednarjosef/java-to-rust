@@ -14,13 +14,16 @@
 //! - `REJECTED` keys, whose value the translation cannot match, are rejected: the command line of
 //!   the run, and `user.timezone`, which the JDK sets once `TimeZone` first runs.
 //!
-//! The key must be a string literal or a constant. `System.getProperties()` (in a whole program)
+//! The key must be a string literal, a constant, or a local of the method that is declared once
+//! with a string literal and never assigned again (`FileSystems` names its key so).
+//! `System.getProperties()` (in a whole program)
 //! is the translator's `java.lang.TranslatedProperties.all()`
 //! (`java/overlay/java/lang/TranslatedProperties.java`), a `Properties` of every key of a plain run,
 //! each read with `System.getProperty`.
 
 use super::{Lowering, Node, Symbol, unsupported};
 use crate::ast::*;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -163,10 +166,16 @@ impl<'t> Lowering<'t> {
         }
         let key = match args.first().map(|arg| &arg.kind) {
             Some(ExprKind::Str(key)) => Some(key.clone()),
-            _ => self.constant_text(node.list("arguments").next()),
+            _ => {
+                let key = node.list("arguments").next();
+                self.constant_text(key).or_else(|| key.and_then(|k| self.local_constant(k)))
+            }
         };
         let Some(key) = key else {
-            return unsupported(node, "`System.getProperty` with a key that is not a string literal");
+            return unsupported(
+                node,
+                "`System.getProperty` with a key that is not a string literal or a constant",
+            );
         };
         let property = match property(&key) {
             Ok(property) => property,
@@ -205,5 +214,49 @@ impl<'t> Lowering<'t> {
             Some(default) => std::mem::replace(&mut default.kind, ExprKind::Null),
             None => ExprKind::Null,
         }))
+    }
+}
+
+impl<'t> Lowering<'t> {
+    /// The text of `node` when it reads a local `String` that the method being lowered declares
+    /// once, with a string literal, and never assigns again.
+    fn local_constant(&self, node: Node<'t>) -> Option<String> {
+        let symbol = node.symbol().filter(|s| s.kind == "LOCAL_VARIABLE" && node.kind() == "IDENTIFIER")?;
+        let method = self.methods[self.method_ctx.get()?].node;
+        let name = symbol.name;
+        let (mut declarations, mut written) = (Vec::new(), false);
+        walk(method.0, &mut |n| {
+            let kind = n.kind();
+            if kind == "VARIABLE" && n.str("name") == name {
+                declarations.push(n);
+            }
+            let variable = if kind == "ASSIGNMENT" || kind.ends_with("_ASSIGNMENT") {
+                n.get("variable")
+            } else if kind.ends_with("_INCREMENT") || kind.ends_with("_DECREMENT") {
+                n.get("expression")
+            } else {
+                None
+            };
+            written |= variable.is_some_and(|v| v.kind() == "IDENTIFIER" && v.str("name") == name);
+        });
+        match declarations[..] {
+            [declaration] if !written => {
+                let init = declaration.get("initializer").filter(|i| i.kind() == "STRING_LITERAL")?;
+                init.0["value"].as_str().map(str::to_string)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Calls `f` on every node of the tree under `v`.
+fn walk<'t>(v: &'t Value, f: &mut impl FnMut(Node<'t>)) {
+    match v {
+        Value::Object(map) => {
+            f(Node(v));
+            map.values().for_each(|c| walk(c, f));
+        }
+        Value::Array(items) => items.iter().for_each(|i| walk(i, f)),
+        _ => {}
     }
 }
