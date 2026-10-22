@@ -40,8 +40,13 @@ public class NamesThatMeet {
     enum KindName implements Formattable {
         CLASS;
 
+        public String toString() {
+            return "class kind";
+        }
+
         public String toString(String locale) {
-            return "kind in " + locale;
+            String s = toString();
+            return s + " in " + locale;
         }
     }
 

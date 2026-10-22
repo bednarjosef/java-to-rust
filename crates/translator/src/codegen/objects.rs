@@ -1827,9 +1827,14 @@ impl<'a> Gen<'a> {
 
     /// Whether method `index` is a `toString` that becomes the class's `Display` implementation:
     /// it borrows its object without changing it and never returns null, and it is what an object
-    /// of the struct it is emitted in runs.
+    /// of the struct it is emitted in runs. A Java enum's `toString` is a method of its own, which
+    /// its `Display` calls, and which may not be `to_string` (javac's `KindName` has the
+    /// `toString(Locale, Messages)` of `Formattable` too).
     pub(super) fn displays(&self, index: usize) -> bool {
         let m = &self.class.methods[index];
+        if self.class.types[m.class].kind == TypeKind::Enum {
+            return false;
+        }
         let runs = match self.homes[index] {
             Home::Class(c) => hierarchy::to_string_impl(self.class, c) == Some(index),
             Home::Fields(_) => true,
