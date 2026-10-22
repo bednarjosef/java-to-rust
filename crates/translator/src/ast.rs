@@ -294,6 +294,9 @@ pub struct Class {
     /// What the translation assumed where Java's meaning depends on something it does not
     /// follow, which the translator prints when it translates.
     pub notes: Vec<Note>,
+    /// The annotation types (`@interface`) whose class literals the code has, by binary name:
+    /// a `java::Class` of each, which `isAnnotation()`. The types themselves are left out.
+    pub annotation_classes: std::collections::BTreeSet<String>,
 }
 
 /// An assumption of the translation at a place of the program: the method (index into

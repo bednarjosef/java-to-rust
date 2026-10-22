@@ -61,8 +61,10 @@ never freed.
   (case labels may be constant expressions, folded as javac folds them), and `System.exit`.
 - Integer overflow wraps as in Java; division by zero throws `ArithmeticException`; float
   arithmetic and printing follow Java's rules (`Double.toString` and `Float.toString` exactly).
-- Annotations and annotation types are left out, since they do nothing at run time; a value,
-  field or variable of an annotation type, or a class implementing one, is rejected.
+- Annotations and annotation types are left out, since they do nothing at run time. The class
+  literal of a top-level annotation type is a `Class` that `isAnnotation()`, and a value of an
+  annotation type is an `Annotation` where the program has that interface; a class implementing
+  one, and any other use of one, is rejected.
 
 ## Strings, builders, characters and formatting
 

@@ -121,7 +121,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let name = first.str("simpleName").to_string();
         let class_file = lowering.class_file_names(&types);
         let notes = lowering.notes.take();
-        let class = Class { name, types, methods, hierarchy, raised, class_file, notes };
+        let annotation_classes = lowering.annotation_classes.take();
+        let class = Class { name, types, methods, hierarchy, raised, class_file, notes, annotation_classes };
         Ok((class, lowering.real.clone(), failed))
     })
 }
@@ -460,6 +461,11 @@ struct Lowering<'t> {
     stubbed: RefCell<std::collections::BTreeSet<usize>>,
     /// What lowering assumed (see `ast::Note`).
     notes: RefCell<Vec<crate::ast::Note>>,
+    /// The annotation types whose class literals the code has (`Class::annotation_classes`).
+    annotation_classes: RefCell<std::collections::BTreeSet<String>>,
+    /// The annotation types declared in other classes, whose binary names lowering does not
+    /// know: a class literal of one is rejected.
+    nested_annotation_types: std::collections::HashSet<String>,
     /// The methods of enums that only the bodies of their constants declare, each implementing a
     /// method of an interface that the enum leaves to it (see `constant_bodies::body_methods`).
     body_methods: std::collections::HashSet<usize>,
@@ -703,6 +709,13 @@ impl<'t> Lowering<'t> {
             _ if let Some(erased) = self.erased(node, name) => erased,
             // A `...` parameter has the array type here, so `Object...` is rejected as `Object[]`.
             "java.lang.Object" => unsupported(node, "Object"),
+            // A value of an annotation type (what `getAnnotation(Documented.class)` returns) is
+            // an `Annotation`, which is all the code may call on it.
+            _ if self.annotation_types.contains(name)
+                && let Some(t) = self.type_index("java.lang.annotation.Annotation") =>
+            {
+                Ok(self.self_type(t))
+            }
             _ if self.annotation_types.contains(name) => {
                 unsupported(node, &format!("using the annotation type `{name}` other than as an annotation"))
             }

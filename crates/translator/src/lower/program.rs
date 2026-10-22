@@ -254,7 +254,17 @@ fn lower_into<'t>(
     let raised = lowering.raised_objects(&types, &methods);
     let class_file = lowering.class_file_names(&types);
     let notes = lowering.notes.take();
-    let class = Class { name: main.to_string(), types, methods, hierarchy, raised, class_file, notes };
+    let annotation_classes = lowering.annotation_classes.take();
+    let class = Class {
+        name: main.to_string(),
+        types,
+        methods,
+        hierarchy,
+        raised,
+        class_file,
+        notes,
+        annotation_classes,
+    };
     Ok((class, lowering.real.clone(), failed))
 }
 
