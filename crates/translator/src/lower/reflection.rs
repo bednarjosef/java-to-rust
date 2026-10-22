@@ -624,7 +624,15 @@ impl<'t> Lowering<'t> {
         }
         let Ok(params) = self.param_types(m) else { return Ok(false) };
         let ret = if info.name == "<init>" { Ok(Type::Void) } else { self.return_type(node, m) };
-        Ok(params.into_iter().all(boxable) && ret.is_ok_and(|r| r == Type::Void || boxable(r)))
+        // The program's `main` takes its arguments from the runtime, not as a parameter
+        // (`method_in_scope`), so the table has no call of it to make.
+        let declared: Vec<Node> = info.node.list("parameters").collect();
+        let main = info.name == "main"
+            && info.node.has_flag("STATIC")
+            && matches!(ret, Ok(Type::Void))
+            && matches!(&declared[..], [p] if p.symbol().is_some_and(|s| s.ty == "java.lang.String[]"))
+            && self.entry.is_none_or(|entry| entry == info.owner);
+        Ok(!main && params.into_iter().all(boxable) && ret.is_ok_and(|r| r == Type::Void || boxable(r)))
     }
 
     /// The type that method `m` returns, read where `m` is declared: the `E` of the anonymous

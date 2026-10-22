@@ -1,7 +1,8 @@
 //! Whole programs: a Java program spread over many files and packages, translated into one Rust
-//! file in which every package is a module (`com.example.util` becomes `mod com { mod example {
-//! mod util { .. } } }`). javac compiles all of it in one run, so that names across files resolve,
-//! and only what is reachable from `main` is lowered and translated.
+//! crate in which every package is a module (`com.example.util` becomes `com::example::util`),
+//! written as one file or as a file per module (`output::Layout`). javac compiles all of it in
+//! one run, so that names across files resolve, and only what is reachable from `main` is
+//! lowered and translated.
 
 mod census;
 mod modules;
@@ -21,6 +22,7 @@ pub use reach::{
 pub use survey::Survey;
 
 use crate::ast::{Error, Pos};
+use crate::output::ModuleTree;
 use crate::{analysis, codegen, javac, lower};
 use serde_json::Value;
 use std::fmt;
@@ -67,8 +69,14 @@ fn fail(message: String) -> ProgramError {
 }
 
 /// Translates a whole program into the source of one Rust program that uses the `java-runtime`
-/// crate.
+/// crate, as one file.
 pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
+    translate_program_modules(program).map(|tree| tree.one_file())
+}
+
+/// Translates a whole program into the modules of a Rust program that uses the `java-runtime`
+/// crate, one per package, for a layout (`output::Layout`) to write as files.
+pub fn translate_program_modules(program: &Program) -> Result<ModuleTree, ProgramError> {
     // An `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]` calls the JDK's
     // method for an `Object[]`, which only that program reaches (`Reach::string_array_writes`).
     match translate_reached(program, false) {
@@ -78,7 +86,7 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
 }
 
 /// `translate_program`, with `Reach::string_array_writes` or without.
-fn translate_reached(program: &Program, string_array_writes: bool) -> Result<String, ProgramError> {
+fn translate_reached(program: &Program, string_array_writes: bool) -> Result<ModuleTree, ProgramError> {
     use crate::timings::phase;
     let (units, reach) = load(program, string_array_writes)?;
     // The program's files are the first units (`load`).
@@ -110,7 +118,7 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Str
         })?;
         phase("messages", || analysis::npe_messages(&class, &mut facts, &names)).map_err(located)?;
     }
-    phase("codegen", || codegen::generate(&class, &facts)).map_err(located)
+    phase("codegen", || codegen::generate_modules(&class, &facts)).map_err(located)
 }
 
 /// Keeps the methods of `class` that can run (`analysis::live_methods`) and gives the others a

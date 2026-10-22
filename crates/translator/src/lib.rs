@@ -8,12 +8,15 @@ pub mod check_cache;
 pub mod codegen;
 pub mod javac;
 pub mod lower;
+pub mod output;
 pub mod program;
 pub mod timings;
 pub mod types;
 
 pub use ast::Error;
-pub use program::{Program, ProgramError, census_program, survey_program, translate_program};
+pub use program::{
+    Program, ProgramError, census_program, survey_program, translate_program, translate_program_modules,
+};
 
 /// Translates one Java source file into the source of a Rust program that uses the
 /// `java-runtime` crate.

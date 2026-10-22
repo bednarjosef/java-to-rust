@@ -15,9 +15,9 @@
 //! is at that position, in any file (or drops the field initializer there), and the analyses and
 //! the generator run again. The generator and the analysis of exceptions report every error they
 //! find, which are stubbed together; the other analyses report their first. A panic while the
-//! generator writes a method stubs the method. So every error recorded is one that a translation
-//! of the program would report once the code before it translated. An error that no
-//! stub can take away ends the census there, with its place: the pieces it did not get to are
+//! generator writes a method is an error of the method, found with the others. So every error
+//! recorded is one that a translation of the program would report once the code before it
+//! translated. An error that no stub can take away ends the census there, with its place: the pieces it did not get to are
 //! counted as they stand. An error that lowering met outside any unit's code is placed in the
 //! unit that alone has code at its line and column.
 //!
@@ -30,6 +30,7 @@
 use super::survey::{self, Part, Piece};
 use super::{Program, ProgramError, load, source_files};
 use crate::ast::{Builtin, Class, Error, Expr, ExprKind, Method, Pos, Stmt, Type, visit_expr, visit_stmt};
+use crate::output::ModuleTree;
 use crate::{analysis, codegen, lower};
 use serde_json::{Value, json};
 use std::cmp::Reverse;
@@ -39,10 +40,12 @@ use std::fmt::Write;
 /// Up to this many example places per message.
 const EXAMPLES: usize = 3;
 
-/// The census: the text report, and the same census as JSON.
+/// The census: the text report, and the same census as JSON; and the modules that the generator
+/// wrote last, with every rejected piece of code stubbed, if it got that far.
 pub struct Census {
     pub report: String,
     pub json: Value,
+    pub modules: Option<ModuleTree>,
 }
 
 /// An error that the census recorded and went on past: the unit of the code it is in (`None`
@@ -99,12 +102,14 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     let unit_files = survey::unit_files(&units.iter().collect::<Vec<_>>(), program, &files);
     drop(trees);
     drop((units, reach));
+    let mut modules = None;
     if let Some(mut class) = class {
-        fatal = phase("analyze", || analyse(&mut class, &lowered.units, &mut rejections));
+        fatal = phase("analyze", || analyse(&mut class, &lowered.units, &mut rejections, &mut modules));
     }
     std::panic::set_hook(hook);
     let tally = Tally::new(&scan.pieces, &unit_files, rejections, fatal);
-    Ok(Census { report: tally.report(&scan, &program.main), json: tally.json(&scan, &program.main) })
+    let (report, json) = (tally.report(&scan, &program.main), tally.json(&scan, &program.main));
+    Ok(Census { report, json, modules })
 }
 
 /// An analysis or the generator, run for its errors.
@@ -112,7 +117,13 @@ type Pass<'a> = &'a dyn Fn(&mut Class) -> Result<(), Vec<Error>>;
 
 /// Runs the analyses and the generator over the lowered program until they pass, stubbing the
 /// code of each error; the error that ends it early, if one does.
-fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Rejection>) -> Option<Rejection> {
+fn analyse(
+    class: &mut Class,
+    units: &[Option<usize>],
+    rejections: &mut Vec<Rejection>,
+    modules: &mut Option<ModuleTree>,
+) -> Option<Rejection> {
+    let generated: std::cell::RefCell<Option<ModuleTree>> = Default::default();
     let mut stubs = Stubs { next_id: next_id(class) + 1, stubbed: HashSet::new() };
     // The check for null enums changes nothing, and `whole_objects` changes the program only when
     // it passes: an error of theirs that no stub takes away is recorded, and the census goes on
@@ -137,14 +148,18 @@ fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Reje
             let facts = crate::timings::phase("census: analyses", || {
                 analysis::analyze_tolerating(class, &tolerated)
             })?;
-            crate::timings::phase("census: generator", || codegen::generate_all(class, &facts)).map(drop)
+            codegen::catch_panics(true);
+            let tree = crate::timings::phase("census: generator", || codegen::generate_all(class, &facts));
+            codegen::catch_panics(false);
+            tree.map(|tree| *generated.borrow_mut() = Some(tree))
         },
     ];
     for (index, pass) in passes.into_iter().enumerate() {
         loop {
             // A stub can lead the translator where a translation never goes. A panic while the
-            // generator writes a method stubs the method; any other ends the census as an error
-            // does, with what it found so far.
+            // generator writes a method is an error of the method, which is stubbed with the
+            // generator's other errors (`codegen::catch_panics`); any other panic ends the census
+            // as an error does, with what it found so far.
             let errors = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pass(class))) {
                 Ok(Ok(())) => break,
                 Ok(Err(errors)) => errors,
@@ -195,6 +210,7 @@ fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Reje
             }
         }
     }
+    *modules = generated.take();
     None
 }
 
