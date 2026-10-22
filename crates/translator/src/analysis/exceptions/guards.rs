@@ -14,6 +14,49 @@ use super::*;
 use crate::analysis::constants::static_value;
 use std::collections::HashMap;
 
+/// How many times the program's code assigns each static, by its class and name, and the
+/// statements of its class's `<clinit>` that assign it (by method and statement), found once for
+/// the program instead of once for each read.
+#[derive(Default)]
+pub(in crate::analysis) struct StaticWrites {
+    of: HashMap<(usize, String), Writes>,
+}
+
+/// How many times a static is assigned, and its `<clinit>`'s statements that assign it.
+type Writes = (usize, Vec<(usize, usize)>);
+
+pub(super) fn static_writes(class: &Class) -> StaticWrites {
+    let mut of: HashMap<(usize, String), Writes> = HashMap::new();
+    for (m, method) in class.methods.iter().enumerate() {
+        let clinit = method.name == "<clinit>";
+        for (i, s) in method.body.iter().enumerate() {
+            if clinit
+                && let Stmt::Expr(Expr {
+                    kind: ExprKind::Assign { op: None, target: Place::Static { class: c, name }, .. },
+                    ..
+                }) = s
+                && *c == method.class
+            {
+                of.entry((*c, name.clone())).or_default().1.push((m, i));
+            }
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |y| {
+                        if let ExprKind::Assign { target: Place::Static { class: c, name }, .. }
+                        | ExprKind::IncDec { target: Place::Static { class: c, name }, .. } = &y.kind
+                        {
+                            of.entry((*c, name.clone())).or_default().0 += 1;
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    StaticWrites { of }
+}
+
 /// A known value: an integer (or a boolean, 0 or 1), or an array of this length.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum Value {
@@ -24,14 +67,14 @@ pub(super) enum Value {
 /// The tuples of argument values that the call `x` may pass, every combination of each
 /// argument's possible values (`None` for an unknown one), when `x` calls one method or
 /// constructor and some argument is known; else none.
-pub(super) fn known_args(class: &Class, x: &Expr) -> Vec<Vec<Option<Value>>> {
+pub(super) fn known_args(class: &Class, writes: &StaticWrites, x: &Expr) -> Vec<Vec<Option<Value>>> {
     let args = match &x.kind {
         ExprKind::Call { args, resolved: Some(_), .. } | ExprKind::New { args, ctor: Some(_), .. } => args,
         _ => return Vec::new(),
     };
     let choices: Vec<Vec<Option<Value>>> = args
         .iter()
-        .map(|a| known(class, a).map_or(vec![None], |v| v.into_iter().map(Some).collect()))
+        .map(|a| known(class, writes, a).map_or(vec![None], |v| v.into_iter().map(Some).collect()))
         .collect();
     if choices.iter().all(|c| c[..] == [None]) {
         return Vec::new();
@@ -47,23 +90,23 @@ pub(super) fn known_args(class: &Class, x: &Expr) -> Vec<Vec<Option<Value>>> {
 }
 
 /// The values that `e` may have when read.
-fn known(class: &Class, e: &Expr) -> Option<Vec<Value>> {
+fn known(class: &Class, writes: &StaticWrites, e: &Expr) -> Option<Vec<Value>> {
     if let ExprKind::Static { class: owner, name } = &e.kind
         && static_value(class, *owner, name).is_none()
     {
-        return static_values(class, *owner, name).map(|v| v.into_iter().map(Value::Int).collect());
+        return static_values(class, writes, *owner, name).map(|v| v.into_iter().map(Value::Int).collect());
     }
-    eval(class, e, &HashMap::new()).map(|v| vec![v])
+    eval(class, writes, e, &HashMap::new()).map(|v| vec![v])
 }
 
 /// The values that the static `name` of class `owner` may have when read: what its class's
 /// initializer assigns it once, and its default 0, which a read during a circular initialization
 /// sees.
-fn static_values(class: &Class, owner: usize, name: &str) -> Option<Vec<i128>> {
-    let value = assigned_once(class, owner, name)?;
+fn static_values(class: &Class, writes: &StaticWrites, owner: usize, name: &str) -> Option<Vec<i128>> {
+    let value = assigned_once(class, writes, owner, name)?;
     let value = match jvm_value(value) {
         Some(v) => v,
-        None => match eval(class, value, &HashMap::new())? {
+        None => match eval(class, writes, value, &HashMap::new())? {
             Value::Int(v) => v,
             Value::Array(_) => return None,
         },
@@ -74,8 +117,8 @@ fn static_values(class: &Class, owner: usize, name: &str) -> Option<Vec<i128>> {
 /// Whether condition `cond` is always true or always false, from literals, constants and the
 /// statics that `static_values` knows: the JDK's `if (LegacyMergeSort.userRequested)`, whose
 /// flag is `Boolean.getBoolean` of a property that a translated program never sets.
-pub(super) fn known_condition(class: &Class, cond: &Expr) -> Option<bool> {
-    match eval(class, cond, &HashMap::new())? {
+pub(super) fn known_condition(class: &Class, writes: &StaticWrites, cond: &Expr) -> Option<bool> {
+    match eval(class, writes, cond, &HashMap::new())? {
         Value::Int(v) => Some(v != 0),
         Value::Array(_) => None,
     }
@@ -84,40 +127,17 @@ pub(super) fn known_condition(class: &Class, cond: &Expr) -> Option<bool> {
 /// The value that class `owner` gives its static `name` when it is initialized: the one
 /// statement of its `<clinit>` that assigns it (the lowering writes a static's initializer there
 /// too) or else its initializer, when nothing else in the program assigns it.
-fn assigned_once<'c>(class: &'c Class, owner: usize, name: &str) -> Option<&'c Expr> {
-    let is_it = |c: usize, n: &str| c == owner && n == name;
-    let mut writes = 0;
-    let mut assigned = Vec::new();
-    for method in &class.methods {
-        let clinit = method.class == owner && method.name == "<clinit>";
-        for s in &method.body {
-            if clinit
-                && let Stmt::Expr(Expr {
-                    kind: ExprKind::Assign { op: None, target: Place::Static { class: c, name: n }, value },
-                    ..
-                }) = s
-                && is_it(*c, n)
-            {
-                assigned.push(&**value);
-            }
-            visit_stmt(
-                s,
-                &mut |e| {
-                    visit_expr(e, &mut |y| {
-                        if let ExprKind::Assign { target: Place::Static { class: c, name: n }, .. }
-                        | ExprKind::IncDec { target: Place::Static { class: c, name: n }, .. } = &y.kind
-                            && is_it(*c, n)
-                        {
-                            writes += 1;
-                        }
-                    })
-                },
-                &mut |_| {},
-            );
-        }
-    }
+fn assigned_once<'c>(class: &'c Class, writes: &StaticWrites, owner: usize, name: &str) -> Option<&'c Expr> {
+    let (count, at) = writes.of.get(&(owner, name.to_string())).map_or((0, &[][..]), |(n, at)| (*n, &at[..]));
+    let assigned: Vec<&Expr> = at
+        .iter()
+        .filter_map(|&(m, s)| match &class.methods[m].body[s] {
+            Stmt::Expr(Expr { kind: ExprKind::Assign { value, .. }, .. }) => Some(&**value),
+            _ => None,
+        })
+        .collect();
     let init = class.types[owner].statics.iter().find(|f| f.name == name)?.init.as_ref();
-    match (&assigned[..], writes, init) {
+    match (&assigned[..], count, init) {
         (&[value], 1, _) => Some(value),
         ([], 0, Some(init)) => Some(init),
         _ => None,
@@ -163,7 +183,7 @@ impl Run {
 }
 
 /// What method `m` runs when called with `args`.
-pub(super) fn run(class: &Class, m: usize, args: &[Option<Value>]) -> Run {
+pub(super) fn run(class: &Class, writes: &StaticWrites, m: usize, args: &[Option<Value>]) -> Run {
     let method = &class.methods[m];
     let mut env: HashMap<&str, Value> = HashMap::new();
     for (p, a) in method.params.iter().zip(args) {
@@ -173,13 +193,19 @@ pub(super) fn run(class: &Class, m: usize, args: &[Option<Value>]) -> Run {
     }
     let mut run = Run::default();
     run.live.push(method.pos);
-    walk(class, &method.body, &mut env, &mut run);
+    walk(class, writes, &method.body, &mut env, &mut run);
     run
 }
 
-fn walk<'c>(class: &'c Class, stmts: &'c [Stmt], env: &mut HashMap<&'c str, Value>, run: &mut Run) {
+fn walk<'c>(
+    class: &'c Class,
+    writes: &StaticWrites,
+    stmts: &'c [Stmt],
+    env: &mut HashMap<&'c str, Value>,
+    run: &mut Run,
+) {
     for s in stmts {
-        stmt(class, s, env, run);
+        stmt(class, writes, s, env, run);
     }
 }
 
@@ -222,7 +248,13 @@ fn forget(env: &mut HashMap<&str, Value>, names: &[String]) {
     }
 }
 
-fn stmt<'c>(class: &'c Class, s: &'c Stmt, env: &mut HashMap<&'c str, Value>, run: &mut Run) {
+fn stmt<'c>(
+    class: &'c Class,
+    writes: &StaticWrites,
+    s: &'c Stmt,
+    env: &mut HashMap<&'c str, Value>,
+    run: &mut Run,
+) {
     // The array creations of the statement's own expressions whose sizes are known.
     let own: Vec<&Expr> = match s {
         Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _) | Stmt::Throw(e) => {
@@ -234,7 +266,7 @@ fn stmt<'c>(class: &'c Class, s: &'c Stmt, env: &mut HashMap<&'c str, Value>, ru
     for e in own {
         visit_expr(e, &mut |y| {
             if let ExprKind::NewArray(dims) = &y.kind
-                && dims.iter().all(|d| matches!(eval(class, d, env), Some(Value::Int(n)) if n >= 0))
+                && dims.iter().all(|d| matches!(eval(class, writes, d, env), Some(Value::Int(n)) if n >= 0))
             {
                 run.sized.push(y.pos);
             }
@@ -243,7 +275,7 @@ fn stmt<'c>(class: &'c Class, s: &'c Stmt, env: &mut HashMap<&'c str, Value>, ru
     match s {
         Stmt::Local { name, init, .. } => {
             positions(s, &mut run.live);
-            let value = init.as_ref().and_then(|e| eval(class, e, env));
+            let value = init.as_ref().and_then(|e| eval(class, writes, e, env));
             forget(env, &assigned(s));
             if let Some(v) = value {
                 env.insert(name, v);
@@ -251,33 +283,33 @@ fn stmt<'c>(class: &'c Class, s: &'c Stmt, env: &mut HashMap<&'c str, Value>, ru
         }
         Stmt::Expr(Expr { kind: ExprKind::Assign { op: None, target: Place::Var(name), value }, .. }) => {
             positions(s, &mut run.live);
-            let value = eval(class, value, env);
+            let value = eval(class, writes, value, env);
             forget(env, &assigned(s));
             if let Some(v) = value {
                 env.insert(name, v);
             }
         }
-        Stmt::Block(stmts) => walk(class, stmts, env, run),
+        Stmt::Block(stmts) => walk(class, writes, stmts, env, run),
         Stmt::If { cond, then, otherwise } => {
             expr_positions(cond, &mut run.live);
-            match eval(class, cond, env) {
+            match eval(class, writes, cond, env) {
                 Some(Value::Int(0)) => {
                     positions(then, &mut run.dead);
                     if let Some(o) = otherwise {
-                        stmt(class, o, env, run);
+                        stmt(class, writes, o, env, run);
                     }
                 }
                 Some(Value::Int(_)) => {
                     if let Some(o) = otherwise {
                         positions(o, &mut run.dead);
                     }
-                    stmt(class, then, env, run);
+                    stmt(class, writes, then, env, run);
                 }
                 _ => {
                     let mut other = env.clone();
-                    stmt(class, then, env, run);
+                    stmt(class, writes, then, env, run);
                     if let Some(o) = otherwise {
-                        stmt(class, o, &mut other, run);
+                        stmt(class, writes, o, &mut other, run);
                     }
                     // What both branches leave the same stays known.
                     env.retain(|k, v| other.get(k) == Some(v));
@@ -285,10 +317,10 @@ fn stmt<'c>(class: &'c Class, s: &'c Stmt, env: &mut HashMap<&'c str, Value>, ru
             }
         }
         Stmt::For { init, cond, update, body } => {
-            walk(class, init, env, run);
+            walk(class, writes, init, env, run);
             if let Some(c) = cond {
                 expr_positions(c, &mut run.live);
-                if eval(class, c, env) == Some(Value::Int(0)) {
+                if eval(class, writes, c, env) == Some(Value::Int(0)) {
                     positions(body, &mut run.dead);
                     update.iter().for_each(|u| expr_positions(u, &mut run.dead));
                     return;
@@ -296,17 +328,17 @@ fn stmt<'c>(class: &'c Class, s: &'c Stmt, env: &mut HashMap<&'c str, Value>, ru
             }
             forget(env, &assigned(s));
             update.iter().for_each(|u| expr_positions(u, &mut run.live));
-            stmt(class, body, &mut env.clone(), run);
+            stmt(class, writes, body, &mut env.clone(), run);
             forget(env, &assigned(s));
         }
         Stmt::While { cond, body } => {
             expr_positions(cond, &mut run.live);
-            if eval(class, cond, env) == Some(Value::Int(0)) {
+            if eval(class, writes, cond, env) == Some(Value::Int(0)) {
                 positions(body, &mut run.dead);
                 return;
             }
             forget(env, &assigned(s));
-            stmt(class, body, &mut env.clone(), run);
+            stmt(class, writes, body, &mut env.clone(), run);
             forget(env, &assigned(s));
         }
         _ => {
@@ -318,8 +350,8 @@ fn stmt<'c>(class: &'c Class, s: &'c Stmt, env: &mut HashMap<&'c str, Value>, ru
 
 /// The value of an expression of the locals `env` that uses only operations that cannot fail,
 /// when it is within its type's range (Java's arithmetic wraps; within the range it is exact).
-fn eval(class: &Class, e: &Expr, env: &HashMap<&str, Value>) -> Option<Value> {
-    let int = |e: &Expr| match eval(class, e, env)? {
+fn eval(class: &Class, writes: &StaticWrites, e: &Expr, env: &HashMap<&str, Value>) -> Option<Value> {
+    let int = |e: &Expr| match eval(class, writes, e, env)? {
         Value::Int(v) => Some(v),
         Value::Array(_) => None,
     };
@@ -332,7 +364,7 @@ fn eval(class: &Class, e: &Expr, env: &HashMap<&str, Value>) -> Option<Value> {
             Some(v) => v,
             // A static read before its class is initialized is its default, so its value is
             // known only when that is the value it is given.
-            None => match static_values(class, *owner, name)?[..] {
+            None => match static_values(class, writes, *owner, name)?[..] {
                 [v] => v,
                 _ => return None,
             },
@@ -342,7 +374,7 @@ fn eval(class: &Class, e: &Expr, env: &HashMap<&str, Value>) -> Option<Value> {
             return Some(Value::Array(int(d).filter(|&n| n >= 0)?));
         }
         ExprKind::ArrayLit(items) => return Some(Value::Array(items.len() as i128)),
-        ExprKind::Length(array) => match eval(class, array, env)? {
+        ExprKind::Length(array) => match eval(class, writes, array, env)? {
             Value::Array(n) => n,
             Value::Int(_) => return None,
         },
@@ -352,7 +384,7 @@ fn eval(class: &Class, e: &Expr, env: &HashMap<&str, Value>) -> Option<Value> {
         ExprKind::Unary(UnOp::Not, x) => i128::from(int(x)? == 0),
         ExprKind::Unary(UnOp::BitNot, x) => !int(x)?,
         ExprKind::Conditional(c, a, b) => {
-            return if int(c)? != 0 { eval(class, a, env) } else { eval(class, b, env) };
+            return if int(c)? != 0 { eval(class, writes, a, env) } else { eval(class, writes, b, env) };
         }
         ExprKind::Binary(op, l, r) => {
             let (a, b) = (int(l)?, int(r)?);

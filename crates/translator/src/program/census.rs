@@ -246,7 +246,9 @@ impl Stubs {
         for (t, decl) in class.types.iter_mut().enumerate() {
             for field in decl.fields.iter_mut().chain(&mut decl.statics) {
                 if field.init.as_ref().is_some_and(at) {
+                    // A constant without its value is a static that starts at Java's default.
                     field.init = None;
+                    field.constant = false;
                     if rejection.anchor.is_none() {
                         rejection.unit = units.get(t).copied().flatten();
                         rejection.anchor = Some(field.pos);

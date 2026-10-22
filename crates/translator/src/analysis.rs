@@ -154,6 +154,10 @@ pub struct Facts {
     pub eager_init: HashSet<usize>,
     /// The static methods and constructors that run their class's `init` when they start.
     pub entry_init: HashSet<usize>,
+    /// The class of `main`, when the program has exactly one, which `main` initializes first.
+    pub main_class: Option<usize>,
+    /// The assignments of each static (see `exceptions::guards`).
+    static_writes: exceptions::guards::StaticWrites,
     /// The boxed kinds (`Type::Boxed` of the primitive) whose identity `==` observes: their boxes
     /// are shared objects. Every other boxed kind is its primitive value.
     pub faithful_boxes: HashSet<Type>,
@@ -235,8 +239,9 @@ pub fn analyze_all(class: &Class) -> Result<Facts, Vec<Error>> {
 }
 
 /// `analyze_all`, past the errors `tolerated` of the checks that only reject (the validation of
-/// constructors and enums, and of what threads share): a census goes on past those of them that
-/// no stub can take away, such as a field's type (`program/census.rs`).
+/// constructors and enums, of what threads share, of strings and boxes as `Object`s and of
+/// monitors): a census goes on past those of them that no stub can take away, such as a field's
+/// type (`program/census.rs`).
 pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, Vec<Error>> {
     let one = |e: Error| vec![e];
     let checked = |result: Result<(), Vec<Error>>| {
@@ -257,13 +262,17 @@ pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, V
     patterns::check(class).map_err(one)?;
     facts.eager_init = statics::eager_classes(class);
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
+    facts.main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
+        [main] => Some(main.class),
+        _ => None,
+    };
     nullness::analyze(class, &mut facts);
-    patterns::check_object_values(class, &facts).map_err(one)?;
+    checked(patterns::check_object_values(class, &facts))?;
     boxing::analyze(class, &mut facts);
     if facts.threaded {
         checked(threads::check(class, &facts))?;
     }
-    monitors::check(class, &facts).map_err(one)?;
+    checked(monitors::check(class, &facts))?;
     facts.class_monitors = monitors::class_monitors(class, &facts);
     borrowed_params(class, &mut facts);
     facts.borrowed_objects = borrowed_objects(class, &facts);

@@ -5,10 +5,20 @@
 //! call.
 
 /// A set of small numbers (type or method indexes), one bit each.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct Bits {
     words: Vec<u64>,
 }
+
+/// The same members, however many words each set has.
+impl PartialEq for Bits {
+    fn eq(&self, other: &Bits) -> bool {
+        let n = self.words.len().max(other.words.len());
+        (0..n).all(|i| self.words.get(i).unwrap_or(&0) == other.words.get(i).unwrap_or(&0))
+    }
+}
+
+impl Eq for Bits {}
 
 impl Bits {
     pub fn insert(&mut self, i: usize) -> bool {
@@ -32,6 +42,16 @@ impl Bits {
         }
         for (w, o) in self.words.iter_mut().zip(&other.words) {
             *w |= o;
+        }
+    }
+
+    /// Adds every member of `other` that is not in `except`.
+    pub fn union_except(&mut self, other: &Bits, except: &Bits) {
+        if self.words.len() < other.words.len() {
+            self.words.resize(other.words.len(), 0);
+        }
+        for (i, (w, o)) in self.words.iter_mut().zip(&other.words).enumerate() {
+            *w |= o & !except.words.get(i).unwrap_or(&0);
         }
     }
 

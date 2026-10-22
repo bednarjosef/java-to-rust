@@ -68,7 +68,8 @@ pub(super) fn check(class: &Class) -> Result<(), Error> {
 /// Rejects what the `Object` enum cannot hold or compare: an array as an `Object`, and `==` or
 /// `!=` between two values of `Object` that may both be strings or boxes, whose identity Java
 /// compares and the translation does not keep (a string or a box in an `Object` is a plain value).
-pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result<(), Error> {
+/// Every such place is reported, in the order of the code.
+pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result<(), Vec<Error>> {
     let Some(object) = class.types.iter().position(|d| d.kind == TypeKind::Interface && d.name == OBJECT)
     else {
         return Ok(());
@@ -131,7 +132,7 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
     let may_both_hold_values = |m: usize, l: &Expr, r: &Expr| {
         values.get_or_init(|| super::object_values::analyze(class, facts)).may_both_be_values(class, m, l, r)
     };
-    let mut found = None;
+    let mut found = Vec::new();
     for (m, method) in class.methods.iter().enumerate() {
         let in_sorted_map = in_sorted_map(class, method.class);
         for s in &method.body {
@@ -143,10 +144,7 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                         ExprKind::Cast(Type::Class(name, _), inner)
                             if *name == OBJECT && inner.ty == Type::StringBuilder && facts.threaded =>
                         {
-                            found.get_or_insert((
-                                x.pos,
-                                "a `StringBuilder` as an `Object` in a program with threads",
-                            ));
+                            found.push((x.pos, "a `StringBuilder` as an `Object` in a program with threads"));
                         }
                         ExprKind::Binary(BinOp::Eq | BinOp::Ne, l, r)
                             if holds_values
@@ -156,10 +154,7 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                                 && !(in_sorted_map && sorted_key(l, &fences) && sorted_key(r, &fences))
                                 && may_both_hold_values(m, l, r) =>
                         {
-                            found.get_or_insert((
-                                x.pos,
-                                "`==` on `Object` values that may be strings or boxes",
-                            ));
+                            found.push((x.pos, "`==` on `Object` values that may be strings or boxes"));
                         }
                         _ => {}
                     })
@@ -168,10 +163,13 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
             );
         }
     }
-    match found {
-        Some((pos, what)) => Err(Error { pos, message: format!("{what} not supported yet") }),
-        None => Ok(()),
+    if found.is_empty() {
+        return Ok(());
     }
+    Err(found
+        .into_iter()
+        .map(|(pos, what)| Error { pos, message: format!("{what} not supported yet") })
+        .collect())
 }
 
 /// `TreeMap`'s entries, whose keys `TreeMap`'s own code compares by identity.
