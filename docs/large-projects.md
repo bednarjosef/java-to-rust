@@ -115,6 +115,24 @@ the order that unblocks the most.
   built and run while the blockers are being fixed. Never the default, and never shipped: it is
   still loud, but only when the code runs, so it must be asked for by name.
 
+### javac end to end
+
+javac is the first large target, and `scripts/javac-check.sh TRANSLATED_JAVAC [CASE...]` checks
+a translated javac against the real one. Each case in `scripts/javac-check/` is a directory of
+small Java files (hello world, generics, an enum with a switch, lambdas, a compile error), with
+an optional `args` file of more javac arguments. Both compilers compile it with the same
+arguments in their own copy of the directory, and the case passes when the class files are the
+same byte for byte and so are standard output, standard error and the exit code. The real javac
+is `javac` on `PATH` (or `JAVAC`), and must be the JDK whose `lib/src.zip` the translation was
+made from; the translated one gets that JDK as `JAVA_HOME`, to read the platform's classes from.
+`SLOT` names a command to run the translated javac under (the build-slot limiter), and
+`JAVAC_CHECK_OUT` the directory that keeps each case's outputs for a look after a failure.
+
+javac itself is never patched, as it is the program under test. Its census keeps the rejection
+of `new DigestInputStream` in `Main.showClass` (Main.java:485), which is only reached with the
+hidden `-XDshowClass` option and ends the program loudly there; translating `MessageDigest`
+through the JDK's own SHA code would lift it.
+
 ## Limits
 
 The hard limits from the project's earlier discussion apply to large projects in full: no code

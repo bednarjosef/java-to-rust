@@ -3,10 +3,10 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
-// Reflection by name over the program's classes: a class found by a computed name, its
-// constructors, methods and fields looked up by name and called, read and written, inherited
-// methods that dispatch to an override, the exceptions of a name that is not there, and those of
-// the code called, which reflection wraps (but `Class.newInstance` does not).
+// Reflection by name over the program's classes: a class found by a computed or spelled-out
+// name, its constructors, methods and fields looked up by name and called, read and written,
+// inherited methods that dispatch to an override, the exceptions of a name that is not there, and
+// those of the code called, which reflection wraps (but `Class.newInstance` does not).
 public class ReflectionTable {
     public static class Greeter {
         public String greeting = "hello";
@@ -72,6 +72,10 @@ public class ReflectionTable {
         public double area() {
             return side * side;
         }
+
+        public String name() {
+            return "square";
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -111,6 +115,7 @@ public class ReflectionTable {
         Shape s = (Shape) Class.forName("ReflectionTable$Square").getDeclaredConstructor().newInstance();
         System.out.println(Shape.class.getMethod("area").invoke(s));
         System.out.println(Square.class.getField("side").getDouble(s));
+        System.out.println(Class.forName("ReflectionTable$Square").getMethod("name").invoke(s));
 
         try {
             Class.forName("ReflectionTable$Missing");
