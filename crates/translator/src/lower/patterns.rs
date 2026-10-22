@@ -76,15 +76,15 @@ fn is_null_label(label: Node) -> bool {
 }
 
 /// Every name that the code in `v` mentions, which a variable of the translation must not take.
-fn names(v: &serde_json::Value, out: &mut HashSet<String>) {
+fn names(v: &crate::value::Value, out: &mut HashSet<String>) {
     match v {
-        serde_json::Value::Object(fields) => {
-            if let Some(name) = fields.get("name").and_then(serde_json::Value::as_str) {
+        crate::value::Value::Object(fields) => {
+            if let Some(name) = fields.get("name").and_then(crate::value::Value::as_str) {
                 out.insert(name.to_string());
             }
             fields.values().for_each(|x| names(x, out));
         }
-        serde_json::Value::Array(items) => items.iter().for_each(|x| names(x, out)),
+        crate::value::Value::Array(items) => items.iter().for_each(|x| names(x, out)),
         _ => {}
     }
 }

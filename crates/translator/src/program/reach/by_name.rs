@@ -29,7 +29,7 @@
 use std::path::PathBuf;
 
 use super::{Item, Walk, class_name, has_flag, text};
-use serde_json::Value;
+use crate::value::Value;
 
 /// The expression that gives the class name, when the cast `node` casts an object created from
 /// a class name.

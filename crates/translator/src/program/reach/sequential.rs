@@ -25,7 +25,7 @@
 //! that overrides `Node.getChildCount()`, whose default is 0, has objects.
 
 use super::{CLASS_KINDS, FieldKey, MethodKey, Walk, class_name, has_flag, members, never_true, text};
-use serde_json::Value;
+use crate::value::Value;
 use std::collections::{HashMap, HashSet};
 
 /// The classes of a walk, with their declarations and outer classes.

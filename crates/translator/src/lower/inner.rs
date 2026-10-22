@@ -452,7 +452,7 @@ impl<'t> Lowering<'t> {
 /// it is anonymous, outside the bodies of the classes found.
 fn classes_in<'t>(node: Node<'t>, out: &mut Vec<(Node<'t>, Option<Node<'t>>)>) {
     match node.0 {
-        serde_json::Value::Object(fields) => {
+        crate::value::Value::Object(fields) => {
             let kind = node.kind();
             if crate::program::CLASS_KINDS.contains(&kind) {
                 out.push((node, None));
@@ -475,7 +475,7 @@ fn classes_in<'t>(node: Node<'t>, out: &mut Vec<(Node<'t>, Option<Node<'t>>)>) {
                 }
             }
         }
-        serde_json::Value::Array(items) => items.iter().for_each(|item| classes_in(Node(item), out)),
+        crate::value::Value::Array(items) => items.iter().for_each(|item| classes_in(Node(item), out)),
         _ => {}
     }
 }

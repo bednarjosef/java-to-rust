@@ -11,7 +11,7 @@ pub use bytecode_names::{
 };
 
 use crate::ast::{Error, Pos};
-use serde_json::Value;
+use crate::value::Value;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};

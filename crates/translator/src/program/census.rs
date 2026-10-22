@@ -31,8 +31,8 @@ use super::survey::{self, Part, Piece};
 use super::{Program, ProgramError, load, source_files};
 use crate::ast::{Builtin, Class, Error, Expr, ExprKind, Method, Pos, Stmt, Type, visit_expr, visit_stmt};
 use crate::output::ModuleTree;
+use crate::value::{Value, json};
 use crate::{analysis, codegen, lower};
-use serde_json::{Value, json};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write;
@@ -44,7 +44,7 @@ const EXAMPLES: usize = 3;
 /// wrote last, with every rejected piece of code stubbed, if it got that far.
 pub struct Census {
     pub report: String,
-    pub json: Value,
+    pub json: serde_json::Value,
     pub modules: Option<ModuleTree>,
 }
 
@@ -109,7 +109,7 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     }
     std::panic::set_hook(hook);
     let tally = Tally::new(&scan.pieces, &unit_files, rejections, fatal);
-    let (report, json) = (tally.report(&scan, &program.main), tally.json(&scan, &program.main));
+    let (report, json) = (tally.report(&scan, &program.main), (&tally.json(&scan, &program.main)).into());
     Ok(Census { report, json, modules })
 }
 
@@ -535,7 +535,7 @@ impl Tally {
 
     fn json(&self, scan: &survey::Census, main: &str) -> Value {
         let pieces = &scan.pieces;
-        let totals: serde_json::Map<String, Value> = Part::ALL
+        let totals: crate::value::Map = Part::ALL
             .iter()
             .map(|&part| {
                 let (all, translate) = self.counts(pieces, part);
