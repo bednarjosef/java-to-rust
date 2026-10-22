@@ -34,6 +34,7 @@ use crate::value::Value;
 use objects::{MethodInfo, TypeInfo};
 use std::cell::{Cell, RefCell};
 
+mod arraycopy_classes;
 mod arrays;
 mod boxing;
 mod by_name;
