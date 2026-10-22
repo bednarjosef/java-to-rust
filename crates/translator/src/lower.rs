@@ -50,10 +50,12 @@ mod java_arrays;
 mod java_objects;
 mod libraries;
 mod local_types;
+mod modules;
 mod natives;
 mod patterns;
 mod platform_logger;
 mod primitives;
+mod processors;
 mod program;
 mod prologues;
 mod recreate;
@@ -67,6 +69,7 @@ use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
 pub use census::panic_message;
 pub(crate) use clinit_errors::rewritten_clinit;
+pub(crate) use enum_tables::{ORDINAL as TABLE_ORDINAL, tabled_field};
 pub use exceptions::{
     is_standard, standard_field_type, standard_local_name, standard_names, standard_subclass,
 };
@@ -1040,6 +1043,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.system_log(node, &symbol, select)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.module_call(node, &symbol, select)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.logger_query(node, &symbol)? {
             return Ok(kind);
         }
@@ -1126,6 +1132,12 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.reflection_native(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.module_native(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.processor_annotations_native(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {
