@@ -280,7 +280,12 @@ impl<'a> Gen<'a> {
         if matches!(e.ty, Type::Class(..)) {
             // `java::or_null` shows `null`, or the object as it shows when it is not null.
             let option = format!("{}.as_ref()", self.object_place(e));
-            let text = self.handle_text("o", e);
+            let (text, raises) = self.handle_text("o", e);
+            if raises {
+                // A `toString` that throws: its exception goes on from here, not from the closure.
+                let texts = self.passed_on(Code::atom(format!("{option}.map(|o| {text}).transpose()")));
+                return Some(Part::Arg(Code::atom(format!("{}({texts})", self.runtime("or_null")))));
+            }
             let option = match text.strip_suffix("(o)") {
                 _ if text == "o" => option,
                 Some(function) if !function.contains(['.', '(']) => format!("{option}.map({function})"),

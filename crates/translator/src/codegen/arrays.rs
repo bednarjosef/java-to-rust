@@ -226,7 +226,7 @@ impl<'a> Gen<'a> {
         if let Some(path) = self.plain_path(array) {
             return self.plain_update(path, op, index, ty, rhs, id, used);
         }
-        if self.raises_in(rhs) {
+        if self.update_raises(op, ty, rhs) {
             return self.update_in_steps(op, array, index, ty, rhs, id, used);
         }
         let (mut binding, handle) = self.write_handle(array, has_effects(index) || has_effects(rhs));
@@ -318,10 +318,33 @@ impl<'a> Gen<'a> {
                     ExprKind::Call { resolved: Some(m), .. }
                     | ExprKind::MethodCall { resolved: Some(m), .. }
                     | ExprKind::New { ctor: Some(m), .. } => self.facts.throwing.contains(m),
+                    // Text made with a call of a `toString` that throws.
+                    _ if crate::analysis::generator_text(x) => {
+                        crate::analysis::text_objects(x).into_iter().any(|o| self.text_raises(o))
+                    }
                     _ => false,
                 }
         });
         found
+    }
+
+    /// `raises_in` for the right operand `rhs` of `op=` on a value of type `ty`, which a string's
+    /// `+=` turns into text.
+    pub(super) fn update_raises(&self, op: BinOp, ty: Type, rhs: &Expr) -> bool {
+        self.raises_in(rhs) || (op == BinOp::Add && ty == Type::String && self.text_raises(rhs))
+    }
+
+    /// Whether the text of `e` is made with a call of a method that throws (`object_text`).
+    fn text_raises(&self, e: &Expr) -> bool {
+        if !matches!(e.ty, Type::Class(..)) {
+            return false;
+        }
+        if let Some(t) = self.enum_of(e) {
+            return self.enum_text_throws(t);
+        }
+        let Some(c) = self.struct_class(e) else { return false };
+        let text = hierarchy::to_string_impl(self.class, c).or_else(|| self.hash_index(c));
+        text.is_some_and(|i| self.facts.throwing.contains(&i))
     }
 
     /// The new element `new` as the body of the closure of an element update: `Ok(new)` where
