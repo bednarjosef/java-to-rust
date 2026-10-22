@@ -944,7 +944,13 @@ impl<'a> Gen<'a> {
                         while bound.contains(&temp) || temp == obj {
                             temp.push('_');
                         }
-                        lines.push(format!("let {temp} = {text};"));
+                        // A nullable string is bound as an owned value first, as `bound_call` does.
+                        if let Some(owned) = text.strip_suffix(".as_deref()") {
+                            lines.push(format!("let {temp}_value = {owned}.clone();"));
+                            lines.push(format!("let {temp} = {temp}_value.as_deref();"));
+                        } else {
+                            lines.push(format!("let {temp} = {text};"));
+                        }
                         bound.push(temp);
                     }
                     self.guarded = outer;
