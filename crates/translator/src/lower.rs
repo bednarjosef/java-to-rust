@@ -1099,7 +1099,7 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.file_system_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
-        if let Some(kind) = self.library_call(node, &symbol, &args)? {
+        if let Some(kind) = self.library_call(node, &symbol, receiver, &args)? {
             return Ok(kind);
         }
         if let Some(kind) = self.blocker_call(node, &symbol, &mut args)? {

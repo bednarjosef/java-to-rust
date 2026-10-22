@@ -1,0 +1,433 @@
+//! The values that the walk knows, and the code that they leave out: a branch on a condition
+//! whose value is known runs one side only, so the calls on the other side run nothing.
+//!
+//! A value is known when it is a literal or a constant (a `static final` one, or the result of a
+//! method that nothing overrides and that only returns a literal), when it is the same in every
+//! place that gives it, or when it follows from known values by an operation that cannot fail. A
+//! parameter is given by the arguments of every call of its method that can run, a local by its
+//! initializer and every assignment to it in the method, and an instance field by its default,
+//! its initializer and every assignment to it that can run; a parameter is not known when its
+//! method is entered other than by such a call (`main`, the runtime's calls, a constructor run
+//! for a class without one of its own), a local bound by a loop, a `catch` or a pattern is not,
+//! and neither is a field that holds a captured local. `x instanceof T` is known to be false
+//! while no object of a class below `T` is created, when `T` is a class that no value of the
+//! runtime (a string, a box, a builder, an enum constant) can be.
+//!
+//! The walk starts from knowing nothing and learns as it goes, so a value may change: when
+//! another call passes a different argument, or an object of a class below `T` is created, every
+//! method whose code relied on the old value is walked again. A value only goes from unknown to
+//! known and then to varying, and a class, once created, stays so, so the walk ends. What it
+//! ends with is consistent: every call that can run is one that the walk found, with the
+//! arguments it saw, so a parameter holds the value that every such call gives, and so on.
+//!
+//! In BigInteger, `multiply(val)` passes `parallel = false` on to every recursive multiply and
+//! square, and to the field of each `RecursiveOp`, so `forkOrInvoke` never forks, and `join`
+//! never helps another worker of a pool: the program starts no thread.
+
+use super::*;
+
+/// What a place is known to hold: one value, or values that differ. A place that no code has
+/// given a value yet is not in the maps.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Known {
+    Value(i128),
+    Varying,
+}
+
+impl Known {
+    fn of(value: Option<i128>) -> Known {
+        value.map_or(Known::Varying, Known::Value)
+    }
+
+    /// What a place known as `old` holds once it is also given `new`.
+    fn join(old: Option<Known>, new: Known) -> Known {
+        match (old, new) {
+            (None, new) => new,
+            (Some(Known::Value(a)), Known::Value(b)) if a == b => Known::Value(a),
+            _ => Known::Varying,
+        }
+    }
+
+    fn value(self) -> Option<i128> {
+        match self {
+            Known::Value(v) => Some(v),
+            Known::Varying => None,
+        }
+    }
+}
+
+/// The parameters and locals of the method being walked, by name.
+pub(super) type Env = HashMap<String, Known>;
+
+/// What the walk has learned, and who relied on it.
+#[derive(Default)]
+pub(super) struct Knowledge {
+    /// The parameters of each method, by method and position.
+    params: HashMap<(usize, usize), Known>,
+    /// The instance fields, by declaring class and name. A field not here holds its default.
+    fields: HashMap<(usize, String), Known>,
+    /// The fields whose class a write did not tell: none of them is known.
+    unplaced: HashSet<String>,
+    /// The methods whose code read each field.
+    field_readers: HashMap<(usize, String), HashSet<usize>>,
+    /// The methods whose code relied on there being no object of a class below each type.
+    instance_readers: HashMap<usize, HashSet<usize>>,
+    /// The types that no value of the runtime can be and that only classes are below, by type.
+    program_only: HashMap<usize, bool>,
+    /// The parameters and locals of the method being walked (`STATIC`: none).
+    pub(super) env: Env,
+}
+
+/// Whether the walk tracks the values of a place of type `ty`: one of an integer type or
+/// `boolean`.
+pub(super) fn tracked(ty: Type) -> bool {
+    matches!(ty, Type::Int | Type::Long | Type::Short | Type::Byte | Type::Char | Type::Boolean)
+}
+
+impl Walk<'_> {
+    /// The fields that hold captured locals, which constructors set from parameters that the
+    /// translation adds: none of them is known.
+    pub(super) fn captured_fields(&self) {
+        let mut state = self.state.borrow_mut();
+        for (t, decl) in self.class.types.iter().enumerate() {
+            for c in &decl.captures {
+                state.known.fields.insert((t, c.field.clone()), Known::Varying);
+            }
+        }
+    }
+
+    /// Method `target` is entered with `args`, evaluated in method `caller` (`None`: with
+    /// arguments the walk does not see). When that changes what a parameter is known to hold,
+    /// the method is walked again.
+    pub(super) fn pass(&self, caller: usize, target: usize, args: Option<&[Expr]>) {
+        let params = &self.class.methods[target].params;
+        let values: Vec<Known> = match args {
+            Some(args) if args.len() == params.len() => args
+                .iter()
+                .zip(params)
+                .map(|(a, p)| if tracked(p.ty) { Known::of(self.known(caller, a)) } else { Known::Varying })
+                .collect(),
+            _ => vec![Known::Varying; params.len()],
+        };
+        let mut changed = false;
+        {
+            let mut state = self.state.borrow_mut();
+            for (i, v) in values.into_iter().enumerate() {
+                let old = state.known.params.get(&(target, i)).copied();
+                let new = Known::join(old, v);
+                if old != Some(new) {
+                    state.known.params.insert((target, i), new);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.rescan(target);
+        }
+    }
+
+    /// The code of method `m` is given `value` for the field `name` of an object of type `ty`
+    /// (`None`: a value the walk does not track).
+    pub(super) fn write_field(&self, m: usize, ty: Type, name: &str, value: Option<&Expr>) {
+        let known = match value {
+            Some(v) => Known::of(self.known(m, v)),
+            None => Known::Varying,
+        };
+        let Some(owner) = self.field_owner(ty, name) else {
+            self.state.borrow_mut().known.unplaced.insert(name.to_string());
+            return;
+        };
+        self.give_field(owner, name, known);
+    }
+
+    /// The initializer `init` of the field `name` of class `owner` runs.
+    pub(super) fn initialize_field(&self, owner: usize, name: &str, init: &Expr) {
+        let known = Known::of(self.known(STATIC, init));
+        self.give_field(owner, name, known);
+    }
+
+    fn give_field(&self, owner: usize, name: &str, known: Known) {
+        let key = (owner, name.to_string());
+        let readers = {
+            let mut state = self.state.borrow_mut();
+            // A field holds its default until it is first written.
+            let old = Some(*state.known.fields.get(&key).unwrap_or(&Known::Value(0)));
+            let new = Known::join(old, known);
+            if old == Some(new) {
+                return;
+            }
+            state.known.fields.insert(key.clone(), new);
+            state.known.field_readers.get(&key).cloned().unwrap_or_default()
+        };
+        for m in readers {
+            self.rescan(m);
+        }
+    }
+
+    /// An object of class `c` is created: the methods that relied on there being none of a type
+    /// above it are walked again.
+    pub(super) fn created(&self, c: usize) {
+        let mut readers = HashSet::new();
+        {
+            let state = self.state.borrow();
+            for t in &self.supers[c] {
+                readers.extend(state.known.instance_readers.get(t).into_iter().flatten().copied());
+            }
+        }
+        for m in readers {
+            self.rescan(m);
+        }
+    }
+
+    /// Method `m` is walked again, on every object that it was walked on.
+    fn rescan(&self, m: usize) {
+        let mut state = self.state.borrow_mut();
+        let contexts = state.contexts.get(&m).cloned().unwrap_or_default();
+        for ctx in contexts {
+            state.work.push((m, ctx));
+        }
+    }
+
+    /// The class that declares the instance field `name` of an object of type `ty`.
+    fn field_owner(&self, ty: Type, name: &str) -> Option<usize> {
+        let mut at = self.class.class_index(ty);
+        while let Some(t) = at {
+            if self.class.types[t].fields.iter().any(|f| f.name == name) {
+                return Some(t);
+            }
+            at = self.class.types[t].extends;
+        }
+        None
+    }
+
+    /// The parameters and locals of method `m` (see the module's comment).
+    pub(super) fn env(&self, m: usize) -> Env {
+        let method = &self.class.methods[m];
+        let mut env = Env::new();
+        {
+            let state = self.state.borrow();
+            for (i, p) in method.params.iter().enumerate() {
+                let known = state.known.params.get(&(m, i)).copied().unwrap_or(Known::Varying);
+                env.insert(p.name.clone(), if tracked(p.ty) { known } else { Known::Varying });
+            }
+        }
+        // Each local starts with no value and gains those of what gives it one (an expression,
+        // or a value that the walk does not know) until none changes.
+        let env = RefCell::new(env);
+        let changed = std::cell::Cell::new(true);
+        let give = |name: &str, source: Option<&Expr>| {
+            let known = match source {
+                Some(e) => Known::of(self.known_in(m, e, &env.borrow())),
+                None => Known::Varying,
+            };
+            let old = env.borrow().get(name).copied();
+            let new = Known::join(old, known);
+            if old != Some(new) {
+                env.borrow_mut().insert(name.to_string(), new);
+                changed.set(true);
+            }
+        };
+        let note_expr = |x: &Expr| match &x.kind {
+            ExprKind::Assign { op: None, target: Place::Var(name), value } => give(name, Some(value)),
+            ExprKind::Assign { target: Place::Var(name), .. }
+            | ExprKind::IncDec { target: Place::Var(name), .. }
+            | ExprKind::InstanceOf { binding: Some(name), .. } => give(name, None),
+            _ => {}
+        };
+        let note_stmt = |s: &Stmt| match s {
+            Stmt::Local { ty, name, .. } if !tracked(*ty) => give(name, None),
+            Stmt::Local { name, init: Some(init), .. } => give(name, Some(init)),
+            Stmt::ForEach { name, .. } => give(name, None),
+            Stmt::Try { catches, .. } => catches.iter().for_each(|c| give(&c.name, None)),
+            _ => {}
+        };
+        while changed.replace(false) {
+            for s in &method.body {
+                visit_stmt(s, &mut |e| visit_expr(e, &mut |x| note_expr(x)), &mut |s| note_stmt(s));
+            }
+        }
+        env.into_inner()
+    }
+
+    /// The expressions of method `m` that cannot run, by id: the side of each branch on a known
+    /// condition that it does not take, and the right operand of an `&&` or `||` that the left
+    /// one decides.
+    pub(super) fn dead(&self, m: usize) -> HashSet<ExprId> {
+        let dead = RefCell::new(HashSet::new());
+        let mark_expr = |e: &Expr| {
+            visit_expr(e, &mut |x| {
+                dead.borrow_mut().insert(x.id);
+            })
+        };
+        let mark_stmt = |s: &Stmt| visit_stmt(s, &mut |e| mark_expr(e), &mut |_| {});
+        let known = |e: &Expr| self.known(m, e);
+        for s in &self.class.methods[m].body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| match &x.kind {
+                        ExprKind::Binary(BinOp::And, l, r) if known(l) == Some(0) => mark_expr(r),
+                        ExprKind::Binary(BinOp::Or, l, r) if known(l).is_some_and(|v| v != 0) => mark_expr(r),
+                        ExprKind::Conditional(c, a, b) => match known(c) {
+                            Some(0) => mark_expr(a),
+                            Some(_) => mark_expr(b),
+                            None => {}
+                        },
+                        _ => {}
+                    })
+                },
+                &mut |s| match s {
+                    Stmt::If { cond, then, otherwise } => match known(cond) {
+                        Some(0) => mark_stmt(then),
+                        Some(_) => otherwise.iter().for_each(|o| mark_stmt(o)),
+                        None => {}
+                    },
+                    Stmt::While { cond, body } if known(cond) == Some(0) => mark_stmt(body),
+                    Stmt::For { cond: Some(cond), update, body, .. } if known(cond) == Some(0) => {
+                        mark_stmt(body);
+                        update.iter().for_each(&mark_expr);
+                    }
+                    _ => {}
+                },
+            );
+        }
+        dead.into_inner()
+    }
+
+    /// The value of `e` in method `m` (`STATIC`: in an initializer), when it is known.
+    pub(super) fn known(&self, m: usize, e: &Expr) -> Option<i128> {
+        if m == STATIC {
+            return self.known_in(STATIC, e, &Env::new());
+        }
+        let env = std::mem::take(&mut self.state.borrow_mut().known.env);
+        let value = self.known_in(m, e, &env);
+        self.state.borrow_mut().known.env = env;
+        value
+    }
+
+    /// `known` with the parameters and locals `env`. Code in an initializer (`m` is `STATIC`)
+    /// is walked once, so its values are only those that never change: literals and constants.
+    fn known_in(&self, m: usize, e: &Expr, env: &Env) -> Option<i128> {
+        let class = self.class;
+        let int = |e: &Expr| self.known_in(m, e, env);
+        let v = match &e.kind {
+            ExprKind::Int(v) => i128::from(*v),
+            ExprKind::Long(v) => i128::from(*v),
+            ExprKind::Char(v) => i128::from(*v),
+            ExprKind::Bool(b) => i128::from(*b),
+            ExprKind::Var(name) => env.get(name.as_str())?.value()?,
+            ExprKind::Static { class: owner, name } => {
+                let field = class.types.get(*owner)?.statics.iter().find(|f| f.name == *name)?;
+                if !field.constant || !tracked(field.ty) {
+                    return None;
+                }
+                match field.init.as_ref()?.kind {
+                    ExprKind::Int(v) => i128::from(v),
+                    ExprKind::Long(v) => i128::from(v),
+                    ExprKind::Char(v) => i128::from(v),
+                    ExprKind::Bool(b) => i128::from(b),
+                    _ => return None,
+                }
+            }
+            ExprKind::Field { object, name } if m != STATIC && tracked(e.ty) => {
+                let owner = self.field_owner(object.ty, name)?;
+                let key = (owner, name.clone());
+                let mut state = self.state.borrow_mut();
+                if state.known.unplaced.contains(name) {
+                    return None;
+                }
+                state.known.field_readers.entry(key.clone()).or_default().insert(m);
+                state.known.fields.get(&key).unwrap_or(&Known::Value(0)).value()?
+            }
+            ExprKind::InstanceOf { ty, .. } if m != STATIC => {
+                let t = class.class_index(*ty)?;
+                if !self.program_only(t) {
+                    return None;
+                }
+                let mut state = self.state.borrow_mut();
+                state.known.instance_readers.entry(t).or_default().insert(m);
+                if state.live.instantiated.iter().any(|&c| self.supers[c].contains(&t)) {
+                    return None;
+                }
+                0
+            }
+            // A method that nothing overrides and that only returns a literal.
+            ExprKind::MethodCall { resolved: Some(r), .. } | ExprKind::Call { resolved: Some(r), .. }
+                if !class.hierarchy.is_overridden(*r) =>
+            {
+                let [Stmt::Return(Some(value), _)] = &class.methods[*r].body[..] else { return None };
+                if !matches!(value.kind, ExprKind::Int(_) | ExprKind::Long(_) | ExprKind::Bool(_)) {
+                    return None;
+                }
+                return self.known_in(STATIC, value, &Env::new());
+            }
+            ExprKind::Assign { op: None, target: Place::Var(_), value } => return int(value),
+            ExprKind::Cast(to, x) if tracked(*to) && tracked(x.ty) => {
+                let v = int(x)?;
+                return in_range(*to, v).then_some(v);
+            }
+            ExprKind::Unary(UnOp::Not, x) => i128::from(int(x)? == 0),
+            ExprKind::Conditional(c, a, b) => return if int(c)? != 0 { int(a) } else { int(b) },
+            // Either operand that is false decides an `&&`, and either that is true an `||`.
+            ExprKind::Binary(BinOp::And, l, r) => match (int(l), int(r)) {
+                (Some(0), _) | (_, Some(0)) => 0,
+                (Some(_), Some(_)) => 1,
+                _ => return None,
+            },
+            ExprKind::Binary(BinOp::Or, l, r) => match (int(l), int(r)) {
+                (Some(a), _) | (_, Some(a)) if a != 0 => 1,
+                (Some(_), Some(_)) => 0,
+                _ => return None,
+            },
+            ExprKind::Binary(op, l, r) => {
+                let (a, b) = (int(l)?, int(r)?);
+                match op {
+                    BinOp::Add => a + b,
+                    BinOp::Sub => a - b,
+                    BinOp::BitAnd => a & b,
+                    BinOp::BitOr => a | b,
+                    BinOp::BitXor => a ^ b,
+                    BinOp::Eq => i128::from(a == b),
+                    BinOp::Ne => i128::from(a != b),
+                    BinOp::Lt => i128::from(a < b),
+                    BinOp::Le => i128::from(a <= b),
+                    BinOp::Gt => i128::from(a > b),
+                    BinOp::Ge => i128::from(a >= b),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        // Java's arithmetic wraps; within its type's range the value is exact.
+        in_range(e.ty, v).then_some(v)
+    }
+
+    /// Whether no value of the runtime can be of type `t`, and every type below it is a class:
+    /// then `instanceof t` is true only of objects that some `new` created.
+    fn program_only(&self, t: usize) -> bool {
+        if let Some(&only) = self.state.borrow().known.program_only.get(&t) {
+            return only;
+        }
+        let class = self.class;
+        let only = class.types[t].name != "java.lang.AbstractStringBuilder"
+            && (0..class.types.len())
+                .filter(|&s| self.supers[s].contains(&t))
+                .all(|s| class.types[s].kind == TypeKind::Class);
+        self.state.borrow_mut().known.program_only.insert(t, only);
+        only
+    }
+}
+
+/// Whether `v` is a value of type `ty`.
+fn in_range(ty: Type, v: i128) -> bool {
+    let (low, high): (i128, i128) = match ty {
+        Type::Int => (i32::MIN.into(), i32::MAX.into()),
+        Type::Long => (i64::MIN.into(), i64::MAX.into()),
+        Type::Short => (i16::MIN.into(), i16::MAX.into()),
+        Type::Byte => (i8::MIN.into(), i8::MAX.into()),
+        Type::Char => (0, u16::MAX.into()),
+        Type::Boolean => (0, 1),
+        _ => return false,
+    };
+    (low..=high).contains(&v)
+}

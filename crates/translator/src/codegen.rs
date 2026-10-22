@@ -669,6 +669,11 @@ impl<'a> Gen<'a> {
         if self.display {
             used.insert("f".into());
         }
+        // A constructor builds its object in `obj` (`objects.rs`), which a parameter such as
+        // `CleanerImpl.PhantomCleanableRef`'s `obj` must not shadow.
+        if m.is_ctor {
+            used.insert("obj".into());
+        }
         self.locals.clear();
         for name in java_names {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.locals.entry(name) {
