@@ -55,7 +55,7 @@ fn check_copy<T>(
 
 /// The positions of a copy as `usize`, or the message of the `ArrayIndexOutOfBoundsException`
 /// that HotSpot throws for them.
-fn copy_bounds<T>(
+pub(crate) fn copy_bounds<T>(
     src_len: usize,
     src_pos: i32,
     dest_len: usize,

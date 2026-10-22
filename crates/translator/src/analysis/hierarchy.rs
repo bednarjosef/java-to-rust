@@ -226,6 +226,16 @@ pub fn flows(
                 edges.insert((s, t));
             }
         }
+        // A `System.arraycopy` between arrays of classes: the objects of the source's element class
+        // are values of the destination's, where they pass the check (`lower::arraycopy_classes`).
+        ExprKind::Builtin(Builtin::Native(Native::ArrayCopy), args) => {
+            if let (Type::Array(s), Type::Array(d)) = (args[0].ty, args[2].ty)
+                && let (Type::Class(..), Type::Class(..)) = (*s, *d)
+                && let (Some(s), Some(d)) = (index(*s), index(*d))
+            {
+                edges.insert((s, d));
+            }
+        }
         // `super.m()`: `this` as a value of the superclass.
         ExprKind::This => {
             if let Some(t) = index(e.ty)

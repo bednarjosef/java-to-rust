@@ -37,6 +37,7 @@ use std::cell::{Cell, RefCell};
 mod annotation_objects;
 mod annotation_presence;
 mod argument_order;
+mod arraycopy_classes;
 mod arrays;
 mod boxing;
 mod by_name;
@@ -65,6 +66,7 @@ mod program;
 mod prologues;
 mod recreate;
 mod reflection;
+mod regex;
 mod switch;
 mod sync;
 mod system;
@@ -1386,11 +1388,11 @@ impl<'t> Lowering<'t> {
                 return Ok(self.object_array_result(node, kind));
             }
             // `String`'s own `join` of the first `size` elements between a prefix and a suffix,
-            // which `StringJoiner` reaches through `SharedSecrets` (`String` is the runtime's). Its
-            // `String[]` of elements is read as one where it is an `Object[]`.
+            // which `StringJoiner` reaches through `SharedSecrets` (`String` is the runtime's).
             ("jdk.internal.access.JavaLangAccess", "join") if args.len() == 5 => {
-                let args = self.string_array_args(node, args, false, false)?;
-                return Ok(ExprKind::Builtin(Builtin::String(StringOp::JoinRange), args));
+                // Its elements, a `String[]` that may be an `Object[]` (`covariant`).
+                args = self.string_array_args(node, std::mem::take(&mut args), false, false)?;
+                Builtin::String(StringOp::JoinRange)
             }
             // What the JVM's `JavaLangAccess` does, which a translated program does not have
             // (`program::TRANSLATED_LANG_ACCESS`). Its object, a static field, reads nothing else.

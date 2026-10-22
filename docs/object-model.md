@@ -498,7 +498,12 @@ and a `String[]` and an `Object[]` are copied element by element, where an eleme
 `String` throws `ArrayStoreException` after the elements before it are stored. Other mismatches
 throw `ArrayStoreException` with HotSpot's message for them ("arraycopy: type mismatch: can not copy
 int[] into long[]", "arraycopy: source type java.lang.String is not an array"). A pair of arrays of
-another element class is rejected at translation.
+two other element classes is copied as HotSpot copies it (`codegen::arraycopy_classes`): when the
+source's class is a subtype of the destination's, every element is stored; otherwise each element is
+checked as it is stored, where null always passes and a non-null element must be an instance of the
+destination's class. The first element that fails throws `ArrayStoreException` after the elements
+before it are stored (`runtime::try_copy_refs`). The message names the two element classes by their
+static types, since a typed array holds no runtime class of its own.
 
 A value read back out of an erased container is a cast from `Object` that may be null, so an
 enum read back is an `Option` of the enum.

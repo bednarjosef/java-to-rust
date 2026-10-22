@@ -60,6 +60,7 @@ use switch::{Frame, Kind};
 
 mod array_writes;
 mod arraycopy;
+mod arraycopy_classes;
 mod arrays;
 mod java_arrays;
 mod java_objects;

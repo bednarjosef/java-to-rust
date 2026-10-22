@@ -250,7 +250,9 @@ Specific cases:
   `split`, `matches`, `replaceAll` or `replaceFirst` does not block the program. A replacement
   that is not such a literal may throw `IllegalArgumentException` or `IndexOutOfBoundsException`,
   which a `catch` sees with Java's message. A non-constant pattern may throw
-  `PatternSyntaxException`, which is not a standard class, so catching it is rejected.
+  `PatternSyntaxException`, which is not a standard class, so catching it is rejected, except in
+  a program translated with the JDK's sources, where the JDK's own `Pattern` runs such a call
+  (`lower/regex.rs`) and throws it as Java does.
 - **Formats**: a format that is not a constant may throw the `IllegalFormatException` subclasses,
   which are standard classes. The runtime builds them from the message and a `raised` flag (Java's
   constructors take the flags or width instead); a raised one's getters answer null or zero.

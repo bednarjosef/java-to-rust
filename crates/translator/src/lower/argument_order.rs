@@ -23,20 +23,25 @@ use std::collections::HashSet;
 
 /// The prefix of the locals that hold a receiver; `$` keeps them apart from the program's names.
 pub(crate) const RECEIVER: &str = "receiver$";
-const ARGUMENT: &str = "argument$";
+pub(super) const ARGUMENT: &str = "argument$";
 
 /// Whether `name` is a local that holds a call's receiver or argument.
 pub(crate) fn held_local(name: &str) -> bool {
     name.starts_with(RECEIVER) || name.starts_with(ARGUMENT)
 }
 
-/// The call or store of a block that the rewrite made (see the module's comment), which computes
-/// its arguments first; `None` for any other expression.
+/// The call or store of a block that the rewrite made (see the module's comment), or that
+/// `lower::regex` makes, which computes its arguments first; `None` for any other expression.
 pub(crate) fn ordered_call(e: &Expr) -> Option<&Expr> {
     let ExprKind::Switch { selector, cases } = &e.kind else { return None };
     let ([case], ExprKind::Int(0)) = (&cases[..], &selector.kind) else { return None };
     let (Stmt::Yield(call) | Stmt::Expr(call), held) = case.body.split_last()? else { return None };
-    let holds = |s: &Stmt| matches!(s, Stmt::Local { name, .. } if held_local(name));
+    // The receiver's check of a call that the JDK's `Pattern` runs (`lower::regex`) too.
+    let holds = |s: &Stmt| match s {
+        Stmt::Local { name, .. } => held_local(name),
+        Stmt::Expr(e) => matches!(e.kind, ExprKind::Builtin(Builtin::String(StringOp::Receiver(..)), _)),
+        _ => false,
+    };
     (matches!(case.labels[..], [CaseLabel::Default]) && !held.is_empty() && held.iter().all(holds))
         .then_some(call)
 }

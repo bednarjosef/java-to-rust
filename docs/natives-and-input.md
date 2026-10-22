@@ -105,8 +105,9 @@ does not reach the native: it is lowered to a new array of `n` nulls of `a`'s ty
 
 The natives of the runtime's own classes (`System.arraycopy`, `Object.hashCode`,
 `System.identityHashCode`, the bit conversions of `Double` and `Float`, the clocks,
-`availableProcessors`, `String.intern`) are in `runtime/src/natives.rs`. The identity hash is
-derived from the object's address, which an `Rc` never changes: stable for the object's life and
+`availableProcessors`, `String.intern`) are in `runtime/src/natives.rs`; the checked copy between
+arrays of two classes, when one side is a plain `Vec`, is `try_copy_refs` in
+`runtime/src/copy_refs.rs`. The identity hash is derived from the object's address, which an `Rc` never changes: stable for the object's life and
 different on every run, as in Java. `String.intern()` is the string itself: strings are values,
 and `==` on two strings stays rejected in the program's own code unless Java interns both sides
 (constants, `intern()` calls, methods returning only those).

@@ -12,9 +12,18 @@ fn object_checked(object: &Expr) -> bool {
 }
 
 /// Whether a `System.arraycopy` has an array of objects as its source, which may be an array of
-/// another type than the destination (the `Object`-typed copy of `codegen/natives.rs`).
+/// another type than the destination (the `Object`-typed copy of `codegen/natives.rs`), or an
+/// array of classes whose element type differs from the destination's, and is not `Object`
+/// (`codegen/arraycopy_classes.rs`).
 fn object_copy(args: &[Expr]) -> bool {
-    matches!(args.first().map(|a| &a.ty), Some(Type::Class(name, _)) if *name == OBJECT)
+    match (args.first().map(|a| &a.ty), args.get(2).map(|a| &a.ty)) {
+        (Some(Type::Class(name, _)), _) => *name == OBJECT,
+        (Some(Type::Array(s)), Some(Type::Array(d))) => match (&**s, &**d) {
+            (Type::Class(..), Type::Class(name, _)) => s != d && *name != OBJECT,
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Whether every object that a value of type `s` may be (`Facts::flows`, which decides the

@@ -609,6 +609,9 @@ impl<'a> Gen<'a> {
         if matches!(src.ty, Type::Class(name, _) if name == OBJECT) {
             return self.object_array_copy(args, id);
         }
+        if let Some(code) = self.checked_class_copy(args, id) {
+            return code;
+        }
         let plain_name = |g: &Self, e: &Expr| match &e.kind {
             ExprKind::Var(name) if g.plain(name).is_some() => Some(name.clone()),
             _ => None,
