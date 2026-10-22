@@ -264,7 +264,8 @@ thread groups behave as Java's; `java.lang.Thread` is `crates/translator/java/Th
 the runtime's natives (`thread.rs`). In a program that can start a thread, the objects threads
 may share are `Arc<java::Locked<C>>` (`Arc<C>` when immutable), arrays that threads may reach are
 `java::SharedArray`,
-and statics are process-wide; a program without threads translates exactly as before.
+and the statics that a started thread can touch are process-wide; a program without threads
+translates exactly as before.
 `synchronized`, `wait`, `notify`, `notifyAll` and `holdsLock` are Java's, kept only where the
 program can tell. In a whole program `java.util.concurrent` (atomics, `ConcurrentHashMap`,
 `ForkJoinPool`, `LockSupport`) and `ThreadLocal` are the JDK's translated code.

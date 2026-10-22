@@ -306,6 +306,10 @@ pub struct Class {
     /// a class in a `ClassCastException` ("module java.base of loader 'bootstrap'"). A package
     /// that is not here is in the unnamed module of the system class loader.
     pub module_labels: std::collections::HashMap<String, String>,
+    /// The types whose statics code that a started thread runs may read or write, or whose static
+    /// initialization it may run (`analysis::live_methods`); `None` when that is not known, and
+    /// then every static may be. Only in a program that starts a thread.
+    pub thread_statics: Option<std::collections::HashSet<usize>>,
 }
 
 /// An assumption of the translation at a place of the program: the method (index into

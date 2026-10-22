@@ -18,6 +18,7 @@
 
 use super::arraycopy::CopyCall;
 use super::*;
+use crate::analysis::{ENUM_COMPARE_NULL, compare_null_message};
 use std::collections::BTreeSet;
 
 /// An item of the enum of a type that the code being generated uses.
@@ -1768,8 +1769,29 @@ impl<'a> Gen<'a> {
         let from = format!("{}::cast_class(&b)", self.runtime("CastSource"));
         let fail = failed(self, from);
         if optional {
-            let other = format!("{}(b.as_ref())", self.runtime("non_null"));
-            return format!("match {place} {{ {pattern} => {compare}, b => {{ let b = {other}; {fail} }} }}");
+            // A null argument fails inside the class's own `compareTo`, with that one's message: a
+            // string's or a box's as a `Result` that the `?` of `compare_to` passes on, where the
+            // group gives a `Result`. Otherwise (an enum's, or a group of only `i32`s) it is
+            // thrown, which a `java::catching` around the call turns into the exception a
+            // `catch` sees. Any other class still fails the cast.
+            let other = match self.runtime_of(c) {
+                Some(ty) if self.facts.throwing.contains(&r) => {
+                    let message = compare_null_message(ty.unboxed());
+                    let checked =
+                        format!("{}(b.as_ref(), {message:?})?", self.runtime("try_non_null_message"));
+                    format!("{{ let b = {checked}; {fail} }}")
+                }
+                _ => {
+                    let message = match self.runtime_of(c) {
+                        Some(ty) => compare_null_message(ty.unboxed()),
+                        None => ENUM_COMPARE_NULL.to_string(),
+                    };
+                    let throw =
+                        format!("{}(\"java.lang.NullPointerException\", {message:?})", self.runtime("throw"));
+                    format!("{{ let Some(b) = b.as_ref() else {{ {throw} }}; {fail} }}")
+                }
+            };
+            return format!("match {place} {{ {pattern} => {compare}, b => {other} }}");
         }
         format!("match {place} {{ {pattern} => {compare}, b => {fail} }}")
     }

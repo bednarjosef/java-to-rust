@@ -73,6 +73,9 @@ pub struct LiveMethods {
     pub touched: HashSet<usize>,
     /// The calls that lowering left unresolved in code that can run: each rejects the program.
     pub unresolved: Vec<Error>,
+    /// The types whose statics code that a started thread runs may touch (`Class::thread_statics`):
+    /// `None` when the program starts no thread, or the facts do not tell.
+    pub thread_statics: Option<HashSet<usize>>,
 }
 
 impl LiveMethods {
@@ -112,7 +115,9 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
                 constructed: HashSet::new(),
                 touched: HashSet::new(),
                 unresolved: Vec::new(),
+                thread_statics: None,
             },
+            built: HashSet::new(),
         }),
     };
     walk.captured_fields();
@@ -125,27 +130,8 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
         walk.code(STATIC, STATIC, e);
         walk.handed(STATIC, STATIC, e);
     }
-    loop {
-        let next = walk.state.borrow_mut().work.pop();
-        let Some((m, ctx)) = next else { break };
-        let env = walk.env(m);
-        walk.state.borrow_mut().known.env = env;
-        let mut dead = walk.dead(m);
-        dead.extend(walk.dead_catches(m));
-        let code = |e: &Expr| {
-            visit_expr(e, &mut |x| {
-                if dead.contains(&x.id) { walk.unresolved(x) } else { walk.expr(m, ctx, x) }
-            })
-        };
-        let statement = |s: &Stmt| match s {
-            Stmt::Throw(e) if dead.contains(&e.id) => {}
-            _ => walk.statement(m, ctx, s),
-        };
-        for s in &class.methods[m].body {
-            visit_stmt(s, &mut |e| code(e), &mut |s| statement(s));
-        }
-        walk.state.borrow_mut().known.env.clear();
-    }
+    walk.run();
+    let thread_statics = if walk.state.borrow().unknown.is_none() { walk.thread_statics() } else { None };
     let Walk { state, .. } = walk;
     let State { unknown, mut live, .. } = state.into_inner();
     if let Some(unknown) = unknown {
@@ -155,7 +141,123 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
     touched.extend(live.methods.iter().map(|&m| class.methods[m].class));
     touched.extend(live.constructed.iter().copied());
     live.touched = touched;
+    live.thread_statics = thread_statics;
     Ok(live)
+}
+
+impl Walk<'_> {
+    /// Walks the methods on the work list, and those they reach, until none is left.
+    fn run(&self) {
+        let class = self.class;
+        loop {
+            let next = self.state.borrow_mut().work.pop();
+            let Some((m, ctx)) = next else { break };
+            let env = self.env(m);
+            self.state.borrow_mut().known.env = env;
+            let mut dead = self.dead(m);
+            dead.extend(self.dead_catches(m));
+            let code = |e: &Expr| {
+                visit_expr(e, &mut |x| {
+                    if dead.contains(&x.id) { self.unresolved(x) } else { self.expr(m, ctx, x) }
+                })
+            };
+            let statement = |s: &Stmt| match s {
+                Stmt::Throw(e) if dead.contains(&e.id) => {}
+                _ => self.statement(m, ctx, s),
+            };
+            for s in &class.methods[m].body {
+                visit_stmt(s, &mut |e| code(e), &mut |s| statement(s));
+            }
+            self.state.borrow_mut().known.env.clear();
+        }
+    }
+
+    /// The types whose statics code that a started thread runs may read or write, or whose
+    /// static initialization it may run: a second walk, once this one is done, from what the
+    /// runtime runs on a thread that `Thread.start()` starts (the call of `run` in
+    /// `Native::ThreadStart`), from the dispatch of an exception that ends a thread
+    /// (`Native::InstallUncaught`) and from the exceptions that the runtime raises. `None` when
+    /// the program starts no thread, or when the facts do not tell what that walk needs.
+    ///
+    /// Why the second walk is sound. It starts from this walk's knowledge, which holds for every
+    /// call and write of running code, the started threads' included (`known`), and with the
+    /// classes that this walk found objects of, of which a thread may be handed any: so it
+    /// follows every call that a thread's code can make. It starts with no type initialized, as a
+    /// thread may be the first to touch a class: so it runs the static initialization of every
+    /// type that the thread's code reads or writes a static of, calls a static method or
+    /// constructor of, or names an enum constant of; and it runs the field initializers of every
+    /// class that the thread's code creates an object of (`State::built`).
+    fn thread_statics(&self) -> Option<HashSet<usize>> {
+        let class = self.class;
+        let main = self.state.borrow();
+        let mut roots: Vec<(usize, &Expr)> = Vec::new();
+        let mut starts = false;
+        for &m in &main.live.methods {
+            for s in &class.methods[m].body {
+                visit_stmt(
+                    s,
+                    &mut |e| {
+                        visit_expr(e, &mut |x| match &x.kind {
+                            ExprKind::Builtin(Builtin::Native(Native::ThreadStart), args) => {
+                                starts = true;
+                                roots.extend(args.last().map(|run| (m, run)));
+                            }
+                            ExprKind::Builtin(Builtin::Native(Native::InstallUncaught), args) => {
+                                roots.extend(args.iter().map(|a| (m, a)))
+                            }
+                            _ => {}
+                        })
+                    },
+                    &mut |_| {},
+                );
+            }
+        }
+        if !starts {
+            return None;
+        }
+        let thread = Walk {
+            class,
+            values: self.values,
+            glue: self.glue.clone(),
+            supers: self.supers.clone(),
+            index: self.index.clone(),
+            state: RefCell::new(State {
+                work: Vec::new(),
+                seen: HashSet::new(),
+                waiting: HashMap::new(),
+                contexts: HashMap::new(),
+                catching: HashMap::new(),
+                glued: HashSet::new(),
+                known: main.known.clone(),
+                unknown: None,
+                live: LiveMethods {
+                    methods: HashSet::new(),
+                    initialized: HashSet::new(),
+                    instantiated: main.live.instantiated.clone(),
+                    constructed: main.live.constructed.clone(),
+                    touched: HashSet::new(),
+                    unresolved: Vec::new(),
+                    thread_statics: None,
+                },
+                built: HashSet::new(),
+            }),
+        };
+        for e in &class.raised {
+            thread.code(STATIC, STATIC, e);
+            thread.handed(STATIC, STATIC, e);
+        }
+        for (m, root) in roots {
+            for &ctx in main.contexts.get(&m).into_iter().flatten() {
+                let env = thread.env(m);
+                thread.state.borrow_mut().known.env = env;
+                thread.code(m, ctx, root);
+                thread.state.borrow_mut().known.env.clear();
+            }
+        }
+        thread.run();
+        let state = thread.state.into_inner();
+        state.unknown.is_none().then_some(state.live.initialized)
+    }
 }
 
 /// Gives every method that cannot run a body that never runs (`Builtin::NoObject`), and returns
@@ -264,6 +366,10 @@ struct State {
     /// The first thing that the walk met that the facts do not answer.
     unknown: Option<String>,
     live: LiveMethods,
+    /// The classes whose field initializers the walk has run: those of `LiveMethods::instantiated`,
+    /// except in the walk of the started threads (`thread_statics`), which starts with the
+    /// objects of the first walk and runs the initializers of those that its code creates.
+    built: HashSet<usize>,
 }
 
 impl Walk<'_> {
@@ -336,9 +442,28 @@ impl Walk<'_> {
     /// and the initializers of its instance fields and of the types above it.
     fn instantiate(&self, c: usize) {
         self.initialize(c);
-        if !self.state.borrow_mut().live.instantiated.insert(c) {
+        let (first, built) = {
+            let mut state = self.state.borrow_mut();
+            (state.live.instantiated.insert(c), state.built.insert(c))
+        };
+        if first {
+            self.first_object(c);
+        }
+        if !built {
             return;
         }
+        for &t in &self.supers[c] {
+            for field in &self.class.types[t].fields {
+                if let Some(init) = &field.init {
+                    self.code(STATIC, c, init);
+                    self.initialize_field(t, &field.name, init);
+                }
+            }
+        }
+    }
+
+    /// The first object of the concrete class `c` is created: what waited for one can run.
+    fn first_object(&self, c: usize) {
         // The `catch` clauses of a type above it can run now.
         let woken: Vec<usize> = {
             let mut state = self.state.borrow_mut();
@@ -357,14 +482,6 @@ impl Walk<'_> {
         let waiting = self.state.borrow_mut().waiting.remove(&c).unwrap_or_default();
         for m in waiting {
             self.reach(m, c);
-        }
-        for &t in &self.supers[c] {
-            for field in &self.class.types[t].fields {
-                if let Some(init) = &field.init {
-                    self.code(STATIC, c, init);
-                    self.initialize_field(t, &field.name, init);
-                }
-            }
         }
     }
 

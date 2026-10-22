@@ -60,7 +60,7 @@ impl Known {
 pub(super) type Env = HashMap<String, Known>;
 
 /// What the walk has learned, and who relied on it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Knowledge {
     /// The parameters of each method, by method and position.
     params: HashMap<(usize, usize), Known>,
