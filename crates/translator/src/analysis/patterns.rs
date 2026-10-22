@@ -213,6 +213,8 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
 const VALUE_SHORTCUTS: &[(&str, &str)] = &[
     ("java.util.Arrays", "deepEquals"),
     ("java.text.DecimalFormatSymbols", "initializeCurrency"),
+    // A silent difference from Java: an equal value in another box, stored by another thread
+    // between the read and the compare-and-set, makes it succeed here where Java's fails.
     ("java.util.concurrent.ConcurrentSkipListMap.Node", "compareAndSetVal"),
 ];
 
