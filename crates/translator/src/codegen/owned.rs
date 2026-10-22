@@ -289,8 +289,10 @@ impl<'a> Gen<'a> {
             }),
             _ => false,
         };
-        let once = rest.iter().any(|s| assigns_once(s) || once_per_case(s))
-            && rest.iter().filter(|s| assigns_stmt(s, name)).count() == 1;
+        // The one statement that assigns it does so once (a later switch that does not assign it
+        // at all, as after javac's `modifiersOpt` loop, is not that statement).
+        let assigning: Vec<&Stmt> = rest.iter().filter(|s| assigns_stmt(s, name)).collect();
+        let once = matches!(assigning[..], [s] if assigns_once(s) || once_per_case(s));
         if !once {
             return self.local_is_mut(ty, name, rest);
         }
