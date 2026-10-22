@@ -1,0 +1,130 @@
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+
+// Reflection by name over the program's classes: a class found by a computed name, its
+// constructors, methods and fields looked up by name and called, read and written, inherited
+// methods that dispatch to an override, and the exceptions of a name that is not there.
+public class ReflectionTable {
+    public static class Greeter {
+        public String greeting = "hello";
+        private int count;
+        public static int created;
+
+        public Greeter() {
+            created++;
+        }
+
+        public Greeter(String greeting, int count) {
+            this.greeting = greeting;
+            this.count = count;
+            created++;
+        }
+
+        public String greet(String name) {
+            count++;
+            return greeting + ", " + name + " #" + count;
+        }
+
+        public static int twice(int x) {
+            return 2 * x;
+        }
+
+        private long secret() {
+            return 42L;
+        }
+
+        public void reset() {
+            count = 0;
+        }
+    }
+
+    public static class LoudGreeter extends Greeter {
+        public String greet(String name) {
+            return super.greet(name).toUpperCase();
+        }
+    }
+
+    interface Shape {
+        double area();
+    }
+
+    public static class Square implements Shape {
+        public double side = 2;
+
+        public double area() {
+            return side * side;
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        Class<?> c = Class.forName(args.length > 0 ? args[0] : "ReflectionTable$Greeter");
+        Object g = c.getConstructor().newInstance();
+        Method greet = c.getMethod("greet", String.class);
+        Method twice = c.getMethod("twice", int.class);
+        System.out.println(greet.invoke(g, "world"));
+        System.out.println(greet.invoke(g, "again"));
+        System.out.println(greet.getName() + " " + greet.getReturnType().getName() + " "
+                + greet.getParameterCount() + " " + greet.getModifiers() + " " + twice.getModifiers());
+        System.out.println(greet);
+        System.out.println(twice.invoke(null, 21));
+        Method secret = c.getDeclaredMethod("secret");
+        secret.setAccessible(true);
+        System.out.println(secret.invoke(g));
+        Constructor<?> two = c.getConstructor(String.class, int.class);
+        Object made = two.newInstance("hi", 10);
+        System.out.println(greet.invoke(made, "you"));
+        Field greeting = c.getField("greeting");
+        System.out.println(greeting.get(made));
+        greeting.set(made, "hey");
+        System.out.println(greet.invoke(made, "there"));
+        Field count = c.getDeclaredField("count");
+        count.setAccessible(true);
+        System.out.println(count.getInt(made) + " " + count.getType());
+        count.setInt(made, 100);
+        System.out.println(greet.invoke(made, "later"));
+        System.out.println(c.getField("created").get(null));
+        System.out.println(c.getDeclaredFields().length);
+
+        Class<?> loud = Class.forName("ReflectionTable$LoudGreeter");
+        Object l = loud.getDeclaredConstructor().newInstance();
+        System.out.println(greet.invoke(l, "dispatch"));
+        String which = args.length > 0 ? args[0] : "reset";
+        System.out.println(loud.getMethod(which).getDeclaringClass().getSimpleName());
+        Shape s = (Shape) Class.forName("ReflectionTable$Square").getDeclaredConstructor().newInstance();
+        System.out.println(Shape.class.getMethod("area").invoke(s));
+        System.out.println(Square.class.getField("side").getDouble(s));
+
+        try {
+            Class.forName("ReflectionTable$Missing");
+        } catch (ClassNotFoundException e) {
+            System.out.println("no class");
+        }
+        try {
+            c.getMethod("absent");
+        } catch (NoSuchMethodException e) {
+            System.out.println("no method");
+        }
+        try {
+            c.getField("count");
+        } catch (NoSuchFieldException e) {
+            System.out.println("no public field");
+        }
+        try {
+            greet.invoke(g, 5);
+        } catch (IllegalArgumentException e) {
+            System.out.println("argument type mismatch");
+        }
+        try {
+            greet.invoke(null, "nobody");
+        } catch (NullPointerException e) {
+            System.out.println("null receiver");
+        }
+        try {
+            Class.forName("ReflectionTable$Greeter").asSubclass(Shape.class);
+        } catch (ClassCastException e) {
+            System.out.println("not a shape");
+        }
+        System.out.println(Class.forName("ReflectionTable$Square").asSubclass(Shape.class).getSimpleName());
+    }
+}

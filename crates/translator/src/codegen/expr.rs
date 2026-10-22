@@ -252,7 +252,13 @@ impl<'a> Gen<'a> {
             let mark = self.out.len();
             let code = self.expr(e);
             self.catching_now.remove(&e.id);
-            return self.caught(e.id, code, mark);
+            let caught = self.caught(e.id, code, mark);
+            // The `ClassNotFoundException` of a name not in the translation always throws: its
+            // closure's value is `Infallible`, which ends the code here as Java's throw does.
+            if matches!(e.kind, ExprKind::Builtin(Builtin::UnknownClass, _)) {
+                return Code::atom(format!("match {} {{}}", caught.text));
+            }
+            return caught;
         }
         if let Some(code) = self.shared_array(e) {
             return code;
@@ -677,8 +683,14 @@ impl<'a> Gen<'a> {
             },
             Builtin::UnknownClass => {
                 let name = self.value(&args[0], Type::String);
-                let message = "java.lang.ClassNotFoundException: {} is not a class of the translated program";
-                Code::atom(format!("{}(format!({message:?}, {}))", self.runtime("throw_uncaught"), name.text))
+                let message = "{}, which is not in the translation";
+                let class = "java.lang.ClassNotFoundException";
+                let throw =
+                    format!("{}({class:?}, &format!({message:?}, {}))", self.runtime("throw"), name.text);
+                if self.catching_now.contains(&id) {
+                    return Code::atom(format!("{{ let never: std::convert::Infallible = {throw}; never }}"));
+                }
+                Code::atom(throw)
             }
             Builtin::MissingResource => {
                 let (class, name) = (self.value(&args[0], Type::String), self.value(&args[1], Type::String));

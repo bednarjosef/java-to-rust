@@ -54,6 +54,7 @@ mod patterns;
 mod primitives;
 mod program;
 mod prologues;
+mod reflection;
 mod switch;
 mod sync;
 mod system;
@@ -501,13 +502,6 @@ impl<'t> Lowering<'t> {
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
             // An array of these (`Class<?>[]`, `Enum<?>[]`) is an array type, below.
             _ if name == "java.lang.Class" || generic_of(name, "java.lang.Class") => Ok(Type::JavaClass),
-            // A constructor without parameters, the only one that a translation creates objects
-            // with from a `Class` value, is its class (`by_name.rs`).
-            _ if name == "java.lang.reflect.Constructor"
-                || generic_of(name, "java.lang.reflect.Constructor") =>
-            {
-                Ok(Type::JavaClass)
-            }
             // A value of one of the program's enums (see `enums::enum_call`).
             _ if (name == "java.lang.Enum" || generic_of(name, "java.lang.Enum"))
                 && self.object.is_some_and(|at| at.enumeration.is_some()) =>
@@ -978,6 +972,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.blocker_call(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.reflection_native(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {

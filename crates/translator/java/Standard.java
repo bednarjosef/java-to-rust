@@ -330,6 +330,10 @@ class ExceptionInInitializerError extends LinkageError {
 }
 
 class NoClassDefFoundError extends LinkageError {
+    public NoClassDefFoundError(String message) {
+        super(message, null);
+    }
+
     public NoClassDefFoundError(String message, Throwable cause) {
         super(message, cause);
     }
