@@ -483,6 +483,7 @@ pub(super) fn runtime_failures(
             Builtin::Boxed(
                 BoxedOp::Box
                 | BoxedOp::ToString
+                | BoxedOp::HexString
                 | BoxedOp::Compare
                 | BoxedOp::HashCode
                 | BoxedOp::Sum

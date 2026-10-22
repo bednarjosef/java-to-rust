@@ -404,8 +404,8 @@ A small subset, end to end:
     `max`/`min` on every type, and the rest of the common ones.
   - `Double`, `Float` and `Boolean`: `isNaN`, `isInfinite`, `isFinite`, `compare`, `sum`,
     `max`/`min`, `parseDouble`, `parseFloat`, `parseBoolean`, `logicalAnd`/`logicalOr`/
-    `logicalXor`, and the `valueOf` of both with Java's grammar and rounding (whitespace,
-    suffixes, hexadecimal floats).
+    `logicalXor`, `toHexString` (`hex_float.rs`), and the `valueOf` of both with Java's grammar
+    and rounding (whitespace, suffixes, hexadecimal floats).
   - `Integer` and `Long`: parsing with a radix and over a `begin`/`end` range of a `String`
     (`parseInt(s, begin, end, radix)`, `valueOf(s, radix)`), the bit and radix methods
     (`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), and the unsigned

@@ -148,6 +148,12 @@ impl<'a> Gen<'a> {
                 let text = self.shown_arg(kind, code);
                 Code::atom(format!("{text}.to_string()"))
             }
+            BoxedOp::HexString => {
+                let code = self.value(&args[0], kind);
+                let function =
+                    if kind == Type::Float { "float_to_hex_string" } else { "double_to_hex_string" };
+                Code::atom(format!("{}({})", self.runtime(function), code.text))
+            }
             BoxedOp::HashCode => {
                 let code = self.value(&args[0], kind);
                 let function = match kind {
