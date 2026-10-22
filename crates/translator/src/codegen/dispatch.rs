@@ -359,6 +359,9 @@ impl<'a> Gen<'a> {
         }
         self.need(Need::Narrow(s, t));
         let name = self.as_name(t);
+        if let Some(text) = self.enum_cast(value, s, to, Some(name.clone()), checked.is_some()) {
+            return self.cast_result(text, checked, self.nullable(value));
+        }
         let cast = self.runtime(if checked.is_some() { "try_cast" } else { "cast" });
         let target = rust_string(&self.binary_name(t));
         let text = if self.nullable(value) {
@@ -376,6 +379,11 @@ impl<'a> Gen<'a> {
     /// (unless the value is null).
     fn failing_cast(&mut self, to: Type, value: &'a Expr, checked: Option<ExprId>) -> Code {
         let t = self.type_of(to).expect("a cast to a type of the program");
+        if let Some(s) = self.enum_of(value)
+            && let Some(text) = self.enum_cast(value, s, to, None, checked.is_some())
+        {
+            return self.cast_result(text, checked, self.nullable(value));
+        }
         if checked.is_some() {
             let ty = self.ty_name(to);
             let fail =

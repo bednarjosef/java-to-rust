@@ -271,6 +271,19 @@ impl<'t> Lowering<'t> {
             // is an `Appendable`, and the generator rejects the others, which no type's values
             // include (see `codegen::dispatch::class_cast`).
             (Type::String | Type::StringBuilder | Type::Boxed(_), Type::Class(..)) => true,
+            // A primitive boxed into an interface that its box implements (`Serializable`,
+            // `Constable`): the value is the box, as it is for `Object` and `Comparable`.
+            (
+                Type::Int
+                | Type::Long
+                | Type::Byte
+                | Type::Short
+                | Type::Char
+                | Type::Double
+                | Type::Float
+                | Type::Boolean,
+                Type::Class(..),
+            ) => true,
             _ => false,
         };
         if !differs {

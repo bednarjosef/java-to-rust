@@ -22,6 +22,7 @@ mod character_classes;
 mod character_tables;
 mod charset;
 mod class;
+mod class_cast;
 mod code_point;
 mod code_point_case_tables;
 mod code_point_chars;
@@ -77,6 +78,7 @@ pub use character::*;
 pub use character_classes::*;
 pub use charset::*;
 pub use class::Class;
+pub use class_cast::*;
 pub use code_point::{
     char_count, code_point_string, high_surrogate, is_bmp_code_point, is_supplementary_code_point,
     is_valid_code_point, low_surrogate, to_chars, to_code_point,

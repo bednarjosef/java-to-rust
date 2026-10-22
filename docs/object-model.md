@@ -294,7 +294,10 @@ or its subclass does not initialize the class again (`codegen/statics.rs::init_c
   pattern.
 - A downcast `(Circle) s` is `java::cast(s.as_circle(), "Circle")`, which returns the value or
   throws `ClassCastException` (`java::cast_failed`: "cannot be cast to class ..."; the message
-  names only the target class). A cast whose operand's class is known and not below the target
+  names only the target class), except a downcast of an enum whose classes are all in `java.base`
+  (strings, boxes, standard classes), which names both classes as HotSpot does (`java::cast_from`,
+  `codegen/class_cast.rs`).
+  A cast whose operand's class is known and not below the target
   always fails, and is written as that failure. A cast or test to a supertype is the implicit
   upcast.
 - A cast of a value that may be null to a Java enum is an `Option` of the enum, as any enum
