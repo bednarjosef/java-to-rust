@@ -244,7 +244,7 @@ impl<'a> Gen<'a> {
             // The lowering drops its statement; anywhere else it is the unit it returns.
             Native::Nothing => Code::atom("()"),
             Native::Missing { what } => {
-                Code::atom(format!("unreachable!(\"the native method {what} never runs\")"))
+                Code::never(format!("unreachable!(\"the native method {what} never runs\")"))
             }
             Native::CdsConfigStatus => call(self, "cds_config_status", vec![]),
             Native::CdsRandomSeed => call(self, "cds_random_seed_for_dumping", vec![]),
