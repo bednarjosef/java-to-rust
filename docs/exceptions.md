@@ -452,7 +452,9 @@ parameters are its captures, of the class around it, also for a lambda in a lamb
 reads the enclosing instance as `this` too; a local or anonymous class reads a captured local as
 `this.val$x`; an inner class's constructor reads its enclosing instance from its first
 parameter (`<parameter1>.chk`), as does a lambda in it, which takes that as a parameter, while
-the initializers the constructor runs read the field (`this.this$0.chk`); javac's own locals are named too (the `s$` of a string `switch`, the iterator
+the initializers the constructor runs read the field (`this.this$0.chk`), also where the
+constructor is a method of a class that builds whole objects (`analysis/whole_objects.rs`);
+javac's own locals are named too (the `s$` of a string `switch`, the iterator
 `i$` of a for-each loop, whose calls start at the collection as javac's do). A parameter that
 its method assigns is `<parameterN>` until the JVM sees it written: HotSpot walks the bytecode
 once, in order, carrying what it has seen forward along each jump, and stops at the failing
@@ -462,7 +464,8 @@ before its body), and not one before a `try` in its `catch`, as an exception han
 with nothing written. `BytecodeNames` follows the lowered code in the order of javac's code
 generator to tell which. The rest of the
 message follows the JVM's rules (`analysis/npe_messages.rs`): a field chain up to five steps
-back, an element with its index when that is a constant, a local or a call (`[...]` otherwise),
+back, an element with its index when that is a constant (an `int` constant field too, which
+javac writes as its value), a local or a call, an enum's `ordinal()` among them (`[...]` otherwise),
 no `because` for the value of `c ? a : b`, no message for a pattern switch's
 `Objects.requireNonNull`, and an assigned value followed back to its source
 (`(s = a).next` fails `because "a" is null`).

@@ -321,8 +321,9 @@ public class BytecodeNames {
                     long[] start = starts.get(at);
                     if (start == null) {
                         // A name that lowering wrote anew, such as a lambda's captured local in
-                        // its body, is where the name it stands for was.
-                        if (!(at instanceof JCIdent)) {
+                        // its body, or a static that it qualifies with its class (an enclosing
+                        // class's, or one imported), is where the name it stands for was.
+                        if (!(at instanceof JCIdent || at instanceof JCFieldAccess && kind.equals("static"))) {
                             return;
                         }
                         start = position(unit, at.pos);
@@ -384,8 +385,10 @@ public class BytecodeNames {
 
                 @Override
                 public void visitVarDef(JCVariableDecl t) {
-                    // A variable that lowering added, which the attributed tree does not have.
-                    if (t.sym != null && !starts.containsKey(t) && t.init != null) {
+                    // A variable that lowering added, which the attributed tree does not have
+                    // (javac names its own with a `$`; a for-each loop's variable is declared
+                    // anew too, but it is the source's).
+                    if (t.sym != null && !starts.containsKey(t) && t.init != null && t.name.toString().contains("$")) {
                         // A call that lowering wrote, such as the `iterator()` of a for-each loop
                         // (`i$`), starts where its receiver does.
                         JCTree init = TreeInfo.skipParens(t.init);

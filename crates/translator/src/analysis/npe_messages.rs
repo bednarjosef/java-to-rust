@@ -582,7 +582,7 @@ impl Messages<'_> {
         let decl = &self.class.types[method.class];
         let synthetic_params =
             decl.kind == TypeKind::Enum || decl.outer.is_some() || !decl.captures.is_empty();
-        if matches!(decl.origin, Origin::Lambda { .. }) || (method.is_ctor && synthetic_params) {
+        if matches!(decl.origin, Origin::Lambda { .. }) || (self.is_constructor(method) && synthetic_params) {
             return None;
         }
         let size = |ty: Type| if matches!(ty, Type::Long | Type::Double) { 2 } else { 1 };
@@ -686,6 +686,19 @@ impl Messages<'_> {
             // one is loaded from the constant pool, which the JVM does not show.
             ExprKind::Int(v) if (-32768..=32767).contains(v) => v.to_string(),
             ExprKind::Int(_) => return Some(Source::Hidden),
+            // An `int` constant, which javac writes as its value (`stackItem[4]`).
+            ExprKind::Static { class, name }
+                if let Some(Expr { kind: ExprKind::Int(v), .. }) = self.class.types[*class]
+                    .statics
+                    .iter()
+                    .find(|f| &f.name == name && f.constant)
+                    .and_then(|f| f.init.as_ref()) =>
+            {
+                if !(-32768..=32767).contains(v) {
+                    return Some(Source::Hidden);
+                }
+                v.to_string()
+            }
             // `(s = a).next`: the class file keeps a copy of the value it stores (`dup`), which the
             // JVM follows back to where the value came from.
             ExprKind::Assign { op: None, target: Place::Var(_), value } => return self.source(value, detail),
@@ -789,6 +802,14 @@ impl Messages<'_> {
                 let named = self.jdk.then(|| self.named_call(e, name).flatten()).flatten();
                 named.or_else(|| self.jdk_static_call(e))
             }),
+            // `e.ordinal()`, which javac calls on the enum's class.
+            ExprKind::Builtin(Builtin::EnumOrdinal, args) => match self.jdk {
+                false => self.call(e.pos, "ordinal"),
+                true => matches!(args[0].ty, Type::Enum(_))
+                    .then(|| self.java_class(args[0].ty))
+                    .flatten()
+                    .map(|c| format!("{c}.ordinal()")),
+            },
             _ => None,
         }
     }
@@ -1095,10 +1116,18 @@ impl Messages<'_> {
             });
         }
         name == crate::lower::OUTER
-            && method.is_ctor
+            && self.is_constructor(method)
             && self.class.types[method.class].outer.is_some()
             && method.params.first().is_some_and(|p| p.name == name)
             && !declared
+    }
+
+    /// Whether `method` is a constructor, or the method that one becomes where its class tree
+    /// builds whole objects (`whole_objects`), which keeps its parameters and its code.
+    fn is_constructor(&self, method: &Method) -> bool {
+        method.is_ctor
+            || !method.is_static
+                && method.name == super::whole_objects::construct_name(self.class, method.class)
     }
 
     /// The parameter of a constructor of class `class` that holds the enclosing instance, as the
@@ -1209,7 +1238,7 @@ impl Messages<'_> {
         let class = self.class.class_index(object.ty)?;
         let decl = &self.class.types[class];
         let outer = name.trim_end_matches('_') == "outer" && decl.captures.iter().all(|c| c.field != name);
-        if !(ctor.is_ctor
+        if !(self.is_constructor(ctor)
             && ctor.class == class
             && lambda.outer == Some(class)
             && decl.outer.is_some()
@@ -1348,11 +1377,15 @@ impl Messages<'_> {
             .all(|s| names.get(&self.class.types[s].name) == Some(own))
     }
 
-    /// Whether class `t` or a superclass has the translation's field `name`.
+    /// Whether class `t` or a superclass has the translation's synthetic field `name`: a capture's,
+    /// or the enclosing instance's that the class declares (`outer`, or `outer_` where a
+    /// superclass has `outer`).
     fn inherits_synthetic(&self, t: usize, name: &str) -> bool {
         let decl = &self.class.types[t];
         decl.captures.iter().any(|c| c.field == name)
-            || (decl.outer.is_some() && name.trim_end_matches('_') == "outer")
+            || (decl.outer.is_some()
+                && name.trim_end_matches('_') == "outer"
+                && decl.fields.iter().any(|f| f.name == name))
             || decl.extends.is_some_and(|s| self.inherits_synthetic(s, name))
     }
 }

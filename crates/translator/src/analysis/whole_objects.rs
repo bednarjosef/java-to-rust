@@ -291,7 +291,8 @@ fn simple_name(name: &str) -> &str {
     name.rsplit(['.', '$']).next().unwrap_or(name)
 }
 
-fn construct_name(class: &Class, t: usize) -> String {
+/// The method that a constructor of class `t` becomes where its class tree is rewritten.
+pub(super) fn construct_name(class: &Class, t: usize) -> String {
     format!("construct{}", simple_name(&class.types[t].name))
 }
 
