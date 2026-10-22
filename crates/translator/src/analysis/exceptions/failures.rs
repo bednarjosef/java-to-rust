@@ -789,7 +789,7 @@ pub(super) fn runtime_failures(
             // Each failure of `java.lang.reflect.Array`'s natives has the checked form, a null
             // argument among them.
             Builtin::Native(Native::ReflectNewArray | Native::ReflectArrayLength | Native::ReflectArraySet) => {
-                for &failure in library_failure(class, builtin, args) {
+                for &failure in library_failure(class, m, builtin, args) {
                     out.push((failure, "this call of the library", true, x.id));
                 }
             }
