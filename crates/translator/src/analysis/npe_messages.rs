@@ -245,7 +245,7 @@ impl Messages<'_> {
                             true => Some(format!("java.lang.{}.{method}()", Type::boxed(*kind))),
                             false => self.call(x.pos, &method),
                         };
-                        return add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                        add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")))
                     }
                     // `Arrays.copyOf` of a null, which fails in the JDK's code (`-g`, so the
                     // parameter has its name): the copy of an array of objects first asks for its
@@ -258,20 +258,17 @@ impl Messages<'_> {
                             _ => "Cannot read the array length",
                         };
                         out.insert(args[0].id, Some(format!("{failure} because \"original\" is null")));
-                        return;
                     }
                     // `new StringBuilder(s)` of a null string, which fails in the JDK's
                     // constructor.
                     Builtin::Builder(BuilderOp::New) if args.len() == 1 && args[0].ty == Type::String => {
                         let message = "Cannot invoke \"String.length()\" because \"str\" is null";
                         out.insert(args[0].id, Some(message.to_string()));
-                        return;
                     }
                     // `new String(s)` of a null, which fails in the JDK's constructor.
                     Builtin::String(StringOp::Identity) => {
                         let message = "Cannot read field \"value\" because \"original\" is null";
                         out.insert(args[0].id, Some(message.to_string()));
-                        return;
                     }
                     // `new String(bytes, ..)` of a null array, which fails in the JDK's
                     // constructor, unless a charset name that may be null fails first (a
@@ -283,7 +280,6 @@ impl Messages<'_> {
                     {
                         let message = "Cannot read the array length because \"bytes\" is null";
                         out.insert(args[0].id, Some(message.to_string()));
-                        return;
                     }
                     // `System.arraycopy` of a null, which the JVM's native code throws without
                     // a message.
@@ -291,7 +287,6 @@ impl Messages<'_> {
                         for array in [&args[0], &args[2]] {
                             out.insert(array.id, None);
                         }
-                        return;
                     }
                     // `new StringBuilder(seq)` of a null `seq`, which the JDK's constructor
                     // asks for its length (`-g`, so the parameter has its name).
@@ -299,11 +294,10 @@ impl Messages<'_> {
                     {
                         let failure = "Cannot invoke \"java.lang.CharSequence.length()\"";
                         out.insert(args[0].id, Some(format!("{failure} because \"seq\" is null")));
-                        return;
                     }
                     // `synchronized` on a null.
                     Builtin::MonitorEnter => {
-                        return add(&args[0], Some("Cannot enter synchronized block".to_string()));
+                        add(&args[0], Some("Cannot enter synchronized block".to_string()))
                     }
                     // The JDK's `Objects.requireNonNull` of the text that
                     // `Long.parseLong(s, begin, end, radix)` and its kin read, whose exception has
@@ -311,7 +305,6 @@ impl Messages<'_> {
                     // the unsigned forms.
                     Builtin::Bits(BitsOp::ParseRange, _) => {
                         out.insert(x.id, None);
-                        return;
                     }
                     // javac's `Objects.requireNonNull` of a pattern switch's selector, whose
                     // exception has no message.
@@ -319,7 +312,6 @@ impl Messages<'_> {
                     | Builtin::Unmatched
                     | Builtin::Unsigned(UnsignedOp::ParseRange, _) => {
                         out.insert(args[0].id, None);
-                        return;
                     }
                     _ => {}
                 }
