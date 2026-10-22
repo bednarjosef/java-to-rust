@@ -4,7 +4,7 @@
 //! natives of translated JDK classes (`declared_native`). A native method's declaration is never
 //! lowered; a call of one the runtime does not implement is rejected with its name.
 
-use super::{Lowering, Node, Symbol, error, unsupported};
+use super::{Lowering, Node, Symbol, unsupported};
 use crate::ast::*;
 
 impl<'t> Lowering<'t> {
@@ -88,13 +88,13 @@ impl<'t> Lowering<'t> {
             // stack behind it is not translated (`UNTRANSLATED`).
             ("java.security.SecureRandom", "getSeed") if symbol.ty == "(int)byte[]" => Native::SecureSeed,
             ("java.lang.System", "lineSeparator") => Native::LineSeparator,
+            // The environment the program runs in, as Java reads it. `getenv()`, a map of all of
+            // it, is not translated yet.
+            ("java.lang.System", "getenv") if symbol.ty == "(java.lang.String)java.lang.String" => {
+                Native::Getenv
+            }
             ("java.lang.System", "getenv") => {
-                return error(
-                    node.pos(),
-                    "`System.getenv` is not supported: the environment differs from run to run, so \
-                     the translation could not be checked against Java"
-                        .to_string(),
-                );
+                return unsupported(node, "`System.getenv()`, the whole environment");
             }
             ("java.lang.Runtime", "availableProcessors") if on_runtime => Native::AvailableProcessors,
             ("java.lang.Runtime", "totalMemory") if on_runtime => Native::TotalMemory,

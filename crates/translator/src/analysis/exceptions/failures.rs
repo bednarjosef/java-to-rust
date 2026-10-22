@@ -271,6 +271,7 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::AvailableProcessors
             | Native::LineSeparator
             | Native::SystemProperty(_)
+            | Native::Getenv
             | Native::TotalMemory
             | Native::FreeMemory
             | Native::MaxMemory

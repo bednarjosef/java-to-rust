@@ -57,6 +57,8 @@ pub enum Native {
     /// `System.getProperty(key)` for a key whose value does not depend on the JVM (see
     /// `lower/system.rs`), by its literal key.
     SystemProperty(&'static str),
+    /// `System.getenv(name)`: the variable of the environment the program runs in, or null.
+    Getenv,
     /// `Runtime.getRuntime().totalMemory()`, `freeMemory()` and `maxMemory()`.
     TotalMemory,
     FreeMemory,

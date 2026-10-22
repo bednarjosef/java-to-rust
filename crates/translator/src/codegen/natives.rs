@@ -111,6 +111,10 @@ impl<'a> Gen<'a> {
                 call(self, "java_home", vec![fallback])
             }
             Native::SystemProperty(key) => call(self, "system_property", vec![rust_string(key)]),
+            Native::Getenv => {
+                let name = self.text_ref(&args[0]);
+                call(self, "getenv", vec![name])
+            }
             Native::CopyMemory { .. } => self.copy_memory(args),
             Native::FullFence => {
                 Code::atom("std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst)".to_string())
