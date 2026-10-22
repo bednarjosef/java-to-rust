@@ -26,15 +26,22 @@ fn only_under(class: &Class, facts: &Facts, s: usize, t: usize) -> bool {
 }
 
 /// Whether `builtin` is a regular expression call whose pattern (and replacement) are constants
-/// that compile, so that it never throws.
+/// that compile, or whose pattern is `Pattern.quote`'s, which matches its text and has no groups,
+/// so that it never throws.
 fn constant_pattern(class: &Class, builtin: &Builtin, args: &[Expr]) -> bool {
     let text = |i: usize| args.get(i).and_then(|a| crate::analysis::constants::text(class, a));
+    let quoted = args.get(1).is_some_and(|a| {
+        matches!(a.kind, ExprKind::Call { resolved: Some(m), .. }
+            if class.methods[m].name == "quote"
+                && class.types[class.methods[m].class].name == "java.util.regex.Pattern")
+    });
     match builtin {
         Builtin::String(StringOp::Split | StringOp::Matches) => {
-            text(1).is_some_and(|p| java_runtime::regex::never_fails(p, None))
+            quoted || text(1).is_some_and(|p| java_runtime::regex::never_fails(p, None))
         }
         Builtin::String(StringOp::ReplaceAll | StringOp::ReplaceFirst) => match (text(1), text(2)) {
             (Some(p), Some(r)) => java_runtime::regex::never_fails(p, Some(r)),
+            (None, Some(r)) if quoted => java_runtime::regex::never_fails("", Some(r)),
             _ => false,
         },
         _ => false,
