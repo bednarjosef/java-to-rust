@@ -4221,17 +4221,14 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
         } }",
     );
     assert_contains(&rust, &["java::catching(|| ", "\"java.util.MissingFormatArgumentException\""]);
-    // One whose class is not known is not: a charset's name, which may be unsupported or illegal.
-    let err = reject(
+    // So does a charset's name, which may be unsupported or illegal.
+    let rust = translate(
         "class A { public static void main(String[] a) {
             try { System.out.println(java.nio.charset.Charset.forName(a[0])); }
             catch (RuntimeException e) { System.out.println(\"bad charset\"); }
         } }",
     );
-    assert!(
-        err.contains("catching an exception that this call of the library may throw not supported yet"),
-        "{err}"
-    );
+    assert_contains(&rust, &["java::catching(|| ", "\"java.nio.charset.UnsupportedCharsetException\""]);
     // Nor is a `PatternSyntaxException`, which is not one of the standard classes; a `catch` that
     // cannot see it is fine.
     let err = reject(
