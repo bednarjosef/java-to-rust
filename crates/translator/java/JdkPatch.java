@@ -159,6 +159,33 @@ final class JdkPatch {
         };
     }
 
+    /**
+     * The files given to javac, each that a patch under {@code patches} names by its path in a
+     * root of {@code sourcepath} as patched.
+     */
+    static List<JavaFileObject> patched(List<File> files, String sourcepath, StandardJavaFileManager fileManager,
+            Path patches) {
+        List<Path> roots = new ArrayList<>();
+        for (String root : sourcepath.split(File.pathSeparator)) {
+            if (!root.isEmpty()) {
+                roots.add(Path.of(root).toAbsolutePath().normalize());
+            }
+        }
+        List<JavaFileObject> out = new ArrayList<>();
+        for (JavaFileObject file : fileManager.getJavaFileObjectsFromFiles(files)) {
+            Path path = Path.of(file.toUri()).toAbsolutePath().normalize();
+            Path root = patches == null ? null : roots.stream().filter(path::startsWith).findFirst().orElse(null);
+            Path patch = root == null ? null : patches.resolve(root.relativize(path).toString());
+            if (patch != null && Files.isRegularFile(patch)) {
+                String binary = root.relativize(path).toString().replace(File.separatorChar, '.').replaceAll("\\.java$", "");
+                out.add(new Patched(file, patch, binary));
+            } else {
+                out.add(file);
+            }
+        }
+        return out;
+    }
+
     private static <T extends FileObject> T unwrap(T file) {
         @SuppressWarnings("unchecked")
         T inner = file instanceof Patched p ? (T) p.original() : file;

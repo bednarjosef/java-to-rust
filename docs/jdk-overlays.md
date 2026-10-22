@@ -140,12 +140,14 @@ skipped. The error names the patch's file and line, and the JDK's file:
   `JAVA_BASE_SOURCES` is set (and the JDK's other modules next to it), and checks the patch mechanism itself either way. By hand:
   `java -cp <build dir>/out JdkPatch crates/translator/java/patches $JAVA_BASE_SOURCES --out DIR`.
 - A patch can patch any library's classes, not only the JDK's: it applies to the file of its path
-  wherever javac's source path has it.
+  wherever javac's source path has it, and to a program's own file at its path too, as javac's
+  sources are the program's when javac is translated.
 
 ### The patches
 
 | patch | what it changes |
 |---|---|
+| `com/sun/tools/javac/main/Main.java` (module `jdk.compiler`) | the hidden `-XDshowClass`, which prints the checksum of javac's own class file, fails loudly |
 | `java/io/PrintStream.java` | encodes text itself with `String.getBytes` instead of through a `StreamEncoder` |
 | `java/io/InputStreamReader.java`, `OutputStreamWriter.java` | decode and encode the common charsets themselves instead of through `StreamDecoder` and `StreamEncoder` |
 | `java/lang/Module.java`, `ModuleLayer.java` | the translation's modules, from its roots' declarations; no layers but the boot layer |
