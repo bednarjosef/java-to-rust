@@ -523,10 +523,11 @@ impl<'a> Gen<'a> {
         let (s, d) = (self.object(src), self.object(dest));
         let checked = self.facts.raising.contains(&id);
         let copy = self.runtime(if checked { "try_arraycopy" } else { "arraycopy" });
-        let throw = if checked {
-            format!("Err::<(), _>({})", self.runtime("Exception::new"))
+        // The checked form returns the exception as the copy's `Err`, the unchecked one throws it.
+        let mismatch = if checked {
+            format!("Err({}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"))", self.runtime("Exception::new"))
         } else {
-            self.runtime("throw")
+            format!("{}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\")", self.runtime("throw"))
         };
         // Names that no local of the method has, as `src` and `dest` may read one.
         let [p, q, n] = ["src_pos", "dest_pos", "length"].map(|base| self.temp(base));
@@ -537,7 +538,7 @@ impl<'a> Gen<'a> {
                 arms.push(format!("({variant}(src), {variant}(dest)) => {copy}(src, {p}, dest, {q}, {n}),"));
             }
         }
-        arms.push(format!("_ => {throw}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"),"));
+        arms.push(format!("_ => {mismatch},"));
         let code = Code::atom(format!(
             "{{ let ({p}, {q}, {n}) = ({}, {}, {}); match (&{s}, &{d}) {{ {} }} }}",
             ints[0],
