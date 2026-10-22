@@ -43,6 +43,7 @@ mod java_arrays;
 mod locked;
 mod math;
 mod monitor;
+mod native_memory;
 mod natives;
 mod null;
 mod out;
@@ -92,6 +93,7 @@ pub use java_arrays::*;
 pub use locked::{Locked, RawLock, Ref, RefMut};
 pub use math::*;
 pub use monitor::*;
+pub use native_memory::*;
 pub use natives::*;
 pub use null::{Handle, OrNull, non_null, null_enum, or_null, same, try_non_null, try_non_null_message};
 pub use out::{

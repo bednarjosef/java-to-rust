@@ -890,10 +890,12 @@ impl<'t> Lowering<'t> {
                 _ => {
                     // A plain read or write of a primitive in an array of primitives held as an
                     // `Object` (as `getCharUnaligned` and the buffers' views of a `byte[]` read):
-                    // the bytes at the offset, whatever it is, as the JVM reads them.
+                    // the bytes at the offset, whatever it is, as the JVM reads them; with a
+                    // null base (`getInt(long address)`), at an address outside the heap.
                     let kind = access_kind(symbol.ty);
                     let base = plain(args[0]).java_type();
                     let raw_base = base == "java.lang.Object"
+                        || plain(args[0]).kind() == "NULL_LITERAL"
                         || base.strip_suffix("[]").is_some_and(|e| PRIMITIVES.contains(&e));
                     if update.is_none() && kind != "reference" && raw_base && self.object.is_some() {
                         return self.raw_memory(node, &args, kind, put == Some(true)).map(Some);

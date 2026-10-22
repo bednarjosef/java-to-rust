@@ -339,12 +339,63 @@ pub fn copy_memory<S: RawBytes, D: RawBytes, A: Elements<S>, B: Elements<D>>(
     swap: i64,
 ) {
     let mut buffer = read_bytes(src, src_offset, bytes);
+    swap_units(&mut buffer, swap);
+    write_bytes(dest, dest_offset, &buffer);
+}
+
+/// `Unsafe.copyMemory0` and `copySwapMemory0` from memory outside the heap, at `address`, into an
+/// array of primitives (see `copy_memory`).
+pub fn copy_from_native<D: RawBytes, B: Elements<D>>(
+    address: i64,
+    dest: &B,
+    dest_offset: i64,
+    bytes: i64,
+    swap: i64,
+) {
+    let mut buffer = crate::read_native(address, native_size(bytes));
+    swap_units(&mut buffer, swap);
+    write_bytes(dest, dest_offset, &buffer);
+}
+
+/// `Unsafe.copyMemory0` and `copySwapMemory0` from an array of primitives into memory outside the
+/// heap, at `address` (see `copy_memory`).
+pub fn copy_to_native<S: RawBytes, A: Elements<S>>(
+    src: &A,
+    src_offset: i64,
+    address: i64,
+    bytes: i64,
+    swap: i64,
+) {
+    let mut buffer = read_bytes(src, src_offset, bytes);
+    swap_units(&mut buffer, swap);
+    crate::write_native(address, &buffer);
+}
+
+/// `Unsafe.copyMemory0` and `copySwapMemory0` within memory outside the heap, from address `src`
+/// to address `dest` (overlapping ranges as if through a buffer).
+pub fn copy_native(src: i64, dest: i64, bytes: i64, swap: i64) {
+    let mut buffer = crate::read_native(src, native_size(bytes));
+    swap_units(&mut buffer, swap);
+    crate::write_native(dest, &buffer);
+}
+
+/// `Unsafe.setMemory0(base, offset, bytes, value)` on an array of primitives: `bytes` bytes of
+/// `value` from `offset` (counted from the start of the array object).
+pub fn set_memory<D: RawBytes, B: Elements<D>>(array: &B, offset: i64, bytes: i64, value: i8) {
+    write_bytes(array, offset, &vec![value as u8; native_size(bytes)]);
+}
+
+fn native_size(bytes: i64) -> usize {
+    usize::try_from(bytes).unwrap_or_else(|_| unsupported_memory("an Unsafe copy of a negative size"))
+}
+
+/// Reverses the bytes of each unit of `swap` bytes, when `swap` is above 1.
+fn swap_units(buffer: &mut [u8], swap: i64) {
     if swap > 1 {
         for unit in buffer.chunks_mut(swap as usize) {
             unit.reverse();
         }
     }
-    write_bytes(dest, dest_offset, &buffer);
 }
 
 /// `Unsafe.getInt(base, offset)` and the other plain reads of a primitive at an offset of an array

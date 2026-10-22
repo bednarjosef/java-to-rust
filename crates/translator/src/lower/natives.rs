@@ -411,7 +411,10 @@ impl<'t> Lowering<'t> {
     /// the JDK's cleaner thread closes the descriptor after the stream is garbage collected: it
     /// does nothing (`REPLACED_METHODS`), as nothing is collected that way in a translated
     /// program. A stream that the program never closes stays open until the program ends. Its
-    /// argument is the stream's `fd` field or a parameter, which reads nothing else.
+    /// argument is the stream's `fd` field or a parameter, which reads nothing else. So does
+    /// `BufferCleaner.startCleaningThreadIfNeeded()`, which starts the thread that frees a direct
+    /// buffer's memory once the buffer is collected: a direct buffer's memory is freed only when
+    /// the program frees it.
     ///
     /// And a native of the translator's `UnixNativeDispatcher` that the runtime implements
     /// (`ast::UNIX_CALLS`), with its arguments as they are.
@@ -425,6 +428,9 @@ impl<'t> Lowering<'t> {
             if !matches!(&args[..], [arg] if matches!(arg.kind, ExprKind::Var(_) | ExprKind::Field { .. })) {
                 return unsupported(node, "`FileCleanable.register` of anything but a variable or a field");
             }
+            return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::Nothing), Vec::new())));
+        }
+        if (symbol.owner, symbol.name) == ("java.nio.BufferCleaner", "startCleaningThreadIfNeeded") {
             return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::Nothing), Vec::new())));
         }
         if symbol.native

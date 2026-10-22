@@ -922,8 +922,19 @@ fence), and so `loadFence` and `storeFence`, and `VarHandle`'s static fences (`f
 `copySwapMemory0` between two arrays of primitives copy the bytes between them, swapping each
 unit for the second, as the heap buffers' `put` and `compact` do; a plain `get` or `put` of a
 primitive at an offset that is neither a field's nor an element's (`getCharUnaligned`, the
-buffers' typed reads of a `byte[]`) reads or writes the bytes of the array at that offset. A base
-that is null or no array of primitives is memory outside the heap, which ends the program. `Unsafe.arrayBaseOffset` and
+buffers' typed reads of a `byte[]`) reads or writes the bytes of the array at that offset. With
+a null base the offset is an address of memory outside the heap, which the runtime keeps
+(`native_memory.rs`): `allocateMemory0` gives a block of its own at an address that is never 0,
+far from every other block, `reallocateMemory0` and `freeMemory0` replace and free it, and the
+reads, writes, `setMemory0` fills and copies (to and from arrays too) at an address work inside
+one live block, behind a lock that threads share; an access outside every live block, past a
+block's end or after it was freed ends the program. So direct buffers work, with their memory
+freed only when the program frees it (no thread waits for them to be collected:
+`BufferCleaner.startCleaningThreadIfNeeded` does nothing). `UnsafeConstants` holds what the JVM
+injects (`java/overlay/jdk/internal/misc/UnsafeConstants.java`): 8-byte addresses, little-endian,
+unaligned access, 64-byte cache lines, and the system's page size. A base that is no array of
+primitives ends the program, and so does a lock, `wait` or `notify` on a string, a box or a class
+held as an `Object`, whose monitor the translation does not keep. `Unsafe.arrayBaseOffset` and
 `arrayIndexScale` of an array class literal are HotSpot's layout (16, and 1 to 8 by element, 4
 for references) and are answered at the call, so their `Class`-taking natives are not reached.
 `Unsafe.park` and `unpark` park the current thread and unpark a thread by its id, as

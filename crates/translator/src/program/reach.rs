@@ -226,6 +226,8 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.VM", "getSavedProperty", "(java.lang.String)java.lang.String"),
     // Nothing is garbage collected, so a file's descriptor needs no cleaner (`lower/natives.rs`).
     ("java.io.FileCleanable", "register", "(java.io.FileDescriptor)void"),
+    // Nor a direct buffer's memory: no thread waits for buffers to be collected.
+    ("java.nio.BufferCleaner", "startCleaningThreadIfNeeded", "()void"),
     // No virtual thread blocks a carrier thread (`lower/natives.rs`).
     ("jdk.internal.misc.Blocker", "begin", "()boolean"),
     ("jdk.internal.misc.Blocker", "begin", "(boolean)boolean"),

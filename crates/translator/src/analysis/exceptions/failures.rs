@@ -239,6 +239,12 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             // A copy outside the arrays, or of memory outside the heap, ends the program
             // (`java::copy_memory`), as the translation cannot go on with it.
             | Native::CopyMemory { .. }
+            // So does an access of memory outside every block (`java::native_memory`).
+            | Native::AllocateNative
+            | Native::PageSize
+            | Native::ReallocateNative
+            | Native::FreeNative
+            | Native::SetMemory
             | Native::Crc32Update
             | Native::InflateInit
             | Native::InflateAdler
@@ -614,7 +620,9 @@ pub(super) fn runtime_failures(
                     if null(&args[1]) {
                         out.push((NPE, "this call", true, args[1].id));
                     }
-                } else if let Builtin::Native(Native::CopyMemory { .. }) | Builtin::RawMemory { .. } = builtin {
+                } else if let Builtin::Native(Native::CopyMemory { .. } | Native::SetMemory)
+                | Builtin::RawMemory { .. } = builtin
+                {
                     // A null base is an address outside the heap, which ends the program.
                 } else if !takes_null && checked.iter().any(null) {
                     let receiver = !checked[1..].iter().any(null);
