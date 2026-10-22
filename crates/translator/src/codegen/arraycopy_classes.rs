@@ -83,11 +83,9 @@ impl<'a> Gen<'a> {
     fn element_arms(&self, s: usize, d: usize, (src_nullable, dst_nullable): (bool, bool)) -> Vec<String> {
         let cases: Vec<(String, usize)> = match self.rep(s) {
             hierarchy::Rep::Object(c) => vec![("x".to_string(), c)],
-            hierarchy::Rep::Enum(t) => self
-                .enum_variants(t)
-                .into_iter()
-                .map(|c| (format!("{}(x)", self.variant(t, c)), c))
-                .collect(),
+            hierarchy::Rep::Enum(t) => {
+                self.enum_variants(t).into_iter().map(|c| (format!("{}(x)", self.variant(t, c)), c)).collect()
+            }
         };
         cases
             .into_iter()
@@ -106,7 +104,13 @@ impl<'a> Gen<'a> {
 
     /// The call that copies the elements of `src` into `dest` with the conversion `convert`: over
     /// two shared arrays, which may be one array, or over slices when a plain array is one of them.
-    fn class_copy_call(&mut self, src: &'a Expr, dest: &'a Expr, (p, q, n): (&str, &str, &str), convert: &str) -> String {
+    fn class_copy_call(
+        &mut self,
+        src: &'a Expr,
+        dest: &'a Expr,
+        (p, q, n): (&str, &str, &str),
+        convert: &str,
+    ) -> String {
         let plain = |g: &Self, e: &Expr| matches!(&e.kind, ExprKind::Var(name) if g.plain(name).is_some());
         if !plain(self, src) && !plain(self, dest) {
             let (s, d) = (self.handle(src), self.handle(dest));
