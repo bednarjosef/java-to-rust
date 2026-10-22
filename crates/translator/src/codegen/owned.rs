@@ -196,7 +196,7 @@ impl<'a> Gen<'a> {
                 .into_iter()
                 .map(|i| (i, &fields[i]))
                 .map(|(i, f)| {
-                    let field = snake_case(&f.name);
+                    let field = field_name(decl, &f.name);
                     let value = match (&bound[i], values[i]) {
                         (Some(local), _) => local.clone(),
                         (None, Some(e)) => {

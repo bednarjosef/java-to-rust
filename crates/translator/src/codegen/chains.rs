@@ -151,7 +151,7 @@ impl<'a> Gen<'a> {
         let (unlink, link, drop_links) =
             (self.runtime("Unlink"), self.runtime("Link"), self.runtime("drop_links"));
         let links: Vec<String> =
-            self.chains.links[t].iter().map(|&f| snake_case(&decl.fields[f].name)).collect();
+            self.chains.links[t].iter().map(|&f| field_name(decl, &decl.fields[f].name)).collect();
         self.gap();
         self.line(&format!("impl<'a{bounded}> {unlink}<'a> for {name}{args} {{"));
         self.indent += 1;

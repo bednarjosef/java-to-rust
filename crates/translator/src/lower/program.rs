@@ -252,7 +252,8 @@ fn lower_into<'t>(
     let failed = lowering.verify(&types, &methods);
     let hierarchy = Hierarchy::new(&types, &methods);
     let raised = lowering.raised_objects(&types, &methods);
-    let class = Class { name: main.to_string(), types, methods, hierarchy, raised };
+    let class_file = lowering.class_file_names(&types);
+    let class = Class { name: main.to_string(), types, methods, hierarchy, raised, class_file };
     Ok((class, lowering.real.clone(), failed))
 }
 

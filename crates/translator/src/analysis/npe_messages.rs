@@ -197,6 +197,9 @@ impl Messages<'_> {
                 }
             }
             ExprKind::Field { object, name } => add(object, Some(format!("Cannot read field \"{name}\""))),
+            ExprKind::Index(..) if let Some((object, name)) = enum_table(x) => {
+                add(object, Some(format!("Cannot read field \"{name}\"")))
+            }
             ExprKind::Index(array, _) => {
                 add(array, element(array).map(|t| format!("Cannot load from {t} array")))
             }
@@ -206,6 +209,17 @@ impl Messages<'_> {
                 add(object, Some(format!("Cannot {verb} field \"{name}\"")))
             }
             ExprKind::IncDec { target: Place::Field { object, name }, .. } => {
+                add(object, Some(format!("Cannot read field \"{name}\"")))
+            }
+            ExprKind::Assign { op, target: Place::Index(array, index), .. }
+                if let Some((object, name)) = enum_table_row(array, index) =>
+            {
+                let verb = if op.is_some() { "read" } else { "assign" };
+                add(object, Some(format!("Cannot {verb} field \"{name}\"")))
+            }
+            ExprKind::IncDec { target: Place::Index(array, index), .. }
+                if let Some((object, name)) = enum_table_row(array, index) =>
+            {
                 add(object, Some(format!("Cannot read field \"{name}\"")))
             }
             ExprKind::Assign { op, target: Place::Index(array, _), .. } => {
@@ -312,6 +326,12 @@ impl Messages<'_> {
                         let failure = "Cannot invoke \"java.lang.CharSequence.length()\"";
                         out.insert(args[0].id, Some(format!("{failure} because \"seq\" is null")));
                     }
+                    // `new StringBuilder(s)` of a null string, which the JDK's constructor asks for
+                    // its length in `AbstractStringBuilder(String str)`.
+                    Builtin::Builder(BuilderOp::New) if args[0].ty == Type::String => {
+                        let failure = "Cannot invoke \"String.length()\"";
+                        out.insert(args[0].id, Some(format!("{failure} because \"str\" is null")));
+                    }
                     // `synchronized` on a null.
                     Builtin::MonitorEnter => {
                         add(&args[0], Some("Cannot enter synchronized block".to_string()))
@@ -372,12 +392,60 @@ impl Messages<'_> {
     /// The message of a `switch` on a string that is null. javac keeps the string in a local of
     /// its own (`s$`), and calls its `hashCode()` first.
     fn string_switch(&self, selector: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
-        if selector.ty == Type::String
-            && let Some(local) = self.names.get(self.outermost, selector.pos, NameKind::Temp, "s$")
-        {
+        if selector.ty != Type::String {
+            return;
+        }
+        let local = match self.jdk {
+            true => self.jdk_switch_slot(selector).map(|slot| format!("<local{slot}>")),
+            false => self.names.get(self.outermost, selector.pos, NameKind::Temp, "s$").map(str::to_string),
+        };
+        if let Some(local) = local {
             let message = format!("Cannot invoke \"String.hashCode()\" because \"{local}\" is null");
             out.insert(selector.id, Some(message));
         }
+    }
+
+    /// The slot of javac's local that holds the string of a `switch` on `selector` in the JDK's
+    /// code, which the class file's table of locals leaves out (it is synthetic), where it is
+    /// certain: the first slot after the parameters, when the method declares no local before
+    /// the `switch` and has nothing else of javac's own there (another `switch`, a `try`, a
+    /// for-each). Not for the code of a lambda, nor a constructor that javac gives parameters of
+    /// its own (an enum's, or one of a class with an enclosing instance or captured locals).
+    fn jdk_switch_slot(&self, selector: &Expr) -> Option<usize> {
+        let method = self.method;
+        let decl = &self.class.types[method.class];
+        let synthetic_params =
+            decl.kind == TypeKind::Enum || decl.outer.is_some() || !decl.captures.is_empty();
+        if matches!(decl.origin, Origin::Lambda { .. }) || (method.is_ctor && synthetic_params) {
+            return None;
+        }
+        let size = |ty: Type| if matches!(ty, Type::Long | Type::Double) { 2 } else { 1 };
+        let slot = usize::from(!method.is_static) + method.params.iter().map(|p| size(p.ty)).sum::<usize>();
+        let (clean, found) = (std::cell::Cell::new(true), std::cell::Cell::new(None));
+        for s in &method.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| match &x.kind {
+                        _ if found.get().is_some() => {}
+                        _ if x.id == selector.id => found.set(Some(clean.get())),
+                        ExprKind::Switch { selector: other, .. } if other.id != selector.id => {
+                            clean.set(false)
+                        }
+                        _ => {}
+                    })
+                },
+                &mut |s| match s {
+                    _ if found.get().is_some() => {}
+                    Stmt::Switch { selector: other, .. } if other.id == selector.id => {}
+                    Stmt::Local { .. } | Stmt::ForEach { .. } | Stmt::Try { .. } | Stmt::Switch { .. } => {
+                        clean.set(false)
+                    }
+                    _ => {}
+                },
+            );
+        }
+        found.get()?.then_some(slot)
     }
 
     /// The messages of the dereferences that statement `s` makes itself, by object.
@@ -440,11 +508,15 @@ impl Messages<'_> {
             ExprKind::Assign { op: None, target: Place::Var(_), value } => return self.source(value, detail),
             ExprKind::Var(name) if self.jdk => self.jdk_local(name)?,
             ExprKind::Var(_) => self.names.get(self.outermost, e.pos, NameKind::Local, "")?.to_string(),
-            // A static field of the JDK's, by its class's binary name: `java.util.Locale.ROOT`.
-            ExprKind::Static { class, name } if self.jdk => {
-                let declared = self.class.types[*class].statics.iter().any(|f| &f.name == name);
-                format!("{}.{name}", self.java_class_at(*class).filter(|_| declared)?)
-            }
+            // A static field of the JDK's, by the class that javac names it by where lowering noted
+            // it (`Class::class_file`), else by its class's binary name: `java.util.Locale.ROOT`.
+            ExprKind::Static { class, name } if self.jdk => match self.jdk_static(e.pos, name) {
+                Some(named) => named?,
+                None => {
+                    let declared = self.class.types[*class].statics.iter().any(|f| &f.name == name);
+                    format!("{}.{name}", self.java_class_at(*class).filter(|_| declared)?)
+                }
+            },
             ExprKind::Static { name, .. } => {
                 self.names.get(self.outermost, e.pos, NameKind::Static, name)?.to_string()
             }
@@ -501,7 +573,11 @@ impl Messages<'_> {
     fn called(&self, e: &Expr) -> Option<String> {
         match &e.kind {
             ExprKind::MethodCall { name, .. } => self.call(e.pos, name).or_else(|| self.jdk_call(e)),
-            ExprKind::Call { name, .. } => self.call(e.pos, name).or_else(|| self.jdk_static_call(e)),
+            ExprKind::Call { name, .. } => self.call(e.pos, name).or_else(|| {
+                // A static method of the JDK, as lowering found javac names it.
+                let named = self.jdk.then(|| self.named_call(e.pos, name).flatten()).flatten();
+                named.or_else(|| self.jdk_static_call(e))
+            }),
             _ => None,
         }
     }
@@ -570,6 +646,10 @@ impl Messages<'_> {
         if !self.jdk || self.class.methods[*r].is_static {
             return None;
         }
+        // As lowering found javac names it, where it noted the call.
+        if let Some(Some(named)) = self.named_call(x.pos, name) {
+            return Some(named);
+        }
         // javac leaves a method that `Object` declares as `Object`'s, whatever the receiver
         // (`Gen.binaryQualifier`), and the JVM shows it as `Object.equals(Object)`.
         let callee = &self.class.methods[*r];
@@ -590,6 +670,55 @@ impl Messages<'_> {
         let params: Option<Vec<String>> =
             self.class.methods[*r].params.iter().map(|p| self.java_param(p.ty)).collect();
         Some(format!("{owner}.{name}({})", params?.join(", ")))
+    }
+
+    /// The method that the call at `pos` names, as the JVM shows it,
+    /// `java.util.Properties.getProperty(String)`, where lowering noted the call
+    /// (`Class::class_file`): `Some(None)` where it is not certain.
+    fn named_call(&self, pos: Pos, name: &str) -> Option<Option<String>> {
+        let key = (self.class.types[self.method.class].name.clone(), pos, name.to_string());
+        let named = self.class.class_file.calls.get(&key)?;
+        Some(named.as_ref().and_then(|call| {
+            let params: Option<Vec<String>> = call.params.iter().map(|p| self.shown_class(p)).collect();
+            Some(format!("{}.{}({})", self.shown_class(&call.class)?, call.name, params?.join(", ")))
+        }))
+    }
+
+    /// A type in javac's names as the JVM shows it in a message: a primitive as it is, an array
+    /// with `[]`, `Object` and `String` by their simple names, and another class by its binary
+    /// name, when that is certain.
+    fn shown_class(&self, ty: &str) -> Option<String> {
+        if let Some(element) = ty.strip_suffix("[]") {
+            return Some(format!("{}[]", self.shown_class(element)?));
+        }
+        Some(match ty {
+            "int" | "long" | "double" | "float" | "short" | "byte" | "char" | "boolean" => ty.to_string(),
+            "java.lang.Object" => "Object".to_string(),
+            "java.lang.String" => "String".to_string(),
+            _ => match self.class.types.iter().position(|d| d.name == ty) {
+                Some(t) => self.java_class_at(t)?,
+                // A class that the program does not have: its name, unless it may be nested.
+                None => {
+                    let segments: Vec<&str> = ty.split('.').collect();
+                    let upper = |s: &str| s.starts_with(|c: char| c.is_ascii_uppercase());
+                    let plain = segments.len() > 1 && segments.iter().filter(|s| upper(s)).count() == 1;
+                    (plain && upper(segments.last()?)).then(|| ty.to_string())?
+                }
+            },
+        })
+    }
+
+    /// The static field `name` that the JDK's code reads at `pos`, as the JVM shows it:
+    /// `jdk.internal.foreign.AbstractMemorySegmentImpl.NIO_ACCESS`, by the class that lowering
+    /// found names it (`Class::static_qualifiers`).
+    /// `None` where lowering did not note the read, `Some(None)` where the name is not certain.
+    fn jdk_static(&self, pos: Pos, name: &str) -> Option<Option<String>> {
+        let key = (self.class.types[self.method.class].name.clone(), pos, name.to_string());
+        let qualifier = self.class.class_file.static_qualifiers.get(&key)?;
+        Some(qualifier.as_deref().and_then(|qualifier| {
+            let t = self.class.types.iter().position(|d| d.name == qualifier)?;
+            Some(format!("{}.{name}", self.java_class_at(t)?))
+        }))
     }
 
     /// Whether `object` is the receiver of the call that an unbound method reference makes: the
@@ -691,13 +820,25 @@ impl Messages<'_> {
         let mut own = true;
         while let Some(c) = t {
             if synthetic(c) {
-                // Only the current class's own, read through `this` outside a constructor.
-                let current = self.method.class;
-                if !own || c != current || !matches!(object.kind, ExprKind::This) || self.method.is_ctor {
+                // A class's own, read through `this` outside a constructor (where javac reads its
+                // parameter instead); the enclosing instance of a member, local or anonymous
+                // class also through another object of it, which javac reads as a field too.
+                let this = matches!(object.kind, ExprKind::This);
+                let decl = &self.class.types[c];
+                let enclosing = decl.captures.iter().all(|c| c.field != name)
+                    && matches!(
+                        decl.origin,
+                        Origin::Member | Origin::Local { .. } | Origin::Anonymous { .. }
+                    );
+                let through_this = c == self.method.class && this && !self.method.is_ctor;
+                if !own || !(through_this || (enclosing && !this)) {
                     return None;
                 }
-                let decl = &self.class.types[c];
-                if decl.extends.is_some_and(|s| self.inherits_synthetic(s, name)) {
+                // A superclass's field of the same name is either one: certain only when it is
+                // the enclosing instance that javac names alike in both.
+                if decl.extends.is_some_and(|s| self.inherits_synthetic(s, name))
+                    && !(enclosing && self.outer_named_alike(c))
+                {
                     return None;
                 }
                 let capture = decl.captures.iter().find(|c| c.field == name);
@@ -717,6 +858,10 @@ impl Messages<'_> {
                     }
                     (Origin::Local { .. } | Origin::Anonymous { .. }, Some(c)) => {
                         Some(JavaField::Named(format!("val${}", c.name)))
+                    }
+                    // The enclosing instance, which javac holds in `this$0` (`Class::class_file`).
+                    (Origin::Member | Origin::Local { .. } | Origin::Anonymous { .. }, None) => {
+                        self.class.class_file.outer_fields.get(&decl.name).cloned().map(JavaField::Named)
                     }
                     _ => None,
                 };
@@ -792,6 +937,16 @@ impl Messages<'_> {
             }
         }
         Some(name.to_string())
+    }
+
+    /// Whether the enclosing instances of class `t` and of each of its superclasses that has
+    /// one are fields of the same name in their class files.
+    fn outer_named_alike(&self, t: usize) -> bool {
+        let names = &self.class.class_file.outer_fields;
+        let Some(own) = names.get(&self.class.types[t].name) else { return false };
+        std::iter::successors(self.class.types[t].extends, |&s| self.class.types[s].extends)
+            .filter(|&s| self.class.types[s].outer.is_some())
+            .all(|s| names.get(&self.class.types[s].name) == Some(own))
     }
 
     /// Whether class `t` or a superclass has the translation's field `name`.
@@ -904,4 +1059,23 @@ fn element(array: &Expr) -> Option<&'static str> {
         Type::Double => "double",
         _ => "object",
     })
+}
+
+/// An instance field of an enum kept as a table (see `lower::enum_tables`), `fOfConstants[e.ordinal()]`:
+/// the enum constant `e` and the field's name `f`.
+fn enum_table(x: &Expr) -> Option<(&Expr, &str)> {
+    match &x.kind {
+        ExprKind::Index(array, index) => enum_table_row(array, index),
+        _ => None,
+    }
+}
+
+/// `enum_table` of the parts of an index.
+fn enum_table_row<'a>(array: &'a Expr, index: &'a Expr) -> Option<(&'a Expr, &'a str)> {
+    match (&array.kind, &index.kind) {
+        (ExprKind::Static { name, .. }, ExprKind::Builtin(Builtin::EnumOrdinal, args)) => {
+            Some((args.first()?, crate::lower::tabled_field(name)?))
+        }
+        _ => None,
+    }
 }

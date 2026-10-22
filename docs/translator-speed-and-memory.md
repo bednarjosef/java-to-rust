@@ -300,7 +300,9 @@ a large part of the JDK: likely 10,000 or more units and 100,000 to 200,000 reac
 - **After steps 1 to 4:** a few minutes and under about 8 GB is a realistic target.
 - **rustc:** millions of lines of output; with step 7, roughly 10 to 30 minutes for a release build.
 
-These are estimates from four data points, not measurements.
+These are estimates from four data points, not measurements. The first survey of the server
+([minecraft-server.md](minecraft-server.md)) confirms the wall: its census holds 5.5 GB after three
+rounds of loading (3,224 units, 636 MB of trees) and is still growing.
 
 ## The goal: javac, translated, in less memory
 

@@ -33,6 +33,13 @@ pub(super) fn snake_case(name: &str) -> String {
     out
 }
 
+/// The Rust name of the field `name` of the class `decl`: `snake_case`, but `base_` for `base`
+/// in a subclass, whose struct may hold its superclass's fields as `base`.
+pub(super) fn field_name(decl: &TypeDecl, name: &str) -> String {
+    let field = snake_case(name);
+    if field == "base" && decl.extends.is_some() { "base_".to_string() } else { field }
+}
+
 pub(super) fn unique(base: String, used: &mut HashSet<String>) -> String {
     let mut name = base.clone();
     let mut n = 2;
@@ -81,9 +88,10 @@ fn unique_in(base: String, first: &mut HashSet<String>, second: &mut HashSet<Str
 pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashMap<usize, String>) {
     let h = &class.hierarchy;
     // Each class has its own `impl`, so names only need to be unique within their class tree.
-    // The enum of a class with subclasses has `base()`, the fields of the class (as
-    // `ByteBuffer`'s enum has beside the JDK's own `ByteBuffer.base()`, then `base_2`).
-    let mut used = vec![HashSet::from(["base".to_string()]); class.types.len()];
+    // `base` and `base_mut` are taken in each: the enum of a class tree has methods of those
+    // names, the fields of the object's class (`dispatch.rs`), beside a method of the JDK's own
+    // `base` (`ByteBuffer.base()`, then `base_2`).
+    let mut used = vec![HashSet::from(["base".to_string(), "base_mut".to_string()]); class.types.len()];
     let mut module_used: HashMap<&str, HashSet<String>> = HashMap::new();
     for m in class.methods.iter().filter(|m| m.is_main) {
         used[m.class].insert("main".to_string());

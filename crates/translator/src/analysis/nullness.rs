@@ -11,11 +11,13 @@
 
 use super::{Facts, leading_assignments};
 use crate::ast::*;
+use std::collections::HashSet;
 
 /// Records the variables, parameters, return values and fields that can hold null, until nothing
 /// changes. A parameter is recorded under its name, as the names of a method's variables and
 /// parameters are distinct.
 pub fn analyze(class: &Class, facts: &mut Facts) {
+    let read: Vec<HashSet<String>> = class.methods.iter().map(read_locals).collect();
     loop {
         let before = (
             facts.nullable_vars.len(),
@@ -102,8 +104,14 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             for stmt in &method.body {
                 let mut on_stmt = |s: &Stmt| match s {
                     Stmt::Local { ty, name, init: Some(init), .. }
-                        if nullable_type(*ty) && maybe_null(facts, m, init) =>
+                        if nullable_type(*ty)
+                            && (maybe_null(facts, m, init)
+                                || matches!(init.kind, ExprKind::Static { .. })
+                                    && !read[m].contains(name)) =>
                     {
+                        // A local that nothing reads, set from a static, initializes the static's
+                        // class (`MemorySegment segment = MemorySegment.NULL;` in the JDK), which
+                        // may be under way, with the static still null.
                         declared.push((m, name.clone()));
                     }
                     Stmt::Return(Some(value), _) if maybe_null(facts, m, value) => returns.push(m),
@@ -172,6 +180,28 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
     // initializer: its cell is an `Option` that is read as it is.
     let nullable = facts.nullable_statics.clone();
     facts.placeholder_statics.retain(|key| !nullable.contains(key));
+}
+
+/// The locals and parameters that the code of `method` reads.
+fn read_locals(method: &Method) -> HashSet<String> {
+    let mut read = HashSet::new();
+    for stmt in &method.body {
+        visit_stmt(
+            stmt,
+            &mut |e| {
+                visit_expr(e, &mut |x| match &x.kind {
+                    ExprKind::Var(name)
+                    | ExprKind::Assign { op: Some(_), target: Place::Var(name), .. }
+                    | ExprKind::IncDec { target: Place::Var(name), .. } => {
+                        read.insert(name.clone());
+                    }
+                    _ => {}
+                })
+            },
+            &mut |_| {},
+        );
+    }
+    read
 }
 
 /// The fields whose nullness is analyzed: strings, arrays, objects and charsets. A boxed field is
