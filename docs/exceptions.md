@@ -237,6 +237,11 @@ one could, `Gen::may_fail` picks the checked form, chosen by the same facts the 
   another class (`comparable.rs`, the bridge's cast), runs inside `java::catching(|| op)`
   (`crates/runtime/src/catching.rs`): inside it, the runtime's `throw` unwinds with the exception
   and `catching` returns it as an `Err`. A panic of anything else still unwinds.
+- **A null argument of `compareTo`** on a `String` or a box is checked like a dereference:
+  `try_non_null_message` gives Java's message for the argument's class, and the `Result` of
+  `compare_to` passes it on with `?`. A raw `Comparable`'s call of any class's `compareTo` with a
+  null argument runs inside `java::catching`, and the receiver's arm raises Java's message for its
+  class, an enum's `Cannot invoke "Object.getClass()"` included (`dispatch.rs`, `compare_arm`).
 
 `impl From<java::Exception> for Throwable` builds an object of the standard class with its
 `(String)` constructor, so `getMessage` and `toString` read as Java's. Lowering declares such a
@@ -487,7 +492,7 @@ local declared in a `finally` (javac copies the block, each copy with its own sl
 instance initializer (copied into every constructor), of a JDK local the translation may have
 renamed, of the enclosing instance of a nested class, a dereference in the code of `java.lang`,
 a failure of the runtime without the checked form (an unboxing the code does not write as a
-call, a library call given null), a dereference in the body of a method reference's class, and a
+call, a library call given null other than a `compareTo`'s argument), a dereference in the body of a method reference's class, and a
 field of a field of an enclosing instance.
 
 ## Differences from Java

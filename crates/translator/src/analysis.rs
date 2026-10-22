@@ -45,7 +45,9 @@ use std::collections::{HashMap, HashSet};
 
 pub use exceptions::{generator_text, text_objects};
 pub use npe_messages::npe_messages;
-pub(crate) use npe_messages::{SEARCH_NULL_ELEMENT, SEARCH_NULL_KEY};
+pub(crate) use npe_messages::{
+    ENUM_COMPARE_NULL, SEARCH_NULL_ELEMENT, SEARCH_NULL_KEY, compare_null_message,
+};
 
 pub use arrays::{RowIndex, Slice, SlicedLoop};
 pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
