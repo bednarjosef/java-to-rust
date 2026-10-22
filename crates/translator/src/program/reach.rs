@@ -731,6 +731,48 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ),
         ("jdk.internal.util.TranslatedArraysSupport", "vectorizedMismatch"),
     ),
+    // A file's bytes, which the JDK reads through a channel and `ByteBuffer`s; the translator's
+    // read `Files.newInputStream` (`sun/nio/fs/TranslatedFiles.java`).
+    (
+        ("java.nio.file.Files", "readAllBytes", "(java.nio.file.Path)byte[]"),
+        ("sun.nio.fs.TranslatedFiles", "readAllBytes"),
+    ),
+    // A file's text, which the JDK copies the bytes of for a `Path` of another module, found by
+    // `Class.getModule`.
+    (
+        (
+            "java.nio.file.Files",
+            "readString",
+            "(java.nio.file.Path,java.nio.charset.Charset)java.lang.String",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "readString"),
+    ),
+    (
+        (
+            "java.nio.file.Files",
+            "writeString",
+            "(java.nio.file.Path,java.lang.CharSequence,java.nio.charset.Charset,java.nio.file.OpenOption[])java.nio.file.Path",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "writeString"),
+    ),
+    // A reader and a writer of a file, which the JDK makes with a `CharsetDecoder` and a
+    // `CharsetEncoder`; the translator's with the `Charset`.
+    (
+        (
+            "java.nio.file.Files",
+            "newBufferedReader",
+            "(java.nio.file.Path,java.nio.charset.Charset)java.io.BufferedReader",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "newBufferedReader"),
+    ),
+    (
+        (
+            "java.nio.file.Files",
+            "newBufferedWriter",
+            "(java.nio.file.Path,java.nio.charset.Charset,java.nio.file.OpenOption[])java.io.BufferedWriter",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "newBufferedWriter"),
+    ),
 ];
 
 /// The translator's class and method that a call of the JDK's method `(owner, name, signature)`
