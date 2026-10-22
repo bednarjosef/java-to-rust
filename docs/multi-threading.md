@@ -1313,6 +1313,10 @@ Decisions that change during the implementation are recorded here, milestone by 
 - **Shared builders**: in a program with threads every `StringBuilder` is a
   `java::SharedStringBuilder`, its units in an `Arc<java::Locked<..>>`, as every array is a
   `java::SharedArray`; its methods take the lock only while they run.
+  Pending: this is decided for the whole program, not per allocation site, so a builder that
+  never leaves its thread pays for a lock on every call (javac builds many). The narrowing to
+  come makes only the builders and arrays that the analysis sees escape to another thread, or
+  that are used as a monitor, shared, and keeps the others `Rc`s.
 - **Not yet shared**: a box compared by identity (an `Rc`) in a static or in a field of a shared
   class is rejected (`analysis/threads.rs`, `check`) until the escape milestone gives it a shared
   form. The closure does not follow the type arguments of a generic

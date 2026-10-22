@@ -48,6 +48,16 @@ fn constant_pattern(class: &Class, builtin: &Builtin, args: &[Expr]) -> bool {
     }
 }
 
+/// Whether `String.format` with `args` (the format first) may throw: unless its format is a
+/// literal, or a `static final` constant, that fits its arguments' types, which then never throws;
+/// the arguments in an `Object[]` are as many as the array has.
+pub(in crate::analysis) fn format_may_fail(class: &Class, args: &[Expr]) -> bool {
+    !crate::analysis::constants::text(class, &args[0]).is_some_and(|format| {
+        !args[1..].iter().any(|a| matches!(a.ty, Type::Array(_)))
+            && java_runtime::format::never_fails(format, &format_samples(&args[1..]))
+    })
+}
+
 /// An argument of the runtime's `format` of each argument's kind, as the code generator passes
 /// it (`format_arg`), with any value.
 fn format_samples(args: &[Expr]) -> Vec<java_runtime::format::Arg<'static>> {
@@ -363,7 +373,10 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::OutFlush
             | Native::ErrFlush,
         ) => &[],
-        Builtin::CodePoint(CodePointOp::ToCharsInto) => &["java.lang.IllegalArgumentException"],
+        // A code point that is not valid (`java::to_chars`, `code_point_string`).
+        Builtin::CodePoint(CodePointOp::ToCharsInto | CodePointOp::ToChars | CodePointOp::ToString) => {
+            &["java.lang.IllegalArgumentException"]
+        }
         Builtin::CodePoint(
             CodePointOp::CharCount
             | CodePointOp::ToCodePoint
@@ -398,17 +411,22 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Native(Native::ArrayCopy) => &["java.lang.ArrayIndexOutOfBoundsException"],
         // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
         Builtin::Arrays(op) if op.ranged() => &["java.lang.ArrayIndexOutOfBoundsException"],
-        // A constant format that fits its arguments' types never throws; the arguments in an
-        // `Object[]` are as many as the array has.
-        Builtin::Format => match crate::analysis::constants::text(class, &args[0]) {
-            Some(format)
-                if !args[1..].iter().any(|a| matches!(a.ty, Type::Array(_)))
-                    && java_runtime::format::never_fails(format, &format_samples(&args[1..])) =>
-            {
-                &[]
-            }
-            _ => &["?"],
-        },
+        Builtin::Format if !format_may_fail(class, args) => &[],
+        // What the runtime's `format` raises (`format.rs`); a format it does not support ends the
+        // program.
+        Builtin::Format => &[
+            "java.util.DuplicateFormatFlagsException",
+            "java.util.FormatFlagsConversionMismatchException",
+            "java.util.IllegalFormatArgumentIndexException",
+            "java.util.IllegalFormatCodePointException",
+            "java.util.IllegalFormatConversionException",
+            "java.util.IllegalFormatFlagsException",
+            "java.util.IllegalFormatPrecisionException",
+            "java.util.IllegalFormatWidthException",
+            "java.util.MissingFormatArgumentException",
+            "java.util.MissingFormatWidthException",
+            "java.util.UnknownFormatConversionException",
+        ],
         // A zero divisor.
         Builtin::Unsigned(UnsignedOp::Divide | UnsignedOp::Remainder, _) => {
             let nonzero = matches!(args[1].kind, ExprKind::Int(v) if v != 0)
@@ -754,6 +772,19 @@ pub(super) fn runtime_failures(
                 | Builtin::RawMemory { .. } = builtin
                 {
                     // A null base is an address outside the heap, which ends the program.
+                } else if let Builtin::Arrays(ArraysOp::BinarySearch | ArraysOp::BinarySearchRange) = builtin {
+                    // The array is dereferenced with the checked form, and so is a key that may
+                    // be null, which fails where it is compared with an element; where elements
+                    // may be null, comparing either fails in the search (`Gen::arrays_op`).
+                    let key = &args[args.len() - 1];
+                    if null(&args[0]) {
+                        out.push((NPE, "this call", true, args[0].id));
+                    }
+                    if facts.nullable_elements.contains(&args[0].ty.element()) {
+                        out.push((NPE, "this call", true, x.id));
+                    } else if null(key) {
+                        out.push((NPE, "this call", true, key.id));
+                    }
                 } else if !takes_null && checked.iter().any(null) {
                     let receiver = !checked[1..].iter().any(null);
                     out.push((NPE, "this call", receiver, if receiver { args[0].id } else { x.id }));

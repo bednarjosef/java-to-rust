@@ -402,6 +402,11 @@ pub fn never_fails(format: &str, args: &[Arg]) -> bool {
 /// other than `%s` and `%S` (and `%n` and `%%`, which take none) is not supported, and fails
 /// loudly when it runs.
 pub fn format_objects(format: &str, texts: &[Option<String>]) -> String {
+    self::format(format, &object_args(format, texts))
+}
+
+/// The arguments of `format_objects`, once its format is known to take only text.
+fn object_args<'a>(format: &str, texts: &'a [Option<String>]) -> Vec<Arg<'a>> {
     if let Ok(items) = parse(format)
         && let Some(spec) = items.iter().find_map(|item| match item {
             Item::Spec(spec) if !matches!(spec.conversion, 's' | 'S' | 'n' | '%') => Some(spec),
@@ -411,21 +416,46 @@ pub fn format_objects(format: &str, texts: &[Option<String>]) -> String {
         let message = format!("%{} of an element of an Object[] in a format not supported", spec.conversion);
         throw(UNSUPPORTED, &message);
     }
-    let args: Vec<Arg> = texts.iter().map(|t| t.as_deref().map_or(Arg::Null, Arg::Text)).collect();
-    self::format(format, &args)
+    texts.iter().map(|t| t.as_deref().map_or(Arg::Null, Arg::Text)).collect()
 }
 
 /// `String.format(format, args)`.
 pub fn format(format: &str, args: &[Arg]) -> String {
-    try_format(format, args).unwrap_or_else(|e| {
-        let message = if e.class == UNSUPPORTED { format!("{} not supported", e.message) } else { e.message };
-        throw(e.class, &message)
-    })
+    try_format(format, args).unwrap_or_else(|e| fail_format(e))
+}
+
+/// `System.out.printf(format, args)`: the text that Java's `Formatter` writes piece by piece, so
+/// that a specifier that fails as it prints (an argument that is missing or does not fit) leaves
+/// the text before it printed, as Java's does. A format that does not parse prints nothing.
+pub fn print_format(format: &str, args: &[Arg]) {
+    use std::io::Write as _;
+    let mut out = String::new();
+    let result = format_into(format, args, &mut out);
+    let _ = crate::out().write_all(out.as_bytes());
+    if let Err(e) = result {
+        fail_format(e)
+    }
+}
+
+/// `print_format` with the arguments in an `Object[]` (see `format_objects`).
+pub fn print_format_objects(format: &str, texts: &[Option<String>]) {
+    print_format(format, &object_args(format, texts))
+}
+
+fn fail_format(e: FormatError) -> ! {
+    let message = if e.class == UNSUPPORTED { format!("{} not supported", e.message) } else { e.message };
+    throw(e.class, &message)
 }
 
 fn try_format(format: &str, args: &[Arg]) -> Result<String, FormatError> {
-    let items = parse(format)?;
     let mut out = String::new();
+    format_into(format, args, &mut out)?;
+    Ok(out)
+}
+
+/// Formats into `out`, which holds the text before the failing specifier when it fails.
+fn format_into(format: &str, args: &[Arg], out: &mut String) -> Result<(), FormatError> {
+    let items = parse(format)?;
     let mut last: i32 = -1;
     let mut last_ordinary: i32 = -1;
     for item in &items {
@@ -469,9 +499,9 @@ fn try_format(format: &str, args: &[Arg]) -> Result<String, FormatError> {
                 args[last as usize]
             }
         };
-        print(&mut out, spec, arg)?;
+        print(out, spec, arg)?;
     }
-    Ok(out)
+    Ok(())
 }
 
 fn conversion_error<T>(spec: &Spec, arg: Arg) -> Result<T, FormatError> {

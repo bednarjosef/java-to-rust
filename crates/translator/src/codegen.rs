@@ -178,6 +178,7 @@ fn generate_with(
         traits: std::collections::BTreeSet::new(),
         ctor_result: None,
         printing: false,
+        printing_format: false,
         guarded: false,
         steady: None,
         annotations: Vec::new(),
@@ -330,6 +331,9 @@ struct Gen<'a> {
     ctor_result: Option<&'static str>,
     /// Whether the text being formatted is printed.
     printing: bool,
+    /// Whether the next `String.format` is `printf`'s, which prints the text itself (see
+    /// `java::print_format`).
+    printing_format: bool,
     /// Whether the statement being emitted also borrows an object mutably (see `conflicts`).
     guarded: bool,
     /// What the statement being emitted does to the plain objects it names, where it is known
@@ -380,7 +384,8 @@ struct Gen<'a> {
     /// `exceptions::try_assigned`).
     try_assigned: HashSet<String>,
     /// The objects of `Facts::null_checked` whose checked dereference has been written, and the
-    /// casts of `Facts::raising` whose checked form has.
+    /// casts of `Facts::raising` whose checked form has; and everything in a `catch` clause that
+    /// is not written, which needs neither.
     dereferenced: HashSet<ExprId>,
     /// The cast of `Facts::raising` that `class_cast` is writing, in the checked form.
     checked_cast: Option<ExprId>,

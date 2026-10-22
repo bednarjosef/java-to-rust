@@ -659,9 +659,16 @@ impl<'a> Gen<'a> {
             Builtin::ArraysToString | Builtin::ArraysFill | Builtin::ArraysSort | Builtin::ArraysCopyOf => {
                 self.arrays_builtin(builtin, args, id)
             }
-            Builtin::Arrays(op) => self.arrays_op(op, args),
+            Builtin::Arrays(op) => self.arrays_op(op, args, id),
             Builtin::ElementUpdate(update) => self.element_update_call(update, args),
             Builtin::ByteView { ty, big_endian } => self.byte_view_call(ty, big_endian, args),
+            // `printf`: the runtime prints what Java's `Formatter` writes, piece by piece.
+            Builtin::Print if matches!(args[0].kind, ExprKind::Builtin(Builtin::Format, _)) => {
+                self.printing_format = true;
+                let code = self.expr(&args[0]);
+                self.printing_format = false;
+                code
+            }
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
                 let outer = std::mem::replace(&mut self.printing, true);

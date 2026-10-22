@@ -24,7 +24,7 @@
 
 use super::{Lowering, Node, Symbol, unsupported};
 use crate::ast::*;
-use serde_json::Value;
+use crate::value::Value;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 

@@ -171,14 +171,13 @@ impl<'t> Lowering<'t> {
             return unsupported(call, "logging a `Throwable` through a `PlatformLogger`");
         }
         let (line, column) = (&call.0["line"], &call.0["column"]);
-        let symbol =
-            serde_json::json!({"kind": "METHOD", "name": name, "owner": owner, "static": false, "type": sig});
-        let print = serde_json::json!({"kind": "METHOD_INVOCATION", "line": line, "column": column,
+        let symbol = crate::value::json!({"kind": "METHOD", "name": name, "owner": owner, "static": false, "type": sig});
+        let print = crate::value::json!({"kind": "METHOD_INVOCATION", "line": line, "column": column,
             "javaType": "void", "arguments": [],
             "methodSelect": {"kind": "MEMBER_SELECT", "line": line, "column": column, "identifier": name,
                 "expression": throwable.0.clone(), "symbol": symbol},
             "symbol": symbol});
-        let print: &'t serde_json::Value = Box::leak(Box::new(print));
+        let print: &'t crate::value::Value = Box::leak(Box::new(print));
         self.expr(Node(print))
     }
 }

@@ -53,13 +53,15 @@ fn template() -> &'static [Value] {
 /// Gives the interfaces of the package `functional` their real packages, in every name and type.
 fn rename(v: &mut Value) {
     match v {
-        Value::String(s) => {
+        Value::String(held) => {
+            let mut s = held.to_string();
             while let Some(at) = s.find("functional.") {
                 let rest = &s[at + "functional.".len()..];
                 let end = rest.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(rest.len());
                 let simple = rest[..end].to_string();
                 s.replace_range(at..at + "functional".len(), package_of(&simple));
             }
+            *held = s.into();
         }
         Value::Array(items) => items.iter_mut().for_each(rename),
         Value::Object(map) => {
@@ -68,7 +70,7 @@ fn rename(v: &mut Value) {
             {
                 let simple = map.get("name").and_then(Value::as_str).unwrap_or_default();
                 let package = package_of(simple);
-                map.insert("owner".into(), Value::String(package.into()));
+                map.insert("owner", Value::String(package.into()));
             }
             map.values_mut().for_each(rename);
         }

@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::{Item, MethodKey, Walk, by_name::class_bound, literal_class, text};
-use serde_json::Value;
+use crate::value::Value;
 
 /// What a lookup looks for.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]

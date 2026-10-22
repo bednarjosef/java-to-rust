@@ -611,6 +611,15 @@ Decisions that changed during the implementation, step by step.
   escape, a malformed reference) or `IndexOutOfBoundsException` (a group the pattern lacks),
   which a `catch` sees with Java's message; a pattern that is not a literal may also throw
   `PatternSyntaxException`, which is not a standard class, so catching it is rejected.
+- **A format that is not a literal** (`String.format`, `formatted`, `printf`) may throw the
+  `java.util.IllegalFormatException` subclasses that the runtime's `format` raises, which are
+  standard classes (`java/Standard.java`): a `catch` sees them with Java's message. The runtime
+  builds them by a constructor from the message and a `raised` flag, since Java's constructors
+  take the flags, the conversion or the width instead; a raised one's getters answer null or
+  zero. `System.out.printf` prints what Java's `Formatter` writes before a specifier that fails
+  as it prints (an argument missing or of the wrong kind), as Java does (`java::print_format`);
+  a format that does not parse prints nothing, in both. The `printf` of a `PrintStream` object
+  formats its text before the stream prints it, so one whose format may fail is rejected.
 - **Still rejected**, with "catching the `X` that this ... may throw": a null dereference
   (`NullPointerException`, whose checked form would wrap every `non_null`), an array creation
   with a negative size, a `ClassCastException` of a downcast, the library calls that may fail
@@ -823,7 +832,11 @@ Decisions that changed during the implementation, step by step.
   of the Java that runs the program, which the corpus and `targets/` already assume.
   `Arrays.copyOf` of a null array has the text of the JDK's code (`Cannot invoke
   "Object.getClass()"` for an array of objects, `Cannot read the array length` for one of
-  primitives). The classes of `java.lang` that a program gets are the translator's own
+  primitives). `Arrays.binarySearch` has the JDK's too: of a null array `Cannot read the array
+  length because "a" is null`, of a null key compared with a string `Cannot read field "value"
+  because "anotherString" is null` (none on an empty range, which compares nothing), and of a
+  null element `Cannot invoke "java.lang.Comparable.compareTo(Object)" because "midVal" is
+  null`. The classes of `java.lang` that a program gets are the translator's own
   (`java/Standard.java`), so a message from their code is not known; where the JDK's code has a
   dereference that may fail, theirs throws the JDK's message itself (`ThreadGroup`'s
   `parent.maxPriority`, `JavaLangAccess.start`'s `thread.start(container)`). A call of the JDK's

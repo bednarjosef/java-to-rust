@@ -6,7 +6,7 @@
 //! a method is scanned once, when it becomes reachable, and every symbol in it makes its
 //! declaration reachable in turn: a worklist that runs until nothing new is found.
 
-use serde_json::Value;
+use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod by_name;
@@ -2313,7 +2313,7 @@ fn has_effects(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::value::json;
 
     /// A static call of `class.name()`, as a statement of javac's tree.
     fn call(class: &str, name: &str) -> Value {

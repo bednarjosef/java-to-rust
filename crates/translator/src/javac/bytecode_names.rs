@@ -7,7 +7,7 @@
 
 use super::{fail, java, parse};
 use crate::ast::{Error, Pos};
-use serde_json::Value;
+use crate::value::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -100,8 +100,8 @@ fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<Bytecod
             line.as_u64().unwrap_or_default() as usize,
             column.as_u64().unwrap_or_default() as usize,
         );
-        let name = if kind == NameKind::Local { String::new() } else { name.clone() };
-        entries.insert((class.clone(), pos, kind, name), text.as_str().map(str::to_string));
+        let name = if kind == NameKind::Local { String::new() } else { name.to_string() };
+        entries.insert((class.to_string(), pos, kind, name), text.as_str().map(str::to_string));
     }
     Ok(BytecodeNames { java: tree["java"].as_str().unwrap_or_default().to_string(), entries })
 }

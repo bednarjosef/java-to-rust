@@ -12,7 +12,7 @@
 //! one (`ObjectInputStream.GetField`) is a stub of its own, without its outer class.
 
 use super::{MethodKey, Walk, provided, strip_arguments, text, untranslated};
-use serde_json::Value;
+use crate::value::Value;
 
 impl Walk<'_> {
     /// The declared type of a variable, `ty`, which is a stub when it is an untranslated class.

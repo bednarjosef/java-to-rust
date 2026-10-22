@@ -63,7 +63,7 @@ impl<'a> Gen<'a> {
             .map(|c| format!("{}(_) => {}", self.variant(t, c), rust_string(&self.java_class_name(c, false))))
             .collect();
         // A `match` (or a block) that starts a statement would be one, so it goes in parentheses.
-        Code::new(format!("match {obj} {{ {} }}", arms.join(", ")), LOWEST)
+        Code::new(super::class_values::variant_match(&obj, &arms), LOWEST)
     }
 
     /// `value`, once `object` has run when it has effects.
