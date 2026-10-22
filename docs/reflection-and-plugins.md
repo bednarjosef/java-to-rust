@@ -184,14 +184,19 @@ handles.
 - **Module layers** other than the boot layer, which load code from a module path, and a
   module's `ModuleDescriptor`.
 - **A bundle of the program's own** (`ResourceBundle.getBundle` of a class of the program, as
-  javac's messages are) reaches the module paths above but does not translate yet. The JDK's
-  `ResourceBundle` keeps any exception of loading a bundle as the cause of the
-  `MissingResourceException` it may throw (`catch (LinkageError|Exception e)` in `loadBundle`),
-  so the message of every `NullPointerException` that the code under it could raise must be
-  known, and about a hundred of them are not (the locale code, the immutable collections'
-  iterators, the translator's own classes of `java.lang`). The JDK's `PropertyResourceBundle`
-  decodes with a `Charset` of its own, which is rejected too, and a `Properties` read from a
-  `Reader` needs monitors on `Object` values that the generator does not give yet.
+  javac's messages are) translates in a named module: a class bundle through `ServiceLoader` and
+  `Class.forName(module, name)`, and a properties file through `PropertyResourceBundle`, whose
+  overlay decodes the bytes as Java's decoder does (UTF-8, or ISO-8859-1 from the start when the
+  first malformed byte is in the first 8192 bytes; a character that the end cuts is a
+  `MalformedInputException`). What it cannot match, a malformed byte later or the property
+  `java.util.PropertyResourceBundle.encoding` set to `UTF-8` with malformed input, throws
+  `UnsupportedOperationException`. The JDK's `ResourceBundle` keeps any exception of loading a
+  bundle as the cause of the `MissingResourceException` it may throw (`catch (LinkageError|Exception
+  e)` in `loadBundle`), so the message of every `NullPointerException` that the code under it
+  could raise must be known (see `docs/exceptions.md`). A program that loads a properties file
+  still does not compile: `Properties.entrySet()` is a `Collections.synchronizedSet` over the
+  `Properties` as its lock, and the generator gives no monitor to an `Object` that may hold a
+  value such as a string.
 - **Members of the runtime's classes** (`String`, the boxes, `Object`, ...) are not in the
   table: a lookup on `String.class` finds nothing. `Modifier` is not translated in a single file.
 
