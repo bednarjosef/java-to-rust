@@ -465,9 +465,21 @@ impl<'t> Lowering<'t> {
                 };
                 let (receiver, first) = if unbound { (param(0), 1) } else { (bound, 0) };
                 let args: Vec<Value> = (first..param_types.len()).map(param).collect();
+                // `Map.Entry::getKey` on a raw qualifier returns `Object`, the erasure of the
+                // method's type variable: the lambda gives the descriptor's type, as javac's
+                // checked cast does, so the call is read as that type (a generic call's value).
+                let declared_ret = symbol["type"].as_str().map_or("", |t| signature(t).1);
+                let type_variable = !declared_ret.is_empty() && !declared_ret.contains(['.', '<', '[']);
+                let reference = |t: &str| t.contains('.') || t.ends_with(']');
+                let ret = if referent_ret == "java.lang.Object" && type_variable && reference(descriptor_ret)
+                {
+                    descriptor_ret
+                } else {
+                    referent_ret
+                };
                 let select = at(json!({"kind": "MEMBER_SELECT", "identifier": node.str("name"),
                     "symbol": symbol, "expression": receiver}));
-                at(json!({"kind": "METHOD_INVOCATION", "javaType": referent_ret, "symbol": symbol,
+                at(json!({"kind": "METHOD_INVOCATION", "javaType": ret, "symbol": symbol,
                     "methodSelect": select, "arguments": args}))
             }
         };
