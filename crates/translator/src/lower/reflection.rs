@@ -545,11 +545,16 @@ impl<'t> Lowering<'t> {
         for t in (0..self.types.len()).filter(|&t| self.reflectable(t)) {
             match kind {
                 LookupKind::Constructor => {
-                    let creatable = matches!(self.types[t].node.kind(), "CLASS" | "RECORD") && {
-                        let (first, last) = self.synthetic_params(t)?;
-                        first.is_empty() && last.is_empty()
-                    };
-                    if !creatable || !reflected(t, "<init>") {
+                    // A local or anonymous class is not found by name, and its constructor takes
+                    // what it captures, which is worked out in its own scope.
+                    let creatable = matches!(self.types[t].node.kind(), "CLASS" | "RECORD")
+                        && reflected(t, "<init>")
+                        && self.nesting(t).is_none()
+                        && {
+                            let (first, last) = self.synthetic_params(t)?;
+                            first.is_empty() && last.is_empty()
+                        };
+                    if !creatable {
                         continue;
                     }
                     for m in (0..self.methods.len()).filter(|&m| self.methods[m].owner == t) {

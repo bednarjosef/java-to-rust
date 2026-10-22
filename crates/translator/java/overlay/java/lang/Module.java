@@ -9,6 +9,7 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -56,8 +57,11 @@ public final class Module {
         "jdk.naming.dns", "jdk.security.auth", "jdk.security.jgss", "jdk.xml.dom", "jdk.zipfs",
     };
 
-    /** The translation's named modules by name, made when first asked for. */
-    private static Map<String, Module> named;
+    /**
+     * The translation's named modules by name, made when first asked for. (A `LinkedHashMap`, so
+     * that its calls reach only that class's methods, not every map's.)
+     */
+    private static LinkedHashMap<String, Module> named;
     /** The unnamed modules of the boot loader and of the class loaders asked so far. */
     private static Module bootUnnamed;
     private static final List<Module> UNNAMED = new ArrayList<>();
@@ -148,9 +152,9 @@ public final class Module {
     }
 
     // The translation's named modules, in the order of their roots.
-    static synchronized Map<String, Module> named() {
+    static synchronized LinkedHashMap<String, Module> named() {
         if (named == null) {
-            Map<String, Module> all = new java.util.LinkedHashMap<>();
+            LinkedHashMap<String, Module> all = new LinkedHashMap<>();
             for (String n : modules0()) {
                 all.put(n, new Module(n, declares0(n)));
             }
@@ -506,12 +510,17 @@ public final class Module {
     }
 
     public String toString() {
-        return isNamed() ? "module " + name : "unnamed module @" + Integer.toHexString(hashCode());
+        return isNamed() ? "module " + name : "unnamed module @" + Integer.toHexString(System.identityHashCode(this));
     }
 
-    /** Whether the root of the module {@code module} ("" the unnamed one) holds the file {@code name}. */
-    static boolean holds(String module, String name) {
-        return holds0(module, name);
+    /** The module of the boot loader whose root holds the file {@code name}, or null. */
+    static String bootHolder(String name) {
+        for (String m : BOOT_MODULES) {
+            if (holds0(m, name)) {
+                return m;
+            }
+        }
+        return null;
     }
 
     /** The names of the translation's named modules, in the order of their roots. */

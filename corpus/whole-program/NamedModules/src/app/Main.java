@@ -37,11 +37,11 @@ public class Main {
         System.out.println(ModuleLayer.boot().findModule("app").get() == app);
         System.out.println(ModuleLayer.boot().findModule("java.base").get() == base);
         System.out.println(ModuleLayer.boot().findModule("no.such.module").isPresent());
-        System.out.println(ModuleLayer.boot().modules().contains(app) + " " + app.getLayer().equals(ModuleLayer.boot()));
+        System.out.println(ModuleLayer.boot().modules().contains(app) + " " + (app.getLayer() == ModuleLayer.boot()));
         System.out.println(ModuleLayer.boot().parents().size() + " " + ModuleLayer.empty().modules().isEmpty());
         System.out.println(Class.forName(app, "app.data.Point") == Point.class);
-        System.out.println(Class.forName(base, "app.data.Point"));
-        System.out.println(Class.forName(app, "java.lang.String"));
+        System.out.println(Class.forName(base, "app.data.Point") == null);
+        System.out.println(Class.forName(app, "java.lang.String") == null);
         Module unnamed = ClassLoader.getSystemClassLoader().getUnnamedModule();
         System.out.println(unnamed.isNamed() + " " + unnamed.getName() + " " + (unnamed == app) + " "
                 + unnamed.toString().startsWith("unnamed module @") + " " + unnamed.isExported("anything"));

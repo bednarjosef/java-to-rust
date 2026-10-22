@@ -125,24 +125,50 @@ program where such a lookup can happen, so they can be checked before the progra
   providers, javac reports its own error, "Bad service configuration file", with our message
   naming the directory.
 
+- **Modules.** With the JDK's sources, `java.lang.Module` and `ModuleLayer` are the translator's
+  own (`java/overlay/java/lang/`), over what the roots declare and hold
+  (`program/modules.rs`, `contents`; kept in `Reach::modules`, and given to `Module` by its
+  natives, `lower/modules.rs`). Each root with a `module-info.java` is a named module, with the
+  class loader that the JVM gives it (the boot loader for `java.base` and the JDK's other boot
+  modules, the platform loader for `java.compiler` and the rest of the platform's, the system
+  loader for any other), and the roots without one are the unnamed module of the system class
+  loader. A class is in the module whose root has its package, and the translator's own classes
+  are `java.base`'s. A module answers `isNamed`, `getName`, `getClassLoader`, `canRead`,
+  `isExported`, `isOpen`, `canUse` and `getPackages` from its declaration, and `addReads`,
+  `addExports`, `addOpens` and `addUses` add to that as in Java; `ModuleLayer.boot()` is the
+  layer of the named modules, over the empty layer. `Class.getModule()`,
+  `Class.getClassLoader()` and `ClassLoader.getUnnamedModule()` go to the translator's
+  `TranslatedModules`, and so do the JDK's `BootLoader.getUnnamedModule`, `loadClassOrNull`
+  and `findResource`, `ClassLoaders`' loaders and `Reflection.verifyModuleAccess`
+  (`REDIRECTED_CALLS`). `Class.forName(module, name)` finds the class only in that module.
+  `ServiceLoader` checks, as Java does, that a named module that loads a service declares that it
+  uses it. What would need code or data from outside the translation throws
+  `UnsupportedOperationException` when it runs, saying "code that is not in the translation
+  cannot run": defining a module layer, the boot layer's `configuration()` (which javac asks for
+  only with `--processor-module-path`), a module's descriptor and annotations, and a resource
+  that a root holds. Two differences from Java: `addExports` and the other `add` methods do not
+  check that their caller is in the module, and the boot layer holds only the translation's
+  named modules, where the JVM's also holds the system modules that service binding resolves.
+
 #### javac's survey, before and after
 
 `--survey` of javac (jdk.compiler with java.compiler, jdk.internal.opt and java.base), pieces of
-code that use each feature, on 2026-10-22:
+code that use each feature, on 2026-10-22: before case 1, with the reflection table, and with the
+modules.
 
-| feature       | javac's code before | after | the JDK's code before | after |
-|---------------|--------------------:|------:|----------------------:|------:|
-| reflection    |                   4 |     0 |                    53 |    41 |
-| class loading |                  11 |     4 |                    30 |    16 |
+| feature       | javac's code before | table | modules | the JDK's code before | table | modules |
+|---------------|--------------------:|------:|--------:|----------------------:|------:|--------:|
+| reflection    |                   4 |     0 |       0 |                    53 |    41 |      39 |
+| class loading |                  11 |     4 |       0 |                    30 |    16 |       4 |
 
-The four left in javac use the module system (`java.lang.Module`, `ModuleLayer`), on paths that
-only code outside the translation takes: `BasicJavacTask.initPlugin` once a plugin is found,
+The four of javac that the table left used the module system on paths that only code outside
+the translation takes: `BasicJavacTask.initPlugin` once a plugin is found,
 `JavacFileManager.getServiceLoader` for a processor module path (`--processor-module-path`), the
-`accessInternalAPI` option, and the source launcher's `ModuleLayer.boot()`. They are still
-rejected when translating, not at run time. Making them runtime errors needs a `Module` of the
-translator's own (every class in the unnamed module) and a `ModuleLayer.boot()` that throws.
-In the JDK's code, the reflection left is mostly `ResourceBundle`'s providers for named modules,
-annotations, and method handles.
+`accessInternalAPI` option, and the source launcher's `ModuleLayer.boot()`. They now translate,
+and those paths fail when they run, saying so. The four left in the JDK's code are
+`BootLoader.loadLibrary`, which the lowering makes a call that does nothing
+(`lower/libraries.rs`). In the JDK's code, the reflection left is mostly annotations and method
+handles.
 
 #### What is left of case 1
 
@@ -155,7 +181,17 @@ annotations, and method handles.
 - **The report** of the lookups that cannot be resolved when translating is not written yet.
 - **Annotations read by reflection** (`getAnnotation`, javac's `AnnotationProxyMaker`), method
   handles, `Proxy` and `java.lang.invoke` are still rejected.
-- **The module system** (`Module`, `ModuleLayer`), as above.
+- **Module layers** other than the boot layer, which load code from a module path, and a
+  module's `ModuleDescriptor`.
+- **A bundle of the program's own** (`ResourceBundle.getBundle` of a class of the program, as
+  javac's messages are) reaches the module paths above but does not translate yet. The JDK's
+  `ResourceBundle` keeps any exception of loading a bundle as the cause of the
+  `MissingResourceException` it may throw (`catch (LinkageError|Exception e)` in `loadBundle`),
+  so the message of every `NullPointerException` that the code under it could raise must be
+  known, and about a hundred of them are not (the locale code, the immutable collections'
+  iterators, the translator's own classes of `java.lang`). The JDK's `PropertyResourceBundle`
+  decodes with a `Charset` of its own, which is rejected too, and a `Properties` read from a
+  `Reader` needs monitors on `Object` values that the generator does not give yet.
 - **Members of the runtime's classes** (`String`, the boxes, `Object`, ...) are not in the
   table: a lookup on `String.class` finds nothing. `Modifier` is not translated in a single file.
 
@@ -193,7 +229,7 @@ Java code it has never seen. There are two ways, and they can be combined:
    from the fixed lists, the recording run, the error and the report for names outside the table.
    This covers what javac needs (its `ServiceLoader` uses, `Class.cast`, the annotation
    reflection) and most ordinary programs. Done except for the recording run, the report,
-   annotations read by reflection and the module system (see "What is left of case 1").
+   annotations read by reflection and module layers (see "What is left of case 1").
 2. **Case 2** comes nearly free once the translator reads several source roots and modules, which
    the javac work needs anyway. With cases 1 and 2, a translated javac runs fully for normal use,
    with annotation processors named when translating.

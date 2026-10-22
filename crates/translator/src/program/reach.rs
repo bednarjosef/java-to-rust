@@ -492,12 +492,15 @@ pub fn unsafe_field_access(class: &str, name: &str, signature: &str) -> Option<b
 /// equivalent of; it guards warnings through `PlatformLogger` that name a class by reflection.
 /// `ThreadLocal.TRACE_VTHREAD_LOCALS` is the property `jdk.traceVirtualThreadLocals`, which is
 /// unset (`UNSET_PROPERTIES`); it guards a `StackWalker` dump of where a virtual thread sets one.
+/// `ResourceBundle.TRACE_ON` is `Boolean.getBoolean("resource.bundle.debug")`, a `-D` property as
+/// `Tripwire`'s; it guards the tracing of how a bundle is found, which prints modules and classes.
 pub const FALSE_FLAGS: &[(&str, &str)] = &[
     ("java.io.FileInputStream", "jfrTracing"),
     ("java.lang.ThreadLocal", "TRACE_VTHREAD_LOCALS"),
     ("java.io.FileOutputStream", "jfrTracing"),
     ("java.io.RandomAccessFile", "jfrTracing"),
     ("java.lang.Throwable", "jfrTracing"),
+    ("java.util.ResourceBundle", "TRACE_ON"),
     ("java.util.Tripwire", "ENABLED"),
     ("java.util.stream.Tripwire", "ENABLED"),
     ("sun.nio.ch.FileChannelImpl", "jfrTracing"),

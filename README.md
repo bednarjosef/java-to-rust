@@ -728,7 +728,12 @@ few dozen of the JDK's units where javac by itself would attribute thousands (se
 whole programs" in docs/performance.md). A source or library root may be a module's, with a
 `module-info.java` (the JDK's are): the translation is of one closed program, so javac compiles
 every root as part of one module, `java.base` when the JDK's sources are a library and the
-unnamed module otherwise, and reads each class from its source (`program/modules.rs`). A
+unnamed module otherwise, and reads each class from its source (`program/modules.rs`). At run
+time the modules are what the roots declare: `Class.getModule()` is the named module of a root
+with a `module-info.java`, with the class loader the JVM gives it, or the unnamed module of the
+system class loader, and `Module` and `ModuleLayer.boot()` answer from the declarations as the
+JVM's boot layer does; defining a module layer throws, saying that code outside the translation
+cannot run (`java/overlay/java/lang/Module.java`). A
 package of a module whose sources are not given is an error that names the module to pass as
 `--library`. Packages become
 nested modules in one output file (`com.example.util` is `mod com { pub(crate) mod example
@@ -743,9 +748,9 @@ is, extends or implements. It stops at the classes that the runtime provides (`S
 whose sources reach deep into the JVM, and at what is not
 translated: reflection (but not `java.lang.reflect.Array`, which is array code, nor `Method`,
 `Field` and `Constructor`, which the reflection table is), method handles, serialization,
-security and class loading (`Module`, `ModuleLayer`, `jdk.internal.loader`; `UNTRANSLATED`;
-`ResourceBundle` is translated, and `ServiceLoader`, `ClassLoader` and `URLClassLoader` are the
-translator's own, over the translation's classes). Library code
+security and class loading (`jdk.internal.loader`; `UNTRANSLATED`; `ResourceBundle` is
+translated, and `ServiceLoader`, `ClassLoader`, `URLClassLoader`, `Module` and `ModuleLayer` are
+the translator's own, over the translation's classes and modules). Library code
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
 `comparableClassFor` and parallel streams reach threads, so the boundary is needed. A program that
 puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints the count).

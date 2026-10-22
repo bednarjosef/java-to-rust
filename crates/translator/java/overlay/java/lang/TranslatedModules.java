@@ -41,13 +41,23 @@ public final class TranslatedModules {
 
     /** {@code BootLoader.loadClassOrNull(name)}: the class of a module of the boot loader, or null. */
     public static Class<?> bootClassOrNull(String name) {
-        Class<?> c;
+        if (name == null) {
+            // Java's fails so too, in the map of its class loading locks.
+            throw new NullPointerException();
+        }
         try {
-            c = Class.forName(name, false, null);
+            // (A concatenation, which is never null: the translation cannot give the message of
+            // a `NullPointerException` in the code of `java.lang`, which `ResourceBundle` keeps.)
+            return ofBootLoader(Class.forName("" + name, false, null));
         } catch (ClassNotFoundException e) {
             return null;
         }
-        return Module.of(c).getClassLoader() == null ? c : null;
+    }
+
+    // The class `c` if a module of the boot loader has it, or null.
+    private static Class<?> ofBootLoader(Class<?> c) {
+        Module module = Module.of(c);
+        return module != null && module.getClassLoader() == null ? c : null;
     }
 
     /**
@@ -55,11 +65,10 @@ public final class TranslatedModules {
      * not in the translation and throws; null for a name that none holds, as in Java.
      */
     public static URL bootResource(String name) {
-        for (Module m : Module.named().values()) {
-            if (m.getClassLoader() == null && Module.holds(m.getName(), name)) {
-                throw new UnsupportedOperationException("the resource " + name + " of " + m
-                        + ": code that is not in the translation cannot run");
-            }
+        String module = Module.bootHolder(name);
+        if (module != null) {
+            throw new UnsupportedOperationException("the resource " + name + " of module " + module
+                    + ": code that is not in the translation cannot run");
         }
         return null;
     }
