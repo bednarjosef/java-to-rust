@@ -4434,8 +4434,10 @@ fn downcasts_are_checked() {
 }
 
 #[test]
-fn pattern_variables_are_read_only_where_the_translation_binds_them() {
-    let err = java_to_rust::translate(
+fn a_negated_pattern_in_an_or_chain_binds_its_variable_for_the_rest_of_the_block() {
+    // The `if` is turned around, with the rest of the block as its then branch
+    // (`lower/negated_patterns.rs`).
+    let rust = java_to_rust::translate(
         "interface S {}
         class A implements S { int v = 1; }
         class B implements S {}
@@ -4447,8 +4449,8 @@ fn pattern_variables_are_read_only_where_the_translation_binds_them() {
             public static void main(String[] x) { System.out.println(f(new A()) + f(new B())); }
         }",
     )
-    .unwrap_err();
-    assert!(err.to_string().contains("a pattern variable used here not supported yet"), "{err}");
+    .unwrap();
+    assert!(rust.contains("if let Some(a) = s.as_a() && !(a.v == 0) {"), "{rust}");
 }
 
 #[test]
