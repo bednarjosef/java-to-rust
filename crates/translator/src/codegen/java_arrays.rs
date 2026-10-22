@@ -59,6 +59,26 @@ impl<'a> Gen<'a> {
                 let v = self.element_value(&args[3], elem);
                 format!("{}({a}, {from}, {to}, {v})", self.runtime("fill_range"))
             }
+            // An array that may be null, whose `NullPointerException` a `catch` sees: the JDK's
+            // code checks the range first where `from` is not 0 (`try_copy_of_range`).
+            ArraysOp::CopyOfRange
+                if self.nullable(&args[0]) && self.facts.null_checked.contains_key(&args[0].id) =>
+            {
+                self.dereferenced.insert(args[0].id);
+                let a = self.optional_handle(&args[0]);
+                let (from, to) = (self.value(&args[1], Type::Int).text, self.value(&args[2], Type::Int).text);
+                let zero = self.element_zero(elem);
+                let message = match self.facts.npe_messages.get(&args[0].id) {
+                    Some(Some(message)) => format!("Some({message:?})"),
+                    _ => "None".to_string(),
+                };
+                let objects = elem.is_reference();
+                let call = format!(
+                    "{}({a}, {from}, {to}, {zero}, {message}, {objects})",
+                    self.runtime("try_copy_of_range")
+                );
+                self.passed_on(Code::atom(call))
+            }
             ArraysOp::CopyOfRange => {
                 let a = self.handle(&args[0]);
                 let (from, to) = (self.value(&args[1], Type::Int).text, self.value(&args[2], Type::Int).text);

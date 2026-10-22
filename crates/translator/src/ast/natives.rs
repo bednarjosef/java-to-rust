@@ -1,6 +1,8 @@
 //! The JDK methods that bottom out in the JVM, which the runtime implements by hand
 //! (`java_runtime::natives`, `math`, `fdlibm`, `out`, `fd`, `vm`).
 
+use super::{ChannelCall, channel_call, channel_nothing};
+
 /// A call into the native layer; its arguments are those of the `Builtin` that holds it, with
 /// the receiver first for instance methods.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,6 +182,8 @@ pub enum Native {
     /// A native that does nothing in a translated program, such as `registerNatives()`: its
     /// statement is dropped.
     Nothing,
+    /// A native of `sun.nio.ch` that a file channel calls (`ast/channels.rs`).
+    Channel(&'static ChannelCall),
     /// `CDS.getCDSConfigStatus()`.
     CdsConfigStatus,
     /// `CDS.getRandomSeedForDumping()`.
@@ -228,18 +232,48 @@ pub enum Native {
     NoPendingReferences,
     /// `SecureRandom.getSeed(numBytes)`: seed bytes from the operating system (`random.rs`).
     SecureSeed,
-    /// `Inflater`'s natives (`inflate.rs`): `init(nowrap)`, then `inflateBytesBytes`, `getAdler`,
-    /// `reset`, `end` and `setDictionary` on the handle that `init` returned.
+    /// `Inflater`'s natives (`inflate.rs`): `init(nowrap)`, then `inflateBytesBytes` and its buffer
+    /// forms (`inflateBytesBuffer`, `inflateBufferBytes`, `inflateBufferBuffer`), `getAdler`,
+    /// `reset`, `end`, and `setDictionary` with its buffer form, on the handle that `init` returned.
     InflateInit,
     InflateBytes,
+    InflateBytesBuffer,
+    InflateBufferBytes,
+    InflateBufferBuffer,
     InflateAdler,
     InflateReset,
     InflateEnd,
     InflateSetDictionary,
+    InflateSetDictionaryBuffer,
     /// `TimeZone.getSystemTimeZoneID(javaHome)`: the zone's name, or `null` (`time_zone.rs`).
     SystemTimeZoneId,
     /// `TimeZone.getSystemGMTOffsetID()`: the local offset from UTC as `GMT+hh:mm`.
     SystemGmtOffsetId,
+}
+
+impl Native {
+    /// A native of `java.io`'s streams, `FileDescriptor` or `UnixFileSystem`.
+    pub fn is_java_io(self) -> bool {
+        matches!(
+            self,
+            Native::FileOpenRead
+                | Native::FileOpenWrite
+                | Native::FileOpenRandom
+                | Native::FileRead
+                | Native::FileReadBytes
+                | Native::FileAvailable
+                | Native::FileSkip
+                | Native::FileClose
+                | Native::FileWrite
+                | Native::FileWriteBytes
+                | Native::FileIsRegular
+                | Native::FileLength
+                | Native::FilePosition
+                | Native::FileSeek
+                | Native::FileSetLength
+                | Native::FileSystem(_)
+        )
+    }
 }
 
 /// The native methods of translated JDK classes that the runtime implements and whose calls
@@ -307,11 +341,23 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long") => {
             Native::InflateBytes
         }
+        ("java.util.zip.Inflater", "inflateBytesBuffer", "(long,byte[],int,int,long,int)long") => {
+            Native::InflateBytesBuffer
+        }
+        ("java.util.zip.Inflater", "inflateBufferBytes", "(long,long,int,byte[],int,int)long") => {
+            Native::InflateBufferBytes
+        }
+        ("java.util.zip.Inflater", "inflateBufferBuffer", "(long,long,int,long,int)long") => {
+            Native::InflateBufferBuffer
+        }
         ("java.util.zip.Inflater", "getAdler", "(long)int") => Native::InflateAdler,
         ("java.util.zip.Inflater", "reset", "(long)void") => Native::InflateReset,
         ("java.util.zip.Inflater", "end", "(long)void") => Native::InflateEnd,
         ("java.util.zip.Inflater", "setDictionary", "(long,byte[],int,int)void") => {
             Native::InflateSetDictionary
+        }
+        ("java.util.zip.Inflater", "setDictionaryBuffer", "(long,long,int)void") => {
+            Native::InflateSetDictionaryBuffer
         }
         ("java.lang.ref.Reference", "hasReferencePendingList", "()boolean") => Native::NoPendingReferences,
         ("java.lang.Thread", "nextThreadNum", "()int") => Native::ThreadNumber,
@@ -349,6 +395,8 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
         || (class == "java.io.UnixFileSystem" && FILE_SYSTEM.contains(&name))
         || (class == UNIX_DISPATCHER && unix_call(name).is_some())
         || (class == NET_DISPATCHER && net_call(name).is_some())
+        || channel_call(class, name).is_some()
+        || channel_nothing(class, name)
         || matches!(
             (class, name),
             (
@@ -546,6 +594,22 @@ mod tests {
         assert_eq!(
             found("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long"),
             Some(Native::InflateBytes)
+        );
+        assert_eq!(
+            found("java.util.zip.Inflater", "inflateBytesBuffer", "(long,byte[],int,int,long,int)long"),
+            Some(Native::InflateBytesBuffer)
+        );
+        assert_eq!(
+            found("java.util.zip.Inflater", "inflateBufferBytes", "(long,long,int,byte[],int,int)long"),
+            Some(Native::InflateBufferBytes)
+        );
+        assert_eq!(
+            found("java.util.zip.Inflater", "inflateBufferBuffer", "(long,long,int,long,int)long"),
+            Some(Native::InflateBufferBuffer)
+        );
+        assert_eq!(
+            found("java.util.zip.Inflater", "setDictionaryBuffer", "(long,long,int)void"),
+            Some(Native::InflateSetDictionaryBuffer)
         );
         // Another overload, or another class's method of the same name, is not the native.
         assert_eq!(found("java.util.zip.CRC32", "update", "(byte[],int,int)void"), None);

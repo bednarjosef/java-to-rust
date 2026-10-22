@@ -241,9 +241,9 @@ on the enclosing object (`super_receiver` in `lower/hierarchy.rs`).
 Rejected:
 
 - a class with subclasses whose constructor uses `this` as a value or calls an overridable
-  method (the whole-object construction of `analysis/whole_objects.rs`, which needs a zero value
-  for every field) when the class has an enclosing instance or captured locals: `outer` and the
-  captures have no zero value;
+  method (the whole-object construction of `analysis/whole_objects.rs`, whose zero object is
+  built with the enclosing instance and captured locals) when a `super(..)` computes them
+  rather than passing on its constructor's parameters;
 - an enclosing instance needed in static code (javac rejects it too);
 - `Outer.this` or `Outer.super` from an inner class that itself extends `Outer`: the search for
   the enclosing instance stops at the first subclass of `Outer`, which is then `this`.

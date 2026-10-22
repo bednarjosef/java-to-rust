@@ -26,14 +26,6 @@ pub(crate) const SEARCH_NULL_ELEMENT: &str =
     "Cannot invoke \"java.lang.Comparable.compareTo(Object)\" because \"midVal\" is null";
 use std::collections::HashMap;
 
-/// The overlays of `java.lang` (`java/overlay/java/lang`), by qualified name.
-const JAVA_LANG_OVERLAYS: &[&str] = &[
-    "java.lang.Module",
-    "java.lang.ModuleLayer",
-    "java.lang.TranslatedModules",
-    "java.lang.TranslatedProperties",
-];
-
 /// How many steps back the JVM follows where a null came from: `a.b.c.d.e` is shown from `b`.
 const MAX_DETAIL: usize = 5;
 
@@ -59,13 +51,14 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
     for method in &class.methods {
         let Some(outermost) = outermost(class, method.class) else { continue };
         // The JDK's classes are compiled with the names of their locals (`-g`), so the JVM shows
-        // those. The classes of `java.lang` that a program gets are the translator's own
-        // (`java/Standard.java`, `java/Threads.java`), whose code is not the JDK's; those of its
-        // overlays get the messages of their own code, as other overlays do.
+        // those. The standard classes of `java.lang` are the translator's own
+        // (`java/Standard.java`, `java/Threads.java`), whose code is not the JDK's; the others are
+        // the JDK's (`CharacterName`), and its overlays get the messages of their own code, as
+        // other overlays do.
         let decl = &class.types[method.class];
         let jdk = super::exceptions::from_jdk(decl);
         let outer = decl.name.split('.').take(3).collect::<Vec<_>>().join(".");
-        if jdk && decl.package == "java.lang" && !JAVA_LANG_OVERLAYS.contains(&outer.as_str()) {
+        if jdk && decl.package == "java.lang" && crate::lower::is_standard(&outer) {
             continue;
         }
         // `CharSequence`'s default `getChars` in a class of the program is the JDK's code too.
@@ -173,6 +166,10 @@ impl Messages<'_> {
     /// The messages of the dereferences that expression `x` makes itself, by object.
     fn expr(&self, x: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
         let mut add = |object: &Expr, action: Option<String>| {
+            // A message that the expression above gave (a native's).
+            if out.contains_key(&object.id) {
+                return;
+            }
             // The JVM gives no message for the null receiver of an unbound method reference
             // (`String::length`), which the class it makes for the reference dereferences.
             if self.reference_receiver(object) {
@@ -200,6 +197,26 @@ impl Messages<'_> {
                 if let Some(message) = self.message(&action, value) {
                     out.insert(x.id, Some(message));
                 }
+            }
+            // The natives of `java.io`, whose C code throws an exception with no message for a null
+            // string or array (a path, the name of a file to open, a buffer) and for a null `File`
+            // whose path it reads (`lower::natives`); a null descriptor is a closed stream to it,
+            // which the translation does not keep apart.
+            ExprKind::Builtin(Builtin::Native(native), args) if native.is_java_io() => {
+                for arg in args {
+                    if arg.ty == Type::String || matches!(arg.ty, Type::Array(_)) {
+                        out.insert(arg.id, None);
+                    }
+                    if let ExprKind::Field { object, name } = &arg.kind
+                        && matches!(name.as_str(), "path" | "fd")
+                    {
+                        out.insert(object.id, None);
+                    }
+                }
+            }
+            ExprKind::Assign { op: None, target: Place::Field { object, .. }, value } if matches!(&value.kind, ExprKind::Builtin(Builtin::Native(n), _) if n.is_java_io()) =>
+            {
+                out.insert(object.id, None);
             }
             ExprKind::Field { object, name } => add(object, Some(format!("Cannot read field \"{name}\""))),
             ExprKind::Index(..) if let Some((object, name)) = enum_table(x) => {
@@ -244,6 +261,18 @@ impl Messages<'_> {
                     };
                     return add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
                 }
+                // A method of a builder, named as the call names it: by the receiver's type,
+                // `java.lang.StringBuilder.ensureCapacity(int)` (or `StringBuffer`), with the
+                // parameters of the overload javac chose.
+                if let Builtin::Builder(op) = builtin
+                    && let Some(name) = builder_method(*op)
+                {
+                    let call = match self.jdk {
+                        true => self.named_call(x.pos, name).flatten(),
+                        false => self.call(x.pos, name),
+                    };
+                    return add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                }
                 // The methods of a charset that may be null.
                 let charset = match builtin {
                     Builtin::Charset(CharsetOp::Name) => Some("name"),
@@ -283,10 +312,11 @@ impl Messages<'_> {
                         };
                         add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")))
                     }
-                    // `Arrays.copyOf` of a null, which fails in the JDK's code (`-g`, so the
-                    // parameter has its name): the copy of an array of objects first asks for its
-                    // class, the others read its length.
-                    Builtin::ArraysCopyOf => {
+                    // `Arrays.copyOf` and `copyOfRange` of a null, which fail in the JDK's code
+                    // (`-g`, so the parameter has its name): the copy of an array of objects first
+                    // asks for its class, the others read its length (`copyOfRange` after checking
+                    // the range unless `from` is 0, which `Gen::arrays_op` follows).
+                    Builtin::ArraysCopyOf | Builtin::Arrays(ArraysOp::CopyOfRange) => {
                         let failure = match args[0].ty {
                             Type::Array(element) if element.is_reference() => {
                                 "Cannot invoke \"Object.getClass()\""
@@ -323,9 +353,54 @@ impl Messages<'_> {
                     // have their names).
                     Builtin::Arrays(ArraysOp::BinarySearch | ArraysOp::BinarySearchRange) => {
                         let message = "Cannot read the array length because \"a\" is null";
-                        out.insert(args[0].id, Some(message.to_string()));
+                        // An `Object[]` that holds strings is the array, converted
+                        // (`StringArrayOf`), and dereferenced as it is.
+                        let mut array = &args[0];
+                        while let ExprKind::Builtin(Builtin::StringArrayOf, inner) = &array.kind {
+                            out.insert(array.id, Some(message.to_string()));
+                            array = &inner[0];
+                        }
+                        out.insert(array.id, Some(message.to_string()));
                         out.insert(args[args.len() - 1].id, Some(SEARCH_NULL_KEY.to_string()));
                         out.insert(x.id, Some(SEARCH_NULL_ELEMENT.to_string()));
+                    }
+                    // A boxed argument of `Math`'s methods in the JDK's code, which the lowering
+                    // passes as it is: javac unboxes it with the boxed class's method.
+                    Builtin::Native(Native::Math { .. }) if self.jdk => {
+                        for arg in args.iter().filter(|a| matches!(a.ty, Type::Boxed(_))) {
+                            let action =
+                                format!("Cannot invoke \"java.lang.{}.{}Value()\"", arg.ty, arg.ty.unboxed());
+                            if let Some(message) = self.message(&action, arg) {
+                                out.insert(arg.id, Some(message));
+                            }
+                        }
+                    }
+                    // `a.clone()` of a null array, a call that the class file names by the array's
+                    // descriptor: `[I.clone()`.
+                    Builtin::Arrays(ArraysOp::Clone) => {
+                        let action =
+                            self.descriptor(args[0].ty).map(|d| format!("Cannot invoke \"{d}.clone()\""));
+                        if let Some(message) = action.and_then(|a| self.message(&a, &args[0])) {
+                            out.insert(args[0].id, Some(message));
+                        }
+                    }
+                    // `Arrays.fill` and `Arrays.sort` of a null array, which the JDK's code asks for
+                    // its length (`-g`, so the parameter has its name).
+                    Builtin::ArraysFill
+                    | Builtin::ArraysSort
+                    | Builtin::Arrays(ArraysOp::FillRange | ArraysOp::SortAll | ArraysOp::SortRange) => {
+                        let message = "Cannot read the array length because \"a\" is null";
+                        out.insert(args[0].id, Some(message.to_string()));
+                    }
+                    // `new String(ascii, hibyte, offset, count)` and `new String(chars, ..)` of a
+                    // null array, which the JDK's constructor asks for its length.
+                    Builtin::String(StringOp::FromHighByte) => {
+                        let message = "Cannot read the array length because \"ascii\" is null";
+                        out.insert(args[0].id, Some(message.to_string()));
+                    }
+                    Builtin::String(StringOp::FromChars) => {
+                        let message = "Cannot read the array length because \"value\" is null";
+                        out.insert(args[0].id, Some(message.to_string()));
                     }
                     // `System.arraycopy` of a null, which the JVM's native code throws without
                     // a message.
@@ -384,21 +459,7 @@ impl Messages<'_> {
     /// The message of a `switch` on an enum that is null, of enum `name`: javac's switch asks for
     /// its `ordinal()`, named by the enum's binary name.
     fn enum_switch(&self, name: &str, selector: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
-        let Some(t) = self.class.type_index(name) else { return };
-        let decl = &self.class.types[t];
-        if !matches!(decl.origin, Origin::Member) {
-            return;
-        }
-        let Some(rest) = (match decl.package.as_str() {
-            "" => Some(decl.name.as_str()),
-            package => decl.name.strip_prefix(package).and_then(|r| r.strip_prefix('.')),
-        }) else {
-            return;
-        };
-        let binary = match decl.package.as_str() {
-            "" => rest.replace('.', "$"),
-            package => format!("{package}.{}", rest.replace('.', "$")),
-        };
+        let Some(binary) = self.class.type_index(name).and_then(|t| self.binary_name(t)) else { return };
         if let Some(message) = self.message(&format!("Cannot invoke \"{binary}.ordinal()\""), selector) {
             out.insert(selector.id, Some(message));
         }
@@ -413,7 +474,11 @@ impl Messages<'_> {
         // The JDK's temps are the walk of its slots (`jdk_switch_temps`), or else the slot that
         // is certain (`jdk_switch_slot`).
         let local = self.names.get(self.outermost, selector.pos, NameKind::Temp, "s$").map(str::to_string);
+        // In the code of a lambda, javac's method for the body has that local in its table of
+        // locals, as `s0$`, for each `switch`.
+        let lambda = matches!(self.class.types[self.method.class].origin, Origin::Lambda { .. });
         let local = match self.jdk {
+            true if lambda => local.or_else(|| Some("s0$".to_string())),
             true => local.or_else(|| self.jdk_switch_slot(selector).map(|slot| format!("<local{slot}>"))),
             false => local,
         };
@@ -427,8 +492,9 @@ impl Messages<'_> {
     /// code, which the class file's table of locals leaves out (it is synthetic), where it is
     /// certain: the first slot after the parameters, when the method declares no local before
     /// the `switch` and has nothing else of javac's own there (another `switch`, a `try`, a
-    /// for-each). Not for the code of a lambda, nor a constructor that javac gives parameters of
-    /// its own (an enum's, or one of a class with an enclosing instance or captured locals).
+    /// for-each). Not for the code of a lambda (see `string_switch`), nor a constructor that javac
+    /// gives parameters of its own (an enum's, or one of a class with an enclosing instance or
+    /// captured locals).
     fn jdk_switch_slot(&self, selector: &Expr) -> Option<usize> {
         let method = self.method;
         let decl = &self.class.types[method.class];
@@ -525,6 +591,11 @@ impl Messages<'_> {
             // JVM follows back to where the value came from.
             ExprKind::Assign { op: None, target: Place::Var(_), value } => return self.source(value, detail),
             ExprKind::Var(name) if self.jdk => self.jdk_local(name)?,
+            // `i++` or `--i` of an `int` local: `iinc` and a load of the local, which the JVM
+            // shows by its name.
+            ExprKind::IncDec { target: Place::Var(name), .. } if self.jdk && e.ty == Type::Int => {
+                self.jdk_local(name)?
+            }
             ExprKind::Var(_) => self.names.get(self.outermost, e.pos, NameKind::Local, "")?.to_string(),
             // A static field of the JDK's, by the class that javac names it by where lowering noted
             // it (`Class::class_file`), else by its class's binary name: `java.util.Locale.ROOT`.
@@ -702,6 +773,28 @@ impl Messages<'_> {
         }))
     }
 
+    /// The descriptor of type `ty` as the JVM shows an array's class in a message: `[I`,
+    /// `[[Ljava.lang.String;`, when that is certain.
+    fn descriptor(&self, ty: Type) -> Option<String> {
+        let class = |name: &str| Some(format!("L{};", self.binary_name(self.class.type_index(name)?)?));
+        Some(match ty {
+            Type::Int => "I".to_string(),
+            Type::Long => "J".to_string(),
+            Type::Double => "D".to_string(),
+            Type::Float => "F".to_string(),
+            Type::Byte => "B".to_string(),
+            Type::Short => "S".to_string(),
+            Type::Char => "C".to_string(),
+            Type::Boolean => "Z".to_string(),
+            Type::Array(element) => format!("[{}", self.descriptor(*element)?),
+            Type::String => "Ljava.lang.String;".to_string(),
+            Type::Boxed(_) => format!("Ljava.lang.{ty};"),
+            Type::JavaClass => "Ljava.lang.Class;".to_string(),
+            Type::Class(name, _) | Type::Enum(name) => class(name)?,
+            _ => return None,
+        })
+    }
+
     /// A type in javac's names as the JVM shows it in a message: a primitive as it is, an array
     /// with `[]`, `Object` and `String` by their simple names, and another class by its binary
     /// name, when that is certain.
@@ -778,6 +871,27 @@ impl Messages<'_> {
         let rest = decl.name.strip_prefix(&package)?.strip_prefix('.')?;
         let name = format!("{package}.{}", rest.replace('.', "$"));
         (name != "java.lang.Object" && name != "java.lang.String").then_some(name)
+    }
+
+    /// The binary name of class `t`, a member class of the program or the JDK:
+    /// `com.example.Outer$Inner`.
+    fn binary_name(&self, t: usize) -> Option<String> {
+        let decl = &self.class.types[t];
+        if is_object(decl) {
+            return Some("java.lang.Object".to_string());
+        }
+        if super::exceptions::from_jdk(decl) || decl.package.is_empty() && decl.name.starts_with("java.") {
+            return self.java_class_at(t);
+        }
+        if !matches!(decl.origin, Origin::Member) {
+            return None;
+        }
+        Some(match decl.package.as_str() {
+            "" => decl.name.replace('.', "$"),
+            package => {
+                format!("{package}.{}", decl.name.strip_prefix(package)?.strip_prefix('.')?.replace('.', "$"))
+            }
+        })
     }
 
     /// A parameter's type as the JVM shows it in a method, when it is certain.
@@ -1014,6 +1128,9 @@ fn string_method(builtin: &Builtin, args: &[Expr]) -> Option<(&'static str, Stri
         (StringOp::StripIndent, []) => fixed("stripIndent", ""),
         (StringOp::ToUpperCase, []) => fixed("toUpperCase", ""),
         (StringOp::ToLowerCase, []) => fixed("toLowerCase", ""),
+        // With a locale, which lowering gives as its language (`case_in_locale`).
+        (StringOp::ToUpperCase, [Type::String]) => fixed("toUpperCase", "java.util.Locale"),
+        (StringOp::ToLowerCase, [Type::String]) => fixed("toLowerCase", "java.util.Locale"),
         (StringOp::Replace, [Type::Char, Type::Char]) => fixed("replace", "char, char"),
         (StringOp::Replace, [_, _]) => fixed("replace", "java.lang.CharSequence, java.lang.CharSequence"),
         (StringOp::ReplaceAll, [_, _]) => fixed("replaceAll", "String, String"),
@@ -1051,11 +1168,44 @@ fn string_method(builtin: &Builtin, args: &[Expr]) -> Option<(&'static str, Stri
     }
 }
 
+/// The name of the method of `StringBuilder` (or `StringBuffer`) that a builder's operation is;
+/// `None` for a constructor.
+fn builder_method(op: BuilderOp) -> Option<&'static str> {
+    Some(match op {
+        BuilderOp::New => return None,
+        BuilderOp::Append => "append",
+        BuilderOp::Insert => "insert",
+        BuilderOp::Reverse => "reverse",
+        BuilderOp::SetCharAt => "setCharAt",
+        BuilderOp::CharAt => "charAt",
+        BuilderOp::DeleteCharAt => "deleteCharAt",
+        BuilderOp::Delete => "delete",
+        BuilderOp::Replace => "replace",
+        BuilderOp::IndexOf => "indexOf",
+        BuilderOp::LastIndexOf => "lastIndexOf",
+        BuilderOp::Length => "length",
+        BuilderOp::SetLength => "setLength",
+        BuilderOp::ToString => "toString",
+        BuilderOp::Substring => "substring",
+        BuilderOp::IsEmpty => "isEmpty",
+        BuilderOp::CompareTo => "compareTo",
+        BuilderOp::AppendCodePoint => "appendCodePoint",
+        BuilderOp::Repeat => "repeat",
+        BuilderOp::CodePointAt => "codePointAt",
+        BuilderOp::CodePointBefore => "codePointBefore",
+        BuilderOp::CodePointCount => "codePointCount",
+        BuilderOp::OffsetByCodePoints => "offsetByCodePoints",
+        BuilderOp::GetChars => "getChars",
+        BuilderOp::EnsureCapacity => "ensureCapacity",
+    })
+}
+
 /// `e` without the casts that the class file has no instruction for, or that pass the value
 /// on as it is (`checkcast`); `None` for a conversion that is an instruction of its own.
 fn transparent(e: &Expr) -> Option<&Expr> {
+    let object = |t: Type| t.is_reference() || matches!(t, Type::Enum(_));
     match &e.kind {
-        ExprKind::Cast(to, inner) if to.is_reference() && inner.ty.is_reference() => transparent(inner),
+        ExprKind::Cast(to, inner) if object(*to) && object(inner.ty) => transparent(inner),
         ExprKind::Cast(Type::Int, inner) if matches!(inner.ty, Type::Char | Type::Byte | Type::Short) => {
             transparent(inner)
         }

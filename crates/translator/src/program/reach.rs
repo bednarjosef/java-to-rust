@@ -927,6 +927,7 @@ pub const TRANSLATED_LANG_ACCESS: &[&str] = &[
     "uncheckedPutCharUTF16",
     "decodeASCII",
     "uncheckedEncodeASCII",
+    "concat",
 ];
 
 /// The class of `TRANSLATED_LANG_ACCESS`.

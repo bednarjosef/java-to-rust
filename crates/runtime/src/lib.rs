@@ -30,6 +30,7 @@ mod exact;
 mod exception;
 mod fd;
 pub mod fdlibm;
+mod file_channel;
 mod float;
 mod float_parse;
 pub mod format;
@@ -81,13 +82,15 @@ pub use code_point_chars::*;
 pub use exact::*;
 pub use exception::*;
 pub use fd::*;
+pub use file_channel::*;
 pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
 pub use format::{Arg, format, format_objects, print_format, print_format_objects};
 pub use fs::*;
 pub use hex_float::{double_to_hex_string, float_to_hex_string};
 pub use inflate::{
-    inflate_adler, inflate_bytes, inflate_end, inflate_init, inflate_reset, inflate_set_dictionary,
+    inflate_adler, inflate_buffer_buffer, inflate_buffer_bytes, inflate_bytes, inflate_bytes_buffer,
+    inflate_end, inflate_init, inflate_reset, inflate_set_dictionary, inflate_set_dictionary_buffer,
 };
 pub use initializer::*;
 pub use integer::*;

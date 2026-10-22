@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 mod boxing;
 mod ceil_div;
 mod chains;
+mod channels;
 mod char_sequence;
 mod character;
 mod charsets;

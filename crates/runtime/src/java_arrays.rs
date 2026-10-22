@@ -176,6 +176,31 @@ pub fn copy_of_range<T: Clone, A: MadeElements<T>>(a: &A, from: i32, to: i32, ze
     A::made(copy)
 }
 
+/// `Arrays.copyOfRange(a, from, to)` of an array that may be null, where a catch sees the
+/// `NullPointerException` (with `message`): the JDK's code asks a null array of `objects` for its
+/// class first, and checks the range of one of primitives first unless `from` is 0.
+pub fn try_copy_of_range<T: Clone, A: MadeElements<T>>(
+    a: Option<&A>,
+    from: i32,
+    to: i32,
+    zero: T,
+    message: Option<&'static str>,
+    objects: bool,
+) -> Result<A, crate::Exception> {
+    match a {
+        Some(a) => Ok(copy_of_range(a, from, to, zero)),
+        None => {
+            if !objects && from != 0 && from > to {
+                throw("java.lang.IllegalArgumentException", &format!("{from} > {to}"));
+            }
+            Err(match message {
+                Some(message) => crate::Exception::new("java.lang.NullPointerException", message),
+                None => crate::Exception::bare("java.lang.NullPointerException"),
+            })
+        }
+    }
+}
+
 /// `Arrays.binarySearch(a, key)`: the index of `key`, or `-(insertion point) - 1`.
 pub fn binary_search_all<T: JavaElement>(a: &impl Elements<T>, key: T) -> i32 {
     binary_search_range(a, 0, len(a), key)

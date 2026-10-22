@@ -466,6 +466,12 @@ impl<'t> Lowering<'t> {
                 let ty = self.signature_type(node, symbol.ty)?;
                 self.constant_literal(node, ty, text)
             }
+            // `Integer.TYPE` is the class of `int`, the same object as `int.class`.
+            None if let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD" && s.is_static)
+                && let Some(primitive) = super::boxing::primitive_class_field(symbol.owner, symbol.name) =>
+            {
+                Ok(ExprKind::Builtin(Builtin::ClassLiteral(primitive), Vec::new()))
+            }
             None if let Some(owner) =
                 node.symbol().map(|s| s.owner).filter(|o| self.annotation_types.contains(*o)) =>
             {
@@ -586,7 +592,7 @@ fn erased(ty: &str) -> Option<String> {
         Some(element) => (element, true),
         None => (ty, false),
     };
-    let base = ty.split('<').next().unwrap_or(ty);
+    let base = ty.split('<').next().unwrap_or(ty).trim_end_matches("[]");
     let rest = &ty[base.len()..];
     let rest = rest.rsplit_once('>').map_or(rest, |(_, after)| after);
     let dims = rest.matches("[]").count() + usize::from(varargs);

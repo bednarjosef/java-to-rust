@@ -504,9 +504,51 @@ pub fn inflate_bytes(
     out_off: i32,
     out_len: i32,
 ) -> Result<i64, Failure> {
+    let output = &mut output[out_off as usize..(out_off + out_len) as usize];
+    run(addr, input, output).map(|(packed, _)| packed)
+}
+
+/// `Inflater.inflateBytesBuffer`: as `inflate_bytes`, with the input copied by the caller and the
+/// output in memory outside the heap, at `output_addr`.
+pub fn inflate_bytes_buffer(addr: i64, input: &[i8], output_addr: i64, out_len: i32) -> Result<i64, Failure> {
+    let mut output = vec![0; out_len as usize];
+    let (packed, written) = run(addr, input, &mut output)?;
+    write_bytes(output_addr, &output[..written]);
+    Ok(packed)
+}
+
+/// `Inflater.inflateBufferBytes`: as `inflate_bytes`, with the input in memory outside the heap,
+/// at `input_addr`.
+pub fn inflate_buffer_bytes(
+    addr: i64,
+    input_addr: i64,
+    in_len: i32,
+    output: &mut [i8],
+    out_off: i32,
+    out_len: i32,
+) -> Result<i64, Failure> {
+    let input = read_bytes(input_addr, in_len);
+    inflate_bytes(addr, &input, output, out_off, out_len)
+}
+
+/// `Inflater.inflateBufferBuffer`: as `inflate_bytes`, with the input and the output both in
+/// memory outside the heap.
+pub fn inflate_buffer_buffer(
+    addr: i64,
+    input_addr: i64,
+    in_len: i32,
+    output_addr: i64,
+    out_len: i32,
+) -> Result<i64, Failure> {
+    let input = read_bytes(input_addr, in_len);
+    inflate_bytes_buffer(addr, &input, output_addr, out_len)
+}
+
+/// Inflates `input` into `output` with the stream at `addr`: the result packed as `inflate_bytes`
+/// gives it, and the number of bytes written.
+fn run(addr: i64, input: &[i8], output: &mut [i8]) -> Result<(i64, usize), Failure> {
     let mut table = streams();
     let stream = table.get_mut(&addr).expect("Inflater used after end");
-    let output = &mut output[out_off as usize..(out_off + out_len) as usize];
     let progress = stream
         .inflate(input, output)
         .map_err(|message| Failure { class: DATA_FORMAT, message: message.to_string() })?;
@@ -514,7 +556,25 @@ pub fn inflate_bytes(
         | (progress.written as i64) << 31
         | i64::from(progress.finished) << 62
         | i64::from(progress.need_dict) << 63;
-    Ok(packed)
+    Ok((packed, progress.written))
+}
+
+/// The `len` bytes at `address`, read only when there are any: an empty buffer has no memory
+/// to read.
+fn read_bytes(address: i64, len: i32) -> Vec<i8> {
+    if len <= 0 {
+        return Vec::new();
+    }
+    crate::read_native(address, len as usize).into_iter().map(|b| b as i8).collect()
+}
+
+/// Writes `bytes` at `address`, unless there are none.
+fn write_bytes(address: i64, bytes: &[i8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let bytes: Vec<u8> = bytes.iter().map(|&b| b as u8).collect();
+    crate::write_native(address, &bytes);
 }
 
 /// `Inflater.getAdler`.
@@ -537,9 +597,19 @@ pub fn inflate_end(addr: i64) {
 /// `Inflater.setDictionary`, which throws `IllegalArgumentException` (with no message, as zlib
 /// gives none) when the dictionary is not the one the header asks for.
 pub fn inflate_set_dictionary(addr: i64, dict: &[i8], off: i32, len: i32) -> Result<(), crate::Exception> {
+    let dict = &dict[off as usize..(off + len) as usize];
+    set_dictionary(addr, dict)
+}
+
+/// `Inflater.setDictionaryBuffer`: as `inflate_set_dictionary`, with the dictionary in memory
+/// outside the heap, at `buffer_addr`.
+pub fn inflate_set_dictionary_buffer(addr: i64, buffer_addr: i64, len: i32) -> Result<(), crate::Exception> {
+    set_dictionary(addr, &read_bytes(buffer_addr, len))
+}
+
+fn set_dictionary(addr: i64, dict: &[i8]) -> Result<(), crate::Exception> {
     let mut table = streams();
     let stream = table.get_mut(&addr).expect("Inflater used after end");
-    let dict = &dict[off as usize..(off + len) as usize];
     stream.set_dictionary(dict).map_err(|()| crate::Exception::bare("java.lang.IllegalArgumentException"))
 }
 
