@@ -1706,7 +1706,7 @@ impl<'a> Gen<'a> {
     /// `java::SameObject` for the enum of `Object` (type `t`), where the program compares values
     /// that may both be strings or boxes (`Facts::identity_checks`): Java's identity, which a
     /// string or a box that is not kept as an object (`faithful_box`) has only as far as unequal
-    /// values are different objects.
+    /// values are different objects, but for `Boolean` and `Byte`, whose equal values are one.
     fn same_object_impl(&mut self, t: usize, variants: &[usize]) {
         if self.facts.identity_checks.is_empty() || Some(t) != self.object_index() {
             return;
@@ -1726,8 +1726,15 @@ impl<'a> Gen<'a> {
             for &c in variants {
                 let v = self.variant(t, c);
                 let same = self.same_variant(c);
-                let unkept = matches!(self.runtime_of(c), Some(Type::String | Type::Boxed(_)))
-                    && !self.runtime_of(c).is_some_and(|ty| self.faithful_box(ty));
+                // A `Boolean` or a `Byte` is one of `valueOf`'s cached objects, the same object
+                // exactly when the values are equal (see `analysis::boxing`).
+                let unkept = match self.runtime_of(c) {
+                    Some(Type::String) => true,
+                    Some(ty @ Type::Boxed(b)) => {
+                        !matches!(*b, Type::Boolean | Type::Byte) && !self.faithful_box(ty)
+                    }
+                    _ => false,
+                };
                 if unkept {
                     let end = self.runtime("unkept_identity");
                     self.line(&format!("({v}(a), {v}(b)) => {same} && {end}(),"));

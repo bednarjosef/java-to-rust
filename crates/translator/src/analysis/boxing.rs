@@ -24,11 +24,15 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
     facts.faithful_boxes.extend(kinds);
 }
 
-/// The boxed kinds of the `==` and `!=` comparisons in `e` between two boxed operands.
+/// The boxed kinds of the `==` and `!=` comparisons in `e` between two boxed operands. A
+/// `Boolean` or a `Byte` is always one of the objects that `valueOf` caches, as the translation
+/// has no `new Boolean(..)` or `new Byte(..)`: two of them are the same object exactly when their
+/// values are equal, so comparing the values is Java's identity.
 fn identity_kinds(e: &Expr, kinds: &mut Vec<Type>) {
     visit_expr(e, &mut |x| {
         if let ExprKind::Binary(BinOp::Eq | BinOp::Ne, l, r) = &x.kind
             && matches!((l.ty, r.ty), (Type::Boxed(_), Type::Boxed(_)))
+            && !matches!(l.ty.unboxed(), Type::Boolean | Type::Byte)
         {
             kinds.push(l.ty);
         }
