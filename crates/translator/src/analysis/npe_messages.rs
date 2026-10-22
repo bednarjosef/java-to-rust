@@ -287,7 +287,10 @@ impl Messages<'_> {
                 }
                 // `o.getClass()` of a null, alone or compared or named.
                 if let Builtin::GetClass | Builtin::ClassName { .. } = builtin {
-                    return add(&args[0], self.call(x.pos, "getClass").map(|m| format!("Cannot invoke \"{m}\"")));
+                    return add(
+                        &args[0],
+                        self.call(x.pos, "getClass").map(|m| format!("Cannot invoke \"{m}\"")),
+                    );
                 }
                 // An enum's own methods, of an enum that may be null. A null argument of
                 // `compareTo` fails in `Enum.compareTo`, the JDK's code (`-g`, so its local has

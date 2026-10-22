@@ -40,7 +40,9 @@ impl<'t> Lowering<'t> {
         let message = match args.get(1).map(|a| &a.kind) {
             None => None,
             Some(ExprKind::Str(message)) => Some(message.clone()),
-            Some(_) => return unsupported(node, "`Objects.requireNonNull` of a charset with a computed message"),
+            Some(_) => {
+                return unsupported(node, "`Objects.requireNonNull` of a charset with a computed message");
+            }
         };
         let Some(throw) = self.null_thrown(message.as_deref(), Type::Charset, pos) else {
             return unsupported(node, "`Objects.requireNonNull` of a charset without `NullPointerException`");
@@ -48,7 +50,8 @@ impl<'t> Lowering<'t> {
         let name = self.fresh_name("charset");
         let var = || self.synth(ExprKind::Var(name.clone()), pos, Type::Charset);
         let null = self.synth(ExprKind::Null, pos, Type::Null);
-        let given = self.synth(ExprKind::Binary(BinOp::Ne, Box::new(var()), Box::new(null)), pos, Type::Boolean);
+        let given =
+            self.synth(ExprKind::Binary(BinOp::Ne, Box::new(var()), Box::new(null)), pos, Type::Boolean);
         let value = ExprKind::Conditional(Box::new(given), Box::new(var()), Box::new(throw));
         let charset = args.into_iter().next().expect("a charset");
         let block = vec![
