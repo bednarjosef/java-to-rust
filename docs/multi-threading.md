@@ -1310,13 +1310,17 @@ Decisions that change during the implementation are recorded here, milestone by 
   mutable (`codegen/objects.rs`, `conflicts`), with a blocking native counting as one, so
   `java::join_thread(self.base().tid, 0)` reads the id in its own block first: the lock is never
   held while the thread waits for another.
-- **Shared builders**: in a program with threads every `StringBuilder` is a
-  `java::SharedStringBuilder`, its units in an `Arc<java::Locked<..>>`, as every array is a
-  `java::SharedArray`; its methods take the lock only while they run.
-  Pending: this is decided for the whole program, not per allocation site, so a builder that
-  never leaves its thread pays for a lock on every call (javac builds many). The narrowing to
-  come makes only the builders and arrays that the analysis sees escape to another thread, or
-  that are used as a monitor, shared, and keeps the others `Rc`s.
+- **Shared builders**: where two threads may reach a builder (a static holds one, or a field
+  or a capture of a shared class, in an array or as a type argument too, or a builder becomes a
+  shared `Object` or `CharSequence`: `analysis/threads.rs`, `shares_builders`), every
+  `StringBuilder` is a `java::SharedStringBuilder`, its units in an `Arc<java::Locked<..>>`,
+  whose methods take the lock only while they run, and whose monitor is that lock. Otherwise
+  every builder stays a `java::StringBuilder`, even in a program with threads, and its monitor
+  is the address of its `Rc`, which is enough when one thread has it. This is decided by type,
+  as it is for classes, not per allocation site.
+  Pending: arrays are still decided for the whole program: every array of a program with
+  threads is a `java::SharedArray`. The same narrowing would keep the arrays that no other
+  thread reaches `Rc`s.
 - **Not yet shared**: a box compared by identity (an `Rc`) in a static or in a field of a shared
   class is rejected (`analysis/threads.rs`, `check`) until the escape milestone gives it a shared
   form. The closure does not follow the type arguments of a generic

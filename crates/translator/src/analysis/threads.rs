@@ -98,6 +98,29 @@ pub(super) fn thread_shared(class: &Class) -> HashSet<usize> {
     shared
 }
 
+/// Whether two threads may reach a builder: a static or a field or capture of a shared class
+/// holds one (in an array or as a type argument too), or one becomes a value of `Object` or
+/// `CharSequence` that is shared (the runtime class of builders is shared). Builders are decided
+/// by type, as classes are: then every builder is a `java::SharedStringBuilder`, else every one
+/// stays a `java::StringBuilder`, whose monitor is the address of its `Rc`.
+pub(super) fn shares_builders(class: &Class, shared: &HashSet<usize>) -> bool {
+    fn holds(ty: Type) -> bool {
+        match ty {
+            Type::StringBuilder => true,
+            Type::Array(element) => holds(*element),
+            Type::Class(_, args) => args.iter().any(|&a| holds(a)),
+            _ => false,
+        }
+    }
+    class.types.iter().enumerate().any(|(t, decl)| {
+        decl.statics.iter().any(|f| holds(f.ty))
+            || shared.contains(&t)
+                && (decl.fields.iter().any(|f| holds(f.ty))
+                    || decl.captures.iter().any(|c| holds(c.ty))
+                    || class.shared_of(t) == Some(Type::StringBuilder))
+    })
+}
+
 /// The classes that a value of type `ty` may be an object of.
 fn types_of(class: &Class, ty: Type, out: &mut Vec<usize>) {
     match ty {
