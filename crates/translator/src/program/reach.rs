@@ -232,6 +232,10 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     // code asks for as it starts (`JarVerifier.debug = Debug.getInstance("jar")`); patched not
     // to name the caller's frame (`java/patches/sun/security/util/Debug.java`).
     "sun.security.util.Debug",
+    // The signers of a jar's entry, which `JarEntry` and `JarFile` keep in fields: abstract and
+    // final classes, of which only signature verification, not translated, makes objects.
+    "java.security.cert.Certificate",
+    "java.security.CodeSigner",
     "java.lang.reflect.Array",
     "java.lang.reflect.InvocationTargetException",
     "java.lang.reflect.Modifier",
