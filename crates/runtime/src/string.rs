@@ -716,6 +716,68 @@ pub fn strip_indent(s: &str) -> String {
     text
 }
 
+/// `s.translateEscapes()`: `s` with each escape sequence of a Java string literal (`\n`, `\s`,
+/// octal ones such as `\101`, `\` before a line terminator, which joins the lines) replaced by
+/// what it stands for. Any other `\` throws `IllegalArgumentException` with Java's message,
+/// which shows the character after it and its code unit: one outside the Basic Multilingual Plane
+/// is shown whole, where Java shows its high surrogate alone, which a string here cannot hold.
+pub fn translate_escapes(s: &str) -> String {
+    try_translate_escapes(s).unwrap_or_else(crate::uncaught)
+}
+
+/// `translate_escapes` where the program observes the `IllegalArgumentException`.
+pub fn try_translate_escapes(s: &str) -> Result<String, crate::Exception> {
+    let chars: Vec<char> = s.chars().collect();
+    let length = chars.len();
+    let mut out = String::with_capacity(s.len());
+    let mut from = 0;
+    while from < length {
+        let mut ch = chars[from];
+        from += 1;
+        if ch == '\\' {
+            ch = if from < length {
+                from += 1;
+                chars[from - 1]
+            } else {
+                '\0'
+            };
+            match ch {
+                'b' => ch = '\u{8}',
+                'f' => ch = '\u{c}',
+                'n' => ch = '\n',
+                'r' => ch = '\r',
+                's' => ch = ' ',
+                't' => ch = '\t',
+                '\'' | '"' | '\\' => {}
+                '0'..='7' => {
+                    let limit = (from + if ch <= '3' { 2 } else { 1 }).min(length);
+                    let mut code = ch as u32 - '0' as u32;
+                    while from < limit && ('0'..='7').contains(&chars[from]) {
+                        code = (code << 3) | (chars[from] as u32 - '0' as u32);
+                        from += 1;
+                    }
+                    ch = char::from_u32(code).expect("an octal escape is at most \\377");
+                }
+                '\n' => continue,
+                '\r' => {
+                    if from < length && chars[from] == '\n' {
+                        from += 1;
+                    }
+                    continue;
+                }
+                _ => {
+                    let unit =
+                        if (ch as u32) > 0xFFFF { 0xD800 + ((ch as u32 - 0x10000) >> 10) } else { ch as u32 };
+                    let message = format!("Invalid escape sequence: \\{ch} \\\\u{unit:04X}");
+                    return Err(crate::Exception::new("java.lang.IllegalArgumentException", message));
+                }
+            }
+        }
+        out.push(ch);
+    }
+    Ok(out)
+}
+
 /// `new String(codePoints, offset, count)`, which throws for a range outside the array and for
 /// an invalid code point.
 pub fn from_code_points(points: &[i32], offset: i32, count: i32) -> String {

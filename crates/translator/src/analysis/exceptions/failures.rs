@@ -72,6 +72,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             // `valueOf(chars)` copies the whole array; only an offset and a count can be out of range.
             StringOp::FromChars if args.len() == 3 => &["java.lang.StringIndexOutOfBoundsException"],
             StringOp::Repeat => &["java.lang.IllegalArgumentException"],
+            // An escape sequence that Java does not have.
+            StringOp::TranslateEscapes => &["java.lang.IllegalArgumentException"],
             StringOp::GetChars => &["java.lang.StringIndexOutOfBoundsException"],
             StringOp::CodePointAt | StringOp::CodePointBefore | StringOp::GetLowBytes => {
                 &["java.lang.StringIndexOutOfBoundsException"]
@@ -625,7 +627,11 @@ pub(super) fn runtime_failures(
                     let checked = matches!(
                         builtin,
                         Builtin::String(
-                            StringOp::Substring | StringOp::FromChars | StringOp::GetChars | StringOp::FromBytes
+                            StringOp::Substring
+                                | StringOp::FromChars
+                                | StringOp::GetChars
+                                | StringOp::FromBytes
+                                | StringOp::TranslateEscapes
                         )
                             | Builtin::ArraysCopyOf
                             | Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _)

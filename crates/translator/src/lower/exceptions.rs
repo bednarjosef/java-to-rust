@@ -127,6 +127,9 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.Character#toChars",
             // An invalid code point of `new String(codePoints, offset, count)`.
             "java.lang.String#<init>",
+            // A negative count, and an escape sequence that Java does not have.
+            "java.lang.String#repeat",
+            "java.lang.String#translateEscapes",
             "java.lang.AbstractStringBuilder#appendCodePoint",
             "java.lang.StringBuilder#appendCodePoint",
             "java.lang.AbstractStringBuilder#repeat",
