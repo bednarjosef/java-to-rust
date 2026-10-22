@@ -466,7 +466,11 @@ impl<'a> Gen<'a> {
                     texts.push(format!("let {} = {source}", self.pattern_binding(name, &source, ty)));
                 }
                 Some((name, ty)) => {
-                    texts.push(format!("let Some({}) = {}", self.local(name), self.narrowed_source(name, ty)));
+                    texts.push(format!(
+                        "let Some({}) = {}",
+                        self.local(name),
+                        self.narrowed_source(name, ty)
+                    ));
                     narrowed.extend(self.narrow(name));
                 }
                 None => {
