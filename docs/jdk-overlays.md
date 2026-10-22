@@ -161,6 +161,8 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `jdk/internal/jrtfs/JrtFileAttributes.java`, `JrtFileSystem.java`, `SystemImage.java` | the `jrt:` file system without `%tc`, `CodeSource` and exploded images |
 | `jdk/internal/misc/UnsafeConstants.java` | the values the JVM injects: 8-byte little-endian addresses, unaligned access, 64-byte cache lines, the system's page size |
 | `jdk/internal/misc/CarrierThreadLocal.java`, `TerminatingThreadLocal.java` | thread-locals without the JVM's carrier threads and identity maps |
+| `jdk/internal/misc/VM.java` | `getRuntimeArguments` answers an empty array: a translated program has no JVM arguments |
+| `jdk/internal/perf/Perf.java` | `createLong` returns the heap buffer that HotSpot returns with `-XX:-UsePerfData`: 8 bytes in native order holding the value |
 | `jdk/internal/util/ByteArray.java` | shifts bytes instead of using array views |
 | `jdk/internal/util/Exceptions.java` | `%s` formatting of its own, and no wait for `VM.isBooted` |
 | `jdk/internal/vm/ScopedValueContainer.java` | runs the operation directly |
