@@ -426,6 +426,7 @@ impl<'t> Lowering<'t> {
             "codePointCount" => BuilderOp::CodePointCount,
             "offsetByCodePoints" => BuilderOp::OffsetByCodePoints,
             "getChars" => BuilderOp::GetChars,
+            "ensureCapacity" => BuilderOp::EnsureCapacity,
             "subSequence" => BuilderOp::Substring,
             _ => return unsupported(node, &format!("method `StringBuilder.{name}`")),
         };

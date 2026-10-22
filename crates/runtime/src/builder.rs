@@ -275,6 +275,14 @@ impl StringBuilder {
         self.0.borrow_mut().resize(len as usize, 0);
     }
 
+    /// `sb.ensureCapacity(minimumCapacity)`: room for that many characters; a capacity that is
+    /// not positive asks for nothing.
+    pub fn ensure_capacity(&self, minimum: i32) {
+        let mut value = self.0.borrow_mut();
+        let more = usize::try_from(minimum).unwrap_or(0).saturating_sub(value.len());
+        value.reserve(more);
+    }
+
     /// `sb.indexOf(s, from)`.
     pub fn index_of(&self, s: &str, from: i32) -> i32 {
         let value = self.0.borrow();

@@ -124,7 +124,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | BuilderOp::Length
             | BuilderOp::ToString
             | BuilderOp::IsEmpty
-            | BuilderOp::CompareTo,
+            | BuilderOp::CompareTo
+            | BuilderOp::EnsureCapacity,
         ) => &[],
         // A negative count, an invalid code point.
         Builtin::Builder(BuilderOp::AppendCodePoint | BuilderOp::Repeat) => {
@@ -225,6 +226,7 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::MaxMemory
             | Native::Gc
             | Native::Nothing
+            | Native::Missing { .. }
             | Native::CdsConfigStatus
             | Native::CdsRandomSeed
             | Native::ContinuationsSupported

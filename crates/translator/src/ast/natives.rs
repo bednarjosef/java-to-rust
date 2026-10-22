@@ -13,6 +13,13 @@ pub enum Native {
     },
     /// `System.arraycopy(src, srcPos, dest, destPos, length)`.
     ArrayCopy,
+    /// A native of a whole program that the runtime does not implement, named `what` (its class,
+    /// name and signature). Where it can run, it rejects the program (`analysis::live_methods`);
+    /// elsewhere it is code that never runs, as in the branch of `Inflater.inflate` that only a
+    /// direct buffer takes.
+    Missing {
+        what: &'static str,
+    },
     DoubleToLongBits,
     DoubleToRawLongBits,
     LongBitsToDouble,

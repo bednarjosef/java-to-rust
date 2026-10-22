@@ -12,6 +12,10 @@ public class BuilderRangesAndErrors {
 
         CharSequence nothing = null;
         sb.setLength(0);
+        // Room for more leaves the text as it is; a capacity that is not positive asks for none.
+        sb.ensureCapacity(100);
+        sb.ensureCapacity(-5);
+        System.out.println("[" + sb + "] " + sb.length());
         sb.append(nothing, 0, 2).append(nothing, 1, 4);
         System.out.println(sb);
 
