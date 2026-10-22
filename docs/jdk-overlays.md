@@ -163,6 +163,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `jdk/internal/misc/CarrierThreadLocal.java`, `TerminatingThreadLocal.java` | thread-locals without the JVM's carrier threads and identity maps |
 | `jdk/internal/misc/VM.java` | `getRuntimeArguments` answers an empty array: a translated program has no JVM arguments |
 | `jdk/internal/perf/Perf.java` | `createLong` returns the heap buffer that HotSpot returns with `-XX:-UsePerfData`: 8 bytes in native order holding the value |
+| `jdk/internal/misc/InnocuousThread.java` | the thread group's parent read with `getParent`, not through an `Unsafe` offset held in a local; the `Thread` offsets stay, so `eraseThreadLocals` and the constructor write the thread's fields as the JDK does |
 | `jdk/internal/util/ByteArray.java` | shifts bytes instead of using array views |
 | `jdk/internal/util/Exceptions.java` | `%s` formatting of its own, and no wait for `VM.isBooted` |
 | `jdk/internal/vm/ScopedValueContainer.java` | runs the operation directly |
