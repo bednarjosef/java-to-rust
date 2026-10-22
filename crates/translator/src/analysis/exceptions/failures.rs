@@ -153,6 +153,9 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
         Builtin::Native(Native::Sleep { .. }) => Some("java.lang.IllegalArgumentException"),
         // A negative count.
         Builtin::Native(Native::SecureSeed) => Some("java.lang.IllegalArgumentException"),
+        // Bad compressed data (`inflate.rs`), and a dictionary that the stream did not ask for.
+        Builtin::Native(Native::InflateBytes) => Some("java.util.zip.DataFormatException"),
+        Builtin::Native(Native::InflateSetDictionary) => Some("java.lang.IllegalArgumentException"),
         // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail, but for
         // the interrupt of `join0`, which `runtime_failures` adds.
         Builtin::Native(
@@ -215,6 +218,10 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::DescriptorAppend
             | Native::FullFence
             | Native::Crc32Update
+            | Native::InflateInit
+            | Native::InflateAdler
+            | Native::InflateReset
+            | Native::InflateEnd
             | Native::NoPendingReferences,
         ) => None,
         // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).

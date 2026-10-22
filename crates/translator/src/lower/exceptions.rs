@@ -34,6 +34,7 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("EOFException", "java.io"),
     ("UnsupportedEncodingException", "java.io"),
     ("UncheckedIOException", "java.io"),
+    ("DataFormatException", "java.util.zip"),
 ];
 
 /// The standard classes that the runtime raises and a translation can catch, each with the
@@ -110,8 +111,12 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.util.Arrays#binarySearch",
             // A negative count of seed bytes (`Native::SecureSeed`).
             "java.security.SecureRandom#getSeed",
+            // A dictionary that the stream did not ask for (`inflate.rs`).
+            "java.util.zip.Inflater#setDictionary",
         ],
     ),
+    // Bad compressed data (`Native::InflateBytes`).
+    ("java.util.zip.DataFormatException", &["java.util.zip.Inflater#inflate"]),
     // A monitor that the thread does not hold.
     (
         "java.lang.IllegalMonitorStateException",

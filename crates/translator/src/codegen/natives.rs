@@ -235,6 +235,12 @@ impl<'a> Gen<'a> {
                 let (off, len) = (self.value(&args[2], Type::Int).text, self.value(&args[3], Type::Int).text);
                 call(self, "crc32_update_bytes", vec![crc, bytes, off, len])
             }
+            Native::InflateInit
+            | Native::InflateBytes
+            | Native::InflateAdler
+            | Native::InflateReset
+            | Native::InflateEnd
+            | Native::InflateSetDictionary => self.inflate_native(native, args, id),
             Native::NoPendingReferences => Code::atom("false"),
             Native::SecureSeed => {
                 let num_bytes = self.value(&args[0], Type::Int).text;
