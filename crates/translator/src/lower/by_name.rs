@@ -407,8 +407,8 @@ impl<'t> Lowering<'t> {
 
     /// `String class_name = given != null ? given : throw new NullPointerException(message);`,
     /// as the JDK's `Class.forName` throws for a null name, with its message or none, when the
-    /// program has that constructor; `class_name` is then never null, so the `switch` over it
-    /// does not check it again. Without the constructor, `String class_name = given;`: the
+    /// program has that class; `class_name` is then never null, so the `switch` over it
+    /// does not check it again. Without the class, `String class_name = given;`: the
     /// `switch` throws, with a message that the analysis gives only where it is certain
     /// (`analysis/npe_messages.rs`).
     fn checked_name(&self, class_name: &str, given: &str, message: Option<&str>, pos: Pos) -> Stmt {
@@ -427,16 +427,13 @@ impl<'t> Lowering<'t> {
     }
 
     /// `switch (0) { default -> throw new NullPointerException(message); }`, a `String` that is
-    /// never given, when the program has that constructor.
+    /// never given, when the program has that class.
     fn null_name(&self, message: Option<&str>, pos: Pos) -> Option<Expr> {
         const NULL: &str = "java.lang.NullPointerException";
         let sig = if message.is_some() { "(java.lang.String)void" } else { "()void" };
+        // A standard class of the translator (`lower::exceptions`), with its constructors, where
+        // the program has it.
         let class = self.type_index(NULL)?;
-        if let Some(reach) = self.reach
-            && !reach.methods.contains(&(NULL.to_string(), "<init>".to_string(), sig.to_string()))
-        {
-            return None;
-        }
         let ctor =
             self.methods.iter().position(|m| m.owner == class && m.name == "<init>" && m.sig == sig)?;
         let args = message

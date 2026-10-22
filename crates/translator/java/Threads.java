@@ -410,6 +410,10 @@ class ClassLoader {
     }
 
     protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+        if (name == null) {
+            // Java's fails so, without a message, in the map of its class loading locks.
+            throw new NullPointerException();
+        }
         if (parent != null) {
             try {
                 return parent.loadClass(name, false);
