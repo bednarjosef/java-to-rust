@@ -4,7 +4,7 @@
 //! code calls, with bodies that never run, since no object of the class exists.
 
 use super::*;
-use serde_json::{Value, json};
+use crate::value::{Value, json};
 use std::collections::BTreeSet;
 
 impl<'t> Lowering<'t> {

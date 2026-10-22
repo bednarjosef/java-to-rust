@@ -132,6 +132,13 @@ TextAdventure, and from more than 55 minutes of CPU (never finished) to about 2 
   text), but it frees that memory for the rest of the run. (The process's resident size doesn't
   shrink afterwards, because the allocator keeps freed memory, so "now" in `--timings` stays at
   the peak.)
+- **The trees are held as compact values** (`value.rs`), not `serde_json` values. A `serde_json`
+  object is a `BTreeMap` whose smallest node has room for eleven fields, each name a `String` of
+  its own, so even a node of a few fields takes over half a kilobyte. Here an object is a sorted
+  list of its fields and every string, name or value, is interned once for the whole run. On
+  javac's census the peak after loading went from 3.15 GB to 1.07 GB (328 MB of JSON), and the
+  peak of the whole run from 3.22 GB to 1.43 GB; the census and the corpus's translations are
+  the same as before.
 - **Not done: lowering the generics attempts only where they change.** Each attempt lowers the
   whole program again from the same trees, which are already held, so no tree is read twice; what
   costs is the lowering itself (5 attempts of about 20 s on javac). Redoing only the methods an

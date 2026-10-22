@@ -22,7 +22,7 @@
 //! members carry `"synthetic": true`, and the calls of `java.util.Objects` they make
 //! `"implicit": true` (they do not make the program use `Object`).
 
-use serde_json::{Map, Value, json};
+use crate::value::{Map, Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Completes the records of these compilation units.
@@ -147,7 +147,7 @@ impl Survey {
                 let object_ctor = text(v, "kind") == "CONSTRUCTOR" && text(v, "owner") == "java.lang.Object";
                 if !object_ctor
                     && ["javaType", "type", "owner"].iter().any(|f| {
-                        fields.get(*f).and_then(Value::as_str).is_some_and(|t| t.contains("java.lang.Object"))
+                        fields.get(f).and_then(Value::as_str).is_some_and(|t| t.contains("java.lang.Object"))
                     })
                 {
                     self.uses_object = true;

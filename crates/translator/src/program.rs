@@ -25,8 +25,8 @@ pub use survey::Survey;
 
 use crate::ast::{Error, Pos};
 use crate::output::ModuleTree;
+use crate::value::Value;
 use crate::{analysis, codegen, javac, lower};
-use serde_json::Value;
 use std::fmt;
 use std::path::{Path, PathBuf};
 

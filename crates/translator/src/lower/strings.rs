@@ -122,7 +122,7 @@ impl<'t> Lowering<'t> {
         };
         let (class, method, signature) = crate::program::LOCALE_LANGUAGE;
         let (line, column) = (&locale.0["line"], &locale.0["column"]);
-        let language = serde_json::json!({"kind": "METHOD_INVOCATION", "line": line, "column": column,
+        let language = crate::value::json!({"kind": "METHOD_INVOCATION", "line": line, "column": column,
             "javaType": "java.lang.String", "arguments": [],
             "methodSelect": {"kind": "MEMBER_SELECT", "line": line, "column": column,
                 "identifier": method, "expression": locale.0,
@@ -130,7 +130,7 @@ impl<'t> Lowering<'t> {
                     "type": signature}},
             "symbol": {"kind": "METHOD", "name": method, "owner": class, "static": false,
                 "type": signature}});
-        let language: &'t serde_json::Value = Box::leak(Box::new(language));
+        let language: &'t crate::value::Value = Box::leak(Box::new(language));
         // The receiver is evaluated before the argument, as in Java.
         let s = self.expr(receiver)?;
         let language = self.expr(Node(language))?;
@@ -332,24 +332,24 @@ impl<'t> Lowering<'t> {
         let (line, column) = (&node.0["line"], &node.0["column"]);
         let symbol = |(owner, name, sig): (&str, &str, &str)| {
             let kind = if name == "<init>" { "CONSTRUCTOR" } else { "METHOD" };
-            serde_json::json!({"kind": kind, "name": name, "owner": owner, "static": false, "type": sig,
+            crate::value::json!({"kind": kind, "name": name, "owner": owner, "static": false, "type": sig,
                 "varargs": name == "format"})
         };
-        let call = |receiver: serde_json::Value,
+        let call = |receiver: crate::value::Value,
                     method: (&str, &str, &str),
-                    args: Vec<serde_json::Value>,
+                    args: Vec<crate::value::Value>,
                     ty: &str| {
-            serde_json::json!({"kind": "METHOD_INVOCATION", "line": line, "column": column, "javaType": ty,
+            crate::value::json!({"kind": "METHOD_INVOCATION", "line": line, "column": column, "javaType": ty,
                 "arguments": args,
                 "methodSelect": {"kind": "MEMBER_SELECT", "line": line, "column": column,
                     "identifier": method.1, "expression": receiver, "symbol": symbol(method)},
                 "symbol": symbol(method)})
         };
-        let formatter = serde_json::json!({"kind": "NEW_CLASS", "line": line, "column": column,
+        let formatter = crate::value::json!({"kind": "NEW_CLASS", "line": line, "column": column,
             "javaType": new.0, "arguments": [locale.0], "symbol": symbol(new)});
         let formatted = call(formatter, format, rest.iter().map(|a| a.0.clone()).collect(), new.0);
         let text = call(formatted, text, Vec::new(), "java.lang.String");
-        let text: &'t serde_json::Value = Box::leak(Box::new(text));
+        let text: &'t crate::value::Value = Box::leak(Box::new(text));
         Ok(self.expr(Node(text))?.kind)
     }
 

@@ -12,6 +12,7 @@ pub mod output;
 pub mod program;
 pub mod timings;
 pub mod types;
+pub mod value;
 
 pub use ast::Error;
 pub use program::{

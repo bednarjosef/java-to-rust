@@ -336,13 +336,15 @@ fn template() -> &'static [Value] {
 fn rename(v: &mut Value, from: &str) {
     let prefix = format!("{from}.");
     match v {
-        Value::String(s) => {
+        Value::String(held) => {
+            let mut s = held.to_string();
             while let Some(at) = s.find(&prefix) {
                 let rest = &s[at + prefix.len()..];
                 let end = rest.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(rest.len());
                 let simple = rest[..end].to_string();
                 s.replace_range(at..at + from.len(), package_of(&simple));
             }
+            *held = s.into();
         }
         Value::Array(items) => items.iter_mut().for_each(|i| rename(i, from)),
         Value::Object(map) => {
@@ -352,7 +354,7 @@ fn rename(v: &mut Value, from: &str) {
             {
                 let simple = map.get("name").and_then(Value::as_str).unwrap_or_default();
                 let package = package_of(simple);
-                map.insert("owner".into(), Value::String(package.into()));
+                map.insert("owner", Value::String(package.into()));
             }
             map.values_mut().for_each(|v| rename(v, from));
         }

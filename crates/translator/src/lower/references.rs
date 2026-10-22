@@ -10,7 +10,7 @@
 //! `this.referent`, `this.referent == o` and `this.referent = null`.
 
 use super::*;
-use serde_json::{Value, json};
+use crate::value::{Value, json};
 
 impl<'t> Lowering<'t> {
     /// The call `node` of a referent native, as the code it stands for; `None` for anything else.

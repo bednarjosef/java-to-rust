@@ -29,8 +29,8 @@ mod suppress;
 mod unsigned;
 
 use crate::ast::*;
+use crate::value::Value;
 use objects::{MethodInfo, TypeInfo};
-use serde_json::Value;
 use std::cell::{Cell, RefCell};
 
 mod arrays;
