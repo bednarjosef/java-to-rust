@@ -833,6 +833,15 @@ impl<'t> Lowering<'t> {
                 {
                     Stmt::Expr(*assign)
                 }
+                // The checked cast that erasure gives a generic method's result (`erased_use`):
+                // Java casts only a value that it uses, and this one is dropped. javac's
+                // `translate(tree.def);` in `Lower.visitNewClass` gets back the block that
+                // replaces an anonymous class's declaration, not the declaration.
+                Expr { kind: ExprKind::Cast(_, call), .. }
+                    if matches!(call.kind, ExprKind::MethodCall { .. } | ExprKind::Call { .. }) =>
+                {
+                    Stmt::Expr(*call)
+                }
                 e => Stmt::Expr(e),
             },
             // Reachability skipped the other branch (`program::live_branch`).
