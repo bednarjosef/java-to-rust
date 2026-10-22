@@ -693,6 +693,7 @@ fn instance_name(ty: Type) -> Option<&'static str> {
     match ty {
         Type::Class(name, _) | Type::Enum(name) => Some(name),
         Type::String | Type::Boxed(_) => runtime_name(ty),
+        Type::JavaClass => Some(CLASS_VALUE),
         _ => None,
     }
 }

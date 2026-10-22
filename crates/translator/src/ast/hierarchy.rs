@@ -351,6 +351,7 @@ impl Class {
             // An array that becomes an `Object` has a runtime class named after its type.
             Type::Array(_) => self.type_index(&ty.to_string()),
             Type::StringBuilder => self.type_index(STRING_BUILDER),
+            Type::JavaClass => self.type_index(CLASS_VALUE),
             _ => self.type_index(runtime_name(ty)?),
         }
     }

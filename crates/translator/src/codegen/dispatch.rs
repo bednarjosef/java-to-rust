@@ -536,6 +536,9 @@ impl<'a> Gen<'a> {
         if let Some(shared) = self.class.shared_of(c) {
             return Some(shared);
         }
+        if self.class.types[c].kind == TypeKind::Runtime && self.class.types[c].name == CLASS_VALUE {
+            return Some(Type::JavaClass);
+        }
         (self.class.types[c].kind == TypeKind::Runtime)
             .then(|| runtime_type(&self.class.types[c].name))
             .flatten()
@@ -1439,6 +1442,10 @@ impl<'a> Gen<'a> {
             }
             return format!("{}({})", self.runtime("address_hash"), self.address(c, handle));
         };
+        // A class's hash is its identity's in Java: there is one class object for each class.
+        if ty == Type::JavaClass {
+            return format!("{handle}.hash_code()");
+        }
         let value = if self.faithful_box(ty) { format!("**{handle}") } else { format!("*{handle}") };
         let function = match ty.unboxed() {
             Type::String => return format!("{}({handle})", self.runtime("string_hash")),

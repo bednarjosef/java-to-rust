@@ -718,11 +718,12 @@ pub(super) fn runtime_failures(
     {
         out.push(("java.lang.ClassCastException", "this cast", true, x.id));
     }
-    // So may a cast of an object to a string, a box or an enum, unless an `instanceof` tested it.
+    // So may a cast of an object to a string, a box, an enum or a class, unless an `instanceof`
+    // tested it.
     if let ExprKind::Cast(to, value) = &x.kind
         && x.pos != value.pos
         && matches!(value.ty, Type::Class(..))
-        && matches!(to, Type::String | Type::Boxed(_) | Type::Enum(_))
+        && matches!(to, Type::String | Type::Boxed(_) | Type::Enum(_) | Type::JavaClass)
         && let Some(name) = instance_name(*to)
         && !matches!(&value.kind, ExprKind::Var(v) if safe.contains(&instance_fact(v, name)))
     {

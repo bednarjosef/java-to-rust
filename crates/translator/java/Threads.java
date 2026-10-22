@@ -42,6 +42,15 @@ class Thread {
     // The thread's context class loader: what was set, the parent's when the thread was made, and
     // for the main thread the application's (`ClassLoader` below).
     private ClassLoader contextClassLoader;
+    // The thread's scoped-value bindings, which the JDK's `ScopedValue` keeps in the thread. A
+    // new thread has none, as a thread that no `StructuredTaskScope` starts. They start unknown
+    // (null), where the JDK's start as `Thread.class` (`NEW_THREAD_BINDINGS`, none); the first
+    // read finds none (`findScopedValueBindings`) and sets them, and so reads the same. (A field
+    // that the constructors set would be every program's.)
+    private Object scopedValueBindings;
+    // The thread's cache of the scoped values it read last, which the JVM keeps for each thread
+    // and `ScopedValue` fills and clears; empty (null) when the thread starts.
+    private Object[] scopedValueCache;
 
     public Thread() {
         this((Runnable) null, genName());
@@ -316,6 +325,33 @@ class Thread {
     // program has set a handler: `uncaught0()` is that exception (see `lower/natives.rs`).
     private static void dispatchUncaught() {
         currentThread().dispatchUncaughtException(uncaught0());
+    }
+
+    static Object scopedValueBindings() {
+        return currentThread().scopedValueBindings;
+    }
+
+    static void setScopedValueBindings(Object bindings) {
+        currentThread().scopedValueBindings = bindings;
+    }
+
+    // The JVM walks the stack for the bindings of a `ScopedValue.Carrier.runWith` when a thread's
+    // are unknown (null). Here they are unknown only before the thread first reads them, when no
+    // `runWith` has set any: none, which `ScopedValue` reads null as.
+    static Object findScopedValueBindings() {
+        return null;
+    }
+
+    static Object[] scopedValueCache() {
+        return currentThread().scopedValueCache;
+    }
+
+    static void setScopedValueCache(Object[] cache) {
+        currentThread().scopedValueCache = cache;
+    }
+
+    // The JVM makes the bindings visible to a stack walk; there is none here.
+    static void ensureMaterializedForStackWalk(Object bindings) {
     }
 
     private static native int nextThreadNum();
