@@ -118,6 +118,73 @@ fn jdk_home() -> String {
     jdk_properties().and_then(|p| p.get("java.home")).cloned().unwrap_or_default()
 }
 
+/// The security properties of the JDK on the path (`conf/security/java.security` under its home),
+/// read once; `None` when there is no such file. A value continued with a `\` at the end of a
+/// line takes in the next line, as `Properties.load` reads it.
+fn security_properties() -> Option<&'static HashMap<String, String>> {
+    static PROPERTIES: OnceLock<Option<HashMap<String, String>>> = OnceLock::new();
+    PROPERTIES
+        .get_or_init(|| {
+            let path = std::path::Path::new(&jdk_home()).join("conf/security/java.security");
+            let text = std::fs::read_to_string(path).ok()?;
+            let mut properties = HashMap::new();
+            let mut lines = text.lines();
+            while let Some(line) = lines.next() {
+                let line = line.trim_start();
+                if line.is_empty() || line.starts_with(['#', '!']) {
+                    continue;
+                }
+                let mut entry = line.to_string();
+                while entry.ends_with('\\') {
+                    entry.pop();
+                    entry.push_str(lines.next().unwrap_or_default().trim_start());
+                }
+                if let Some((key, value)) = entry.split_once(['=', ':']) {
+                    properties.insert(key.trim().to_string(), value.trim_start().to_string());
+                }
+            }
+            Some(properties)
+        })
+        .as_ref()
+}
+
+/// `SecurityProperties.includedInExceptions(category)`: whether the system or security property
+/// `jdk.includeInExceptions` lists the category. No system property is set in a plain run, so it
+/// is the JDK's security property; `None` when the JDK's file cannot be read.
+fn included_in_exceptions(category: &str) -> Option<bool> {
+    let listed = security_properties()?.get("jdk.includeInExceptions");
+    Some(listed.is_some_and(|list| list.split(',').any(|c| c.trim().eq_ignore_ascii_case(category))))
+}
+
+/// `Integer.decode` or `Long.decode` of `text` as `Integer.getInteger` and `Long.getLong` read a
+/// property: a sign, then a hexadecimal (`0x`, `#`), octal (`0`) or decimal number, in range.
+fn decode(text: &str, long: bool) -> Option<i64> {
+    let (negative, digits) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let (radix, digits) = if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        (16, hex)
+    } else if let Some(hex) = digits.strip_prefix('#') {
+        (16, hex)
+    } else if digits.len() > 1
+        && let Some(octal) = digits.strip_prefix('0')
+    {
+        (8, octal)
+    } else {
+        (10, digits)
+    };
+    if digits.is_empty() || digits.starts_with(['-', '+']) {
+        return None;
+    }
+    let magnitude = i128::from_str_radix(digits, radix).ok()?;
+    let value = if negative { -magnitude } else { magnitude };
+    let (min, max) =
+        if long { (i64::MIN as i128, i64::MAX as i128) } else { (i32::MIN as i128, i32::MAX as i128) };
+    (min..=max).contains(&value).then_some(value as i64)
+}
+
 impl<'t> Lowering<'t> {
     /// `System.getProperty(key)` or `getProperty(key, default)`; `None` for any other method. The
     /// key must be a literal, so that the translation knows which value to give.
@@ -146,6 +213,62 @@ impl<'t> Lowering<'t> {
                 selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
                 cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
             }));
+        }
+        // Values that a plain run has without a property for them: there is no security manager
+        // (`java -Djava.security.manager` would set one), so the `jrt:` file system's check of
+        // its caller's permission does nothing (`REPLACED_METHODS`); preview features are off
+        // (`--enable-preview`); and the categories of detail in exceptions are those of the JDK's
+        // security properties.
+        match (symbol.owner, symbol.name, symbol.ty) {
+            ("java.lang.System", "getSecurityManager", "()java.lang.SecurityManager") => {
+                return Ok(Some(ExprKind::Null));
+            }
+            ("jdk.internal.jrtfs.JrtFileSystemProvider", "checkPermission", "()void") => {
+                return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::Nothing), Vec::new())));
+            }
+            ("jdk.internal.misc.PreviewFeatures", "isPreviewEnabled", "()boolean") => {
+                return Ok(Some(ExprKind::Bool(false)));
+            }
+            ("sun.security.util.SecurityProperties", "includedInExceptions", "(java.lang.String)boolean") => {
+                let key = node.list("arguments").next();
+                let Some(category) = self.constant_text(key) else {
+                    return unsupported(
+                        node,
+                        "`SecurityProperties.includedInExceptions` of a category that is not a constant",
+                    );
+                };
+                let Some(included) = included_in_exceptions(&category) else {
+                    return unsupported(
+                        node,
+                        "`SecurityProperties.includedInExceptions` without the JDK's security properties to read",
+                    );
+                };
+                return Ok(Some(ExprKind::Bool(included)));
+            }
+            // `Runtime.version().feature()`, the release of the JDK the translator ran with
+            // (`java.specification.version`, `26`), as the source versions of javac's code ask it.
+            // A `Runtime.Version` itself is the JDK's value, which the translation has none of.
+            ("java.lang.Runtime.Version", "feature", "()int")
+                if node.get("methodSelect").and_then(|s| s.get("expression")).is_some_and(|r| {
+                    r.kind() == "METHOD_INVOCATION"
+                        && r.symbol().is_some_and(|s| (s.owner, s.name) == ("java.lang.Runtime", "version"))
+                }) =>
+            {
+                let feature = jdk_properties()
+                    .and_then(|p| p.get("java.specification.version"))
+                    .and_then(|v| v.parse::<i32>().ok());
+                let Some(feature) = feature else {
+                    return unsupported(
+                        node,
+                        "`Runtime.version()` without a `java` on the path to read the JDK's from",
+                    );
+                };
+                return Ok(Some(ExprKind::Int(feature)));
+            }
+            ("java.lang.Integer", "getInteger", _) | ("java.lang.Long", "getLong", _) if symbol.is_static => {
+                return self.number_property(node, symbol, args).map(Some);
+            }
+            _ => {}
         }
         if (symbol.owner, symbol.name) == ("java.lang.System", "getProperties") {
             let (owner, name, signature) = crate::program::TRANSLATED_PROPERTIES;
@@ -218,6 +341,60 @@ impl<'t> Lowering<'t> {
 }
 
 impl<'t> Lowering<'t> {
+    /// `Integer.getInteger(key)`, `getInteger(key, default)` and `Long.getLong` likewise: the
+    /// property's value decoded as a number, or the default (null without one) when the property
+    /// is unset or is no number. The key must be a constant, as for `System.getProperty`, and one
+    /// that the runtime answers (`user.dir`, ...) is no number.
+    fn number_property(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        args: &mut [Expr],
+    ) -> Result<ExprKind, Error> {
+        let long = symbol.owner == "java.lang.Long";
+        let key = match args.first().map(|arg| &arg.kind) {
+            Some(ExprKind::Str(key)) => Some(key.clone()),
+            _ => self.constant_text(node.list("arguments").next()),
+        };
+        let Some(key) = key else {
+            return unsupported(
+                node,
+                &format!("`{}.{}` with a key that is not a constant", symbol.owner, symbol.name),
+            );
+        };
+        let value = match property(&key) {
+            Ok(Property::Fixed(text)) => decode(&text, long),
+            Ok(Property::Run(_) | Property::Unset) => None,
+            Err(message) => return unsupported(node, &message),
+        };
+        let boxed = Type::boxed(if long { Type::Long } else { Type::Int });
+        let pos = node.pos();
+        let Some(value) = value else {
+            return Ok(match args.get_mut(1) {
+                Some(default) => {
+                    let default = std::mem::replace(default, self.synth(ExprKind::Null, pos, boxed));
+                    self.convert(default, boxed).kind
+                }
+                None => ExprKind::Null,
+            });
+        };
+        // Java evaluates the default even where the property gives the value.
+        if let Some(default) = args.get(1)
+            && has_effects(default)
+        {
+            return unsupported(
+                node,
+                &format!("a default of `{}.{}` that has effects", symbol.owner, symbol.name),
+            );
+        }
+        let number = if long {
+            self.synth(ExprKind::Long(value), pos, Type::Long)
+        } else {
+            self.synth(ExprKind::Int(value as i32), pos, Type::Int)
+        };
+        Ok(self.convert(number, boxed).kind)
+    }
+
     /// The text of `node` when it reads a local `String` that the method being lowered declares
     /// once, with a string literal, and never assigns again.
     fn local_constant(&self, node: Node<'t>) -> Option<String> {

@@ -440,6 +440,7 @@ pub const MATH_FUNCTIONS: &[&str] = &[
     "toRadians",
     "toDegrees",
     "scalb",
+    "getExponent",
 ];
 
 #[cfg(test)]
