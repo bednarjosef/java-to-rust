@@ -29,6 +29,7 @@ mod exceptions;
 mod expr;
 mod field_inits;
 mod file_channels;
+mod file_copy;
 mod files;
 mod idiomatic;
 mod imports;

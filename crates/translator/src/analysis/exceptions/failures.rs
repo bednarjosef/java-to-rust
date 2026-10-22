@@ -358,11 +358,15 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::InflateEnd
             | Native::NoPendingReferences
             | Native::TransferUnsupported
+            | Native::DirectCopy
+            | Native::BufferedCopy
             | Native::UnmapFile
             | Native::AllocationGranularity,
         ) => &[],
         // A file that cannot be read for the mapping fails with an `IOException` (`file_channels.rs`).
         Builtin::Native(Native::MapFile) => &["java.io.IOException"],
+        // A descriptor that is not open (`file_copy.rs`), which `Files.copy` never passes.
+        Builtin::Native(Native::PosixFadvise) => &["java.io.IOException"],
         // A read or write outside the array, or of memory outside the heap, ends the program.
         Builtin::RawMemory { .. } => &[],
         // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).

@@ -406,6 +406,32 @@ pub fn unix_sync(fd: i32, metadata: bool) {
     record(fd::with_file(fd, |f| if metadata { f.sync_all() } else { f.sync_data() }), ())
 }
 
+/// `statvfs(path)` into `out`: `f_frsize`, `f_blocks`, `f_bfree` and `f_bavail`, the four fields
+/// `UnixFileStoreAttributes` keeps.
+pub fn unix_statvfs(p: &[i8], out: &mut [i64]) {
+    let path = CString::new(p.iter().map(|&b| b as u8).collect::<Vec<u8>>()).unwrap_or_default();
+    // `struct statvfs` on 64-bit Linux (glibc and musl): eleven words, then six spare ints. Its
+    // fields are `f_bsize, f_frsize, f_blocks, f_bfree, f_bavail, ...`, read by index.
+    let mut buf = [0u64; 14];
+    let result = match unsafe { statvfs(path.as_ptr(), &mut buf) } {
+        0 => Ok(()),
+        _ => Err(errno()),
+    };
+    record(
+        result.map(|()| {
+            let fields = [buf[1], buf[2], buf[3], buf[4]];
+            for (slot, field) in out.iter_mut().zip(fields) {
+                *slot = field as i64;
+            }
+        }),
+        (),
+    );
+}
+
+unsafe extern "C" {
+    fn statvfs(path: *const std::ffi::c_char, buf: *mut [u64; 14]) -> i32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +480,12 @@ mod tests {
         assert_eq!((stat[8], stat[9], stat[10], stat[11]), (1000, 500, 2000, 250));
         assert_eq!(unix_access(&file, 4), 0);
         assert_eq!(unix_access(&[dir.clone(), bytes("/none")].concat(), 0), 2);
+        let mut vfs = [0i64; 4];
+        unix_statvfs(&dir, &mut vfs);
+        assert_eq!(unix_last_error(), 0);
+        assert!(vfs[0] > 0 && vfs[2] <= vfs[1], "block size and blocks: {vfs:?}");
+        unix_statvfs(&[dir.clone(), bytes("/none")].concat(), &mut vfs);
+        assert_eq!(unix_last_error(), 2, "ENOENT");
         let handle = unix_opendir(&dir);
         assert!(handle > 0);
         assert_eq!(unix_readdir(handle), bytes("a.txt"));

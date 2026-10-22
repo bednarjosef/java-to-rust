@@ -107,18 +107,18 @@ impl<'t> Lowering<'t> {
         // A decoder or an encoder of the charset: the JDK's, made by the translator's method
         // (`program::CHARSET_CODERS`).
         if let Some(receiver) = receiver
-            && let Some((class, to, sig)) =
-                crate::program::charset_coder(symbol.owner, symbol.name, symbol.ty)
+            && let Some(method) = crate::program::charset_coder(symbol.owner, symbol.name, symbol.ty)
         {
-            let resolved = self
-                .methods
-                .iter()
-                .position(|m| self.types[m.owner].javac == class && m.name == to && m.sig == sig);
-            if resolved.is_none() {
-                return unsupported(node, &format!("`Charset.{}` outside a whole program", symbol.name));
-            }
             let args = vec![self.expr(receiver)?];
-            return Ok(ExprKind::Call { name: to.to_string(), args, resolved });
+            return self.charset_call(node, symbol.name, method, args);
+        }
+        // A method that the JDK does by a coder with its arguments (`program::CHARSET_CODINGS`).
+        if let Some(receiver) = receiver
+            && let Some(method) = crate::program::charset_coding(symbol.owner, symbol.name, symbol.ty)
+        {
+            let operands: Vec<Node> = std::iter::once(receiver).chain(args).collect();
+            let operands: Vec<Expr> = operands.into_iter().map(|n| self.expr(n)).collect::<Result<_, _>>()?;
+            return self.charset_call(node, symbol.name, method, operands);
         }
         let op = match (symbol.name, args.len(), receiver.is_some()) {
             ("forName", 1, false) => CharsetOp::ForName,
@@ -145,6 +145,25 @@ impl<'t> Lowering<'t> {
             return Ok(ExprKind::Builtin(Builtin::Charset(constant(charset)), Vec::new()));
         }
         Ok(ExprKind::Builtin(Builtin::Charset(op), operands))
+    }
+
+    /// A call of the translator's method `method` (`program::charset_coder` or `charset_coding`)
+    /// for the charset method `name`, which must be in the program.
+    fn charset_call(
+        &self,
+        node: Node<'t>,
+        name: &str,
+        (class, to, sig): (&str, &str, &str),
+        args: Vec<Expr>,
+    ) -> Result<ExprKind, Error> {
+        let resolved = self
+            .methods
+            .iter()
+            .position(|m| self.types[m.owner].javac == class && m.name == to && m.sig == sig);
+        if resolved.is_none() {
+            return unsupported(node, &format!("`Charset.{name}` outside a whole program"));
+        }
+        Ok(ExprKind::Call { name: to.to_string(), args, resolved })
     }
 
     /// `==` or `!=` on charsets, or of a charset and `null`: a comparison of the two values, which
