@@ -72,18 +72,25 @@ impl<'t> Lowering<'t> {
             self.forget_alias(name);
         }
         // `Object` may also hold a string, a box or an array, `CharSequence` a string or a
-        // builder, and `Appendable` a builder.
+        // builder, `Appendable` a builder, and `Number` a numeric box.
         let char_sequence = matches!(value.ty, Type::Class(name, _) if name == CHAR_SEQUENCE);
         let target = matches!(ty, Type::Class(..) | Type::Enum(_))
             || (Self::is_object(value.ty)
                 && matches!(ty, Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_)))
             || (char_sequence && matches!(ty, Type::String | Type::StringBuilder))
-            || (self.is_appendable(value.ty) && ty == Type::StringBuilder);
+            || (self.is_appendable(value.ty) && ty == Type::StringBuilder)
+            || Self::is_numeric_box_of(value.ty, ty);
         if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
             return unsupported(node, "instanceof on these types");
         }
         self.object_array(node, ty)?;
         Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
+    }
+
+    /// Whether `ty` is a box of a number, which a value of type `value`, `Number`, may be.
+    pub(super) fn is_numeric_box_of(value: Type, ty: Type) -> bool {
+        matches!(value, Type::Class(name, _) if name == NUMBER)
+            && matches!(ty, Type::Boxed(b) if !matches!(b, Type::Boolean | Type::Char))
     }
 
     /// Whether type `a` is type `b` or a subtype of it, through superclasses and interfaces.
