@@ -353,8 +353,9 @@ impl<'a> Gen<'a> {
         // Each piece the generator writes is an item: the text it added, and what it named.
         let mut items: Vec<(Origin, usize, Named)> = Vec::new();
         let mut item = |g: &mut Self, origin: Origin, start: usize| {
+            let named = take_refers();
             if g.out.len() > start {
-                items.push((origin, start, take_refers()));
+                items.push((origin, start, named));
             }
         };
         for (index, decl) in class.types.iter().enumerate() {
