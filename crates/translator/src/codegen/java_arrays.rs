@@ -7,8 +7,34 @@ use super::*;
 
 impl<'a> Gen<'a> {
     /// One of the methods in `ArraysOp`, as a call of its runtime helper.
-    pub(super) fn arrays_op(&mut self, op: ArraysOp, args: &'a [Expr]) -> Code {
+    pub(super) fn arrays_op(&mut self, op: ArraysOp, args: &'a [Expr], id: ExprId) -> Code {
         let elem = element(args[0].ty);
+        // A search over elements that may be null whose `NullPointerException` a `catch` sees.
+        if matches!(op, ArraysOp::BinarySearch | ArraysOp::BinarySearchRange)
+            && self.facts.null_checked.contains_key(&id)
+        {
+            self.dereferenced.insert(id);
+            let a = self.handle(&args[0]);
+            let range = match op {
+                ArraysOp::BinarySearchRange => {
+                    let (from, to) =
+                        (self.value(&args[1], Type::Int).text, self.value(&args[2], Type::Int).text);
+                    format!("Some(({from}, {to}))")
+                }
+                _ => "None".to_string(),
+            };
+            let key = self.element_value(&args[args.len() - 1], elem);
+            let message = |g: &Self, id: ExprId, default: &str| match g.facts.npe_messages.get(&id) {
+                Some(Some(message)) => format!("{message:?}"),
+                _ => format!("{default:?}"),
+            };
+            let null_element = message(self, id, crate::analysis::SEARCH_NULL_ELEMENT);
+            let null_key = message(self, args[args.len() - 1].id, crate::analysis::SEARCH_NULL_KEY);
+            let search = self.runtime("try_binary_search");
+            return Code::atom(self.passed_on(Code::atom(format!(
+                "{search}({a}, {range}, {key}, {null_element}, {null_key})"
+            ))));
+        }
         let text = match op {
             ArraysOp::Equals => {
                 let (a, b) = (self.optional_handle(&args[0]), self.optional_handle(&args[1]));
@@ -39,10 +65,26 @@ impl<'a> Gen<'a> {
                 let zero = self.element_zero(elem);
                 format!("{}({a}, {from}, {to}, {zero})", self.runtime("copy_of_range"))
             }
+            // A key that may be null fails where Java compares it with an element, in the
+            // element's `compareTo` (`binary_search_all_nullable`).
+            ArraysOp::BinarySearch if self.nullable(&args[1]) && !self.nullable_element(elem) => {
+                let a = self.handle(&args[0]);
+                let key = self.optional_to(&args[1], elem).text;
+                let search = format!("{}({a}, {key})", self.runtime("binary_search_all_nullable"));
+                self.dereference(&[args[1].id], &search)
+            }
             ArraysOp::BinarySearch => {
                 let a = self.handle(&args[0]);
                 let key = self.element_value(&args[1], elem);
                 format!("{}({a}, {key})", self.runtime("binary_search_all"))
+            }
+            ArraysOp::BinarySearchRange if self.nullable(&args[3]) && !self.nullable_element(elem) => {
+                let a = self.handle(&args[0]);
+                let (from, to) = (self.value(&args[1], Type::Int).text, self.value(&args[2], Type::Int).text);
+                let key = self.optional_to(&args[3], elem).text;
+                let search =
+                    format!("{}({a}, {from}, {to}, {key})", self.runtime("binary_search_range_nullable"));
+                self.dereference(&[args[3].id], &search)
             }
             ArraysOp::BinarySearchRange => {
                 let a = self.handle(&args[0]);

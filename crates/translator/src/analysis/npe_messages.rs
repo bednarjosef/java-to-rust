@@ -19,6 +19,11 @@ use super::Facts;
 use crate::ast::*;
 use crate::javac::{BytecodeNames, CHECKED_JAVA, NameKind};
 use std::cell::RefCell;
+
+/// The messages of `Arrays.binarySearch` comparing a null key with a string, and a null element.
+pub(crate) const SEARCH_NULL_KEY: &str = "Cannot read field \"value\" because \"anotherString\" is null";
+pub(crate) const SEARCH_NULL_ELEMENT: &str =
+    "Cannot invoke \"java.lang.Comparable.compareTo(Object)\" because \"midVal\" is null";
 use std::collections::HashMap;
 
 /// The overlays of `java.lang` (`java/overlay/java/lang`), by qualified name.
@@ -311,6 +316,16 @@ impl Messages<'_> {
                     {
                         let message = "Cannot read the array length because \"bytes\" is null";
                         out.insert(args[0].id, Some(message.to_string()));
+                    }
+                    // `Arrays.binarySearch` of a null array, which `Arrays` asks for its length, of
+                    // a null key, which fails in `String.compareTo` of an element, and of a null
+                    // element, whose `compareTo` `Arrays` calls (`-g`, so the parameters and locals
+                    // have their names).
+                    Builtin::Arrays(ArraysOp::BinarySearch | ArraysOp::BinarySearchRange) => {
+                        let message = "Cannot read the array length because \"a\" is null";
+                        out.insert(args[0].id, Some(message.to_string()));
+                        out.insert(args[args.len() - 1].id, Some(SEARCH_NULL_KEY.to_string()));
+                        out.insert(x.id, Some(SEARCH_NULL_ELEMENT.to_string()));
                     }
                     // `System.arraycopy` of a null, which the JVM's native code throws without
                     // a message.

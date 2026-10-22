@@ -659,7 +659,7 @@ impl<'a> Gen<'a> {
             Builtin::ArraysToString | Builtin::ArraysFill | Builtin::ArraysSort | Builtin::ArraysCopyOf => {
                 self.arrays_builtin(builtin, args, id)
             }
-            Builtin::Arrays(op) => self.arrays_op(op, args),
+            Builtin::Arrays(op) => self.arrays_op(op, args, id),
             Builtin::ElementUpdate(update) => self.element_update_call(update, args),
             Builtin::ByteView { ty, big_endian } => self.byte_view_call(ty, big_endian, args),
             Builtin::Println | Builtin::Print => {
