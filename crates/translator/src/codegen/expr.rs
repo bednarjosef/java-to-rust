@@ -492,6 +492,9 @@ impl<'a> Gen<'a> {
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
+                if let Some(code) = self.enum_conditional(e, cond, a, b) {
+                    return code;
+                }
                 if let Some(code) = self.narrowed_conditional(e, cond, a, b) {
                     return code;
                 }

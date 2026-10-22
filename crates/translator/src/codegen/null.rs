@@ -509,7 +509,7 @@ impl<'a> Gen<'a> {
 
     /// Treats the possibly-null `name` as a non-null `&str` from here on; returns it if it was not
     /// already, for `unnarrow`.
-    fn narrow(&mut self, name: &str) -> Option<String> {
+    pub(super) fn narrow(&mut self, name: &str) -> Option<String> {
         self.borrowed.insert(name.to_string()).then(|| name.to_string())
     }
 
@@ -580,17 +580,27 @@ impl<'a> Gen<'a> {
         if !(0..parts.len()).any(binds) {
             return None;
         }
-        Some(Code::new(self.and_chain(&parts), AND))
+        // The unboxing of a box that may be null is the failure of the `&&` it is an operand of,
+        // which the chain does not write as one: inside the closure of `e` the whole chain is
+        // caught; else such an operand runs inside `java::catching` on its own.
+        let mut caught = HashMap::new();
+        unboxing_ands(e, &self.facts.catching, &mut caught);
+        if self.catching_now.contains(&e.id) {
+            self.dereferenced.extend(caught.drain().map(|(_, and)| and));
+        }
+        Some(Code::new(self.and_chain(&parts, &caught), AND))
     }
 
-    fn and_chain(&mut self, parts: &[&'a Expr]) -> String {
+    /// `parts`, joined by `&&`; `caught` maps an operand that unboxes to its `&&` of
+    /// `Facts::catching`.
+    fn and_chain(&mut self, parts: &[&'a Expr], caught: &HashMap<ExprId, ExprId>) -> String {
         let mut texts = Vec::new();
         for (k, part) in parts.iter().enumerate() {
             if let Some((value, ty, name)) = pattern(part)
                 && parts[k + 1..].iter().any(|l| mentions(l, name))
             {
                 let source = self.pattern_source(value, ty);
-                let rest = self.and_chain(&parts[k + 1..]);
+                let rest = self.and_chain(&parts[k + 1..], caught);
                 let name = self.local(name);
                 // A failure that goes on from the rest (`?`, `or_break!`) cannot leave a closure.
                 texts.push(if rest.contains('?') || rest.contains("or_break!") {
@@ -600,7 +610,15 @@ impl<'a> Gen<'a> {
                 });
                 break;
             }
-            texts.push(self.expr(part).at(AND + 1));
+            let code = match caught.get(&part.id) {
+                Some(&and) => {
+                    let mark = self.out.len();
+                    let code = self.value(part, Type::Boolean);
+                    self.caught(and, code, mark)
+                }
+                None => self.value(part, Type::Boolean),
+            };
+            texts.push(code.at(AND + 1));
         }
         texts.join(" && ")
     }
@@ -648,4 +666,16 @@ impl<'a> Gen<'a> {
 /// take before `else`.
 fn let_else_source(source: String) -> String {
     if source.ends_with('}') { format!("({source})") } else { source }
+}
+
+/// The operands of the `&&`s of a chain that unbox a box, of those `&&`s in `catching`, each
+/// mapped to its `&&`.
+fn unboxing_ands(e: &Expr, catching: &HashMap<ExprId, Pos>, out: &mut HashMap<ExprId, ExprId>) {
+    let ExprKind::Binary(BinOp::And, l, r) = &e.kind else { return };
+    for operand in [l, r] {
+        if catching.contains_key(&e.id) && matches!(operand.ty, Type::Boxed(_)) {
+            out.insert(operand.id, e.id);
+        }
+        unboxing_ands(operand, catching, out);
+    }
 }

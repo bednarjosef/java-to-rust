@@ -1189,11 +1189,7 @@ impl<'a> Gen<'a> {
             None => {
                 let c = self.struct_class(object).expect("an object has a class");
                 let name = rust_string(&self.java_class_name(c, simple));
-                if has_effects(object) {
-                    let text = self.expr(object).text;
-                    return Code::atom(format!("{{ {text}; String::from({name}) }}"));
-                }
-                Code::atom(format!("String::from({name})"))
+                self.after_object(object, &format!("String::from({name})"))
             }
             Some(t) => {
                 let obj = self.object(object);

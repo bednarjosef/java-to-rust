@@ -413,7 +413,7 @@ impl<'t> Lowering<'t> {
     /// (`analysis/npe_messages.rs`).
     fn checked_name(&self, class_name: &str, given: &str, message: Option<&str>, pos: Pos) -> Stmt {
         let given = || self.synth(ExprKind::Var(given.to_string()), pos, Type::String);
-        let init = match self.null_name(message, pos) {
+        let init = match self.null_thrown(message, Type::String, pos) {
             Some(throw) => {
                 let null = self.synth(ExprKind::Null, pos, Type::Null);
                 let cond = ExprKind::Binary(BinOp::Ne, Box::new(given()), Box::new(null));
@@ -426,9 +426,9 @@ impl<'t> Lowering<'t> {
         Stmt::Local { ty: Type::String, name: class_name.to_string(), init: Some(init), pos }
     }
 
-    /// `switch (0) { default -> throw new NullPointerException(message); }`, a `String` that is
-    /// never given, when the program has that class.
-    fn null_name(&self, message: Option<&str>, pos: Pos) -> Option<Expr> {
+    /// `switch (0) { default -> throw new NullPointerException(message); }`, a value of type `ty`
+    /// that is never given, when the program has that class.
+    pub(super) fn null_thrown(&self, message: Option<&str>, ty: Type, pos: Pos) -> Option<Expr> {
         const NULL: &str = "java.lang.NullPointerException";
         let sig = if message.is_some() { "(java.lang.String)void" } else { "()void" };
         // A standard class of the translator (`lower::exceptions`), with its constructors, where
@@ -444,6 +444,6 @@ impl<'t> Lowering<'t> {
         let throw = Stmt::Throw(self.convert(new, Type::class("java.lang.Throwable")));
         let selector = Box::new(self.synth(ExprKind::Int(0), pos, Type::Int));
         let cases = vec![Case { labels: vec![CaseLabel::Default], body: vec![throw] }];
-        Some(self.synth(ExprKind::Switch { selector, cases }, pos, Type::String))
+        Some(self.synth(ExprKind::Switch { selector, cases }, pos, ty))
     }
 }

@@ -693,9 +693,10 @@ impl<'a> Gen<'a> {
                 let (c, handle) = self.variant_value(e);
                 match self.variant_of(t, c) {
                     Some(variant) => format!("{variant}({handle})"),
+                    // The object is read first, which may throw.
                     None => {
                         let ty = struct_name(&self.class.types[t].name);
-                        format!("None::<{ty}>.unwrap_or_else(|| {})", absent(self, c))
+                        format!("{{ let _ = {handle}; None::<{ty}>.unwrap_or_else(|| {}) }}", absent(self, c))
                     }
                 }
             }
@@ -786,9 +787,15 @@ impl<'a> Gen<'a> {
             None => {
                 let c = self.value_class(value);
                 // An object's last use moves its handle in.
+                // No object of the class is created, so none reaches here; the value is still
+                // computed first, which may throw.
                 let Some(variant) = self.variant_of(t, c) else {
                     let ty = self.ty_name(to);
-                    return Code::atom(format!("None::<{ty}>.unwrap_or_else(|| {})", absent(self, c)));
+                    let text = self.expr(value).text;
+                    return Code::atom(format!(
+                        "{{ let _ = {text}; None::<{ty}>.unwrap_or_else(|| {}) }}",
+                        absent(self, c)
+                    ));
                 };
                 let v = match self.runtime_of(c) {
                     Some(_) => self.variant_value(value).1,

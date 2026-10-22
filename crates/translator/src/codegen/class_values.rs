@@ -33,15 +33,7 @@ impl<'a> Gen<'a> {
             }
             ty => self.type_class(ty),
         };
-        if self.nullable(object) {
-            let check = self.null_check(object).text;
-            return Code::new(format!("{{ {check}; {class} }}"), LOWEST);
-        }
-        if has_effects(object) {
-            let text = self.expr(object).text;
-            return Code::new(format!("{{ {text}; {class} }}"), LOWEST);
-        }
-        Code::atom(class)
+        self.after_object(object, &class)
     }
 
     /// `ComparableClassFor(x)`: `Some` of the class of `x` where that class says it implements
