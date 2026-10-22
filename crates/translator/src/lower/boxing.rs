@@ -32,6 +32,7 @@ pub(super) fn is_boxed_method(name: &str) -> bool {
             | "parseDouble"
             | "parseFloat"
             | "parseBoolean"
+            | "decode"
             | "valueOf"
             | "toString"
             | "toHexString"
@@ -103,6 +104,9 @@ impl<'t> Lowering<'t> {
                 BoxedOp::Parse
             }
             ("valueOf", true) => BoxedOp::Box,
+            ("decode", true) if args.first().is_some_and(|a| matches!(a.ty, Type::String | Type::Null)) => {
+                BoxedOp::Decode
+            }
             ("toString" | "hashCode", true) => {
                 if name == "toString" {
                     BoxedOp::ToString
@@ -140,6 +144,7 @@ impl<'t> Lowering<'t> {
         }
         let expected = match op {
             BoxedOp::Parse
+            | BoxedOp::Decode
             | BoxedOp::Box
             | BoxedOp::Unbox
             | BoxedOp::ToString
@@ -155,7 +160,7 @@ impl<'t> Lowering<'t> {
         }
         let kind = boxed_type(symbol.owner).expect("a boxed method").unboxed();
         // No `Character` parses a string.
-        if matches!(op, BoxedOp::Parse) && matches!(kind, Type::Char) {
+        if matches!(op, BoxedOp::Parse | BoxedOp::Decode) && matches!(kind, Type::Char) {
             return unsupported(node, &format!("`{}.{name}` of a string", symbol.owner));
         }
         Ok(Builtin::Boxed(op, kind))

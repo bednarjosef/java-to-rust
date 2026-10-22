@@ -422,6 +422,9 @@ A small subset, end to end:
     `parseUnsignedInt` with a radix or a range, `toUnsignedLong`, `toUnsignedInt`), which `Byte` and
     `Short` share. Their `NumberFormatException` and `IndexOutOfBoundsException` messages are Java's.
   - `Short` and `Byte`: `parseShort`/`parseByte` and `valueOf`, with or without a radix.
+  - `decode` of `Integer`, `Long`, `Short` and `Byte`: a sign, then a decimal, `0x`/`#`
+    hexadecimal or `0` octal number, with Java's messages (`integer_parse.rs`). The
+    `NullPointerException` of a null string is not caught yet.
   - `Character`: the code point methods (`toChars`, `toChars(int, char[], int)`, `toString(int)`,
     `charCount`, `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint`, ...), the tests
     `isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`, `digit`,
@@ -507,6 +510,11 @@ compared with null, printed as `null`); using a null one throws `NullPointerExce
 Java's message where a method of the charset is called. Only an array of charsets that would hold
 null is rejected. Encoding replaces unmappable characters as Java does,
 and decoding replaces malformed input as Java's `String` does (`crates/runtime/src/charset.rs`).
+In a whole program, `newDecoder()` and `newEncoder()` of a charset give the JDK's own
+`CharsetDecoder` and `CharsetEncoder` of the six charsets, which decode and encode between
+buffers, report or replace malformed and unmappable input, and throw as Java's do: their classes
+are copied from the JDK's sources into `java/overlay/sun/nio/cs/TranslatedCoders.java`
+(`scripts/generate-charset-coders.py`).
 
 #### Enums
 
@@ -530,7 +538,8 @@ argument that is another enum's constant or a static method's result, as the JDK
 `fOfConstants` indexed by ordinal, the constructor is a function `init_shape_constant(ordinal, ..)` (for an enum `Shape`)
 that fills a constant's row, and the enum's static initialization builds every constant, in
 order, before its other static initializers (an exception there is Java's
-`ExceptionInInitializerError`). A read of `e.f` is `fOfConstants[e.ordinal()]`, and the enum's
+`ExceptionInInitializerError`, and where a `catch` observes it, the first use throws it and
+every later use `NoClassDefFoundError`, as for any static initializer). A read of `e.f` is `fOfConstants[e.ordinal()]`, and the enum's
 methods initialize it first. Unlike Java, using a constant (`Shape.SQUARE`, `values()`, a
 `switch`) does not initialize the enum by itself; reading its fields or calling its methods does.
 
@@ -743,7 +752,12 @@ few dozen of the JDK's units where javac by itself would attribute thousands (se
 whole programs" in docs/performance.md). A source or library root may be a module's, with a
 `module-info.java` (the JDK's are): the translation is of one closed program, so javac compiles
 every root as part of one module, `java.base` when the JDK's sources are a library and the
-unnamed module otherwise, and reads each class from its source (`program/modules.rs`). A
+unnamed module otherwise, and reads each class from its source (`program/modules.rs`). At run
+time the modules are what the roots declare: `Class.getModule()` is the named module of a root
+with a `module-info.java`, with the class loader the JVM gives it, or the unnamed module of the
+system class loader, and `Module` and `ModuleLayer.boot()` answer from the declarations as the
+JVM's boot layer does; defining a module layer throws, saying that code outside the translation
+cannot run (`java/overlay/java/lang/Module.java`). A
 package of a module whose sources are not given is an error that names the module to pass as
 `--library`.
 
@@ -778,10 +792,12 @@ is, extends or implements. It stops at the classes that the runtime provides (`S
 `StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`; `RUNTIME_CLASSES`),
 whose sources reach deep into the JVM, and at what is not
 translated: reflection (but not `java.lang.reflect.Array`, which is array code, nor `Method`,
-`Field` and `Constructor`, which the reflection table is), method handles, serialization,
-security and class loading (`Module`, `ModuleLayer`, `jdk.internal.loader`; `UNTRANSLATED`;
-`ResourceBundle` is translated, and `ServiceLoader`, `ClassLoader` and `URLClassLoader` are the
-translator's own, over the translation's classes). Library code
+`Field` and `Constructor`, which the reflection table is), method handles (but not the
+`VarHandle` constants and a constructor's `MethodHandle` constant, resolved when translating, see
+`lower/handles.rs`), serialization,
+security and class loading (`jdk.internal.loader`; `UNTRANSLATED`; `ResourceBundle` is
+translated, and `ServiceLoader`, `ClassLoader`, `URLClassLoader`, `Module` and `ModuleLayer` are
+the translator's own, over the translation's classes and modules). Library code
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
 `comparableClassFor` and parallel streams reach threads, so the boundary is needed. An
 untranslated class that is the type of a variable (the `ObjectInputStream` of
@@ -859,10 +875,17 @@ the home of the JDK the translator ran with. `java.class.path` is `.`. Any other
 on the translator's path sets (`java -XshowSettings:properties`: `java.version`, `java.vendor`,
 `file.encoding`, `user.language`, ...) has that JDK's value, fixed in the translation; a key it
 does not set (`java.locale.providers`, `java.util.currency.data`, the program's own) gives null,
-or the default given. The key must be a literal or a constant, and the two keys whose value the
-translation cannot match are rejected: `sun.java.command` (the command line) and
-`user.timezone` (set once `TimeZone` runs). In a whole program `System.getProperties()` is a
+or the default given. The two keys whose value the translation cannot match are rejected as
+literals or constants: `sun.java.command` (the command line) and `user.timezone` (set once
+`TimeZone` runs). A key that code computes is a `switch` over the keys of a plain run, in which
+those two are unset, as they are in `System.getProperties()`. In a whole program `System.getProperties()` is a
 `Properties` of the keys of a plain run, made once (`java/overlay/java/lang/TranslatedProperties.java`).
+`File.separator` and `File.pathSeparator` (and their `char` forms) are the constants `/` and `:`,
+as the runtime's `file.separator` and `path.separator` are, so that a pattern made of one is
+known to compile.
+`System.getenv(name)` reads the environment the program runs in, as Java does (`system.rs`): null
+for a variable that is unset or a name that no variable can have. `System.getenv()`, the whole
+environment as a map, is not translated yet.
 `Integer.getInteger` and `Long.getLong` read a property the same way and decode it as
 `Integer.decode` does, giving the default (or null) when it is unset or no number.
 `Runtime.version().feature()` is the release of the JDK the translator ran with
@@ -874,7 +897,8 @@ type whose only value is null, so `System.getSecurityManager()` is null and a te
 manager against null decides its branch, `AccessController.doPrivileged` of a `PrivilegedAction`
 runs the action (`java/overlay/java/lang/TranslatedAccessController.java`), and the `jrt:` file
 system's permission check does nothing;
-`SecurityProperties.includedInExceptions` reads the JDK's `conf/security/java.security`. The memory
+`SecurityProperties.includedInExceptions` and `Security.getProperty` read the JDK's
+`conf/security/java.security`. The memory
 figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
 JVM's, and `gc()` does nothing, as `System.gc()` does. `Runtime.halt` flushes the output and exits without shutdown
 hooks. Scoped values are the JDK's `ScopedValue` over the translator's `Thread`, which keeps a
@@ -906,6 +930,17 @@ and `end` does nothing, as without virtual threads. `jdk.internal.util.ByteArray
 `inflateBytesToChars`, and `uncheckedNewStringOrThrow` and `uncheckedGetBytesOrThrow` for
 `java.nio.file`) are its static methods of the same name
 (`java/overlay/jdk/internal/access/TranslatedLangAccess.java`).
+
+`InetAddress` looks names up through the system's name service, as the JVM's natives do: the
+JDK's `InetAddress`, `Inet4AddressImpl` and `Inet6AddressImpl` (`java/overlay/java/net`) call the
+translator's `java.net.TranslatedNet`, whose natives are libc's `getaddrinfo`, `getnameinfo`,
+`gethostname` and `getifaddrs` on the bytes of names and addresses (`net.rs`), and which makes the
+JDK's address objects of what they give, with the JDK's `UnknownHostException`s. Whether IPv4
+and IPv6 are available is tested once, as the JVM does when it starts. Nothing opens a connection:
+sockets, `isReachable` and the listing of network interfaces stay rejected. A hosts file that
+`jdk.net.hosts.file` names and a resolver of the program's own (`InetAddressResolverProvider`) throw
+`UnsupportedOperationException`; with the built-in resolver only, a lookup catches only its
+`UnknownHostException`, where the JDK's also wraps a custom resolver's `RuntimeException`.
 
 `java.nio.file` (`Files`, `Path`, `Paths`, directory streams, attributes) is the JDK's code over
 the translator's `sun.nio.fs.UnixNativeDispatcher` (`java/overlay/sun/nio/fs`), whose natives

@@ -58,9 +58,12 @@ pub enum StringOp {
     /// `new String(ascii, hibyte, offset, count)`: each `char` is `hibyte` over a byte.
     FromHighByte,
     HashCode,
-    /// `s.toString()`, `s.intern()` and `new String(s)`: the string itself (or an equal copy),
-    /// which throws when `s` is null.
+    /// `new String(s)`: the string itself (or an equal copy), which throws when `s` is null.
     Identity,
+    /// `s.toString()`, as `Identity`.
+    ToString,
+    /// `s.intern()`, as `Identity`.
+    Intern,
     /// `s.equals(x)` where `x` is no string (a box, a builder, an enum, an array, an object): never
     /// equal, after evaluating both and throwing on a null `s`.
     EqualsOther,

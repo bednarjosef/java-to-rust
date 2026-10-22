@@ -1,10 +1,21 @@
-//! The JVM services that programs call directly: `System.getProperty`, the memory figures and
+//! The JVM services that programs call directly: `System.getProperty`, `System.getenv`, the
+//! memory figures and
 //! `gc` of `Runtime`, `Runtime.halt`, and `Thread`'s sleeps and yields. A property whose value
 //! depends on the machine or the run is answered here from the machine it runs on, as the JVM
 //! answers it; the translation fixes the others (see `lower::system`). The memory figures are plausible
 //! constants, not the JVM's, which depend on the machine and its flags.
 
 use crate::exit;
+
+/// `System.getenv(name)`: the variable of the environment the program runs in, as the JVM reads
+/// it, or `None` where it is unset. A name that no variable can have (empty, or with `=` or a
+/// zero byte) is unset, and a value that is not UTF-8 is read with replacement characters.
+pub fn getenv(name: &str) -> Option<String> {
+    if name.is_empty() || name.contains(['=', '\0']) {
+        return None;
+    }
+    std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+}
 
 /// The value of a system property that depends on the machine or the run (the translation fixes
 /// the others, see `lower::system`).

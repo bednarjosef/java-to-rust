@@ -126,11 +126,15 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     let caught = |k: &Kind, frames: &[Frame]| frames.iter().any(|f| f.catches.iter().any(|&t| matches(k, t)));
     let initializer: Vec<bool> = (0..class.methods.len()).map(|m| class.is_initializer(m)).collect();
     // A static initializer that the lowering rewrote keeps its failures as exceptions (see
-    // `lower/clinit_errors.rs`): it is translated like a method, not collapsed.
-    let guarded: Vec<bool> = class
-        .methods
-        .iter()
-        .map(|m| m.name == "<clinit>" && crate::lower::rewritten_clinit(&class.types[m.class]))
+    // `lower/clinit_errors.rs`): it is translated like a method, not collapsed. So do the
+    // functions that build the constants of its enum (`lower/enum_tables.rs`), which only it
+    // calls, inside the `try` whose `catch` makes their failure the class's.
+    let guarded: Vec<bool> = (0..class.methods.len())
+        .map(|m| {
+            let method = &class.methods[m];
+            (method.name == "<clinit>" || class.builds_constants(m))
+                && crate::lower::rewritten_clinit(&class.types[method.class])
+        })
         .collect();
     let raised = |p: &Point, escapes: &[BTreeSet<Kind>]| -> BTreeSet<Kind> {
         match &p.raise {

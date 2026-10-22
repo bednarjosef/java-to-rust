@@ -271,10 +271,23 @@ impl<'a> Gen<'a> {
             });
             n
         };
-        let once = rest.iter().any(|s| match s {
+        let assigns_once = |s: &Stmt| match s {
             Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) => count(e) == 1,
             _ => false,
-        }) && rest.iter().filter(|s| assigns_stmt(s, name)).count() == 1;
+        };
+        // A switch whose cases do not fall into the next, each assigning it once at most, in
+        // a statement of its own (a local that the cases share, `lower::switch`).
+        let once_per_case = |s: &Stmt| match s {
+            Stmt::Switch { cases, .. } => cases.iter().enumerate().all(|(i, c)| {
+                let assigning: Vec<&Stmt> = c.body.iter().filter(|s| assigns_stmt(s, name)).collect();
+                (i + 1 == cases.len() || !exceptions::completes_all(&c.body))
+                    && assigning.len() <= 1
+                    && assigning.iter().all(|s| assigns_once(s))
+            }),
+            _ => false,
+        };
+        let once = rest.iter().any(|s| assigns_once(s) || once_per_case(s))
+            && rest.iter().filter(|s| assigns_stmt(s, name)).count() == 1;
         if !once {
             return self.local_is_mut(ty, name, rest);
         }
