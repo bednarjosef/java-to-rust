@@ -34,15 +34,16 @@
 mod entry;
 mod failures;
 mod field_inits;
-mod guards;
+pub(super) mod guards;
 
 use super::Facts;
+use super::closure::{self, Bits};
 use super::hierarchy;
 use super::nullness::{maybe_null, non_null_names};
 use crate::ast::*;
 use crate::lower::standard_subclass;
 use failures::runtime_failures;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 /// What a static initializer that throws raises: Java wraps the exception in this `Error`.
 const INITIALIZER_ERROR: &str = "java.lang.ExceptionInInitializerError";
@@ -50,7 +51,7 @@ const INITIALIZER_ERROR: &str = "java.lang.ExceptionInInitializerError";
 /// An exception that may be raised: an object of a concrete class of the program (or a standard
 /// class it creates), or a failure of the runtime, by its standard class's name (`"?"` when the
 /// operation's failures are not known exactly).
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Kind {
     Class(usize),
     Runtime(&'static str),
@@ -102,6 +103,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     if class.type_index("java.lang.Throwable").is_none() {
         return Ok(());
     }
+    facts.static_writes = guards::static_writes(class);
     facts.initialized_statics = initialized_statics(class, facts);
     let mut errors = Vec::new();
     let mut reject = |pos: Pos, message: &str| errors.push(Error { pos, message: message.to_string() });
@@ -155,47 +157,120 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
 
     // What escapes each method, and of that, what the program's code throws: all of it for a
     // method of the program, and for one of the JDK what escapes the program's methods it calls.
+    // Methods are looked at callees first, and again whenever what escapes a method they call
+    // grows (in calls that go round), until nothing does; what escapes only grows, so the order
+    // does not change the outcome. The kinds are numbered, and each point's own kinds and those
+    // its `try`s catch are sets of those numbers, worked out once.
     let escapes_of = |points: &[Vec<Point>]| {
-        let mut escapes: Vec<BTreeSet<Kind>> = vec![BTreeSet::new(); class.methods.len()];
-        let mut from_program: Vec<BTreeSet<Kind>> = vec![BTreeSet::new(); class.methods.len()];
-        loop {
-            let mut changed = false;
-            for m in 0..class.methods.len() {
-                let mut out = BTreeSet::new();
-                let mut program = BTreeSet::new();
-                for p in &points[m] {
-                    out.extend(raised(p, &escapes).into_iter().filter(|k| !caught(k, &p.frames)));
-                    if let Raise::Call(callees) = &p.raise {
-                        let through = callees.iter().flat_map(|&c| from_program[c].iter().cloned());
-                        program.extend(through.filter(|k| !caught(k, &p.frames)));
-                    }
-                }
-                if !jdk[m] {
-                    program = out.clone();
-                }
-                if bugs_only[m] {
-                    if initializer[m] {
-                        program.clear();
-                    }
-                    out = program.clone();
-                }
-                if initializer[m] && !guarded[m] {
-                    for set in [&mut out, &mut program] {
-                        if !set.is_empty() {
-                            *set = BTreeSet::from([Kind::Runtime(INITIALIZER_ERROR)]);
+        let n = class.methods.len();
+        let mut kinds: Vec<Kind> = Vec::new();
+        let mut numbers: HashMap<Kind, usize> = HashMap::new();
+        let mut number = |k: Kind| {
+            *numbers.entry(k.clone()).or_insert_with(|| {
+                kinds.push(k);
+                kinds.len() - 1
+            })
+        };
+        let initializer_error = number(Kind::Runtime(INITIALIZER_ERROR));
+        let own: Vec<Vec<Bits>> = points
+            .iter()
+            .map(|ps| {
+                ps.iter()
+                    .map(|p| match &p.raise {
+                        Raise::Throw(t) => {
+                            h.concretes(*t).into_iter().map(|c| number(Kind::Class(c))).collect()
+                        }
+                        Raise::Runtime { class, .. } => Bits::from_iter([number(Kind::Runtime(class))]),
+                        Raise::Call(_) | Raise::Text(_) => Bits::default(),
+                    })
+                    .collect()
+            })
+            .collect();
+        // What the `try`s around each point catch, shared by the points with the same `try`s.
+        let mut masks: Vec<Bits> = vec![Bits::default()];
+        // Each `try` by its id, what it catches and whether it has a `finally`.
+        type Tries<'a> = Vec<(usize, &'a [usize], bool)>;
+        let mut mask_of: HashMap<Tries, usize> = HashMap::new();
+        let caught_by: Vec<Vec<usize>> = points
+            .iter()
+            .map(|ps| {
+                ps.iter()
+                    .map(|p| {
+                        if p.frames.is_empty() {
+                            return 0;
+                        }
+                        let key = p.frames.iter().map(|f| (f.id, &f.catches[..], f.finally)).collect();
+                        *mask_of.entry(key).or_insert_with(|| {
+                            masks.push((0..kinds.len()).filter(|&k| caught(&kinds[k], &p.frames)).collect());
+                            masks.len() - 1
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut escapes: Vec<Bits> = vec![Bits::default(); n];
+        let mut from_program: Vec<Bits> = vec![Bits::default(); n];
+        let mut callers: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut callees: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (m, ps) in points.iter().enumerate() {
+            for p in ps {
+                if let Raise::Call(called) = &p.raise {
+                    for &c in called {
+                        if callers[c].last() != Some(&m) {
+                            callers[c].push(m);
+                            callees[m].push(c);
                         }
                     }
                 }
-                if out != escapes[m] || program != from_program[m] {
-                    escapes[m] = out;
-                    from_program[m] = program;
-                    changed = true;
-                }
-            }
-            if !changed {
-                return escapes;
             }
         }
+        let mut queued = vec![true; n];
+        let mut queue: VecDeque<usize> = closure::components(&callees).1.into_iter().flatten().collect();
+        while let Some(m) = queue.pop_front() {
+            queued[m] = false;
+            let mut out = Bits::default();
+            let mut program = Bits::default();
+            for (i, p) in points[m].iter().enumerate() {
+                let caught = &masks[caught_by[m][i]];
+                out.union_except(&own[m][i], caught);
+                if let Raise::Call(called) = &p.raise {
+                    for &c in called {
+                        out.union_except(&escapes[c], caught);
+                        program.union_except(&from_program[c], caught);
+                    }
+                }
+            }
+            if !jdk[m] {
+                program = out.clone();
+            }
+            if bugs_only[m] {
+                if initializer[m] {
+                    program = Bits::default();
+                }
+                out = program.clone();
+            }
+            if initializer[m] && !guarded[m] {
+                for set in [&mut out, &mut program] {
+                    if !set.is_empty() {
+                        *set = Bits::from_iter([initializer_error]);
+                    }
+                }
+            }
+            if out != escapes[m] || program != from_program[m] {
+                escapes[m] = out;
+                from_program[m] = program;
+                for &c in &callers[m] {
+                    if !queued[c] {
+                        queued[c] = true;
+                        queue.push_back(c);
+                    }
+                }
+            }
+        }
+        escapes
+            .iter()
+            .map(|set| set.iter().map(|k| kinds[k].clone()).collect())
+            .collect::<Vec<BTreeSet<Kind>>>()
     };
     let mut escapes = escapes_of(&points);
     // A call that raises nothing for the arguments it passes is no point (see `guards`). Leaving
@@ -210,7 +285,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 }
                 let callee = callees[0];
                 let quiet = p.known.iter().all(|args| {
-                    let run = guards::run(class, callee, args);
+                    let run = guards::run(class, &facts.static_writes, callee, args);
                     points[callee].iter().all(|q| {
                         // The start of a method that initializes the caller's own class, which is
                         // initialized or being initialized, does nothing.
@@ -232,38 +307,48 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         escapes = escapes_of(&points);
     }
 
-    // What the callers of each method observe.
+    // What the callers of each method observe: what the callers of its callers observe, and
+    // what the `try`s around its calls catch. A call may run any method of an override group, so
+    // the methods of a group observe the same. A method is looked at again whenever what it
+    // observes grows, until nothing does; that only grows, so the order does not change the
+    // outcome.
     let mut seen: Vec<Seen> = vec![Seen::default(); class.methods.len()];
-    loop {
-        let mut next = seen.clone();
-        for m in 0..class.methods.len() {
-            for p in &points[m] {
-                let Raise::Call(callees) = &p.raise else { continue };
-                let mut here = if bugs_only[m] { Seen::default() } else { seen[m].clone() };
-                for f in &p.frames {
-                    here.types.extend(f.catches.iter().copied());
-                    here.all |= f.finally;
-                }
-                for &c in callees {
-                    next[c].types.extend(here.types.iter().copied());
-                    next[c].all |= here.all;
+    let mut queued = vec![true; class.methods.len()];
+    let mut queue: VecDeque<usize> = (0..class.methods.len()).collect();
+    let grow = |seen: &mut Seen, more: &Seen| {
+        let before = (seen.types.len(), seen.all);
+        seen.types.extend(more.types.iter().copied());
+        seen.all |= more.all;
+        before != (seen.types.len(), seen.all)
+    };
+    while let Some(m) = queue.pop_front() {
+        queued[m] = false;
+        let mut grown = Vec::new();
+        for p in &points[m] {
+            let Raise::Call(callees) = &p.raise else { continue };
+            let mut here = if bugs_only[m] { Seen::default() } else { seen[m].clone() };
+            for f in &p.frames {
+                here.types.extend(f.catches.iter().copied());
+                here.all |= f.finally;
+            }
+            for &c in callees {
+                if grow(&mut seen[c], &here) {
+                    grown.push(c);
                 }
             }
         }
-        // A call may run any method of an override group.
-        for m in 0..class.methods.len() {
-            for g in h.group(m) {
-                if g != m {
-                    let other = next[g].clone();
-                    next[m].types.extend(other.types);
-                    next[m].all |= other.all;
-                }
+        let own = seen[m].clone();
+        for &g in h.group_members(m) {
+            if g != m && grow(&mut seen[g], &own) {
+                grown.push(g);
             }
         }
-        if next == seen {
-            break;
+        for c in grown {
+            if !queued[c] {
+                queued[c] = true;
+                queue.push_back(c);
+            }
         }
-        seen = next;
     }
     let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|&t| matches(k, t));
 
@@ -931,7 +1016,7 @@ fn stmt_points(
         Stmt::If { cond, then, otherwise } => {
             expr_points(class, facts, m, cond, frames, safe, out);
             // A branch that a known condition never takes raises nothing (see `guards`).
-            let known = guards::known_condition(class, cond);
+            let known = guards::known_condition(class, &facts.static_writes, cond);
             let then_safe = narrowed(safe, cond, true, |v| assigns_stmt(then, v));
             if known != Some(false) {
                 stmt_points(class, facts, m, then, frames, &then_safe, out);
@@ -1099,10 +1184,8 @@ fn static_inits(class: &Class, facts: &Facts, m: usize, x: &Expr) -> Vec<usize> 
     let current = class.methods.get(m).map(|c| c.class);
     // `main` starts by initializing its class (`statics::entry_inits`), so no later code runs
     // that class's `<clinit>` but the code it runs itself, where the call returns at once.
-    let main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
-        [main] => Some(main.class),
-        _ => None,
-    };
+    let main_class = facts.main_class;
+    debug_assert_eq!(class.hierarchy.overriders.len(), class.methods.len(), "the hierarchy is out of date");
     classes
         .into_iter()
         .filter_map(|t| {
@@ -1112,7 +1195,10 @@ fn static_inits(class: &Class, facts: &Facts, m: usize, x: &Expr) -> Vec<usize> 
             if initialized {
                 return None;
             }
-            class.methods.iter().position(|c| c.class == init && c.name == "<clinit>")
+            let methods = class.hierarchy.methods_of(init).iter().copied();
+            methods
+                .into_iter()
+                .find(|&c| class.methods[c].class == init && class.methods[c].name == "<clinit>")
         })
         .collect()
 }
@@ -1131,7 +1217,7 @@ fn expr_points(
     let callees = class.callees(x);
     if !callees.is_empty() {
         let known = match callees[..] {
-            [only] => Some(guards::known_args(class, x))
+            [only] => Some(guards::known_args(class, &facts.static_writes, x))
                 .filter(|k| k.first().is_some_and(|args| class.methods[only].params.len() == args.len()))
                 .unwrap_or_default(),
             _ => Vec::new(),

@@ -138,9 +138,6 @@ impl<'t> Lowering<'t> {
             .chain(ancestors.iter().copied())
             .flat_map(|c| self.declared_fields(c))
             .collect();
-        if outer && fields.contains(OUTER) {
-            return unsupported(self.types[t].node, "a field named `outer` in a nested class");
-        }
         // The synthetic fields of the superclasses, which this class's own must not hide.
         let synthetic: HashSet<String> = ancestors
             .iter()

@@ -152,7 +152,7 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _) => {
             &["java.lang.NumberFormatException"]
         }
-        Builtin::EnumValueOf => &["java.lang.IllegalArgumentException"],
+        Builtin::EnumValueOf | Builtin::NotEnumClass => &["java.lang.IllegalArgumentException"],
         Builtin::Bits(..) => &[],
         Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => &[],
         Builtin::Unsigned(UnsignedOp::Compare | UnsignedOp::ToString | UnsignedOp::Widen, _) => &[],
@@ -168,6 +168,9 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Native(Native::Sleep { .. }) => &["java.lang.IllegalArgumentException"],
         // A negative count.
         Builtin::Native(Native::SecureSeed) => &["java.lang.IllegalArgumentException"],
+        // Bad compressed data (`inflate.rs`), and a dictionary that the stream did not ask for.
+        Builtin::Native(Native::InflateBytes) => &["java.util.zip.DataFormatException"],
+        Builtin::Native(Native::InflateSetDictionary) => &["java.lang.IllegalArgumentException"],
         // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail, but for
         // the interrupt of `join0`, which `runtime_failures` adds.
         Builtin::Native(
@@ -225,12 +228,18 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::CdsRandomSeed
             | Native::ContinuationsSupported
             | Native::NanoTimeAdjustment
+            | Native::SystemTimeZoneId
+            | Native::SystemGmtOffsetId
             | Native::ArrayBaseOffset
             | Native::ArrayIndexScale(_)
             | Native::DescriptorHandle
             | Native::DescriptorAppend
             | Native::FullFence
             | Native::Crc32Update
+            | Native::InflateInit
+            | Native::InflateAdler
+            | Native::InflateReset
+            | Native::InflateEnd
             | Native::NoPendingReferences,
         ) => &[],
         // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).
@@ -442,7 +451,6 @@ pub(super) fn runtime_failures(
             | Builtin::Exit
             | Builtin::MainArgs
             | Builtin::NoObject { .. }
-            | Builtin::UnknownClass
             | Builtin::MissingResource
             | Builtin::InitializeClass { .. }
             | Builtin::ClassName { .. }
@@ -476,6 +484,7 @@ pub(super) fn runtime_failures(
             Builtin::Boxed(
                 BoxedOp::Box
                 | BoxedOp::ToString
+                | BoxedOp::HexString
                 | BoxedOp::Compare
                 | BoxedOp::HashCode
                 | BoxedOp::Sum
@@ -487,6 +496,8 @@ pub(super) fn runtime_failures(
             // checks no other (`codegen::sync`).
             Builtin::MonitorEnter if null(&args[0]) => out.push((NPE, "this synchronized", true, args[0].id)),
             Builtin::MonitorEnter => {}
+            // A class name that is not in the translation (`lower::by_name`).
+            Builtin::UnknownClass => out.push(("java.lang.ClassNotFoundException", "this class name", false, x.id)),
             // A class that is not the object's; a `catch` sees it through `java::catching`.
             Builtin::ClassCheck => out.push(("java.lang.ClassCastException", "this cast", false, x.id)),
             // An object of a class that is not `Cloneable` refuses to be copied.
@@ -555,7 +566,7 @@ pub(super) fn runtime_failures(
                         | Builtin::Boxed(BoxedOp::Equals, _)
                         // A null string is the `NumberFormatException` of `parse_radix`.
                         | Builtin::Bits(BitsOp::ParseRadix, _)
-                        | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
+                        | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported | CharsetOp::Equals)
                         | Builtin::Native(Native::SystemIdentityHash)
                         // The expected and the new element of an atomic update may be null.
                         | Builtin::ElementUpdate(_)
@@ -605,6 +616,7 @@ pub(super) fn runtime_failures(
                             | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
                             | Builtin::CodePoint(CodePointOp::ToCharsInto)
                             | Builtin::EnumValueOf
+                            | Builtin::NotEnumClass
                             | Builtin::Native(Native::ArrayCopy)
                             | Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. })
                             | Builtin::Native(

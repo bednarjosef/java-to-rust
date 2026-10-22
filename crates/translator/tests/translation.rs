@@ -1547,11 +1547,11 @@ fn objects_created_from_a_class_name_are_of_the_classes_that_code_names() {
         &[
             "\"app.Circle\" => {",
             "Rc::new(Circle::new());",
-            "java::throw_uncaught(format!(\"java.lang.ClassNotFoundException: {} is not a class of the translated program\"",
+            "java::throw(\"java.lang.ClassNotFoundException\", &format!(\"{}, which is not in the translation\"",
         ],
     );
-    // No code names `Square`, so no name can create one.
-    assert_lacks(&rust, &["Square", "square"]);
+    // No code names `Square`, so no name can create one; and no reflection is needed.
+    assert_lacks(&rust, &["Square", "square", "Constructor"]);
 }
 
 #[test]
@@ -2984,7 +2984,7 @@ fn census_sources(dir: &str) -> std::path::PathBuf {
             ),
             (
                 "p/Other.java",
-                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void same() {\n        String s = \"x\";\n        System.out.println(s.intern() == \"x\");\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\n",
+                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void same() {\n        String s = new String(\"x\");\n        System.out.println(s == \"x\");\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\n",
             ),
         ],
     )
@@ -3315,9 +3315,14 @@ fn intern_is_the_string_itself_and_string_identity_stays_rejected() {
     );
     assert_contains(&rust, &["let t = s.clone();", "s.len() as i32"]);
     // A string is a value in the translation, so `==` on two strings, which compares references
-    // in Java (and is what `intern` exists for), is rejected rather than guessed.
-    let err = java_to_rust::translate(
+    // in Java, is rejected rather than guessed, unless Java interns both (what `intern` exists
+    // for), when the references are the same exactly when the text is.
+    let rust = translate(
         "class A { public static void main(String[] a) { String s = \"x\"; System.out.println(s.intern() == \"x\"); } }",
+    );
+    assert_contains(&rust, &["s == \"x\""]);
+    let err = java_to_rust::translate(
+        "class A { public static void main(String[] a) { String s = new String(\"x\"); System.out.println(s == \"x\"); } }",
     )
     .expect_err("== on strings must be rejected");
     assert!(err.to_string().contains("== on strings compares references; not supported yet"), "{err}");
@@ -5105,4 +5110,33 @@ fn seeds_come_from_the_operating_system() {
     );
     assert_contains(&rust, &["or_throw(java::try_secure_seed(16))"]);
     assert_lacks(&rust, &["SecureRandom"]);
+}
+
+#[test]
+fn a_builder_made_from_a_char_sequence_copies_its_text_and_rejects_program_classes() {
+    let rust = translate(
+        "public class Main {
+            public static void main(String[] a) {
+                CharSequence text = \"abc\";
+                CharSequence nothing = null;
+                System.out.println(new StringBuilder(text).append(new StringBuffer(nothing)));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::StringBuilder::from_text(&text.to_string())",
+            "java::StringBuilder::from_text(&java::non_null(nothing.as_ref()).to_string())",
+        ],
+    );
+    let program = "package app;\npublic class Main implements CharSequence {\n    public int length() { return 0; }\n    public char charAt(int i) { return 'x'; }\n    public CharSequence subSequence(int s, int e) { return this; }\n    public String toString() { return \"\"; }\n    public static void main(String[] a) {\n        CharSequence s = new Main();\n        System.out.println(new StringBuilder(s));\n    }\n}\n";
+    let dir = write_sources("builder-from-program-class", &[("app/Main.java", program)]);
+    let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+    let error =
+        java_to_rust::translate_program(&program).expect_err("a program class as a CharSequence").to_string();
+    assert!(
+        error.contains("creating a builder from a `CharSequence` that a program class implements"),
+        "{error}"
+    );
 }

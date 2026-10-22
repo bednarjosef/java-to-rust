@@ -28,6 +28,10 @@ fn java(main: &str, options: &[&str]) -> Command {
     // A short-lived JVM: skip the optimizing compiler, the parallel collector and perf data
     // (whose lock-file warnings go to stdout when many JVMs run at once).
     command.args(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData"]);
+    // A small young generation: left to itself, the collector grows it to gigabytes of garbage
+    // between collections (2.4 GB of memory for javac's 0.35 GB of live trees and symbols, for a
+    // program that reaches 600 of the JDK's units), at no gain in speed.
+    command.arg("-XX:MaxNewSize=128m");
     // `JavaTree` attributes the classes of a program one by one, with javac's own `analyze`;
     // `BytecodeNames` reads what javac's code generator decided.
     for package in JAVAC_PACKAGES {
@@ -158,6 +162,8 @@ pub struct Session {
     errors: Option<JoinHandle<Vec<u8>>>,
     /// The classes asked for so far.
     asked: HashSet<String>,
+    /// The size of the trees received so far, in bytes of JSON.
+    pub received: usize,
 }
 
 impl Session {
@@ -176,6 +182,7 @@ impl Session {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| fail(format!("cannot run `java` (a JDK must be on PATH): {e}")))?;
+        crate::timings::javac_process(Some(child.id()));
         let input = child.stdin.take();
         let output = BufReader::new(child.stdout.take().expect("stdout is piped"));
         let mut stderr = child.stderr.take().expect("stderr is piped");
@@ -184,7 +191,8 @@ impl Session {
             let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
             bytes
         });
-        let mut session = Session { child, input, output, errors: Some(errors), asked: HashSet::new() };
+        let mut session =
+            Session { child, input, output, errors: Some(errors), asked: HashSet::new(), received: 0 };
         let units = session.read()?;
         Ok((session, units))
     }
@@ -211,6 +219,8 @@ impl Session {
             Ok(n) if n > 0 && line.ends_with(b"\n") => {}
             _ => return Err(self.failure()),
         }
+        crate::timings::note_javac();
+        self.received += line.len();
         let mut tree = parse(&line).map_err(|e| fail(format!("unreadable javac tree: {e}")))?;
         Ok(match tree["units"].take() {
             Value::Array(units) => units,
@@ -220,6 +230,7 @@ impl Session {
 
     /// Why javac stopped: the compile error that it printed.
     fn failure(&mut self) -> (Option<String>, Error) {
+        crate::timings::javac_process(None);
         self.input = None;
         let _ = self.child.wait();
         let stderr = self.errors.take().and_then(|e| e.join().ok()).unwrap_or_default();
@@ -256,6 +267,7 @@ impl Records {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        crate::timings::javac_process(None);
         // The end of its input ends javac.
         self.input = None;
         let _ = self.child.wait();

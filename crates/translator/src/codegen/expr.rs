@@ -252,7 +252,13 @@ impl<'a> Gen<'a> {
             let mark = self.out.len();
             let code = self.expr(e);
             self.catching_now.remove(&e.id);
-            return self.caught(e.id, code, mark);
+            let caught = self.caught(e.id, code, mark);
+            // The `ClassNotFoundException` of a name not in the translation always throws: its
+            // closure's value is `Infallible`, which ends the code here as Java's throw does.
+            if matches!(e.kind, ExprKind::Builtin(Builtin::UnknownClass, _)) {
+                return Code::atom(format!("match {} {{}}", caught.text));
+            }
+            return caught;
         }
         if let Some(code) = self.shared_array(e) {
             return code;
@@ -335,6 +341,11 @@ impl<'a> Gen<'a> {
                 if l.ty == Type::JavaClass || r.ty == Type::JavaClass =>
             {
                 self.class_identity(*op, l, r)
+            }
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
+                if l.ty == Type::Charset || r.ty == Type::Charset =>
+            {
+                self.charset_identity(*op, l, r)
             }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if l.ty == Type::StringBuilder => {
                 self.builder_identity(*op, l, r)
@@ -661,6 +672,21 @@ impl<'a> Gen<'a> {
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty, id)
             }
+            Builtin::NotEnumClass => {
+                let name = self.str_ref(&args[0]);
+                let message = format!("format!(\"{{}} is not an enum class\", {name})");
+                if self.facts.raising.contains(&id) {
+                    let exception = self.runtime("Exception");
+                    let result = self.ty_name(ty);
+                    let failure = format!(
+                        "Err::<{result}, {exception}>({exception}::new(\"java.lang.IllegalArgumentException\", {message}))"
+                    );
+                    Code::atom(self.passed_on(Code::atom(failure)))
+                } else {
+                    let throw = self.runtime("throw");
+                    Code::atom(format!("{throw}(\"java.lang.IllegalArgumentException\", &{message})"))
+                }
+            }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
             Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty, id),
             Builtin::CodePoint(op) => self.code_point_builtin(op, args, id),
@@ -680,8 +706,14 @@ impl<'a> Gen<'a> {
             },
             Builtin::UnknownClass => {
                 let name = self.value(&args[0], Type::String);
-                let message = "java.lang.ClassNotFoundException: {} is not a class of the translated program";
-                Code::atom(format!("{}(format!({message:?}, {}))", self.runtime("throw_uncaught"), name.text))
+                let message = "{}, which is not in the translation";
+                let class = "java.lang.ClassNotFoundException";
+                let throw =
+                    format!("{}({class:?}, &format!({message:?}, {}))", self.runtime("throw"), name.text);
+                if self.catching_now.contains(&id) {
+                    return Code::atom(format!("{{ let never: std::convert::Infallible = {throw}; never }}"));
+                }
+                Code::atom(throw)
             }
             Builtin::MissingResource => {
                 let (class, name) = (self.value(&args[0], Type::String), self.value(&args[1], Type::String));

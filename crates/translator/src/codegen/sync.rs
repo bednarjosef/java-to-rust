@@ -146,9 +146,10 @@ impl<'a> Gen<'a> {
     /// The statics of the class monitors of this module's classes.
     pub(super) fn class_monitors(&mut self) {
         let class = self.class;
-        let here: Vec<usize> = (0..class.types.len())
+        let here: Vec<usize> = self
+            .module_type_indexes()
+            .into_iter()
             .filter(|t| self.facts.class_monitors.contains(t))
-            .filter(|&t| self.module_types().any(|d| std::ptr::eq(d, &class.types[t])))
             .collect();
         if here.is_empty() {
             return;

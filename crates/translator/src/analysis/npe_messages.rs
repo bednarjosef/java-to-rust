@@ -191,6 +191,12 @@ impl Messages<'_> {
                     Builtin::StringLength => "length",
                     Builtin::StringEquals => "equals",
                     Builtin::StringCharAt => "charAt",
+                    // The methods of a charset that may be null.
+                    Builtin::Charset(CharsetOp::Name) => "name",
+                    Builtin::Charset(CharsetOp::DisplayName) => "displayName",
+                    Builtin::Charset(CharsetOp::ToString) => "toString",
+                    Builtin::Charset(CharsetOp::HashCode) => "hashCode",
+                    Builtin::Charset(CharsetOp::Equals) => "equals",
                     // `i.intValue()`, which javac names by the boxed class.
                     Builtin::Boxed(BoxedOp::Unbox, kind) => {
                         let method = format!("{}Value", x.ty);
@@ -219,6 +225,14 @@ impl Messages<'_> {
                         for array in [&args[0], &args[2]] {
                             out.insert(array.id, None);
                         }
+                        return;
+                    }
+                    // `new StringBuilder(seq)` of a null `seq`, which the JDK's constructor
+                    // asks for its length (`-g`, so the parameter has its name).
+                    Builtin::Builder(BuilderOp::New) if matches!(args[0].ty, Type::Class(c, _) if c == CHAR_SEQUENCE) =>
+                    {
+                        let failure = "Cannot invoke \"java.lang.CharSequence.length()\"";
+                        out.insert(args[0].id, Some(format!("{failure} because \"seq\" is null")));
                         return;
                     }
                     // `synchronized` on a null.

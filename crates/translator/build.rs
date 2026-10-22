@@ -4,7 +4,9 @@
 //! use them, as `standard.json` in the build directory, and the tree of `java/Functional.java`,
 //! the JDK's functional interfaces for programs translated without the JDK's sources, as
 //! `functional.json`, and the tree of `java/Threads.java`, the translator's `java.lang.Thread`, as
-//! `threads.json` (compiled with `java/ThreadLocalStub.java`, the name of a JDK class it uses).
+//! `threads.json` (compiled with `java/ThreadLocalStub.java`, the name of a JDK class it uses), and
+//! the tree of `java/Reflection.java`, the translator's `java.lang.reflect.Method`, `Field` and
+//! `Constructor`, as `reflection.json`.
 
 use std::process::Command;
 
@@ -22,6 +24,7 @@ fn main() {
     println!("cargo:rerun-if-changed=java/Functional.java");
     println!("cargo:rerun-if-changed=java/Threads.java");
     println!("cargo:rerun-if-changed=java/ThreadLocalStub.java");
+    println!("cargo:rerun-if-changed=java/Reflection.java");
     let out = std::env::var("OUT_DIR").expect("cargo sets OUT_DIR");
     let mut javac = Command::new("javac");
     javac.args(["-d", &out, "-Xlint:none"]);
@@ -37,6 +40,7 @@ fn main() {
         ("java/Standard.java", "standard.json", None),
         ("java/Functional.java", "functional.json", None),
         ("java/Threads.java", "threads.json", Some("java/ThreadLocalStub.java")),
+        ("java/Reflection.java", "reflection.json", None),
     ] {
         let tree = Command::new("java")
             .args(["--add-exports", JAVAC_API, "-cp", &out, "JavaTree", "--program", source])

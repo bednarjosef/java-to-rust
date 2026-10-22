@@ -373,7 +373,7 @@ impl<'t> Lowering<'t> {
         // The `length()`, `charAt(int)` and `subSequence(int, int)` that a class implementing
         // `CharSequence` declares or inherits implement the interface's. A `subSequence` may
         // return a subclass of `CharSequence` (`CharBuffer`'s returns a `CharBuffer`), which the
-        // dispatcher converts; one that returns a string is rejected.
+        // dispatcher converts, or a string (javac's names return theirs), which a bridge converts.
         if let Some(s) = at.char_sequence {
             for t in (0..self.types.len()).filter(|&t| self.implements_directly(t, "java.lang.CharSequence"))
             {
@@ -392,7 +392,7 @@ impl<'t> Lowering<'t> {
                             let returned = methods[m].ret;
                             let fits = match ret {
                                 Some(ret) => returned == ret,
-                                None => matches!(returned, Type::Class(..)),
+                                None => matches!(returned, Type::Class(..) | Type::String),
                             };
                             if !fits && ret.is_none() {
                                 return Err(Error {

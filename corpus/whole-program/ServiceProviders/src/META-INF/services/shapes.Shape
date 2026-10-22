@@ -1,0 +1,4 @@
+# The shapes, in the order the loader finds them.
+shapes.Circle
+shapes.Square   # with a comment
+shapes.Circle

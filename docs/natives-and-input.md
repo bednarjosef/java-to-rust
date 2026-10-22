@@ -78,7 +78,7 @@ Two layers bottom out in the JVM:
 | `Class.getSuperclass`, `isAssignableFrom`, `isInstance` | 2 to 4 | not yet: class model |
 | `Object.clone()` | 3 | done for arrays (`Array.clone`); objects need the object model |
 | `Runtime.availableProcessors`, `System.currentTimeMillis` | 3 | done |
-| `String.intern()` | 3 | done: the string itself (`StringOp::Identity`); `==` on two strings stays rejected, see 4.1 |
+| `String.intern()` | 3 | done: the string itself (`StringOp::Identity`); `==` on two strings stays rejected unless Java interns both (constants, `intern()`), see 4.1 |
 | `Thread.currentThread`, `holdsLock`, `Object.notifyAll` and the scoped-value natives of `Thread` | 2 to 3 | threads design |
 | `Double.doubleToRawLongBits`, `longBitsToDouble` | 2 | done |
 
@@ -700,7 +700,7 @@ cannot be stood in for there, since javac reads an exported package of java.base
 | `FileDescriptor.getHandle(int)long` | `java::fd_handle(fd)` | -1 (Windows handles only) |
 | `FileDescriptor.getAppend(int)boolean` | `java::fd_append(fd)` | the descriptor's `O_APPEND`, as `fcntl(fd, F_GETFL)` tells (from `/proc/self/fdinfo`; `false` where that is missing); `true` for a descriptor that is not open, since Java reads `fcntl`'s -1 as all flags |
 | `CRC32.update(int,int)int`, `updateBytes0(int,byte[],int,int)int` | `java::crc32_update`, `crc32_update_bytes` | zlib's CRC-32 |
-| `String.intern()` | the string itself (`StringOp::Identity`, there before) | strings are values; `==` and `!=` on two strings stay rejected at translation (`== on strings compares references`), so no program can see that copies are not canonical |
+| `String.intern()` | the string itself (`StringOp::Identity`, there before) | strings are values; `==` and `!=` on two strings stay rejected at translation (`== on strings compares references`) unless both sides are strings Java interns (constant expressions, `intern()` calls, methods returning only those), so no program can see that copies are not canonical |
 
 Not done, because they need objects, exceptions or threads: everything else of section 1, in
 particular `Throwable.fillInStackTrace(int)` and `NullPointerException.getExtendedNPEMessage()`

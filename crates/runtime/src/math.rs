@@ -27,6 +27,21 @@ pub fn floor_mod<T: Integer + PartialOrd + Default + std::ops::Add<Output = T>>(
     if m != zero && (m < zero) != (b < zero) { m + b } else { m }
 }
 
+/// `Math.multiplyHigh`: the high 64 bits of the 128-bit signed product.
+pub fn multiply_high(x: i64, y: i64) -> i64 {
+    ((x as i128 * y as i128) >> 64) as i64
+}
+
+/// `Math.unsignedMultiplyHigh`: the high 64 bits of the 128-bit product of the unsigned values.
+pub fn unsigned_multiply_high(x: i64, y: i64) -> i64 {
+    ((x as u64 as u128 * y as u64 as u128) >> 64) as i64
+}
+
+/// `Math.multiplyFull`: the exact product of two `int`s, which fits in a `long`.
+pub fn multiply_full(x: i32, y: i32) -> i64 {
+    x as i64 * y as i64
+}
+
 /// `Math.floorDiv` where the program observes the `ArithmeticException` of a zero divisor.
 pub fn try_floor_div<T: Integer + PartialOrd + Default + std::ops::Sub<Output = T> + From<i8>>(
     a: T,
@@ -237,6 +252,22 @@ mod tests {
         assert_eq!(floor_div(i32::MIN, -1), i32::MIN);
         assert_eq!(floor_mod(i64::MIN, -1), 0);
         assert_eq!(floor_div(-6i64, 3), -2);
+    }
+
+    #[test]
+    fn products_match_java() {
+        // Expected values from Java's Math.multiplyHigh, unsignedMultiplyHigh and multiplyFull.
+        assert_eq!(multiply_high(-3, 1 << 40), -1);
+        assert_eq!(multiply_high(i64::MIN, i64::MIN), 4611686018427387904);
+        assert_eq!(multiply_high(i64::MIN, -1), 0);
+        assert_eq!(multiply_high(i64::MAX, i64::MAX), 4611686018427387903);
+        assert_eq!(multiply_high(-1, 1), -1);
+        assert_eq!(unsigned_multiply_high(-1, -1), -2);
+        assert_eq!(unsigned_multiply_high(i64::MIN, 2), 1);
+        assert_eq!(unsigned_multiply_high(-3, 7), 6);
+        assert_eq!(multiply_full(i32::MIN, i32::MIN), 4611686018427387904);
+        assert_eq!(multiply_full(-7, 3), -21);
+        assert_eq!(multiply_full(i32::MAX, i32::MIN), -4611686016279904256);
     }
 
     #[test]

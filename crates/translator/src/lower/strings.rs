@@ -223,9 +223,6 @@ impl<'t> Lowering<'t> {
             _ => return unsupported(node, &format!("method `String.{name}`")),
         };
         match op {
-            StringOp::ContentEquals if args[0].ty == Type::Null => {
-                return unsupported(node, "`String.contentEquals(null)`");
-            }
             StringOp::Contains | StringOp::Replace
                 if args.iter().any(|a| !char_sequence(a.ty) && a.ty != Type::Char) =>
             {
@@ -518,6 +515,12 @@ impl<'t> Lowering<'t> {
                 "java.lang.StringBuilder" | "java.lang.StringBuffer",
                 [] | [Type::Int | Type::String | Type::StringBuilder],
             ) => ExprKind::Builtin(Builtin::Builder(BuilderOp::New), args),
+            // The builder starts with the characters of a `CharSequence`; a null one throws.
+            ("java.lang.StringBuilder" | "java.lang.StringBuffer", [Type::Class(c, _)])
+                if *c == CHAR_SEQUENCE =>
+            {
+                ExprKind::Builtin(Builtin::Builder(BuilderOp::New), args)
+            }
             (owner, _) => return unsupported(node, &format!("this constructor of `{owner}`")),
         }))
     }

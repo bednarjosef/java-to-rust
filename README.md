@@ -210,6 +210,7 @@ A small subset, end to end:
   instanceof Circle c` binds `c` with `if let`, a let chain, `let .. else` (for `if (!(x instanceof
   Circle c)) return ..;`) or `is_some_and`, and a downcast or a cast across interfaces is checked,
   throwing `ClassCastException` when it fails. A pattern variable read anywhere else is rejected.
+  One may be assigned (`n = n.next` in a loop), except one of a record or switch pattern.
   `Object` is an enum too, with a variant for each of the program's classes and enums whose values
   become `Object`s and one for each string or box (`Object::String(..)`, `Object::Integer(5)`), so
   `Object` variables, fields, parameters, arrays and varargs translate, with `instanceof` and casts
@@ -242,8 +243,10 @@ A small subset, end to end:
   `doubleValue()` run; `Number`'s `byteValue()` and `shortValue()` narrow `intValue()`, and a
   class that overrides them is rejected. `CharSequence` is such an enum too, over strings,
   builders and the program's classes that implement it: `length()`, `charAt` and `subSequence` run
-  the class's own, or the string's or builder's (a `subSequence` that returns a `String` is
-  rejected), and `toString()` gives the text. A method
+  the class's own, or the string's or builder's (a `subSequence` that returns a `String`, as
+  javac's names have it, gets a bridge that converts the string), and `toString()` gives the
+  text. `CharSequence.getChars` is rejected: Java runs the string's, the builder's or the
+  interface's default method by the object's class, and their exceptions differ. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &
@@ -281,13 +284,24 @@ A small subset, end to end:
   `Dog.class.getName()` a constant. Any other class is a value, a `java::Class` that is `Copy`
   and equal by binary name: `x.getClass()` of an object, string, box, array or enum constant,
   class literals (`int[].class`, `String.class`, `Dog.class`), and `getName`, `getSimpleName`,
-  `getSuperclass`, `getComponentType`, `isArray`, `isInterface`, `isPrimitive`, `isEnum`,
-  `toString`, `hashCode` and `equals`. `isInstance(x)` and `cast(x)` of any class value compare
+  `getCanonicalName`, `getPackageName`, `getSuperclass`, `getComponentType`, `getEnumConstants`,
+  `isArray`, `isInterface`, `isPrimitive`, `isEnum`, `isAnnotation`, `toString`, `hashCode` and
+  `equals`; `getInterfaces` of a class literal, and `isAssignableFrom` of a class literal of a
+  class or interface of the program. `isInstance(x)` and `cast(x)` of any class value compare
   its binary name with those of `x`'s class and of every class and interface above it, which the
   generator writes out for each class `x` may be of; a failed `cast` throws Java's
   `ClassCastException` (`Cannot cast java.lang.String to Main$Dog`), which a `catch` sees.
-  Reflection (`getDeclaredFields`, `newInstance`, ...) is rejected, as are a record with an array component (its text would be the array's identity) and
-  a generic record in a record pattern. An accessor written in the record runs at each use of a
+  `Class.forName` of a constant name is that class, and of a computed one a `switch` over the
+  binary names of the classes that code can find by name; a name that is not in the translation
+  throws Java's `ClassNotFoundException`, which says so. Reflection over the program's classes
+  goes through a table of their members that the translation builds in, only for the classes and
+  names that lookups of reachable code can find (`getMethod`, `getField`, `getConstructor`,
+  `newInstance` and their relatives; `Method.invoke`, `Field.get` and `set`,
+  `Constructor.newInstance`; `lower/reflection.rs`), and `ServiceLoader` finds the providers that
+  `module-info.java` and `META-INF/services` declare (see
+  [docs/reflection-and-plugins.md](docs/reflection-and-plugins.md)). Rejected are a record with
+  an array component (its text would be the array's identity) and a generic record in a record
+  pattern. An accessor written in the record runs at each use of a
   pattern variable that names a component, not once.
 - **The class of a method's caller**: a static method that asks for the class that called it
   (`StackWalker.getInstance(RETAIN_CLASS_REFERENCE).getCallerClass()`, as logging libraries name a
@@ -389,12 +403,13 @@ A small subset, end to end:
   `Byte`, `Short` and `Character` methods, `String`, `StringBuilder` and `StringBuffer`, and
   `String.format`, all hand-written in the runtime with Java's exact results:
   - `Math` and `StrictMath`: `floorDiv`, `floorMod`, the `*Exact` integer methods (they throw on
-    overflow), `round`, `rint`, `clamp`, `copySign`, `hypot`, `fma`, `ulp`, `nextUp`/`nextDown`,
-    `max`/`min` on every type, and the rest of the common ones.
+    overflow), `multiplyHigh`, `unsignedMultiplyHigh`, `multiplyFull`, `round`, `rint`, `clamp`,
+    `copySign`, `hypot`, `fma`, `ulp`, `nextUp`/`nextDown`, `max`/`min` on every type, and the rest
+    of the common ones.
   - `Double`, `Float` and `Boolean`: `isNaN`, `isInfinite`, `isFinite`, `compare`, `sum`,
     `max`/`min`, `parseDouble`, `parseFloat`, `parseBoolean`, `logicalAnd`/`logicalOr`/
-    `logicalXor`, and the `valueOf` of both with Java's grammar and rounding (whitespace,
-    suffixes, hexadecimal floats).
+    `logicalXor`, `toHexString` (`hex_float.rs`), and the `valueOf` of both with Java's grammar
+    and rounding (whitespace, suffixes, hexadecimal floats).
   - `Integer` and `Long`: parsing with a radix and over a `begin`/`end` range of a `String`
     (`parseInt(s, begin, end, radix)`, `valueOf(s, radix)`), the bit and radix methods
     (`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), and the unsigned
@@ -482,7 +497,10 @@ name throws `UnsupportedCharsetException` or `IllegalCharsetNameException` with 
 which here ends the program uncaught with exit code 1, since the translation cannot catch them.
 `Charset.defaultCharset()` is UTF-8, as Java answers from version 18 on (JEP 400). The runtime
 knows only the six charsets above, so `forName` rejects other names, such as `windows-1252`, that
-Java supports. A `Charset` is never null. Encoding replaces unmappable characters as Java does,
+Java supports. A `Charset` may be null as a reference may (a field or a parameter given null,
+compared with null, printed as `null`); using a null one throws `NullPointerException`, with
+Java's message where a method of the charset is called. Only an array of charsets that would hold
+null is rejected. Encoding replaces unmappable characters as Java does,
 and decoding replaces malformed input as Java's `String` does (`crates/runtime/src/charset.rs`).
 
 #### Enums
@@ -496,7 +514,10 @@ field that is not final is accepted as long as only the constructor sets it. An 
 overridden method becomes a `match self` with an arm per overriding constant and the enum's own
 body (if it is not abstract) for the rest. `valueOf` of a name that is no constant throws
 `IllegalArgumentException` with Java's message (`No enum constant Main.Size.HUGE`), which a
-`catch` can take (`Size::try_enum_value_of(s)?`).
+`catch` can take (`Size::try_enum_value_of(s)?`). `Enum.valueOf(cls, name)` with a class value,
+as javac's annotation proxies call it, tests the class against each of the program's enums and
+takes that enum's `valueOf`; a class that is no enum throws `IllegalArgumentException` (`java.lang.String
+is not an enum class`).
 
 An enum whose constructor does more than set fields to constant values (a loop, a call, an
 argument that is another enum's constant or a static method's result, as the JDK's
@@ -730,9 +751,11 @@ call of an instance method also reaches its overriders in every class that an in
 is, extends or implements. It stops at the classes that the runtime provides (`String`,
 `StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`; `RUNTIME_CLASSES`),
 whose sources reach deep into the JVM, and at what is not
-translated: reflection (but not `java.lang.reflect.Array`, which is array code), method handles,
-serialization, security and class loading (`Module`, `ResourceBundle`, `ServiceLoader`,
-`jdk.internal.loader`; `UNTRANSLATED`). Library code
+translated: reflection (but not `java.lang.reflect.Array`, which is array code, nor `Method`,
+`Field` and `Constructor`, which the reflection table is), method handles, serialization,
+security and class loading (`Module`, `ModuleLayer`, `jdk.internal.loader`; `UNTRANSLATED`;
+`ResourceBundle` is translated, and `ServiceLoader`, `ClassLoader` and `URLClassLoader` are the
+translator's own, over the translation's classes). Library code
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
 `comparableClassFor` and parallel streams reach threads, so the boundary is needed. A program that
 puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints the count).
@@ -878,7 +901,10 @@ fence), and so `loadFence` and `storeFence`. `Unsafe.arrayBaseOffset` and
 for references) and are answered at the call, so their `Class`-taking natives are not reached.
 `Unsafe.park` and `unpark` park the current thread and unpark a thread by its id, as
 `LockSupport` does.
-`String.intern()` is the string itself; `==` on two strings stays rejected.
+`String.intern()` is the string itself; `==` on two strings stays rejected, except where Java's
+sharing makes identity the same as equal text: both sides are constant expressions, `intern()`
+calls, conditionals of those, or calls of methods that cannot be overridden and return only such
+strings (`corpus/features/InternedStringIdentity.java`).
 
 ### Not yet
 
@@ -900,8 +926,7 @@ Each construct below is rejected at translation with an error that names it:
 Also rejected: `Scanner` (it reaches `java.util.regex`, which needs
 `Character.UnicodeScript`), `System.out`, `System.err` or `System.in` as a value without the
 JDK's sources, readers and writers in charsets other than UTF-8, US-ASCII, ISO-8859-1, UTF-16BE
-and UTF-16LE (an `UnsupportedOperationException` when one is created), `Charset.aliases()`, `null` as a `Charset` (and a `Charset` field or array element
-that starts out null), catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and
+and UTF-16LE (an `UnsupportedOperationException` when one is created), `Charset.aliases()`, a `Charset` array element that is or starts out null, catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and
 charsets beyond the six above.
 
 `docs/jdk-coverage.md` has the census of the JDK code that the target programs reach: what share

@@ -77,12 +77,14 @@ fn programs(root: &Path, work: &Path) -> Vec<Program> {
     out
 }
 
-fn java_files(dir: &Path, out: &mut Vec<PathBuf>) {
+/// The files under `dir`: the `.java` ones, or with `java` false the others, the resources
+/// (`META-INF/services`), which the run on Java finds next to the classes.
+fn files(dir: &Path, out: &mut Vec<PathBuf>, java: bool) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         if path.is_dir() {
-            java_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "java") {
+            files(&path, out, java);
+        } else if path.extension().is_some_and(|e| e == "java") == java {
             out.push(path);
         }
     }
@@ -92,9 +94,12 @@ fn java_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// `cache` by an earlier run with the same sources, input and Java version.
 fn run_java(p: &Program, classes: &Path, cache: &Path) -> Run {
     let mut sources = Vec::new();
-    java_files(&p.sources, &mut sources);
+    files(&p.sources, &mut sources, true);
     sources.sort();
-    let key = java_key(p, &sources);
+    let mut resources = Vec::new();
+    files(&p.sources, &mut resources, false);
+    resources.sort();
+    let key = java_key(p, &sources.iter().chain(&resources).cloned().collect::<Vec<_>>());
     let stored = key.as_ref().and_then(|key| check_cache::load(cache, key)).and_then(|entry| {
         let text = String::from_utf8(entry).ok()?;
         let (code, stdout) = text.split_once('\n')?;
@@ -111,6 +116,11 @@ fn run_java(p: &Program, classes: &Path, cache: &Path) -> Run {
         .output()
         .expect("running `javac` failed; the test needs a JDK on PATH");
     assert!(javac.status.success(), "javac failed on {}: {}", p.name, String::from_utf8_lossy(&javac.stderr));
+    for resource in &resources {
+        let to = classes.join(resource.strip_prefix(&p.sources).unwrap());
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(resource, to).unwrap();
+    }
     let java = Command::new("java").arg("-cp").arg(classes).arg(&p.main).stdin(stdin_of(p)).output();
     let result = run(java.expect("running `java` failed"));
     if let (Some(key), Some(code)) = (key, result.code) {

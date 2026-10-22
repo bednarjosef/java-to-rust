@@ -44,6 +44,18 @@ pub(super) fn unique(base: String, used: &mut HashSet<String>) -> String {
     name
 }
 
+/// `unique` among the names `used` and those `taken` in an enclosing scope, and taken in `used`.
+pub(super) fn unique_beside(base: String, used: &mut HashSet<String>, taken: &HashSet<String>) -> String {
+    let mut name = base.clone();
+    let mut n = 2;
+    while used.contains(&name) || taken.contains(&name) {
+        name = format!("{base}_{n}");
+        n += 1;
+    }
+    used.insert(name.clone());
+    name
+}
+
 /// `unique` among the names of two scopes, and taken in both.
 fn unique_in(base: String, first: &mut HashSet<String>, second: &mut HashSet<String>) -> String {
     let mut name = base.clone();

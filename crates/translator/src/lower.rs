@@ -57,6 +57,7 @@ mod primitives;
 mod program;
 mod prologues;
 mod recreate;
+mod reflection;
 mod switch;
 mod sync;
 mod system;
@@ -219,6 +220,53 @@ impl<'t> Lowering<'t> {
     /// code of it that the targets reach makes a string with an identity of its own to tell it
     /// apart (a `new String` kept as a marker): there, the reference comparison gives what value
     /// equality does, which is how the library's code is lowered (`Objects.equals`).
+    ///
+    /// Two strings that Java interns are the same object exactly when they have the same text, so
+    /// the program's comparison of two of them is lowered that way too: constant expressions
+    /// (literals, constant variables and their concatenations, which the JVM shares), the result
+    /// of `intern()`, and a conditional of those. Any other string may be a copy with the same
+    /// text, and is rejected.
+    /// Whether the string `node` is one that Java interns: a constant expression, the result of
+    /// `intern()`, a conditional of two such, or a call of a method that no other method
+    /// overrides and that only returns such, followed `depth` calls deep.
+    fn interned(&self, node: Node<'t>, depth: usize) -> bool {
+        match node.kind() {
+            "PARENTHESIZED" => node.get("expression").is_some_and(|n| self.interned(n, depth)),
+            "CONDITIONAL_EXPRESSION" => {
+                node.get("trueExpression").is_some_and(|n| self.interned(n, depth))
+                    && node.get("falseExpression").is_some_and(|n| self.interned(n, depth))
+            }
+            "METHOD_INVOCATION" => {
+                let Some(symbol) = node.symbol() else { return false };
+                if symbol.owner == "java.lang.String" {
+                    return symbol.name == "intern" && !symbol.is_static && symbol.ty == "()java.lang.String";
+                }
+                let Some(m) = self.method_index(&symbol) else { return false };
+                let declaration = self.methods[m].node;
+                let fixed = symbol.is_static
+                    || declaration.has_flag("PRIVATE")
+                    || declaration.has_flag("FINAL")
+                    || self.types[self.methods[m].owner].node.has_flag("FINAL");
+                let Some(body) = declaration.get("body") else { return false };
+                if depth == 0 || !fixed {
+                    return false;
+                }
+                let mut returns = Vec::new();
+                fn collect<'t>(n: Node<'t>, out: &mut Vec<Option<Node<'t>>>) {
+                    match n.kind() {
+                        "RETURN" => out.push(n.get("expression")),
+                        // Their `return`s are not the method's.
+                        "LAMBDA_EXPRESSION" | "CLASS" | "ENUM" | "RECORD" | "INTERFACE" => {}
+                        _ => charsets::children(n).into_iter().for_each(|c| collect(c, out)),
+                    }
+                }
+                collect(body, &mut returns);
+                !returns.is_empty() && returns.iter().all(|r| r.is_some_and(|r| self.interned(r, depth - 1)))
+            }
+            _ => switch::constant_string(node),
+        }
+    }
+
     fn library_string_comparison(
         &self,
         node: Node<'t>,
@@ -226,7 +274,11 @@ impl<'t> Lowering<'t> {
         left: Expr,
         right: Expr,
     ) -> Result<ExprKind, Error> {
-        if !self.library.get(self.current.get()).copied().unwrap_or(false) {
+        let library = self.library.get(self.current.get()).copied().unwrap_or(false);
+        let both_interned = ["leftOperand", "rightOperand"]
+            .iter()
+            .all(|side| node.get(side).is_some_and(|n| self.interned(n, 3)));
+        if !library && !both_interned {
             return error(node.pos(), "== on strings compares references; not supported yet");
         }
         let equal = ExprKind::Builtin(Builtin::ObjectsEquals, vec![left, right]);
@@ -350,8 +402,12 @@ impl<'t> Lowering<'t> {
             self.guard_clinit(index, &mut clinit, &mut types[index], methods.as_slice());
             methods.push(clinit);
         }
+        let mut writes = enums::EnumFieldWrites::default();
         for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
-            if let Err(e) = self.finish_enum(index, types, methods) {
+            let finished = self.finish_enum(index, types, methods, &mut writes);
+            // The enum's own methods may have changed.
+            writes.forget(methods, index);
+            if let Err(e) = finished {
                 // In a census, an enum that lowering rejects keeps its constants without values.
                 self.reject_at(index, Some(self.types[index].node.pos()), e).map_err(|e| (index, e))?;
                 let names = self.enum_constant_names(index);
@@ -369,11 +425,13 @@ impl<'t> Lowering<'t> {
         index: usize,
         types: &mut [TypeDecl],
         methods: &mut Vec<Method>,
+        writes: &mut enums::EnumFieldWrites,
     ) -> Result<(), Error> {
         self.constant_bodies(index, methods)?;
+        writes.forget(methods, index);
         let bodies = self.constant_body_fields(index)?;
         let own_fields = types[index].fields.len();
-        let pure = self.check_enum(index, methods).and_then(|()| {
+        let pure = self.check_enum(index, methods, writes).and_then(|()| {
             self.add_body_fields(&bodies, &mut types[index].fields)?;
             self.enum_constants(index, &types[index].fields, methods, &bodies)
         });
@@ -509,13 +567,6 @@ impl<'t> Lowering<'t> {
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
             // An array of these (`Class<?>[]`, `Enum<?>[]`) is an array type, below.
             _ if name == "java.lang.Class" || generic_of(name, "java.lang.Class") => Ok(Type::JavaClass),
-            // A constructor without parameters, the only one that a translation creates objects
-            // with from a `Class` value, is its class (`by_name.rs`).
-            _ if name == "java.lang.reflect.Constructor"
-                || generic_of(name, "java.lang.reflect.Constructor") =>
-            {
-                Ok(Type::JavaClass)
-            }
             // A value of one of the program's enums (see `enums::enum_call`).
             _ if (name == "java.lang.Enum" || generic_of(name, "java.lang.Enum"))
                 && self.object.is_some_and(|at| at.enumeration.is_some()) =>
@@ -937,8 +988,13 @@ impl<'t> Lowering<'t> {
             return Ok(place);
         }
         match node.kind() {
-            "IDENTIFIER" if node.symbol().is_some_and(|s| s.kind == "BINDING_VARIABLE") => {
-                unsupported(node, "assigning a pattern variable")
+            // A pattern variable of a record or switch pattern names a value it does not hold (an
+            // alias, see `patterns`); that of `x instanceof T v` is a variable.
+            "IDENTIFIER"
+                if node.symbol().is_some_and(|s| s.kind == "BINDING_VARIABLE")
+                    && self.alias(node).is_some() =>
+            {
+                unsupported(node, "assigning a pattern variable of a record or switch pattern")
             }
             "IDENTIFIER" => Ok(Place::Var(self.local(node)?)),
             "ARRAY_ACCESS" => {
@@ -1047,6 +1103,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.blocker_call(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.reflection_native(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {
