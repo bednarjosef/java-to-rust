@@ -59,7 +59,7 @@ pub fn tree(source: &str) -> Result<Value, Error> {
         return Err(
             match (line.and_then(|l| l.parse().ok()), column.and_then(|c| c.parse().ok()), message) {
                 (Some(line), Some(column), Some(message)) => {
-                    Error { pos: Pos { line, column }, message: message.trim().to_string() }
+                    Error { pos: Pos::new(line, column), message: message.trim().to_string() }
                 }
                 _ => fail(stderr.trim().to_string()),
             },
@@ -131,7 +131,7 @@ fn compile_error(stderr: &[u8]) -> (Option<String>, Error) {
             // The lines of the same message, indented, below its first.
             let details = lines.take_while(|l| l.starts_with(char::is_whitespace));
             let message = missing_module(message, details).unwrap_or_else(|| message.trim().to_string());
-            return (Some(file.to_string()), Error { pos: Pos { line, column }, message });
+            return (Some(file.to_string()), Error { pos: Pos::new(line, column), message });
         }
     }
     fail(stderr.trim().to_string())

@@ -158,7 +158,7 @@ impl<'t> Node<'t> {
 
     fn pos(self) -> Pos {
         let at = |f: &str| self.0[f].as_u64().unwrap_or(0) as usize;
-        Pos { line: at("line"), column: at("column") }
+        Pos::new(at("line"), at("column"))
     }
 
     fn get(self, field: &str) -> Option<Node<'t>> {
