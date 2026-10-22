@@ -2,6 +2,7 @@
 //! one expression may raise: a null dereference, an index out of bounds, a division by zero, a
 //! malformed number, a failed cast, and what each method of the library throws.
 
+use super::comparable::is_compare_call;
 use super::*;
 
 /// Whether the generator has the checked form of dereferencing `object`: the object of a call or
@@ -1002,6 +1003,9 @@ pub(super) fn runtime_failures(
         && !matches!(&value.kind, ExprKind::Var(v) if safe.contains(&instance_fact(v, name)))
     {
         out.push(("java.lang.ClassCastException", "this cast", true, x.id));
+    }
+    if is_compare_call(class, x) {
+        out.push(("java.lang.ClassCastException", "this compareTo", false, x.id));
     }
     // A box that may be null is unboxed by arithmetic and comparisons, but not by `==` or `!=`
     // with an operand that is no primitive (`v == null`), which compares references.
