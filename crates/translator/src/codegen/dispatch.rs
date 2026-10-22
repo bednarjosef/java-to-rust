@@ -16,6 +16,7 @@
 //! Each item of an enum is written only when some code uses it. The generator learns which by
 //! generating the program until no new item is asked for (see `generate`).
 
+use super::arraycopy::CopyCall;
 use super::*;
 use std::collections::BTreeSet;
 
@@ -271,7 +272,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The binary name of type `t`, as the JVM shows it: `shapes.Outer$Inner`.
-    fn binary_name(&self, t: usize) -> String {
+    pub(super) fn binary_name(&self, t: usize) -> String {
         let decl = &self.class.types[t];
         if let Some(array) = self.class.array_of(t) {
             return self.descriptor(array);
@@ -522,22 +523,16 @@ impl<'a> Gen<'a> {
             [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
         let (s, d) = (self.object(src), self.object(dest));
         let checked = self.facts.raising.contains(&id);
-        let copy = self.runtime(if checked { "try_arraycopy" } else { "arraycopy" });
-        let throw = if checked {
-            format!("Err::<(), _>({})", self.runtime("Exception::new"))
-        } else {
-            self.runtime("throw")
-        };
         // Names that no local of the method has, as `src` and `dest` may read one.
         let [p, q, n] = ["src_pos", "dest_pos", "length"].map(|base| self.temp(base));
-        let mut arms = Vec::new();
-        if let Some(t) = self.object_index() {
-            for c in self.enum_variants(t).into_iter().filter(|&c| self.class.array_of(c).is_some()) {
-                let variant = self.variant(t, c);
-                arms.push(format!("({variant}(src), {variant}(dest)) => {copy}(src, {p}, dest, {q}, {n}),"));
+        let arms = match self.object_index() {
+            Some(t) => {
+                let variants = self.enum_variants(t);
+                let call = CopyCall { pos: src.pos, checked, names: [p.as_str(), q.as_str(), n.as_str()] };
+                self.object_copy_arms(t, &variants, call)
             }
-        }
-        arms.push(format!("_ => {throw}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"),"));
+            None => vec!["_ => unreachable!(),".to_string()],
+        };
         let code = Code::atom(format!(
             "{{ let ({p}, {q}, {n}) = ({}, {}, {}); match (&{s}, &{d}) {{ {} }} }}",
             ints[0],

@@ -113,6 +113,38 @@ pub fn try_arraycopy<T: Clone, A: Elements<T>>(
     Ok(())
 }
 
+/// `arraycopy` from an array of `T` into one of `U`, as the copy of references between two
+/// arrays of different types. `convert` gives each element as a `U`, or the message of the
+/// `ArrayStoreException` that HotSpot throws for it. The elements before the failing one are
+/// stored and the rest are not, as HotSpot stores them.
+pub fn try_arraycopy_with<T: Clone, U: Clone, S: Elements<T>, D: Elements<U>>(
+    src: &S,
+    src_pos: i32,
+    dest: &D,
+    dest_pos: i32,
+    length: i32,
+    convert: impl Fn(&T) -> Result<U, &'static str>,
+) -> Result<(), Exception> {
+    let (from, to, n) = copy_bounds::<T>(src.items().len(), src_pos, dest.items().len(), dest_pos, length)
+        .map_err(|message| Exception::new("java.lang.ArrayIndexOutOfBoundsException", message))?;
+    let mut stored = Vec::with_capacity(n);
+    let mut failure = None;
+    for item in &src.items()[from..from + n] {
+        match convert(item) {
+            Ok(u) => stored.push(u),
+            Err(message) => {
+                failure = Some(message);
+                break;
+            }
+        }
+    }
+    dest.items_mut()[to..to + stored.len()].clone_from_slice(&stored);
+    match failure {
+        Some(message) => Err(Exception::new("java.lang.ArrayStoreException", message)),
+        None => Ok(()),
+    }
+}
+
 /// `copy_slice`, where the program observes the exception (see `try_arraycopy`).
 pub fn try_copy_slice<T: Clone>(
     src: &[T],

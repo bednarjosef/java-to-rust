@@ -491,9 +491,12 @@ remember its element class, so:
   read (an `Option` where the element may be null).
 
 `System.arraycopy` where the source or destination is an `Object` matches their array variants
-(`codegen::dispatch::object_array_copy`): two arrays of one type are copied, anything else throws
-`ArrayStoreException` with the message "arraycopy: type mismatch", even where Java would copy
-(an `Object[]` of `Integer`s into an `Integer[]`).
+(`codegen::dispatch::object_array_copy`, `codegen::arraycopy`): two arrays of one type are copied,
+and a `String[]` and an `Object[]` are copied element by element, where an element that is not a
+`String` throws `ArrayStoreException` after the elements before it are stored. Other mismatches
+throw `ArrayStoreException` with HotSpot's message for them ("arraycopy: type mismatch: can not copy
+int[] into long[]", "arraycopy: source type java.lang.String is not an array"). A pair of arrays of
+another element class is rejected at translation.
 
 A value read back out of an erased container is a cast from `Object` that may be null, so an
 enum read back is an `Option` of the enum.
