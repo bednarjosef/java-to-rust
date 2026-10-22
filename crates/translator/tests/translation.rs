@@ -5253,3 +5253,25 @@ fn a_builder_made_from_a_char_sequence_copies_its_text_and_rejects_program_class
         "{error}"
     );
 }
+
+#[test]
+fn a_class_that_is_a_char_sequence_through_an_interface_gets_the_default_get_chars() {
+    // As javac's names are, through `javax.lang.model.element.Name`.
+    let rust = translate(
+        "public class Main {
+            interface Named extends CharSequence {}
+            static class Word implements Named {
+                public int length() { return 2; }
+                public char charAt(int i) { return 'w'; }
+                public CharSequence subSequence(int s, int e) { return \"w\"; }
+            }
+            public static void main(String[] a) {
+                CharSequence s = new Word();
+                char[] dst = new char[2];
+                s.getChars(0, 2, dst, 0);
+                System.out.println(new String(dst));
+            }
+        }",
+    );
+    assert_contains(&rust, &["java::check_from_to_index(", "java::check_index("]);
+}

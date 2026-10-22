@@ -294,7 +294,7 @@ impl<'a> Gen<'a> {
                 } else if self.class.methods[*index].is_static {
                     self.static_call(*index, args)
                 } else if !*is_super && let Some(t) = self.enum_of(receiver) {
-                    self.enum_call(t, receiver, *index, args)
+                    self.enum_call(t, e.pos, receiver, *index, args)
                 } else {
                     // The method of the receiver's class, which an interface's method is not.
                     let target = self.dispatch(receiver, *index, *is_super);
