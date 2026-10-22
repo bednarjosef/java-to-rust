@@ -195,6 +195,14 @@ pub enum Native {
     NoPendingReferences,
     /// `SecureRandom.getSeed(numBytes)`: seed bytes from the operating system (`random.rs`).
     SecureSeed,
+    /// `Inflater`'s natives (`inflate.rs`): `init(nowrap)`, then `inflateBytesBytes`, `getAdler`,
+    /// `reset`, `end` and `setDictionary` on the handle that `init` returned.
+    InflateInit,
+    InflateBytes,
+    InflateAdler,
+    InflateReset,
+    InflateEnd,
+    InflateSetDictionary,
 }
 
 /// The native methods of translated JDK classes that the runtime implements and whose calls
@@ -224,6 +232,16 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("jdk.internal.misc.Unsafe", "fullFence", "()void") => Native::FullFence,
         ("java.util.zip.CRC32", "update", "(int,int)int") => Native::Crc32Update,
         ("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int") => Native::Crc32UpdateBytes,
+        ("java.util.zip.Inflater", "init", "(boolean)long") => Native::InflateInit,
+        ("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long") => {
+            Native::InflateBytes
+        }
+        ("java.util.zip.Inflater", "getAdler", "(long)int") => Native::InflateAdler,
+        ("java.util.zip.Inflater", "reset", "(long)void") => Native::InflateReset,
+        ("java.util.zip.Inflater", "end", "(long)void") => Native::InflateEnd,
+        ("java.util.zip.Inflater", "setDictionary", "(long,byte[],int,int)void") => {
+            Native::InflateSetDictionary
+        }
         ("java.lang.ref.Reference", "hasReferencePendingList", "()boolean") => Native::NoPendingReferences,
         ("java.lang.Thread", "nextThreadNum", "()int") => Native::ThreadNumber,
         ("java.lang.Thread", "nextThreadId", "()long") => Native::ThreadId,
@@ -416,6 +434,11 @@ mod tests {
         assert_eq!(
             found("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int"),
             Some(Native::Crc32UpdateBytes)
+        );
+        assert_eq!(found("java.util.zip.Inflater", "init", "(boolean)long"), Some(Native::InflateInit));
+        assert_eq!(
+            found("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long"),
+            Some(Native::InflateBytes)
         );
         // Another overload, or another class's method of the same name, is not the native.
         assert_eq!(found("java.util.zip.CRC32", "update", "(byte[],int,int)void"), None);
