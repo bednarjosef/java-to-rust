@@ -1,36 +1,41 @@
-//! Java's `String` methods on Rust strings. Java indexes a string by UTF-16 code unit, so every
-//! index here counts code units: on an ASCII string they are its bytes, and other strings are
-//! walked or converted to their code units. A result that would cut a surrogate pair in half
-//! holds a lone surrogate in Java, which no Rust string can; it becomes `?`, as Java prints it.
+//! Java's `String` methods on WTF-8 strings (`Wtf8`, `JString`), which hold Java's UTF-16 code
+//! units exactly. Java indexes a string by code unit, so every index here counts code units: on
+//! an ASCII string they are its bytes, and other strings are walked or converted to their code
+//! units. A result that cuts a surrogate pair in half holds the lone surrogate, as Java's does.
 //!
 //! Out-of-range indices throw `StringIndexOutOfBoundsException` with Java's message.
 
-use crate::{is_java_whitespace, throw, throw_exception};
+use crate::{JString, Wtf8, is_java_whitespace, throw, throw_exception};
 
 /// The UTF-16 code units of `s`.
-pub fn units(s: &str) -> Vec<u16> {
-    s.encode_utf16().collect()
+pub fn units(s: &Wtf8) -> Vec<u16> {
+    s.units().collect()
 }
 
-/// A string from UTF-16 code units; a lone surrogate becomes `?`, as Java prints it.
-pub fn from_units(units: &[u16]) -> String {
-    char::decode_utf16(units.iter().copied()).map(|c| c.unwrap_or('?')).collect()
+/// A string from UTF-16 code units, exactly.
+pub fn from_units(units: &[u16]) -> JString {
+    JString::from_units(units)
 }
 
 /// Java's `s.length()`: the number of UTF-16 code units.
-fn length(s: &str) -> usize {
-    if s.is_ascii() { s.len() } else { s.encode_utf16().count() }
+fn length(s: &Wtf8) -> usize {
+    s.unit_len()
+}
+
+/// The units a code point takes.
+fn unit_count(c: u32) -> usize {
+    if c >= 0x10000 { 2 } else { 1 }
 }
 
 /// The byte offset in `s` of the code unit at `index` (which may be the length), or `None` when
 /// it is the second unit of a surrogate pair.
-fn byte_offset(s: &str, index: usize) -> Option<usize> {
+fn byte_offset(s: &Wtf8, index: usize) -> Option<usize> {
     let mut units = 0;
-    for (offset, c) in s.char_indices() {
+    for (offset, c) in s.code_point_indices() {
         if units == index {
             return Some(offset);
         }
-        units += c.len_utf16();
+        units += unit_count(c);
         if units > index {
             return None;
         }
@@ -38,21 +43,21 @@ fn byte_offset(s: &str, index: usize) -> Option<usize> {
     (units == index).then_some(s.len())
 }
 
-/// The byte offset of the first character that starts at or after code unit `index`.
-fn byte_offset_at_or_after(s: &str, index: usize) -> usize {
+/// The byte offset of the first code point that starts at or after code unit `index`.
+fn byte_offset_at_or_after(s: &Wtf8, index: usize) -> usize {
     let mut units = 0;
-    for (offset, c) in s.char_indices() {
+    for (offset, c) in s.code_point_indices() {
         if units >= index {
             return offset;
         }
-        units += c.len_utf16();
+        units += unit_count(c);
     }
     s.len()
 }
 
-/// The code unit index of the byte offset `offset`, which is on a character boundary.
-fn unit_index(s: &str, offset: usize) -> i32 {
-    if s.is_ascii() { offset as i32 } else { s[..offset].encode_utf16().count() as i32 }
+/// The code unit index of the byte offset `offset`, which is on a code point boundary.
+fn unit_index(s: &Wtf8, offset: usize) -> i32 {
+    if s.is_ascii() { offset as i32 } else { s.slice(0, offset).unit_len() as i32 }
 }
 
 /// Java's check of a range `[begin, end)` of a string of `length` units.
@@ -65,58 +70,71 @@ fn check_begin_end(begin: i32, end: i32, length: usize) -> Result<(), crate::Exc
 }
 
 /// `s.substring(begin)`.
-pub fn substring_from(s: &str, begin: i32) -> String {
+pub fn substring_from(s: &Wtf8, begin: i32) -> JString {
     try_substring_from(s, begin).unwrap_or_else(crate::uncaught)
 }
 
 /// `s.substring(begin, end)`.
-pub fn substring(s: &str, begin: i32, end: i32) -> String {
+pub fn substring(s: &Wtf8, begin: i32, end: i32) -> JString {
     try_substring(s, begin, end).unwrap_or_else(crate::uncaught)
 }
 
 /// `s.substring(begin, end)` of a string that the translation proved ASCII, whose code units are
 /// its bytes: no scan of the string.
-pub fn ascii_substring(s: &str, begin: i32, end: i32) -> String {
+pub fn ascii_substring(s: &Wtf8, begin: i32, end: i32) -> JString {
     try_ascii_substring(s, begin, end).unwrap_or_else(crate::uncaught)
 }
 
 /// `s.substring(begin)` of an ASCII string.
-pub fn ascii_substring_from(s: &str, begin: i32) -> String {
+pub fn ascii_substring_from(s: &Wtf8, begin: i32) -> JString {
     try_ascii_substring_from(s, begin).unwrap_or_else(crate::uncaught)
 }
 
 /// `ascii_substring` where the program observes the `StringIndexOutOfBoundsException`.
-pub fn try_ascii_substring(s: &str, begin: i32, end: i32) -> Result<String, crate::Exception> {
+pub fn try_ascii_substring(s: &Wtf8, begin: i32, end: i32) -> Result<JString, crate::Exception> {
     check_begin_end(begin, end, s.len())?;
-    Ok(s[begin as usize..end as usize].to_string())
+    Ok(s.slice(begin as usize, end as usize).to_owned())
 }
 
 /// `ascii_substring_from` where the program observes the `StringIndexOutOfBoundsException`.
-pub fn try_ascii_substring_from(s: &str, begin: i32) -> Result<String, crate::Exception> {
+pub fn try_ascii_substring_from(s: &Wtf8, begin: i32) -> Result<JString, crate::Exception> {
     try_ascii_substring(s, begin, s.len() as i32)
 }
 
 /// `substring_from` where the program observes the `StringIndexOutOfBoundsException`.
-pub fn try_substring_from(s: &str, begin: i32) -> Result<String, crate::Exception> {
+pub fn try_substring_from(s: &Wtf8, begin: i32) -> Result<JString, crate::Exception> {
     let len = length(s);
     try_substring(s, begin, len as i32)
 }
 
 /// `substring` where the program observes the `StringIndexOutOfBoundsException`.
-pub fn try_substring(s: &str, begin: i32, end: i32) -> Result<String, crate::Exception> {
+pub fn try_substring(s: &Wtf8, begin: i32, end: i32) -> Result<JString, crate::Exception> {
     if s.is_ascii() {
         check_begin_end(begin, end, s.len())?;
-        return Ok(s[begin as usize..end as usize].to_string());
+        return Ok(s.slice(begin as usize, end as usize).to_owned());
     }
     check_begin_end(begin, end, length(s))?;
     Ok(match (byte_offset(s, begin as usize), byte_offset(s, end as usize)) {
-        (Some(a), Some(b)) => s[a..b].to_string(),
+        (Some(a), Some(b)) => s.slice(a, b).to_owned(),
         _ => from_units(&units(s)[begin as usize..end as usize]),
     })
 }
 
+/// The code units of code point `ch` (a `char` widened to `int`, or a supplementary one), or
+/// `None` for a value that is no code point.
+fn code_point_units(ch: i32, buf: &mut [u16; 2]) -> Option<&[u16]> {
+    match u32::try_from(ch) {
+        Ok(c) if c < 0x10000 => {
+            buf[0] = c as u16;
+            Some(&buf[..1])
+        }
+        Ok(c) => char::from_u32(c).map(|c| &*c.encode_utf16(buf)),
+        Err(_) => None,
+    }
+}
+
 /// `s.indexOf(ch, from)`, where `ch` is a code point (a `char` widened to `int`).
-pub fn index_of_char(s: &str, ch: i32, from: i32) -> i32 {
+pub fn index_of_char(s: &Wtf8, ch: i32, from: i32) -> i32 {
     let from = from.max(0) as usize;
     if s.is_ascii() {
         if !(0..0x80).contains(&ch) || from >= s.len() {
@@ -126,23 +144,13 @@ pub fn index_of_char(s: &str, ch: i32, from: i32) -> i32 {
     }
     let units = units(s);
     let mut buf = [0u16; 2];
-    let target: &[u16] = match u32::try_from(ch) {
-        Ok(c) if c < 0x10000 => {
-            buf[0] = c as u16;
-            &buf[..1]
-        }
-        Ok(c) => match char::from_u32(c) {
-            Some(c) => c.encode_utf16(&mut buf),
-            None => return -1,
-        },
-        Err(_) => return -1,
-    };
+    let Some(target) = code_point_units(ch, &mut buf) else { return -1 };
     let last = units.len().saturating_sub(target.len() - 1);
     (from..last).find(|&i| units[i..].starts_with(target)).map_or(-1, |i| i as i32)
 }
 
 /// `s.lastIndexOf(ch, from)`, where `ch` is a code point.
-pub fn last_index_of_char(s: &str, ch: i32, from: i32) -> i32 {
+pub fn last_index_of_char(s: &Wtf8, ch: i32, from: i32) -> i32 {
     if from < 0 {
         return -1;
     }
@@ -155,17 +163,7 @@ pub fn last_index_of_char(s: &str, ch: i32, from: i32) -> i32 {
     }
     let units = units(s);
     let mut buf = [0u16; 2];
-    let target: &[u16] = match u32::try_from(ch) {
-        Ok(c) if c < 0x10000 => {
-            buf[0] = c as u16;
-            &buf[..1]
-        }
-        Ok(c) => match char::from_u32(c) {
-            Some(c) => c.encode_utf16(&mut buf),
-            None => return -1,
-        },
-        Err(_) => return -1,
-    };
+    let Some(target) = code_point_units(ch, &mut buf) else { return -1 };
     if units.len() < target.len() {
         return -1;
     }
@@ -173,24 +171,36 @@ pub fn last_index_of_char(s: &str, ch: i32, from: i32) -> i32 {
     (0..=end).rev().find(|&i| units[i..].starts_with(target)).map_or(-1, |i| i as i32)
 }
 
+/// `indexOf` over code units, for a pattern that can match half of a pair.
+fn index_of_units(s: &Wtf8, t: &Wtf8, from: usize) -> i32 {
+    let (s, t) = (units(s), units(t));
+    if t.len() > s.len() {
+        return -1;
+    }
+    (from..=s.len() - t.len()).find(|&i| s[i..].starts_with(&t)).map_or(-1, |i| i as i32)
+}
+
 /// `s.indexOf(t, from)`.
-pub fn index_of(s: &str, t: &str, from: i32) -> i32 {
+pub fn index_of(s: &Wtf8, t: &Wtf8, from: i32) -> i32 {
     if s.is_ascii() {
         let from = from.clamp(0, s.len() as i32) as usize;
-        return s[from..].find(t).map_or(-1, |i| (i + from) as i32);
+        return s.find_from(t, from).map_or(-1, |i| i as i32);
     }
     let len = length(s);
     let from = from.clamp(0, len as i32) as usize;
     if t.is_empty() {
         return from as i32;
     }
-    // A match starts on a character: `t` cannot start with the second half of a pair.
+    if t.has_half_edges() {
+        return index_of_units(s, t, from);
+    }
+    // A match starts on a code point: `t` does not start with the second half of a pair.
     let start = byte_offset_at_or_after(s, from);
-    s[start..].find(t).map_or(-1, |i| unit_index(s, start + i))
+    s.find_from(t, start).map_or(-1, |i| unit_index(s, i))
 }
 
 /// `s.lastIndexOf(t, from)`.
-pub fn last_index_of(s: &str, t: &str, from: i32) -> i32 {
+pub fn last_index_of(s: &Wtf8, t: &Wtf8, from: i32) -> i32 {
     let (len, t_len) = (length(s) as i64, length(t) as i64);
     let from = (from as i64).min(len - t_len);
     if from < 0 {
@@ -201,23 +211,32 @@ pub fn last_index_of(s: &str, t: &str, from: i32) -> i32 {
     }
     if s.is_ascii() {
         let end = (from as usize + t.len()).min(s.len());
-        return s[..end].rfind(t).map_or(-1, |i| i as i32);
+        return s.rfind_before(t, end).map_or(-1, |i| i as i32);
     }
-    // The match starts at a character that starts at or before unit `from`.
+    if t.has_half_edges() {
+        let (s, t) = (units(s), units(t));
+        return (0..=from as usize).rev().find(|&i| s[i..].starts_with(&t)).map_or(-1, |i| i as i32);
+    }
+    // The match starts at a code point that starts at or before unit `from`.
     let mut starts = Vec::new();
     let mut units = 0;
-    for (offset, c) in s.char_indices() {
+    for (offset, c) in s.code_point_indices() {
         if units > from as usize {
             break;
         }
         starts.push((offset, units));
-        units += c.len_utf16();
+        units += unit_count(c);
     }
-    starts.into_iter().rev().find(|&(offset, _)| s[offset..].starts_with(t)).map_or(-1, |(_, u)| u as i32)
+    let bytes = s.as_bytes();
+    starts
+        .into_iter()
+        .rev()
+        .find(|&(offset, _)| bytes[offset..].starts_with(t.as_bytes()))
+        .map_or(-1, |(_, u)| u as i32)
 }
 
 /// `s.startsWith(prefix, offset)`.
-pub fn starts_with_at(s: &str, prefix: &str, offset: i32) -> bool {
+pub fn starts_with_at(s: &Wtf8, prefix: &Wtf8, offset: i32) -> bool {
     let (len, p_len) = (length(s) as i64, length(prefix) as i64);
     if offset < 0 || offset as i64 > len - p_len {
         return false;
@@ -226,69 +245,102 @@ pub fn starts_with_at(s: &str, prefix: &str, offset: i32) -> bool {
         return true;
     }
     match byte_offset(s, offset as usize) {
-        Some(at) => s[at..].starts_with(prefix),
-        None => false,
+        Some(at) if !prefix.has_half_edges() => s.as_bytes()[at..].starts_with(prefix.as_bytes()),
+        _ => units(s)[offset as usize..].starts_with(&units(prefix)),
     }
 }
 
 /// `s.lines()`: the lines of `s`, each ended by `\n`, `\r` or `\r\n` or by the end of the
 /// string, without an empty line after the last line end.
-pub fn lines(s: &str) -> Vec<String> {
+pub fn lines(s: &Wtf8) -> Vec<JString> {
+    let bytes = s.as_bytes();
     let mut out = Vec::new();
-    let mut rest = s;
-    while !rest.is_empty() {
-        let end = rest.find(['\n', '\r']).unwrap_or(rest.len());
-        out.push(rest[..end].to_string());
-        let after = &rest[end..];
-        rest = after.strip_prefix("\r\n").or_else(|| after.strip_prefix(['\n', '\r'])).unwrap_or(after);
+    let mut at = 0;
+    while at < bytes.len() {
+        let end = bytes[at..].iter().position(|&b| b == b'\n' || b == b'\r').map_or(bytes.len(), |i| at + i);
+        out.push(s.slice(at, end).to_owned());
+        at = match bytes[end..] {
+            [b'\r', b'\n', ..] => end + 2,
+            [] => end,
+            _ => end + 1,
+        };
     }
     out
 }
 
 /// Java's `s.isBlank()`: empty or only whitespace, as `Character.isWhitespace` defines it.
-pub fn is_blank(s: &str) -> bool {
-    s.chars().all(|c| is_java_whitespace(c as u32))
+pub fn is_blank(s: &Wtf8) -> bool {
+    s.code_points().all(is_java_whitespace)
 }
 
 /// `s.trim()`: without the code units up to `' '` at both ends.
-pub fn trim(s: &str) -> String {
-    s.trim_matches(|c: char| c <= ' ').to_string()
+pub fn trim(s: &Wtf8) -> JString {
+    s.trim_by(true, true, |c| c <= ' ' as u32).to_owned()
 }
 
 /// `s.strip()`: without whitespace (`Character.isWhitespace`) at both ends.
-pub fn strip(s: &str) -> String {
-    s.trim_matches(|c: char| is_java_whitespace(c as u32)).to_string()
+pub fn strip(s: &Wtf8) -> JString {
+    s.trim_by(true, true, is_java_whitespace).to_owned()
 }
 
 /// `s.stripLeading()`.
-pub fn strip_leading(s: &str) -> String {
-    s.trim_start_matches(|c: char| is_java_whitespace(c as u32)).to_string()
+pub fn strip_leading(s: &Wtf8) -> JString {
+    s.trim_by(true, false, is_java_whitespace).to_owned()
 }
 
 /// `s.stripTrailing()`.
-pub fn strip_trailing(s: &str) -> String {
-    s.trim_end_matches(|c: char| is_java_whitespace(c as u32)).to_string()
+pub fn strip_trailing(s: &Wtf8) -> JString {
+    s.trim_by(false, true, is_java_whitespace).to_owned()
+}
+
+/// `map` applied to the text of `s` between its lone surrogates, which stay as they are.
+fn map_text(s: &Wtf8, map: impl Fn(&str) -> String) -> JString {
+    if let Some(text) = s.to_str() {
+        return map(text).into();
+    }
+    let mut out = JString::new();
+    let mut run = String::new();
+    for c in s.code_points() {
+        match char::from_u32(c) {
+            Some(c) => run.push(c),
+            None => {
+                out.push_str(&map(&run));
+                run.clear();
+                out.push_unit(c as u16);
+            }
+        }
+    }
+    out.push_str(&map(&run));
+    out
 }
 
 /// `s.toUpperCase()` in the root locale: Unicode's full case mapping, so `ß` is `SS`.
-pub fn uppercase(s: &str) -> String {
-    if s.is_ascii() { s.to_ascii_uppercase() } else { s.to_uppercase() }
+pub fn uppercase(s: &Wtf8) -> JString {
+    if s.is_ascii() {
+        s.expect_str("toUpperCase").to_ascii_uppercase().into()
+    } else {
+        map_text(s, str::to_uppercase)
+    }
 }
 
 /// `s.toLowerCase()` in the root locale: Unicode's full case mapping, with a final `Σ` as `ς`.
-pub fn lowercase(s: &str) -> String {
-    if s.is_ascii() { s.to_ascii_lowercase() } else { s.to_lowercase() }
+pub fn lowercase(s: &Wtf8) -> JString {
+    if s.is_ascii() {
+        s.expect_str("toLowerCase").to_ascii_lowercase().into()
+    } else {
+        map_text(s, str::to_lowercase)
+    }
 }
 
 /// `s.toUpperCase(locale)`, given the locale's language: the root locale's mapping, which is
 /// every language's but Turkish, Azeri and Lithuanian (`special_casing`).
-pub fn uppercase_in(s: &str, language: &str) -> String {
+pub fn uppercase_in(s: &Wtf8, language: &Wtf8) -> JString {
     special_casing(language);
     uppercase(s)
 }
 
 /// `s.toLowerCase(locale)`, given the locale's language (see `uppercase_in`).
-pub fn lowercase_in(s: &str, language: &str) -> String {
+pub fn lowercase_in(s: &Wtf8, language: &Wtf8) -> JString {
     special_casing(language);
     lowercase(s)
 }
@@ -296,8 +348,8 @@ pub fn lowercase_in(s: &str, language: &str) -> String {
 /// Ends the program for a language whose case mapping is not the root locale's: Java maps the
 /// dotted and dotless `i` of Turkish and Azeri, and the dot above of Lithuanian, its own way,
 /// which the runtime does not have.
-fn special_casing(language: &str) {
-    if matches!(language, "tr" | "az" | "lt") {
+fn special_casing(language: &Wtf8) {
+    if matches!(language.as_bytes(), b"tr" | b"az" | b"lt") {
         crate::throw_uncaught(format!(
             "the case mapping of the language \"{language}\" is not supported by the translation"
         ));
@@ -305,47 +357,64 @@ fn special_casing(language: &str) {
 }
 
 /// `s.replace(old, new)` on `char`s, which replaces code units, even halves of a pair.
-pub fn replace_char(s: &str, old: u16, new: u16) -> String {
+pub fn replace_char(s: &Wtf8, old: u16, new: u16) -> JString {
     let surrogate = |c: u16| (0xD800..0xE000).contains(&c);
-    if !surrogate(old) && !surrogate(new) {
+    if let (false, false, Some(text)) = (surrogate(old), surrogate(new), s.to_str()) {
         let (old, new) = (char::from_u32(old as u32).unwrap(), char::from_u32(new as u32).unwrap());
-        return s.chars().map(|c| if c == old { new } else { c }).collect();
+        return text.chars().map(|c| if c == old { new } else { c }).collect::<String>().into();
     }
-    let replaced: Vec<u16> = s.encode_utf16().map(|c| if c == old { new } else { c }).collect();
+    let replaced: Vec<u16> = s.units().map(|c| if c == old { new } else { c }).collect();
     from_units(&replaced)
 }
 
 /// `s.replace(target, replacement)` on strings. An empty target matches before every code unit
 /// and at the end.
-pub fn replace(s: &str, target: &str, replacement: &str) -> String {
-    if !target.is_empty() {
-        return s.replace(target, replacement);
+pub fn replace(s: &Wtf8, target: &Wtf8, replacement: &Wtf8) -> JString {
+    if let (Some(s), Some(t), Some(r)) = (s.to_str(), target.to_str(), replacement.to_str())
+        && (!t.is_empty() || s.is_ascii())
+    {
+        return s.replace(t, r).into();
     }
-    if s.is_ascii() {
-        return s.replace("", replacement);
-    }
-    let r = units(replacement);
-    let mut out = r.clone();
-    for unit in s.encode_utf16() {
-        out.push(unit);
+    let (s, t, r) = (units(s), units(target), units(replacement));
+    let mut out = Vec::with_capacity(s.len());
+    if t.is_empty() {
         out.extend_from_slice(&r);
+        for &unit in &s {
+            out.push(unit);
+            out.extend_from_slice(&r);
+        }
+        return from_units(&out);
+    }
+    let mut i = 0;
+    while i < s.len() {
+        if s[i..].starts_with(&t) {
+            out.extend_from_slice(&r);
+            i += t.len();
+        } else {
+            out.push(s[i]);
+            i += 1;
+        }
     }
     from_units(&out)
 }
 
 /// `s.repeat(count)`.
-pub fn repeat(s: &str, count: i32) -> String {
+pub fn repeat(s: &Wtf8, count: i32) -> JString {
     if count < 0 {
         throw("java.lang.IllegalArgumentException", &format!("count is negative: {count}"));
     }
     if (length(s) as u64) * (count as u64) > i32::MAX as u64 {
         throw("java.lang.OutOfMemoryError", "Required length exceeds implementation limit");
     }
-    s.repeat(count as usize)
+    let mut out = JString::with_capacity(s.len() * count as usize);
+    for _ in 0..count {
+        out.push_wtf8(s);
+    }
+    out
 }
 
 /// `a.compareTo(b)`: the difference of the first code units that differ, or of the lengths.
-pub fn compare_to(a: &str, b: &str) -> i32 {
+pub fn compare_to(a: &Wtf8, b: &Wtf8) -> i32 {
     if a.is_ascii() && b.is_ascii() {
         let (x, y) = (a.as_bytes(), b.as_bytes());
         return match x.iter().zip(y).find(|(p, q)| p != q) {
@@ -353,8 +422,8 @@ pub fn compare_to(a: &str, b: &str) -> i32 {
             None => x.len() as i32 - y.len() as i32,
         };
     }
-    let mut x = a.encode_utf16();
-    let mut y = b.encode_utf16();
+    let mut x = a.units();
+    let mut y = b.units();
     loop {
         match (x.next(), y.next()) {
             (Some(p), Some(q)) if p == q => {}
@@ -425,7 +494,7 @@ fn code_point_including(units: &[u16], k: usize) -> (u32, bool) {
 }
 
 /// `a.compareToIgnoreCase(b)`.
-pub fn compare_to_ignore_case(a: &str, b: &str) -> i32 {
+pub fn compare_to_ignore_case(a: &Wtf8, b: &Wtf8) -> i32 {
     if a.is_ascii() && b.is_ascii() {
         let (x, y) = (a.as_bytes(), b.as_bytes());
         for (p, q) in x.iter().zip(y) {
@@ -464,30 +533,30 @@ fn compare_units_ci(x: &[u16], y: &[u16]) -> i32 {
 }
 
 /// `s.contentEquals(text)`: whether the texts are equal.
-pub fn content_equals(a: &str, b: &str) -> bool {
+pub fn content_equals(a: &Wtf8, b: &Wtf8) -> bool {
     a == b
 }
 
 /// `a.equalsIgnoreCase(b)`.
-pub fn equals_ignore_case(a: &str, b: &str) -> bool {
-    if a.len() == b.len() && a.eq_ignore_ascii_case(b) {
+pub fn equals_ignore_case(a: &Wtf8, b: &Wtf8) -> bool {
+    if a.len() == b.len() && a.as_bytes().eq_ignore_ascii_case(b.as_bytes()) {
         return true;
     }
     length(a) == length(b) && compare_to_ignore_case(a, b) == 0
 }
 
 /// `s.hashCode()`: `s[0]*31^(n-1) + ... + s[n-1]` over the code units, wrapping.
-pub fn string_hash(s: &str) -> i32 {
-    s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
+pub fn string_hash(s: &Wtf8) -> i32 {
+    s.units().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
 }
 
 /// `new String(chars, offset, count)` and `String.valueOf(chars, offset, count)`.
-pub fn from_chars_range(chars: &[u16], offset: i32, count: i32) -> String {
+pub fn from_chars_range(chars: &[u16], offset: i32, count: i32) -> JString {
     try_from_chars_range(chars, offset, count).unwrap_or_else(crate::uncaught)
 }
 
 /// `from_chars_range` where the program observes the `StringIndexOutOfBoundsException`.
-pub fn try_from_chars_range(chars: &[u16], offset: i32, count: i32) -> Result<String, crate::Exception> {
+pub fn try_from_chars_range(chars: &[u16], offset: i32, count: i32) -> Result<JString, crate::Exception> {
     let len = chars.len();
     if offset < 0 || count < 0 || offset as i64 + count as i64 > len as i64 {
         let message = format!("offset {offset}, count {count}, length {len}");
@@ -498,21 +567,21 @@ pub fn try_from_chars_range(chars: &[u16], offset: i32, count: i32) -> Result<St
 
 /// `s.getChars(begin, end, dst, dst_begin)`: the UTF-16 units `begin..end` of `s` into `dst` from
 /// `dst_begin`.
-pub fn get_chars(s: &str, begin: i32, end: i32, dst: &mut [u16], dst_begin: i32) {
+pub fn get_chars(s: &Wtf8, begin: i32, end: i32, dst: &mut [u16], dst_begin: i32) {
     try_get_chars(s, begin, end, dst, dst_begin).unwrap_or_else(crate::uncaught)
 }
 
 /// `get_chars` where the program observes the `StringIndexOutOfBoundsException`: a range outside
 /// the string, or a destination too short, with the JDK's messages.
 pub fn try_get_chars(
-    s: &str,
+    s: &Wtf8,
     begin: i32,
     end: i32,
     dst: &mut [u16],
     dst_begin: i32,
 ) -> Result<(), crate::Exception> {
     const OUT: &str = "java.lang.StringIndexOutOfBoundsException";
-    let units: Vec<u16> = s.encode_utf16().collect();
+    let units = units(s);
     check_begin_end(begin, end, units.len())?;
     let count = end - begin;
     if dst_begin < 0 || dst_begin as i64 + count as i64 > dst.len() as i64 {
@@ -529,7 +598,7 @@ pub fn try_get_chars(
 /// may be null: Java checks the range on the string before it reads `dst.length`. A failure is
 /// thrown (`crate::throw`), for a `java::catching` around the call.
 pub fn sequence_get_chars(
-    s: &str,
+    s: &Wtf8,
     begin: i32,
     end: i32,
     dst: Option<&impl crate::Elements<u16>>,
@@ -551,7 +620,7 @@ pub(crate) fn null_destination() -> crate::Exception {
 
 /// `s.getBytes(begin, end, dst, dst_begin)`, the deprecated form that keeps the low byte of each
 /// code unit.
-pub fn get_low_bytes(s: &str, begin: i32, end: i32, dst: &mut [i8], dst_begin: i32) {
+pub fn get_low_bytes(s: &Wtf8, begin: i32, end: i32, dst: &mut [i8], dst_begin: i32) {
     let units = units(s);
     check_begin_end(begin, end, units.len()).unwrap_or_else(|e| throw_exception(e));
     let count = end - begin;
@@ -653,29 +722,36 @@ pub(crate) fn offset_by_code_points_units(units: &[u16], index: i32, offset: i32
 }
 
 /// `s.codePointAt(index)`.
-pub fn code_point_at(s: &str, index: i32) -> i32 {
+pub fn code_point_at(s: &Wtf8, index: i32) -> i32 {
     code_point_at_units(&units(s), index)
 }
 
 /// `s.codePointBefore(index)`.
-pub fn code_point_before(s: &str, index: i32) -> i32 {
+pub fn code_point_before(s: &Wtf8, index: i32) -> i32 {
     code_point_before_units(&units(s), index)
 }
 
 /// `s.codePointCount(begin, end)`.
-pub fn code_point_count(s: &str, begin: i32, end: i32) -> i32 {
+pub fn code_point_count(s: &Wtf8, begin: i32, end: i32) -> i32 {
     code_point_count_units(&units(s), begin, end)
 }
 
 /// `s.offsetByCodePoints(index, offset)`.
-pub fn offset_by_code_points(s: &str, index: i32, offset: i32) -> i32 {
+pub fn offset_by_code_points(s: &Wtf8, index: i32, offset: i32) -> i32 {
     offset_by_code_points_units(&units(s), index, offset)
 }
 
 /// `s.regionMatches(ignore_case, toffset, other, ooffset, len)`: whether the `len` code units of
 /// `s` from `toffset` equal those of `other` from `ooffset`, ignoring case as `compareToIgnoreCase`
 /// does when `ignore_case`.
-pub fn region_matches(s: &str, ignore_case: bool, toffset: i32, other: &str, ooffset: i32, len: i32) -> bool {
+pub fn region_matches(
+    s: &Wtf8,
+    ignore_case: bool,
+    toffset: i32,
+    other: &Wtf8,
+    ooffset: i32,
+    len: i32,
+) -> bool {
     let (a, b) = (units(s), units(other));
     if ooffset < 0
         || toffset < 0
@@ -697,65 +773,65 @@ pub fn region_matches(s: &str, ignore_case: bool, toffset: i32, other: &str, oof
 /// `s.stripIndent()`: the lines of `s` without the white space that all its non-blank lines (and
 /// a blank last line) begin with, nor any at their ends, joined by `\n`. A string that ends with
 /// a line terminator keeps every line's indentation, and ends with `\n`.
-pub fn strip_indent(s: &str) -> String {
+pub fn strip_indent(s: &Wtf8) -> JString {
     if s.is_empty() {
-        return String::new();
+        return JString::new();
     }
-    let opt_out = s.ends_with(['\n', '\r']);
+    let opt_out = matches!(s.as_bytes().last(), Some(b'\n' | b'\r'));
     let lines = lines(s);
-    let white = |c: char| is_java_whitespace(c as u32);
-    // White space is one code unit per character, so counting characters counts units.
-    let leading = |line: &str| line.chars().take_while(|&c| white(c)).count();
+    let white = |c: u32| is_java_whitespace(c);
+    // White space is one code unit per code point, so counting code points counts units.
+    let leading = |line: &Wtf8| line.code_points().take_while(|&c| white(c)).count();
     let outdent = if opt_out {
         0
     } else {
         let mut outdent = lines
             .iter()
-            .filter(|line| leading(line) != line.chars().count())
+            .filter(|line| leading(line) != line.code_points().count())
             .map(|line| leading(line))
             .min()
             .unwrap_or(usize::MAX);
         let last = lines.last().expect("a string that is not empty has a line");
-        if last.chars().all(white) {
-            outdent = outdent.min(last.chars().count());
+        if last.code_points().all(white) {
+            outdent = outdent.min(last.code_points().count());
         }
         outdent
     };
-    let mut out: Vec<String> = Vec::new();
-    for line in &lines {
-        let trimmed = line.trim_end_matches(white);
-        if trimmed.chars().all(white) {
-            out.push(String::new());
-        } else {
+    let mut text = JString::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            text.push_str("\n");
+        }
+        let trimmed = line.trim_by(false, true, white);
+        if !trimmed.code_points().all(white) {
             let skip = outdent.min(leading(line));
-            out.push(trimmed.chars().skip(skip).collect());
+            let start = trimmed.code_point_indices().nth(skip).map_or(trimmed.len(), |(i, _)| i);
+            text.push_wtf8(trimmed.slice(start, trimmed.len()));
         }
     }
-    let mut text = out.join("\n");
     if opt_out {
-        text.push('\n');
+        text.push_str("\n");
     }
     text
 }
 
 /// `new String(codePoints, offset, count)`, which throws for a range outside the array and for
 /// an invalid code point.
-pub fn from_code_points(points: &[i32], offset: i32, count: i32) -> String {
+pub fn from_code_points(points: &[i32], offset: i32, count: i32) -> JString {
     let range = range_of(points.len(), offset, count).unwrap_or_else(|e| crate::throw_exception(e));
-    let mut s = String::new();
+    let mut s = JString::new();
     for &point in &points[range] {
         if !(0..=0x10FFFF).contains(&point) {
             let message = format!("Not a valid Unicode code point: 0x{point:X}");
             crate::throw("java.lang.IllegalArgumentException", &message);
         }
-        // A lone surrogate becomes '?', as `from_units` makes it.
-        s.push(char::from_u32(point as u32).unwrap_or('?'));
+        s.push_code_point(point as u32);
     }
     s
 }
 
 /// `new String(ascii, hibyte, offset, count)`: each `char` is `hibyte`'s low byte over a byte.
-pub fn from_high_byte(bytes: &[i8], hibyte: i32, offset: i32, count: i32) -> String {
+pub fn from_high_byte(bytes: &[i8], hibyte: i32, offset: i32, count: i32) -> JString {
     let range = range_of(bytes.len(), offset, count).unwrap_or_else(|e| crate::throw_exception(e));
     let high = ((hibyte & 0xff) as u16) << 8;
     let units: Vec<u16> = bytes[range].iter().map(|&b| high | u16::from(b as u8)).collect();
@@ -775,52 +851,61 @@ fn range_of(len: usize, offset: i32, count: i32) -> Result<std::ops::Range<usize
 /// `String.join(prefix, suffix, delimiter, elements, size)` of the JDK: the first `size` of
 /// `elements` joined by `delimiter`, between `prefix` and `suffix`.
 pub fn join_range<T: JoinItem>(
-    prefix: &str,
-    suffix: &str,
-    delimiter: &str,
+    prefix: &Wtf8,
+    suffix: &Wtf8,
+    delimiter: &Wtf8,
     elements: &[T],
     size: i32,
-) -> String {
-    [prefix, &join(delimiter, &elements[..size as usize]), suffix].concat()
+) -> JString {
+    let mut out = prefix.to_owned();
+    out.push_wtf8(&join(delimiter, &elements[..size as usize]));
+    out.push_wtf8(suffix);
+    out
 }
 
 /// The text of each element of a `String.join`: a string, or `null`.
 pub trait JoinItem {
-    fn text(&self) -> &str;
+    fn text(&self) -> &Wtf8;
 }
 
-impl JoinItem for String {
-    fn text(&self) -> &str {
+impl JoinItem for JString {
+    fn text(&self) -> &Wtf8 {
         self
     }
 }
 
 impl JoinItem for crate::JStr {
-    fn text(&self) -> &str {
+    fn text(&self) -> &Wtf8 {
+        self
+    }
+}
+
+impl JoinItem for &Wtf8 {
+    fn text(&self) -> &Wtf8 {
         self
     }
 }
 
 impl JoinItem for &str {
-    fn text(&self) -> &str {
-        self
+    fn text(&self) -> &Wtf8 {
+        Wtf8::new(self)
     }
 }
 
 impl<T: JoinItem> JoinItem for Option<T> {
-    fn text(&self) -> &str {
-        self.as_ref().map_or("null", JoinItem::text)
+    fn text(&self) -> &Wtf8 {
+        self.as_ref().map_or(Wtf8::new("null"), JoinItem::text)
     }
 }
 
 /// `String.join(delimiter, elements)`.
-pub fn join<T: JoinItem>(delimiter: &str, elements: &[T]) -> String {
-    let mut out = String::new();
+pub fn join<T: JoinItem>(delimiter: &Wtf8, elements: &[T]) -> JString {
+    let mut out = JString::new();
     for (i, e) in elements.iter().enumerate() {
         if i > 0 {
-            out.push_str(delimiter);
+            out.push_wtf8(delimiter);
         }
-        out.push_str(e.text());
+        out.push_wtf8(e.text());
     }
     out
 }
@@ -829,77 +914,88 @@ pub fn join<T: JoinItem>(delimiter: &str, elements: &[T]) -> String {
 mod tests {
     use super::*;
 
+    fn w(s: &str) -> &Wtf8 {
+        Wtf8::new(s)
+    }
+
     #[test]
     fn case_mapping_in_a_locale_is_the_root_locales_for_most_languages() {
-        assert_eq!(uppercase_in("straße", "en"), "STRASSE");
-        assert_eq!(uppercase_in("title", ""), "TITLE");
-        assert_eq!(lowercase_in("\u{39f}\u{394}\u{39f}\u{3a3}", "de"), "\u{3bf}\u{3b4}\u{3bf}\u{3c2}");
-        assert_eq!(lowercase_in("ISTANBUL", "fr"), "istanbul");
+        assert_eq!(uppercase_in(w("straße"), w("en")), "STRASSE");
+        assert_eq!(uppercase_in(w("title"), w("")), "TITLE");
+        assert_eq!(lowercase_in(w("\u{39f}\u{394}\u{39f}\u{3a3}"), w("de")), "\u{3bf}\u{3b4}\u{3bf}\u{3c2}");
+        assert_eq!(lowercase_in(w("ISTANBUL"), w("fr")), "istanbul");
     }
 
     #[test]
     fn substrings_count_code_units() {
-        assert_eq!(substring_from("hello", 2), "llo");
-        assert_eq!(substring("héllo", 1, 3), "él");
-        assert_eq!(substring("a😀b", 1, 3), "😀");
-        assert_eq!(substring("a😀b", 1, 2), "?");
-        assert_eq!(substring_from("abc", 3), "");
+        assert_eq!(substring_from(w("hello"), 2), "llo");
+        assert_eq!(substring(w("héllo"), 1, 3), "él");
+        assert_eq!(substring(w("a😀b"), 1, 3), "😀");
+        assert_eq!(units(&substring(w("a😀b"), 1, 2)), [0xD83D]);
+        let tail = substring_from(w("😀x"), 1);
+        assert_eq!(units(&tail), [0xDE00, 'x' as u16]);
+        assert_eq!(compare_to(w("<"), &tail), '<' as i32 - 0xDE00);
+        assert_eq!(compare_to(w("日"), &tail), 0x65E5 - 0xDE00);
+        let mut joined = substring(w("a😀b"), 0, 2);
+        joined.push_wtf8(&tail);
+        assert_eq!(joined, *"a😀x");
+        assert_eq!(substring_from(w("abc"), 3), "");
     }
 
     #[test]
     fn searches_count_code_units() {
-        assert_eq!(index_of_char("a😀b", 'b' as i32, 0), 3);
-        assert_eq!(index_of_char("a😀b", 0x1F600, 0), 1);
-        assert_eq!(index_of_char("a😀b", 0xDE00, 0), 2);
-        assert_eq!(last_index_of_char("abcabc", 'b' as i32, 3), 1);
-        assert_eq!(last_index_of_char("abcabc", 'b' as i32, 100), 4);
-        assert_eq!(index_of("a😀bcb", "b", 0), 3);
-        assert_eq!(index_of("a😀bcb", "b", 4), 5);
-        assert_eq!(index_of("abc", "", 5), 3);
-        assert_eq!(last_index_of("a😀bcb", "b", 4), 3);
-        assert_eq!(last_index_of("abcab", "ab", 10), 3);
-        assert_eq!(last_index_of("abc", "", 10), 3);
-        assert_eq!(last_index_of("éaé", "é", 1), 0);
-        assert_eq!(last_index_of("éaé", "é", 2), 2);
+        assert_eq!(index_of_char(w("a😀b"), 'b' as i32, 0), 3);
+        assert_eq!(index_of_char(w("a😀b"), 0x1F600, 0), 1);
+        assert_eq!(index_of_char(w("a😀b"), 0xDE00, 0), 2);
+        assert_eq!(last_index_of_char(w("abcabc"), 'b' as i32, 3), 1);
+        assert_eq!(last_index_of_char(w("abcabc"), 'b' as i32, 100), 4);
+        assert_eq!(index_of(w("a😀bcb"), w("b"), 0), 3);
+        assert_eq!(index_of(w("a😀bcb"), w("b"), 4), 5);
+        assert_eq!(index_of(w("abc"), w(""), 5), 3);
+        assert_eq!(last_index_of(w("a😀bcb"), w("b"), 4), 3);
+        assert_eq!(last_index_of(w("abcab"), w("ab"), 10), 3);
+        assert_eq!(last_index_of(w("abc"), w(""), 10), 3);
+        assert_eq!(last_index_of(w("éaé"), w("é"), 1), 0);
+        assert_eq!(last_index_of(w("éaé"), w("é"), 2), 2);
     }
 
     #[test]
     fn comparisons_follow_java() {
-        assert_eq!(compare_to("apple", "banana"), -1);
-        assert_eq!(compare_to("ab", "abcd"), -2);
-        assert_eq!(compare_to("\u{FFFF}", "😀"), 0xFFFF - 0xD83D);
-        assert_eq!(compare_to_ignore_case("Hello", "hello"), 0);
-        assert_eq!(compare_to_ignore_case("a", "B"), -1);
-        assert!(equals_ignore_case("STRASSE", "strasse"));
-        assert!(!equals_ignore_case("ß", "SS"));
-        assert_eq!(string_hash("hello"), 99162322);
-        assert_eq!(string_hash(""), 0);
+        assert_eq!(compare_to(w("apple"), w("banana")), -1);
+        assert_eq!(compare_to(w("ab"), w("abcd")), -2);
+        assert_eq!(compare_to(w("\u{FFFF}"), w("😀")), 0xFFFF - 0xD83D);
+        assert_eq!(compare_to_ignore_case(w("Hello"), w("hello")), 0);
+        assert_eq!(compare_to_ignore_case(w("a"), w("B")), -1);
+        assert!(equals_ignore_case(w("STRASSE"), w("strasse")));
+        assert!(!equals_ignore_case(w("ß"), w("SS")));
+        assert_eq!(string_hash(w("hello")), 99162322);
+        assert_eq!(string_hash(w("")), 0);
     }
 
     #[test]
     fn replacing_and_trimming() {
-        assert_eq!(replace("abc", "", "-"), "-a-b-c-");
-        assert_eq!(replace("aaa", "aa", "b"), "ba");
-        assert_eq!(replace_char("a.b.c", '.' as u16, '/' as u16), "a/b/c");
-        assert_eq!(trim(" \t x y \n"), "x y");
-        assert_eq!(strip("\u{2003}x\u{A0}"), "x\u{A0}");
-        assert!(is_blank(" \u{2028}\u{1F}"));
-        assert_eq!(uppercase("straße"), "STRASSE");
-        assert_eq!(join(", ", &[Some("a"), None]), "a, null");
+        assert_eq!(replace(w("abc"), w(""), w("-")), "-a-b-c-");
+        assert_eq!(replace(w("aaa"), w("aa"), w("b")), "ba");
+        assert_eq!(replace_char(w("a.b.c"), '.' as u16, '/' as u16), "a/b/c");
+        assert_eq!(trim(w(" \t x y \n")), "x y");
+        assert_eq!(strip(w("\u{2003}x\u{A0}")), "x\u{A0}");
+        assert!(is_blank(w(" \u{2028}\u{1F}")));
+        assert_eq!(uppercase(w("straße")), "STRASSE");
+        assert_eq!(join(w(", "), &[Some("a"), None]), "a, null");
     }
 
     #[test]
     fn joined_ranges_have_a_prefix_and_suffix() {
-        assert_eq!(join_range("[", "]", ", ", &[Some("a"), None, Some("c")], 2), "[a, null]");
-        assert_eq!(join_range("<", ">", "-", &[] as &[&str], 0), "<>");
+        assert_eq!(join_range(w("["), w("]"), w(", "), &[Some("a"), None, Some("c")], 2), "[a, null]");
+        assert_eq!(join_range(w("<"), w(">"), w("-"), &[] as &[&str], 0), "<>");
     }
 
     #[test]
     fn lines_end_at_each_line_terminator() {
-        assert_eq!(lines("a\nb\r\nc\rd\n\ne\n"), ["a", "b", "c", "d", "", "e"]);
-        assert!(lines("").is_empty());
-        assert_eq!(lines("\n"), [""]);
-        assert_eq!(lines("\r\r\n"), ["", ""]);
-        assert_eq!(lines("x"), ["x"]);
+        assert_eq!(lines(w("a\nb\r\nc\rd\n\ne\n")), ["a", "b", "c", "d", "", "e"]);
+        assert!(lines(w("")).is_empty());
+        assert_eq!(lines(w("\n")), [""]);
+        assert_eq!(lines(w("\r\r\n")), ["", ""]);
+        assert_eq!(lines(w("x")), ["x"]);
     }
 }

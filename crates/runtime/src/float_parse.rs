@@ -34,22 +34,26 @@ impl Float for f32 {
 }
 
 /// Java's `Double.parseDouble`, which throws `NumberFormatException` for what Java rejects.
-pub fn parse_double(s: &str) -> f64 {
+pub fn parse_double(s: &crate::Wtf8) -> f64 {
+    let s = &*s.to_string_lossy();
     parse(s)
 }
 
 /// Java's `Float.parseFloat`, which throws `NumberFormatException` for what Java rejects.
-pub fn parse_float(s: &str) -> f32 {
+pub fn parse_float(s: &crate::Wtf8) -> f32 {
+    let s = &*s.to_string_lossy();
     parse(s)
 }
 
 /// `parse_double` where the program observes the `NumberFormatException`.
-pub fn try_parse_double(s: &str) -> Result<f64, crate::Exception> {
+pub fn try_parse_double(s: &crate::Wtf8) -> Result<f64, crate::Exception> {
+    let s = &*s.to_string_lossy();
     try_parse(s)
 }
 
 /// `parse_float` where the program observes the `NumberFormatException`.
-pub fn try_parse_float(s: &str) -> Result<f32, crate::Exception> {
+pub fn try_parse_float(s: &crate::Wtf8) -> Result<f32, crate::Exception> {
+    let s = &*s.to_string_lossy();
     try_parse(s)
 }
 

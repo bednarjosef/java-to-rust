@@ -56,6 +56,7 @@ use idiomatic::{bool_test, literal_shift};
 use names::*;
 use null::is_null_test;
 use primitives::*;
+use switch::byte_string;
 use switch::{Frame, Kind};
 
 mod array_writes;
@@ -283,9 +284,15 @@ enum Loop<'a> {
     DoWhile(&'a Expr),
 }
 
+/// A piece of a string concatenation or of printed text.
 enum Part {
+    /// Constant text.
     Lit(String),
+    /// A value shown through its `Display`, such as a number.
     Arg(Code),
+    /// A string, `char` or builder, which a concatenation takes as it is (a `java::Piece`), so
+    /// that the halves of a pair that meet join.
+    Text(Code),
 }
 
 struct Gen<'a> {
@@ -546,13 +553,13 @@ impl<'a> Gen<'a> {
             .map(|(i, p)| {
                 let mutable = if body && assigns_any(&m.body, &p.name) { "mut " } else { "" };
                 let ty = if self.borrowed_optional.contains(&p.name) {
-                    "Option<&str>".to_string()
+                    "Option<&java::Wtf8>".to_string()
                 } else if self.optional_var(index, p.ty, &p.name) {
                     format!("Option<{}>", self.ty_name(p.ty))
                 } else if self.facts.borrowed_objects.contains(&(index, i)) {
                     format!("&{}", self.ty_name(p.ty))
                 } else if self.borrowed.contains(&p.name) {
-                    "&str".to_string()
+                    "&java::Wtf8".to_string()
                 } else if let Some(&written) = self.facts.borrowed_arrays.get(&(index, i)) {
                     self.borrowed_ty(p.ty, written)
                 } else {

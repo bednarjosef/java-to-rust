@@ -216,7 +216,7 @@ pub(super) fn default_value(ty: Type) -> Option<&'static str> {
         Type::Double | Type::Float => "0.0",
         Type::Boolean => "false",
         Type::String if super::shared_strings() => "java::JStr::default()",
-        Type::String => "String::new()",
+        Type::String => "java::JString::new()",
         _ => return None,
     })
 }
@@ -714,7 +714,9 @@ impl<'a> Gen<'a> {
         // A message the runtime made is a new string.
         match super::shared_strings() {
             true => self.line("let raised_message = java::JStr::new(e.message.clone().unwrap_or_default());"),
-            false => self.line("let raised_message = e.message.clone().unwrap_or_default();"),
+            false => {
+                self.line("let raised_message = java::JString::from(e.message.clone().unwrap_or_default());")
+            }
         }
         self.line("match e.class {");
         self.indent += 1;
@@ -1199,7 +1201,7 @@ impl<'a> Gen<'a> {
             None => {
                 let c = self.struct_class(object).expect("an object has a class");
                 let name = rust_string(&self.java_class_name(c, simple));
-                self.after_object(object, &format!("String::from({name})"))
+                self.after_object(object, &format!("java::JString::from({name})"))
             }
             Some(t) => {
                 let obj = self.object(object);
@@ -1214,7 +1216,7 @@ impl<'a> Gen<'a> {
                         )
                     })
                     .collect();
-                Code::atom(format!("String::from(match {obj} {{ {} }})", arms.join(", ")))
+                Code::atom(format!("java::JString::from(match {obj} {{ {} }})", arms.join(", ")))
             }
         }
     }

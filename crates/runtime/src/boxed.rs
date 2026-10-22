@@ -123,7 +123,8 @@ pub fn char_numeric_value(c: u16) -> i32 {
 }
 
 /// `Boolean.parseBoolean`: true for `true` in any case, and false for anything else, null included.
-pub fn parse_boolean(s: &str) -> bool {
+pub fn parse_boolean(s: &crate::Wtf8) -> bool {
+    let s = &*s.to_string_lossy();
     s.eq_ignore_ascii_case("true")
 }
 
@@ -177,9 +178,9 @@ mod tests {
             ("-Infinity", f64::NEG_INFINITY),
         ];
         for (text, java) in cases {
-            assert_eq!(parse_double(text), java, "{text:?}");
+            assert_eq!(parse_double(crate::Wtf8::new(text)), java, "{text:?}");
         }
-        assert!(parse_double("NaN").is_nan());
+        assert!(parse_double(crate::Wtf8::new("NaN")).is_nan());
     }
 
     #[test]
@@ -221,7 +222,7 @@ mod tests {
         for (text, java) in
             [("true", true), ("TRUE", true), ("tRuE", true), ("yes", false), ("", false), (" true", false)]
         {
-            assert_eq!(parse_boolean(text), java, "{text:?}");
+            assert_eq!(parse_boolean(crate::Wtf8::new(text)), java, "{text:?}");
         }
     }
 

@@ -50,11 +50,10 @@ pub fn to_chars(cp: i32) -> Array<u16> {
     from_vec(units(cp).unwrap_or_else(|message| throw("java.lang.IllegalArgumentException", &message)))
 }
 
-/// Java's `Character.toString(cp)`. A lone surrogate, which a Rust string cannot hold, prints as
-/// `?`, as Java's UTF-8 output does.
-pub fn code_point_string(cp: i32) -> String {
+/// Java's `Character.toString(cp)`, a lone surrogate too.
+pub fn code_point_string(cp: i32) -> crate::JString {
     let units = units(cp).unwrap_or_else(|message| throw("java.lang.IllegalArgumentException", &message));
-    char::decode_utf16(units).map(|unit| unit.unwrap_or('?')).collect()
+    crate::JString::from_units(&units)
 }
 
 /// The units of a code point, or Java's message for one that is not valid.
@@ -99,7 +98,7 @@ mod tests {
         assert_eq!(units(0x41), Ok(vec![0x41]));
         assert_eq!(units(0x1_F600), Ok(vec![0xD83D, 0xDE00]));
         assert_eq!(code_point_string(0x1_F600), "\u{1F600}");
-        assert_eq!(code_point_string(0xD800), "?");
+        assert_eq!(code_point_string(0xD800).units().collect::<Vec<_>>(), [0xD800]);
     }
 
     #[test]

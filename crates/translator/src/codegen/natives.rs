@@ -377,8 +377,8 @@ impl<'a> Gen<'a> {
         let throwable = self.throwable_type();
         let attempts = std::mem::take(&mut self.attempts);
         let throwing = std::mem::replace(&mut self.throwing, false);
-        let text = self.value(&args[0], Type::String).text;
-        let text = if super::shared_strings() { format!("String::from({text})") } else { text };
+        // The trace is printed, which shows a lone surrogate as `?`.
+        let text = format!("{}.to_string()", self.value(&args[0], Type::String).at(ATOM));
         self.attempts = attempts;
         self.throwing = throwing;
         let (set, pending) = (self.runtime("set_trace_hook"), self.runtime("set_pending_uncaught"));
@@ -388,11 +388,16 @@ impl<'a> Gen<'a> {
         ))
     }
 
-    /// A thread's name as a `String`, which `Thread` checks is not null.
+    /// A thread's name as a `String`, which `Thread` checks is not null. A Rust thread's name is
+    /// UTF-8, and the name is printed, so a lone surrogate in it is `?`.
     fn thread_name(&mut self, name: &'a Expr) -> String {
-        let text = self.value(name, Type::String).text;
-        let text = if self.nullable(name) { format!("{}({text})", self.runtime("non_null")) } else { text };
-        if super::shared_strings() { format!("String::from({text})") } else { text }
+        let text = self.value(name, Type::String);
+        let text = if self.nullable(name) {
+            format!("{}({})", self.runtime("non_null"), text.text)
+        } else {
+            text.at(ATOM)
+        };
+        format!("{text}.to_string()")
     }
 
     /// `System.identityHashCode(e)` of a value of the enum of `t` (`Object`, an interface, a

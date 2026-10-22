@@ -45,12 +45,14 @@ pub fn to_unsigned_string(value: u64, radix: i32) -> String {
 
 /// Java's `parseUnsignedInt(s, radix)` (`bits` 32) and `parseUnsignedLong(s, radix)` (`bits` 64),
 /// which throw `NumberFormatException` for what Java rejects. `None` is a null string.
-pub fn parse_unsigned(s: Option<&str>, radix: i32, bits: u32) -> u64 {
+pub fn parse_unsigned(s: Option<&crate::Wtf8>, radix: i32, bits: u32) -> u64 {
     try_parse_unsigned(s, radix, bits).unwrap_or_else(uncaught)
 }
 
 /// The checked form of `parse_unsigned`.
-pub fn try_parse_unsigned(s: Option<&str>, radix: i32, bits: u32) -> Result<u64, Exception> {
+pub fn try_parse_unsigned(s: Option<&crate::Wtf8>, radix: i32, bits: u32) -> Result<u64, Exception> {
+    let s = s.map(|s| s.to_string_lossy());
+    let s = s.as_deref();
     let Some(s) = s else {
         return Err(Exception::new("java.lang.NumberFormatException", "Cannot parse null string"));
     };

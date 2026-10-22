@@ -6,11 +6,11 @@
 //! is generated from the JDK; the case and alphabetic tests are Rust's, which agree with Java's.
 
 use super::character_tables::{DIGITS, FRACTIONS, LETTERS, NUMERIC_OFFSETS, UPPER_CASE_EXCEPTIONS};
-use super::{Exception, string_length};
+use super::{Exception, JString, Wtf8, string_length};
 use std::fmt;
 
-/// Formats a `char` the way Java prints it. A lone surrogate, which no Rust string can hold,
-/// prints as `?`, as Java's UTF-8 output does.
+/// Formats a `char` the way Java prints it: a lone surrogate prints as `?`, as Java's UTF-8
+/// output does.
 pub struct Char(pub u16);
 
 impl fmt::Display for Char {
@@ -20,28 +20,29 @@ impl fmt::Display for Char {
     }
 }
 
-pub fn char_to_string(c: u16) -> String {
-    Char(c).to_string()
+/// `String.valueOf(c)`: the string of one code unit, a lone surrogate too.
+pub fn char_to_string(c: u16) -> JString {
+    JString::from_units(&[c])
 }
 
 /// Java's `s.charAt(index)`: the UTF-16 code unit at `index`.
-pub fn char_at(s: &str, index: i32) -> u16 {
+pub fn char_at(s: &Wtf8, index: i32) -> u16 {
     try_char_at(s, index).unwrap_or_else(crate::uncaught)
 }
 
 /// `s.charAt(index)` on an ASCII string, where code units are bytes.
-pub fn ascii_char_at(s: &str, index: i32) -> u16 {
+pub fn ascii_char_at(s: &Wtf8, index: i32) -> u16 {
     try_ascii_char_at(s, index).unwrap_or_else(crate::uncaught)
 }
 
 /// `char_at` where the program observes the `StringIndexOutOfBoundsException`.
-pub fn try_char_at(s: &str, index: i32) -> Result<u16, Exception> {
-    let unit = usize::try_from(index).ok().and_then(|i| s.encode_utf16().nth(i));
+pub fn try_char_at(s: &Wtf8, index: i32) -> Result<u16, Exception> {
+    let unit = usize::try_from(index).ok().and_then(|i| s.units().nth(i));
     unit.ok_or_else(|| out_of_bounds(index, string_length(s)))
 }
 
 /// `ascii_char_at` where the program observes the `StringIndexOutOfBoundsException`.
-pub fn try_ascii_char_at(s: &str, index: i32) -> Result<u16, Exception> {
+pub fn try_ascii_char_at(s: &Wtf8, index: i32) -> Result<u16, Exception> {
     match usize::try_from(index).ok().and_then(|i| s.as_bytes().get(i)) {
         Some(&b) => Ok(b as u16),
         None => Err(out_of_bounds(index, s.len() as i32)),
@@ -144,16 +145,17 @@ mod tests {
     fn chars_print_as_text() {
         assert_eq!(char_to_string(unit('a')), "a");
         assert_eq!(char_to_string(unit('é')), "é");
-        assert_eq!(char_to_string(0xD800), "?");
+        assert_eq!(char_to_string(0xD800).units().collect::<Vec<_>>(), [0xD800]);
+        assert_eq!(char_to_string(0xD800).to_string(), "?");
         assert_eq!(format!("[{}]", Char(unit('\n'))), "[\n]");
     }
 
     #[test]
     fn char_at_counts_utf16_units() {
-        assert_eq!(char_at("héllo", 1), unit('é'));
-        assert_eq!(char_at("a😀b", 1), 0xD83D);
-        assert_eq!(char_at("a😀b", 3), unit('b'));
-        assert_eq!(ascii_char_at("abc", 2), unit('c'));
+        assert_eq!(char_at(crate::Wtf8::new("héllo"), 1), unit('é'));
+        assert_eq!(char_at(crate::Wtf8::new("a😀b"), 1), 0xD83D);
+        assert_eq!(char_at(crate::Wtf8::new("a😀b"), 3), unit('b'));
+        assert_eq!(ascii_char_at(crate::Wtf8::new("abc"), 2), unit('c'));
     }
 
     #[test]

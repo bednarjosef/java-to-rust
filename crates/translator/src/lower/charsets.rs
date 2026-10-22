@@ -140,7 +140,7 @@ impl<'t> Lowering<'t> {
         // property that the translation fixes (`lower::system`), is that charset, which cannot fail.
         if op == CharsetOp::ForName
             && let [Expr { kind: ExprKind::Str(name), .. }] = &operands[..]
-            && let Some(charset) = java_runtime::Charset::known(name)
+            && let Some(charset) = java_runtime::Charset::known(java_runtime::Wtf8::new(name))
         {
             return Ok(ExprKind::Builtin(Builtin::Charset(constant(charset)), Vec::new()));
         }

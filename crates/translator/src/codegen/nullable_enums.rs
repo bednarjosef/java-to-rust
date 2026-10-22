@@ -80,9 +80,9 @@ impl<'a> Gen<'a> {
             inner = value;
         }
         if matches!(inner.kind, ExprKind::Null) {
-            return "\"null\"".to_string();
+            return self.wtf8_literal("null");
         }
         let option = self.option_ref(e);
-        format!("&{}({option}).to_string()", self.runtime("or_null"))
+        format!("&{}::from({}({option}).to_string())", self.runtime("JString"), self.runtime("or_null"))
     }
 }

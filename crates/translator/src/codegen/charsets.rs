@@ -73,15 +73,15 @@ impl<'a> Gen<'a> {
             CharsetOp::DefaultCharset => Code::atom(format!("{charset}::default_charset()")),
             CharsetOp::Name => {
                 let recv = self.charset(&args[0]);
-                Code::atom(format!("{recv}.name().to_string()"))
+                Code::atom(format!("{}::from({recv}.name())", self.runtime("JString")))
             }
             CharsetOp::DisplayName => {
                 let recv = self.charset(&args[0]);
-                Code::atom(format!("{recv}.display_name().to_string()"))
+                Code::atom(format!("{}::from({recv}.display_name())", self.runtime("JString")))
             }
             CharsetOp::ToString => {
                 let recv = self.charset(&args[0]);
-                Code::atom(format!("{recv}.to_string()"))
+                Code::atom(format!("{}::from({recv}.to_string())", self.runtime("JString")))
             }
             CharsetOp::HashCode => {
                 let recv = self.charset(&args[0]);

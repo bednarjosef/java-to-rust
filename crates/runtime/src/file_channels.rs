@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn read_only_map_holds_the_file_from_a_position() {
         let path = temp_file("read-only", b"0123456789abcdef");
-        let fd = fd_open_read(path.to_str().unwrap()).unwrap();
+        let fd = fd_open_read(crate::Wtf8::new(path.to_str().unwrap())).unwrap();
         let address = map_file(fd, 0, 4, 6, false).unwrap();
         assert_eq!(read_native(address, 6), b"456789".to_vec());
         let past_end = map_file(fd, 0, 14, 4, false).unwrap();
@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn private_map_is_a_copy() {
         let path = temp_file("private", b"abcdef");
-        let fd = fd_open_read(path.to_str().unwrap()).unwrap();
+        let fd = fd_open_read(crate::Wtf8::new(path.to_str().unwrap())).unwrap();
         let address = map_file(fd, 2, 0, 6, false).unwrap();
         write_native(address, b"XY");
         assert_eq!(read_native(address, 6), b"XYcdef".to_vec());

@@ -9,7 +9,7 @@
 //! rejected: the translator checks a constant pattern when it translates the call, and any other
 //! pattern fails when it is compiled at run time.
 
-use crate::throw;
+use crate::{JString, Wtf8, throw};
 use std::cell::RefCell;
 
 /// A compiled pattern.
@@ -501,8 +501,13 @@ fn matches(regex: &Regex, s: &str, mut each: impl FnMut(&[Option<(usize, usize)>
     }
 }
 
-/// `s.split(regex, limit)`.
-pub fn split(s: &str, regex: &str, limit: i32) -> Vec<String> {
+/// `s.split(regex, limit)`. A string or an expression with a lone surrogate is not supported.
+pub fn split(s: &Wtf8, regex: &Wtf8, limit: i32) -> Vec<JString> {
+    let (s, regex) = (s.expect_str("split"), regex.expect_str("split"));
+    split_str(s, regex, limit).into_iter().map(JString::from).collect()
+}
+
+fn split_str(s: &str, regex: &str, limit: i32) -> Vec<String> {
     let regex = compiled(regex);
     let mut parts = Vec::new();
     let mut index = 0;
@@ -632,18 +637,21 @@ fn replace(s: &str, regex: &str, replacement: &str, all: bool) -> String {
 }
 
 /// `s.replaceAll(regex, replacement)`.
-pub fn replace_all(s: &str, regex: &str, replacement: &str) -> String {
-    replace(s, regex, replacement, true)
+pub fn replace_all(s: &Wtf8, regex: &Wtf8, replacement: &Wtf8) -> JString {
+    let what = "replaceAll";
+    replace(s.expect_str(what), regex.expect_str(what), replacement.expect_str(what), true).into()
 }
 
 /// `s.replaceFirst(regex, replacement)`.
-pub fn replace_first(s: &str, regex: &str, replacement: &str) -> String {
-    replace(s, regex, replacement, false)
+pub fn replace_first(s: &Wtf8, regex: &Wtf8, replacement: &Wtf8) -> JString {
+    let what = "replaceFirst";
+    replace(s.expect_str(what), regex.expect_str(what), replacement.expect_str(what), false).into()
 }
 
 /// Whether `regex` matches somewhere in `s`, as `Matcher.find` from the start.
-pub fn finds(s: &str, regex: &str) -> bool {
-    let regex = compiled(regex);
+pub fn finds(s: &Wtf8, regex: &Wtf8) -> bool {
+    let s = s.expect_str("a regular expression");
+    let regex = compiled(regex.expect_str("a regular expression"));
     let mut found = false;
     matches(&regex, s, |_| {
         found = true;
@@ -653,8 +661,9 @@ pub fn finds(s: &str, regex: &str) -> bool {
 }
 
 /// `s.matches(regex)`: whether the whole string matches.
-pub fn matches_all(s: &str, regex: &str) -> bool {
-    let regex = compiled(regex);
+pub fn matches_all(s: &Wtf8, regex: &Wtf8) -> bool {
+    let s = s.expect_str("matches");
+    let regex = compiled(regex.expect_str("matches"));
     let matcher = Matcher {
         regex: &regex,
         input: s.chars().collect(),
@@ -669,7 +678,11 @@ mod tests {
     use super::*;
 
     fn parts(s: &str, regex: &str, limit: i32) -> Vec<String> {
-        split(s, regex, limit)
+        split_str(s, regex, limit)
+    }
+
+    fn w(s: &str) -> &Wtf8 {
+        Wtf8::new(s)
     }
 
     #[test]
@@ -691,23 +704,23 @@ mod tests {
 
     #[test]
     fn replacement_follows_java() {
-        assert_eq!(replace_all("a1b22", "\\d", "#"), "a#b##");
-        assert_eq!(replace_all("abc", "", "-"), "-a-b-c-");
-        assert_eq!(replace_all("john smith", "(\\w+) (\\w+)", "$2 $1"), "smith john");
-        assert_eq!(replace_first("aaa", "a", "b"), "baa");
-        assert_eq!(replace_all("a.b", ".", "x"), "xxx");
-        assert_eq!(replace_all("aaa", "a*?", "-"), "-a-a-a-");
-        assert!(matches_all("abc123", "[a-z]+\\d{3}"));
-        assert!(!matches_all("abc", "ab"));
-        assert!(matches_all("ab", "(a|ab)b?"));
-        assert_eq!(replace_all("a..b...c", "(\\.)(\\1)+", "/"), "a/b/c");
-        assert_eq!(replace_all("abab cdc", "(\\w)(\\w)\\1\\2", "<$0>"), "<abab> cdc");
+        assert_eq!(replace_all(w("a1b22"), w("\\d"), w("#")), "a#b##");
+        assert_eq!(replace_all(w("abc"), w(""), w("-")), "-a-b-c-");
+        assert_eq!(replace_all(w("john smith"), w("(\\w+) (\\w+)"), w("$2 $1")), "smith john");
+        assert_eq!(replace_first(w("aaa"), w("a"), w("b")), "baa");
+        assert_eq!(replace_all(w("a.b"), w("."), w("x")), "xxx");
+        assert_eq!(replace_all(w("aaa"), w("a*?"), w("-")), "-a-a-a-");
+        assert!(matches_all(w("abc123"), w("[a-z]+\\d{3}")));
+        assert!(!matches_all(w("abc"), w("ab")));
+        assert!(matches_all(w("ab"), w("(a|ab)b?")));
+        assert_eq!(replace_all(w("a..b...c"), w("(\\.)(\\1)+"), w("/")), "a/b/c");
+        assert_eq!(replace_all(w("abab cdc"), w("(\\w)(\\w)\\1\\2"), w("<$0>")), "<abab> cdc");
         // `\11` is group 1 then `1` when there is no group 11.
-        assert!(matches_all("aa1", "(a)\\11"));
-        assert!(!matches_all("a", "\\2(a)"));
+        assert!(matches_all(w("aa1"), w("(a)\\11")));
+        assert!(!matches_all(w("a"), w("\\2(a)")));
         assert_eq!(parts("a\r\nb\nc\rd\u{2028}e", "\\R", 0), ["a", "b", "c", "d", "e"]);
-        assert!(matches_all("\r\n", "\\R"));
-        assert!(matches_all("\r\n", "\\R\\n"));
+        assert!(matches_all(w("\r\n"), w("\\R")));
+        assert!(matches_all(w("\r\n"), w("\\R\\n")));
     }
 
     #[test]

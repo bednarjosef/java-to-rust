@@ -9,11 +9,11 @@
 use super::*;
 
 impl<'a> Gen<'a> {
-    /// A string, or any `CharSequence`, as a `&str` that a runtime function takes: null throws
+    /// A string, or any `CharSequence`, as a `&java::Wtf8` that a runtime function takes: null throws
     /// `NullPointerException`, and a builder gives its current text.
     pub(super) fn text_ref(&mut self, e: &'a Expr) -> String {
         match e.ty {
-            Type::StringBuilder => format!("&{}.to_string()", self.builder_recv(e)),
+            Type::StringBuilder => format!("&{}.text()", self.builder_recv(e)),
             _ if self.nullable(e) => self.deref(e),
             _ => self.str_ref(e),
         }
@@ -23,7 +23,7 @@ impl<'a> Gen<'a> {
     fn str_recv(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             _ if self.nullable(e) => self.deref(e),
-            ExprKind::Str(s) => rust_string(s),
+            ExprKind::Str(s) => self.wtf8_literal(s),
             ExprKind::Var(name) => self.local(name),
             ExprKind::Field { object, name } if self.field_in_place(object, name) => self.object_place(e),
             _ => self.expr(e).at(ATOM),
@@ -192,8 +192,7 @@ impl<'a> Gen<'a> {
             }
             StringOp::Concat => {
                 let (a, b) = (self.text_ref(&args[0]), self.text_ref(&args[1]));
-                // Each side is `&String` or `&str` (`text_ref`), and an array holds one type.
-                Code::atom(format!("[{a} as &str, {b} as &str].concat()"))
+                Code::atom(format!("{}({a}, {b})", self.runtime("concat!")))
             }
             StringOp::ToCharArray => {
                 let s = self.text_ref(&args[0]);
@@ -343,7 +342,7 @@ impl<'a> Gen<'a> {
                 Code::atom(self.dereference(&[args[0].id], &option))
             }
             StringOp::Identity | StringOp::ToString | StringOp::Intern if self.nullable(&args[0]) => {
-                Code::atom(format!("{}.to_string()", self.deref(&args[0])))
+                Code::atom(format!("{}.to_owned()", self.deref(&args[0])))
             }
             StringOp::Identity | StringOp::ToString | StringOp::Intern => self.expr(&args[0]),
             // A statement, which `effect` leaves out where the receiver is never null.
@@ -393,7 +392,7 @@ impl<'a> Gen<'a> {
             .map(|a| match a.ty {
                 Type::StringBuilder if optional && self.nullable(a) => {
                     let option = self.builder_option(a);
-                    format!("{option}.map(|b| b.to_string()).as_deref()")
+                    format!("{option}.map(|b| b.text()).as_deref()")
                 }
                 _ if optional && self.nullable(a) => self.option_ref(a),
                 _ if optional => format!("Some({})", self.text_ref(a)),
@@ -401,7 +400,7 @@ impl<'a> Gen<'a> {
             })
             .collect();
         if items.is_empty() {
-            return Code::atom(format!("{f}({delimiter}, &[] as &[&str])"));
+            return Code::atom(format!("{f}({delimiter}, &[] as &[&java::Wtf8])"));
         }
         Code::atom(format!("{f}({delimiter}, &[{}])", items.join(", ")))
     }
@@ -500,7 +499,7 @@ impl<'a> Gen<'a> {
             BuilderOp::Reverse => method("reverse", vec![]),
             BuilderOp::Length => method("length", vec![]),
             BuilderOp::IsEmpty => method("is_empty", vec![]),
-            BuilderOp::ToString => method("to_string", vec![]),
+            BuilderOp::ToString => method("text", vec![]),
             BuilderOp::CharAt
             | BuilderOp::DeleteCharAt
             | BuilderOp::SetLength
@@ -586,10 +585,10 @@ impl<'a> Gen<'a> {
     fn appended(&mut self, base: &str, x: &'a Expr) -> (String, String) {
         let suffixed = |s: &str| format!("{base}_{s}");
         match x.ty {
-            Type::Null => (suffixed("str"), "\"null\"".to_string()),
+            Type::Null => (suffixed("str"), self.wtf8_literal("null")),
             Type::String if self.nullable(x) => {
                 let option = self.option_ref(x);
-                (suffixed("str"), format!("{option}.unwrap_or(\"null\")"))
+                (suffixed("str"), format!("{option}.unwrap_or({})", self.wtf8_literal("null")))
             }
             Type::String => (suffixed("str"), self.str_ref(x)),
             Type::Char => (suffixed("char"), self.char_arg(x)),
@@ -597,7 +596,8 @@ impl<'a> Gen<'a> {
             Type::Enum(_) if self.enum_maybe_null(x) => (suffixed("str"), self.nullable_enum_text(x)),
             Type::StringBuilder if self.nullable(x) => {
                 let option = self.builder_option(x);
-                let text = format!("&{}({option}).to_string()", self.runtime("or_null"));
+                let null = self.wtf8_literal("null");
+                let text = format!("&{option}.map_or_else(|| {null}.to_owned(), |b| b.text())");
                 (suffixed("str"), text)
             }
             Type::StringBuilder => {
@@ -636,10 +636,15 @@ impl<'a> Gen<'a> {
             let slice = self.slice_of(array);
             let f = self.runtime(if printing { "print_format_objects" } else { "format_objects" });
             // Elements that are never null are not `Option`s.
+            let text = match *element {
+                Type::String if super::shared_strings() => "o.text()",
+                Type::String => "o.clone()",
+                _ => "java::JString::from(o.to_string())",
+            };
             let text = if self.nullable_element(*element) {
-                "o.as_ref().map(|o| o.to_string())"
+                format!("o.as_ref().map(|o| {text})")
             } else {
-                "Some(o.to_string())"
+                format!("Some({text})")
             };
             let texts = format!("{slice}.iter().map(|o| {text}).collect::<Vec<_>>()");
             return Code::atom(format!("{f}({format}, &{texts})"));
@@ -692,9 +697,8 @@ impl<'a> Gen<'a> {
         let mut parts = Vec::new();
         self.parts(e, &mut parts);
         match parts.as_slice() {
-            [Part::Arg(code)] if code.text.ends_with(".to_string()") => code.text.clone(),
-            [Part::Arg(code)] => format!("{}.to_string()", code.receiver()),
-            _ => self.format("format!", parts).text,
+            [Part::Text(code)] if e.ty == Type::String => code.text.clone(),
+            _ => self.concat_text(parts).text,
         }
     }
 
@@ -718,7 +722,7 @@ impl<'a> Gen<'a> {
         let recv = self.recv(&v, kind);
         let format = |spec: &str| {
             let text = if v.literal.is_some() { v.typed() } else { v.text.clone() };
-            Code::atom(format!("format!(\"{{:{spec}}}\", {text})"))
+            Code::atom(format!("java::JString::from(format!(\"{{:{spec}}}\", {text}))"))
         };
         let int = |text: String| Code::new(format!("{text} as i32"), AS);
         // The value as an `i64`, which the runtime's functions take for both kinds.
@@ -757,7 +761,7 @@ impl<'a> Gen<'a> {
             BitsOp::ToStringRadix => {
                 let radix = self.int_arg(&args[1]);
                 let f = self.runtime("to_string_radix");
-                Code::atom(format!("{f}({wide}, {radix})"))
+                Code::atom(format!("{}::from({f}({wide}, {radix}))", self.runtime("JString")))
             }
             BitsOp::ParseRadix | BitsOp::ParseRange => unreachable!("handled above"),
         }

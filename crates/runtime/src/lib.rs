@@ -139,7 +139,7 @@ pub use unsigned::{
     try_parse_unsigned,
 };
 pub use vm::*;
-pub use wtf8::{JString, Wtf8};
+pub use wtf8::{JString, Piece, Wtf8, wtf8};
 
 /// Formats a `double` like Java's `Double.toString`: `1.0`, `0.001`, `1.0E7`, `4.9E-324`.
 pub struct Double(pub f64);
@@ -298,14 +298,8 @@ pub fn min(a: f64, b: f64) -> f64 {
 }
 
 /// Java's `String.length()`, which counts UTF-16 code units.
-pub fn string_length(s: &str) -> i32 {
-    if s.is_ascii() {
-        return s.len() as i32;
-    }
-    // Each character is one unit but those of four bytes, which are two: count the bytes that
-    // start a character, and once more those that start one of four bytes.
-    let units: usize = s.bytes().map(|b| usize::from((b as i8) >= -0x40) + usize::from(b >= 0xF0)).sum();
-    units as i32
+pub fn string_length(s: &Wtf8) -> i32 {
+    s.unit_len() as i32
 }
 
 /// Java's `System.exit`.

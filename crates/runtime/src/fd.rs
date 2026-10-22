@@ -454,17 +454,20 @@ pub(crate) fn is_open(fd: i32) -> bool {
 const EBADF: i32 = 9;
 
 /// The descriptor of a file to read, for `FileInputStream.open0`.
-pub fn fd_open_read(name: &str) -> Result<i32, Failure> {
+pub fn fd_open_read(name: &crate::Wtf8) -> Result<i32, Failure> {
+    let name = &*name.to_string_lossy();
     with(|t| t.open_read(name))
 }
 
 /// The descriptor of a file to write, for `FileOutputStream.open0`.
-pub fn fd_open_write(name: &str, append: bool) -> Result<i32, Failure> {
+pub fn fd_open_write(name: &crate::Wtf8, append: bool) -> Result<i32, Failure> {
+    let name = &*name.to_string_lossy();
     with(|t| t.open_write(name, append))
 }
 
 /// The descriptor of a file to read, or to read and write, for `RandomAccessFile.open0`.
-pub fn fd_open_random(name: &str, mode: i32) -> Result<i32, Failure> {
+pub fn fd_open_random(name: &crate::Wtf8, mode: i32) -> Result<i32, Failure> {
+    let name = &*name.to_string_lossy();
     with(|t| t.open_random(name, mode))
 }
 

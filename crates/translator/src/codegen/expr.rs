@@ -146,32 +146,27 @@ impl<'a> Gen<'a> {
             return self.append_optional(name, value);
         }
         if !mentions(value, target) && !super::shared_strings() {
+            if let ExprKind::Str(s) = &value.kind {
+                return format!("{name}.push_str({})", rust_string(s));
+            }
             if value.ty == Type::String
                 && matches!(value.kind, ExprKind::Str(_) | ExprKind::Var(_))
                 && !self.nullable(value)
             {
-                return format!("{name} += {}", self.str_ref(value));
+                return format!("{name}.push_wtf8({})", self.str_ref(value));
             }
             if matches!(value.ty, Type::Class(..))
                 && self.enum_of(value).is_none()
                 && let Some(index) = self.to_string_index(value)
             {
-                return format!("{name} += &{}", self.method_call(value, index, &[]).text);
+                return format!("{name}.push_wtf8(&{})", self.method_call(value, index, &[]).text);
             }
             let mut parts = Vec::new();
             self.parts(value, &mut parts);
-            if parts.len() == 1 {
-                match parts.pop().expect("one part") {
-                    Part::Lit(text) => return format!("{name} += {}", rust_string(&text)),
-                    Part::Arg(code) => {
-                        let ty = if value.ty == Type::Double { Type::Void } else { value.ty };
-                        return format!("{name} += &{}.to_string()", self.recv(&code, ty));
-                    }
-                }
-            }
-            return format!("{name} += &{}", self.format("format!", parts).text);
+            let pieces = self.pieces(parts).join(", ");
+            return format!("{}({name}, {pieces})", self.runtime("append!"));
         }
-        let mut parts = vec![Part::Arg(Code::atom(name))];
+        let mut parts = vec![Part::Text(Code::atom(name))];
         self.parts(value, &mut parts);
         format!("{name} = {}", self.concat(parts).text)
     }
@@ -282,15 +277,15 @@ impl<'a> Gen<'a> {
             ExprKind::Char(c) => Code::literal(Literal::Char(*c)),
             ExprKind::Bool(b) => Code::atom(b.to_string()),
             ExprKind::Str(s) if super::shared_strings() => Code::atom(self.string_literal(&rust_string(s))),
-            ExprKind::Str(s) if s.is_empty() => Code::atom("String::new()"),
-            ExprKind::Str(s) => Code::atom(format!("String::from({})", rust_string(s))),
+            ExprKind::Str(s) if s.is_empty() => Code::atom("java::JString::new()"),
+            ExprKind::Str(s) => Code::atom(format!("java::JString::from({})", rust_string(s))),
             ExprKind::Var(name) => {
                 let rust = self.local(name);
                 match e.ty {
                     Type::String if self.borrowed.contains(name) && super::shared_strings() => {
                         Code::atom(format!("{rust}.clone()"))
                     }
-                    Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
+                    Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_owned()")),
                     // An object or array narrowed by a null check is a reference to the `Rc`.
                     Type::Class(..) | Type::StringBuilder | Type::Array(_)
                         if self.borrowed.contains(name) =>
@@ -786,9 +781,10 @@ impl<'a> Gen<'a> {
                 self.class_instance(builtin == Builtin::ClassCheck, args)
             }
             Builtin::ComparableClassFor => self.comparable_class_for(&args[0]),
-            Builtin::ClassLiteralName { class, simple } => {
-                Code::atom(format!("String::from({})", rust_string(&self.java_class_name(class, simple))))
-            }
+            Builtin::ClassLiteralName { class, simple } => Code::atom(format!(
+                "java::JString::from({})",
+                rust_string(&self.java_class_name(class, simple))
+            )),
             Builtin::MathAbs => {
                 let x = self.value(&args[0], ty);
                 // Math.abs(Integer.MIN_VALUE) is Integer.MIN_VALUE.

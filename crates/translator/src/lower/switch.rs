@@ -228,8 +228,10 @@ impl<'t> Lowering<'t> {
                     };
                     return Ok(CaseLabel::Value(self.synth(kind, constant.pos(), ty)));
                 }
-                // A constant field of the selector's type is matched by its name, a Rust `const`.
-                if matches!(constant.kind(), "IDENTIFIER" | "MEMBER_SELECT")
+                // A constant field of the selector's type is matched by its name, a Rust `const`;
+                // a string's, by its text, since a string switch matches bytes.
+                if ty != Type::String
+                    && matches!(constant.kind(), "IDENTIFIER" | "MEMBER_SELECT")
                     && constant.symbol().is_some_and(|s| s.constant.is_some())
                     && let Ok(named) = self.expr(constant)
                     && matches!(named.kind, ExprKind::Static { .. })

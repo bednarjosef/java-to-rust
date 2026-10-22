@@ -2,17 +2,17 @@
 //! literal has them, become the characters they stand for. Java reads the string by UTF-16 code
 //! unit, and so does this; a malformed escape throws `IllegalArgumentException`.
 
-use crate::Exception;
 use crate::string::{from_units, units};
+use crate::{Exception, JString, Wtf8};
 
 /// `s.translateEscapes()`, which throws `IllegalArgumentException` for a malformed escape.
-pub fn translate_escapes(s: &str) -> String {
+pub fn translate_escapes(s: &Wtf8) -> JString {
     try_translate_escapes(s).unwrap_or_else(|e| crate::throw_exception(e))
 }
 
 /// `translate_escapes` where the program observes the `IllegalArgumentException`, with the JDK's
 /// message for the first malformed escape.
-pub fn try_translate_escapes(s: &str) -> Result<String, Exception> {
+pub fn try_translate_escapes(s: &Wtf8) -> Result<JString, Exception> {
     const BACKSLASH: u16 = b'\\' as u16;
     let chars = units(s);
     let mut out: Vec<u16> = Vec::with_capacity(chars.len());
@@ -29,7 +29,7 @@ pub fn try_translate_escapes(s: &str) -> Result<String, Exception> {
                 }
                 None => 0,
             };
-            // A lone surrogate is shown as `?`, as `from_units` makes it.
+            // The message shows a lone surrogate as `?`.
             let shown = char::from_u32(u32::from(ch)).unwrap_or('?');
             ch = match shown {
                 'b' => 0x08,
@@ -83,11 +83,11 @@ mod tests {
 
     /// The code points of the translation, so that invisible characters show.
     fn points(s: &str) -> Vec<u32> {
-        translate_escapes(s).chars().map(|c| c as u32).collect()
+        translate_escapes(Wtf8::new(s)).code_points().collect()
     }
 
     fn message(s: &str) -> String {
-        try_translate_escapes(s).unwrap_err().message.unwrap_or_default()
+        try_translate_escapes(Wtf8::new(s)).unwrap_err().message.unwrap_or_default()
     }
 
     #[test]
@@ -115,24 +115,24 @@ mod tests {
 
     #[test]
     fn a_space_escape_is_a_space() {
-        assert_eq!(translate_escapes(r"a\sb"), "a b");
+        assert_eq!(translate_escapes(crate::Wtf8::new(r"a\sb")), "a b");
     }
 
     #[test]
     fn a_backslash_before_a_line_end_is_discarded() {
-        assert_eq!(translate_escapes("a\\\nb"), "ab");
-        assert_eq!(translate_escapes("a\\\r\nb"), "ab");
-        assert_eq!(translate_escapes("a\\\rb"), "ab");
-        assert_eq!(translate_escapes("\\\n\\\n"), "");
+        assert_eq!(translate_escapes(crate::Wtf8::new("a\\\nb")), "ab");
+        assert_eq!(translate_escapes(crate::Wtf8::new("a\\\r\nb")), "ab");
+        assert_eq!(translate_escapes(crate::Wtf8::new("a\\\rb")), "ab");
+        assert_eq!(translate_escapes(crate::Wtf8::new("\\\n\\\n")), "");
         // Only the `\n` after a `\r` belongs to the terminator; a second `\r` stays.
-        assert_eq!(translate_escapes("\\\r\r"), "\r");
+        assert_eq!(translate_escapes(crate::Wtf8::new("\\\r\r")), "\r");
     }
 
     #[test]
     fn text_without_escapes_is_unchanged() {
-        assert_eq!(translate_escapes(""), "");
-        assert_eq!(translate_escapes("plain \u{1F600} text"), "plain \u{1F600} text");
-        assert_eq!(translate_escapes("\\\\n"), "\\n");
+        assert_eq!(translate_escapes(crate::Wtf8::new("")), "");
+        assert_eq!(translate_escapes(crate::Wtf8::new("plain \u{1F600} text")), "plain \u{1F600} text");
+        assert_eq!(translate_escapes(crate::Wtf8::new("\\\\n")), "\\n");
     }
 
     #[test]
@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn a_malformed_escape_is_an_illegal_argument_exception() {
-        let e = crate::catching(|| translate_escapes(r"\q")).unwrap_err();
+        let e = crate::catching(|| translate_escapes(crate::Wtf8::new(r"\q"))).unwrap_err();
         assert_eq!(e.class, "java.lang.IllegalArgumentException");
         assert_eq!(e.message.as_deref(), Some("Invalid escape sequence: \\q \\\\u0071"));
     }

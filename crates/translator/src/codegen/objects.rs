@@ -120,7 +120,7 @@ pub(super) fn default_value(ty: Type) -> &'static str {
         Type::Double | Type::Float => "0.0",
         Type::Boolean => "false",
         Type::String if super::shared_strings() => "java::JStr::default()",
-        Type::String => "String::new()",
+        Type::String => "java::JString::new()",
         // A `java::StringBuilder`, or a `java::SharedStringBuilder` in a program with threads.
         Type::StringBuilder => "Default::default()",
         Type::JavaClass => "java::Class::OBJECT",
@@ -1575,13 +1575,10 @@ impl<'a> Gen<'a> {
                 // A static that may be null shows as `null` and is written as `Some`.
                 let nullable = self.place_nullable(target);
                 let old = match nullable {
-                    true if super::shared_strings() => {
-                        format!("{}({old}.as_deref())", self.runtime("or_null"))
-                    }
-                    true => format!("{old}.unwrap_or_else(|| String::from(\"null\"))"),
+                    true => format!("{old}.as_deref().unwrap_or({})", self.wtf8_literal("null")),
                     false => old,
                 };
-                let mut parts = vec![Part::Arg(Code::atom(old))];
+                let mut parts = vec![Part::Text(Code::atom(old))];
                 self.parts(value, &mut parts);
                 let text = self.concat(parts).text;
                 let text = if nullable { format!("Some({text})") } else { text };
@@ -1715,14 +1712,11 @@ impl<'a> Gen<'a> {
                 // as `Some`: the text is never null.
                 let old = if self.place_nullable(place) {
                     wrap = true;
-                    match super::shared_strings() {
-                        true => format!("{}({old}.as_deref())", self.runtime("or_null")),
-                        false => format!("{old}.unwrap_or_else(|| String::from(\"null\"))"),
-                    }
+                    format!("{old}.as_deref().unwrap_or({})", self.wtf8_literal("null"))
                 } else {
                     old
                 };
-                let mut parts = vec![Part::Arg(Code::atom(old))];
+                let mut parts = vec![Part::Text(Code::atom(old))];
                 self.parts(value, &mut parts);
                 lines.push(format!("let {new} = {};", self.concat(parts).text));
                 new.clone()
@@ -1857,27 +1851,8 @@ impl<'a> Gen<'a> {
     /// of the struct it is emitted in runs. A Java enum's `toString` is a method of its own, which
     /// its `Display` calls, and which may not be `to_string` (javac's `KindName` has the
     /// `toString(Locale, Messages)` of `Formattable` too).
-    pub(super) fn displays(&self, index: usize) -> bool {
-        let m = &self.class.methods[index];
-        // A shared string is the object that the method returns, which `Display` would not keep.
-        if self.class.types[m.class].kind == TypeKind::Enum || super::shared_strings() {
-            return false;
-        }
-        let runs = match self.homes[index] {
-            Home::Class(c) => hierarchy::to_string_impl(self.class, c) == Some(index),
-            Home::Fields(_) => true,
-            _ => false,
-        };
-        m.name == "toString"
-            && m.params.is_empty()
-            && !m.is_static
-            && m.ret == Type::String
-            && runs
-            && self.facts.self_methods.contains(&index)
-            && !self.facts.mutating.contains(&index)
-            && !self.facts.nullable_returns.contains(&index)
-            // `Display` cannot return an exception: one that throws is called (`object_text`).
-            && !self.facts.throwing.contains(&index)
+    pub(super) fn displays(&self, _index: usize) -> bool {
+        false
     }
 
     /// Whether displaying an object of `e`'s class can neither print nor throw, so that printing
