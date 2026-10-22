@@ -150,7 +150,9 @@ impl<'t> Lowering<'t> {
         Ok(Some(ExprKind::MethodCall {
             receiver: Box::new(receiver),
             name: symbol.name.to_string(),
-            args: std::mem::take(args),
+            // An argument converts to its parameter's type, as `range(date)` passes a class's
+            // object for an interface.
+            args: self.convert_args(Some(resolved), std::mem::take(args))?,
             resolved: Some(resolved),
             is_super: false,
         }))

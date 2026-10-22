@@ -149,6 +149,15 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                 }
             }
         }
+        // A parameter that its method sets to a value that may be null (`moment =
+        // moment.plus(days)`) is an `Option`, in every method of its group as below.
+        for (m, name) in &vars {
+            if let Some(i) =
+                class.methods.get(*m).and_then(|method| method.params.iter().position(|p| &p.name == name))
+            {
+                params.push((*m, i));
+            }
+        }
         facts.nullable_vars.extend(vars);
         facts.nullable_vars.extend(declared);
         // The methods of an override group share their parameters' and return value's nullness,

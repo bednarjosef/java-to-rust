@@ -621,7 +621,17 @@ public class JavaTree {
                 return kept.get(0);
             }
         }
-        return typeText(type);
+        // A capture of `?` or `? super T` is bounded by its type variable's bound, as
+        // `ChronoLocalDateTime<?>.toLocalDate()` is a `ChronoLocalDate`: written as a capture of
+        // `? extends` that bound's erasure, which is the capture's erasure.
+        String text = typeText(type);
+        if (type instanceof TypeVariable variable && text.startsWith("capture#") && !text.contains(" of ? extends ")) {
+            String bound = typeText(types.erasure(variable.getUpperBound()));
+            if (!bound.equals("java.lang.Object")) {
+                return text.substring(0, text.indexOf(" of ")) + " of ? extends " + bound;
+            }
+        }
+        return text;
     }
 
     /**
