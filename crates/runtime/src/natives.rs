@@ -158,32 +158,6 @@ pub fn double_to_long_bits(d: f64) -> i64 {
     if d.is_nan() { 0x7ff8_0000_0000_0000 } else { d.to_bits() as i64 }
 }
 
-/// `Double.toHexString`: `NaN` and the infinities as `Double.toString` shows them, else the sign,
-/// `0x`, the significand in hexadecimal without its trailing zeros (`1.` and the fraction for a
-/// normal number, `0.` for a subnormal one, one `0` where the fraction is zero), `p` and the
-/// exponent in decimal (`-1022` for a subnormal number, `0` for zero).
-pub fn double_to_hex_string(d: f64) -> String {
-    if d.is_nan() {
-        return "NaN".to_string();
-    }
-    if d.is_infinite() {
-        return if d > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
-    }
-    let sign = if d.is_sign_negative() { "-" } else { "" };
-    if d == 0.0 {
-        return format!("{sign}0x0.0p0");
-    }
-    let bits = d.to_bits();
-    let subnormal = d.abs() < f64::MIN_POSITIVE;
-    let fraction = format!("{:013x}", bits & 0x000f_ffff_ffff_ffff);
-    let fraction = match fraction.trim_end_matches('0') {
-        "" => "0",
-        trimmed => trimmed,
-    };
-    let (lead, exponent) = if subnormal { (0, -1022) } else { (1, ((bits >> 52) & 0x7ff) as i64 - 1023) };
-    format!("{sign}0x{lead}.{fraction}p{exponent}")
-}
-
 /// `Double.doubleToRawLongBits`.
 pub fn double_to_raw_long_bits(d: f64) -> i64 {
     d.to_bits() as i64
@@ -294,28 +268,6 @@ mod tests {
         copy_slice(&[7, 8, 9], 1, &mut d, 0, 2);
         assert_eq!(d, [8, 9, 0]);
         copy_slice(&[1, 2], 2, &mut d, 3, 0);
-    }
-
-    #[test]
-    fn hex_strings_of_doubles_match_java() {
-        let cases = [
-            (1.0, "0x1.0p0"),
-            (-1.0, "-0x1.0p0"),
-            (2.0, "0x1.0p1"),
-            (3.0, "0x1.8p1"),
-            (0.1, "0x1.999999999999ap-4"),
-            (0.0, "0x0.0p0"),
-            (-0.0, "-0x0.0p0"),
-            (f64::MAX, "0x1.fffffffffffffp1023"),
-            (f64::MIN_POSITIVE, "0x1.0p-1022"),
-            (f64::from_bits(1), "0x0.0000000000001p-1022"),
-            (f64::from_bits(0x0008_0000_0000_0000), "0x0.8p-1022"),
-            (f64::NAN, "NaN"),
-            (f64::NEG_INFINITY, "-Infinity"),
-        ];
-        for (d, text) in cases {
-            assert_eq!(double_to_hex_string(d), text, "{d}");
-        }
     }
 
     #[test]

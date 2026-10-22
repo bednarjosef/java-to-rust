@@ -61,7 +61,6 @@ impl<'t> Lowering<'t> {
             }
             ("java.lang.Double", "doubleToLongBits") => Native::DoubleToLongBits,
             ("java.lang.Double", "doubleToRawLongBits") => Native::DoubleToRawLongBits,
-            ("java.lang.Double", "toHexString") => Native::DoubleToHexString,
             ("java.lang.Double", "longBitsToDouble") => Native::LongBitsToDouble,
             ("java.lang.Float", "floatToIntBits") => Native::FloatToIntBits,
             ("java.lang.Float", "floatToRawIntBits") => Native::FloatToRawIntBits,

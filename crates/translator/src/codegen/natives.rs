@@ -15,10 +15,6 @@ impl<'a> Gen<'a> {
                 let x = self.value(&args[0], Type::Double).text;
                 call(self, "double_to_long_bits", vec![x])
             }
-            Native::DoubleToHexString => {
-                let x = self.value(&args[0], Type::Double).text;
-                call(self, "double_to_hex_string", vec![x])
-            }
             Native::DoubleToRawLongBits | Native::FloatToRawIntBits => {
                 let (from, to) = if native == Native::DoubleToRawLongBits {
                     (Type::Double, "i64")

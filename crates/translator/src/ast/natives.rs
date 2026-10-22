@@ -15,8 +15,6 @@ pub enum Native {
     ArrayCopy,
     DoubleToLongBits,
     DoubleToRawLongBits,
-    /// `Double.toHexString(d)`, of the runtime's `Double`.
-    DoubleToHexString,
     LongBitsToDouble,
     FloatToIntBits,
     FloatToRawIntBits,
