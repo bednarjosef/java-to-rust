@@ -1378,6 +1378,9 @@ impl<'t> Lowering<'t> {
                 let char_arg = args.first().is_some_and(|a| a.ty == Type::Char);
                 self.character_method(node, name, symbol.ty, char_arg)?
             }
+            ("java.util.Objects", "requireNonNull") if args.first().is_some_and(|a| a.ty == Type::Charset) => {
+                return self.required_charset(node, args);
+            }
             // Where the JDK's `Objects` is translated, its calls are calls of it, but for the calls
             // that the members written for records make on values that are not `Object`s.
             ("java.util.Objects", name)

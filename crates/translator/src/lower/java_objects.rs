@@ -31,6 +31,36 @@ impl<'t> Lowering<'t> {
         }
     }
 
+    /// `Objects.requireNonNull(cs)` or `requireNonNull(cs, "message")` of a charset, which is the
+    /// runtime's value rather than an object of the translation:
+    /// `switch (0) { default -> { Charset c = cs; yield c != null ? c : throw new
+    /// NullPointerException("message"); } }`.
+    pub(super) fn required_charset(&self, node: Node<'t>, args: Vec<Expr>) -> Result<ExprKind, Error> {
+        let pos = node.pos();
+        let message = match args.get(1).map(|a| &a.kind) {
+            None => None,
+            Some(ExprKind::Str(message)) => Some(message.clone()),
+            Some(_) => return unsupported(node, "`Objects.requireNonNull` of a charset with a computed message"),
+        };
+        let Some(throw) = self.null_thrown(message.as_deref(), Type::Charset, pos) else {
+            return unsupported(node, "`Objects.requireNonNull` of a charset without `NullPointerException`");
+        };
+        let name = self.fresh_name("charset");
+        let var = || self.synth(ExprKind::Var(name.clone()), pos, Type::Charset);
+        let null = self.synth(ExprKind::Null, pos, Type::Null);
+        let given = self.synth(ExprKind::Binary(BinOp::Ne, Box::new(var()), Box::new(null)), pos, Type::Boolean);
+        let value = ExprKind::Conditional(Box::new(given), Box::new(var()), Box::new(throw));
+        let charset = args.into_iter().next().expect("a charset");
+        let block = vec![
+            Stmt::Local { ty: Type::Charset, name: name.clone(), init: Some(charset), pos },
+            Stmt::Yield(self.synth(value, pos, Type::Charset)),
+        ];
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        })
+    }
+
     /// Whether values of `ty` compare and hash as values: strings, boxes and enums.
     fn compares_as_value(ty: Type) -> bool {
         matches!(ty, Type::String | Type::Boxed(_) | Type::Enum(_))
