@@ -1150,7 +1150,11 @@ impl Messages<'_> {
                         Origin::Member | Origin::Local { .. } | Origin::Anonymous { .. }
                     );
                 let through_this = c == self.method.class && this;
-                if !own || !(through_this || (enclosing && !this)) {
+                // The enclosing instance of a lambda's class read through the enclosing instances
+                // of the lambdas around this code, whose bodies are methods of the same class.
+                let chained =
+                    decl.captures.iter().all(|c| c.field != name) && self.lambda_of(object) == Some(c);
+                if !own || !(through_this || chained || (enclosing && !this)) {
                     return None;
                 }
                 // A superclass's field of the same name is either one: certain only when it is
@@ -1168,12 +1172,11 @@ impl Messages<'_> {
                     (Origin::Lambda { .. }, Some(_)) => Some(JavaField::Captured(
                         self.names.get(self.outermost, object.pos, NameKind::Local, "").map(str::to_string),
                     )),
-                    // The enclosing instance of a lambda's class: `this`, unless that is itself a
-                    // lambda's.
+                    // The enclosing instance of a lambda's class: `this`, also where that is itself
+                    // a lambda's, as javac's method for each lambda's body is one of the class
+                    // around them all.
                     (Origin::Lambda { .. }, None) => {
-                        let enclosing = decl.outer.map(|o| &self.class.types[o].origin);
-                        (name == "outer" && !matches!(enclosing, Some(Origin::Lambda { .. }) | None))
-                            .then_some(JavaField::This)
+                        (name == "outer" && decl.outer.is_some()).then_some(JavaField::This)
                     }
                     (Origin::Local { .. } | Origin::Anonymous { .. }, Some(c)) => {
                         Some(JavaField::Named(format!("val${}", c.name)))
@@ -1191,33 +1194,58 @@ impl Messages<'_> {
         Some(JavaField::Named(name.to_string()))
     }
 
-    /// The enclosing instance of the class whose constructor's code declares the lambda whose
-    /// code this is, read through the lambda's `this` (`object`) as its field `name`: javac's
-    /// method for the lambda takes the constructor's parameter (`outer_param`) as one of its own,
-    /// before the lambda's: the first when the lambda captures no local, which would come before
-    /// it or after it. `None` for another field, `Some(None)` where the parameter is not certain.
+    /// The enclosing instance of the class whose constructor's code declares a lambda, read
+    /// through the lambda's object (`object`, see `lambda_of`) as its field `name`: javac's method
+    /// for the lambda takes the constructor's parameter (`outer_param`) as one of its own, before
+    /// the lambda's, and so does one for a lambda in it: the first when the lambdas capture no
+    /// local, which would come before it or after it. `None` for another field, `Some(None)` where
+    /// the parameter is not certain.
     fn lambda_outer_param(&self, object: &Expr, name: &str) -> Option<Option<String>> {
-        let ExprKind::Field { object: this, name: field } = &object.kind else { return None };
-        let lambda = &self.class.types[self.method.class];
+        let ExprKind::Field { object: inner, name: field } = &object.kind else { return None };
+        let l = self.lambda_of(inner)?;
+        let lambda = &self.class.types[l];
         let Origin::Lambda { method: Some(m), .. } = lambda.origin else { return None };
         let ctor = &self.class.methods[m];
         let class = self.class.class_index(object.ty)?;
         let decl = &self.class.types[class];
         let outer = name.trim_end_matches('_') == "outer" && decl.captures.iter().all(|c| c.field != name);
-        if !(matches!(this.kind, ExprKind::This)
-            && ctor.is_ctor
+        if !(ctor.is_ctor
             && ctor.class == class
             && lambda.outer == Some(class)
             && decl.outer.is_some()
             && outer
-            && matches!(self.java_field(this, field), Some(JavaField::This)))
+            && matches!(self.java_field(inner, field), Some(JavaField::This)))
         {
             return None;
         }
-        if !lambda.captures.is_empty() {
-            return Some(None);
+        // The lambdas from this code's out to the one in the constructor.
+        let mut t = self.method.class;
+        loop {
+            if !self.class.types[t].captures.is_empty() {
+                return Some(None);
+            }
+            if t == l {
+                break;
+            }
+            t = self.class.types[t].outer?;
         }
         Some(self.outer_param(class))
+    }
+
+    /// The lambda's class whose object `e` is, when it is the object of this code's lambda
+    /// (`this`) or one around it, reached through the enclosing instances of the lambdas between.
+    fn lambda_of(&self, e: &Expr) -> Option<usize> {
+        let lambda = |t: usize| matches!(self.class.types[t].origin, Origin::Lambda { .. });
+        match &e.kind {
+            ExprKind::This => Some(self.method.class).filter(|&t| lambda(t)),
+            ExprKind::Field { object, name } => {
+                let inner = self.lambda_of(object)?;
+                let decl = &self.class.types[inner];
+                let outer = name == "outer" && decl.captures.iter().all(|c| &c.field != name);
+                decl.outer.filter(|&o| outer && lambda(o))
+            }
+            _ => None,
+        }
     }
 
     /// The enclosing instance of `object`, of an inner class of the JDK, as the class file reads

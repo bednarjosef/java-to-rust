@@ -1,6 +1,10 @@
 // The messages of a null field of an enclosing instance, which javac reads from the constructor's
 // parameter in the constructor's code (`<parameter1>.chk`), also in a lambda there, and from the
-// field in the initializers the constructor runs (`this.this$0.chk`).
+// field in the initializers the constructor runs (`this.this$0.chk`). A lambda in a lambda reads
+// them as the one around it does, its body being a method of the same class.
+import java.util.List;
+import java.util.function.Consumer;
+
 public class NullEnclosingInstances {
     Object chk = null;
 
@@ -97,6 +101,53 @@ public class NullEnclosingInstances {
         }
     }
 
+    class Lambdas {
+        Object lint = null;
+
+        void own(List<String> items) {
+            items.forEach(a -> {
+                Runnable r = () -> lint.toString();
+                r.run();
+            });
+        }
+
+        void enclosing(List<String> items) {
+            items.forEach(a -> {
+                Consumer<String> c = b -> chk.toString();
+                c.accept(a);
+            });
+        }
+
+        Lambdas() {
+        }
+
+        Lambdas(List<String> items) {
+            items.forEach(a -> {
+                Runnable r = () -> chk.toString();
+                r.run();
+            });
+        }
+    }
+
+    void capturing(List<String> items, String site) {
+        items.forEach(a -> {
+            Runnable r = () -> {
+                if (site.isEmpty()) {
+                    return;
+                }
+                chk.toString();
+            };
+            r.run();
+        });
+    }
+
+    void deeper(List<String> items) {
+        items.forEach(a -> items.forEach(b -> {
+            Runnable r = () -> chk.hashCode();
+            r.run();
+        }));
+    }
+
     static void run(Runnable r) {
         try {
             r.run();
@@ -118,5 +169,11 @@ public class NullEnclosingInstances {
         run(() -> o.new InLambda());
         run(() -> o.new InLambdaWithOwn());
         run(() -> o.new InitializedLambda());
+        List<String> one = List.of("x");
+        run(() -> o.new Lambdas().own(one));
+        run(() -> o.new Lambdas().enclosing(one));
+        run(() -> o.new Lambdas(one));
+        run(() -> o.capturing(one, "s"));
+        run(() -> o.deeper(one));
     }
 }

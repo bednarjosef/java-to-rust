@@ -448,7 +448,8 @@ static field and each local: the slot `Gen` gives it, read after code generation
 are javac's own rather than a copy of its rules. A program whose sources are a module that the
 JDK has too (javac's `jdk.compiler`) compiles as part of that module (`--patch-module`), as the
 unnamed module may not hold its packages. A lambda's body is a method whose first
-parameters are its captures; a local or anonymous class reads a captured local as
+parameters are its captures, of the class around it, also for a lambda in a lambda, which so
+reads the enclosing instance as `this` too; a local or anonymous class reads a captured local as
 `this.val$x`; an inner class's constructor reads its enclosing instance from its first
 parameter (`<parameter1>.chk`), as does a lambda in it, which takes that as a parameter, while
 the initializers the constructor runs read the field (`this.this$0.chk`); javac's own locals are named too (the `s$` of a string `switch`, the iterator
