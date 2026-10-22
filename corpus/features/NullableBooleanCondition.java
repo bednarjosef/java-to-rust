@@ -41,6 +41,11 @@ public class NullableBooleanCondition {
         } catch (NullPointerException e) {
             System.out.println("caught " + e.getMessage());
         }
+        try {
+            System.out.println(value(Integer.valueOf(7)));
+        } catch (ClassCastException e) {
+            System.out.println("caught a cast");
+        }
         pick(maybe(-2), "d");
     }
 }
