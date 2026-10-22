@@ -71,6 +71,7 @@ impl<'t> Lowering<'t> {
             catch_panics: false,
             stubbing: Cell::new(false),
             stubbed: Default::default(),
+            body_methods: Default::default(),
             annotation_types: Default::default(),
             rejected_classes: Default::default(),
             callers: Default::default(),
@@ -146,6 +147,9 @@ impl<'t> Lowering<'t> {
                 }
                 kind => return unsupported(member, &kind_words(kind)),
             }
+        }
+        if node.kind() == "ENUM" {
+            self.body_methods(index);
         }
         Ok(())
     }
