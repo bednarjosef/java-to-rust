@@ -771,6 +771,17 @@ impl<'t> Lowering<'t> {
         if symbol.owner != VAR_HANDLE {
             return Ok(None);
         }
+        // The static fences, which the JDK makes `Unsafe`'s `loadFence`, `storeFence` and
+        // `fullFence`, each of which is a full fence (`Native::FullFence`).
+        if symbol.is_static
+            && matches!(
+                symbol.name,
+                "fullFence" | "acquireFence" | "releaseFence" | "loadLoadFence" | "storeStoreFence"
+            )
+            && node.list("arguments").next().is_none()
+        {
+            return Ok(Some(ExprKind::Builtin(Builtin::Native(Native::FullFence), Vec::new())));
+        }
         let receiver = node.child("methodSelect")?.get("expression");
         let (Some((put, update)), Some(handle)) =
             (var_handle_method(symbol.name), receiver.and_then(|r| self.var_handle(r)))
