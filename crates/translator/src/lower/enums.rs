@@ -326,10 +326,43 @@ impl<'t> Lowering<'t> {
     }
 }
 
+/// Whether the constructor `m`, with the constructors it calls first, cannot let the object it
+/// builds out before it returns: it uses `this` only to read and set its fields, calls no method
+/// of an object and creates none. Then no method of a subclass runs on the object while it is
+/// built, to read a field that the subclass's constructor has not set yet.
+fn keeps_this(class: &Class, m: usize, depth: usize) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    let (mut kept, mut this, mut fields) = (true, 0, 0);
+    let mut chained = Vec::new();
+    let of_this = |object: &Expr| matches!(object.kind, ExprKind::This);
+    for stmt in &class.methods[m].body {
+        let mut each = |e: &Expr| match &e.kind {
+            ExprKind::This => this += 1,
+            ExprKind::Field { object, .. } if of_this(object) => fields += 1,
+            ExprKind::Assign { target: Place::Field { object, .. }, .. }
+            | ExprKind::IncDec { target: Place::Field { object, .. }, .. }
+                if of_this(object) =>
+            {
+                fields += 1
+            }
+            ExprKind::MethodCall { .. } | ExprKind::New { .. } => kept = false,
+            ExprKind::SuperInit { resolved, .. } | ExprKind::ThisCall { resolved, .. } => {
+                chained.push(*resolved)
+            }
+            _ => {}
+        };
+        visit_stmt(stmt, &mut |top| visit_expr(top, &mut each), &mut |_| {});
+    }
+    kept && this == fields && chained.into_iter().all(|r| r.is_some_and(|r| keeps_this(class, r, depth + 1)))
+}
+
 /// Whether `value` is the `null` literal written where an enum of type `ty` is expected.
 /// Whether the instance field `name` of class `index` is set before any read: every constructor
-/// begins with `this.name = value`, where `value` does not read the field, and no initializer of
-/// the class reads it. Then the field is never `null` where Java could see it.
+/// begins with `this.name = value`, where `value` does not read the field, after at most a
+/// `super(..)` that cannot let the object out (`keeps_this`), and no initializer of the class
+/// reads it. Then the field is never `null` where Java could see it.
 fn set_before_use(class: &Class, index: usize, name: &str) -> bool {
     let reads = |e: &Expr| {
         let mut read = false;
@@ -359,7 +392,15 @@ fn set_before_use(class: &Class, index: usize, name: &str) -> bool {
     };
     !ctors.is_empty()
         && ctors.iter().all(|m| {
-            for stmt in &m.body {
+            for (i, stmt) in m.body.iter().enumerate() {
+                if i == 0
+                    && let Stmt::Expr(Expr { kind: ExprKind::SuperInit { args, resolved: Some(r) }, .. }) =
+                        stmt
+                    && !args.iter().any(|a| reads(a))
+                    && keeps_this(class, *r, 0)
+                {
+                    continue;
+                }
                 let Stmt::Expr(Expr {
                     kind: ExprKind::Assign { op: None, target: Place::Field { object, name: n }, value },
                     ..
