@@ -512,9 +512,12 @@ impl<'a> Gen<'a> {
         if let Some(t) = self.enum_of(object) {
             return self.enum_field_path(t, object.ty, name);
         }
-        let field = snake_case(name);
-        let (Some(s), Some(owner)) = (self.struct_class(object), self.class.field_owner(object.ty, name))
-        else {
+        let declared = self.class.field_owner(object.ty, name);
+        let field = match declared {
+            Some(owner) => field_name(&self.class.types[owner], name),
+            None => snake_case(name),
+        };
+        let (Some(s), Some(owner)) = (self.struct_class(object), declared) else {
             return field;
         };
         // A field of the struct's class that the expression's type does not have: `super.clone()`
@@ -524,6 +527,7 @@ impl<'a> Gen<'a> {
         } else {
             self.class.hierarchy.field_owner(s, name)
         };
+        let field = field_name(&self.class.types[owner], name);
         hierarchy::base_path(self.facts, self.class, s, owner) + &field
     }
 
@@ -1148,10 +1152,23 @@ impl<'a> Gen<'a> {
         if let Some(constant) = self.constant_read(class, name, ty) {
             return constant;
         }
+        self.static_cell_read(class, name, ty, false)
+    }
+
+    /// A static that starts empty (`Facts::placeholder_statics`) read as the `Option` it holds,
+    /// `None` while its class's initialization, under way, has not set it yet; `None` for any
+    /// other static.
+    pub(super) fn placeholder_read(&mut self, class: usize, name: &str, ty: Type) -> Option<Code> {
+        let placeholder = self.facts.placeholder_statics.contains(&(class, name.to_string()));
+        placeholder.then(|| self.static_cell_read(class, name, ty, true))
+    }
+
+    /// A read of the cell of a static, which initializes its class first. A static that starts
+    /// empty holds its value once its class is initialized: it is that value, unless `optional`.
+    fn static_cell_read(&mut self, class: usize, name: &str, ty: Type, optional: bool) -> Code {
         let cell = cell_name(&self.class.types[class], name);
         let read = Slot::Static { cell, plain: is_cell(ty) }.read(self.clones(ty));
-        // A static that starts empty holds its value once its class is initialized.
-        let read = if self.facts.placeholder_statics.contains(&(class, name.to_string())) {
+        let read = if !optional && self.facts.placeholder_statics.contains(&(class, name.to_string())) {
             format!("{}({read})", self.runtime("non_null"))
         } else {
             read
@@ -1711,7 +1728,7 @@ impl<'a> Gen<'a> {
         }
         for f in &decl.fields {
             let ty = self.field_ty_name(f.ty, self.field_nullable(&decl.name, &f.name));
-            self.line(&format!("{}{}: {ty},", self.vis(), snake_case(&f.name)));
+            self.line(&format!("{}{}: {ty},", self.vis(), field_name(decl, &f.name)));
         }
         self.indent -= 1;
         self.line("}");
@@ -1891,7 +1908,7 @@ impl<'a> Gen<'a> {
             let nullable = self.field_nullable(name, &f.name);
             let value = self.field_value(f.init.as_ref().expect("filtered"), f.ty, nullable);
             self.guarded = outer;
-            let field = snake_case(&f.name);
+            let field = field_name(&class.types[index], &f.name);
             if by_value {
                 self.line(&format!("{}.{field} = {value};", self.this_name()));
             } else {
@@ -1940,7 +1957,7 @@ impl<'a> Gen<'a> {
                 fields.extend(decl.fields.iter().map(|f| {
                     format!(
                         "{}: {}",
-                        snake_case(&f.name),
+                        field_name(decl, &f.name),
                         self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name))
                     )
                 }));

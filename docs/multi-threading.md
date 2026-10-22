@@ -452,6 +452,14 @@ the null check it is today (a lock no other thread can contend is invisible, and
 `IllegalMonitorStateException` for `notify` outside `synchronized` is still raised, by a
 `java::check_owner` call when the analysis cannot see the enclosing region).
 
+A known difference from Java: a string, a boxed value or a `Class` held as an `Object` has no
+monitor, because the translation keeps them as values without an identity of their own. Where
+an `Object` that is locked may hold one of them as well as objects of the program (as
+`Collections.synchronizedSet(set, mutex)` locks the `Properties` it is given), the objects keep
+their monitors, and locking, waiting on or notifying such a value ends the program with
+"synchronizing on, waiting on or notifying a String, a boxed value or a Class held as an Object
+is not supported by the translation" (`java::unkept_monitor`), where Java would lock it.
+
 ### 3.2 Two forms
 
 **Fused** (`Arc<java::Locked<C>>`, or `Arc<java::Monitor<C>>` when the class uses `wait`):

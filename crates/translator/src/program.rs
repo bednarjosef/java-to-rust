@@ -14,12 +14,12 @@ pub use modules::Contents as ModuleContents;
 pub use reach::{
     CLASS_KINDS, FORMAT_IN_LOCALE, FieldUpdate, IN_MODULE, LOCALE_LANGUAGE, Lookup, LookupKind,
     PRINT_FORMATTED, Reach, STRING_STREAMS, TRANSLATED_LANG_ACCESS, TRANSLATED_LANG_ACCESS_CLASS,
-    TRANSLATED_MODULES, TRANSLATED_NESTED, TRANSLATED_PROPERTIES, UNSET_PROPERTIES, caller_query,
-    charset_coder, class_bound, class_for_name, class_name, component_array, computed_for_name,
+    TRANSLATED_MODULES, TRANSLATED_NESTED, TRANSLATED_PROPERTIES, TRANSLATED_SEGMENTS, UNSET_PROPERTIES,
+    caller_query, charset_coder, class_bound, class_for_name, class_name, component_array, computed_for_name,
     created_by_name, direct_stream_call, field_offset_named, is_ensure_initialized, literal_class,
     live_branch, lookup, module_call, module_for_name, provided, recreated_exception, redirected_call,
-    release_query, standard_stream_field, stream_of_call, unsafe_field_access, unsafe_field_update,
-    unset_property_ifs, untranslated, writes_string_array,
+    release_query, segment_access, standard_stream_field, stream_of_call, unsafe_field_access,
+    unsafe_field_update, unset_property_ifs, untranslated, writes_string_array,
 };
 pub use survey::Survey;
 

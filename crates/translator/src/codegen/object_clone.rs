@@ -22,9 +22,9 @@ impl<'a> Gen<'a> {
                     } else {
                         ("o", "let o = o.borrow(); ")
                     };
-                    let literal = self.copy_literal(c, &|g, path, f| {
+                    let literal = self.copy_literal(c, &|g, path, f, rust| {
                         let clone = if g.clones(f.ty) { ".clone()" } else { "" };
-                        format!("{read}.{path}{}{clone}", snake_case(&f.name))
+                        format!("{read}.{path}{rust}{clone}")
                     });
                     format!("{variant}(o) => {{ {borrow}{variant}({}) }}", self.copy_handle(c, literal))
                 } else {
@@ -46,26 +46,28 @@ impl<'a> Gen<'a> {
                 (name, value)
             })
             .collect();
-        let literal = self.copy_literal(c, &|_, _, f| {
+        let literal = self.copy_literal(c, &|_, _, f, _| {
             reads.iter().find(|(name, _)| *name == f.name).map(|(_, v)| v.clone()).unwrap_or_default()
         });
         Code::atom(self.copy_handle(c, literal))
     }
 
-    /// The struct literal of an object of class `c`: each field's value is `read(path, field)`,
+    /// The struct literal of an object of class `c`: each field's value is `read(path, field, rust)`,
     /// where `path` leads from the object's struct to the struct that holds the field (`base.`),
     /// the fields struct of a superclass that the struct embeds as `base`.
-    fn copy_literal(&self, c: usize, read: &dyn Fn(&Self, &str, &Field) -> String) -> String {
+    fn copy_literal(&self, c: usize, read: &dyn Fn(&Self, &str, &Field, &str) -> String) -> String {
         self.literal_at(c, "", read)
     }
 
-    fn literal_at(&self, k: usize, path: &str, read: &dyn Fn(&Self, &str, &Field) -> String) -> String {
+    fn literal_at(&self, k: usize, path: &str, read: &dyn Fn(&Self, &str, &Field, &str) -> String) -> String {
         let mut parts = Vec::new();
         if let Some(a) = hierarchy::embedded(self.facts, self.class, k) {
             parts.push(format!("base: {}", self.literal_at(a, &format!("{path}base."), read)));
         }
-        for f in &self.class.types[k].fields {
-            parts.push(format!("{}: {}", snake_case(&f.name), read(self, path, f)));
+        let decl = &self.class.types[k];
+        for f in &decl.fields {
+            let rust = field_name(decl, &f.name);
+            parts.push(format!("{rust}: {}", read(self, path, f, &rust)));
         }
         format!("{} {{ {} }}", self.struct_of(k), parts.join(", "))
     }
