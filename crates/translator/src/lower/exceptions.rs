@@ -29,6 +29,19 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("InputMismatchException", "java.util"),
     ("EmptyStackException", "java.util"),
     ("MissingResourceException", "java.util"),
+    ("IllegalFormatException", "java.util"),
+    ("DuplicateFormatFlagsException", "java.util"),
+    ("FormatFlagsConversionMismatchException", "java.util"),
+    ("IllegalFormatArgumentIndexException", "java.util"),
+    ("IllegalFormatCodePointException", "java.util"),
+    ("IllegalFormatConversionException", "java.util"),
+    ("IllegalFormatFlagsException", "java.util"),
+    ("IllegalFormatPrecisionException", "java.util"),
+    ("IllegalFormatWidthException", "java.util"),
+    ("MissingFormatArgumentException", "java.util"),
+    ("MissingFormatWidthException", "java.util"),
+    ("UnknownFormatConversionException", "java.util"),
+    ("UnknownFormatFlagsException", "java.util"),
     ("IOException", "java.io"),
     ("FileNotFoundException", "java.io"),
     ("EOFException", "java.io"),
@@ -132,6 +145,7 @@ const RAISED: &[(&str, &[&str])] = &[
             "enum#valueOf",
             "java.lang.Enum#valueOf",
             "java.lang.Character#toChars",
+            "java.lang.Character#toString",
             // An invalid code point of `new String(codePoints, offset, count)`.
             "java.lang.String#<init>",
             "java.lang.AbstractStringBuilder#appendCodePoint",
@@ -155,6 +169,19 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.util.zip.Inflater#setDictionary",
         ],
     ),
+    // A format that the arguments do not fit (`Builtin::Format`).
+    ("java.util.DuplicateFormatFlagsException", FORMATS),
+    ("java.util.FormatFlagsConversionMismatchException", FORMATS),
+    ("java.util.IllegalFormatArgumentIndexException", FORMATS),
+    ("java.util.IllegalFormatCodePointException", FORMATS),
+    ("java.util.IllegalFormatConversionException", FORMATS),
+    ("java.util.IllegalFormatFlagsException", FORMATS),
+    ("java.util.IllegalFormatPrecisionException", FORMATS),
+    ("java.util.IllegalFormatWidthException", FORMATS),
+    ("java.util.MissingFormatArgumentException", FORMATS),
+    ("java.util.MissingFormatWidthException", FORMATS),
+    ("java.util.UnknownFormatConversionException", FORMATS),
+    ("java.util.UnknownFormatFlagsException", FORMATS),
     // Bad compressed data (`Native::InflateBytes`).
     ("java.util.zip.DataFormatException", &["java.util.zip.Inflater#inflate"]),
     // A monitor that the thread does not hold.
@@ -247,6 +274,14 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.Float#",
         ],
     ),
+];
+
+/// The calls that format text with the runtime's `format` (`Builtin::Format`).
+const FORMATS: &[&str] = &[
+    "java.lang.String#format",
+    "java.lang.String#formatted",
+    "java.io.PrintStream#printf",
+    "java.io.PrintStream#format",
 ];
 
 /// The operation without which the runtime never raises `InterruptedException`.
@@ -699,7 +734,14 @@ fn raise_classes(uses: &mut Uses, raised: &mut HashSet<String>) {
             || uses.catches.iter().any(|c| is_standard(c) && standard_subclass(class, c));
         if caught && operations.iter().any(|o| uses.operations.contains(*o)) {
             uses.classes.insert(class.to_string());
-            uses.members.insert((class.to_string(), "<init>".into(), "(java.lang.String)void".into()));
+            // A format's exception is built from the message and a `raised` flag (see
+            // `raised_objects`), since its `(String)` constructor, if any, takes something else.
+            let from_message = if standard_subclass(class, "java.util.IllegalFormatException") {
+                "(java.lang.String,boolean)void"
+            } else {
+                "(java.lang.String)void"
+            };
+            uses.members.insert((class.to_string(), "<init>".into(), from_message.into()));
             if BARE.contains(class) {
                 uses.members.insert((class.to_string(), "<init>".into(), "()void".into()));
             }
@@ -802,11 +844,12 @@ impl Standard {
                     let member = (class.clone(), text(m, "name"), text(&m["symbol"], "type"));
                     // An interface's abstract methods, which its lambdas implement.
                     let is_abstract = interface && m["body"].is_null();
-                    // A method that implements an interface's method that is used, which a call of
-                    // that one may run (`ThreadGroup.uncaughtException`).
+                    // A method that implements or overrides a standard method that is used, which a
+                    // call of that one may run (`ThreadGroup.uncaughtException`, the `getMessage`
+                    // of a format's exception).
                     let overrides = m["symbol"]["overrides"].as_array().into_iter().flatten().any(|o| {
                         let owner = text(o, "owner");
-                        decl(&owner).is_some_and(|i| i["kind"] == "INTERFACE")
+                        decl(&owner).is_some()
                             && uses.members.contains(&(owner, member.1.clone(), text(o, "type")))
                     });
                     if is_abstract || overrides {
@@ -934,9 +977,15 @@ impl<'t> Lowering<'t> {
             if !self.standard.raised.contains(&decl.name) {
                 continue;
             }
-            let ctor = methods.iter().position(|m| {
-                m.is_ctor && m.class == t && m.params.len() == 1 && m.params[0].ty == Type::String
-            });
+            // A class whose `(String)` constructor is not from its message (a format's exceptions)
+            // has one from the message and a `raised` flag.
+            let from_message = |m: &Method| m.params.len() == 1 && m.params[0].ty == Type::String;
+            let raised = |m: &Method| {
+                m.params.len() == 2 && m.params[0].ty == Type::String && m.params[1].ty == Type::Boolean
+            };
+            let of_class = |m: &&Method| m.is_ctor && m.class == t;
+            let ctor = (methods.iter().position(|m| of_class(&m) && raised(m)))
+                .or_else(|| methods.iter().position(|m| of_class(&m) && from_message(m)));
             let Some(ctor) = ctor else { continue };
             let expr = |kind: ExprKind, ty: Type| {
                 let id = self.next_id.get();
@@ -954,10 +1003,11 @@ impl<'t> Lowering<'t> {
                 ));
             }
             let message = expr(ExprKind::Var("raisedMessage".to_string()), Type::String);
-            out.push(expr(
-                ExprKind::New { class: t, args: vec![message], ctor: Some(ctor) },
-                Type::class(&decl.name),
-            ));
+            let mut args = vec![message];
+            if methods[ctor].params.len() == 2 {
+                args.push(expr(ExprKind::Bool(true), Type::Boolean));
+            }
+            out.push(expr(ExprKind::New { class: t, args, ctor: Some(ctor) }, Type::class(&decl.name)));
         }
         out
     }

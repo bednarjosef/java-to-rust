@@ -356,7 +356,10 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::OutFlush
             | Native::ErrFlush,
         ) => &[],
-        Builtin::CodePoint(CodePointOp::ToCharsInto) => &["java.lang.IllegalArgumentException"],
+        // A code point that is not valid (`java::to_chars`, `code_point_string`).
+        Builtin::CodePoint(CodePointOp::ToCharsInto | CodePointOp::ToChars | CodePointOp::ToString) => {
+            &["java.lang.IllegalArgumentException"]
+        }
         Builtin::CodePoint(
             CodePointOp::CharCount
             | CodePointOp::ToCodePoint
@@ -400,7 +403,21 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             {
                 &[]
             }
-            _ => &["?"],
+            // What the runtime's `format` raises (`format.rs`); a format it does not support ends
+            // the program.
+            _ => &[
+                "java.util.DuplicateFormatFlagsException",
+                "java.util.FormatFlagsConversionMismatchException",
+                "java.util.IllegalFormatArgumentIndexException",
+                "java.util.IllegalFormatCodePointException",
+                "java.util.IllegalFormatConversionException",
+                "java.util.IllegalFormatFlagsException",
+                "java.util.IllegalFormatPrecisionException",
+                "java.util.IllegalFormatWidthException",
+                "java.util.MissingFormatArgumentException",
+                "java.util.MissingFormatWidthException",
+                "java.util.UnknownFormatConversionException",
+            ],
         },
         // A zero divisor.
         Builtin::Unsigned(UnsignedOp::Divide | UnsignedOp::Remainder, _) => {
