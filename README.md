@@ -400,8 +400,9 @@ A small subset, end to end:
   `Byte`, `Short` and `Character` methods, `String`, `StringBuilder` and `StringBuffer`, and
   `String.format`, all hand-written in the runtime with Java's exact results:
   - `Math` and `StrictMath`: `floorDiv`, `floorMod`, the `*Exact` integer methods (they throw on
-    overflow), `round`, `rint`, `clamp`, `copySign`, `hypot`, `fma`, `ulp`, `nextUp`/`nextDown`,
-    `max`/`min` on every type, and the rest of the common ones.
+    overflow), `multiplyHigh`, `unsignedMultiplyHigh`, `multiplyFull`, `round`, `rint`, `clamp`,
+    `copySign`, `hypot`, `fma`, `ulp`, `nextUp`/`nextDown`, `max`/`min` on every type, and the rest
+    of the common ones.
   - `Double`, `Float` and `Boolean`: `isNaN`, `isInfinite`, `isFinite`, `compare`, `sum`,
     `max`/`min`, `parseDouble`, `parseFloat`, `parseBoolean`, `logicalAnd`/`logicalOr`/
     `logicalXor`, `toHexString` (`hex_float.rs`), and the `valueOf` of both with Java's grammar
