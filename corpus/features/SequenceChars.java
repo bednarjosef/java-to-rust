@@ -1,7 +1,7 @@
 /**
- * `CharSequence.getChars` on a string, a builder and a class that has only `charAt` and `length`,
- * which gets the interface's default, with ranges outside the sequence or the array and a null
- * array.
+ * `CharSequence.getChars` on a string, a builder and classes that have only `charAt` and `length`,
+ * one of them through an interface that extends `CharSequence`, which get the interface's default,
+ * with ranges outside the sequence or the array and a null array.
  */
 public class SequenceChars {
     /** A sequence of the letters from `first`, `count` of them. */
@@ -35,6 +35,40 @@ public class SequenceChars {
                 sb.append(charAt(i));
             }
             return sb.toString();
+        }
+    }
+
+    /** A sequence with a name, as javac's names are. */
+    interface Named extends CharSequence {
+        String name();
+    }
+
+    /** The text of a string, through `Named`. */
+    static class Word implements Named {
+        private final String text;
+
+        Word(String text) {
+            this.text = text;
+        }
+
+        public String name() {
+            return "word";
+        }
+
+        public int length() {
+            return text.length();
+        }
+
+        public char charAt(int index) {
+            return text.charAt(index);
+        }
+
+        public CharSequence subSequence(int start, int end) {
+            return new Word(text.substring(start, end));
+        }
+
+        public String toString() {
+            return text;
         }
     }
 
@@ -77,7 +111,7 @@ public class SequenceChars {
     }
 
     public static void main(String[] args) {
-        CharSequence[] all = {"hello", new StringBuilder("world"), new Letters('a', 6)};
+        CharSequence[] all = {"hello", new StringBuilder("world"), new Letters('a', 6), new Word("kettle")};
         for (CharSequence s : all) {
             System.out.println(copy(s, 0, s.length(), new char[s.length()], 0));
             System.out.println(copy(s, 1, 3, "........".toCharArray(), 4));
