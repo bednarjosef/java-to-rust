@@ -96,7 +96,15 @@ impl<'a> Gen<'a> {
                 let chars = self.slice_of(&args[0]);
                 call(self, if newline { "eprintln_chars" } else { "eprint_chars" }, vec![chars])
             }
+            // `java.home` falls back to the translator's JDK, its argument.
+            Native::SystemProperty("java.home") => {
+                let fallback = self.text_ref(&args[0]);
+                call(self, "java_home", vec![fallback])
+            }
             Native::SystemProperty(key) => call(self, "system_property", vec![rust_string(key)]),
+            Native::FullFence => {
+                Code::atom("std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst)".to_string())
+            }
             Native::TotalMemory => call(self, "total_memory", vec![]),
             Native::FreeMemory => call(self, "free_memory", vec![]),
             Native::MaxMemory => call(self, "max_memory", vec![]),
@@ -136,6 +144,10 @@ impl<'a> Gen<'a> {
                 let tid = self.value(&args[0], Type::Long).text;
                 call(self, "thread_alive", vec![tid])
             }
+            Native::ThreadState => {
+                let tid = self.value(&args[0], Type::Long).text;
+                call(self, "thread_state", vec![tid])
+            }
             Native::ThreadJoin => {
                 let (tid, millis) =
                     (self.value(&args[0], Type::Long).text, self.value(&args[1], Type::Long).text);
@@ -160,6 +172,7 @@ impl<'a> Gen<'a> {
                 call(self, "unpark", vec![tid])
             }
             Native::InstallUncaught => self.install_uncaught(args),
+            Native::InstallTrace => self.install_trace(args),
             Native::UncaughtException => {
                 let ty = self.ty_name(ty);
                 call(self, &format!("pending_uncaught::<{ty}>"), vec![])
@@ -187,7 +200,12 @@ impl<'a> Gen<'a> {
             | Native::FileWriteBytes
             | Native::FileIsRegular
             | Native::FileLength
-            | Native::FilePosition => self.file_native(native, args, id),
+            | Native::FilePosition
+            | Native::FileOpenRandom
+            | Native::FileSeek
+            | Native::FileSetLength => self.file_native(native, args, id),
+            Native::FileSystem(name) => self.file_system_native(name, args, ty, id),
+            Native::Unix(name) => self.unix_native(name, args, ty),
             // The lowering drops its statement; anywhere else it is the unit it returns.
             Native::Nothing => Code::atom("()"),
             Native::CdsConfigStatus => call(self, "cds_config_status", vec![]),
@@ -197,6 +215,9 @@ impl<'a> Gen<'a> {
                 let offset = self.value(&args[0], Type::Long).text;
                 call(self, "nano_time_adjustment", vec![offset])
             }
+            // The javaHome argument is dropped: it is a property read, and `time_zone.rs` does not use it.
+            Native::SystemTimeZoneId => call(self, "system_time_zone_id", vec![]),
+            Native::SystemGmtOffsetId => call(self, "system_gmt_offset_id", vec![]),
             Native::ArrayBaseOffset => call(self, "array_base_offset", vec![]),
             Native::ArrayIndexScale(element) => call(self, "array_index_scale", vec![rust_string(element)]),
             Native::DescriptorHandle | Native::DescriptorAppend => {
@@ -216,6 +237,23 @@ impl<'a> Gen<'a> {
                 let bytes = self.slice_of(&args[1]);
                 let (off, len) = (self.value(&args[2], Type::Int).text, self.value(&args[3], Type::Int).text);
                 call(self, "crc32_update_bytes", vec![crc, bytes, off, len])
+            }
+            Native::InflateInit
+            | Native::InflateBytes
+            | Native::InflateAdler
+            | Native::InflateReset
+            | Native::InflateEnd
+            | Native::InflateSetDictionary => self.inflate_native(native, args, id),
+            Native::NoPendingReferences => Code::atom("false"),
+            Native::SecureSeed => {
+                let num_bytes = self.value(&args[0], Type::Int).text;
+                let call = Code::atom(format!("{}({num_bytes})", self.runtime("try_secure_seed")));
+                if self.facts.raising.contains(&id) {
+                    let checked = format!("{}.map_err({})", call.text, self.runtime("Failure::exception"));
+                    Code::atom(self.passed_on(Code::atom(checked)))
+                } else {
+                    Code::atom(format!("{}({})", self.runtime("or_throw"), call.text))
+                }
             }
         }
     }
@@ -280,6 +318,23 @@ impl<'a> Gen<'a> {
              {pending}(uncaught); {body}; true }}, |e: &dyn std::any::Any| \
              e.downcast_ref::<{throwable}>().map(|e| String::from(match e {{ {} }})))",
             arms.join(", ")
+        ))
+    }
+
+    /// `Native::InstallTrace` with its call of `Throwable.uncaughtTrace()`: the runtime gets a
+    /// function that makes an uncaught exception of the program's `Throwable` the pending one,
+    /// which `uncaught0()` returns, and gives the text of its stack trace.
+    fn install_trace(&mut self, args: &'a [Expr]) -> Code {
+        let throwable = self.throwable_type();
+        let attempts = std::mem::take(&mut self.attempts);
+        let throwing = std::mem::replace(&mut self.throwing, false);
+        let text = self.value(&args[0], Type::String).text;
+        self.attempts = attempts;
+        self.throwing = throwing;
+        let (set, pending) = (self.runtime("set_trace_hook"), self.runtime("set_pending_uncaught"));
+        Code::atom(format!(
+            "{set}(|e: &dyn std::any::Any| e.downcast_ref::<{throwable}>().map(|e| {{ \
+             {pending}(e.clone()); {text} }}))"
         ))
     }
 

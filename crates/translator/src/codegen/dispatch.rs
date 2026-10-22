@@ -372,6 +372,14 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The name that a pattern binds from `source` (`pattern_source`). Where no value of the
+    /// program is a `T` (`None::<T>`), the code that would run with it may still assign fields of
+    /// it, as of a value of a class that no object of the program is: it is bound `mut` there.
+    pub(super) fn pattern_binding(&self, name: &str, source: &str) -> String {
+        let local = self.local(name);
+        if source.starts_with("None::<") { format!("mut {local}") } else { local }
+    }
+
     /// The `Option` that `value instanceof T name` binds `name` from: the value as a `T` when the
     /// test passes.
     pub(super) fn pattern_source(&mut self, value: &'a Expr, to: Type) -> String {
@@ -1248,6 +1256,8 @@ impl<'a> Gen<'a> {
         let place = if self.facts.borrowed_objects.contains(&(r, 0)) { other } else { format!("&{other}") };
         let same = match self.runtime_of(c).map(Type::unboxed) {
             Some(Type::Double | Type::Float) => "o.to_bits() == b.to_bits()",
+            // Arrays are `Arc`s in a program with threads, as `array_identity` compares them.
+            Some(Type::Array(_)) if self.facts.threaded => "Arc::ptr_eq(o, b)",
             Some(Type::Array(_)) => "Rc::ptr_eq(o, b)",
             Some(Type::StringBuilder) => "o.same(b)",
             // A box whose identity is kept (`java::Boxed`) compares the values it holds.

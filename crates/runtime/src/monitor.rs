@@ -139,8 +139,11 @@ pub fn try_monitor_wait(held: &impl HasMonitor, millis: i64) -> Result<(), crate
         MonitorOf::Local(address) if holds_local(address) => {
             // Only an interrupt, from another thread or from before the wait, ends a wait
             // without a timeout.
+            let state = crate::thread::State::waiting(timeout.is_some());
             if crate::thread::take_interrupt()
-                || crate::thread::interruptible_sleep(timeout.unwrap_or(Duration::MAX))
+                || crate::thread::in_state(state, || {
+                    crate::thread::interruptible_sleep(timeout.unwrap_or(Duration::MAX))
+                })
             {
                 return Err(crate::Exception::bare("java.lang.InterruptedException"));
             }

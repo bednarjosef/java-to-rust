@@ -187,12 +187,12 @@ impl<'t> Lowering<'t> {
     }
 
     /// The lambda whose class is `t`.
-    fn lambda_of_type(&self, t: usize) -> Option<&LambdaInfo<'t>> {
+    pub(super) fn lambda_of_type(&self, t: usize) -> Option<&LambdaInfo<'t>> {
         self.lambdas.iter().find(|l| l.class == t)
     }
 
     /// The lambda whose constructor or method is `m`.
-    fn lambda_of_method(&self, m: usize) -> Option<&LambdaInfo<'t>> {
+    pub(super) fn lambda_of_method(&self, m: usize) -> Option<&LambdaInfo<'t>> {
         self.lambdas.iter().find(|l| l.ctor == m || l.method == m)
     }
 

@@ -321,10 +321,11 @@ fn set_before_use(class: &Class, index: usize, name: &str) -> bool {
         })
 }
 
-/// Rejects `null` where an enum value is expected, except in a nullable enum local (see
-/// `enum_nulls`). Java gives an enum-typed field `null` until it is set, so an instance field
-/// without an initializer is allowed only when every constructor sets it first (see
-/// `set_before_use`) or it holds a captured local, and a static field must have an initializer.
+/// Rejects `null` where an enum value is expected, except in the places that may hold it (see
+/// `enum_nulls`). Java gives an enum-typed field `null` until it is set: an instance field that
+/// starts as `null` (it has no initializer, or `null`), unless every constructor sets it first
+/// (see `set_before_use`) or it holds a captured local, is such a place, an `Option` that starts
+/// as `None`. A static field must have an initializer that is not `null`.
 pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
     let found: Cell<Option<Pos>> = Cell::new(None);
     let record = |pos: Pos| {
@@ -332,31 +333,28 @@ pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
             found.set(Some(pos));
         }
     };
-    let places = enum_nulls::places(class);
+    let mut starting_null = Vec::new();
     for (t, decl) in class.types.iter().enumerate() {
-        for f in decl.fields.iter().chain(&decl.statics) {
-            if let Some(init) = &f.init
-                && matches!(init.kind, ExprKind::Null)
-                && matches!(f.ty, Type::Enum(_))
-            {
-                record(init.pos);
+        for f in decl.statics.iter().filter(|f| matches!(f.ty, Type::Enum(_))) {
+            match &f.init {
+                Some(init) if matches!(init.kind, ExprKind::Null) => record(init.pos),
+                Some(_) => {}
+                None => record(f.pos),
             }
         }
         // A captured local's field is set from the constructor's parameter before anything runs.
         let captured = |name: &str| decl.captures.iter().any(|c| c.field == name);
-        for f in decl.fields.iter().filter(|f| f.init.is_none() && matches!(f.ty, Type::Enum(_))) {
-            // A field that the program sets to null is an `Option`, which starts as Java's null.
-            if !captured(&f.name)
-                && !set_before_use(class, t, &f.name)
-                && !places.holds_null(&decl.name, &f.name)
-            {
-                record(f.pos);
+        for f in decl.fields.iter().filter(|f| matches!(f.ty, Type::Enum(_))) {
+            let starts_null = match &f.init {
+                Some(init) => matches!(init.kind, ExprKind::Null),
+                None => !captured(&f.name) && !set_before_use(class, t, &f.name),
+            };
+            if starts_null {
+                starting_null.push((decl.name.clone(), f.name.clone()));
             }
         }
-        for f in decl.statics.iter().filter(|f| f.init.is_none() && matches!(f.ty, Type::Enum(_))) {
-            record(f.pos);
-        }
     }
+    let places = enum_nulls::places(class, starting_null);
     for m in 0..class.methods.len() {
         if let Some(pos) = enum_nulls::escape(class, m, &places) {
             record(pos);

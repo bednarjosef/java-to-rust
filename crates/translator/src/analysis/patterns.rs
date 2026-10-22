@@ -16,6 +16,7 @@
 //! in code that does not declare a `name` of its own is a read of the pattern's variable.
 
 use crate::ast::*;
+use crate::program::FieldUpdate;
 use std::collections::HashSet;
 
 pub(super) fn check(class: &Class) -> Result<(), Error> {
@@ -155,6 +156,22 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                                 && may_both_hold_values(m, l, r) =>
                         {
                             found.push((x.pos, "`==` on `Object` values that may be strings or boxes"));
+                        }
+                        // An atomic compare of an element compares it with the expected value
+                        // by identity, which a string or a box does not keep.
+                        ExprKind::Builtin(
+                            Builtin::ElementUpdate(
+                                FieldUpdate::CompareAndSet | FieldUpdate::CompareAndExchange,
+                            ),
+                            args,
+                        ) if holds_values
+                            && may_be_value(&args[0])
+                            && may_both_hold_values(m, &args[0], &args[0]) =>
+                        {
+                            found.push((
+                                x.pos,
+                                "an atomic compare of `Object` elements that may be strings or boxes",
+                            ));
                         }
                         _ => {}
                     })

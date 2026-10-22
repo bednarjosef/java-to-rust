@@ -105,6 +105,11 @@ pub struct Facts {
     /// is initialized: their cell starts empty, as there is no object to start it with, so it is
     /// an `Option` that is written with `Some` and read with `java::non_null`.
     pub placeholder_statics: HashSet<(usize, String)>,
+    /// Statics that are never null where code reads them, though the nullness analysis lets
+    /// them be: a static set nowhere else, which the first statements of its class's static
+    /// initializer set to a value that is not null, as `ForkJoinPool`'s `U = Unsafe.getUnsafe()`.
+    /// Reading it cannot throw (see `exceptions`); its cell is still an `Option`.
+    pub initialized_statics: HashSet<(usize, String)>,
     /// The element types (strings, objects and arrays) whose arrays can hold null: their
     /// elements are `Option`s, in every array of that element type.
     pub nullable_elements: HashSet<Type>,
@@ -255,10 +260,11 @@ pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, V
         closure_types: closures::closure_types(class),
         ..Facts::default()
     };
+    use crate::timings::phase;
     facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
-    ranges::analyze(class, &mut facts);
-    representation(class, &mut facts);
-    checked(validate(class, &facts))?;
+    phase("analysis: ranges", || ranges::analyze(class, &mut facts));
+    phase("analysis: representation", || representation(class, &mut facts));
+    checked(phase("analysis: validate", || validate(class, &facts)))?;
     patterns::check(class).map_err(one)?;
     facts.eager_init = statics::eager_classes(class);
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
@@ -266,21 +272,23 @@ pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, V
         [main] => Some(main.class),
         _ => None,
     };
-    nullness::analyze(class, &mut facts);
-    checked(patterns::check_object_values(class, &facts))?;
-    boxing::analyze(class, &mut facts);
+    phase("analysis: nullness", || nullness::analyze(class, &mut facts));
+    checked(phase("analysis: object values", || patterns::check_object_values(class, &facts)))?;
+    phase("analysis: boxing", || boxing::analyze(class, &mut facts));
     if facts.threaded {
-        checked(threads::check(class, &facts))?;
+        checked(phase("analysis: threads", || threads::check(class, &facts)))?;
     }
-    checked(monitors::check(class, &facts))?;
+    checked(phase("analysis: monitors", || monitors::check(class, &facts)))?;
     facts.class_monitors = monitors::class_monitors(class, &facts);
-    borrowed_params(class, &mut facts);
-    facts.borrowed_objects = borrowed_objects(class, &facts);
+    phase("analysis: borrowing", || {
+        borrowed_params(class, &mut facts);
+        facts.borrowed_objects = borrowed_objects(class, &facts);
+    });
     ascii_strings(class, &mut facts);
-    arrays::analyze(class, &mut facts);
-    indexing::analyze(class, &mut facts);
-    moves::analyze(class, &mut facts);
-    exceptions::analyze(class, &mut facts)?;
+    phase("analysis: arrays", || arrays::analyze(class, &mut facts));
+    phase("analysis: indexing", || indexing::analyze(class, &mut facts));
+    phase("analysis: moves", || moves::analyze(class, &mut facts));
+    phase("analysis: exceptions", || exceptions::analyze(class, &mut facts))?;
     // An uncaught-exception handler gets the failures of the runtime as objects of their classes.
     if threads::handles_uncaught(class) {
         for new in &class.raised {

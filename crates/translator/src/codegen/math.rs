@@ -6,6 +6,14 @@ use super::*;
 impl<'a> Gen<'a> {
     /// The methods of this file; `None` for any other method, which `math` translates.
     pub(super) fn math_extra(&mut self, name: &str, args: &'a [Expr], ty: Type) -> Option<Code> {
+        // `scalb(x, n)` takes an `int` after its operand, and is the same in `Math` and
+        // `StrictMath` (`scalb_f32` for `float`).
+        if name == "scalb" {
+            let float = if ty == Type::Float { "_f32" } else { "" };
+            let x = self.value(&args[0], ty).text;
+            let n = self.value(&args[1], Type::Int).text;
+            return Some(Code::atom(format!("{}({x}, {n})", self.runtime(&format!("scalb{float}")))));
+        }
         // `toIntExact` takes a `long`, and `clamp(long, int, int)` computes in `long`.
         let operand = match name {
             "toIntExact" => Type::Long,

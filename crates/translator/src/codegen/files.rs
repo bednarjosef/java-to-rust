@@ -1,6 +1,8 @@
 //! The file natives (`ast::Native::File*`), which call the runtime's descriptor table
-//! (`java_runtime::fd`). A call that can fail is wrapped in `or_throw`, which raises the Java
-//! exception, or where the program may catch it, passed on as a thrown exception. Every native but `open0` takes the stream's descriptor (`fd`) as its first argument.
+//! (`java_runtime::fd`), and those of `java.io.UnixFileSystem` (`Native::FileSystem`, on
+//! `java_runtime::fs`). A call that can fail is wrapped in `or_throw`, which raises the Java
+//! exception, or where the program may catch it, passed on as a thrown exception. Every
+//! descriptor native but `open0` takes the stream's descriptor (`fd`) as its first argument.
 
 use super::*;
 
@@ -8,13 +10,24 @@ impl<'a> Gen<'a> {
     pub(super) fn file_native(&mut self, native: Native, args: &'a [Expr], id: ExprId) -> Code {
         match native {
             Native::FileOpenRead => {
-                let name = self.str_value(&args[0]);
-                self.fallible(id, "fd_open_read", vec![format!("&{name}")])
+                let name = self.text_ref(&args[0]);
+                self.fallible(id, "fd_open_read", vec![name])
             }
             Native::FileOpenWrite => {
-                let name = self.str_value(&args[0]);
+                let name = self.text_ref(&args[0]);
                 let append = self.value(&args[1], Type::Boolean).text;
-                self.fallible(id, "fd_open_write", vec![format!("&{name}"), append])
+                self.fallible(id, "fd_open_write", vec![name, append])
+            }
+            Native::FileOpenRandom => {
+                let name = self.text_ref(&args[0]);
+                let mode = self.value(&args[1], Type::Int).text;
+                self.fallible(id, "fd_open_random", vec![name, mode])
+            }
+            Native::FileSeek | Native::FileSetLength => {
+                let fd = self.value(&args[0], Type::Int).text;
+                let n = self.value(&args[1], Type::Long).text;
+                let f = if native == Native::FileSeek { "fd_seek" } else { "fd_set_length" };
+                self.fallible(id, f, vec![fd, n])
             }
             Native::FileRead => {
                 let fd = self.value(&args[0], Type::Int).text;
@@ -64,6 +77,73 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// A native of `java.io.UnixFileSystem` (`java_runtime::fs`), whose `File` arguments the
+    /// lowering made their paths. `list0` gives `null` (an `Option`) for a directory it cannot
+    /// read; `createFileExclusively0` and `canonicalize0` may throw.
+    pub(super) fn file_system_native(&mut self, name: &str, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
+        let mut values = Vec::new();
+        for arg in args {
+            values.push(match arg.ty {
+                Type::String => self.text_ref(arg),
+                Type::Boolean => self.value(arg, Type::Boolean).text,
+                Type::Long => self.value(arg, Type::Long).text,
+                _ => self.value(arg, Type::Int).text,
+            });
+        }
+        let f = match name {
+            "getBooleanAttributes0" => "fs_attributes",
+            "checkAccess0" => "fs_access",
+            "getLastModifiedTime0" => "fs_modified",
+            "getLength0" => "fs_length",
+            "setPermission0" => "fs_set_permission",
+            "createFileExclusively0" => return self.fallible(id, "fs_create_file", values),
+            "canonicalize0" => return self.fallible(id, "fs_canonicalize", values),
+            "delete0" => "fs_delete",
+            "list0" => {
+                let names = format!("{}({})", self.runtime("fs_list"), values.join(", "));
+                let each = self.string_vec_as(ty, "names".to_string());
+                let array = format!("{}({each})", self.array_maker("from_vec"));
+                return Code::atom(format!("{names}.map(|names| {array})"));
+            }
+            "createDirectory0" => "fs_create_directory",
+            "rename0" => "fs_rename",
+            "setLastModifiedTime0" => "fs_set_modified",
+            "setReadOnly0" => "fs_set_read_only",
+            "getNameMax0" => "fs_name_max",
+            _ => unreachable!("not a native of `UnixFileSystem` the runtime implements: {name}"),
+        };
+        Code::atom(format!("{}({})", self.runtime(f), values.join(", ")))
+    }
+
+    /// A native of the translator's `UnixNativeDispatcher` (`Native::Unix`), as a call of the
+    /// runtime's function (`ast::UNIX_CALLS`). A path is the runtime's `&[i8]`; the `long[]` that
+    /// `stat0` and `fstat0` fill, and the buffer that `readBytes` reads into, are borrowed
+    /// mutably. A `byte[]` that the function returns becomes a new array.
+    pub(super) fn unix_native(&mut self, name: &str, args: &'a [Expr], ty: Type) -> Code {
+        let f = crate::ast::UNIX_CALLS.iter().find(|(n, _)| *n == name).map(|(_, f)| *f);
+        let f = f.unwrap_or_else(|| {
+            unreachable!("not a native of `UnixNativeDispatcher` the runtime implements: {name}")
+        });
+        let mut values = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            values.push(match arg.ty {
+                Type::Array(_) => {
+                    let written = arg.ty.element() == Type::Long || (name == "readBytes" && i == 1);
+                    self.array_arg(arg, written)
+                }
+                Type::Boolean => self.value(arg, Type::Boolean).text,
+                Type::Long => self.value(arg, Type::Long).text,
+                _ => self.value(arg, Type::Int).text,
+            });
+        }
+        let call = format!("{}({})", self.runtime(f), values.join(", "));
+        if matches!(ty, Type::Array(_)) {
+            let array = format!("{}({call})", self.array_maker("from_vec"));
+            return Code::atom(array);
+        }
+        Code::atom(call)
+    }
+
     /// The natives of the stream under `System.out` and `System.err` (`Native::StandardWrite`
     /// and the others), which the runtime's `out` implements; they cannot fail.
     pub(super) fn standard_native(&mut self, native: Native, args: &'a [Expr]) -> Code {
@@ -90,7 +170,7 @@ impl<'a> Gen<'a> {
     /// A call of a runtime function that returns `Result`, with the failure raised as Java's
     /// exception: where a `catch` or a `finally` may see it (`Facts::raising`), as a thrown
     /// exception that goes on from here, else as an uncaught one.
-    fn fallible(&mut self, id: ExprId, f: &str, args: Vec<String>) -> Code {
+    pub(super) fn fallible(&mut self, id: ExprId, f: &str, args: Vec<String>) -> Code {
         let call = format!("{}({})", self.runtime(f), args.join(", "));
         if self.facts.raising.contains(&id) {
             let checked = format!("{call}.map_err({})", self.runtime("Failure::exception"));

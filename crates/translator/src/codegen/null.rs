@@ -369,7 +369,7 @@ impl<'a> Gen<'a> {
             // `if (!(x instanceof T name)) .. else { .. }`
             Some((value, ty, name)) => {
                 let source = self.pattern_source(value, ty);
-                self.line(&format!("if let Some({}) = {source} {{", self.local(name)));
+                self.line(&format!("if let Some({}) = {source} {{", self.pattern_binding(name, &source)));
                 None
             }
             None => {
@@ -444,7 +444,7 @@ impl<'a> Gen<'a> {
                 _ if bound => {
                     let (value, ty, name) = pattern(part).expect("a pattern");
                     let source = self.pattern_source(value, ty);
-                    texts.push(format!("let Some({}) = {source}", self.local(name)));
+                    texts.push(format!("let Some({}) = {source}", self.pattern_binding(name, &source)));
                 }
                 Some((name, ty)) => {
                     texts.push(format!("let Some({}) = {}", self.local(name), self.option_source(name, ty)));
@@ -567,14 +567,15 @@ impl<'a> Gen<'a> {
             return false;
         }
         let source = self.pattern_source(value, ty);
-        self.line(&format!("let Some({}) = {source} else {{", self.local(name)));
+        self.line(&format!("let Some({}) = {source} else {{", self.pattern_binding(name, &source)));
         self.nested(then);
         self.line("};");
         true
     }
 
     /// `if (s == null) return ..;` (or `break`, `continue`): the rest of the block sees `s` as
-    /// non-null, so it is bound with `let Some(s) = s.as_deref() else { .. };`. Returns the name
+    /// non-null, so it is bound with `let Some(s) = s.as_deref() else { .. };` (`s.clone()` for an
+    /// array). Returns the name
     /// of `s`, or `None`, emitting nothing, when `stmt` is not of that form or `rest` assigns `s`.
     pub(super) fn early_null_exit(&mut self, stmt: &'a Stmt, rest: &[Stmt]) -> Option<&'a str> {
         let Stmt::If { cond, then, otherwise: None } = stmt else { return None };
@@ -586,7 +587,13 @@ impl<'a> Gen<'a> {
         {
             return None;
         }
-        self.line(&format!("let Some({}) = {} else {{", self.local(name), self.option_source(name, ty)));
+        // An array is bound as its own handle, which the runtime's array functions take by
+        // reference (`copy_of(&a, ..)`), as they take every other array.
+        let source = match ty {
+            Type::Array(_) => format!("{}.clone()", self.local(name)),
+            _ => self.option_source(name, ty),
+        };
+        self.line(&format!("let Some({}) = {source} else {{", self.local(name)));
         self.nested(then);
         self.line("};");
         Some(name)

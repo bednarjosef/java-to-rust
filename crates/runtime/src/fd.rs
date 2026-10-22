@@ -1,5 +1,5 @@
-//! The file descriptors behind the natives of `java.io.FileInputStream`, `FileOutputStream` and
-//! `FileDescriptor` (`ast::Native::File*`). A descriptor is an index into a table of the process, as
+//! The file descriptors behind the natives of `java.io.FileInputStream`, `FileOutputStream`,
+//! `RandomAccessFile` and `FileDescriptor` (`ast::Native::File*`). A descriptor is an index into a table of the process, as
 //! the JVM's is: 0, 1 and 2 are standard input, output and error. Standard output
 //! goes through `out` so that it stays in order with `println!`. Standard input is descriptor 0
 //! itself, read without a buffer in between, so that each read returns what the JVM's would; what
@@ -30,6 +30,8 @@ enum Entry {
     Stderr,
     Read(File),
     Write(File),
+    /// A `RandomAccessFile` opened with `"rw"`, which reads and writes.
+    ReadWrite(File),
 }
 
 /// The descriptors of the process. Tests supply standard input as a reader (`stdin`); the
@@ -113,9 +115,15 @@ fn io_failure(e: io::Error) -> Failure {
     Failure { class: "java.io.IOException", message: e.to_string() }
 }
 
+/// An `IOException` whose message is the reason alone, as the JVM's
+/// `JNU_ThrowIOExceptionWithLastError` gives it.
+pub(crate) fn last_error(e: io::Error) -> Failure {
+    Failure { class: "java.io.IOException", message: reason(&e) }
+}
+
 /// The reason in an `io::Error` as C's `strerror` gives it: `No such file or directory`, not
 /// `No such file or directory (os error 2)`.
-fn reason(e: &io::Error) -> String {
+pub(crate) fn reason(e: &io::Error) -> String {
     let text = e.to_string();
     match text.find(" (os error") {
         Some(end) => text[..end].to_string(),
@@ -185,6 +193,29 @@ impl FdTable {
         Ok(self.insert(Entry::Write(file)))
     }
 
+    /// `RandomAccessFile.open0(name, mode)`: the descriptor of a file to read, or with `O_RDWR`
+    /// in `mode` to read and write, created if it does not exist. A directory cannot be opened,
+    /// as the JVM's `handleOpen` refuses it. (`O_SYNC` and `O_DSYNC` only make each write wait for
+    /// the disk, which no program can see.)
+    pub fn open_random(&mut self, name: &str, mode: i32) -> Result<i32, Failure> {
+        const O_RDWR: i32 = 2;
+        let write = mode & O_RDWR != 0;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(write)
+            .create(write)
+            .truncate(false)
+            .open(name)
+            .map_err(|e| not_found(name, &e))?;
+        if file.metadata().is_ok_and(|m| m.is_dir()) {
+            return Err(Failure {
+                class: "java.io.FileNotFoundException",
+                message: format!("{name} (Is a directory)"),
+            });
+        }
+        Ok(self.insert(if write { Entry::ReadWrite(file) } else { Entry::Read(file) }))
+    }
+
     /// Reads once from an input descriptor into `bytes`, as one `read` system call does.
     fn read_into(&mut self, fd: i32, bytes: &mut [u8]) -> Result<usize, Failure> {
         let entry = self.entries.get_mut(fd as usize).and_then(Option::as_mut);
@@ -196,7 +227,7 @@ impl FdTable {
                     None => process_stdin().read(bytes),
                 }
             }
-            Some(Entry::Read(file)) => file.read(bytes),
+            Some(Entry::Read(file) | Entry::ReadWrite(file)) => file.read(bytes),
             Some(_) => return Err(bad_descriptor()),
             None => return Err(closed()),
         };
@@ -258,7 +289,7 @@ impl FdTable {
     fn with_file<T>(&self, fd: i32, f: impl FnOnce(&File) -> T) -> Result<Option<T>, Failure> {
         match self.entries.get(fd as usize).and_then(Option::as_ref) {
             Some(Entry::Stdin) if self.stdin.is_none() => Ok(Some(f(&process_stdin()))),
-            Some(Entry::Read(file) | Entry::Write(file)) => Ok(Some(f(file))),
+            Some(Entry::Read(file) | Entry::Write(file) | Entry::ReadWrite(file)) => Ok(Some(f(file))),
             Some(_) => Ok(None),
             None => Err(closed()),
         }
@@ -282,6 +313,35 @@ impl FdTable {
         position.unwrap_or(Ok(0)).map_err(io_failure)
     }
 
+    /// `RandomAccessFile.seek0(pos)`: moves the position, which may go past the end.
+    pub fn seek(&self, fd: i32, pos: i64) -> Result<(), Failure> {
+        if pos < 0 {
+            return Err(Failure {
+                class: "java.io.IOException",
+                message: "Negative seek offset".to_string(),
+            });
+        }
+        let moved = self.with_file(fd, |mut f| f.seek(SeekFrom::Start(pos as u64)).map(|_| ()))?;
+        moved.unwrap_or(Ok(())).map_err(last_error)
+    }
+
+    /// `RandomAccessFile.setLength0(n)`: truncates or extends the file to `n` bytes. The position
+    /// stays where it was, or moves to the new end if that is before it.
+    pub fn set_length(&self, fd: i32, length: i64) -> Result<(), Failure> {
+        let set = self.with_file(fd, |mut f| {
+            let position = f.stream_position()?;
+            if length < 0 {
+                return Err(io::Error::from_raw_os_error(22));
+            }
+            f.set_len(length as u64)?;
+            if position > length as u64 {
+                f.seek(SeekFrom::End(0))?;
+            }
+            Ok(())
+        })?;
+        set.unwrap_or(Ok(())).map_err(last_error)
+    }
+
     /// `write(b)` and `writeBytes`: the bytes go to the descriptor's stream. Standard output is
     /// the runtime's buffered `out`.
     pub fn write(&mut self, fd: i32, bytes: &[u8]) -> Result<(), Failure> {
@@ -294,7 +354,7 @@ impl FdTable {
                 out::raw_write(STDERR_FD, bytes);
                 Ok(())
             }
-            Some(Entry::Write(file)) => file.write_all(bytes).map_err(io_failure),
+            Some(Entry::Write(file) | Entry::ReadWrite(file)) => file.write_all(bytes).map_err(io_failure),
             Some(_) => Err(bad_descriptor()),
             None => Err(closed()),
         }
@@ -332,7 +392,7 @@ fn os_descriptor(entry: &Entry) -> Option<i32> {
         Entry::Stdin => 0,
         Entry::Stdout => 1,
         Entry::Stderr => 2,
-        Entry::Read(file) | Entry::Write(file) => file.as_raw_fd(),
+        Entry::Read(file) | Entry::Write(file) | Entry::ReadWrite(file) => file.as_raw_fd(),
     })
 }
 
@@ -353,6 +413,46 @@ fn with<T>(f: impl FnOnce(&mut FdTable) -> T) -> T {
     f(&mut FDS.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
+/// A descriptor for `file`, which `sun.nio.fs`'s natives opened (`unix.rs`), to read, to write,
+/// or both.
+pub(crate) fn insert_file(file: File, read: bool, write: bool) -> i32 {
+    let entry = match (read, write) {
+        (true, true) => Entry::ReadWrite(file),
+        (false, true) => Entry::Write(file),
+        _ => Entry::Read(file),
+    };
+    with(|t| t.insert(entry))
+}
+
+/// `f` of the file that descriptor `fd` holds; `EBADF` where it holds none (closed, or a
+/// standard stream).
+pub(crate) fn with_file<T>(fd: i32, f: impl FnOnce(&File) -> io::Result<T>) -> io::Result<T> {
+    with(|t| match t.entries.get(fd as usize).and_then(Option::as_ref) {
+        Some(Entry::Read(file) | Entry::Write(file) | Entry::ReadWrite(file)) if fd >= 0 => f(file),
+        _ => Err(io::Error::from_raw_os_error(EBADF)),
+    })
+}
+
+/// `dup(fd)`: a new descriptor of the same open file.
+pub(crate) fn duplicate(fd: i32) -> io::Result<i32> {
+    with(|t| {
+        let entry = match t.entries.get(fd as usize).and_then(Option::as_ref) {
+            Some(Entry::Read(file)) if fd >= 0 => Entry::Read(file.try_clone()?),
+            Some(Entry::Write(file)) if fd >= 0 => Entry::Write(file.try_clone()?),
+            Some(Entry::ReadWrite(file)) if fd >= 0 => Entry::ReadWrite(file.try_clone()?),
+            _ => return Err(io::Error::from_raw_os_error(EBADF)),
+        };
+        Ok(t.insert(entry))
+    })
+}
+
+/// Whether descriptor `fd` is open.
+pub(crate) fn is_open(fd: i32) -> bool {
+    with(|t| fd >= 0 && t.entries.get(fd as usize).is_some_and(Option::is_some))
+}
+
+const EBADF: i32 = 9;
+
 /// The descriptor of a file to read, for `FileInputStream.open0`.
 pub fn fd_open_read(name: &str) -> Result<i32, Failure> {
     with(|t| t.open_read(name))
@@ -361,6 +461,19 @@ pub fn fd_open_read(name: &str) -> Result<i32, Failure> {
 /// The descriptor of a file to write, for `FileOutputStream.open0`.
 pub fn fd_open_write(name: &str, append: bool) -> Result<i32, Failure> {
     with(|t| t.open_write(name, append))
+}
+
+/// The descriptor of a file to read, or to read and write, for `RandomAccessFile.open0`.
+pub fn fd_open_random(name: &str, mode: i32) -> Result<i32, Failure> {
+    with(|t| t.open_random(name, mode))
+}
+
+pub fn fd_seek(fd: i32, pos: i64) -> Result<(), Failure> {
+    with(|t| t.seek(fd, pos))
+}
+
+pub fn fd_set_length(fd: i32, length: i64) -> Result<(), Failure> {
+    with(|t| t.set_length(fd, length))
 }
 
 pub fn fd_read(fd: i32) -> Result<i32, Failure> {
@@ -534,6 +647,33 @@ mod tests {
         assert!(t.append(42));
         assert!(t.append(-1));
         assert_eq!(fd_handle(STDOUT_FD), -1);
+    }
+
+    #[test]
+    fn random_access_reads_writes_and_seeks() {
+        let name = temp_file("random", "random.bin");
+        let _ = std::fs::remove_file(&name);
+        let mut t = table(b"");
+        let only_read = t.open_random(&name, 1).unwrap_err();
+        assert_eq!(only_read.class, "java.io.FileNotFoundException");
+        let rw = t.open_random(&name, 2).unwrap();
+        t.write(rw, b"hello").unwrap();
+        assert_eq!(t.position(rw), Ok(5));
+        t.seek(rw, 1).unwrap();
+        assert_eq!(t.read(rw), Ok(b'e' as i32));
+        t.seek(rw, 8).unwrap();
+        t.write(rw, b"!").unwrap();
+        assert_eq!(t.length(rw), Ok(9));
+        assert_eq!(t.seek(rw, -1).unwrap_err().message, "Negative seek offset");
+        t.set_length(rw, 3).unwrap();
+        assert_eq!(t.position(rw), Ok(3));
+        assert_eq!(t.read(rw), Ok(-1));
+        t.close(rw);
+        let r = t.open_random(&name, 1).unwrap();
+        assert_eq!(t.write(r, b"x"), Err(bad_descriptor()));
+        t.close(r);
+        let dir = std::path::Path::new(&name).parent().unwrap().to_string_lossy().into_owned();
+        assert_eq!(t.open_random(&dir, 1).unwrap_err().message, format!("{dir} (Is a directory)"));
     }
 
     #[test]

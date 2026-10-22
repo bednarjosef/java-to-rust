@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 mod boxing;
 mod chains;
+mod char_sequence;
 mod character;
 mod charsets;
 mod class_values;
@@ -26,6 +27,7 @@ mod expr;
 mod field_inits;
 mod files;
 mod idiomatic;
+mod inflate;
 mod math;
 mod names;
 mod null;

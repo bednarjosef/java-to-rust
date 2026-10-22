@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod by_name;
 mod initialize;
+mod reflection;
 mod sequential;
 mod stubs;
 
@@ -18,6 +19,7 @@ pub use by_name::{
     class_bound, class_for_name, computed_for_name, created_by_name, locale_data_classes, module_for_name,
 };
 pub use initialize::{is_ensure_initialized, literal_class};
+pub use reflection::{Kind as LookupKind, Lookup, lookup};
 
 /// A method or constructor: the qualified name of its class, its name (`<init>` for a
 /// constructor) and javac's signature, such as `(int)void`.
@@ -75,6 +77,12 @@ pub struct Reach {
     pub named: BTreeSet<String>,
     /// The locale data classes that a computed `Class.forName(module, name)` finds.
     pub found_by_name: BTreeSet<String>,
+    /// The providers that `ServiceLoader` finds of each service that reachable code loads, in
+    /// its order, each with whether a module declares it (`reflection.rs`).
+    pub services: BTreeMap<String, Vec<(String, bool)>>,
+    /// The members that reflection looks up by name, as (the class it looks in, the member's
+    /// name), `<init>` for constructors (`reflection.rs`).
+    pub reflected: BTreeSet<(String, String)>,
 }
 
 impl Reach {
@@ -141,17 +149,25 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     // JDK's code of `Charset` looks charsets up among all of them.
     "java.nio.charset.Charset",
     "java.nio.charset.StandardCharsets",
+    // The JDK's classes of the charsets the runtime has (`lower/charsets.rs`).
+    "sun.nio.cs.ISO_8859_1",
+    "sun.nio.cs.US_ASCII",
+    "sun.nio.cs.UTF_16",
+    "sun.nio.cs.UTF_16BE",
+    "sun.nio.cs.UTF_16LE",
+    "sun.nio.cs.UTF_8",
     "sun.util.logging.PlatformLogger",
 ];
 
 /// What is not translated, by the prefix of qualified class names, with the feature it is:
 /// reachability stops there, as at the runtime's classes, and the survey counts its use. Library
 /// code reaches these on paths that only its data rules out, such as `TreeMap.addAll` reading
-/// from a stream that is null there. Class and resource loading finds classes and data by name
-/// (`ServiceLoader` the providers), which is reflection in all but name: a closed-world
-/// translation knows its classes. `ResourceBundle` is translated: the locale data it finds by
-/// name are the classes of the program. (`java.lang.Module` is a prefix of `java.lang.ModuleLayer`
-/// too.)
+/// from a stream that is null there. Class and resource loading finds classes and data by name,
+/// which is reflection in all but name: a closed-world translation knows its classes. Some is
+/// translated all the same: `ResourceBundle`, whose locale data found by name are the classes of
+/// the program, and `ServiceLoader`, whose providers are those the sources declare (the
+/// translator's, `java/overlay/java/util/ServiceLoader.java`). (`java.lang.Module` is a prefix of
+/// `java.lang.ModuleLayer` too.)
 pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.io.ObjectInputStream", "serialization"),
     ("java.io.ObjectOutputStream", "serialization"),
@@ -160,7 +176,6 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.lang.invoke.", "reflection"),
     ("java.lang.reflect.", "reflection"),
     ("java.security.", "security"),
-    ("java.util.ServiceLoader", "class loading"),
     ("jdk.internal.loader.", "class loading"),
     ("jdk.internal.reflect.", "reflection"),
     ("sun.security.", "security"),
@@ -169,10 +184,17 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
 /// Classes under a prefix of `UNTRANSLATED` that are translated all the same:
 /// `java.lang.reflect.Array` creates arrays of a component type and measures them, which is what
 /// `Arrays.copyOf` and `Collection.toArray` need of it, not reflection. `Modifier` tests the bits
-/// of a member's modifiers, and `InvocationTargetException` is an exception like any other,
-/// which code that creates an object from a `Class` value catches (`by_name.rs`).
-pub const TRANSLATED_ANYWAY: &[&str] =
-    &["java.lang.reflect.Array", "java.lang.reflect.InvocationTargetException", "java.lang.reflect.Modifier"];
+/// of a member's modifiers. `Method`, `Field` and `Constructor` are the translator's own, over the
+/// reflection table (`reflection.rs`), and so is `InvocationTargetException`, which wraps the
+/// exceptions of what they call (`java/Standard.java`).
+pub const TRANSLATED_ANYWAY: &[&str] = &[
+    "java.lang.reflect.Array",
+    "java.lang.reflect.InvocationTargetException",
+    "java.lang.reflect.Modifier",
+    "java.lang.reflect.Method",
+    "java.lang.reflect.Field",
+    "java.lang.reflect.Constructor",
+];
 
 /// Methods of translated classes whose calls the lowering replaces with the runtime's code
 /// (`lower/natives.rs`), so that reachability does not enter them, as with the runtime's classes.
@@ -185,11 +207,51 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int"),
     ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.Class<?>,java.lang.String)long"),
     ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.reflect.Field)long"),
+    ("jdk.internal.misc.Unsafe", "staticFieldOffset", "(java.lang.reflect.Field)long"),
+    ("jdk.internal.misc.Unsafe", "staticFieldBase", "(java.lang.reflect.Field)java.lang.Object"),
     ("java.util.HashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
     ("java.util.concurrent.ConcurrentHashMap", "comparableClassFor", "(java.lang.Object)java.lang.Class<?>"),
     // A saved property is a property (`lower/system.rs`).
     ("jdk.internal.misc.VM", "getSavedProperty", "(java.lang.String)java.lang.String"),
+    // Nothing is garbage collected, so a file's descriptor needs no cleaner (`lower/natives.rs`).
+    ("java.io.FileCleanable", "register", "(java.io.FileDescriptor)void"),
+    // No virtual thread blocks a carrier thread (`lower/natives.rs`).
+    ("jdk.internal.misc.Blocker", "begin", "()boolean"),
+    ("jdk.internal.misc.Blocker", "begin", "(boolean)boolean"),
+    ("jdk.internal.misc.Blocker", "end", "(boolean)void"),
+    // A translated program has no native library to load (`lower/libraries.rs`).
+    ("jdk.internal.loader.BootLoader", "loadLibrary", "(java.lang.String)void"),
+    ("java.security.SecureRandom", "getSeed", "(int)byte[]"),
 ];
+
+/// A method, by class, name and javac's signature.
+type Member = (&'static str, &'static str, &'static str);
+
+/// The methods of the JDK that the translator's standard classes (`lower::exceptions`) call, by
+/// the standard method that calls them: reachability does not read the standard classes' code.
+const STANDARD_CALLS: &[(Member, Member)] = &[
+    (
+        ("java.lang.Throwable", "printStackTrace", "(java.io.PrintStream)void"),
+        ("java.io.PrintStream", "println", "(java.lang.String)void"),
+    ),
+    (
+        ("java.lang.Throwable", "printStackTrace", "(java.io.PrintWriter)void"),
+        ("java.io.PrintWriter", "println", "(java.lang.String)void"),
+    ),
+];
+
+/// The methods that answer which class called the method that calls them: the lowering makes the
+/// answer the class of each call of that method (`lower/callers.rs`), so reachability does not
+/// enter them, nor counts the one of `jdk.internal.reflect` as reflection.
+pub const CALLER_QUERIES: &[(&str, &str, &str)] = &[
+    ("jdk.internal.reflect.Reflection", "getCallerClass", "()java.lang.Class<?>"),
+    ("java.lang.StackWalker", "getCallerClass", "()java.lang.Class<?>"),
+];
+
+/// The class of the method among `CALLER_QUERIES` with this class, name and signature, if it is one.
+pub fn caller_query(class: &str, name: &str, signature: &str) -> Option<&'static str> {
+    CALLER_QUERIES.iter().find(|q| **q == (class, name, signature)).map(|q| q.0)
+}
 
 /// The class and the field that `node` is the offset of, when it is a call of `Unsafe`'s
 /// `objectFieldOffset` of a class literal and the field's name, or of the field that
@@ -197,12 +259,33 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
 /// names it (`lower/handles.rs`).
 pub fn field_offset_named(node: &Value) -> Option<(String, String)> {
     let symbol = &node["symbol"];
-    if text(node, "kind") != "METHOD_INVOCATION"
-        || (text(symbol, "owner"), text(symbol, "name")) != ("jdk.internal.misc.Unsafe", "objectFieldOffset")
-    {
+    if text(node, "kind") != "METHOD_INVOCATION" {
         return None;
     }
     let args = node["arguments"].as_array()?;
+    // The field of a `VarHandle` that `findVarHandle` of a class literal makes.
+    let finds = matches!(
+        (text(symbol, "owner"), text(symbol, "name")),
+        ("java.lang.invoke.MethodHandles.Lookup", "findVarHandle")
+            | ("jdk.internal.invoke.MhUtil", "findVarHandle")
+    );
+    if finds && let [.., class, field, _] = &args[..] {
+        let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
+        return Some((literal_class(class)?, field.to_string()));
+    }
+    // The field that `getDeclaredField` finds, which only a field's handle may use (`handles`):
+    // `ForkJoinPool` finds `poolIds` so through a local of type `Class<ForkJoinPool>`.
+    if (text(symbol, "owner"), text(symbol, "name")) == ("java.lang.Class", "getDeclaredField")
+        && let [field] = &args[..]
+    {
+        let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
+        return Some((class_named(&node["methodSelect"]["expression"])?, field.to_string()));
+    }
+    if text(symbol, "owner") != "jdk.internal.misc.Unsafe"
+        || !matches!(text(symbol, "name"), "objectFieldOffset" | "staticFieldOffset")
+    {
+        return None;
+    }
     let (class, field) = match &args[..] {
         [class, field] => (class, field),
         [get]
@@ -215,7 +298,16 @@ pub fn field_offset_named(node: &Value) -> Option<(String, String)> {
         _ => return None,
     };
     let field = field["value"].as_str().filter(|_| text(field, "kind") == "STRING_LITERAL")?;
-    Some((literal_class(class)?, field.to_string()))
+    Some((class_named(class)?, field.to_string()))
+}
+
+/// The class that the expression `node` of type `Class<C>` is: a class literal, or a value of
+/// that exact type, as `ForkJoinPool`'s local `Class<ForkJoinPool> klass` that finds its fields.
+fn class_named(node: &Value) -> Option<String> {
+    literal_class(node).or_else(|| {
+        let class = text(node, "javaType").strip_prefix("java.lang.Class<")?.strip_suffix('>')?;
+        (!class.starts_with('?')).then(|| strip_arguments(class))
+    })
 }
 
 /// The methods that lowering replaces whatever their signature, as `REPLACED_METHODS`: the
@@ -284,11 +376,17 @@ pub fn runtime_stream_call(node: &Value) -> bool {
     })
 }
 
-/// Whether the method is one of the `REPLACED_METHODS`, or an access of `Unsafe` through a
-/// field's offset, which the lowering replaces with the field.
+/// Whether the method is one of the `REPLACED_METHODS`, an access of `Unsafe` through a field's
+/// offset, which the lowering replaces with the field, or a method that makes or uses a
+/// `VarHandle`.
 pub fn replaced(class: &str, name: &str, signature: &str) -> bool {
     REPLACED_METHODS.contains(&(class, name, signature))
+        // A method that makes a `VarHandle` makes a constant that lowering keeps as what it
+        // reaches, and the handle's accesses are those of the field or element (`lower/handles.rs`).
+        || signature.ends_with(")java.lang.invoke.VarHandle")
+        || class == "java.lang.invoke.VarHandle"
         || REPLACED_BY_NAME.contains(&(class, name))
+        || caller_query(class, name, signature).is_some()
         || (class == "java.lang.Character" && crate::lower::runtime_character_method(name, signature))
         || unsafe_field_access(class, name, signature).is_some()
         || unsafe_field_update(class, name, signature).is_some()
@@ -307,6 +405,9 @@ pub enum FieldUpdate {
     /// `compareAndExchange<Kind><Mode>(o, offset, expected, x)`: the old value, the field set to
     /// `x` when it was `expected`.
     CompareAndExchange,
+    /// `getAndBitwiseOr<Kind><Mode>(o, offset, mask)`, and the `And` and `Xor` forms: the old
+    /// value, the field combined with `mask` by the operator (`BitOr`, `BitAnd` or `BitXor`).
+    GetAndBitwise(crate::ast::BinOp),
 }
 
 /// Whether the method is one of `Unsafe`'s atomic updates of an `int`, `long` or reference field
@@ -315,8 +416,12 @@ pub fn unsafe_field_update(class: &str, name: &str, signature: &str) -> Option<F
     if class != "jdk.internal.misc.Unsafe" {
         return None;
     }
-    let forms: [(&str, FieldUpdate, &[&str]); 5] = [
+    use crate::ast::BinOp;
+    let forms: [(&str, FieldUpdate, &[&str]); 8] = [
         ("getAndAdd", FieldUpdate::GetAndAdd, &["", "Acquire", "Release"]),
+        ("getAndBitwiseOr", FieldUpdate::GetAndBitwise(BinOp::BitOr), &["", "Acquire", "Release"]),
+        ("getAndBitwiseAnd", FieldUpdate::GetAndBitwise(BinOp::BitAnd), &["", "Acquire", "Release"]),
+        ("getAndBitwiseXor", FieldUpdate::GetAndBitwise(BinOp::BitXor), &["", "Acquire", "Release"]),
         ("getAndSet", FieldUpdate::GetAndSet, &["", "Acquire", "Release"]),
         ("compareAndSet", FieldUpdate::CompareAndSet, &[""]),
         ("weakCompareAndSet", FieldUpdate::CompareAndSet, &["", "Plain", "Acquire", "Release"]),
@@ -326,12 +431,14 @@ pub fn unsafe_field_update(class: &str, name: &str, signature: &str) -> Option<F
     forms.into_iter().find_map(|(prefix, update, modes)| {
         let rest = name.strip_prefix(prefix)?;
         let (kind, ty) = kinds.into_iter().find(|(k, _)| rest.starts_with(k))?;
-        if !modes.contains(&&rest[kind.len()..]) || (update == FieldUpdate::GetAndAdd && kind == "Reference")
-        {
+        let numeric = matches!(update, FieldUpdate::GetAndAdd | FieldUpdate::GetAndBitwise(_));
+        if !modes.contains(&&rest[kind.len()..]) || (numeric && kind == "Reference") {
             return None;
         }
         let expected = match update {
-            FieldUpdate::GetAndAdd | FieldUpdate::GetAndSet => format!("(java.lang.Object,long,{ty}){ty}"),
+            FieldUpdate::GetAndAdd | FieldUpdate::GetAndSet | FieldUpdate::GetAndBitwise(_) => {
+                format!("(java.lang.Object,long,{ty}){ty}")
+            }
             FieldUpdate::CompareAndSet => format!("(java.lang.Object,long,{ty},{ty})boolean"),
             FieldUpdate::CompareAndExchange => format!("(java.lang.Object,long,{ty},{ty}){ty}"),
         };
@@ -381,8 +488,11 @@ pub fn unsafe_field_access(class: &str, name: &str, signature: &str) -> Option<b
 /// `jdk.internal.event`. The streams' `Tripwire.ENABLED` is `Boolean.getBoolean` of a system
 /// property that only `-D` on the JVM's command line sets, which a translated program has no
 /// equivalent of; it guards warnings through `PlatformLogger` that name a class by reflection.
+/// `ThreadLocal.TRACE_VTHREAD_LOCALS` is the property `jdk.traceVirtualThreadLocals`, which is
+/// unset (`UNSET_PROPERTIES`); it guards a `StackWalker` dump of where a virtual thread sets one.
 pub const FALSE_FLAGS: &[(&str, &str)] = &[
     ("java.io.FileInputStream", "jfrTracing"),
+    ("java.lang.ThreadLocal", "TRACE_VTHREAD_LOCALS"),
     ("java.io.FileOutputStream", "jfrTracing"),
     ("java.io.RandomAccessFile", "jfrTracing"),
     ("java.lang.Throwable", "jfrTracing"),
@@ -427,10 +537,23 @@ fn archived_null_test(condition: &Value, equal: bool) -> bool {
 /// translated program, as in a program run without options (`lower/system.rs`). `Arrays.sort`
 /// reads the first to choose its old merge sort, and `ThreadLocalRandom` the second to seed
 /// itself from `SecureRandom`.
-pub const UNSET_PROPERTIES: &[&str] = &["java.util.Arrays.useLegacyMergeSort", "java.util.secureRandomSeed"];
+pub const UNSET_PROPERTIES: &[&str] = &[
+    "java.util.Arrays.useLegacyMergeSort",
+    "java.util.secureRandomSeed",
+    // The common `ForkJoinPool`'s settings, and whether every thread is tracked for thread dumps.
+    "java.util.concurrent.ForkJoinPool.common.parallelism",
+    "java.util.concurrent.ForkJoinPool.common.threadFactory",
+    "java.util.concurrent.ForkJoinPool.common.exceptionHandler",
+    "java.util.concurrent.ForkJoinPool.common.maximumSpares",
+    "jdk.trackAllThreads",
+    // Whether `ThreadLocal` prints where a virtual thread sets one.
+    "jdk.traceVirtualThreadLocals",
+];
 
 /// The `if` statements among the statements of `block` whose `then` branch never runs: their
-/// condition is `Boolean.parseBoolean(v)` of a local `v` that the block declares earlier with the
+/// condition is `Boolean.parseBoolean(v)` or `v != null` (or `||` of such tests, as the common
+/// `ForkJoinPool` tests its thread factory's and handler's names) of a local `v` that the block
+/// declares earlier with the
 /// value of one of the `UNSET_PROPERTIES` (`System.getProperty` or `VM.getSavedProperty` of it,
 /// which is null) and never assigns, as `ThreadLocalRandom`'s static block tests
 /// `java.util.secureRandomSeed` before it reaches `SecureRandom`.
@@ -473,21 +596,59 @@ pub fn unset_property_ifs(block: &Value) -> Vec<&Value> {
     let mut written = Vec::new();
     assigned(block, &mut written);
     unset.retain(|name| !written.contains(name));
-    statements
-        .iter()
-        .filter(|s| {
-            let condition = &s["condition"];
-            let condition =
-                if text(condition, "kind") == "PARENTHESIZED" { &condition["expression"] } else { condition };
-            let symbol = &condition["symbol"];
-            let arg = &condition["arguments"][0];
-            text(s, "kind") == "IF"
-                && text(condition, "kind") == "METHOD_INVOCATION"
-                && (text(symbol, "owner"), text(symbol, "name")) == ("java.lang.Boolean", "parseBoolean")
-                && text(arg, "kind") == "IDENTIFIER"
-                && unset.contains(&text(arg, "name"))
-        })
-        .collect()
+    let is_unset = |v: &Value| text(v, "kind") == "IDENTIFIER" && unset.contains(&text(v, "name"));
+    // `Boolean.parseBoolean(v)`, `v != null`, or either of two such conditions.
+    fn never<'v>(condition: &'v Value, is_unset: &dyn Fn(&'v Value) -> bool) -> bool {
+        let symbol = &condition["symbol"];
+        let (left, right) = (&condition["leftOperand"], &condition["rightOperand"]);
+        let null = |v: &Value| text(v, "kind") == "NULL_LITERAL";
+        match text(condition, "kind") {
+            "PARENTHESIZED" => never(&condition["expression"], is_unset),
+            "CONDITIONAL_OR" => never(left, is_unset) && never(right, is_unset),
+            "NOT_EQUAL_TO" => (is_unset(left) && null(right)) || (null(left) && is_unset(right)),
+            "METHOD_INVOCATION" => {
+                (text(symbol, "owner"), text(symbol, "name")) == ("java.lang.Boolean", "parseBoolean")
+                    && is_unset(&condition["arguments"][0])
+            }
+            _ => false,
+        }
+    }
+    statements.iter().filter(|s| text(s, "kind") == "IF" && never(&s["condition"], &is_unset)).collect()
+}
+
+/// The variable whose exception the `try` statement `node` replaces with a new one of the same
+/// class, as `ForkJoinTask.getException` does by reflection for an exception that another thread
+/// threw: it finds the public constructors of `ex.getClass()` (two `Constructor` locals, a loop
+/// over `getConstructors()`, then an `if` that calls the one of a `Throwable`, else the one
+/// without parameters and `initCause`). `lower::recreate` writes it without reflection.
+pub fn recreated_exception(node: &Value) -> Option<&str> {
+    if text(node, "kind") != "TRY"
+        || node["resources"].as_array().is_some_and(|r| !r.is_empty())
+        || !node["finallyBlock"].is_null()
+    {
+        return None;
+    }
+    let statements = node["block"]["statements"].as_array()?;
+    let kinds: Vec<&str> = statements.iter().map(|s| text(s, "kind")).collect();
+    if kinds != ["VARIABLE", "VARIABLE", "ENHANCED_FOR_LOOP", "IF"]
+        || !statements[..2]
+            .iter()
+            .all(|v| text(&v["symbol"], "type").starts_with("java.lang.reflect.Constructor"))
+    {
+        return None;
+    }
+    let all = &statements[2]["expression"];
+    let get_class = &all["methodSelect"]["expression"];
+    let exception = &get_class["methodSelect"]["expression"];
+    let called = |call: &Value, owner: &str, name: &str| {
+        text(call, "kind") == "METHOD_INVOCATION"
+            && (text(&call["symbol"], "owner"), text(&call["symbol"], "name")) == (owner, name)
+    };
+    (called(all, "java.lang.Class", "getConstructors")
+        && called(get_class, "java.lang.Object", "getClass")
+        && text(exception, "kind") == "IDENTIFIER"
+        && text(exception, "javaType") == "java.lang.Throwable")
+        .then(|| text(exception, "name"))
 }
 
 /// The only branch of an `if` statement or a `?:` that can run, when its condition is never true
@@ -614,12 +775,128 @@ pub fn writes_string_array(node: &Value) -> bool {
             .is_some_and(|a| text(a, "javaType") == "java.lang.String[]")
 }
 
+/// The translator's `System.getProperties()` (`java/overlay/java/lang/TranslatedProperties.java`,
+/// see `lower::system`).
+pub const TRANSLATED_PROPERTIES: JdkMethod =
+    ("java.lang.TranslatedProperties", "all", "()java.util.Properties");
+
+/// The methods of `JavaLangAccess` that are the translator's static methods of the same name and
+/// type in `TRANSLATED_LANG_ACCESS_CLASS` (`java/overlay/jdk/internal/access/`), as
+/// `SharedSecrets.getJavaLangAccess()` is null in a translated program (see `lower.rs`).
+pub const TRANSLATED_LANG_ACCESS: &[&str] = &[
+    "countPositives",
+    "countNonZeroAscii",
+    "uncheckedNewStringWithLatin1Bytes",
+    "inflateBytesToChars",
+    "start",
+    "uncheckedNewStringOrThrow",
+    "uncheckedGetBytesOrThrow",
+];
+
+/// The class of `TRANSLATED_LANG_ACCESS`.
+pub const TRANSLATED_LANG_ACCESS_CLASS: &str = "jdk.internal.access.TranslatedLangAccess";
+
+/// Static methods of the JDK whose calls are calls of a static method of the translator's
+/// (`java/overlay`) with the same type, by the JDK's method and the translator's class and name
+/// (see `lower.rs`). Reachability goes to the translator's method, and not into the JDK's.
+pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
+    // The default file system, whose provider a property could name and reflection create (the
+    // property is not set in a translated program, see `lower::system`), and which the JDK finds
+    // by the URI `file:///` (`sun/nio/fs/TranslatedFiles.java`).
+    (
+        (
+            "java.nio.file.FileSystems.DefaultFileSystemHolder",
+            "defaultFileSystem",
+            "()java.nio.file.FileSystem",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "defaultFileSystem"),
+    ),
+    // The first mismatch of two arrays, which the JDK finds reading memory at offsets from the
+    // arrays' bases; the translator's leaves every element to its callers' loops
+    // (`jdk/internal/util/TranslatedArraysSupport.java`).
+    (
+        (
+            "jdk.internal.util.ArraysSupport",
+            "vectorizedMismatch",
+            "(java.lang.Object,long,java.lang.Object,long,int,int)int",
+        ),
+        ("jdk.internal.util.TranslatedArraysSupport", "vectorizedMismatch"),
+    ),
+    // A file's bytes, which the JDK reads through a channel and `ByteBuffer`s; the translator's
+    // read `Files.newInputStream` (`sun/nio/fs/TranslatedFiles.java`).
+    (
+        ("java.nio.file.Files", "readAllBytes", "(java.nio.file.Path)byte[]"),
+        ("sun.nio.fs.TranslatedFiles", "readAllBytes"),
+    ),
+    // A file's text, which the JDK copies the bytes of for a `Path` of another module, found by
+    // `Class.getModule`.
+    (
+        (
+            "java.nio.file.Files",
+            "readString",
+            "(java.nio.file.Path,java.nio.charset.Charset)java.lang.String",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "readString"),
+    ),
+    (
+        (
+            "java.nio.file.Files",
+            "writeString",
+            "(java.nio.file.Path,java.lang.CharSequence,java.nio.charset.Charset,java.nio.file.OpenOption[])java.nio.file.Path",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "writeString"),
+    ),
+    // A reader and a writer of a file, which the JDK makes with a `CharsetDecoder` and a
+    // `CharsetEncoder`; the translator's with the `Charset`.
+    (
+        (
+            "java.nio.file.Files",
+            "newBufferedReader",
+            "(java.nio.file.Path,java.nio.charset.Charset)java.io.BufferedReader",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "newBufferedReader"),
+    ),
+    (
+        (
+            "java.nio.file.Files",
+            "newBufferedWriter",
+            "(java.nio.file.Path,java.nio.charset.Charset,java.nio.file.OpenOption[])java.io.BufferedWriter",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "newBufferedWriter"),
+    ),
+];
+
+/// The translator's class and method that a call of the JDK's method `(owner, name, signature)`
+/// calls instead (`REDIRECTED_CALLS`), where a variable-arity parameter is written as an array
+/// (javac writes `T...`).
+pub fn redirected_call(owner: &str, name: &str, signature: &str) -> Option<(&'static str, &'static str)> {
+    let signature = signature.replace("...", "[]");
+    REDIRECTED_CALLS
+        .iter()
+        .find(|((o, n, s), _)| (*o, *n, *s) == (owner, name, &*signature))
+        .map(|(_, to)| *to)
+}
+
 /// A method of the JDK, by class, name and javac's type of it.
 pub type JdkMethod = (&'static str, &'static str, &'static str);
 
 /// `Locale.getLanguage()`, which `String.toUpperCase(locale)` and `toLowerCase(locale)` call to
 /// tell the languages with their own case mapping (see `lower::strings`).
 pub const LOCALE_LANGUAGE: JdkMethod = ("java.util.Locale", "getLanguage", "()java.lang.String");
+
+/// What `String.format(locale, format, args...)` runs, as the JDK's does: `new
+/// Formatter(locale).format(format, args).toString()`, each called on what the one before
+/// returns (see `lower::strings`). So do `printf` and `format` of a `PrintStream` with a locale.
+pub const FORMAT_IN_LOCALE: [JdkMethod; 3] = [
+    ("java.util.Formatter", "<init>", "(java.util.Locale)void"),
+    ("java.util.Formatter", "format", "(java.lang.String,java.lang.Object[])java.util.Formatter"),
+    ("java.util.Formatter", "toString", "()java.lang.String"),
+];
+
+/// Whether a method's javac type is that of a formatting method with a locale first.
+pub fn formats_in_locale(signature: &str) -> bool {
+    signature.starts_with("(java.util.Locale,java.lang.String,")
+}
 
 /// The methods of `String` that stream with the JDK's methods (see `lower::strings`), and those
 /// methods, each called on what the one before returns. `chars()` streams the string's UTF-16 code
@@ -693,6 +970,8 @@ pub struct Rounds<'t> {
     stays_sequential: bool,
     /// The locale data classes of the libraries (`Walk::locale_data`).
     locale_data: Vec<String>,
+    /// The service providers of the sources (`Walk::providers`).
+    providers: Vec<super::modules::ServiceProvider>,
     /// The walk without the assumption, made once it fails, and then kept up too.
     parallel: Option<Walk<'t>>,
     /// How many times a walk started again (`Walk::stale`).
@@ -710,6 +989,7 @@ impl<'t> Rounds<'t> {
             check: sequential::Index::default(),
             stays_sequential: true,
             locale_data: Vec::new(),
+            providers: Vec::new(),
             parallel: None,
             restarts: 0,
             string_array_writes: false,
@@ -727,6 +1007,13 @@ impl<'t> Rounds<'t> {
     /// classes of the libraries (`by_name::locale_data_classes`).
     pub fn with_locale_data(mut self, classes: Vec<String>) -> Rounds<'t> {
         self.locale_data = classes;
+        self
+    }
+
+    /// Reachability in which `ServiceLoader` finds these service providers, in its order
+    /// (`modules::service_providers`).
+    pub fn with_providers(mut self, providers: Vec<super::modules::ServiceProvider>) -> Rounds<'t> {
+        self.providers = providers;
         self
     }
 
@@ -752,7 +1039,8 @@ impl<'t> Rounds<'t> {
             }
             None => {
                 let walk =
-                    Walk::start(&self.units, &self.main, true, self.string_array_writes, &self.locale_data)?;
+                    Walk::start(&self.units, &self.main, true, self.string_array_writes, &self.locale_data)?
+                        .with_providers(&self.providers);
                 self.sequential.insert(walk)
             }
         };
@@ -767,7 +1055,8 @@ impl<'t> Rounds<'t> {
             }
             None if !self.stays_sequential => {
                 let walk =
-                    Walk::start(&self.units, &self.main, false, self.string_array_writes, &self.locale_data)?;
+                    Walk::start(&self.units, &self.main, false, self.string_array_writes, &self.locale_data)?
+                        .with_providers(&self.providers);
                 self.parallel = Some(walk);
             }
             None => {}
@@ -860,10 +1149,26 @@ struct Walk<'t> {
     /// Whether reachable code finds a class by a name it computes, `Class.forName(name)`, which
     /// initializes every class that it can find (`by_name.rs`).
     finds_named: bool,
+    /// Whether reachable code makes a new exception of an exception's class
+    /// (`recreated_exception`): each exception class whose objects are created has the
+    /// constructor that does it.
+    recreates: bool,
     /// The parameters, by method and position, that a method gives `ensureInitialized`, and the
     /// class literals that reachable code passes to each parameter (`initialize.rs`).
     initializing: HashSet<(MethodKey, usize)>,
     class_arguments: HashMap<(MethodKey, usize), BTreeSet<String>>,
+    /// The lookups of members by name of reachable code, its string literals and the classes
+    /// of its class literals, and the lookups made so far, by class and name (`reflection.rs`).
+    lookups: BTreeSet<Lookup>,
+    strings: HashSet<String>,
+    class_literals: HashSet<String>,
+    reflected_keys: HashSet<(String, String)>,
+    /// The service providers of the sources, and the services that
+    /// `ServiceLoader.load` of reachable code loads: by a class literal, or `None` for a
+    /// `Class` value, which may be any service whose class literal reachable code has
+    /// (`reflection.rs`).
+    providers: Vec<super::modules::ServiceProvider>,
+    service_loads: BTreeSet<Option<String>>,
 }
 
 impl<'t> Walk<'t> {
@@ -913,6 +1218,7 @@ impl<'t> Walk<'t> {
             overriders: std::mem::take(&mut self.overriders),
             sequential,
             locale_data: std::mem::take(&mut self.locale_data),
+            providers: std::mem::take(&mut self.providers),
             ..Walk::default()
         };
         self.reach.sequential = sequential;
@@ -1033,12 +1339,18 @@ impl<'t> Walk<'t> {
     }
 
     fn run(&mut self) {
-        while let Some(item) = self.work.pop() {
-            match item {
-                Item::Class(class) => self.class(class),
-                Item::Init(class) => self.init(class),
-                Item::Method(key) => self.method(key),
-                Item::Field(key) => self.field(key),
+        loop {
+            while let Some(item) = self.work.pop() {
+                match item {
+                    Item::Class(class) => self.class(class),
+                    Item::Init(class) => self.init(class),
+                    Item::Method(key) => self.method(key),
+                    Item::Field(key) => self.field(key),
+                }
+            }
+            // What reflection's lookups find among the classes found so far (`reflection.rs`).
+            if !self.reflect() {
+                break;
             }
         }
     }
@@ -1181,12 +1493,51 @@ impl<'t> Walk<'t> {
         if !self.reach.instantiated.insert(class.clone()) {
             return;
         }
+        if self.recreates {
+            self.recreatable(&class);
+        }
         self.live(class.clone());
         let decl = self.classes[&class].0;
         self.initializers(decl, &class, false);
         // Library code calls these on any object, as string conversion calls `toString`.
         for (name, signature) in OBJECT_METHODS {
             self.work.push(Item::Method((class.clone(), name.to_string(), signature.to_string())));
+        }
+    }
+
+    /// Reachable code makes a new exception of an exception's class (`recreated_exception`).
+    fn recreates_exceptions(&mut self) {
+        if std::mem::replace(&mut self.recreates, true) {
+            return;
+        }
+        let classes: Vec<String> = self.reach.instantiated.iter().cloned().collect();
+        for class in classes {
+            self.recreatable(&class);
+        }
+    }
+
+    /// The constructor that makes a new exception of class `class` from another
+    /// (`recreated_exception`): its public one of a `Throwable`, else its public one without
+    /// parameters (and `initCause`, a standard method).
+    fn recreatable(&mut self, class: &str) {
+        let mut work = vec![class.to_string()];
+        let mut throwable = false;
+        while let Some(c) = work.pop() {
+            if c == "java.lang.Throwable" || crate::lower::standard_subclass(&c, "java.lang.Throwable") {
+                throwable = true;
+                break;
+            }
+            work.extend(self.supertypes.get(&c).cloned().unwrap_or_default());
+        }
+        if !throwable {
+            return;
+        }
+        for signature in ["(java.lang.Throwable)void", "()void"] {
+            let key = (class.to_string(), "<init>".to_string(), signature.to_string());
+            if self.methods.get(&key).is_some_and(|m| has_flag(m, "PUBLIC")) {
+                self.work.push(Item::Method(key));
+                return;
+            }
         }
     }
 
@@ -1227,6 +1578,12 @@ impl<'t> Walk<'t> {
 
     fn field(&mut self, key: FieldKey) {
         let Some(&node) = self.fields.get(&key) else {
+            // A field of a standard class (the translator's `Thread`) is declared with the class
+            // of its type, though the code may never create one (`ForkJoinWorkerThread` clears
+            // `Thread.inheritableThreadLocals` through `Unsafe`).
+            if let Some(ty) = crate::lower::standard_field_type(&key.0, &key.1) {
+                self.work.push(Item::Class(ty));
+            }
             return self.block(&key.0.clone(), Item::Field(key));
         };
         if !self.reach.fields.insert(key.clone()) {
@@ -1342,6 +1699,10 @@ impl<'t> Walk<'t> {
                     self.work.push(if initialize { Item::Init(class) } else { Item::Class(class) });
                 }
                 self.reflective(value);
+                self.reflection_scan(value);
+                if recreated_exception(value).is_some() {
+                    self.recreates_exceptions();
+                }
                 if let Some(field) = field_offset_named(value) {
                     self.work.push(Item::Field(field));
                 }
@@ -1379,8 +1740,19 @@ impl<'t> Walk<'t> {
         }
     }
 
+    /// Reaches what a formatting with a locale runs (`FORMAT_IN_LOCALE`).
+    fn format_in_locale(&mut self) {
+        for (class, method, signature) in FORMAT_IN_LOCALE {
+            self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+        }
+    }
+
     fn symbol(&mut self, symbol: &Value) {
         let (owner, name) = (text(symbol, "owner").to_string(), text(symbol, "name").to_string());
+        let member = (owner.as_str(), name.as_str(), text(symbol, "type"));
+        for (_, (class, method, signature)) in STANDARD_CALLS.iter().filter(|(m, _)| *m == member) {
+            self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
+        }
         match text(symbol, "kind") {
             "METHOD"
                 if owner == "java.lang.String"
@@ -1398,10 +1770,38 @@ impl<'t> Walk<'t> {
                     self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
                 }
             }
+            // The translator's properties (see `lower::system`).
+            "METHOD" if owner == "java.lang.System" && name == "getProperties" => {
+                let (class, method, signature) = TRANSLATED_PROPERTIES;
+                self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
+            // The translator's methods that replace some of the JDK's (`REDIRECTED_CALLS`).
+            "METHOD" if let Some((class, to)) = redirected_call(&owner, &name, text(symbol, "type")) => {
+                let signature = text(symbol, "type").to_string();
+                self.work.push(Item::Method((class.into(), to.into(), signature)));
+            }
+            // The translator's code for what `JavaLangAccess` does (see `lower.rs`).
+            "METHOD"
+                if owner == "jdk.internal.access.JavaLangAccess"
+                    && TRANSLATED_LANG_ACCESS.contains(&name.as_str()) =>
+            {
+                let signature = text(symbol, "type").to_string();
+                self.work.push(Item::Method((TRANSLATED_LANG_ACCESS_CLASS.into(), name, signature)));
+            }
             // Formatted where it is called, and printed by `PRINT_FORMATTED`.
             "METHOD" if owner == "java.io.PrintStream" && matches!(name.as_str(), "printf" | "format") => {
                 let (class, method, signature) = PRINT_FORMATTED;
                 self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+                if formats_in_locale(text(symbol, "type")) {
+                    self.format_in_locale();
+                }
+            }
+            "METHOD"
+                if owner == "java.lang.String"
+                    && name == "format"
+                    && formats_in_locale(text(symbol, "type")) =>
+            {
+                self.format_in_locale();
             }
             "METHOD" | "CONSTRUCTOR" => {
                 self.stub_method(symbol);
@@ -1744,25 +2144,26 @@ mod tests {
 
     #[test]
     fn class_loading_is_not_translated_and_reflect_array_is() {
-        assert_eq!(untranslated("java.util.ServiceLoader"), Some("class loading"));
+        assert_eq!(untranslated("java.util.ServiceLoader"), None);
         assert_eq!(untranslated("java.util.ResourceBundle.Control"), None);
         assert_eq!(untranslated("java.lang.ModuleLayer"), Some("class loading"));
         assert_eq!(untranslated("jdk.internal.loader.BootLoader"), Some("class loading"));
-        assert_eq!(untranslated("java.lang.reflect.Method"), Some("reflection"));
+        assert_eq!(untranslated("java.lang.reflect.Proxy"), Some("reflection"));
+        assert_eq!(untranslated("java.lang.reflect.Method"), None);
         assert_eq!(untranslated("java.lang.reflect.Array"), None);
         assert_eq!(untranslated("java.lang.reflect.Modifier"), None);
         assert_eq!(untranslated("java.util.ArrayList"), None);
-        // Reachability stops at the loader, and goes into `Array`.
+        // Reachability stops at the module layer, and goes into `Array`.
         let unit = json!({"typeDecls": [
-            class("Main", &[("main", vec![call("java.util.ServiceLoader", "load"), call("java.lang.reflect.Array", "newInstance")])]),
-            class("java.util.ServiceLoader", &[("load", vec![call("Provider", "run")])]),
+            class("Main", &[("main", vec![call("java.lang.ModuleLayer", "boot"), call("java.lang.reflect.Array", "newInstance")])]),
+            class("java.lang.ModuleLayer", &[("boot", vec![call("Provider", "run")])]),
             class("java.lang.reflect.Array", &[("newInstance", vec![call("Other", "run")])]),
             class("Provider", &[("run", vec![])]),
             class("Other", &[("run", vec![])]),
         ]});
         let reach = reach(&[&unit], "Main").unwrap();
         let method = |class: &str| (class.to_string(), "run".to_string(), "()void".to_string());
-        assert!(!reach.classes.contains("java.util.ServiceLoader"), "{reach:?}");
+        assert!(!reach.classes.contains("java.lang.ModuleLayer"), "{reach:?}");
         assert!(!reach.methods.contains(&method("Provider")), "{reach:?}");
         assert!(reach.classes.contains("java.lang.reflect.Array"), "{reach:?}");
         assert!(reach.methods.contains(&method("Other")), "{reach:?}");

@@ -83,6 +83,8 @@ pub enum Native {
     ThreadStart,
     /// `alive0(tid)`, `join0(tid, millis)` and `rename0(tid, name)`.
     ThreadAlive,
+    /// `state0(tid)`: what the thread is doing, by `Thread.State`'s ordinal, or 0 without a record.
+    ThreadState,
     ThreadJoin,
     ThreadRename,
     /// `interrupt0(tid)`, `isInterrupted0(tid)`, and `clearInterrupt0()` of `Thread.interrupted()`,
@@ -96,6 +98,11 @@ pub enum Native {
     InstallUncaught,
     UncaughtException,
     PrintUncaught,
+    /// Gives the runtime the text of the stack trace of an uncaught exception: the argument, a call
+    /// of `Throwable.uncaughtTrace()` that lowering puts at the start of `main` (see
+    /// `lower/natives.rs`), which is not evaluated where the native is, and which reads the
+    /// exception with `Throwable.uncaught0()` (`UncaughtException`).
+    InstallTrace,
     /// `Unsafe.park(absolute, time)` of `LockSupport`: waits for the calling thread's permit, until
     /// the deadline `time` (milliseconds since the epoch) when `absolute`, else for `time`
     /// nanoseconds, or without a limit for 0.
@@ -114,6 +121,9 @@ pub enum Native {
     FileOpenRead,
     /// `FileOutputStream.open0(name, append)`: creates or opens the file and returns its descriptor.
     FileOpenWrite,
+    /// `RandomAccessFile.open0(name, mode)`: opens the file to read, or to read and write, and
+    /// returns its descriptor.
+    FileOpenRandom,
     /// The natives of a stream that act on its descriptor, which is their first argument: the
     /// stream's `fd` as an `int` (the object model supplies it); `read0()`.
     FileRead,
@@ -133,6 +143,18 @@ pub enum Native {
     FileIsRegular,
     FileLength,
     FilePosition,
+    /// `RandomAccessFile.seek0(pos)` and `setLength0(n)`; its `read0`, `readBytes0`, `write0`,
+    /// `writeBytes0`, `length0` and `getFilePointer` are `FileRead` and the others.
+    FileSeek,
+    FileSetLength,
+    /// A native of `java.io.UnixFileSystem` by its name (`getBooleanAttributes0`, `list0`, ...),
+    /// whose `File` arguments are their paths (`java_runtime::fs`).
+    FileSystem(&'static str),
+    /// A native of the translator's `sun.nio.fs.UnixNativeDispatcher`
+    /// (`java/overlay/sun/nio/fs/UnixNativeDispatcher.java`) by its name (`open0`, `stat0`, ...):
+    /// a system call of `java.nio.file` on the bytes of a path, which records its `errno` rather
+    /// than failing (`java_runtime::unix`, `UNIX_CALLS`).
+    Unix(&'static str),
     /// The natives of the stream under the translator's `System.out` and `System.err` objects
     /// (`java/overlay/java/io/StandardOutput.java`), the runtime's buffered standard output and
     /// error (`java_runtime::out`): `write0(fd, b)`, `writeBytes0(fd, b, off, len)`,
@@ -161,10 +183,30 @@ pub enum Native {
     DescriptorHandle,
     /// `FileDescriptor.getAppend(fd)`.
     DescriptorAppend,
+    /// `Unsafe.fullFence()`, and so its `loadFence()` and `storeFence()`: a fence that orders
+    /// every memory access before it against every one after it.
+    FullFence,
     /// `CRC32.update(crc, b)`.
     Crc32Update,
     /// `CRC32.updateBytes0(crc, b, off, len)`.
     Crc32UpdateBytes,
+    /// `Reference.hasReferencePendingList()`: a translated program has no garbage collector that
+    /// discovers references, so no reference is ever pending.
+    NoPendingReferences,
+    /// `SecureRandom.getSeed(numBytes)`: seed bytes from the operating system (`random.rs`).
+    SecureSeed,
+    /// `Inflater`'s natives (`inflate.rs`): `init(nowrap)`, then `inflateBytesBytes`, `getAdler`,
+    /// `reset`, `end` and `setDictionary` on the handle that `init` returned.
+    InflateInit,
+    InflateBytes,
+    InflateAdler,
+    InflateReset,
+    InflateEnd,
+    InflateSetDictionary,
+    /// `TimeZone.getSystemTimeZoneID(javaHome)`: the zone's name, or `null` (`time_zone.rs`).
+    SystemTimeZoneId,
+    /// `TimeZone.getSystemGMTOffsetID()`: the local offset from UTC as `GMT+hh:mm`.
+    SystemGmtOffsetId,
 }
 
 /// The native methods of translated JDK classes that the runtime implements and whose calls
@@ -177,6 +219,11 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         // Registers `getNanoTimeAdjustment`, and nothing else.
         ("jdk.internal.misc.VM", "initialize", "()void") => Native::Nothing,
         ("jdk.internal.misc.VM", "getNanoTimeAdjustment", "(long)long") => Native::NanoTimeAdjustment,
+        // The javaHome argument is only the place of the JDK's `tzmappings`, which is not read.
+        ("java.util.TimeZone", "getSystemTimeZoneID", "(java.lang.String)java.lang.String") => {
+            Native::SystemTimeZoneId
+        }
+        ("java.util.TimeZone", "getSystemGMTOffsetID", "()java.lang.String") => Native::SystemGmtOffsetId,
         ("jdk.internal.misc.CDS", "getCDSConfigStatus", "()int") => Native::CdsConfigStatus,
         ("jdk.internal.misc.CDS", "getRandomSeedForDumping", "()long") => Native::CdsRandomSeed,
         // Without an archive there is nothing to restore. Its argument is a class literal, which
@@ -191,8 +238,20 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.io.StandardOutput", "writeBytes0", "(int,byte[],int,int)void") => Native::StandardWriteBytes,
         ("java.io.StandardOutput", "flush0", "(int)void") => Native::StandardFlush,
         ("java.io.StandardOutput", "close0", "(int)void") => Native::StandardClose,
+        ("jdk.internal.misc.Unsafe", "fullFence", "()void") => Native::FullFence,
         ("java.util.zip.CRC32", "update", "(int,int)int") => Native::Crc32Update,
         ("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int") => Native::Crc32UpdateBytes,
+        ("java.util.zip.Inflater", "init", "(boolean)long") => Native::InflateInit,
+        ("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long") => {
+            Native::InflateBytes
+        }
+        ("java.util.zip.Inflater", "getAdler", "(long)int") => Native::InflateAdler,
+        ("java.util.zip.Inflater", "reset", "(long)void") => Native::InflateReset,
+        ("java.util.zip.Inflater", "end", "(long)void") => Native::InflateEnd,
+        ("java.util.zip.Inflater", "setDictionary", "(long,byte[],int,int)void") => {
+            Native::InflateSetDictionary
+        }
+        ("java.lang.ref.Reference", "hasReferencePendingList", "()boolean") => Native::NoPendingReferences,
         ("java.lang.Thread", "nextThreadNum", "()int") => Native::ThreadNumber,
         ("java.lang.Thread", "nextThreadId", "()long") => Native::ThreadId,
         ("java.lang.Thread", "mainId0", "()long") => Native::MainThreadId,
@@ -203,6 +262,7 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
             Native::ThreadStart
         }
         ("java.lang.Thread", "alive0", "(long)boolean") => Native::ThreadAlive,
+        ("java.lang.Thread", "state0", "(long)int") => Native::ThreadState,
         ("java.lang.Thread", "join0", "(long,long)void") => Native::ThreadJoin,
         ("java.lang.Thread", "rename0", "(long,java.lang.String)void") => Native::ThreadRename,
         ("java.lang.Thread", "interrupt0", "(long)void") => Native::ThreadInterrupt,
@@ -213,15 +273,18 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.lang.Thread", "printUncaught0", "(java.lang.String,java.lang.Throwable)void") => {
             Native::PrintUncaught
         }
+        ("java.lang.Throwable", "uncaught0", "()java.lang.Throwable") => Native::UncaughtException,
         _ => return None,
     })
 }
 
 /// Whether the runtime implements a native method of a translated JDK class: one of
-/// `declared_native`, or a stream native of `java.io`, which `lower/natives.rs` lowers with the
-/// descriptor of the stream's object.
+/// `declared_native`, a stream native of `java.io`, which `lower/natives.rs` lowers with the
+/// descriptor of the stream's object, or a native of `java.io.UnixFileSystem` (`FILE_SYSTEM`).
 pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
     declared_native(class, name, signature).is_some()
+        || (class == "java.io.UnixFileSystem" && FILE_SYSTEM.contains(&name))
+        || (class == UNIX_DISPATCHER && unix_call(name).is_some())
         || matches!(
             (class, name),
             (
@@ -231,12 +294,85 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
             )
                 | ("java.io.FileOutputStream", "open0" | "write" | "writeBytes" | "close0")
                 | ("java.io.FileDescriptor", "close0")
+                | (
+                    "java.io.RandomAccessFile",
+                    "open0" | "read0" | "readBytes0" | "write0" | "writeBytes0" | "getFilePointer"
+                        | "seek0" | "length0" | "setLength0"
+                )
                 // Lowered as code on the referent (`lower::references`).
                 | ("java.lang.ref.Reference", "get0" | "refersTo0" | "clear0")
                 | ("java.lang.ref.PhantomReference", "refersTo0" | "clear0")
                 // `LockSupport`'s, with the thread's id for `unpark` (`lower/natives.rs`).
                 | ("jdk.internal.misc.Unsafe", "park" | "unpark")
         )
+}
+
+/// The natives of `java.io.UnixFileSystem` that the runtime implements (`Native::FileSystem`).
+/// `getSpace0`, which needs `statvfs`, is not one of them.
+pub const FILE_SYSTEM: &[&str] = &[
+    "getBooleanAttributes0",
+    "checkAccess0",
+    "getLastModifiedTime0",
+    "getLength0",
+    "setPermission0",
+    "createFileExclusively0",
+    "delete0",
+    "list0",
+    "createDirectory0",
+    "rename0",
+    "setLastModifiedTime0",
+    "setReadOnly0",
+    "canonicalize0",
+    "getNameMax0",
+];
+
+/// The translator's class of the system calls of `java.nio.file`.
+pub const UNIX_DISPATCHER: &str = "sun.nio.fs.UnixNativeDispatcher";
+
+/// The natives of `UNIX_DISPATCHER` that the runtime implements (`Native::Unix`), with the
+/// runtime's function of each. The dispatcher's other natives (the calls relative to an open
+/// directory, extended attributes, `statvfs`, the mount table) are not among them.
+pub const UNIX_CALLS: &[(&str, &str)] = &[
+    ("lastError", "unix_last_error"),
+    ("getcwd0", "unix_getcwd"),
+    ("dup0", "unix_dup"),
+    ("open0", "unix_open"),
+    ("close0", "unix_close"),
+    ("link0", "unix_link"),
+    ("unlink0", "unix_unlink"),
+    ("rename0", "unix_rename"),
+    ("mkdir0", "unix_mkdir"),
+    ("rmdir0", "unix_rmdir"),
+    ("readlink0", "unix_readlink"),
+    ("realpath0", "unix_realpath"),
+    ("symlink0", "unix_symlink"),
+    ("stat0", "unix_stat"),
+    ("fstat0", "unix_fstat"),
+    ("chown0", "unix_chown"),
+    ("fchown0", "unix_fchown"),
+    ("chmod0", "unix_chmod"),
+    ("fchmod0", "unix_fchmod"),
+    ("futimens0", "unix_futimens"),
+    ("utimensat0", "unix_utimensat"),
+    ("opendir0", "unix_opendir"),
+    ("closedir0", "unix_closedir"),
+    ("readdir0", "unix_readdir"),
+    ("access0", "unix_access"),
+    ("getpwuid0", "unix_getpwuid"),
+    ("getgrgid0", "unix_getgrgid"),
+    ("strerror0", "unix_strerror"),
+    ("readBytes", "unix_read"),
+    ("writeBytes", "unix_write"),
+    ("position", "unix_position"),
+    ("seek", "unix_seek"),
+    ("size", "unix_size"),
+    ("truncate", "unix_truncate"),
+    ("sync", "unix_sync"),
+];
+
+/// The name of a native of `UNIX_DISPATCHER` that the runtime implements, as `UNIX_CALLS` has it.
+pub fn unix_call(name: &str) -> Option<&'static str> {
+    UNIX_CALLS.iter().find(|(n, _)| *n == name).map(|(n, _)| *n)
 }
 
 /// The `Math` and `StrictMath` functions the native layer covers (beyond `abs`, `max`, `min`).
@@ -284,6 +420,7 @@ pub const MATH_FUNCTIONS: &[&str] = &[
     "clamp",
     "toRadians",
     "toDegrees",
+    "scalb",
 ];
 
 #[cfg(test)]
@@ -307,9 +444,24 @@ mod tests {
             found("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int"),
             Some(Native::Crc32UpdateBytes)
         );
+        assert_eq!(found("java.util.zip.Inflater", "init", "(boolean)long"), Some(Native::InflateInit));
+        assert_eq!(
+            found("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long"),
+            Some(Native::InflateBytes)
+        );
         // Another overload, or another class's method of the same name, is not the native.
         assert_eq!(found("java.util.zip.CRC32", "update", "(byte[],int,int)void"), None);
         assert_eq!(found("jdk.internal.misc.Unsafe", "initialize", "()void"), None);
+        // `TimeZone`'s natives are private, so only `getDefault` calls them, and `java.util` cannot
+        // be stood in for; the mapping is checked here.
+        assert_eq!(
+            found("java.util.TimeZone", "getSystemTimeZoneID", "(java.lang.String)java.lang.String"),
+            Some(Native::SystemTimeZoneId)
+        );
+        assert_eq!(
+            found("java.util.TimeZone", "getSystemGMTOffsetID", "()java.lang.String"),
+            Some(Native::SystemGmtOffsetId)
+        );
         assert!(runtime_native("java.io.FileInputStream", "readBytes", "(byte[],int,int)int"));
         assert!(!runtime_native("java.lang.Throwable", "fillInStackTrace", "(int)java.lang.Throwable"));
     }

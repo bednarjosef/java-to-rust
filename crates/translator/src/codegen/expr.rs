@@ -252,7 +252,13 @@ impl<'a> Gen<'a> {
             let mark = self.out.len();
             let code = self.expr(e);
             self.catching_now.remove(&e.id);
-            return self.caught(e.id, code, mark);
+            let caught = self.caught(e.id, code, mark);
+            // The `ClassNotFoundException` of a name not in the translation always throws: its
+            // closure's value is `Infallible`, which ends the code here as Java's throw does.
+            if matches!(e.kind, ExprKind::Builtin(Builtin::UnknownClass, _)) {
+                return Code::atom(format!("match {} {{}}", caught.text));
+            }
+            return caught;
         }
         if let Some(code) = self.shared_array(e) {
             return code;
@@ -407,7 +413,10 @@ impl<'a> Gen<'a> {
                     None => Update::Assign(value),
                     Some(op) => Update::Compound(*op, value),
                 };
-                self.update(target, e.ty, how, e.id, false)
+                // The write of `Unsafe.putReference` and its kind is a void call (`lower::handles`):
+                // its value has the field's type.
+                let ty = if e.ty == Type::Void { value.ty } else { e.ty };
+                self.update(target, ty, how, e.id, false)
             }
             ExprKind::IncDec {
                 target: target @ (Place::Field { .. } | Place::Static { .. }),
@@ -642,6 +651,7 @@ impl<'a> Gen<'a> {
             }
             Builtin::Arrays(op) => self.arrays_op(op, args),
             Builtin::ElementUpdate(update) => self.element_update_call(update, args),
+            Builtin::ByteView { ty, big_endian } => self.byte_view_call(ty, big_endian, args),
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
                 let outer = std::mem::replace(&mut self.printing, true);
@@ -676,8 +686,14 @@ impl<'a> Gen<'a> {
             },
             Builtin::UnknownClass => {
                 let name = self.value(&args[0], Type::String);
-                let message = "java.lang.ClassNotFoundException: {} is not a class of the translated program";
-                Code::atom(format!("{}(format!({message:?}, {}))", self.runtime("throw_uncaught"), name.text))
+                let message = "{}, which is not in the translation";
+                let class = "java.lang.ClassNotFoundException";
+                let throw =
+                    format!("{}({class:?}, &format!({message:?}, {}))", self.runtime("throw"), name.text);
+                if self.catching_now.contains(&id) {
+                    return Code::atom(format!("{{ let never: std::convert::Infallible = {throw}; never }}"));
+                }
+                Code::atom(throw)
             }
             Builtin::MissingResource => {
                 let (class, name) = (self.value(&args[0], Type::String), self.value(&args[1], Type::String));
@@ -761,10 +777,10 @@ impl<'a> Gen<'a> {
             Builtin::String(op) => self.string_builtin(op, args, id),
             // A chained call gives `&Self`; as a value, the builder is another handle to it.
             Builtin::Builder(op) if op.chains() => {
-                let code = self.builder_call(op, args);
+                let code = self.builder_call(id, op, args);
                 Code::atom(format!("{}.clone()", code.text))
             }
-            Builtin::Builder(op) => self.builder_call(op, args),
+            Builtin::Builder(op) => self.builder_call(id, op, args),
             Builtin::Format => self.format_builtin(args),
             Builtin::ObjectsEquals => self.objects_equals(args),
             Builtin::NullChecked => self.null_checked(args),

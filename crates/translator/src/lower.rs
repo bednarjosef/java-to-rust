@@ -37,6 +37,7 @@ use std::cell::{Cell, RefCell};
 mod arrays;
 mod boxing;
 mod by_name;
+mod callers;
 mod captures;
 mod census;
 mod charsets;
@@ -47,12 +48,15 @@ mod initializers;
 mod inner;
 mod java_arrays;
 mod java_objects;
+mod libraries;
 mod local_types;
 mod natives;
 mod patterns;
 mod primitives;
 mod program;
 mod prologues;
+mod recreate;
+mod reflection;
 mod switch;
 mod sync;
 mod system;
@@ -62,7 +66,9 @@ use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
 pub use census::panic_message;
 pub(crate) use clinit_errors::rewritten_clinit;
-pub use exceptions::{is_standard, standard_local_name, standard_names, standard_subclass};
+pub use exceptions::{
+    is_standard, standard_field_type, standard_local_name, standard_names, standard_subclass,
+};
 pub use functional::is_functional;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
@@ -322,6 +328,8 @@ struct Lowering<'t> {
     /// The annotation types (`@interface`) that were left out, by javac's name: an annotation
     /// does nothing when the program runs, but a value of one is not translated.
     annotation_types: std::collections::HashSet<String>,
+    /// What each method asks about its caller (see `callers`).
+    callers: callers::Callers,
 }
 
 /// An error that lowering for a census records: the index of the type whose code it is in, the
@@ -406,6 +414,7 @@ impl<'t> Lowering<'t> {
         let node = info.node;
         self.current.set(info.owner);
         self.in_ctor.set(node.str("name") == "<init>");
+        self.check_throwable_override(node)?;
         let is_ctor = node.str("name") == "<init>";
         let is_static = node.has_flag("STATIC");
         let name = node.str("name").to_string();
@@ -425,7 +434,7 @@ impl<'t> Lowering<'t> {
             && param_type(params[0]) == "java.lang.String[]"
             && self.entry.is_none_or(|entry| entry == info.owner);
         let args_param = is_main.then(|| params[0]);
-        let params = if is_main {
+        let mut params: Vec<Param> = if is_main {
             Vec::new()
         } else {
             params
@@ -435,6 +444,7 @@ impl<'t> Lowering<'t> {
                 })
                 .collect::<Result<_, Error>>()?
         };
+        params.extend(self.caller_param(index, node, is_main)?);
         // An abstract method of an enum is implemented by the constants' bodies, which
         // `constant_bodies` makes its body.
         let abstract_in_enum =
@@ -464,6 +474,9 @@ impl<'t> Lowering<'t> {
         };
         if let Some(param) = args_param.filter(|p| reads_name(&body, p.str("name"))) {
             body.insert(0, self.args_decl(param));
+        }
+        if is_main && let Some(hook) = self.trace_hook(node.pos()) {
+            body.insert(0, hook);
         }
         Ok(Method {
             name,
@@ -497,20 +510,14 @@ impl<'t> Lowering<'t> {
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
             // An array of these (`Class<?>[]`, `Enum<?>[]`) is an array type, below.
             _ if name == "java.lang.Class" || generic_of(name, "java.lang.Class") => Ok(Type::JavaClass),
-            // A constructor without parameters, the only one that a translation creates objects
-            // with from a `Class` value, is its class (`by_name.rs`).
-            _ if name == "java.lang.reflect.Constructor"
-                || generic_of(name, "java.lang.reflect.Constructor") =>
-            {
-                Ok(Type::JavaClass)
-            }
             // A value of one of the program's enums (see `enums::enum_call`).
             _ if (name == "java.lang.Enum" || generic_of(name, "java.lang.Enum"))
                 && self.object.is_some_and(|at| at.enumeration.is_some()) =>
             {
                 Ok(Type::class(ENUM))
             }
-            "java.nio.charset.Charset" => Ok(Type::Charset),
+            // The JDK's classes of the standard charsets too (`charsets::STANDARD_CHARSET_CLASSES`).
+            _ if charsets::is_charset_type(name) => Ok(Type::Charset),
             "byte" => Ok(Type::Byte),
             "short" => Ok(Type::Short),
             "char" => Ok(Type::Char),
@@ -527,6 +534,11 @@ impl<'t> Lowering<'t> {
                 Ok(Type::class(&self.types[t].name))
             }
             "<nulltype>" => Ok(Type::Null),
+            // javac gives no name to the intersection of a `?:`'s branch types, such as
+            // `Serializable & Comparable<?>` for an enum and a string: the value is an `Object`.
+            "" if matches!(node.kind(), "CONDITIONAL_EXPRESSION" | "PARENTHESIZED") => {
+                self.ty(node, "java.lang.Object")
+            }
             // `this` in the body of an enum constant, which is the constant.
             _ if name.starts_with("<anonymous ") && self.enum_index(&name[11..name.len() - 1]).is_some() => {
                 Ok(Type::enum_type(&name[11..name.len() - 1]))
@@ -567,6 +579,10 @@ impl<'t> Lowering<'t> {
                 if let Some(otherwise) = stmt.get("elseStatement") {
                     self.stmt_into(otherwise, &mut out)?;
                 }
+                continue;
+            }
+            // A field found by reflection only to make a handle of it, which is no value.
+            if self.handle_field_local(node, stmt) {
                 continue;
             }
             self.stmt_into(stmt, &mut out)?;
@@ -833,7 +849,7 @@ impl<'t> Lowering<'t> {
                     } else {
                         (left, right)
                     };
-                    ExprKind::Binary(op, Box::new(left), Box::new(right))
+                    self.binary_before_assignment(node, op, left, right)
                 }
             }
         };
@@ -851,6 +867,32 @@ impl<'t> Lowering<'t> {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
         Ok(Expr { kind, pos: node.pos(), ty, id })
+    }
+
+    /// `left op right`, where `right` may assign the variable that `left` reads, as in
+    /// `a == (a = next(a))`: Java reads `left` first, so its value is kept in a local before
+    /// `right` runs.
+    fn binary_before_assignment(&self, node: Node<'t>, op: BinOp, left: Expr, right: Expr) -> ExprKind {
+        let read = match &left.kind {
+            ExprKind::Cast(_, inner) => inner,
+            _ => &left,
+        };
+        let ExprKind::Var(name) = &read.kind else {
+            return ExprKind::Binary(op, Box::new(left), Box::new(right));
+        };
+        if !assigns(&right, name) {
+            return ExprKind::Binary(op, Box::new(left), Box::new(right));
+        }
+        let (pos, ty) = (node.pos(), left.ty);
+        let copy = self.fresh_name("left");
+        let var = self.synth(ExprKind::Var(copy.clone()), pos, ty);
+        let binary = ExprKind::Binary(op, Box::new(var), Box::new(right));
+        let result = self.synth(binary, pos, self.ty(node, node.java_type()).unwrap_or(Type::Boolean));
+        let block = vec![Stmt::Local { ty, name: copy, init: Some(left), pos }, Stmt::Yield(result)];
+        ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        }
     }
 
     fn number<T: std::str::FromStr>(&self, node: Node) -> Result<T, Error> {
@@ -901,6 +943,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.handle_access(node, &symbol)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.var_handle_access(node, &symbol)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);
         }
@@ -908,6 +953,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.class_call(node, &symbol, select)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.caller_class(node, &symbol, select)? {
             return Ok(kind);
         }
         if let Some(kind) = self.copy_of_with_class(node, &symbol)? {
@@ -957,7 +1005,36 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.system_property_call(node, &symbol, &mut args)? {
             return Ok(kind);
         }
+        // The translator's method in place of the JDK's (`program::REDIRECTED_CALLS`).
+        if symbol.is_static
+            && let Some((class, to)) = crate::program::redirected_call(symbol.owner, symbol.name, symbol.ty)
+        {
+            let resolved = self
+                .methods
+                .iter()
+                .position(|m| self.types[m.owner].javac == class && m.name == to && m.sig == symbol.ty);
+            if resolved.is_none() {
+                return unsupported(
+                    node,
+                    &format!("`{}.{}` outside a whole program", symbol.owner, symbol.name),
+                );
+            }
+            let args = self.convert_generic_args(node, resolved, args)?;
+            return Ok(ExprKind::Call { name: to.to_string(), args, resolved });
+        }
         if let Some(kind) = self.descriptor_call(node, &symbol, receiver, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.file_system_call(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.library_call(node, &symbol, &args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.blocker_call(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.reflection_native(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {
@@ -1035,6 +1112,22 @@ impl<'t> Lowering<'t> {
             ("jdk.internal.access.JavaLangAccess", "join") if args.len() == 5 => {
                 Builtin::String(StringOp::JoinRange)
             }
+            // What the JVM's `JavaLangAccess` does, which a translated program does not have
+            // (`program::TRANSLATED_LANG_ACCESS`). Its object, a static field, reads nothing else.
+            ("jdk.internal.access.JavaLangAccess", name)
+                if crate::program::TRANSLATED_LANG_ACCESS.contains(&name) =>
+            {
+                let class = crate::program::TRANSLATED_LANG_ACCESS_CLASS;
+                let resolved = self
+                    .methods
+                    .iter()
+                    .position(|m| self.types[m.owner].javac == class && m.name == name && m.sig == symbol.ty);
+                if resolved.is_none() {
+                    return unsupported(node, &format!("`JavaLangAccess.{name}` outside a whole program"));
+                }
+                let args = self.convert_args(resolved, args)?;
+                return Ok(ExprKind::Call { name: name.to_string(), args, resolved });
+            }
             // There are no virtual threads: a thread's carrier is the thread itself
             // (`ThreadLocalRandom` keeps its seeds in the carrier).
             ("jdk.internal.access.JavaLangAccess", "currentCarrierThread") => {
@@ -1053,6 +1146,9 @@ impl<'t> Lowering<'t> {
                 _,
             ) => {
                 return self.builder_call(node, &symbol, receiver, args);
+            }
+            ("java.lang.Byte" | "java.lang.Short", "compareUnsigned") if args.len() == 2 => {
+                return Ok(self.small_compare_unsigned(node, &symbol, args));
             }
             (owner, name) if unsigned::is_unsigned_method(owner, name) => {
                 self.unsigned_call(node, &symbol, &args)?
@@ -1091,8 +1187,9 @@ impl<'t> Lowering<'t> {
                     );
                     return error(node.pos(), message);
                 }
-                let args = self.convert_generic_args(node, resolved, args)?;
+                let mut args = self.convert_generic_args(node, resolved, args)?;
                 if symbol.is_static {
+                    args.extend(self.caller_arg(node, resolved)?);
                     return Ok(ExprKind::Call { name, args, resolved });
                 }
                 // `super.m()`, or `Iface.super.m()` for a default method of an interface.

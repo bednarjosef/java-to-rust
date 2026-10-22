@@ -125,16 +125,21 @@ impl StringBuilder {
         self.append_chars(&chars[offset as usize..end as usize])
     }
 
-    /// `sb.append(s, start, end)` of a part of a string.
+    /// `sb.append(s, start, end)` of a part of a string. The check is Java 26's
+    /// `Preconditions.checkFromToIndex` on `s.length()`, so a null `s` (already "null") is checked
+    /// as its four characters.
     pub fn append_range(&self, s: &str, start: i32, end: i32) -> &Self {
+        self.try_append_range(s, start, end).unwrap_or_else(crate::uncaught)
+    }
+
+    /// `append_range` where the program observes the `IndexOutOfBoundsException`.
+    pub fn try_append_range(&self, s: &str, start: i32, end: i32) -> Result<&Self, crate::Exception> {
         let units: Vec<u16> = s.encode_utf16().collect();
         if start < 0 || start > end || end as usize > units.len() {
-            throw(
-                "java.lang.IndexOutOfBoundsException",
-                &format!("start {start}, end {end}, length {}", units.len()),
-            );
+            let message = format!("Range [{start}, {end}) out of bounds for length {}", units.len());
+            return Err(crate::Exception::new("java.lang.IndexOutOfBoundsException", message));
         }
-        self.append_chars(&units[start as usize..end as usize])
+        Ok(self.append_chars(&units[start as usize..end as usize]))
     }
 
     fn check_offset(&self, offset: i32, len: usize) {

@@ -281,25 +281,46 @@ A small subset, end to end:
   `Dog.class.getName()` a constant. Any other class is a value, a `java::Class` that is `Copy`
   and equal by binary name: `x.getClass()` of an object, string, box, array or enum constant,
   class literals (`int[].class`, `String.class`, `Dog.class`), and `getName`, `getSimpleName`,
-  `getSuperclass`, `getComponentType`, `isArray`, `isInterface`, `isPrimitive`, `isEnum`,
-  `toString`, `hashCode` and `equals`. `isInstance(x)` and `cast(x)` of any class value compare
+  `getCanonicalName`, `getPackageName`, `getSuperclass`, `getComponentType`, `getEnumConstants`,
+  `isArray`, `isInterface`, `isPrimitive`, `isEnum`, `isAnnotation`, `toString`, `hashCode` and
+  `equals`; `getInterfaces` of a class literal, and `isAssignableFrom` of a class literal of a
+  class or interface of the program. `isInstance(x)` and `cast(x)` of any class value compare
   its binary name with those of `x`'s class and of every class and interface above it, which the
   generator writes out for each class `x` may be of; a failed `cast` throws Java's
   `ClassCastException` (`Cannot cast java.lang.String to Main$Dog`), which a `catch` sees.
-  Reflection (`getDeclaredFields`, `newInstance`, ...) is rejected, as are a record with an array component (its text would be the array's identity) and
-  a generic record in a record pattern. An accessor written in the record runs at each use of a
+  `Class.forName` of a constant name is that class, and of a computed one a `switch` over the
+  binary names of the classes that code can find by name; a name that is not in the translation
+  throws Java's `ClassNotFoundException`, which says so. Reflection over the program's classes
+  goes through a table of their members that the translation builds in, only for the classes and
+  names that lookups of reachable code can find (`getMethod`, `getField`, `getConstructor`,
+  `newInstance` and their relatives; `Method.invoke`, `Field.get` and `set`,
+  `Constructor.newInstance`; `lower/reflection.rs`), and `ServiceLoader` finds the providers that
+  `module-info.java` and `META-INF/services` declare (see
+  [docs/reflection-and-plugins.md](docs/reflection-and-plugins.md)). Rejected are a record with
+  an array component (its text would be the array's identity) and a generic record in a record
+  pattern. An accessor written in the record runs at each use of a
   pattern variable that names a component, not once.
+- **The class of a method's caller**: a static method that asks for the class that called it
+  (`StackWalker.getInstance(RETAIN_CLASS_REFERENCE).getCallerClass()`, as logging libraries name a
+  logger after it, or `Reflection.getCallerClass()` in the JDK's `@CallerSensitive` methods such as
+  `ResourceBundle.getBundle`) gets that class from each call as a parameter more, since the
+  translator knows which class every call is in (`lower/callers.rs`). Asking anywhere else, and
+  walking the stack's frames (`StackWalker.walk`), is rejected.
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
   and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
   `super(message)`, `super(message, cause)`, fields, and overrides of `getMessage` and `toString`)
   and the standard ones (`Exception`, `RuntimeException`, `IllegalArgumentException`,
   `IllegalStateException`, `UnsupportedOperationException` and the rest of
   `crates/translator/java/Standard.java`, written in Java and given to the program by the
-  translator), with `getMessage`, `getCause`, `toString`, `printStackTrace` (without stack frames)
-  and `getClass().getName()` and `getSimpleName()`. A method returns `Result<T, Throwable>` only
+  translator), with `getMessage`, `getCause`, `toString`, `printStackTrace` (to standard error, a
+  `PrintStream` or a `PrintWriter`) and `getClass().getName()` and `getSimpleName()`. Stack traces
+  are empty, as the specification of `getStackTrace` allows: `printStackTrace` prints what Java
+  prints without the `at` lines (the exception, its suppressed exceptions and its causes), and
+  `setStackTrace` gives an exception the frames that it then has (docs/exceptions.md, "Stack
+  traces"). A method returns `Result<T, Throwable>` only
   when some caller catches what it may throw, `?` passes it on, and every other method keeps its
   plain signature: an exception that nothing catches ends the program where it is thrown, with
-  `Exception in thread "main" ...` on standard error and exit code 1. A `try` is a labeled block
+  `Exception in thread "main" ` and its stack trace on standard error and exit code 1. A `try` is a labeled block
   that evaluates to a `Result`, and its catch clauses are a `match`. `finally` runs however its
   `try` ends: after an exception (which then goes on), a `return` (whose value is taken first) and a
   `break` or `continue` out of the `try`, through nested `try`s; a `return` or an exception in the
@@ -383,8 +404,8 @@ A small subset, end to end:
     `max`/`min` on every type, and the rest of the common ones.
   - `Double`, `Float` and `Boolean`: `isNaN`, `isInfinite`, `isFinite`, `compare`, `sum`,
     `max`/`min`, `parseDouble`, `parseFloat`, `parseBoolean`, `logicalAnd`/`logicalOr`/
-    `logicalXor`, and the `valueOf` of both with Java's grammar and rounding (whitespace,
-    suffixes, hexadecimal floats).
+    `logicalXor`, `toHexString` (`hex_float.rs`), and the `valueOf` of both with Java's grammar
+    and rounding (whitespace, suffixes, hexadecimal floats).
   - `Integer` and `Long`: parsing with a radix and over a `begin`/`end` range of a `String`
     (`parseInt(s, begin, end, radix)`, `valueOf(s, radix)`), the bit and radix methods
     (`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), and the unsigned
@@ -534,10 +555,10 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   concatenating it gives `null` (`java::or_null`). `==` on objects compares identity:
   `Rc::ptr_eq(&a, &b)`, or `java::same(a.as_ref(), b.as_ref())` where either may be null.
   An enum local, field, array element or return value that the program sets to null (or the
-  elements of `new E[n]`, which start null) is an `Option` of the enum, compared with
-  `kinds[i] == Some(Kind::Dead)`; such a value may only be stored, returned, tested against
-  null, compared, printed or dropped, and any other use of it is rejected
-  (`lower/enum_nulls.rs`).
+  elements of `new E[n]`, and a field that no constructor sets first, which start null) is an
+  `Option` of the enum, compared with `kinds[i] == Some(Kind::Dead)`; such a value may only be
+  stored (in a local too), returned, tested against null, compared, printed or dropped, and any
+  other use of it is rejected (`lower/enum_nulls.rs`).
 - Arrays (`int[]`, `long[]`, `double[]`, `boolean[]`, `String[]`, and arrays of arrays) are shared
   references in the faithful form, `java::Array<T>`: a shared cell whose clones see each other's
   writes. The aliasing analysis (`analysis/arrays.rs`) finds local arrays that no other name can
@@ -720,9 +741,11 @@ call of an instance method also reaches its overriders in every class that an in
 is, extends or implements. It stops at the classes that the runtime provides (`String`,
 `StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`; `RUNTIME_CLASSES`),
 whose sources reach deep into the JVM, and at what is not
-translated: reflection (but not `java.lang.reflect.Array`, which is array code), method handles,
-serialization, security and class loading (`Module`, `ResourceBundle`, `ServiceLoader`,
-`jdk.internal.loader`; `UNTRANSLATED`). Library code
+translated: reflection (but not `java.lang.reflect.Array`, which is array code, nor `Method`,
+`Field` and `Constructor`, which the reflection table is), method handles, serialization,
+security and class loading (`Module`, `ModuleLayer`, `jdk.internal.loader`; `UNTRANSLATED`;
+`ResourceBundle` is translated, and `ServiceLoader`, `ClassLoader` and `URLClassLoader` are the
+translator's own, over the translation's classes). Library code
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
 `comparableClassFor` and parallel streams reach threads, so the boundary is needed. A program that
 puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints the count).
@@ -788,10 +811,18 @@ delegates to fdlibm. HotSpot replaces `Math.sin`, `cos`, `tan`, `exp`, `log`, `p
 platform libm), which agree with it on all but about 0.1 percent of arguments, and
 `Math.log10` is computed correctly rounded, as HotSpot's is.
 
-`System.getProperty` is answered at run time for the keys whose values do not depend on the JVM:
-`line.separator`, `file.separator`, `path.separator`, `user.dir`, `user.home`, `user.name`,
-`java.io.tmpdir`, `os.name` and `os.arch`. Any other key gives null, or the default given; a key
-the JVM sets itself (`java.version`, `java.vendor`, ...) is rejected at translation. The memory
+`System.getProperty` gives what a plain `java Main` run gives (`lower/system.rs`). The keys that
+depend on the machine or the run are answered when the program runs: `line.separator`,
+`file.separator`, `path.separator`, `user.dir`, `user.home`, `user.name`, `java.io.tmpdir`,
+`os.name`, `os.arch` and `os.version`, and `java.home`, which is the run's `JAVA_HOME`, or else
+the home of the JDK the translator ran with. `java.class.path` is `.`. Any other key that the JDK
+on the translator's path sets (`java -XshowSettings:properties`: `java.version`, `java.vendor`,
+`file.encoding`, `user.language`, ...) has that JDK's value, fixed in the translation; a key it
+does not set (`java.locale.providers`, `java.util.currency.data`, the program's own) gives null,
+or the default given. The key must be a literal or a constant, and the two keys whose value the
+translation cannot match are rejected: `sun.java.command` (the command line) and
+`user.timezone` (set once `TimeZone` runs). In a whole program `System.getProperties()` is a
+`Properties` of the keys of a plain run, made once (`java/overlay/java/lang/TranslatedProperties.java`). The memory
 figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
 JVM's, and `gc()` does nothing. `Runtime.halt` flushes the output and exits without shutdown
 hooks. `onSpinWait` and `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
@@ -801,8 +832,50 @@ natives (`open0`, `read0`, `readBytes`, `available0`, `skip0`, `length0`, `posit
 `isRegularFile0`, `writeBytes`, `close0`): stdin is the process's descriptor 0, read after
 standard output is written out so that a prompt shows, stdout writes through the buffered
 `System.out` so its order is kept with `println`, stderr is written as it is, and files are opened
-by path. Their failures are the JDK's `IOException` and `FileNotFoundException`, which a `catch`
-sees.
+by path. `RandomAccessFile`'s natives are the same table's (`open0` with `"r"` or `"rw"`, which
+creates the file, `read0`, `readBytes0`, `write0`, `writeBytes0`, `seek0`, `getFilePointer`,
+`length0`, `setLength0`). Their failures are the JDK's `IOException` and `FileNotFoundException`,
+with its messages, which a `catch` sees. `java.io.File` asks `UnixFileSystem`, whose natives
+(`fs.rs`) are `std::fs` on the `File`'s path: `getBooleanAttributes0` (exists, regular file,
+directory), `checkAccess0`, `getLength0`, `getLastModifiedTime0`, `setLastModifiedTime0`,
+`setPermission0`, `setReadOnly0`, `createFileExclusively0`, `createDirectory0`, `delete0`,
+`rename0`, `list0` (the system's order), `canonicalize0` and `getNameMax0`; `getSpace0` is
+rejected. A file stream's `FileCleanable.register` does nothing, since nothing is garbage
+collected: a stream the program never closes stays open until it ends. `Blocker.begin` is `false`
+and `end` does nothing, as without virtual threads. `jdk.internal.util.ByteArray`, which
+`RandomAccessFile` and the data streams use to pack numbers, is the translator's own
+(`java/overlay/jdk/internal/util/ByteArray.java`), which shifts bytes where the JDK's uses
+`VarHandle` views, and the `JavaLangAccess` methods that the data streams call on
+`SharedSecrets` (`countPositives`, `countNonZeroAscii`, `uncheckedNewStringWithLatin1Bytes`,
+`inflateBytesToChars`, and `uncheckedNewStringOrThrow` and `uncheckedGetBytesOrThrow` for
+`java.nio.file`) are its static methods of the same name
+(`java/overlay/jdk/internal/access/TranslatedLangAccess.java`).
+
+`java.nio.file` (`Files`, `Path`, `Paths`, directory streams, attributes) is the JDK's code over
+the translator's `sun.nio.fs.UnixNativeDispatcher` (`java/overlay/sun/nio/fs`), whose natives
+take paths as byte arrays, where the JDK's take addresses of native memory, and are `std::fs` and
+libc (`unix.rs`): `stat`, `lstat`, `fstat` (the attributes come back as an array of numbers that
+the translator's `UnixFileAttributes` copies), `open`, `close`, `mkdir`, `rmdir`, `unlink`,
+`rename`, `link`, `symlink`, `readlink`, `realpath`, `getcwd`, `access`, `chmod`, `chown`,
+`utimensat`, `opendir`, `readdir`, `closedir`, `getpwuid`, `getgrgid` and `strerror`, with the
+system's errors as the JDK's `UnixException`s, and so its exceptions and messages. The default
+file system is the platform's directly (`FileSystems.getDefault()` does not look for another
+provider). A file's bytes are read and written by the translator's streams on the runtime's
+descriptor table (`UnixFileInputStream`, `UnixFileOutputStream`), which `Files.newInputStream`,
+`newOutputStream`, `readAllBytes`, `readString`, `write`, `writeString`, `readAllLines`,
+`newBufferedReader` and `newBufferedWriter` use; `Files.newByteChannel` and
+`FileChannel.open` give the translator's `UnixFileChannel`, which copies between `ByteBuffer`s
+and arrays. What differs from Java: calls relative to an open directory (`openat`, `fstatat`,
+`unlinkat`, `SecureDirectoryStream`) fail with `ENOSYS`, as on a system without them; there are
+no extended attributes, so no DOS or user-defined attribute views (`getFileAttributeView` gives
+null); a reader or writer of `Files` replaces malformed or unmappable characters where the JDK's
+throws; the names of temporary files come from a `java.util.Random`, not a `SecureRandom`
+(`TempFileHelper.java`); the translator's `InvalidPathException` and `DirectoryIteratorException`
+do not check their arguments, and `Util.toString` gives null for null, where the JDK's throw
+(only the JDK's own callers reach them, which never pass null); memory-mapped files, file locks
+and asynchronous file channels throw `UnsupportedOperationException`; and `statvfs` (a file
+store's space), the mount table, `getpwnam` and `getgrnam`, and the extended-attribute natives
+are rejected.
 
 A native method of a translated JDK class is never lowered itself (javac marks it `native`); a
 call of one becomes the runtime function that `ast/natives.rs` names for its class, name and
@@ -812,7 +885,8 @@ signature, and any other is rejected with its name and signature. The runtime ha
 `getRandomSeedForDumping` (0: no class data sharing); `ContinuationSupport.isSupported0` (false,
 as with `-XX:-VMContinuations`); `VM.getNanoTimeAdjustment` (HotSpot's, from the system clock);
 `FileDescriptor.getHandle` (-1) and `getAppend` (the descriptor's `O_APPEND`); and
-`CRC32.update` and `updateBytes0` (zlib's CRC-32). `Unsafe.arrayBaseOffset` and
+`CRC32.update` and `updateBytes0` (zlib's CRC-32); `Unsafe.fullFence` (a sequentially consistent
+fence), and so `loadFence` and `storeFence`. `Unsafe.arrayBaseOffset` and
 `arrayIndexScale` of an array class literal are HotSpot's layout (16, and 1 to 8 by element, 4
 for references) and are answered at the call, so their `Class`-taking natives are not reached.
 `Unsafe.park` and `unpark` park the current thread and unpark a thread by its id, as

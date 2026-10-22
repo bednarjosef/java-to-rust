@@ -74,9 +74,10 @@ signature. Everything else is decided here.
    the block evaluates to `java::Completion` (normal, return, jump or throw) and the jump happens
    after the `finally` body.
 8. **Uncaught exceptions** end the program as Java's do: `Exception in thread "main" ` and the
-   exception's `toString()` on standard error, a `Caused by: ...` line per cause, exit code 1.
-   Stack frames are not printed (they cannot match). `printStackTrace()` prints the same lines
-   without the thread prefix.
+   exception's stack trace on standard error, exit code 1. Stack traces are empty, as the
+   specification allows (see "Stack traces" in section 4): the trace is the exception's
+   `toString()`, its suppressed exceptions and its causes, as Java prints them without the `at`
+   lines. `printStackTrace()` prints the same lines without the thread prefix.
 9. **Static initializers return `Result` only where a `catch` observes them**: a static block, or
    a static field initializer, that throws is wrapped in `ExceptionInInitializerError` as Java
    does, at the first use of the class. The uncaught case translates without a `Result`: the
@@ -102,7 +103,8 @@ signature. Everything else is decided here.
     cannot raise them), a `toString` that throws an exception that a call of it observes (for one
     of the JDK's, an exception of the program's code that it runs), or a
     `toString` of the program that throws what a `catch` around an object's text, or around a
-    call on the way to it, would catch (it is `Display`), `getStackTrace`, `setStackTrace`, `fillInStackTrace` and `initCause`.
+    call on the way to it, would catch (it is `Display`), an override of `printStackTrace` of a
+    stream or a writer, and a `fillInStackTrace` that does more than return the exception.
 
 ## 1. The representation
 
@@ -244,7 +246,7 @@ the runtime may raise it (section 3), so the enum of `Throwable` only has the va
 needs. Of each class it declares the constructors the program calls (and those that the
 runtime's failures and `super(...)` chains need), and of `Throwable` the methods the program
 calls, with the methods those call: `getMessage`, `getLocalizedMessage`, `getCause`,
-`toString`, `printStackTrace()`. Their bodies:
+`toString`, `printStackTrace()`. Their bodies (`printStackTrace` is in "Stack traces", section 4):
 
 ```java
 Throwable(String message) { this.message = message; }
@@ -254,7 +256,6 @@ String getMessage() { return message; }
 String getLocalizedMessage() { return getMessage(); }
 Throwable getCause() { return cause; }
 String toString() { String m = getLocalizedMessage(); return m != null ? <class name> + ": " + m : <class name>; }
-void printStackTrace() { System.err.println(this); for (Throwable c = getCause(); c != null; c = c.getCause()) System.err.println("Caused by: " + c); }
 ```
 
 and every other standard constructor is `X(params) { super(params); }`, except
@@ -736,6 +737,39 @@ Decisions that changed during the implementation, step by step.
     method may return a `Result` where it need not. An uncaught static initializer that is not
     rewritten also gets an entry point, which may do the same for its callers.
 
+### Stack traces
+
+- **Empty by design**: the specification of `Throwable.getStackTrace` lets a virtual machine
+  omit frames, down to a trace of none, and a translation has no frames to give. So
+  `getStackTrace()` returns an empty array, `fillInStackTrace()` does nothing and returns the
+  exception, and `setStackTrace(frames)` stores a copy of the frames (with Java's
+  `NullPointerException` for a null frame, `stackTrace[i]`), which `getStackTrace()` then returns,
+  as Java's does. `StackTraceElement` is the translator's (`Standard.java`): its constructor of a
+  class, a method, a file and a line (with Java's checks for null names), its getters and its
+  `toString`, without the class loader and the module; its `equals` and `hashCode` are not there yet.
+- **Printing**: `printStackTrace()`, `printStackTrace(PrintStream)` and
+  `printStackTrace(PrintWriter)` print what Java's `printStackTrace` and `printEnclosedTrace`
+  print with those traces: the exception's `toString()`, a `\tat ` line per frame, each suppressed
+  exception after `\tSuppressed: ` (indented by a tab more at each level), each cause after
+  `Caused by: `, `[CIRCULAR REFERENCE: ..]` for an exception printed before, and the frames that a
+  suppressed exception or a cause has in common with the trace around it elided as `... n more`.
+  With no frames, that is the exception's line, its suppressed exceptions' and its causes', and no
+  `... n more` (nothing is in common). An uncaught exception is printed the same way after
+  `Exception in thread "main" ` (and after `Caused by: ` under an `ExceptionInInitializerError`):
+  where the program may make an exception with more of a trace than its `toString()` (it uses a
+  cause, `initCause`, `getCause`, `addSuppressed` or `setStackTrace`), `main` starts by giving the
+  runtime `Throwable.uncaughtTrace()` (`Native::InstallTrace`), which makes the text.
+- **Testing**: the corpus compares standard output, where Java prints real frames, so
+  `corpus/whole-program/StackTracesGiven.java` sets every printed exception's frames with
+  `setStackTrace`, which Java then prints as given, and prints them to `System.out` and to a
+  `PrintWriter`.
+- **Rejected**: an override of `printStackTrace(PrintStream)` or `printStackTrace(PrintWriter)`
+  (Java's `printStackTrace()` and its uncaught exceptions print through it), and an override of
+  `fillInStackTrace` whose body is more than `return this;` or `return super.fillInStackTrace();`
+  (Java's constructors run it).
+- **Later, possibly**: real frames, which the translation would have to record as it runs (the
+  Rust backtrace has the Rust functions, not Java's methods and lines).
+
 ### The messages of `NullPointerException`
 
 - **Java's message comes from the class file**: the JVM describes the instruction that met the
@@ -751,8 +785,9 @@ Decisions that changed during the implementation, step by step.
   catches, and those whose exception leaves a method that a call in the `try` may run
   (`Facts::npe_message_needed`). The others stay bare. Adding a suppressed exception to it
   (`addSuppressed`, as each try-with-resources does when closing throws too) does not read
-  either one, since only `getSuppressed` gets a suppressed exception back (the runtime's stack
-  traces do not show it): in a program that calls `getSuppressed`, the suppressed one is read.
+  either one, since only `getSuppressed` gets a suppressed exception back, and only a
+  `printStackTrace` to a stream or a writer prints it where the output is compared (a stack trace
+  on standard error is not): in a program that calls either, the suppressed one is read.
   The `catch` of a rewritten static initializer of the JDK (section 0.9), which makes what it
   catches the cause of its `ExceptionInInitializerError`, reads nothing either: the JDK's
   initializers throw only for bugs (see the rule for them under static initializers). Only then does the translation compile
@@ -773,7 +808,23 @@ Decisions that changed during the implementation, step by step.
   `Arrays.copyOf` of a null array has the text of the JDK's code (`Cannot invoke
   "Object.getClass()"` for an array of objects, `Cannot read the array length` for one of
   primitives). The classes of `java.lang` that a program gets are the translator's own
-  (`java/Standard.java`), so a message from their code is not known.
+  (`java/Standard.java`), so a message from their code is not known; where the JDK's code has a
+  dereference that may fail, theirs throws the JDK's message itself (`ThreadGroup`'s
+  `parent.maxPriority`, `JavaLangAccess.start`'s `thread.start(container)`). A call of the JDK's
+  is named by the erasure of its receiver's type (the translator's own classes by their real
+  names) and its descriptor, a parameter of `Object` as `Object`, as the translation erases type
+  variables as javac does; a method that `Object` declares stays `Object`'s
+  (`Object.equals(Object)`), whatever the receiver. The JVM follows an assigned value back to
+  where it came from (`(s = a).next` fails `because "a" is null`).
+- **Dereferences that never fail need no message**: besides the null tests of the exceptions
+  analysis, a variable tested as it is assigned (`(k = e.getKey()) != null && k.equals(key)`),
+  one that an `if (v == null) v = ..;` sets when it was null, and a static that the first
+  statements of its class's static initializer set to a value that is not null and that nothing
+  else assigns (`ForkJoinPool.U`, `ForkJoinPool.common`), when what those statements run before
+  it never reads it (`Facts::initialized_statics`): another thread waits for the initialization,
+  and a failed one throws before reading. A branch of an `if` on a call of a method that only
+  returns a constant (the translator's `Thread.isVirtual()`) is never taken. Corpus:
+  `features/NullMessagesAfterTests.java`, `whole-program/ForkJoinTasks.java`.
 - **Checked against Java 26** (`javac::CHECKED_JAVA`): with another Java the texts may differ,
   and a program whose `catch` reads one is not translated.
 - **Rejected** where a `catch` may read a message that is not certain: a dereference of a
@@ -782,6 +833,9 @@ Decisions that changed during the implementation, step by step.
   for every way out of the `try`, each copy with its own slots) or in an instance initializer
   (copied into every constructor), of a local of the JDK's code that the translation may have
   renamed (`s2` for a second `s`), of the enclosing instance of a nested class, a dereference
-  in the code of `java.lang`, and a failure of the runtime without the checked form (unboxing,
-  a library call given null). Corpus: `features/RuntimeNullPointerMessages.java`,
+  in the code of `java.lang`, a failure of the runtime without the checked form (an unboxing
+  that the code does not write as a call, a library call given null), a dereference in the body
+  of a method reference's class (the JVM gives no message in its hidden frames, but javac makes
+  some references lambdas, whose code is the class's own), and a field of a field of an enclosing
+  instance. Corpus: `features/RuntimeNullPointerMessages.java`,
   `features/LocalNullPointerMessages.java`.

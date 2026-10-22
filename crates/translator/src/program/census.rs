@@ -8,7 +8,9 @@
 //! class's declaration (extending or implementing a class that is not translated, or code of a
 //! nested class that the planning of its captured variables rejects) rejects the class: it
 //! extends and implements none of those, and each of its methods, constructors, field
-//! initializers and initializer blocks is rejected with that error and stubbed. An error of an
+//! initializers and initializer blocks is rejected with that error and stubbed. As in a
+//! translation, only what can run counts: the methods that cannot run (`analysis::live_methods`)
+//! get a body that never runs, and what lowering rejected in them is left out. An error of an
 //! analysis or of the generator, which only has a line and column, stubs the methods whose code
 //! is at that position, in any file (or drops the field initializer there), and the analyses and
 //! the generator run again. The generator and the analysis of exceptions report every error they
@@ -73,14 +75,20 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
             units: Vec::new(),
         }
     });
-    let mut rejections: Vec<Rejection> = lowered
-        .rejected
-        .into_iter()
-        .map(|r| Rejection { unit: r.unit, anchor: r.anchor, error: r.error })
-        .collect();
+    let rejection = |r: lower::Rejected| Rejection { unit: r.unit, anchor: r.anchor, error: r.error };
+    let mut rejections = Vec::new();
     let (class, mut fatal) = match lowered.class {
-        Err((unit, error)) => (None, Some(Rejection { unit, anchor: None, error })),
-        Ok(class) => (Some(class), None),
+        Err((unit, error)) => {
+            rejections.extend(lowered.rejected.into_iter().map(rejection));
+            (None, Some(Rejection { unit, anchor: None, error }))
+        }
+        // As a translation does, only what can run counts (the unresolved calls are found again
+        // below, where they are stubbed).
+        Ok(mut class) => {
+            let (running, _) = phase("live methods", || super::narrow(&mut class, lowered.rejected));
+            rejections.extend(running.into_iter().map(rejection));
+            (Some(class), None)
+        }
     };
     // What the census needs of javac's trees is taken from them now, so that they are not held
     // while the program is analysed: the pieces of code, the files, and the units of the
@@ -258,10 +266,10 @@ impl Stubs {
                 if field.pos == pos && rejection.unit.is_none() {
                     rejection.unit = units.get(t).copied().flatten();
                 }
-                if field.init.as_ref().is_some_and(at) {
-                    // A constant without its value is a static that starts at Java's default.
+                // A constant's value is a literal that nothing rejects, though its position may
+                // be that of an error in another file.
+                if !field.constant && field.init.as_ref().is_some_and(at) {
                     field.init = None;
-                    field.constant = false;
                     if rejection.anchor.is_none() {
                         rejection.unit = units.get(t).copied().flatten();
                         rejection.anchor = Some(field.pos);
