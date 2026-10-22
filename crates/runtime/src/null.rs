@@ -44,6 +44,32 @@ pub fn same<H: Handle>(a: Option<&H>, b: Option<&H>) -> bool {
     }
 }
 
+/// `a == b` on two `Object`s that may both be strings or boxes (see `SameObject`), either of
+/// which may be null.
+pub fn same_object<T: SameObject>(a: Option<&T>, b: Option<&T>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.same_object(b),
+        (a, b) => a.is_none() && b.is_none(),
+    }
+}
+
+/// Java's `==` on the values of a type that holds strings or boxes as plain values, which the
+/// translation implements for the enum of `Object`: objects are the same when they are one
+/// object, and a string or a box is not the same as a different value. Two equal strings or boxes
+/// may or may not be one object in Java, which the translation does not know, and end the program
+/// (`unkept_identity`).
+pub trait SameObject {
+    fn same_object(&self, other: &Self) -> bool;
+}
+
+/// Ends the program at `==` on two equal strings or boxes held as `Object`s, whose identity the
+/// translation does not keep.
+pub fn unkept_identity() -> ! {
+    crate::exception::die(
+        "comparing two equal Strings or boxed values held as Objects by identity (==) is not supported by the translation",
+    )
+}
+
 /// A handle of an object: an `Rc`, or an `Arc` for an object that threads share. Its address is
 /// the object's identity.
 pub trait Handle {

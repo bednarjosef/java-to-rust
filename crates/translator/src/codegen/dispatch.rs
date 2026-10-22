@@ -796,7 +796,7 @@ impl<'a> Gen<'a> {
     }
 
     /// A value of an enum as an `Option<&..>`: `None` for null.
-    fn enum_option(&mut self, e: &'a Expr) -> String {
+    pub(super) fn enum_option(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             ExprKind::Null => "None".to_string(),
             _ if self.nullable(e) => format!("{}.as_ref()", self.object_place(e)),
@@ -1003,6 +1003,7 @@ impl<'a> Gen<'a> {
             self.line("}");
         }
         self.identity_impl(t, &variants);
+        self.same_object_impl(t, &variants);
         self.monitor_impl(t, &variants);
         if self.wanted.contains(&Need::Display(t)) {
             self.display_impl(t, &variants);
@@ -1658,30 +1659,88 @@ impl<'a> Gen<'a> {
             self.indent += 1;
             for &c in variants {
                 let v = self.variant(t, c);
-                // An array is a shared handle, the same array only when it is the same handle; in a
-                // program with threads, an `Arc`, as a shared object is.
-                let array = self.class.array_of(c).is_some();
-                // A box whose identity is kept is the same box only when it is the same object.
-                let faithful = self.runtime_of(c).is_some_and(|ty| self.faithful_box(ty));
-                let same_box = format!("{}(Some(a), Some(b))", self.runtime("same_optional"));
-                // A floating box held as a value is compared as `equals` compares it, so that
-                // where the translation compares values for Java's identity (a shortcut before
-                // `equals`), `-0.0` differs from `0.0` and NaN equals NaN.
-                let same_bits = format!("{}(f64::from(*a), f64::from(*b))", self.runtime("double_equals"));
-                let floating = matches!(self.runtime_of(c), Some(Type::Boxed(b)) if matches!(*b, Type::Double | Type::Float));
-                let same = match () {
-                    _ if self.runtime_of(c) == Some(Type::StringBuilder) => "a.same(b)",
-                    _ if faithful => &same_box,
-                    _ if floating && self.holds_value(c) => &same_bits,
-                    _ if self.holds_value(c) && !array => "a == b",
-                    _ if self.facts.thread_shared.contains(&c)
-                        || array && self.runtime_of(c).is_some_and(|ty| self.shared_array_type(ty)) =>
-                    {
-                        "Arc::ptr_eq(a, b)"
-                    }
-                    _ => "Rc::ptr_eq(a, b)",
-                };
+                let same = self.same_variant(c);
                 self.line(&format!("({v}(a), {v}(b)) => {same},"));
+            }
+            if variants.len() > 1 {
+                self.line("_ => false,");
+            }
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Whether `a` and `b`, the objects of two values of class `c`'s variant, are equal for the
+    /// enum's `PartialEq`.
+    fn same_variant(&mut self, c: usize) -> String {
+        // An array is a shared handle, the same array only when it is the same handle; in a
+        // program with threads, an `Arc`, as a shared object is.
+        let array = self.class.array_of(c).is_some();
+        // A box whose identity is kept is the same box only when it is the same object.
+        let faithful = self.runtime_of(c).is_some_and(|ty| self.faithful_box(ty));
+        // A floating box held as a value is compared as `equals` compares it, so that where the
+        // translation compares values for Java's identity (a shortcut before `equals`), `-0.0`
+        // differs from `0.0` and NaN equals NaN.
+        let floating =
+            matches!(self.runtime_of(c), Some(Type::Boxed(b)) if matches!(*b, Type::Double | Type::Float));
+        match () {
+            _ if self.runtime_of(c) == Some(Type::StringBuilder) => "a.same(b)".to_string(),
+            _ if faithful => format!("{}(Some(a), Some(b))", self.runtime("same_optional")),
+            _ if floating && self.holds_value(c) => {
+                format!("{}(f64::from(*a), f64::from(*b))", self.runtime("double_equals"))
+            }
+            _ if self.holds_value(c) && !array => "a == b".to_string(),
+            _ if self.facts.thread_shared.contains(&c)
+                || array && self.runtime_of(c).is_some_and(|ty| self.shared_array_type(ty)) =>
+            {
+                "Arc::ptr_eq(a, b)".to_string()
+            }
+            _ => "Rc::ptr_eq(a, b)".to_string(),
+        }
+    }
+
+    /// `java::SameObject` for the enum of `Object` (type `t`), where the program compares values
+    /// that may both be strings or boxes (`Facts::identity_checks`): Java's identity, which a
+    /// string or a box that is not kept as an object (`faithful_box`) has only as far as unequal
+    /// values are different objects, but for `Boolean` and `Byte`, whose equal values are one.
+    fn same_object_impl(&mut self, t: usize, variants: &[usize]) {
+        if self.facts.identity_checks.is_empty() || Some(t) != self.object_index() {
+            return;
+        }
+        let name = struct_name(&self.class.types[t].name);
+        let trait_name = self.runtime("SameObject");
+        self.gap();
+        self.line(&format!("impl {trait_name} for {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn same_object(&self, other: &{name}) -> bool {{"));
+        self.indent += 1;
+        if variants.is_empty() {
+            self.line("match *self {}");
+        } else {
+            self.line("match (self, other) {");
+            self.indent += 1;
+            for &c in variants {
+                let v = self.variant(t, c);
+                let same = self.same_variant(c);
+                // A `Boolean` or a `Byte` is one of `valueOf`'s cached objects, the same object
+                // exactly when the values are equal (see `analysis::boxing`).
+                let unkept = match self.runtime_of(c) {
+                    Some(Type::String) => true,
+                    Some(ty @ Type::Boxed(b)) => {
+                        !matches!(*b, Type::Boolean | Type::Byte) && !self.faithful_box(ty)
+                    }
+                    _ => false,
+                };
+                if unkept {
+                    let end = self.runtime("unkept_identity");
+                    self.line(&format!("({v}(a), {v}(b)) => {same} && {end}(),"));
+                } else {
+                    self.line(&format!("({v}(a), {v}(b)) => {same},"));
+                }
             }
             if variants.len() > 1 {
                 self.line("_ => false,");

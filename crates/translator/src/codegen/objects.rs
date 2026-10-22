@@ -781,9 +781,18 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// `a == b` and `a != b` on objects: whether they are the same object, as `Rc::ptr_eq`, or
-    /// `java::same` where either may be null.
-    pub(super) fn identity(&mut self, op: BinOp, l: &'a Expr, r: &'a Expr) -> Code {
+    /// `a == b` and `a != b` (expression `id`) on objects: whether they are the same object, as
+    /// `Rc::ptr_eq`, or `java::same` where either may be null; `java::same_object` on `Object`s
+    /// that may both be strings or boxes (`Facts::identity_checks`).
+    pub(super) fn identity(&mut self, id: ExprId, op: BinOp, l: &'a Expr, r: &'a Expr) -> Code {
+        if self.facts.identity_checks.contains(&id)
+            && self.enum_of(l).is_some()
+            && self.enum_of(l) == self.enum_of(r)
+        {
+            let (a, b) = (self.enum_option(l), self.enum_option(r));
+            let same = format!("{}({a}, {b})", self.runtime("same_object"));
+            return if op == BinOp::Ne { Code::new(format!("!{same}"), UNARY) } else { Code::atom(same) };
+        }
         if self.enum_of(l).is_some() || self.enum_of(r).is_some() {
             return self.enum_identity(op, l, r);
         }

@@ -193,11 +193,17 @@ pub const TRANSLATED_NESTED: &[&str] = &[
 /// the program, and `ServiceLoader`, whose providers are those the sources declare (the
 /// translator's, `java/patches/java/util/ServiceLoader.java`), and `Module` and `ModuleLayer`,
 /// whose modules are those of the translation (`java/patches/java/lang/Module.java`).
+/// `ObjectMethods` and `SwitchBootstraps` are the bootstrap methods of `invokedynamic` for a
+/// record's methods and a `switch` on patterns, which the translation makes without them; only a
+/// class name that code computes, which `Class.forName` initializes (`reach::by_name`), reaches
+/// them, and their static state is method handles.
 pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.io.ObjectInputStream", "serialization"),
     ("java.io.ObjectOutputStream", "serialization"),
     ("java.io.ObjectStreamClass", "serialization"),
     ("java.lang.invoke.", "reflection"),
+    ("java.lang.runtime.ObjectMethods", "reflection"),
+    ("java.lang.runtime.SwitchBootstraps", "reflection"),
     ("java.lang.reflect.", "reflection"),
     ("java.security.", "security"),
     // There is no security manager (`System.getSecurityManager()` is null, see `lower::system`).
@@ -222,6 +228,10 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     // An action that `AccessController.doPrivileged` runs, which the translator's runs directly
     // (`REDIRECTED_CALLS`): a plain interface.
     "java.security.PrivilegedAction",
+    // The security code's debugging output, off unless a property turns it on, which library
+    // code asks for as it starts (`JarVerifier.debug = Debug.getInstance("jar")`); patched not
+    // to name the caller's frame (`java/patches/sun/security/util/Debug.java`).
+    "sun.security.util.Debug",
     "java.lang.reflect.Array",
     "java.lang.reflect.InvocationTargetException",
     "java.lang.reflect.Modifier",
@@ -2517,6 +2527,7 @@ mod tests {
         assert_eq!(untranslated("java.util.ResourceBundle.Control"), None);
         assert_eq!(untranslated("java.lang.ModuleLayer"), None);
         assert_eq!(untranslated("java.lang.invoke.MethodHandles"), Some("reflection"));
+        assert_eq!(untranslated("java.lang.runtime.SwitchBootstraps"), Some("reflection"));
         assert_eq!(untranslated("jdk.internal.loader.BootLoader"), Some("class loading"));
         assert_eq!(untranslated("java.lang.reflect.Proxy"), Some("reflection"));
         assert_eq!(untranslated("java.lang.reflect.Method"), None);

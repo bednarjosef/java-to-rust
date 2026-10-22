@@ -156,6 +156,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `java/nio/file/TempFileHelper.java` | names from `java.util.Random` instead of `SecureRandom` |
 | `java/util/PropertyResourceBundle.java` | reads a stream through `TranslatedPropertyFiles` |
 | `java/util/ServiceLoader.java` | the providers the translator read from the sources |
+| `java/util/WeakHashMap.java` | matches a key by reading the referent, `k == key \|\| key.equals(k)`, instead of `refersTo` |
 | `jdk/internal/foreign/Utils.java` | no method handles of address layouts; `makeRawSegmentViewVarHandle` throws |
 | `jdk/internal/jimage/BasicImageReader.java` | reads the image's index and resources into arrays instead of mapping the file |
 | `jdk/internal/jrtfs/JrtFileAttributes.java`, `JrtFileSystem.java`, `SystemImage.java` | the `jrt:` file system without `%tc`, `CodeSource` and exploded images |
@@ -170,6 +171,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `javax/annotation/processing/AbstractProcessor.java` (module `java.compiler`) | reads its processor's annotations through `TranslatedProcessorAnnotations` |
 | `sun/nio/cs/UTF_8.java` and the other standard charsets | their nested `Decoder` and `Encoder` can be made by `TranslatedCoders`, the coders of a charset that is the runtime's value |
 | `sun/nio/fs/*.java` | system calls through the runtime (`UnixNativeDispatcher`), channels and streams of our own, no extended attributes |
+| `sun/security/util/Debug.java` | translated although `sun.security` is not; writing a message, which names the caller's frame, fails loudly |
 
 ## Checks
 

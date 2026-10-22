@@ -107,7 +107,10 @@ pub use monitor::*;
 pub use native_memory::*;
 pub use natives::*;
 pub use net::*;
-pub use null::{Handle, OrNull, non_null, or_null, same, try_non_null, try_non_null_message};
+pub use null::{
+    Handle, OrNull, SameObject, non_null, or_null, same, same_object, try_non_null, try_non_null_message,
+    unkept_identity,
+};
 pub use out::{
     Out, drain_stdout, eprint_chars, eprintln_chars, err, err_flush, flush, out, print_chars, println_chars,
     standard_close, standard_flush, standard_write, standard_write_bytes, write_byte,

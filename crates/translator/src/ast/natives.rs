@@ -422,9 +422,10 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
     })
 }
 
-/// Whether the runtime implements a native method of a translated JDK class: one of
+/// Whether the translation implements a native method of a translated JDK class: one of
 /// `declared_native`, a stream native of `java.io`, which `lower/natives.rs` lowers with the
-/// descriptor of the stream's object, or a native of `java.io.UnixFileSystem` (`FILE_SYSTEM`).
+/// descriptor of the stream's object, a native of `java.io.UnixFileSystem` (`FILE_SYSTEM`), or
+/// one that lowering writes as code.
 pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
     declared_native(class, name, signature).is_some()
         || (class == "java.io.UnixFileSystem" && FILE_SYSTEM.contains(&name))
@@ -451,6 +452,12 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
                 | ("java.lang.ref.PhantomReference", "refersTo0" | "clear0")
                 // `LockSupport`'s, with the thread's id for `unpark` (`lower/natives.rs`).
                 | ("jdk.internal.misc.Unsafe", "park" | "unpark")
+                // What the translator read from the program's roots: its modules
+                // (`lower/modules.rs`), the providers of a service (`lower/reflection.rs`) and a
+                // processor's annotations (`lower/processors.rs`).
+                | ("java.lang.Module", "modules0" | "moduleOf0" | "declares0" | "holds0")
+                | ("java.util.ServiceLoader", "providers0" | "create0")
+                | ("javax.annotation.processing.TranslatedProcessorAnnotations", "values0")
         )
 }
 
@@ -688,6 +695,11 @@ mod tests {
         assert!(!runtime_native("java.lang.Throwable", "fillInStackTrace", "(int)java.lang.Throwable"));
         // The name service calls that the runtime answers (`NET_CALLS`), as the census lists them.
         assert!(runtime_native(NET_DISPATCHER, "lookup0", "(byte[],int)byte[]"));
+        assert!(runtime_native(
+            "java.util.ServiceLoader",
+            "providers0",
+            "(java.lang.String)java.lang.Class<?>[]"
+        ));
         assert!(!runtime_native(NET_DISPATCHER, "connect0", "()void"));
     }
 }

@@ -66,14 +66,18 @@ pub(super) fn check(class: &Class) -> Result<(), Error> {
     Ok(())
 }
 
-/// Rejects what the `Object` enum cannot hold or compare: an array as an `Object`, and `==` or
-/// `!=` between two values of `Object` that may both be strings or boxes, whose identity Java
-/// compares and the translation does not keep (a string or a box in an `Object` is a plain value).
-/// Every such place is reported, in the order of the code.
-pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result<(), Vec<Error>> {
+/// The `==` and `!=` between two values of `Object` that may both be strings or boxes, whose
+/// identity Java compares and the translation does not keep (a string or a box in an `Object` is
+/// a plain value): `Facts::identity_checks`, which compare them at run time. And the rejection of
+/// what the `Object` enum cannot compare: an atomic compare of such values, every place in the
+/// order of the code.
+pub(super) fn check_object_values(
+    class: &Class,
+    facts: &super::Facts,
+) -> (HashSet<ExprId>, Result<(), Vec<Error>>) {
     let Some(object) = class.types.iter().position(|d| d.kind == TypeKind::Interface && d.name == OBJECT)
     else {
-        return Ok(());
+        return (HashSet::new(), Ok(()));
     };
     // An array in an `Object` keeps its identity: it is shared.
     let holds_values = super::hierarchy::variants(class, facts, object)
@@ -137,6 +141,7 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
         values.get_or_init(|| super::object_values::analyze(class, facts)).may_both_be_values(class, m, l, r)
     };
     let mut found = Vec::new();
+    let mut checks = HashSet::new();
     for (m, method) in class.methods.iter().enumerate() {
         let in_sorted_map = in_sorted_map(class, method.class);
         let value_shortcut =
@@ -155,7 +160,7 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
                                 && !(in_sorted_map && sorted_key(l, &fences) && sorted_key(r, &fences))
                                 && may_both_hold_values(m, l, r) =>
                         {
-                            found.push((x.pos, "`==` on `Object` values that may be strings or boxes"));
+                            checks.insert(x.id);
                         }
                         // An atomic compare of an element compares it with the expected value
                         // by identity, which a string or a box does not keep.
@@ -181,12 +186,13 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
         }
     }
     if found.is_empty() {
-        return Ok(());
+        return (checks, Ok(()));
     }
-    Err(found
+    let errors = found
         .into_iter()
         .map(|(pos, what)| Error { pos, message: format!("{what} not supported yet") })
-        .collect())
+        .collect();
+    (checks, Err(errors))
 }
 
 /// The methods of the JDK (by class and name) whose `==` on objects that may be strings or boxes
@@ -203,9 +209,22 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
 ///   just read from the same node (`v = n.val`). It fails in Java only where another thread has
 ///   stored a value since: with an equal one, it succeeds here, as Java's retry, which reads that
 ///   value and compares it as the first read was compared, would. A `ConcurrentSkipListSet`
-///   holds `Boolean.TRUE` as every value.
+///   holds `Boolean.TRUE` as every value;
+/// - `WeakHashMap.put`: `if (value != oldValue) e.value = value;` keeps the old value where it is
+///   the same object, and here where it is an equal value, which is the same to the translation;
+/// - `CopyOnWriteArrayList.set`: `if (oldValue != element)` copies the array with the new element,
+///   and keeps it where the element is the old one, or here an equal value: the list's elements are
+///   the same either way, and only its private snapshot is another array;
+/// - `CopyOnWriteArrayList.remove(o, snapshot, index)`, given the first `index` where
+///   `o.equals(snapshot[index])`: `current[i] != snapshot[i] && Objects.equals(o, current[i])`
+///   skips an element that is an equal value of the snapshot's, which `o` does not equal as it does
+///   not equal the snapshot's; and `current[index] == o` takes `index` where Java would look for
+///   `o` again from `index` and find it there, `o` equal to an equal value.
 const VALUE_SHORTCUTS: &[(&str, &str)] = &[
     ("java.util.Arrays", "deepEquals"),
+    ("java.util.WeakHashMap", "put"),
+    ("java.util.concurrent.CopyOnWriteArrayList", "set"),
+    ("java.util.concurrent.CopyOnWriteArrayList", "remove"),
     ("java.text.DecimalFormatSymbols", "initializeCurrency"),
     // A silent difference from Java: an equal value in another box, stored by another thread
     // between the read and the compare-and-set, makes it succeed here where Java's fails.
