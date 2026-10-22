@@ -689,8 +689,18 @@ impl<'t> Lowering<'t> {
         }
         types.push(decl(OBJECT, "", TypeKind::Interface, Vec::new()));
         let runtime = std::iter::once(at.decl).chain(at.comparable.map(|c| c.decl)).collect::<Vec<_>>();
+        // The strings and boxes are `Serializable` and `Constable` (`Serializable s = 2.5;`) where
+        // the program names those.
+        let serializable = self.type_index("java.io.Serializable");
+        let constable = self.type_index("java.lang.constant.Constable");
         for (name, _) in runtime_values() {
             let mut implements = runtime.clone();
+            implements.extend(serializable);
+            let constant = matches!(
+                name,
+                "java.lang.String" | "java.lang.Integer" | "java.lang.Long" | "java.lang.Float" | "java.lang.Double"
+            );
+            implements.extend(constable.filter(|_| constant));
             if let Some(n) = at.number.filter(|_| is_number_box(name)) {
                 implements.push(n.decl);
             }
