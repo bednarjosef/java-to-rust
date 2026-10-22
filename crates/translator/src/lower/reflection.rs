@@ -354,6 +354,10 @@ impl<'t> Lowering<'t> {
                 let m = *m;
                 let info = &self.methods[m];
                 let creates = native == "newInstance0";
+                // A constructor of an abstract class has slot -1 (`table0`): nothing creates one.
+                if creates && self.types[info.owner].node.has_flag("ABSTRACT") {
+                    return Ok(None);
+                }
                 // The receiver (`invoke0` of an instance method) and the `Object[]` of arguments.
                 let (receiver, array) = if creates { (None, 1) } else { (Some(1), 2) };
                 let receiver = receiver.filter(|_| !info.node.has_flag("STATIC"));
