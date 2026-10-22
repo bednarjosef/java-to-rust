@@ -1372,9 +1372,11 @@ impl<'t> Lowering<'t> {
                 return Ok(self.object_array_result(node, kind));
             }
             // `String`'s own `join` of the first `size` elements between a prefix and a suffix,
-            // which `StringJoiner` reaches through `SharedSecrets` (`String` is the runtime's).
+            // which `StringJoiner` reaches through `SharedSecrets` (`String` is the runtime's). Its
+            // `String[]` of elements is read as one where it is an `Object[]`.
             ("jdk.internal.access.JavaLangAccess", "join") if args.len() == 5 => {
-                Builtin::String(StringOp::JoinRange)
+                let args = self.string_array_args(node, args, false, false)?;
+                return Ok(ExprKind::Builtin(Builtin::String(StringOp::JoinRange), args));
             }
             // What the JVM's `JavaLangAccess` does, which a translated program does not have
             // (`program::TRANSLATED_LANG_ACCESS`). Its object, a static field, reads nothing else.
