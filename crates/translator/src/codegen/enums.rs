@@ -260,7 +260,8 @@ impl<'a> Gen<'a> {
             }
             Builtin::EnumValueOf => {
                 let Type::Enum(name) = ty else { unreachable!("valueOf returns an enum") };
-                let text = self.str_ref(&args[0]);
+                // A null name throws `NullPointerException`.
+                let text = self.text_ref(&args[0]);
                 let value = if self.facts.raising.contains(&id) {
                     let call = Code::atom(format!("{}::try_enum_value_of({text})", struct_name(name)));
                     self.passed_on(call)

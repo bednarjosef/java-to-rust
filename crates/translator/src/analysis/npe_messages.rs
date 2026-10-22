@@ -325,6 +325,10 @@ impl Messages<'_> {
                         };
                         out.insert(args[0].id, Some(format!("{failure} because \"original\" is null")));
                     }
+                    // `valueOf` of a null name, which `Enum.valueOf` rejects with its own message.
+                    Builtin::EnumValueOf => {
+                        out.insert(args[0].id, Some("Name is null".to_string()));
+                    }
                     // `new StringBuilder(s)` of a null string, which fails in the JDK's
                     // constructor.
                     Builtin::Builder(BuilderOp::New) if args.len() == 1 && args[0].ty == Type::String => {
