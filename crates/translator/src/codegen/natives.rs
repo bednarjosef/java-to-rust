@@ -15,6 +15,10 @@ impl<'a> Gen<'a> {
                 let x = self.value(&args[0], Type::Double).text;
                 call(self, "double_to_long_bits", vec![x])
             }
+            Native::DoubleToHexString => {
+                let x = self.value(&args[0], Type::Double).text;
+                call(self, "double_to_hex_string", vec![x])
+            }
             Native::DoubleToRawLongBits | Native::FloatToRawIntBits => {
                 let (from, to) = if native == Native::DoubleToRawLongBits {
                     (Type::Double, "i64")
@@ -359,6 +363,17 @@ impl<'a> Gen<'a> {
     fn math(&mut self, name: &str, strict: bool, args: &'a [Expr], ty: Type, id: ExprId) -> Code {
         if let Some(code) = self.math_extra(name, args, ty) {
             return code;
+        }
+        // `getExponent` is the unbiased exponent of the bits: `MAX_EXPONENT + 1` for NaN and the
+        // infinities, `MIN_EXPONENT - 1` for zero and the subnormal numbers, as in Java.
+        if name == "getExponent" {
+            let (operand, shift, mask, bias) = match args[0].ty.unboxed() {
+                Type::Float => (Type::Float, 23, "0xff", 127),
+                _ => (Type::Double, 52, "0x7ff", 1023),
+            };
+            let x = self.value(&args[0], operand);
+            let x = self.recv(&x, operand);
+            return Code::atom(format!("((({x}.to_bits() >> {shift}) & {mask}) as i32 - {bias})"));
         }
         // The operand type of the overloads: `round(float)` returns `int`, `floorMod(long, int)`
         // computes in `long`.

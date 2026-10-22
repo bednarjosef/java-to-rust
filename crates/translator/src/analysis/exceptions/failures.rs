@@ -204,6 +204,7 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Native(
             Native::DoubleToLongBits
             | Native::DoubleToRawLongBits
+            | Native::DoubleToHexString
             | Native::LongBitsToDouble
             | Native::FloatToIntBits
             | Native::FloatToRawIntBits

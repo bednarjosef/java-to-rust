@@ -52,6 +52,7 @@ mod libraries;
 mod local_types;
 mod natives;
 mod patterns;
+mod platform_logger;
 mod primitives;
 mod program;
 mod prologues;
@@ -324,6 +325,9 @@ struct Lowering<'t> {
     rejected_classes: RefCell<std::collections::BTreeMap<usize, Error>>,
     /// The methods that are a census's stubs.
     stubbed: RefCell<std::collections::BTreeSet<usize>>,
+    /// The methods of enums that only the bodies of their constants declare, each implementing a
+    /// method of an interface that the enum leaves to it (see `constant_bodies::body_methods`).
+    body_methods: std::collections::HashSet<usize>,
     /// The annotation types (`@interface`) that were left out, by javac's name: an annotation
     /// does nothing when the program runs, but a value of one is not translated.
     annotation_types: std::collections::HashSet<String>,
@@ -449,6 +453,8 @@ impl<'t> Lowering<'t> {
         let dormant = self.reach.is_some_and(|r| r.dormant(&self.types[info.owner].javac, node.0));
         let mut body = match node.get("body") {
             Some(_) if dormant || self.stubbing.get() => self.never(info.owner, node.pos()),
+            // The constants without a body of their own run the interface's (`body_methods`).
+            Some(_) if self.body_methods.contains(&index) => self.interface_default(index, &params, ret)?,
             Some(body) => self.block(body)?,
             None if abstract_in_enum || is_abstract => Vec::new(),
             None => return unsupported(node, "methods without a body"),
@@ -604,6 +610,8 @@ impl<'t> Lowering<'t> {
             // Assertions are disabled by default in Java, so an `assert` does nothing at all.
             "ASSERT" => return Ok(()),
             "SYNCHRONIZED" => return self.synchronized(node, out),
+            // A `PlatformLogger` has no value of its own (see `platform_logger`).
+            "VARIABLE" if self.logger_variable(node)? => return Ok(()),
             "VARIABLE" => {
                 let ty = self.ty(node, node.symbol().map_or("", |s| s.ty))?;
                 let init = match node.get("initializer") {
@@ -613,6 +621,10 @@ impl<'t> Lowering<'t> {
                 Stmt::Local { ty, name: node.str("name").to_string(), init, pos: node.pos() }
             }
             "EXPRESSION_STATEMENT" if let Some(set_all) = self.set_all(node)? => set_all,
+            "EXPRESSION_STATEMENT" if let Some(logged) = self.logger_statement(node)? => {
+                out.extend(logged);
+                return Ok(());
+            }
             // The value of a field handle is no field's (see `handles`).
             "EXPRESSION_STATEMENT" if self.handle_definition(node) => return Ok(()),
             "EXPRESSION_STATEMENT" => match self.expr(node.child("expression")?)? {
@@ -952,6 +964,9 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.system_log(node, &symbol, select)? {
             return Ok(kind);
         }
+        if let Some(kind) = self.logger_query(node, &symbol)? {
+            return Ok(kind);
+        }
         if let Some(kind) = self.class_call(node, &symbol, select)? {
             return Ok(kind);
         }
@@ -1189,17 +1204,22 @@ impl<'t> Lowering<'t> {
                     args.extend(self.caller_arg(node, resolved)?);
                     return Ok(ExprKind::Call { name, args, resolved });
                 }
-                // `super.m()`, or `Iface.super.m()` for a default method of an interface.
+                // `super.m()`, or `Iface.super.m()` for a default method of an interface, in a
+                // class or in another interface's default method.
                 let is_super = receiver.is_some_and(|r| {
                     r.kind() == "IDENTIFIER" && r.str("name") == "super"
-                        || r.kind() == "MEMBER_SELECT"
-                            && r.str("identifier") == "super"
-                            && self.types[self.lambda_holder(self.current.get())].node.kind() != "INTERFACE"
+                        || r.kind() == "MEMBER_SELECT" && r.str("identifier") == "super"
                 });
                 let receiver = match receiver {
                     Some(r) if is_super => self.super_receiver(r)?,
                     Some(r) => self.receiver(r, symbol.owner)?,
                     None => self.this(node),
+                };
+                // An interface's method on an enum that leaves it to its constants' bodies is the
+                // enum's own (see `constant_bodies::body_methods`).
+                let resolved = match receiver.ty {
+                    Type::Enum(e) if !is_super => self.body_method(e, resolved).or(resolved),
+                    _ => resolved,
                 };
                 let receiver = Box::new(receiver);
                 return Ok(ExprKind::MethodCall { receiver, name, args, resolved, is_super });

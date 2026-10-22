@@ -66,6 +66,9 @@ pub(super) fn thread_shared(class: &Class) -> HashSet<usize> {
             types_of(class, f.ty, &mut work);
         }
     }
+    // The objects that become values of each type, as the representation's `flows` finds them
+    // but with every method that a class inherits run on its whole object: as many or more.
+    let flows = super::hierarchy::flows(class, &HashSet::new(), &Default::default());
     let mut shared = HashSet::new();
     while let Some(t) = work.pop() {
         if !shared.insert(t) {
@@ -73,11 +76,16 @@ pub(super) fn thread_shared(class: &Class) -> HashSet<usize> {
         }
         let decl = &class.types[t];
         // The whole class tree, whose enum borrows each object's fields struct the same way, and
-        // every class that a value of an interface may be. An interface's enum, and `Object`'s,
-        // has no fields, so their other classes may stay thread-local.
+        // every class whose objects become values of an interface: its enum's variants are among
+        // them (see `hierarchy::variants`). An interface's enum, and `Object`'s, has no fields,
+        // so their other classes may stay thread-local.
         let object = class.type_index("java.lang.Object");
         work.extend(h.ancestors(t).into_iter().filter(|&a| Some(a) != object));
-        work.extend(h.subtypes[t].iter().copied());
+        if decl.kind == TypeKind::Interface {
+            work.extend(flows[t].iter().copied());
+        } else {
+            work.extend(h.subtypes[t].iter().copied());
+        }
         for f in &decl.fields {
             types_of(class, f.ty, &mut work);
         }

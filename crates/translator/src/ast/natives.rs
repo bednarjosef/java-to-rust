@@ -15,6 +15,8 @@ pub enum Native {
     ArrayCopy,
     DoubleToLongBits,
     DoubleToRawLongBits,
+    /// `Double.toHexString(d)`, of the runtime's `Double`.
+    DoubleToHexString,
     LongBitsToDouble,
     FloatToIntBits,
     FloatToRawIntBits,
@@ -394,6 +396,7 @@ pub const MATH_FUNCTIONS: &[&str] = &[
     "toRadians",
     "toDegrees",
     "scalb",
+    "getExponent",
 ];
 
 #[cfg(test)]
