@@ -86,13 +86,34 @@ What this gives:
 [thorough-mode.md](thorough-mode.md) already describes this table ("analyses fill the
 representation table and the code generator follows it"); it was never built as one structure.
 
-### 2. The generator produces items with a module path, not one string
+### 2. The generator produces items with a module path, not one string (done)
 
-The generator appends text directly (about 1,150 `format!`, `push_str` and `write!` calls) and
-holds the current module in a thread-local context (`codegen/modules.rs`). For files per module,
-crates, and natural names, it should produce items, each with the module path it belongs to and
-the items it refers to, and a separate writer should lay them out: one file today, a file per
-module next, crates later (see the crate layering in [large-projects.md](large-projects.md)).
+The generator still appends text (about 1,150 `format!`, `push_str` and `write!` calls), but what
+it makes is now a tree of modules, one per Java package, and a separate writer lays the tree out.
+The pieces, smallest first:
+
+- **`output::Item`**: one item of a module, such as a class's struct with its `impl`s, a static
+  method, or the package's statics: its text (at no indentation), what it was made from
+  (`Origin`: the class, its enum, the statics, `fn main`), and the packages and classes it names.
+- **`output::Module`**: a package's module: its path (`["com", "example", "util"]`), its `use`
+  lines and its items.
+- **`output::ModuleTree`**: every module of the program, the crate root first.
+- **The name resolver** (`Resolver` in `codegen/modules.rs`): every name of a class, a static
+  field or a static method in another module goes through it (`modules::split`). It chooses the
+  path from the module being written (`util::Counter` through `use crate::com::example::util;`,
+  or `crate::java_::util::Optional` when two modules share a name) and records what each item
+  names. `codegen/imports.rs` names the crate root's items through `use crate::Object;`.
+- **`output::Layout`**: `OneFile` (inline modules in one `main.rs`: a translated file, `-o`, the
+  translation tests) or `FilePerModule` (`--crate`: `src/com/example/util.rs` for
+  `com.example.util`). An item's text is the same in both; the one-file layout indents it.
+
+What is left: the resolver is still held in a thread-local for the duration of `generate`,
+because the functions that make names (`struct_name`, `cell_name`, `init_name`) are called from
+about 40 places in 10 files; passing the resolver to them is mechanical and was left for a time
+when fewer branches edit the generator. Natural names plug in at the resolver (it decides every
+path and could decide the names); a split into crates is one more layout plus a rule that puts each
+module in a crate, with the resolver writing `other_crate::path` and `pub` across crates (see
+[several-crates.md](several-crates.md)).
 
 ### 3. Snapshot tests instead of strings in one file
 
@@ -117,8 +138,9 @@ and a message, so that a large project gets a list of problems instead of a cras
   summaries of methods instead of their bodies ([translator-speed-and-memory.md](translator-speed-and-memory.md)).
 - **The stand-ins for JDK classes** (`Standard.java`, `java/overlay/java/io`) on one written list,
   each with the reason it exists and what would let it be replaced by the JDK's own class.
-- **Global state in the generator** (the thread-local module context) goes away with change 2,
-  which also matters once the generator runs on every core.
+- **Global state in the generator** (the thread-local name resolver) goes once the name
+  functions take the resolver as a parameter (see change 2), which also matters once the
+  generator runs on every core.
 
 ## Order and effort
 
