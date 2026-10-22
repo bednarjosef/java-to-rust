@@ -135,4 +135,13 @@ final class TranslatedLangAccess {
         bytes[i] = (byte) ch;
         bytes[i + 1] = (byte) (ch >> 8);
     }
+
+    /**
+     * {@code prefix}, then {@code value} as {@code String.valueOf} gives it, then {@code suffix},
+     * with a null prefix, value or suffix read as {@code "null"}, as the JDK's
+     * {@code StringConcatHelper.concat} does for {@code ConstantUtils}.
+     */
+    static String concat(String prefix, Object value, String suffix) {
+        return prefix + value + suffix;
+    }
 }
