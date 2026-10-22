@@ -33,6 +33,7 @@ mod float;
 mod float_parse;
 pub mod format;
 mod fs;
+mod inflate;
 mod initializer;
 mod integer;
 mod integer_parse;
@@ -76,6 +77,9 @@ pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
 pub use format::{Arg, format, format_objects};
 pub use fs::*;
+pub use inflate::{
+    inflate_adler, inflate_bytes, inflate_end, inflate_init, inflate_reset, inflate_set_dictionary,
+};
 pub use initializer::*;
 pub use integer::*;
 pub use integer_parse::{parse_radix, parse_small_radix, try_parse_radix, try_parse_small_radix};
