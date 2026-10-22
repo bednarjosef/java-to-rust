@@ -12,6 +12,8 @@ enum Kind {
     Class,
     Enum,
     Interface,
+    /// An annotation type (`@interface`), an interface.
+    Annotation,
     Primitive,
 }
 
@@ -41,6 +43,11 @@ impl Class {
     /// An interface, which has no superclass.
     pub const fn interface(name: &'static str, simple: &'static str) -> Class {
         Class { name, simple, kind: Kind::Interface, superclass: None, component: None }
+    }
+
+    /// An annotation type, an interface that `isAnnotation()`.
+    pub const fn annotation(name: &'static str, simple: &'static str) -> Class {
+        Class { name, simple, kind: Kind::Annotation, superclass: None, component: None }
     }
 
     /// An array class, `[Ljava.lang.String;`, whose superclass is `Object`.
@@ -163,7 +170,12 @@ impl Class {
 
     /// `isInterface()`.
     pub fn is_interface(&self) -> bool {
-        self.kind == Kind::Interface
+        matches!(self.kind, Kind::Interface | Kind::Annotation)
+    }
+
+    /// `isAnnotation()`.
+    pub fn is_annotation(&self) -> bool {
+        self.kind == Kind::Annotation
     }
 
     /// `isEnum()`.
@@ -219,7 +231,7 @@ impl fmt::Display for Class {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.kind {
             Kind::Class | Kind::Enum => write!(f, "class {}", self.name),
-            Kind::Interface => write!(f, "interface {}", self.name),
+            Kind::Interface | Kind::Annotation => write!(f, "interface {}", self.name),
             Kind::Primitive => f.write_str(self.name),
         }
     }

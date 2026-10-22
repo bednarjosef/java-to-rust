@@ -61,8 +61,10 @@ never freed.
   (case labels may be constant expressions, folded as javac folds them), and `System.exit`.
 - Integer overflow wraps as in Java; division by zero throws `ArithmeticException`; float
   arithmetic and printing follow Java's rules (`Double.toString` and `Float.toString` exactly).
-- Annotations and annotation types are left out, since they do nothing at run time; a value,
-  field or variable of an annotation type, or a class implementing one, is rejected.
+- Annotations and annotation types are left out, since they do nothing at run time. The class
+  literal of a top-level annotation type is a `Class` that `isAnnotation()`, and a value of an
+  annotation type is an `Annotation` where the program has that interface; a class implementing
+  one, and any other use of one, is rejected.
 
 ## Strings, builders, characters and formatting
 
@@ -107,7 +109,11 @@ never freed.
   `newDecoder()`/`newEncoder()` give the JDK's own coders of the six charsets
   (`java/overlay/sun/nio/cs/TranslatedCoders.java`).
 - `==` on strings is rejected, except where Java's sharing makes identity equal to equal text:
-  both sides constants, `intern()` calls, or methods that return only such strings.
+  both sides constants, `intern()` calls, or methods that return only such strings. A
+  constant compared with a call of a method that no other overrides and that returns that
+  constant on some path (or with a local set once from such a call) is compared as text, with
+  a note printed at translation: this is wrong only if a string that the method computes has
+  the constant's text.
 
 ## Classes and objects
 
@@ -119,7 +125,9 @@ never freed.
 - An object parameter that a method only uses (fields, calls, comparison, printing) is a
   borrowed `&Rc<..>`. Methods of shared classes borrow their object
   (`p.borrow_mut().set(2)`) when nothing they run can reach the object another way.
-- `==` on objects is identity: `Rc::ptr_eq`, or `java::same` where either side may be null.
+- `==` on objects is identity: `Rc::ptr_eq`, or `java::same` where either side may be null. Two
+  `Object`s that may both be strings or boxes are compared at run time, and equal ones end the
+  program, as the translation does not keep their identity.
 - `super.clone()` of `Object` is a shallow copy of the runtime class, a `match` on the variant in
   a class tree; a class that is not `Cloneable` throws `CloneNotSupportedException`. `clone` of
   an object other than `this` is rejected.
@@ -167,8 +175,9 @@ Design: [object-model.md](object-model.md).
   `match self`. `valueOf` of an unknown name throws `IllegalArgumentException` with Java's
   message. An enum value that may be null is an `Option` of the enum. Using a constant does not
   initialize the enum by itself, unlike Java; reading its fields or calling its methods does.
-  Rejected in a constant's body: static fields, blocks and member classes, and fields whose name
-  or type clashes with the enum's.
+  A body's methods that override nothing are methods of the enum. Rejected in a constant's body:
+  static fields, blocks and member classes, and fields whose name or type clashes with the
+  enum's.
 - A **record** is a class with the members Java gives it (written into javac's tree by
   `javac/records.rs`): canonical or compact constructor, accessors, `toString`, `equals` and
   `hashCode`. A `switch` with patterns (`case Circle c when ..`, `case null`, record patterns,

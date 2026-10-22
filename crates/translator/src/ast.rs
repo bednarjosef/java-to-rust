@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{LazyLock, Mutex};
 
+mod channels;
 mod charsets;
 mod code_point;
 mod counting;
@@ -13,6 +14,7 @@ mod java_arrays;
 mod natives;
 mod strings;
 mod unsigned;
+pub use channels::*;
 pub use charsets::*;
 pub use code_point::*;
 pub use counting::*;
@@ -291,6 +293,20 @@ pub struct Class {
     pub raised: Vec<Expr>,
     /// What the class files name that lowering knows from javac's tree.
     pub class_file: ClassFileNames,
+    /// What the translation assumed where Java's meaning depends on something it does not
+    /// follow, which the translator prints when it translates.
+    pub notes: Vec<Note>,
+    /// The annotation types (`@interface`) whose class literals the code has, by binary name:
+    /// a `java::Class` of each, which `isAnnotation()`. The types themselves are left out.
+    pub annotation_classes: std::collections::BTreeSet<String>,
+}
+
+/// An assumption of the translation at a place of the program: the method (index into
+/// `Class::methods`) whose code it is in, the position, and what is assumed.
+pub struct Note {
+    pub method: Option<usize>,
+    pub pos: Pos,
+    pub message: String,
 }
 
 /// What the class files that javac writes name, where lowering knows it from javac's tree: the

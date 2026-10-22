@@ -256,7 +256,18 @@ fn lower_into<'t>(
     let hierarchy = Hierarchy::new(&types, &methods);
     let raised = lowering.raised_objects(&types, &methods);
     let class_file = lowering.class_file_names(&types);
-    let class = Class { name: main.to_string(), types, methods, hierarchy, raised, class_file };
+    let notes = lowering.notes.take();
+    let annotation_classes = lowering.annotation_classes.take();
+    let class = Class {
+        name: main.to_string(),
+        types,
+        methods,
+        hierarchy,
+        raised,
+        class_file,
+        notes,
+        annotation_classes,
+    };
     Ok((class, lowering.real.clone(), failed))
 }
 

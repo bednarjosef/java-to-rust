@@ -268,8 +268,15 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         // A negative count.
         Builtin::Native(Native::SecureSeed) => &["java.lang.IllegalArgumentException"],
         // Bad compressed data (`inflate.rs`), and a dictionary that the stream did not ask for.
-        Builtin::Native(Native::InflateBytes) => &["java.util.zip.DataFormatException"],
-        Builtin::Native(Native::InflateSetDictionary) => &["java.lang.IllegalArgumentException"],
+        Builtin::Native(
+            Native::InflateBytes
+            | Native::InflateBytesBuffer
+            | Native::InflateBufferBytes
+            | Native::InflateBufferBuffer,
+        ) => &["java.util.zip.DataFormatException"],
+        Builtin::Native(Native::InflateSetDictionary | Native::InflateSetDictionaryBuffer) => {
+            &["java.lang.IllegalArgumentException"]
+        }
         // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail, but for
         // the interrupt of `join0`, which `runtime_failures` adds.
         Builtin::Native(
@@ -349,14 +356,23 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::InflateAdler
             | Native::InflateReset
             | Native::InflateEnd
-            | Native::NoPendingReferences,
+            | Native::NoPendingReferences
+            | Native::TransferUnsupported
+            | Native::UnmapFile
+            | Native::AllocationGranularity,
         ) => &[],
+        // A file that cannot be read for the mapping fails with an `IOException` (`file_channels.rs`).
+        Builtin::Native(Native::MapFile) => &["java.io.IOException"],
         // A read or write outside the array, or of memory outside the heap, ends the program.
         Builtin::RawMemory { .. } => &[],
         // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).
         Builtin::Native(Native::Unix(_)) => &[],
         // So do the name service calls of `java.net` (`java_runtime::net`).
         Builtin::Native(Native::Net(_)) => &[],
+        // The natives of a file channel fail with an `IOException` where the JVM's do (`file_channel.rs`).
+        Builtin::Native(Native::Channel(call)) => {
+            if call.fails { &["java.io.IOException"] } else { &[] }
+        }
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
         // of a closed descriptor does nothing.
         Builtin::Native(Native::FileOpenRead | Native::FileOpenWrite | Native::FileOpenRandom) => {

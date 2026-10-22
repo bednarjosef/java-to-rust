@@ -1,6 +1,8 @@
 //! The JDK methods that bottom out in the JVM, which the runtime implements by hand
 //! (`java_runtime::natives`, `math`, `fdlibm`, `out`, `fd`, `vm`).
 
+use super::{ChannelCall, channel_call, channel_nothing};
+
 /// A call into the native layer; its arguments are those of the `Builtin` that holds it, with
 /// the receiver first for instance methods.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,6 +182,8 @@ pub enum Native {
     /// A native that does nothing in a translated program, such as `registerNatives()`: its
     /// statement is dropped.
     Nothing,
+    /// A native of `sun.nio.ch` that a file channel calls (`ast/channels.rs`).
+    Channel(&'static ChannelCall),
     /// `CDS.getCDSConfigStatus()`.
     CdsConfigStatus,
     /// `CDS.getRandomSeedForDumping()`.
@@ -228,18 +232,33 @@ pub enum Native {
     NoPendingReferences,
     /// `SecureRandom.getSeed(numBytes)`: seed bytes from the operating system (`random.rs`).
     SecureSeed,
-    /// `Inflater`'s natives (`inflate.rs`): `init(nowrap)`, then `inflateBytesBytes`, `getAdler`,
-    /// `reset`, `end` and `setDictionary` on the handle that `init` returned.
+    /// `Inflater`'s natives (`inflate.rs`): `init(nowrap)`, then `inflateBytesBytes` and its buffer
+    /// forms (`inflateBytesBuffer`, `inflateBufferBytes`, `inflateBufferBuffer`), `getAdler`,
+    /// `reset`, `end`, and `setDictionary` with its buffer form, on the handle that `init` returned.
     InflateInit,
     InflateBytes,
+    InflateBytesBuffer,
+    InflateBufferBytes,
+    InflateBufferBuffer,
     InflateAdler,
     InflateReset,
     InflateEnd,
     InflateSetDictionary,
+    InflateSetDictionaryBuffer,
     /// `TimeZone.getSystemTimeZoneID(javaHome)`: the zone's name, or `null` (`time_zone.rs`).
     SystemTimeZoneId,
     /// `TimeZone.getSystemGMTOffsetID()`: the local offset from UTC as `GMT+hh:mm`.
     SystemGmtOffsetId,
+    /// `FileDispatcherImpl.transferTo0` and `transferFrom0`: the runtime answers
+    /// `IOStatus.UNSUPPORTED_CASE`, so the JDK copies through buffers instead (`file_channels.rs`).
+    TransferUnsupported,
+    /// `UnixFileDispatcherImpl.map0(fd, prot, position, length, isSync)`: a block outside the heap
+    /// with the file's bytes (`file_channels.rs`). Its descriptor is lowered to its number.
+    MapFile,
+    /// `UnixFileDispatcherImpl.unmap0(address, length)`: frees the block that `MapFile` made.
+    UnmapFile,
+    /// `UnixFileDispatcherImpl.allocationGranularity0()`: the page size.
+    AllocationGranularity,
 }
 
 impl Native {
@@ -323,6 +342,32 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("jdk.internal.misc.UnsafeConstants", "pageSize0", "()int") => Native::PageSize,
         ("jdk.internal.misc.Unsafe", "reallocateMemory0", "(long,long)long") => Native::ReallocateNative,
         ("jdk.internal.misc.Unsafe", "freeMemory0", "(long)void") => Native::FreeNative,
+        // A transfer is copied by the JDK's own fallback, and a mapping by `MapFile`, which
+        // `lower/file_channels.rs` lowers with the descriptor's number.
+        (
+            "sun.nio.ch.FileDispatcherImpl",
+            "transferTo0",
+            "(java.io.FileDescriptor,long,long,java.io.FileDescriptor,boolean)long",
+        ) => Native::TransferUnsupported,
+        (
+            "sun.nio.ch.FileDispatcherImpl",
+            "transferFrom0",
+            "(java.io.FileDescriptor,java.io.FileDescriptor,long,long,boolean)long",
+        ) => Native::TransferUnsupported,
+        ("sun.nio.ch.UnixFileDispatcherImpl", "allocationGranularity0", "()long") => {
+            Native::AllocationGranularity
+        }
+        (
+            "sun.nio.ch.UnixFileDispatcherImpl",
+            "map0",
+            "(java.io.FileDescriptor,int,long,long,boolean)long",
+        ) => Native::MapFile,
+        ("sun.nio.ch.UnixFileDispatcherImpl", "unmap0", "(long,long)int") => Native::UnmapFile,
+        // Nothing is written back: no mapping is writable or synchronous (`file_channels.rs`).
+        ("java.nio.MappedMemoryUtils", "force0", "(java.io.FileDescriptor,long,long)void") => Native::Nothing,
+        ("jdk.internal.misc.Unsafe", "writeback0", "(long)void") => Native::Nothing,
+        ("jdk.internal.misc.Unsafe", "writebackPreSync0", "()void") => Native::Nothing,
+        ("jdk.internal.misc.Unsafe", "writebackPostSync0", "()void") => Native::Nothing,
         ("jdk.internal.misc.Unsafe", "setMemory0", "(java.lang.Object,long,long,byte)void") => {
             Native::SetMemory
         }
@@ -332,11 +377,23 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long") => {
             Native::InflateBytes
         }
+        ("java.util.zip.Inflater", "inflateBytesBuffer", "(long,byte[],int,int,long,int)long") => {
+            Native::InflateBytesBuffer
+        }
+        ("java.util.zip.Inflater", "inflateBufferBytes", "(long,long,int,byte[],int,int)long") => {
+            Native::InflateBufferBytes
+        }
+        ("java.util.zip.Inflater", "inflateBufferBuffer", "(long,long,int,long,int)long") => {
+            Native::InflateBufferBuffer
+        }
         ("java.util.zip.Inflater", "getAdler", "(long)int") => Native::InflateAdler,
         ("java.util.zip.Inflater", "reset", "(long)void") => Native::InflateReset,
         ("java.util.zip.Inflater", "end", "(long)void") => Native::InflateEnd,
         ("java.util.zip.Inflater", "setDictionary", "(long,byte[],int,int)void") => {
             Native::InflateSetDictionary
+        }
+        ("java.util.zip.Inflater", "setDictionaryBuffer", "(long,long,int)void") => {
+            Native::InflateSetDictionaryBuffer
         }
         ("java.lang.ref.Reference", "hasReferencePendingList", "()boolean") => Native::NoPendingReferences,
         ("java.lang.Thread", "nextThreadNum", "()int") => Native::ThreadNumber,
@@ -365,14 +422,17 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
     })
 }
 
-/// Whether the runtime implements a native method of a translated JDK class: one of
+/// Whether the translation implements a native method of a translated JDK class: one of
 /// `declared_native`, a stream native of `java.io`, which `lower/natives.rs` lowers with the
-/// descriptor of the stream's object, or a native of `java.io.UnixFileSystem` (`FILE_SYSTEM`).
+/// descriptor of the stream's object, a native of `java.io.UnixFileSystem` (`FILE_SYSTEM`), or
+/// one that lowering writes as code.
 pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
     declared_native(class, name, signature).is_some()
         || (class == "java.io.UnixFileSystem" && FILE_SYSTEM.contains(&name))
         || (class == UNIX_DISPATCHER && unix_call(name).is_some())
         || (class == NET_DISPATCHER && net_call(name).is_some())
+        || channel_call(class, name).is_some()
+        || channel_nothing(class, name)
         || matches!(
             (class, name),
             (
@@ -392,6 +452,12 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
                 | ("java.lang.ref.PhantomReference", "refersTo0" | "clear0")
                 // `LockSupport`'s, with the thread's id for `unpark` (`lower/natives.rs`).
                 | ("jdk.internal.misc.Unsafe", "park" | "unpark")
+                // What the translator read from the program's roots: its modules
+                // (`lower/modules.rs`), the providers of a service (`lower/reflection.rs`) and a
+                // processor's annotations (`lower/processors.rs`).
+                | ("java.lang.Module", "modules0" | "moduleOf0" | "declares0" | "holds0")
+                | ("java.util.ServiceLoader", "providers0" | "create0")
+                | ("javax.annotation.processing.TranslatedProcessorAnnotations", "values0")
         )
 }
 
@@ -555,6 +621,37 @@ mod tests {
         assert_eq!(found("java.io.FileDescriptor", "getHandle", "(int)long"), Some(Native::DescriptorHandle));
         assert_eq!(found("java.io.FileInputStream", "initIDs", "()void"), Some(Native::Nothing));
         assert_eq!(found("java.nio.MappedMemoryUtils", "registerNatives", "()void"), Some(Native::Nothing));
+        assert_eq!(
+            found(
+                "sun.nio.ch.FileDispatcherImpl",
+                "transferTo0",
+                "(java.io.FileDescriptor,long,long,java.io.FileDescriptor,boolean)long"
+            ),
+            Some(Native::TransferUnsupported)
+        );
+        assert_eq!(
+            found(
+                "sun.nio.ch.UnixFileDispatcherImpl",
+                "map0",
+                "(java.io.FileDescriptor,int,long,long,boolean)long"
+            ),
+            Some(Native::MapFile)
+        );
+        assert_eq!(
+            found("sun.nio.ch.UnixFileDispatcherImpl", "unmap0", "(long,long)int"),
+            Some(Native::UnmapFile)
+        );
+        assert_eq!(
+            found("sun.nio.ch.UnixFileDispatcherImpl", "allocationGranularity0", "()long"),
+            Some(Native::AllocationGranularity)
+        );
+        assert_eq!(
+            found("java.nio.MappedMemoryUtils", "force0", "(java.io.FileDescriptor,long,long)void"),
+            Some(Native::Nothing)
+        );
+        assert_eq!(found("jdk.internal.misc.Unsafe", "writeback0", "(long)void"), Some(Native::Nothing));
+        assert_eq!(found("jdk.internal.misc.Unsafe", "writebackPreSync0", "()void"), Some(Native::Nothing));
+        assert_eq!(found("jdk.internal.misc.Unsafe", "writebackPostSync0", "()void"), Some(Native::Nothing));
         assert_eq!(found("java.util.zip.CRC32", "update", "(int,int)int"), Some(Native::Crc32Update));
         assert_eq!(
             found("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int"),
@@ -564,6 +661,22 @@ mod tests {
         assert_eq!(
             found("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long"),
             Some(Native::InflateBytes)
+        );
+        assert_eq!(
+            found("java.util.zip.Inflater", "inflateBytesBuffer", "(long,byte[],int,int,long,int)long"),
+            Some(Native::InflateBytesBuffer)
+        );
+        assert_eq!(
+            found("java.util.zip.Inflater", "inflateBufferBytes", "(long,long,int,byte[],int,int)long"),
+            Some(Native::InflateBufferBytes)
+        );
+        assert_eq!(
+            found("java.util.zip.Inflater", "inflateBufferBuffer", "(long,long,int,long,int)long"),
+            Some(Native::InflateBufferBuffer)
+        );
+        assert_eq!(
+            found("java.util.zip.Inflater", "setDictionaryBuffer", "(long,long,int)void"),
+            Some(Native::InflateSetDictionaryBuffer)
         );
         // Another overload, or another class's method of the same name, is not the native.
         assert_eq!(found("java.util.zip.CRC32", "update", "(byte[],int,int)void"), None);
@@ -582,6 +695,11 @@ mod tests {
         assert!(!runtime_native("java.lang.Throwable", "fillInStackTrace", "(int)java.lang.Throwable"));
         // The name service calls that the runtime answers (`NET_CALLS`), as the census lists them.
         assert!(runtime_native(NET_DISPATCHER, "lookup0", "(byte[],int)byte[]"));
+        assert!(runtime_native(
+            "java.util.ServiceLoader",
+            "providers0",
+            "(java.lang.String)java.lang.Class<?>[]"
+        ));
         assert!(!runtime_native(NET_DISPATCHER, "connect0", "()void"));
     }
 }

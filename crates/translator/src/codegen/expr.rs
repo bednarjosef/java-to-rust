@@ -342,7 +342,7 @@ impl<'a> Gen<'a> {
             ExprKind::Binary(op, l, r) if is_null_test(*op, l, r) => self.null_test(*op, l, r),
             ExprKind::Binary(BinOp::And, ..) if let Some(code) = self.bound_and(e) => code,
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(..)) => {
-                self.identity(*op, l, r)
+                self.identity(e.id, *op, l, r)
             }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
                 if l.ty == Type::JavaClass || r.ty == Type::JavaClass =>
@@ -366,9 +366,11 @@ impl<'a> Gen<'a> {
                 self.boxed_identity(*op, l, r)
             }
             // Enums of which one may be null (`analysis::nullness`): `Option`s, equal when both
-            // are null or both are the same constant.
+            // are null or both are the same constant. So are two boxes of a kind whose equal
+            // values are one object (`Boolean` and `Byte`, see `analysis::boxing`).
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
-                if matches!((l.ty, r.ty), (Type::Enum(_), Type::Enum(_)))
+                if (matches!((l.ty, r.ty), (Type::Enum(_), Type::Enum(_)))
+                    || matches!(l.ty, Type::Boxed(_)) && r.ty == l.ty)
                     && (self.nullable(l) || self.nullable(r)) =>
             {
                 let (a, b) = (self.optional_to(l, l.ty), self.optional_to(r, r.ty));
@@ -443,6 +445,14 @@ impl<'a> Gen<'a> {
                 if let ExprKind::NewArray(sizes) = &value.kind
                     && value.ty != *to =>
             {
+                // The `new` is written here rather than by `expr`, which would run it inside
+                // `java::catching` where a `catch` sees its exception.
+                if self.facts.catching.contains_key(&value.id) && self.catching_now.insert(value.id) {
+                    let mark = self.out.len();
+                    let code = self.new_object_rows(*to, value.ty, sizes);
+                    self.catching_now.remove(&value.id);
+                    return self.caught(value.id, code, mark);
+                }
                 self.new_object_rows(*to, value.ty, sizes)
             }
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),

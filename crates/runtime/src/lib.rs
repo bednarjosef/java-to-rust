@@ -30,6 +30,8 @@ mod exact;
 mod exception;
 mod fd;
 pub mod fdlibm;
+mod file_channel;
+mod file_channels;
 mod float;
 mod float_parse;
 pub mod format;
@@ -81,13 +83,16 @@ pub use code_point_chars::*;
 pub use exact::*;
 pub use exception::*;
 pub use fd::*;
+pub use file_channel::*;
+pub use file_channels::*;
 pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
 pub use format::{Arg, format, format_objects, print_format, print_format_objects};
 pub use fs::*;
 pub use hex_float::{double_to_hex_string, float_to_hex_string};
 pub use inflate::{
-    inflate_adler, inflate_bytes, inflate_end, inflate_init, inflate_reset, inflate_set_dictionary,
+    inflate_adler, inflate_buffer_buffer, inflate_buffer_bytes, inflate_bytes, inflate_bytes_buffer,
+    inflate_end, inflate_init, inflate_reset, inflate_set_dictionary, inflate_set_dictionary_buffer,
 };
 pub use initializer::*;
 pub use integer::*;
@@ -102,7 +107,10 @@ pub use monitor::*;
 pub use native_memory::*;
 pub use natives::*;
 pub use net::*;
-pub use null::{Handle, OrNull, non_null, or_null, same, try_non_null, try_non_null_message};
+pub use null::{
+    Handle, OrNull, SameObject, non_null, or_null, same, same_object, try_non_null, try_non_null_message,
+    unkept_identity,
+};
 pub use out::{
     Out, drain_stdout, eprint_chars, eprintln_chars, err, err_flush, flush, out, print_chars, println_chars,
     standard_close, standard_flush, standard_write, standard_write_bytes, write_byte,

@@ -115,6 +115,10 @@ impl<'a> Gen<'a> {
                     rust_string(&simple)
                 )
             }
+            Type::Class(name, _) if self.class.annotation_classes.contains(name) => {
+                let simple = name.rsplit('.').next().unwrap_or(name);
+                format!("java::Class::annotation({}, {})", rust_string(name), rust_string(simple))
+            }
             _ => match self.class.type_of(ty) {
                 Some(c) => self.decl_class(c),
                 None => constant("OBJECT"),
@@ -177,7 +181,8 @@ impl<'a> Gen<'a> {
             ClassOp::GetCanonicalName => "get_canonical_name",
             ClassOp::GetPackageName => "get_package_name",
             ClassOp::DescriptorString => "descriptor_string",
-            ClassOp::DesiredAssertionStatus | ClassOp::IsAnnotation => {
+            ClassOp::IsAnnotation => "is_annotation",
+            ClassOp::DesiredAssertionStatus => {
                 return Code::new(format!("{{ let _ = {class}; false }}"), LOWEST);
             }
             ClassOp::Equals => {

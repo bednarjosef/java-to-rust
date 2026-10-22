@@ -3284,6 +3284,37 @@ fn enum_constant_bodies_become_arms_of_the_enum_method() {
 }
 
 #[test]
+fn a_method_of_a_constant_body_that_overrides_nothing_is_a_method_of_the_enum() {
+    let rust = translate(
+        "public class A {
+            enum Op {
+                TWICE { int apply(int a) { return twice(a); } private int twice(int x) { return 2 * x; } },
+                SAME { int apply(int a) { return a; } };
+                abstract int apply(int a);
+            }
+            public static void main(String[] args) { System.out.println(Op.TWICE.apply(4)); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &["AOp::Twice => {\n                self.twice(a)", "fn twice(self, x: i32) -> i32 {"],
+    );
+    // Two of one name and signature would be two methods that the calls cannot tell apart.
+    let error = java_to_rust::translate(
+        "public class A {
+            enum Op {
+                TWICE { int apply(int a) { return f(a); } private int f(int x) { return 2 * x; } },
+                SAME { int apply(int a) { return f(a); } private int f(int x) { return x; } };
+                abstract int apply(int a);
+            }
+            public static void main(String[] args) { System.out.println(Op.TWICE.apply(4)); }
+        }",
+    )
+    .expect_err("two helpers of one name and signature");
+    assert!(error.to_string().contains("methods of one name and signature that override nothing"), "{error}");
+}
+
+#[test]
 fn an_enum_field_with_a_method_of_its_name_gets_another_accessor() {
     let rust = translate(
         "public class A {
@@ -3513,6 +3544,7 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             public native void putReferenceVolatile(Object o, long offset, Object x);
             public final Object getReferenceAcquire(Object o, long offset) { return getReferenceVolatile(o, offset); }
             public final void putReferenceRelease(Object o, long offset, Object x) { putReferenceVolatile(o, offset, x); }
+            public final void putReference(Object o, long offset, Object x) { putReferenceVolatile(o, offset, x); }
             public native int getInt(Object o, long offset);
             public native void putIntVolatile(Object o, long offset, int x);
             public final native boolean compareAndSetReference(Object o, long offset, Object expected, Object x);
@@ -3593,6 +3625,9 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             static { initialize(); }
             private static native void initialize();
             public static native long getNanoTimeAdjustment(long offsetInSeconds);
+            // The translator's patch replaces it (java/patches/jdk/internal/misc/VM.java), so the
+            // stand-in has it too.
+            public static native String[] getRuntimeArguments();
         }",
     ),
     (
@@ -3602,6 +3637,24 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             private static final boolean SUPPORTED = isSupported0();
             public static boolean isSupported() { return SUPPORTED; }
             private static native boolean isSupported0();
+        }",
+    ),
+    (
+        "lib/jdk/internal/misc/Erasable.java",
+        "package jdk.internal.misc;
+        public class Erasable {
+            Object locals;
+            public Object locals() { return locals; }
+            public void set(Object o) { locals = o; }
+        }",
+    ),
+    (
+        "lib/jdk/internal/misc/Erasing.java",
+        "package jdk.internal.misc;
+        public final class Erasing extends Erasable {
+            private static final Unsafe U = Unsafe.getUnsafe();
+            private static final long LOCALS = U.objectFieldOffset(Erasable.class, \"locals\");
+            public void erase() { U.putReference(this, LOCALS, null); }
         }",
     ),
 ];
@@ -3688,6 +3741,19 @@ fn an_access_through_a_field_offset_is_the_field() {
         &["LAZY_VALUE", "LAZY_COUNT", "field_offset", "fn get_reference_acquire", "fn get_int"],
     );
     assert_contains(&rust, &["self.value", "self.count"]);
+}
+
+#[test]
+fn a_write_through_the_offset_of_a_superclass_field_is_the_field() {
+    // `InnocuousThread` erases the thread-locals of its `Thread` this way: the offset names a
+    // field of the superclass, and the object written is the subclass's.
+    let rust = translate_with_natives(
+        "jdk-superclass-handles",
+        "Erasing e = new Erasing(); e.set(\"set\"); e.erase(); System.out.println(e.locals());",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["self.base.locals = None;"]);
+    assert_lacks(&rust, &["LOCALS", "field_offset", "fn put_reference"]);
 }
 
 #[test]
@@ -4571,33 +4637,34 @@ fn a_class_extending_number_implements_it_and_byte_value_narrows_int_value() {
 }
 
 #[test]
-fn identity_of_object_values_that_may_be_strings_is_rejected() {
-    let err = java_to_rust::translate(
+fn identity_of_object_values_that_may_be_strings_is_checked_at_run_time() {
+    // Different values are different objects; equal ones end the program, as the translation
+    // does not keep their identity.
+    let rust = translate(
         "class M { public static void main(String[] x) { Object a = \"s\"; Object b = \"s\"; System.out.println(a == b); } }",
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("`==` on `Object` values that may be strings or boxes not supported yet"),
-        "{err}"
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::same_object(Some(&a), Some(&b))",
+            "impl java::SameObject for Object {",
+            "(Object::String(a), Object::String(b)) => a == b && java::unkept_identity(),",
+        ],
     );
 }
 
 #[test]
 fn identity_of_object_values_follows_what_flows_into_them() {
     // Only program objects reach `same`'s parameters, so `==` is plain identity; once a box may
-    // reach both sides, it is rejected again.
+    // reach both sides, it is checked at run time.
     let program = |arg: &str| {
         format!(
             "class M {{ static boolean same(Object a, Object b) {{ return a == b; }}
                 public static void main(String[] x) {{ Object m = {arg}; System.out.println(same(m, {arg})); }} }}"
         )
     };
-    java_to_rust::translate(&program("new M()")).unwrap();
-    let err = java_to_rust::translate(&program("1")).unwrap_err();
-    assert!(
-        err.to_string().contains("`==` on `Object` values that may be strings or boxes not supported yet"),
-        "{err}"
-    );
+    assert!(!translate(&program("new M()")).contains("same_object"));
+    assert!(translate(&program("1")).contains("java::same_object("));
 }
 
 #[test]
@@ -5357,4 +5424,39 @@ fn an_analysis_error_names_its_file_where_another_file_has_code_at_its_position(
         piece["errors"].as_array().expect("errors").len()
     };
     assert_eq!((errors("p.Fine"), errors("p.Rank")), (0, 1));
+}
+
+#[test]
+fn a_string_constant_compared_with_what_a_method_returns_is_compared_as_text_with_a_note() {
+    let java = "public class A {
+        static final String ALL = \".*\";
+        static String pattern(String s) { return s.equals(\"*\") ? ALL : s.replace(\".\", \"\\\\.\"); }
+        static String direct(String s) { if (s.isEmpty()) { return ALL; } return s + \"!\"; }
+        public static void main(String[] args) {
+            String p = direct(args.length > 0 ? args[0] : \"\");
+            System.out.println(p == ALL);
+            System.out.println(direct(\"x\") != ALL);
+        }
+    }";
+    let (rust, notes) = java_to_rust::translate_with_notes(java).expect("translates");
+    assert_contains(&rust, &["java::println!(\"{}\", p == String::from(A_ALL));"]);
+    let messages: Vec<String> =
+        notes.iter().map(|n| format!("{}:{}: {}", n.pos.line, n.pos.column, n.message)).collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages[0].starts_with(
+            "7:32: `==` on strings compared as text: assumes that no string that `A.direct` computes"
+        ),
+        "{messages:?}"
+    );
+    // A string that the method does not return as the constant itself is still rejected.
+    let error = java_to_rust::translate(
+        "public class A {
+            static final String ALL = \".*\";
+            static String other(String s) { return s + \"!\"; }
+            public static void main(String[] args) { System.out.println(other(\"x\") == ALL); }
+        }",
+    )
+    .expect_err("the method never returns the constant");
+    assert!(error.to_string().contains("== on strings compares references"), "{error}");
 }

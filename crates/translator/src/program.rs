@@ -116,6 +116,7 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
     let file = |unit: Option<usize>| unit.map(|u| units[u].file.clone());
     let mut class = lowered.class.map_err(|(unit, error)| ProgramError { file: file(unit), error })?;
     stamp_units(&mut class, &lowered.units);
+    print_notes(&class, &units.iter().map(|u| u.file.clone()).collect::<Vec<_>>());
     if let Err(rejected) = phase("live methods", || keep_live(&mut class, lowered.rejected)) {
         let file = file(rejected.unit).or_else(|| locate(&units, &class, rejected.error.pos));
         return Err(ProgramError { file, error: rejected.error });
@@ -373,9 +374,21 @@ impl Unit {
 /// Stamps on the positions of the code of each class the unit it is in (`Pos::unit`): those of
 /// the methods, of the expressions in them and of the fields' initializers. `units` is the unit
 /// of each type, `None` for the types that lowering provides.
+/// Prints the assumptions of the translation (`ast::Note`) to standard error, each at its file
+/// (`files`, by unit), line and column.
+pub(crate) fn print_notes(class: &crate::ast::Class, files: &[String]) {
+    for note in &class.notes {
+        let file = note.pos.unit.and_then(|u| files.get(u as usize)).map_or("", String::as_str);
+        eprintln!("note: {file}:{}:{}: {}", note.pos.line, note.pos.column, note.message);
+    }
+}
+
 pub(crate) fn stamp_units(class: &mut crate::ast::Class, units: &[Option<usize>]) {
     use crate::ast::{rewrite_expr, rewrite_stmt};
     let unit_of = |t: usize| units.get(t).copied().flatten().and_then(|u| u32::try_from(u).ok());
+    for note in &mut class.notes {
+        note.pos.unit = note.method.and_then(|m| unit_of(class.methods[m].class));
+    }
     for method in &mut class.methods {
         let unit = unit_of(method.class);
         method.pos.unit = unit;

@@ -75,7 +75,11 @@ impl<'t> Lowering<'t> {
             stub_message: Default::default(),
             ends_rejected: false,
             stubbed: Default::default(),
+            notes: Default::default(),
+            annotation_classes: Default::default(),
+            nested_annotation_types: Default::default(),
             body_methods: Default::default(),
+            body_helpers: Default::default(),
             annotation_types: Default::default(),
             rejected_classes: Default::default(),
             callers: Default::default(),
@@ -129,6 +133,7 @@ impl<'t> Lowering<'t> {
                 // Does nothing when the program runs (see `annotation_types`).
                 "ANNOTATION_TYPE" => {
                     self.annotation_types.insert(crate::program::class_name(member.0));
+                    self.nested_annotation_types.insert(crate::program::class_name(member.0));
                 }
                 "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
                     // Named after its outer class once that is named (see `inner::name_nested`).
@@ -486,10 +491,32 @@ impl<'t> Lowering<'t> {
                 let ty = self.signature_type(node, symbol.ty)?;
                 self.constant_literal(node, ty, text)
             }
+            // `Integer.TYPE` is the class of `int`, the same object as `int.class`.
+            None if let Some(symbol) = node.symbol().filter(|s| s.kind == "FIELD" && s.is_static)
+                && let Some(primitive) = super::boxing::primitive_class_field(symbol.owner, symbol.name) =>
+            {
+                Ok(ExprKind::Builtin(Builtin::ClassLiteral(primitive), Vec::new()))
+            }
             None if let Some(owner) =
                 node.symbol().map(|s| s.owner).filter(|o| self.annotation_types.contains(*o)) =>
             {
                 unsupported(node, &format!("a field of the annotation type `{owner}`"))
+            }
+            // `SecurityProperties`, which is not translated, initializes this field with
+            // `includedInExceptions("jar")`, which lowering answers from the JDK's security
+            // properties (`lower/system.rs`).
+            None if node.symbol().is_some_and(|s| {
+                s.owner == "sun.security.util.SecurityProperties"
+                    && s.name == "INCLUDE_JAR_NAME_IN_EXCEPTIONS"
+            }) =>
+            {
+                match super::system::included_in_exceptions("jar") {
+                    Some(included) => Ok(ExprKind::Bool(included)),
+                    None => unsupported(
+                        node,
+                        "`SecurityProperties.INCLUDE_JAR_NAME_IN_EXCEPTIONS` without the JDK's security properties to read",
+                    ),
+                }
             }
             None => unsupported(node, "fields"),
         }

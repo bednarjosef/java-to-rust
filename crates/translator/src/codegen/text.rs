@@ -174,8 +174,12 @@ impl<'a> Gen<'a> {
                 let s = self.text_ref(&args[0]);
                 let f = self.runtime("equals_ignore_case");
                 if self.nullable(&args[1]) {
+                    // The receiver first, as Java evaluates it, and outside a closure, where a
+                    // `?` of it would not leave the method.
                     let other = self.option_ref(&args[1]);
-                    Code::atom(format!("{other}.is_some_and(|o| {f}({s}, o))"))
+                    Code::atom(format!(
+                        "match ({s}, {other}) {{ (receiver_, Some(other_)) => {f}(receiver_, other_), _ => false }}"
+                    ))
                 } else {
                     let other = self.str_ref(&args[1]);
                     Code::atom(format!("{f}({s}, {other})"))
@@ -183,7 +187,8 @@ impl<'a> Gen<'a> {
             }
             StringOp::Concat => {
                 let (a, b) = (self.text_ref(&args[0]), self.text_ref(&args[1]));
-                Code::atom(format!("[{a}, {b}].concat()"))
+                // Each side is `&String` or `&str` (`text_ref`), and an array holds one type.
+                Code::atom(format!("[{a} as &str, {b} as &str].concat()"))
             }
             StringOp::ToCharArray => {
                 let s = self.text_ref(&args[0]);

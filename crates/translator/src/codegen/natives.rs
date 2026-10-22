@@ -236,6 +236,11 @@ impl<'a> Gen<'a> {
             Native::FileSystem(name) => self.file_system_native(name, args, ty, id),
             Native::Unix(name) => self.unix_native(crate::ast::UNIX_CALLS, name, args, ty),
             Native::Net(name) => self.unix_native(crate::ast::NET_CALLS, name, args, ty),
+            Native::Channel(call) => self.channel_native(call, args, id),
+            Native::TransferUnsupported
+            | Native::MapFile
+            | Native::UnmapFile
+            | Native::AllocationGranularity => self.file_channel_native(native, args, id),
             // The lowering drops its statement; anywhere else it is the unit it returns.
             Native::Nothing => Code::atom("()"),
             Native::Missing { what } => {
@@ -273,10 +278,14 @@ impl<'a> Gen<'a> {
             }
             Native::InflateInit
             | Native::InflateBytes
+            | Native::InflateBytesBuffer
+            | Native::InflateBufferBytes
+            | Native::InflateBufferBuffer
             | Native::InflateAdler
             | Native::InflateReset
             | Native::InflateEnd
-            | Native::InflateSetDictionary => self.inflate_native(native, args, id),
+            | Native::InflateSetDictionary
+            | Native::InflateSetDictionaryBuffer => self.inflate_native(native, args, id),
             Native::NoPendingReferences => Code::atom("false"),
             Native::SecureSeed => {
                 let num_bytes = self.value(&args[0], Type::Int).text;
@@ -302,10 +311,14 @@ impl<'a> Gen<'a> {
         let name = self.thread_name(name);
         let local = self.local(var);
         let set = self.runtime("set_current_thread");
+        // The call is outside the `try`s of the starting code, and outside the `java::catching`
+        // of one around the start.
         let attempts = std::mem::take(&mut self.attempts);
+        let catching = std::mem::take(&mut self.catching_now);
         let throwing = std::mem::replace(&mut self.throwing, false);
         let body = self.expr(run).text;
         self.attempts = attempts;
+        self.catching_now = catching;
         self.throwing = throwing;
         let start = self.runtime("start_thread");
         Code::atom(format!(
@@ -322,9 +335,11 @@ impl<'a> Gen<'a> {
     fn install_uncaught(&mut self, args: &'a [Expr]) -> Code {
         let throwable = self.throwable_type();
         let attempts = std::mem::take(&mut self.attempts);
+        let catching = std::mem::take(&mut self.catching_now);
         let throwing = std::mem::replace(&mut self.throwing, false);
         let body = self.expr(&args[0]).text;
         self.attempts = attempts;
+        self.catching_now = catching;
         self.throwing = throwing;
         let raised: Vec<String> =
             self.facts.raised_classes.iter().map(|&c| rust_string(&self.class.types[c].name)).collect();

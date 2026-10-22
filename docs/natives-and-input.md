@@ -67,14 +67,20 @@ something a translated program does not have.
 | `FileDescriptor.getHandle(fd)` | `java::fd_handle(fd)` | -1 (Windows handles only) |
 | `FileDescriptor.getAppend(fd)` | `java::fd_append(fd)` | the descriptor's `O_APPEND` (from `/proc/self/fdinfo`, `false` where missing); `true` for a descriptor that is not open, as Java reads `fcntl`'s -1 |
 | `FileInputStream`, `FileOutputStream`, `RandomAccessFile`, `FileDescriptor` natives (`open0`, `read0`, `readBytes`, `available0`, `skip0`, `write`, `seek0`, `close0`, ...) | `fd.rs` | a descriptor table of the process; 0, 1 and 2 are the standard streams |
+| `sun.nio.ch.UnixFileDispatcherImpl` natives (`read0`, `pread0`, `write0`, `pwrite0`, `seek0`, `size0`, `truncate0`, `available0`, `isOther0`, `setDirect0`, `release0`); `FileDispatcherImpl.init0`, `IOUtil.iovMax`, `IOUtil.writevMax`, `NativeThread.init`, `current0`, `signal0` | `file_channel.rs` | the channel natives of `FileChannelImpl`, on the descriptor table: `read0` and `pread0` give -1 at the end of the file; `seek0` with -1 gives the position; `setDirect0` always fails with an `IOException` ("Operation not supported": the standard library cannot set `O_DIRECT` on an open file); `release0` does nothing (no lock is taken, as `lock0` is not implemented); `signal0` does nothing (no translated thread is blocked in a native call to wake); `current0` is never 0 |
 | `UnixFileSystem` natives (`FILE_SYSTEM`) | `fs.rs` | `File`'s attributes, listing, creating, renaming, deleting; not `getSpace0` |
 | the translator's `sun.nio.fs.UnixNativeDispatcher` (`UNIX_CALLS`) | `unix.rs` | the system calls of `java.nio.file`, recording `errno` rather than failing |
 | the translator's `java.net.TranslatedNet` (`NET_CALLS`) | `net.rs` | the C library's name service |
 | `Unsafe.allocateMemory0`, `reallocateMemory0`, `freeMemory0`, `setMemory0`, `copyMemory0`, `copySwapMemory0`; `UnsafeConstants.pageSize0` | `native_memory.rs`, `java::copy_memory` | memory outside the heap by address, for direct buffers |
+| `FileDispatcherImpl.transferTo0`, `transferFrom0` | `file_channels.rs`: `UNSUPPORTED_CASE` | the JDK's `transferToArbitraryChannel` (or its `transferFrom` twin) copies through buffers at the same positions and counts, so `Files.copy` and `FileChannel.transferTo`/`transferFrom` give Java's bytes and positions; `copy_file_range` is not used |
+| `UnixFileDispatcherImpl.map0(fd, prot, position, length, isSync)` | `file_channels.rs`, lowered with the descriptor's number (`lower/file_channels.rs`) | a read-only (`MAP_RO`) or private (`MAP_PV`) mapping is a block of memory outside the heap holding the file's bytes from `position` (zeros past the end of the file), taken when the map is made. Later writes to the file are not seen, and writes to a private mapping do not reach the file, as in Java. A read-write or synchronous mapping ends the program with a message |
+| `UnixFileDispatcherImpl.unmap0(address, length)` | `file_channels.rs` | frees the block; 0 |
+| `UnixFileDispatcherImpl.allocationGranularity0()` | `file_channels.rs` | the page size (4096), which `FileChannelImpl` aligns mapping positions to |
+| `MappedMemoryUtils.force0`, `Unsafe.writeback0`, `writebackPreSync0`, `writebackPostSync0` | nothing (statement dropped) | exact because no mapping is writable or synchronous, so there is nothing to write back |
 | `Unsafe.fullFence()` (and `loadFence`, `storeFence`) | a full fence | |
 | `Unsafe.park`, `unpark` | `thread.rs` | `LockSupport`'s permits |
 | `CRC32.update`, `updateBytes0` | `java::crc32_update`, `crc32_update_bytes` | zlib's CRC-32 |
-| `Inflater` natives | `inflate.rs` | zlib inflation |
+| `Inflater` natives (`inflateBytesBytes`, `inflateBytesBuffer`, `inflateBufferBytes`, `inflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, ...) | `inflate.rs` | zlib inflation, from arrays or from memory outside the heap by address (direct buffers) |
 | `Reference.get0`, `refersTo0`, `clear0`; `hasReferencePendingList()` | code on the field `referent`; `false` | see "References" below |
 | `SecureRandom.getSeed` | `random.rs` | seed bytes from the operating system |
 | the natives of the translator's `Thread` | `thread.rs` | see [multi-threading.md](multi-threading.md) |
@@ -102,8 +108,14 @@ compared with one recorded run.
   (`toArray(T[])`, `TimSort`'s work arrays) is lowered to a new array of `n` nulls of `a`'s type
   without it (`lower::arrays::component_array`, `program::component_array`); any other call of
   `Array.newInstance` reaches the native and is rejected where it can run.
+- `FileChannelImpl` (the channel of `RandomAccessFile.getChannel()` and `FileInputStream.getChannel()`)
+  reaches the channel natives above, but its path stops before them: `AbstractInterruptibleChannel`
+  calls `JavaLangAccess.blockedOn`, and `InnocuousThread` uses a field offset as a value. So no
+  program reaches them yet. `FileChannel.open` and `Files.newByteChannel` do not use
+  `FileChannelImpl` at all: they use the overlay `UnixFileChannel` (`java/overlay/sun/nio/fs`).
 - Stack walking (`StackTraceElement.initStackTraceElements`, `StackStreamFactory`), class
-  definition and module natives, sockets, `statvfs`, and every native not in the table.
+  definition and module natives, sockets, `statvfs`, `MappedMemoryUtils.isLoaded0`, `load0` and
+  `unload0` (`MappedByteBuffer.isLoaded`, `load`, `unload`), and every native not in the table.
 
 ## The reachability boundary
 

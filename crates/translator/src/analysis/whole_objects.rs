@@ -11,8 +11,9 @@
 //! - Each constructor of a class with subclasses in the tree becomes an instance method,
 //!   `construct<Name>`, whose `super(..)` or `this(..)` becomes a call of the matching method on
 //!   `this`, followed (unless it calls `this(..)`) by the class's field initializers. The class
-//!   gets one constructor with no parameters, which builds the fields struct with every field
-//!   zero, null or false and whose `super()` is that of its superclass.
+//!   gets one constructor that takes only its enclosing instance and captured locals (javac sets
+//!   them before `super(..)`), which builds the fields struct with them and every other field
+//!   zero, null or false, and whose `super(..)` is that of its superclass.
 //! - A constructor of a class without subclasses that extends one of them starts with that
 //!   `super()`, sets the enclosing instance and captured locals (which javac sets before
 //!   `super(..)` too), calls the superclass's `construct<Name>` with the arguments of its
@@ -53,19 +54,6 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
             }
         }
     }
-    for &t in &whole {
-        let decl = &class.types[t];
-        if decl.outer.is_some() || !decl.captures.is_empty() {
-            let pos =
-                class.methods.iter().find(|m| m.is_ctor && m.class == t).map_or(Pos::default(), |m| m.pos);
-            return Err(Error {
-                pos,
-                message: "constructors of a class with subclasses that use `this` as a value or call overridable \
-                          methods, in a class with an enclosing instance or captured locals, not supported yet"
-                    .to_string(),
-            });
-        }
-    }
     // The classes without subclasses whose superclass is rewritten.
     let leaves: BTreeSet<usize> = (0..class.types.len())
         .filter(|t| !whole.contains(t) && class.types[*t].extends.is_some_and(|e| whole.contains(&e)))
@@ -74,26 +62,75 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
     let original: Vec<usize> = (0..class.methods.len())
         .filter(|&m| class.methods[m].is_ctor && whole.contains(&class.methods[m].class))
         .collect();
+    // The enclosing instance and captured locals, which javac sets before `super(..)`: the zero
+    // object is built with them, so an override that the superclass's part calls finds them set.
+    let mut order: Vec<usize> = whole.iter().copied().collect();
+    order.sort_by_key(|&t| class.hierarchy.ancestors(t).len());
+    let mut synthetic: HashMap<usize, Vec<(String, Type)>> = HashMap::new();
+    for &t in &order {
+        let mut fields = class.types[t].extends.and_then(|e| synthetic.get(&e)).cloned().unwrap_or_default();
+        fields.extend(own_synthetic(class, t));
+        synthetic.insert(t, fields);
+    }
+    // For each constructor of these classes and of their subclasses without subclasses, the
+    // parameters that pass the synthetic fields of its zero object (of its superclass's, for one
+    // of a class without subclasses).
+    let mut sources: HashMap<usize, Vec<Source>> = HashMap::new();
+    for m in (0..class.methods.len()).filter(|&m| {
+        let method = &class.methods[m];
+        method.is_ctor && (whole.contains(&method.class) || leaves.contains(&method.class))
+    }) {
+        let t = class.methods[m].class;
+        let found = if whole.contains(&t) {
+            synthetic_sources(class, &whole, &synthetic, m)
+        } else {
+            leaf_sources(class, &whole, &synthetic, m)
+        };
+        match found {
+            Some(found) => _ = sources.insert(m, found),
+            None => {
+                return Err(Error {
+                    pos: class.methods[m].pos,
+                    message: "constructors of a class with subclasses that use `this` as a value or call \
+                              overridable methods, in a class with an enclosing instance or captured locals \
+                              that a constructor does not pass on as they are, not supported yet"
+                        .to_string(),
+                });
+            }
+        }
+    }
     for &m in &original {
         rewrite.construct.insert(m, construct_name(class, class.methods[m].class));
     }
-    // The constructors with no parameters that build the zero objects, superclasses first.
-    let mut order: Vec<usize> = whole.iter().copied().collect();
-    order.sort_by_key(|&t| class.hierarchy.ancestors(t).len());
+    // The constructors that build the zero objects, superclasses first: they take only the
+    // synthetic fields.
     for &t in &order {
         let zero = class.methods.len();
         rewrite.zero.insert(t, zero);
         let pos = class.methods.iter().find(|m| m.is_ctor && m.class == t).map_or(Pos::default(), |m| m.pos);
-        let body = match class.types[t].extends.and_then(|e| rewrite.zero.get(&e)) {
-            Some(&above) => {
-                let kind = ExprKind::SuperInit { args: Vec::new(), resolved: Some(above) };
+        let fields = &synthetic[&t];
+        let mut body = match class.types[t].extends.and_then(|e| rewrite.zero.get(&e).map(|&z| (e, z))) {
+            Some((e, above)) => {
+                let args = synthetic[&e]
+                    .iter()
+                    .map(|(f, ty)| rewrite.expr(ExprKind::Var(f.clone()), pos, *ty))
+                    .collect();
+                let kind = ExprKind::SuperInit { args, resolved: Some(above) };
                 vec![Stmt::Expr(rewrite.expr(kind, pos, Type::Void))]
             }
             None => Vec::new(),
         };
+        let inherited = class.types[t].extends.and_then(|e| synthetic.get(&e)).map_or(0, Vec::len);
+        for (f, ty) in &fields[inherited..] {
+            let object = Box::new(rewrite.this(class, t, pos));
+            let value = Box::new(rewrite.expr(ExprKind::Var(f.clone()), pos, *ty));
+            let kind = ExprKind::Assign { op: None, target: Place::Field { object, name: f.clone() }, value };
+            body.push(Stmt::Expr(rewrite.expr(kind, pos, *ty)));
+        }
+        let params = fields.iter().map(|(f, ty)| Param { name: f.clone(), ty: *ty }).collect();
         class.methods.push(Method {
             name: "<init>".to_string(),
-            params: Vec::new(),
+            params,
             ret: Type::Void,
             body,
             is_main: false,
@@ -163,7 +200,7 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
             if whole.contains(&t) {
                 rewrite.construct(class, m, own);
             } else {
-                rewrite.leaf(class, m, own);
+                rewrite.leaf(class, m, own, &sources[&m]);
             }
         }
     }
@@ -177,10 +214,11 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
         let pos = class.methods[m].pos;
         let ty = self_type(class, t);
         let zero = rewrite.zero[&t];
-        let new = rewrite.expr(ExprKind::New { class: t, args: Vec::new(), ctor: Some(zero) }, pos, ty);
-        let obj = || "obj".to_string();
         let params: Vec<Param> =
             class.methods[m].params.iter().map(|p| Param { name: p.name.clone(), ty: p.ty }).collect();
+        let passed = sources[&m].iter().map(|source| rewrite.source(source, &params, pos)).collect();
+        let new = rewrite.expr(ExprKind::New { class: t, args: passed, ctor: Some(zero) }, pos, ty);
+        let obj = || "obj".to_string();
         let args = params.iter().map(|p| rewrite.expr(ExprKind::Var(p.name.clone()), pos, p.ty)).collect();
         let receiver = Box::new(rewrite.expr(ExprKind::Var(obj()), pos, ty));
         let call = ExprKind::MethodCall {
@@ -281,6 +319,111 @@ fn next_id(class: &Class) -> ExprId {
     max + 1
 }
 
+/// The synthetic fields that class `t` declares itself (`lower::inner`), first in its struct:
+/// its enclosing instance (`outer`, or `outer_` and so on where a superclass holds its own), and
+/// the captured locals that no superclass captures.
+fn own_synthetic(class: &Class, t: usize) -> Vec<(String, Type)> {
+    let decl = &class.types[t];
+    let synthetic = |name: &str| {
+        decl.outer.is_some() && name.strip_prefix("outer").is_some_and(|rest| rest.chars().all(|c| c == '_'))
+            || decl.captures.iter().any(|c| c.field == name)
+    };
+    decl.fields.iter().take_while(|f| synthetic(&f.name)).map(|f| (f.name.clone(), f.ty)).collect()
+}
+
+/// What a synthetic field of a zero object is built with, from the parameters of a constructor:
+/// a parameter, or a field of one (`deferredAttr.super(..)` passes `outer.deferredAttr`), which
+/// javac reads before `super(..)` too.
+enum Source {
+    Param(usize),
+    Field(Box<Source>, String, Type),
+}
+
+/// What constructor `m` of a class rewritten passes as the synthetic fields of its class
+/// (`synthetic`), in order: those that its `this(..)` or `super(..)` passes on, and those that it
+/// sets itself. `None` where one is something else than a `Source`.
+fn synthetic_sources(
+    class: &Class,
+    whole: &BTreeSet<usize>,
+    synthetic: &HashMap<usize, Vec<(String, Type)>>,
+    m: usize,
+) -> Option<Vec<Source>> {
+    let method = &class.methods[m];
+    let t = method.class;
+    let at = explicit_call(&method.body);
+    let call = at.map(|i| &method.body[i]);
+    let mut out = match call {
+        Some(Stmt::Expr(Expr { kind: ExprKind::ThisCall { args, resolved: Some(r) }, .. })) => {
+            let inner = synthetic_sources(class, whole, synthetic, *r)?;
+            return passed_on(method, args, &inner);
+        }
+        Some(Stmt::Expr(Expr { kind: ExprKind::SuperInit { args, resolved: Some(r) }, .. }))
+            if whole.contains(&class.methods[*r].class) =>
+        {
+            let inner = synthetic_sources(class, whole, synthetic, *r)?;
+            passed_on(method, args, &inner)?
+        }
+        _ => Vec::new(),
+    };
+    let inherited = class.types[t].extends.and_then(|e| synthetic.get(&e)).map_or(0, Vec::len);
+    let after = at.map_or(0, |i| i + 1);
+    for (field, _) in &synthetic[&t][inherited..] {
+        let set = method.body[after..].iter().find_map(|s| match s {
+            Stmt::Expr(Expr {
+                kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, value },
+                ..
+            }) if matches!(object.kind, ExprKind::This) && name == field => source(method, value),
+            _ => None,
+        })?;
+        out.push(set);
+    }
+    Some(out)
+}
+
+/// What constructor `m` of a class without subclasses whose superclass is rewritten passes, by
+/// its `super(..)`, as the synthetic fields of the superclass's zero object.
+fn leaf_sources(
+    class: &Class,
+    whole: &BTreeSet<usize>,
+    synthetic: &HashMap<usize, Vec<(String, Type)>>,
+    m: usize,
+) -> Option<Vec<Source>> {
+    let method = &class.methods[m];
+    match explicit_call(&method.body).map(|i| &method.body[i]) {
+        Some(Stmt::Expr(Expr { kind: ExprKind::SuperInit { args, resolved: Some(r) }, .. })) => {
+            let inner = synthetic_sources(class, whole, synthetic, *r)?;
+            passed_on(method, args, &inner)
+        }
+        // A constructor that calls another of its class gets its superclass's part from it.
+        _ => Some(Vec::new()),
+    }
+}
+
+/// `inner`, the sources of the constructor that `method` calls with the arguments `args` of its
+/// `this(..)` or `super(..)`, from the parameters of `method`.
+fn passed_on(method: &Method, args: &[Expr], inner: &[Source]) -> Option<Vec<Source>> {
+    fn substitute(method: &Method, args: &[Expr], s: &Source) -> Option<Source> {
+        match s {
+            Source::Param(i) => source(method, args.get(*i)?),
+            Source::Field(object, name, ty) => {
+                Some(Source::Field(Box::new(substitute(method, args, object)?), name.clone(), *ty))
+            }
+        }
+    }
+    inner.iter().map(|s| substitute(method, args, s)).collect()
+}
+
+/// `value`, an expression of a constructor `method`, as a `Source`.
+fn source(method: &Method, value: &Expr) -> Option<Source> {
+    match &value.kind {
+        ExprKind::Var(v) => method.params.iter().position(|p| p.name == *v).map(Source::Param),
+        ExprKind::Field { object, name } => {
+            Some(Source::Field(Box::new(source(method, object)?), name.clone(), value.ty))
+        }
+        _ => None,
+    }
+}
+
 struct Rewrite {
     next_id: ExprId,
     /// The constructor with no parameters of each class with subclasses that is rewritten.
@@ -294,6 +437,17 @@ impl Rewrite {
         let id = self.next_id;
         self.next_id += 1;
         Expr { kind, pos, ty, id }
+    }
+
+    /// The value of `source` in a constructor with the parameters `params`.
+    fn source(&mut self, source: &Source, params: &[Param], pos: Pos) -> Expr {
+        match source {
+            Source::Param(i) => self.expr(ExprKind::Var(params[*i].name.clone()), pos, params[*i].ty),
+            Source::Field(object, name, ty) => {
+                let object = Box::new(self.source(object, params, pos));
+                self.expr(ExprKind::Field { object, name: name.clone() }, pos, *ty)
+            }
+        }
     }
 
     fn this(&mut self, class: &Class, t: usize, pos: Pos) -> Expr {
@@ -366,7 +520,7 @@ impl Rewrite {
     /// Starts constructor `m` of a class without subclasses whose superclass is rewritten with
     /// the zero `super()`, then sets the enclosing instance and captured locals, calls the
     /// superclass's `construct<Name>` and runs `inits`.
-    fn leaf(&mut self, class: &mut Class, m: usize, inits: Vec<Stmt>) {
+    fn leaf(&mut self, class: &mut Class, m: usize, inits: Vec<Stmt>, sources: &[Source]) {
         let t = class.methods[m].class;
         let zero = class.types[t].extends.and_then(|e| self.zero.get(&e)).copied();
         let at = explicit_call(&class.methods[m].body);
@@ -394,8 +548,11 @@ impl Rewrite {
         let first = body.remove(0);
         let mut out = vec![first];
         out.extend(prologue);
-        if let Stmt::Expr(Expr { kind: ExprKind::SuperInit { resolved, .. }, .. }) = &mut out[0] {
+        let params = &class.methods[m].params;
+        let passed: Vec<Expr> = sources.iter().map(|source| self.source(source, params, pos)).collect();
+        if let Stmt::Expr(Expr { kind: ExprKind::SuperInit { resolved, args }, .. }) = &mut out[0] {
             *resolved = Some(zero);
+            *args = passed;
         }
         let leading = body
             .iter()
