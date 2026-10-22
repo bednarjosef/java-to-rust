@@ -848,6 +848,297 @@ class InputMismatchException extends NoSuchElementException {
     }
 }
 
+// The exceptions of a format that `String.format`, `formatted` and `printf` reject, which the
+// runtime raises (`format.rs`) with Java's message. The runtime's are built by the constructor
+// from that message and a `raised` flag (`lower::exceptions::raised_objects`), and their
+// `getMessage` is the message; Java's own constructors keep what they are given, and
+// `getMessage` makes the text from it as Java's does. A raised exception's getters (the flags,
+// the specifier, ...) answer null or zero, since the runtime gives only the message.
+class IllegalFormatException extends IllegalArgumentException {
+    IllegalFormatException() {
+    }
+
+    IllegalFormatException(String message, boolean raised) {
+        super(message);
+    }
+}
+
+class DuplicateFormatFlagsException extends IllegalFormatException {
+    private String flags;
+
+    public DuplicateFormatFlagsException(String f) {
+        this.flags = f;
+    }
+
+    DuplicateFormatFlagsException(String message, boolean raised) {
+        super(message, raised);
+    }
+
+    public String getFlags() {
+        return flags;
+    }
+
+    public String getMessage() {
+        return flags == null ? super.getMessage() : "Flags = '" + flags + "'";
+    }
+}
+
+class FormatFlagsConversionMismatchException extends IllegalFormatException {
+    private String f;
+    private char c;
+
+    public FormatFlagsConversionMismatchException(String f, char c) {
+        this.f = f;
+        this.c = c;
+    }
+
+    FormatFlagsConversionMismatchException(String message, boolean raised) {
+        super(message, raised);
+    }
+
+    public String getFlags() {
+        return f;
+    }
+
+    public char getConversion() {
+        return c;
+    }
+
+    public String getMessage() {
+        return f == null ? super.getMessage() : "Conversion = " + c + ", Flags = " + f;
+    }
+}
+
+class IllegalFormatArgumentIndexException extends IllegalFormatException {
+    private int illegalIndex;
+    private boolean raised;
+
+    IllegalFormatArgumentIndexException(int index) {
+        illegalIndex = index;
+    }
+
+    IllegalFormatArgumentIndexException(String message, boolean raised) {
+        super(message, raised);
+        this.raised = raised;
+    }
+
+    int getIndex() {
+        return illegalIndex;
+    }
+
+    public String getMessage() {
+        if (raised) {
+            return super.getMessage();
+        }
+        if (illegalIndex == -2147483648) {
+            return "Format argument index: (not representable as int)";
+        }
+        return "Illegal format argument index = " + illegalIndex;
+    }
+}
+
+class IllegalFormatCodePointException extends IllegalFormatException {
+    private int c;
+    private boolean raised;
+
+    public IllegalFormatCodePointException(int c) {
+        this.c = c;
+    }
+
+    IllegalFormatCodePointException(String message, boolean raised) {
+        super(message, raised);
+        this.raised = raised;
+    }
+
+    public int getCodePoint() {
+        return c;
+    }
+
+    public String getMessage() {
+        return raised ? super.getMessage() : "Code point = 0x" + Integer.toHexString(c);
+    }
+}
+
+class IllegalFormatConversionException extends IllegalFormatException {
+    private char c;
+    private Class<?> arg;
+
+    public IllegalFormatConversionException(char c, Class<?> arg) {
+        this.c = c;
+        this.arg = arg;
+    }
+
+    IllegalFormatConversionException(String message, boolean raised) {
+        super(message, raised);
+    }
+
+    public char getConversion() {
+        return c;
+    }
+
+    public Class<?> getArgumentClass() {
+        return arg;
+    }
+
+    public String getMessage() {
+        return arg == null ? super.getMessage() : c + " != " + arg.getName();
+    }
+}
+
+class IllegalFormatFlagsException extends IllegalFormatException {
+    private String flags;
+
+    public IllegalFormatFlagsException(String f) {
+        this.flags = f;
+    }
+
+    IllegalFormatFlagsException(String message, boolean raised) {
+        super(message, raised);
+    }
+
+    public String getFlags() {
+        return flags;
+    }
+
+    public String getMessage() {
+        return flags == null ? super.getMessage() : "Flags = '" + flags + "'";
+    }
+}
+
+class IllegalFormatPrecisionException extends IllegalFormatException {
+    private int p;
+    private boolean raised;
+
+    public IllegalFormatPrecisionException(int p) {
+        this.p = p;
+    }
+
+    IllegalFormatPrecisionException(String message, boolean raised) {
+        super(message, raised);
+        this.raised = raised;
+    }
+
+    public int getPrecision() {
+        return p;
+    }
+
+    public String getMessage() {
+        return raised ? super.getMessage() : Integer.toString(p);
+    }
+}
+
+class IllegalFormatWidthException extends IllegalFormatException {
+    private int w;
+    private boolean raised;
+
+    public IllegalFormatWidthException(int w) {
+        this.w = w;
+    }
+
+    IllegalFormatWidthException(String message, boolean raised) {
+        super(message, raised);
+        this.raised = raised;
+    }
+
+    public int getWidth() {
+        return w;
+    }
+
+    public String getMessage() {
+        return raised ? super.getMessage() : Integer.toString(w);
+    }
+}
+
+class MissingFormatArgumentException extends IllegalFormatException {
+    private String s;
+
+    public MissingFormatArgumentException(String s) {
+        this.s = s;
+    }
+
+    MissingFormatArgumentException(String message, boolean raised) {
+        super(message, raised);
+    }
+
+    public String getFormatSpecifier() {
+        return s;
+    }
+
+    public String getMessage() {
+        return s == null ? super.getMessage() : "Format specifier '" + s + "'";
+    }
+}
+
+class MissingFormatWidthException extends IllegalFormatException {
+    private String s;
+
+    public MissingFormatWidthException(String s) {
+        this.s = s;
+    }
+
+    MissingFormatWidthException(String message, boolean raised) {
+        super(message, raised);
+    }
+
+    public String getFormatSpecifier() {
+        return s;
+    }
+
+    public String getMessage() {
+        return s == null ? super.getMessage() : s;
+    }
+}
+
+class UnknownFormatConversionException extends IllegalFormatException {
+    private String s;
+
+    public UnknownFormatConversionException(String s) {
+        this.s = s;
+    }
+
+    UnknownFormatConversionException(String message, boolean raised) {
+        super(message, raised);
+    }
+
+    public String getConversion() {
+        return s;
+    }
+
+    public String getMessage() {
+        return s == null ? super.getMessage() : "Conversion = '" + s + "'";
+    }
+}
+
+class UnknownFormatFlagsException extends IllegalFormatException {
+    private String flags;
+
+    public UnknownFormatFlagsException(String f) {
+        this.flags = f;
+    }
+
+    UnknownFormatFlagsException(String message, boolean raised) {
+        super(message, raised);
+    }
+
+    public String getFlags() {
+        return flags;
+    }
+
+    public String getMessage() {
+        return flags == null ? super.getMessage() : "Flags = " + flags;
+    }
+}
+
+// Bad compressed data, which the runtime's decompressor raises (`inflate.rs`).
+class DataFormatException extends Exception {
+    public DataFormatException() {
+    }
+
+    public DataFormatException(String s) {
+        super(s);
+    }
+}
+
 class EmptyStackException extends RuntimeException {
     public EmptyStackException() {
     }
