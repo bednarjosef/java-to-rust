@@ -212,12 +212,103 @@ pub(super) fn default_value(ty: Type) -> Option<&'static str> {
     })
 }
 
-/// A local of the method that `try_assigned` names (`assigned`) whose type has no
-/// `default_value`, that is not an array (which starts empty) and that is not an `Option`
-/// (`optional`), which starts as `None`: not supported yet.
+/// Whether a statement of `body` itself, not one nested in it, sets local `name`: once `body`
+/// completes normally, the local holds a value.
+fn sets_at_top(body: &[Stmt], name: &str) -> bool {
+    body.iter().any(|s| {
+        matches!(s, Stmt::Expr(e)
+            if matches!(&e.kind, ExprKind::Assign { op: None, target: Place::Var(v), .. } if v == name))
+    })
+}
+
+/// Whether some code of `stmts` assigns local `name`.
+fn assigns(stmts: &[Stmt], name: &str) -> bool {
+    let mut found = false;
+    for s in stmts {
+        visit_stmt(
+            s,
+            &mut |e| {
+                visit_expr(e, &mut |x| {
+                    if let ExprKind::Assign { target: Place::Var(v), .. }
+                    | ExprKind::IncDec { target: Place::Var(v), .. } = &x.kind
+                        && v == name
+                    {
+                        found = true;
+                    }
+                })
+            },
+            &mut |_| {},
+        );
+    }
+    found
+}
+
+/// The locals that the block `body` of a `try` without `finally` carries out in its `Ok` value
+/// (`Ok((a, b))`), for the `match` on it to set them: those of `unset` that a statement of the
+/// block itself sets, which then hold a value wherever the block completes normally, as Java's
+/// definite assignment has them when the code after the `try` reads them.
+pub(super) fn carried_out(body: &[Stmt], unset: &HashMap<String, Type>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in body {
+        if let Stmt::Expr(e) = s
+            && let ExprKind::Assign { op: None, target: Place::Var(v), .. } = &e.kind
+            && unset.contains_key(v)
+            && !out.contains(v)
+        {
+            out.push(v.clone());
+        }
+    }
+    if completes_all(body) { out } else { Vec::new() }
+}
+
+/// A Rust tuple of `items`: `(a,)` of one.
+fn tuple(items: &[String]) -> String {
+    match items {
+        [one] => format!("({one},)"),
+        _ => format!("({})", items.join(", ")),
+    }
+}
+
+/// Whether every `try` of `body` that assigns local `name` carries its value out where Rust needs
+/// it (`carried_out`): it has no `finally`, and its block sets the local with a statement of its
+/// own or never completes normally. The `try` statements in the cases of a switch expression are
+/// looked at too.
+fn carriable(body: &[Stmt], name: &str) -> bool {
+    let ok = std::cell::Cell::new(true);
+    for s in body {
+        visit_stmt(
+            s,
+            &mut |e| {
+                visit_expr(e, &mut |x| {
+                    if let ExprKind::Switch { cases, .. } = &x.kind
+                        && !cases.iter().all(|case| carriable(&case.body, name))
+                    {
+                        ok.set(false);
+                    }
+                })
+            },
+            &mut |s| {
+                if let Stmt::Try { body, catches, finally } = s
+                    && (assigns(body, name) || catches.iter().any(|c| assigns(&c.body, name)))
+                    && !(finally.is_none()
+                        && (!assigns(body, name) || sets_at_top(body, name) || !completes_all(body)))
+                {
+                    ok.set(false);
+                }
+            },
+        );
+    }
+    ok.get()
+}
+
+/// A local of the method that `try_assigned` names (`assigned`) whose type has no value to start
+/// as (`starts`, see `Gen::try_start`), that is not an `Option` (`optional`), which starts as
+/// `None`, and that not every `try` that assigns it can carry out (`carriable`): not supported
+/// yet.
 pub(super) fn check_try_assigned(
     body: &[Stmt],
     assigned: &HashSet<String>,
+    starts: impl Fn(Type) -> bool,
     optional: impl Fn(Type, &str) -> bool,
 ) -> Option<Error> {
     let mut found = None;
@@ -225,9 +316,9 @@ pub(super) fn check_try_assigned(
         visit_stmt(s, &mut |_| {}, &mut |s| {
             if let Stmt::Local { ty, name, init: None, pos } = s
                 && assigned.contains(name)
-                && default_value(*ty).is_none()
-                && !matches!(ty, Type::Array(_))
+                && !starts(*ty)
                 && !optional(*ty, name)
+                && !carriable(body, name)
                 && found.is_none()
             {
                 found = Some(Error {
@@ -438,6 +529,22 @@ impl<'a> Gen<'a> {
 
     /// The call `code` of method `callee`: as it is when the method does not throw, else with
     /// what its failure does here (see the module's documentation).
+    /// The value that a local that `try_assigned` names starts as, which Java's definite
+    /// assignment never lets the code read: the value Java would give a field, an empty array,
+    /// the first constant of an enum, or the zero of a plain box; `None` for a type without one.
+    pub(super) fn try_start(&self, ty: Type) -> Option<String> {
+        match ty {
+            Type::Array(_) => Some(self.placeholder(ty, false)),
+            Type::Enum(name) => {
+                let t = self.class.type_index(name)?;
+                let constants = self.class.types[t].enum_constants.as_deref().unwrap_or_default();
+                (!constants.is_empty()).then(|| self.placeholder(ty, false))
+            }
+            Type::Boxed(_) if !self.faithful_box(ty) => default_value(ty.unboxed()).map(str::to_string),
+            _ => default_value(ty).map(str::to_string),
+        }
+    }
+
     pub(super) fn raising(&mut self, code: Code, callee: usize) -> Code {
         if !self.facts.throwing.contains(&callee) {
             return code;
@@ -717,7 +824,14 @@ impl<'a> Gen<'a> {
     /// The statements of a `try` block or `catch` clause, as a block that evaluates to the
     /// `Result` or `java::Completion` (`completion`) its header (written) declares: what leaves it
     /// leaves by `label`, and its normal end is `Ok(())` or `java::Completion::Normal`.
-    fn attempt_block(&mut self, label: String, completion: bool, stmts: &'a [Stmt], before: &[String]) {
+    fn attempt_block(
+        &mut self,
+        label: String,
+        completion: bool,
+        stmts: &'a [Stmt],
+        before: &[String],
+        normal: Option<String>,
+    ) {
         self.indent += 1;
         self.open_block(Kind::Try);
         self.attempts.push(Attempt { label, frame: self.frames.len() - 1, completion });
@@ -726,7 +840,11 @@ impl<'a> Gen<'a> {
         }
         self.stmts(stmts, false);
         if completes_all(stmts) {
-            let normal = if completion { self.runtime("Completion::Normal") } else { "Ok(())".to_string() };
+            let normal = match normal {
+                Some(normal) => normal,
+                None if completion => self.runtime("Completion::Normal"),
+                None => "Ok(())".to_string(),
+            };
             self.line(&normal);
         }
         self.attempts.pop();
@@ -764,14 +882,30 @@ impl<'a> Gen<'a> {
         // A body that cannot complete normally ends only by an exception (or leaves the method):
         // its block is never `Ok`, which its type says, so that the `match` needs no `Ok` arm.
         let completes = completes_all(body);
-        let ok = if completes { "()" } else { "std::convert::Infallible" };
+        // The locals that the block sets for the code after the `try`, which Rust does not see
+        // set on the way through the `match`, go out in its `Ok` value.
+        let carried = carried_out(body, &self.unset_locals);
+        let ok = match () {
+            _ if !completes => "std::convert::Infallible".to_string(),
+            _ if carried.is_empty() => "()".to_string(),
+            _ => {
+                let types: Vec<String> = carried.iter().map(|n| self.ty_name(self.unset_locals[n])).collect();
+                tuple(&types)
+            }
+        };
+        let rust: Vec<String> = carried.iter().map(|n| self.local(n)).collect();
+        let normal = (!carried.is_empty()).then(|| format!("Ok({})", tuple(&rust)));
         self.line(&format!("let {result}: Result<{ok}, {throwable}> = {{"));
-        self.attempt_block(label, false, body, &[]);
+        self.attempt_block(label, false, body, &[], normal);
         self.line("};");
         self.line(&format!("match {result} {{"));
         self.indent += 1;
-        if completes {
+        if completes && carried.is_empty() {
             self.line("Ok(()) => {}");
+        } else if completes {
+            let values: Vec<String> = rust.iter().map(|r| self.temp(&format!("{r}_value"))).collect();
+            let sets: Vec<String> = rust.iter().zip(&values).map(|(r, v)| format!("{r} = {v};")).collect();
+            self.line(&format!("Ok({}) => {{ {} }}", tuple(&values), sets.join(" ")));
         }
         let (arms, all) = self.catch_arms(catches);
         let count = all.len();
@@ -934,7 +1068,7 @@ impl<'a> Gen<'a> {
         let first = if arms.is_empty() { &last } else { &result };
         self.line(&format!("let {first}: {ty} = {{"));
         self.finallies.push(Finally { frame: self.frames.len(), jumps: Vec::new() });
-        self.attempt_block(label, completion, body, &[]);
+        self.attempt_block(label, completion, body, &[], None);
         self.line("};");
         if !arms.is_empty() {
             self.line(&format!("let {last} = match {result} {{"));
@@ -945,7 +1079,7 @@ impl<'a> Gen<'a> {
                 let thrown = self.thrown(completion, &pattern);
                 self.line(&format!("{thrown} => {{"));
                 let handler = self.attempt_label("handler");
-                self.attempt_block(handler, completion, &catch.body, &before);
+                self.attempt_block(handler, completion, &catch.body, &before, None);
                 self.line("}");
             }
             self.line("other => other,");

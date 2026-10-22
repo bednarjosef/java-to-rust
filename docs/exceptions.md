@@ -535,8 +535,12 @@ Decisions that changed during the implementation, step by step.
   make every exception class a value of `Throwable`, and the values of `Throwable` under a
   `catch` type values of that type, so the enums have the variants the arms need.
 - **A local declared without a value and assigned in a live `try` body** starts at Java's
-  default value under `#[allow(unused_assignments)]`; such a local of a type without a
-  default value here (an object, an array) is rejected.
+  default value under `#[allow(unused_assignments)]`, an array empty, an enum at its first
+  constant and a plain box at zero. One of an object's type starts without a value: a `try`
+  block (without `finally`) whose own statements set it carries its value out in its `Ok`
+  value (`Ok((a, b))`), which the `match` arm puts in the local, so that Rust sees it set on
+  every way to the code after the `try`, as Java's definite assignment does. Set elsewhere
+  (only inside an `if` of the block, or in a `try` with a `finally`), it is rejected.
 - **Still rejected** (each with a message naming it): `finally` (step 4, now done),
   try-with-resources (step 7), constructors and `toString` methods that throw something a caller catches (step 6),
   a call of `main` that is caught, an enum constant initializer that throws an exception of
