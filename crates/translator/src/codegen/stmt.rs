@@ -156,6 +156,12 @@ impl<'a> Gen<'a> {
         if self.optional_return() {
             return self.optional_to(value, self.ret);
         }
+        // A result that is never null, though the analysis cannot tell of the value
+        // (`analysis::nullness::never_null_result`): an `Option` that is always `Some`.
+        if crate::analysis::nullable_type(self.ret) && self.nullable(value) {
+            let code = self.expr(value);
+            return Code::atom(format!("{}.expect(\"a result that is never null\")", code.at(ATOM)));
+        }
         if self.facts.owned_returns.contains(&self.method) {
             return Code::atom(self.owned(value));
         }
