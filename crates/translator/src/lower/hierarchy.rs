@@ -188,6 +188,11 @@ impl<'t> Lowering<'t> {
         let types = self.param_types(index)?;
         for (a, &ty) in args.iter().zip(&types) {
             self.fail_on_covariant(a.ty, ty);
+            // A charset is the runtime's value, which is not an object of the translation: it
+            // cannot be passed as an `Object` (`Objects.requireNonNull(cs)` erased).
+            if a.ty == Type::Charset && matches!(ty, Type::Class(..)) && self.param_owner(ty).is_none() {
+                return error(a.pos, "a charset passed as an object not supported yet".to_string());
+            }
         }
         // The array of a Rust generic's type variable passed for an erased array (`asList`'s `T[]`
         // to `Arrays.ArrayList`'s `E[]`, an `Object[]`) erases the generic: it is lowered again.
