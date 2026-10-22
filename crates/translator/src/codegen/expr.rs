@@ -672,6 +672,7 @@ impl<'a> Gen<'a> {
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty, id)
             }
+            Builtin::RawMemory { ty, put } => self.raw_memory(ty, put, args),
             Builtin::NotEnumClass => {
                 let name = self.str_ref(&args[0]);
                 let message = format!("format!(\"{{}} is not an enum class\", {name})");

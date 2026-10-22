@@ -888,6 +888,16 @@ impl<'t> Lowering<'t> {
                 (Some((index, kind)), _) => Offset::Element(index, kind),
                 (_, Some(kind)) => Offset::Computed(args[1], kind),
                 _ => {
+                    // A plain read or write of a primitive in an array of primitives held as an
+                    // `Object` (as `getCharUnaligned` and the buffers' views of a `byte[]` read):
+                    // the bytes at the offset, whatever it is, as the JVM reads them.
+                    let kind = access_kind(symbol.ty);
+                    let base = plain(args[0]).java_type();
+                    let raw_base = base == "java.lang.Object"
+                        || base.strip_suffix("[]").is_some_and(|e| PRIMITIVES.contains(&e));
+                    if update.is_none() && kind != "reference" && raw_base && self.object.is_some() {
+                        return self.raw_memory(node, &args, kind, put == Some(true)).map(Some);
+                    }
                     let what = "an offset that is neither a field's nor an array element's";
                     return unsupported(node, &format!("`Unsafe.{}` with {what}", symbol.name));
                 }
@@ -911,6 +921,38 @@ impl<'t> Lowering<'t> {
             }
         };
         self.access_at(node, place, ty, class, &args[2..], update, put).map(Some)
+    }
+
+    /// `U.get<Kind>(base, offset)` or `U.put<Kind>(base, offset, x)` of a primitive of kind `kind`
+    /// at an offset that is computed elsewhere, in a base that holds an array of primitives:
+    /// `Builtin::RawMemory` of the base as an `Object`.
+    fn raw_memory(
+        &self,
+        node: Node<'t>,
+        args: &[Node<'t>],
+        kind: Kind,
+        put: bool,
+    ) -> Result<ExprKind, Error> {
+        let ty = match kind {
+            "boolean" => Type::Boolean,
+            "byte" => Type::Byte,
+            "short" => Type::Short,
+            "char" => Type::Char,
+            "int" => Type::Int,
+            "long" => Type::Long,
+            "float" => Type::Float,
+            _ => Type::Double,
+        };
+        let base = self.expr(args[0])?;
+        self.note_object_array(base.ty);
+        let mut operands =
+            vec![self.convert(base, Type::class(OBJECT)), self.convert(self.expr(args[1])?, Type::Long)];
+        if put {
+            operands.push(self.convert(self.expr(args[2])?, ty));
+            return Ok(ExprKind::Builtin(Builtin::RawMemory { ty, put }, operands));
+        }
+        let read = self.synth(ExprKind::Builtin(Builtin::RawMemory { ty, put }, operands), node.pos(), ty);
+        Ok(self.convert(read, self.ty(node, node.java_type())?).kind)
     }
 
     /// The access of `Unsafe` or of a `VarHandle` `node` at `place`, of type `ty`, a field of class
