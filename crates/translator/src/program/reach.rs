@@ -236,6 +236,11 @@ pub const TRANSLATED_ANYWAY: &[&str] = &[
     // final classes, of which only signature verification, not translated, makes objects.
     "java.security.cert.Certificate",
     "java.security.CodeSigner",
+    // Reading a jar's manifest, as javac does for each jar on its class path, checks its size
+    // against `MAX_SIG_FILE_SIZE`, a static of this class, and `JarVerifier` asks it which
+    // entries are signature files; verifying a signature (`new SignatureFileVerifier`) needs
+    // `PKCS7` and stays rejected.
+    "sun.security.util.SignatureFileVerifier",
     "java.lang.reflect.Array",
     "java.lang.reflect.InvocationTargetException",
     "java.lang.reflect.Modifier",
@@ -927,6 +932,7 @@ pub const TRANSLATED_LANG_ACCESS: &[&str] = &[
     "start",
     "uncheckedNewStringOrThrow",
     "uncheckedGetBytesOrThrow",
+    "getBytesUTF8OrThrow",
     "uncheckedGetUTF16Char",
     "uncheckedPutCharUTF16",
     "decodeASCII",
