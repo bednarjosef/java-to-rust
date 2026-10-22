@@ -8,13 +8,22 @@
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
-/// Whether class `index` needs an `init` function: it has a `<clinit>` that is not lazy.
-pub fn eager(class: &Class, index: usize) -> bool {
-    let Some(clinit) = class.methods.iter().find(|m| m.class == index && m.name == "<clinit>") else {
+/// The classes, by index, that need an `init` function: they have a `<clinit>` that is not lazy.
+pub fn eager_classes(class: &Class) -> HashSet<usize> {
+    let changed = changed_later(class);
+    let none = HashSet::new();
+    (0..class.types.len()).filter(|&t| eager(class, t, changed.get(&t).unwrap_or(&none))).collect()
+}
+
+/// Whether class `index` needs an `init` function, given the statics of it that `changed_later`
+/// finds.
+fn eager(class: &Class, index: usize, changed: &HashSet<String>) -> bool {
+    debug_assert_eq!(class.hierarchy.overriders.len(), class.methods.len(), "the hierarchy is out of date");
+    let methods = class.hierarchy.methods_of(index).iter().map(|&m| &class.methods[m]);
+    let Some(clinit) = methods.into_iter().find(|m| m.class == index && m.name == "<clinit>") else {
         return false;
     };
     let decl = &class.types[index];
-    let changed = changed_later(class, index);
     let mut assigned: HashSet<&str> = HashSet::new();
     !clinit.body.iter().all(|stmt| {
         let Stmt::Expr(Expr {
@@ -32,12 +41,12 @@ pub fn eager(class: &Class, index: usize) -> bool {
     })
 }
 
-/// The statics of class `index` that code outside its static initialization assigns. A lazy cell
-/// computed from one of them would see its value at the cell's first access, not the value Java's
-/// initialization saw.
-fn changed_later(class: &Class, index: usize) -> HashSet<String> {
-    let mut changed = HashSet::new();
-    for m in class.methods.iter().filter(|m| !(m.class == index && m.name == "<clinit>")) {
+/// For each class, by index, the statics of it that code outside its static initialization
+/// assigns. A lazy cell computed from one of them would see its value at the cell's first access,
+/// not the value Java's initialization saw.
+fn changed_later(class: &Class) -> HashMap<usize, HashSet<String>> {
+    let mut changed: HashMap<usize, HashSet<String>> = HashMap::new();
+    for m in &class.methods {
         for stmt in &m.body {
             visit_stmt(
                 stmt,
@@ -45,9 +54,9 @@ fn changed_later(class: &Class, index: usize) -> HashSet<String> {
                     visit_expr(e, &mut |x| match &x.kind {
                         ExprKind::Assign { target: Place::Static { class: c, name }, .. }
                         | ExprKind::IncDec { target: Place::Static { class: c, name }, .. }
-                            if *c == index =>
+                            if !(m.class == *c && m.name == "<clinit>") =>
                         {
-                            changed.insert(name.clone());
+                            changed.entry(*c).or_default().insert(name.clone());
                         }
                         _ => {}
                     })

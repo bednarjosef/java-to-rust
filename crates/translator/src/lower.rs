@@ -347,8 +347,12 @@ impl<'t> Lowering<'t> {
             self.guard_clinit(index, &mut clinit, &mut types[index], methods.as_slice());
             methods.push(clinit);
         }
+        let mut writes = enums::EnumFieldWrites::default();
         for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
-            if let Err(e) = self.finish_enum(index, types, methods) {
+            let finished = self.finish_enum(index, types, methods, &mut writes);
+            // The enum's own methods may have changed.
+            writes.forget(methods, index);
+            if let Err(e) = finished {
                 // In a census, an enum that lowering rejects keeps its constants without values.
                 self.reject_at(index, Some(self.types[index].node.pos()), e).map_err(|e| (index, e))?;
                 let names = self.enum_constant_names(index);
@@ -366,11 +370,13 @@ impl<'t> Lowering<'t> {
         index: usize,
         types: &mut [TypeDecl],
         methods: &mut Vec<Method>,
+        writes: &mut enums::EnumFieldWrites,
     ) -> Result<(), Error> {
         self.constant_bodies(index, methods)?;
+        writes.forget(methods, index);
         let bodies = self.constant_body_fields(index)?;
         let own_fields = types[index].fields.len();
-        let pure = self.check_enum(index, methods).and_then(|()| {
+        let pure = self.check_enum(index, methods, writes).and_then(|()| {
             self.add_body_fields(&bodies, &mut types[index].fields)?;
             self.enum_constants(index, &types[index].fields, methods, &bodies)
         });

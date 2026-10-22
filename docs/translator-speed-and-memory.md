@@ -82,6 +82,144 @@ builders of enum tables.)
 - **Lowering costs more on programs that are rejected.** It used to stop at the first rejection,
   and now lowers everything (3 to 5 s against 11 to 16 s). The walk itself takes 2 to 3 s.
 
+## Scaling to javac
+
+Measured on 2026-10-22 with release builds, on the javac setup described under "The goal" below
+and on TextAdventure, before (main at 1c62e39) and after the changes of branch
+`translator-memory`. The machine had a load of about 6 on 16 cores. "Translator peak" is the
+translator process's peak resident memory, "javac peak" the java process's.
+
+### What was slow, and how it was fixed
+
+Every whole-program analysis computes the smallest set of facts that is closed under its rules
+(which methods a method reaches, which objects a variable can hold, which exceptions a call can
+throw). The old code got there by going over the whole program again and again until a round
+changed nothing, and some of the rules looked things up by going through every class or method.
+On small programs that is quick; on javac, with 26,000 methods, the number of rounds and the cost
+of each both grow with the program, so the cost grows with its square or worse.
+
+The fixes give the same results, because the smallest closed set does not depend on the order in
+which it is reached. They only change how the work is ordered:
+
+- **Groups of methods that call each other, done once each.** What a method reaches through its
+  calls is computed once per group of methods that call each other in a cycle, callees first, as
+  sets of bits (`analysis/closure.rs`). This replaced rounds over every call with sets of names,
+  in borrowing, codegen's call chains and the exception analysis.
+- **A list of what is left to do.** The points-to analysis (`object_values`) records which facts
+  each method's visit read, and when a fact grows it visits again only the methods that read it,
+  instead of every method in the next round. The exception analysis does the same.
+- **One scan instead of one per class.** Several analyses (objects that are owned, eager statics,
+  ranges, the static fields of the exception guards, enum field writes in lowering) scanned the
+  whole program once for each class or field; they now scan it once and keep an index.
+- **Lookups that were searches.** Class hierarchy questions (the members of a class, its
+  subclasses, who overrides a method) went through every class each time; they are now tables
+  built once. The generator did the same for names and enum variants.
+
+`whole_objects`, the analysis the old census never got past on javac, was slow for the first
+three of these reasons: the borrowing rounds over name sets, a scan of the program per class for
+the objects each class owns, and hierarchy searches inside both. It went from 193 s to 0.6 s on
+TextAdventure, and from more than 55 minutes of CPU (never finished) to about 2 s on javac.
+
+### Memory
+
+- **javac streams the trees and lets go of each unit once sent.** `JavaTree` used to build the
+  whole output as one string and keep every tree; it now writes each unit as it is made and then
+  drops its method bodies. Its young generation is capped (`-XX:MaxNewSize=128m`), so the garbage
+  collector runs before the heap grows. javac's peak on javac went from 2.31 GB to 0.66 GB.
+- **The translator drops the trees once lowered**, and the census drops them and the
+  reachability results before the analyses. This doesn't lower the peak, which is reached when
+  the trees arrive (318 MB of JSON become about 3 GB of `serde_json` values, 9 to 10 times the
+  text), but it frees that memory for the rest of the run. (The process's resident size doesn't
+  shrink afterwards, because the allocator keeps freed memory, so "now" in `--timings` stays at
+  the peak.)
+- **Not done: lowering the generics attempts only where they change.** Each attempt lowers the
+  whole program again from the same trees, which are already held, so no tree is read twice; what
+  costs is the lowering itself (5 attempts of about 20 s on javac). Redoing only the methods an
+  attempt affects means tracking which methods depend on which generics decision, which is not a
+  small change.
+- **Not done: a compact transfer format.** A unit's JSON repeats few strings (239 distinct ones
+  among 3,075 in a typical unit), and node kinds, types, owners and names are about 65% of the
+  bytes, so a table of strings would make the text several times smaller. But the peak comes from
+  the `serde_json` values the text becomes, not from the text, so a smaller wire format alone would
+  not move it. The first step that pays is reading typed nodes straight from the stream (step 5 of
+  "Memory for large projects"), and that is a rewrite of how the translator reads trees.
+
+### Before and after
+
+javac, translated (`-o`, not a census). Both end the same way: 2,800 of 25,945 methods can run,
+then a rejection (`Runtime.Version`, at JarFile.java:142).
+
+| phase | before | after |
+|---|---:|---:|
+| javac | 31.0 s | 32.4 s |
+| reachability | 24.5 s | 25.3 s |
+| lowering | 147.4 s (5 attempts of 29.5 s) | 107.7 s (5 of about 21 s) |
+| methods that can run | 34.7 s | 20.5 s |
+| javac peak | 1.38 GB | 0.66 GB |
+| translator peak | 3.01 GB | 3.01 GB |
+
+javac, census (`--census`):
+
+Getting the code and lowering it cost the same as above (31.1 s for javac, 22.1 s for
+reachability and 97.9 s for lowering, after).
+
+| phase | before | after |
+|---|---:|---:|
+| whole objects | never finished (more than 55 min of CPU) | 2.3 s a run |
+| analyses and generation | — | 2,164 s: 118 rounds of the analyses (1,403 s) and 97 of the generator (654 s) |
+| result | none | 95.8% of 26,607 pieces translate (below) |
+| javac peak | 1.38 to 2.31 GB | 0.66 GB |
+| translator peak | 3.01 GB | 3.01 GB |
+
+The census takes about 39 minutes in all. It is long because the generator stops at its first
+panic, and so runs once for each piece of code that makes it panic (97 rounds of 6 to 7 s; each
+was 115 s before), and the analyses likewise run again after each rejection they cannot go past
+within a round (118 rounds of about 12 s).
+
+TextAdventure, translated. Both end at the same rejection (a `Charset` subclass, at
+ISO_8859_1.java:42); 135 MB of trees.
+
+| phase | before | after |
+|---|---:|---:|
+| javac | 16.3 to 17.4 s | 16.4 to 16.5 s |
+| reachability | 2.8 s | 2.9 s |
+| lowering | 21.7 s (4 attempts of 5.4 s) | 13.5 s (4 of 3.35 s) |
+| methods that can run | 4.7 to 5.0 s | 2.3 s |
+| javac peak | 0.59 to 2.53 GB | 0.52 GB |
+| translator peak | 1.25 GB | 1.25 GB |
+
+(Without the cap on the young generation, javac's peak varies a lot from run to run.)
+
+TextAdventure, census:
+
+| phase | before | after |
+|---|---:|---:|
+| lowering | 22.0 s | 13.5 s |
+| whole objects | 380 s | 0.65 s |
+| analyses and generation | 9,320 s (23 rounds of the analyses, about 390 s each), then a rejection it could not go past | 326 s (70 rounds of the analyses, about 3 s each, and 61 of the generator) |
+| result | stopped at Pattern.java:1670, with 98.4% of the pieces counted so far | complete: 96.2% of 10,044 pieces translate |
+| javac peak | 2.41 GB | 0.52 GB |
+| translator peak | 1.34 GB | 1.25 GB |
+
+The outputs are the same before and after: every target program's translation and census gives
+the same text.
+
+### Round two
+
+- **Summaries instead of bodies** (step 2 of "Memory for large projects"). The translator's peak
+  is now all trees. Keeping a summary of each method and its lowered form, and dropping the
+  `serde_json` values unit by unit as they are lowered, would bring it down to what the lowered
+  program needs; reading typed nodes from the stream would do it without the values at all.
+- **javac freeing more.** javac keeps its symbols and types to the end, and the attributed trees
+  of what it has not yet sent. Attributing and sending one unit at a time, rather than all of them
+  first, would keep only the symbols.
+- **Narrowing by points-to facts during reachability** (step 7 of "Memory for large projects").
+  Of javac's 25,945 lowered methods, 2,800 can run. Using the points-to facts while deciding what
+  to read would mean javac never attributes most of the rest, which shrinks every copy of the
+  program and every phase after it.
+- **A census that doesn't rerun the generator per panic.** Catching a panic per piece of code,
+  instead of per round, would cut the 97 generator rounds on javac to one.
+
 ## Steps for the translator
 
 In order of payoff for the effort:
@@ -121,8 +259,8 @@ Today a translation holds the whole reached program in memory three times over:
 Peak memory grows with the code of everything reached. The goal is that it grows with summaries
 of that code, plus the few methods being worked on at a time. In order:
 
-1. **Measure first.** `--timings` prints the time of each phase; it should also print the peak
-   memory of each, in both processes, so the largest consumer is fixed first.
+1. **Measure first.** Done: `--timings` prints the time of each phase and the peak memory so far,
+   the translator's and javac's.
 2. **Summaries instead of bodies.** Most of the translator needs to know *about* a method (what
    it calls, which objects it can return, which exceptions it can raise), not its code. Read a
    method, record its summary, drop its body; run the whole-program analyses on the summaries;
@@ -130,7 +268,8 @@ of that code, plus the few methods being worked on at a time. In order:
    optimize whole programs at scale work this way (ThinLTO's summaries).
 3. **javac forgets what it has handed over.** Once a method's tree is exported, javac needs only
    its symbol and signature; the body can be released, as javac's own compile policy does after
-   generating a class's bytecode.
+   generating a class's bytecode. Partly done: `JavaTree` streams the trees and releases each
+   unit's method bodies once sent (see "Scaling to javac").
 4. **A compact transfer format.** A table of names and types written once and referred to by
    number, nodes as small binary records, streamed through the pipe instead of built as one
    string. Likely five to ten times smaller than JSON.
@@ -223,11 +362,27 @@ running `--census`:
   26,102 pieces of code: 11,358 of javac's own and 14,744 of the libraries').
 - **Lowering**: five attempts (the Rust generics are narrowed down between them) of 16 s each, 81 s
   in all on a quiet machine (148 s while other builds ran).
-- **The analyses: not finished.** After lowering, the census's first run of the whole-program
-  object analysis (`analysis::whole_objects`) did not end within 55 minutes of CPU, so there are
-  no overall percentages yet. The check for null enums before it takes 0.17 s a round. The
-  translator's largest process peaked at 4.4 GB by then. This analysis is the next thing to make
-  fast before javac can be measured further.
+- **The census, complete** (2026-10-22, see "Scaling to javac"): of javac's own 11,358 pieces of
+  code, 10,755 (94.7%) translate; of the libraries' 15,249, 14,742 (96.7%); together 25,497 of
+  26,607 (95.8%). It reaches 143 native methods, 43 of them in the runtime. What holds javac's own
+  code up, by the stage that rejects it:
+  - the analyses: catching an exception that a `toString` may throw (198 pieces), catching the
+    `NullPointerException` of a dereference (88), catching an exception that a library call may
+    throw (71), constructors of a class whose subclasses use `this` or call overridable methods
+    (40), a `StringBuilder` that threads may share (25), a static initializer that throws inside
+    a `try` (21), a `toString` that throws a caught exception (18), an exception's constructor
+    that throws (16), `==` on `Object` values that may be strings or boxes (9), catching the
+    exception of an operation (9);
+  - lowering: `Throwable.printStackTrace` and its relatives (13), `ClassLoader` and other types
+    (13), reflection (9);
+  - the generator: a call that lowering left unresolved (`acquireFence`, 8) and 4 pieces where it
+    panicked.
+
+  The libraries' code: native methods (87), catching around `toString` (59) and library calls
+  (42), types (53) and methods (44) of the runtime that are not there yet, `Unsafe` accesses
+  whose offset is not a field's (36), reflection (23), implementing (21) or extending (13) a
+  class that is not supported, values set by the JVM (15), a `StringBuilder` that threads may
+  share (10).
 - **What lowering alone rejects** (a census that stopped after lowering, before the census could
   go past rejected classes): 99.1% of javac's own 11,358 pieces of code and 97.3% of the libraries'
   15,253 lower. javac's own code is held up most by method references on a computed receiver

@@ -816,7 +816,7 @@ impl<'a> Gen<'a> {
             _ => format!("{bound} @ ({alternatives})"),
         };
         let mut before = Vec::new();
-        let pattern = match hierarchy::rep(self.class, self.facts, ty) {
+        let pattern = match self.rep(ty) {
             // The parameter is the object of the one class it catches.
             hierarchy::Rep::Object(_) => format!("{}({bound})", variants[0]),
             // The parameter is a `Throwable`.

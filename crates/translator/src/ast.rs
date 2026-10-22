@@ -1,7 +1,9 @@
 //! The Java syntax tree the translator works on: a typed subset of Java, lowered from javac's
 //! attributed tree (`lower.rs`), so every expression has its Java type and calls are resolved.
 
+use std::collections::HashSet;
 use std::fmt;
+use std::sync::{LazyLock, Mutex};
 
 mod charsets;
 mod code_point;
@@ -156,13 +158,13 @@ impl Type {
 
 /// A class or enum name, leaked once so that types stay `Copy`.
 fn interned_name(name: &str) -> &'static str {
-    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    static NAMES: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Default::default);
     let mut names = NAMES.lock().unwrap();
-    match names.iter().find(|n| **n == name) {
+    match names.get(name) {
         Some(&n) => n,
         None => {
             let n: &'static str = Box::leak(name.to_string().into_boxed_str());
-            names.push(n);
+            names.insert(n);
             n
         }
     }
@@ -172,26 +174,26 @@ fn intern_types(types: &[Type]) -> &'static [Type] {
     if types.is_empty() {
         return &[];
     }
-    static LISTS: std::sync::Mutex<Vec<&'static [Type]>> = std::sync::Mutex::new(Vec::new());
+    static LISTS: LazyLock<Mutex<HashSet<&'static [Type]>>> = LazyLock::new(Default::default);
     let mut lists = LISTS.lock().unwrap();
-    match lists.iter().find(|l| **l == types) {
-        Some(l) => l,
+    match lists.get(types) {
+        Some(&l) => l,
         None => {
             let l: &'static [Type] = Box::leak(types.to_vec().into_boxed_slice());
-            lists.push(l);
+            lists.insert(l);
             l
         }
     }
 }
 
 fn intern(ty: Type) -> &'static Type {
-    static TYPES: std::sync::Mutex<Vec<&'static Type>> = std::sync::Mutex::new(Vec::new());
+    static TYPES: LazyLock<Mutex<HashSet<&'static Type>>> = LazyLock::new(Default::default);
     let mut types = TYPES.lock().unwrap();
-    match types.iter().find(|t| ***t == ty) {
-        Some(t) => t,
+    match types.get(&ty) {
+        Some(&t) => t,
         None => {
             let t: &'static Type = Box::leak(Box::new(ty));
-            types.push(t);
+            types.insert(t);
             t
         }
     }

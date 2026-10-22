@@ -26,6 +26,7 @@
 //! through is written as before.
 
 use super::*;
+use crate::analysis::closure::{Bits, reached_union};
 use std::collections::BTreeSet;
 
 /// Which structs and enums take part in chains, computed once per program.
@@ -63,18 +64,9 @@ impl<'a> Gen<'a> {
             }
         }
         // `reach[c]`: the classes reachable from `c` by one field or more.
-        let reach: Vec<BTreeSet<usize>> = (0..n)
-            .map(|c| {
-                let mut seen = BTreeSet::new();
-                let mut stack: Vec<usize> = edges[c].iter().copied().collect();
-                while let Some(d) = stack.pop() {
-                    if seen.insert(d) {
-                        stack.extend(edges[d].iter().copied());
-                    }
-                }
-                seen
-            })
-            .collect();
+        let next: Vec<Vec<usize>> = edges.iter().map(|e| e.iter().copied().collect()).collect();
+        let own: Vec<Bits> = edges.iter().map(|e| e.iter().copied().collect()).collect();
+        let reach = reached_union(&next, &own);
         let mut chains =
             Chains { links: vec![Vec::new(); n], unlinks: vec![false; n], enums: BTreeSet::new() };
         for (t, decl) in class.types.iter().enumerate() {
@@ -91,7 +83,7 @@ impl<'a> Gen<'a> {
                     .concretes(t)
                     .into_iter()
                     .filter(|&c| objects(c))
-                    .any(|c| held.iter().any(|&d| d == c || reach[d].contains(&c)));
+                    .any(|c| held.iter().any(|&d| d == c || reach[d].contains(c)));
                 if closes {
                     chains.links[t].push(f);
                     self.held_enums(field.ty, &mut chains.enums);
@@ -120,7 +112,7 @@ impl<'a> Gen<'a> {
                 if self.class.types[t].kind == TypeKind::Param {
                     return;
                 }
-                match hierarchy::rep(self.class, self.facts, t) {
+                match self.rep(t) {
                     hierarchy::Rep::Object(c) => {
                         out.insert(c);
                     }

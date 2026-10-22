@@ -60,11 +60,10 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     let files = source_files(program)?;
     // As a translation first does: without the writes of `String` arrays as `Object` arrays.
     let (units, reach) = load(program, false)?;
-    let units: Vec<&Value> = units.iter().collect();
-    let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     // Panics are rejections in a census: they are reported with the rest, not printed.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
+    let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     // The program's files are the first units (`load`).
     let lower = || lower::census_lower_program(&trees, files.len(), &reach, &program.main);
     let lowered = phase("lower", || std::panic::catch_unwind(lower));
@@ -78,28 +77,38 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     });
     let rejection = |r: lower::Rejected| Rejection { unit: r.unit, anchor: r.anchor, error: r.error };
     let mut rejections = Vec::new();
-    let mut fatal = match lowered.class {
+    let (class, mut fatal) = match lowered.class {
         Err((unit, error)) => {
             rejections.extend(lowered.rejected.into_iter().map(rejection));
-            Some(Rejection { unit, anchor: None, error })
+            (None, Some(Rejection { unit, anchor: None, error }))
         }
         // As a translation does, only what can run counts (the unresolved calls are found again
         // below, where they are stubbed).
         Ok(mut class) => {
             let (running, _) = phase("live methods", || super::narrow(&mut class, lowered.rejected));
             rejections.extend(running.into_iter().map(rejection));
-            phase("analyze", || analyse(&mut class, &lowered.units, &mut rejections))
+            (Some(class), None)
         }
     };
-    std::panic::set_hook(hook);
+    // What the census needs of javac's trees is taken from them now, so that they are not held
+    // while the program is analysed: the pieces of code, the files, and the units of the
+    // rejections of lowering that have none. Those of the analyses and the generator get theirs
+    // from the stubs (`Stubs::stub`).
     locate(&trees, rejections.iter_mut().filter(|r| r.anchor.is_none()).chain(&mut fatal));
-    let scan = survey::scan(&units, &reach, program, &files);
-    let tally = Tally::new(&scan.pieces, &survey::unit_files(&units, program, &files), rejections, fatal);
+    let scan = survey::scan(&units.iter().collect::<Vec<_>>(), &reach, program, &files);
+    let unit_files = survey::unit_files(&units.iter().collect::<Vec<_>>(), program, &files);
+    drop(trees);
+    drop((units, reach));
+    if let Some(mut class) = class {
+        fatal = phase("analyze", || analyse(&mut class, &lowered.units, &mut rejections));
+    }
+    std::panic::set_hook(hook);
+    let tally = Tally::new(&scan.pieces, &unit_files, rejections, fatal);
     Ok(Census { report: tally.report(&scan, &program.main), json: tally.json(&scan, &program.main) })
 }
 
 /// An analysis or the generator, run for its errors.
-type Pass = fn(&mut Class) -> Result<(), Vec<Error>>;
+type Pass<'a> = &'a dyn Fn(&mut Class) -> Result<(), Vec<Error>>;
 
 /// Runs the analyses and the generator over the lowered program until they pass, stubbing the
 /// code of each error; the error that ends it early, if one does.
@@ -107,20 +116,27 @@ fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Reje
     let mut stubs = Stubs { next_id: next_id(class) + 1, stubbed: HashSet::new() };
     // The check for null enums changes nothing, and `whole_objects` changes the program only when
     // it passes: an error of theirs that no stub takes away is recorded, and the census goes on
-    // without them. One of the analyses or the generator that no stub takes away ends it. The
-    // generator reports every error it finds, which are stubbed together.
+    // without them. An error of a check of the analyses that only rejects (as of a field's type)
+    // that no stub takes away is recorded too, and the analyses go on past it
+    // (`analysis::analyze_tolerating`). Any other error of the analyses or the generator that no
+    // stub takes away ends it. The generator reports every error it finds, which are stubbed
+    // together.
+    let tolerated: std::cell::RefCell<Vec<Error>> = Default::default();
     let passes: [Pass; 4] = [
-        |class| {
+        &|class| {
             crate::timings::phase("census: enum nulls", || lower::check_enum_nulls(class))
                 .map_err(|e| vec![e])
         },
-        |class| {
+        &|class| {
             crate::timings::phase("census: whole objects", || analysis::whole_objects(class))
                 .map_err(|e| vec![e])
         },
-        unresolved_calls,
-        |class| {
-            let facts = crate::timings::phase("census: analyses", || analysis::analyze_all(class))?;
+        &unresolved_calls,
+        &|class| {
+            let tolerated = tolerated.borrow();
+            let facts = crate::timings::phase("census: analyses", || {
+                analysis::analyze_tolerating(class, &tolerated)
+            })?;
             crate::timings::phase("census: generator", || codegen::generate_all(class, &facts)).map(drop)
         },
     ];
@@ -137,30 +153,58 @@ fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Reje
                     vec![Error { pos: codegen::panicked_in().unwrap_or_default(), message }]
                 }
             };
-            let mut stuck = None;
+            let mut stuck = Vec::new();
             let mut stubbed = false;
             for error in errors {
                 let rejection = stubs.stub(class, units, error);
                 if rejection.anchor.is_some() {
                     stubbed = true;
                     rejections.push(rejection);
-                } else if stuck.is_none() {
-                    stuck = Some(rejection);
+                } else {
+                    stuck.push(rejection);
                 }
             }
             // An error that no stub took away comes back, unless the stubs took away its cause.
             if stubbed {
                 continue;
             }
-            let stuck = stuck.expect("a pass that fails has an error");
-            if index == passes.len() - 1 {
-                return Some(stuck);
+            if index < passes.len() - 1 {
+                rejections.push(stuck.into_iter().next().expect("a pass that fails has an error"));
+                break;
             }
-            rejections.push(stuck);
-            break;
+            // The analyses go on past an error they met before only if it is one they tolerate.
+            let same = |a: &Error, b: &Error| a.pos == b.pos && a.message == b.message;
+            let new: Vec<Rejection> = stuck
+                .iter()
+                .filter(|r| !tolerated.borrow().iter().any(|t| same(t, &r.error)))
+                .map(copy)
+                .collect();
+            if new.is_empty() {
+                // It ends the census: it is that error, no longer one recorded and gone past.
+                let first = stuck.into_iter().next()?;
+                if let Some(at) = rejections.iter().rposition(|r| same(&r.error, &first.error)) {
+                    rejections.remove(at);
+                }
+                return Some(first);
+            }
+            for rejection in new {
+                tolerated
+                    .borrow_mut()
+                    .push(Error { pos: rejection.error.pos, message: rejection.error.message.clone() });
+                rejections.push(rejection);
+            }
         }
     }
     None
+}
+
+/// A copy of a rejection.
+fn copy(r: &Rejection) -> Rejection {
+    Rejection {
+        unit: r.unit,
+        anchor: r.anchor,
+        error: Error { pos: r.error.pos, message: r.error.message.clone() },
+    }
 }
 
 /// The stubs that the census puts in place of code that an analysis or the generator rejected.
@@ -218,6 +262,10 @@ impl Stubs {
         }
         for (t, decl) in class.types.iter_mut().enumerate() {
             for field in decl.fields.iter_mut().chain(&mut decl.statics) {
+                // An error at a field's declaration (its type) is placed in the field's unit.
+                if field.pos == pos && rejection.unit.is_none() {
+                    rejection.unit = units.get(t).copied().flatten();
+                }
                 // A constant's value is a literal that nothing rejects, though its position may
                 // be that of an error in another file.
                 if !field.constant && field.init.as_ref().is_some_and(at) {

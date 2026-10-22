@@ -362,7 +362,7 @@ impl<'a> Gen<'a> {
     /// The concrete class whose objects represent the values of class type `t`: `t` itself, or
     /// the one class under it whose objects there are.
     pub(super) fn rep_class(&self, t: usize) -> usize {
-        match hierarchy::rep(self.class, self.facts, t) {
+        match self.rep(t) {
             hierarchy::Rep::Object(c) => c,
             hierarchy::Rep::Enum(t) => t,
         }
@@ -448,7 +448,7 @@ impl<'a> Gen<'a> {
             return struct_name(&self.class.types[t].name);
         }
         if let Some(t) = self.class.type_index(name)
-            && let hierarchy::Rep::Enum(t) = hierarchy::rep(self.class, self.facts, t)
+            && let hierarchy::Rep::Enum(t) = self.rep(t)
         {
             self.need(Need::Enum(t));
             return struct_name(&self.class.types[t].name);

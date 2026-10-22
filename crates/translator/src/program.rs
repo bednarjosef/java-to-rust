@@ -81,13 +81,18 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
 fn translate_reached(program: &Program, string_array_writes: bool) -> Result<String, ProgramError> {
     use crate::timings::phase;
     let (units, reach) = load(program, string_array_writes)?;
-    let units: Vec<&Value> = units.iter().collect();
-    let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     // The program's files are the first units (`load`).
     let program_units = source_files(program)?.len();
-    let file = |unit: Option<usize>| unit.and_then(|u| units[u]["file"].as_str()).map(str::to_string);
-    let lowered =
-        phase("lower", || lower::tolerant_lower_program(&trees, program_units, &reach, &program.main));
+    let lowered = {
+        let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
+        phase("lower", || lower::tolerant_lower_program(&trees, program_units, &reach, &program.main))
+    };
+    // javac's trees are not needed once the program is lowered: only the file and the classes
+    // of each unit, to say where an error is.
+    let kept: Vec<Unit> = units.iter().map(Unit::new).collect();
+    drop((units, reach));
+    let units = kept;
+    let file = |unit: Option<usize>| unit.map(|u| units[u].file.clone());
     let mut class = lowered.class.map_err(|(unit, error)| ProgramError { file: file(unit), error })?;
     if let Err(rejected) = phase("live methods", || keep_live(&mut class, lowered.rejected)) {
         let file = file(rejected.unit).or_else(|| locate(&units, &class, rejected.error.pos));
@@ -255,7 +260,9 @@ fn load(program: &Program, string_array_writes: bool) -> Result<(Vec<Value>, Rea
     if crate::timings::enabled() {
         let (javac, reaching) = (javac.as_secs_f64(), reaching.as_secs_f64());
         let (classes, methods) = (reach.classes.len(), reach.methods.len());
-        eprintln!("timing: javac: {javac:.3} s, {} units", units.len());
+        let memory = crate::timings::memory();
+        let received = session.received as f64 / 1e6;
+        eprintln!("timing: javac: {javac:.3} s, {} units, {received:.0} MB of trees{memory}", units.len());
         eprintln!(
             "timing: reach: {reaching:.3} s, {round} rounds ({walks} walks from the start again), {classes} classes and {methods} methods"
         );
@@ -298,10 +305,27 @@ impl Store {
     }
 }
 
+/// What is kept of a unit once the program is lowered: its file and the qualified names of its
+/// top-level classes.
+struct Unit {
+    file: String,
+    classes: Vec<String>,
+}
+
+impl Unit {
+    fn new(unit: &Value) -> Unit {
+        let decls = unit["tree"]["typeDecls"].as_array().into_iter().flatten();
+        Unit {
+            file: unit["file"].as_str().unwrap_or_default().to_string(),
+            classes: decls.map(class_name).collect(),
+        }
+    }
+}
+
 /// The file of the code at `pos` that an analysis or the generator rejected, which the error
 /// does not carry: the unit of the classes whose methods have code there, when they agree on one
 /// (a line and column of one file may be that of another file's code too).
-fn locate(units: &[&Value], class: &crate::ast::Class, pos: Pos) -> Option<String> {
+fn locate(units: &[Unit], class: &crate::ast::Class, pos: Pos) -> Option<String> {
     use crate::ast::{visit_expr, visit_stmt};
     let mut files = std::collections::BTreeSet::new();
     for method in &class.methods {
@@ -324,12 +348,12 @@ fn locate(units: &[&Value], class: &crate::ast::Class, pos: Pos) -> Option<Strin
             _ => decl.name.as_str(),
         };
         let unit = units.iter().find(|u| {
-            u["tree"]["typeDecls"].as_array().into_iter().flatten().any(|d| {
-                let top = class_name(d);
-                name == top || name.strip_prefix(top.as_str()).is_some_and(|r| r.starts_with(['.', '$']))
+            u.classes.iter().any(|top| {
+                name == top.as_str()
+                    || name.strip_prefix(top.as_str()).is_some_and(|r| r.starts_with(['.', '$']))
             })
         });
-        files.insert(unit.and_then(|u| u["file"].as_str())?);
+        files.insert(unit.map(|u| u.file.as_str())?);
     }
     let mut files = files.into_iter();
     match (files.next(), files.next()) {
