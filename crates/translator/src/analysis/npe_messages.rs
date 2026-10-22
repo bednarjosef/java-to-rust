@@ -24,14 +24,14 @@ use std::cell::RefCell;
 pub(crate) const SEARCH_NULL_KEY: &str = "Cannot read field \"value\" because \"anotherString\" is null";
 pub(crate) const SEARCH_NULL_ELEMENT: &str =
     "Cannot invoke \"java.lang.Comparable.compareTo(Object)\" because \"midVal\" is null";
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// How many steps back the JVM follows where a null came from: `a.b.c.d.e` is shown from `b`.
 const MAX_DETAIL: usize = 5;
 
 /// Fills in `Facts::npe_messages`, and rejects the program where a message that a `catch` may
 /// read (`Facts::npe_message_needed`) is not certain.
-pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> Result<(), Error> {
+pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> Result<(), Vec<Error>> {
     let first_needed = || {
         facts
             .npe_message_needed
@@ -45,7 +45,7 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
             "the message of a `NullPointerException` with Java {} not supported yet (it is checked against Java {CHECKED_JAVA})",
             names.java
         );
-        return Err(Error { pos, message });
+        return Err(vec![Error { pos, message }]);
     }
     let messages = RefCell::new(HashMap::new());
     for method in &class.methods {
@@ -63,17 +63,19 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
         }
         // `CharSequence`'s default `getChars` in a class of the program is the JDK's code too.
         let jdk = jdk || method.jdk_code;
-        let mut receivers = HashMap::new();
+        let (mut receivers, mut arguments) = (HashMap::new(), HashMap::new());
         for s in &method.body {
             visit_stmt(s, &mut |_| {}, &mut |s| {
-                if let Stmt::Local { name, init: Some(init), .. } = s
-                    && name.starts_with(crate::lower::RECEIVER)
-                {
-                    receivers.insert(name.as_str(), init);
+                if let Stmt::Local { name, init: Some(init), .. } = s {
+                    if name.starts_with(crate::lower::RECEIVER) {
+                        receivers.insert(name.as_str(), init);
+                    } else if name.starts_with(crate::lower::ARGUMENT) {
+                        arguments.insert(name.as_str(), init);
+                    }
                 }
             });
         }
-        let at = Messages { class, names, outermost: &outermost, method, jdk, receivers };
+        let at = Messages { class, names, outermost: &outermost, method, jdk, receivers, arguments };
         for s in &method.body {
             visit_stmt(
                 s,
@@ -84,31 +86,40 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
     }
     let mut messages = messages.into_inner();
     messages.retain(|id, _| facts.null_checked.contains_key(id));
-    let missing = facts
+    let mut missing: Vec<(Pos, ExprId)> = facts
         .npe_message_needed
         .iter()
         .filter(|id| !messages.contains_key(id))
         .filter_map(|id| facts.null_checked.get(id).map(|p| (*p, *id)))
-        .min_by_key(|(p, _)| (p.line, p.column));
-    if let Some((pos, id)) = missing {
-        // A position in the JDK's code may be in any of its many files: the message names the
-        // method.
-        let at =
-            class.methods.iter().filter(|m| super::exceptions::from_jdk(&class.types[m.class])).find(|m| {
-                let mut here = false;
-                for s in &m.body {
-                    visit_stmt(s, &mut |e| visit_expr(e, &mut |x| here |= x.id == id), &mut |_| {});
+        .collect();
+    if missing.is_empty() {
+        facts.npe_messages = messages;
+        return Ok(());
+    }
+    missing.sort_by_key(|(p, id)| (p.line, p.column, *id));
+    // A position in the JDK's code may be in any of its many files: the message names the method.
+    let ids: HashSet<ExprId> = missing.iter().map(|(_, id)| *id).collect();
+    let mut in_jdk: HashMap<ExprId, &Method> = HashMap::new();
+    for m in class.methods.iter().filter(|m| super::exceptions::from_jdk(&class.types[m.class])) {
+        for s in &m.body {
+            let mut see = |x: &Expr| {
+                if ids.contains(&x.id) {
+                    in_jdk.insert(x.id, m);
                 }
-                here
-            });
-        let method = at.map_or(String::new(), |m| format!(" in `{}.{}`", class.types[m.class].name, m.name));
+            };
+            visit_stmt(s, &mut |e| visit_expr(e, &mut see), &mut |_| {});
+        }
+    }
+    let errors = missing.into_iter().map(|(pos, id)| {
+        let method = in_jdk
+            .get(&id)
+            .map_or(String::new(), |m| format!(" in `{}.{}`", class.types[m.class].name, m.name));
         let message = format!(
             "the message of the `NullPointerException` of this dereference{method} not supported yet"
         );
-        return Err(Error { pos, message });
-    }
-    facts.npe_messages = messages;
-    Ok(())
+        Error { pos, message }
+    });
+    Err(errors.collect())
 }
 
 /// Whether `decl` is `java.lang.Object`.
@@ -153,6 +164,9 @@ struct Messages<'a> {
     /// The locals that hold the receiver of a call until its arguments are computed
     /// (`lower/argument_order.rs`), with the receiver: the JVM names the receiver itself.
     receivers: HashMap<&'a str, &'a Expr>,
+    /// The locals that hold an argument of a call that a receiver is computed before
+    /// (`lower/argument_order.rs`), with the argument.
+    arguments: HashMap<&'a str, &'a Expr>,
 }
 
 /// A field as the class file has it.
@@ -291,7 +305,8 @@ impl Messages<'_> {
                     // `NullPointerException` with no message for it.
                     if let (Builtin::String(StringOp::ToLowerCase | StringOp::ToUpperCase), [_, language]) =
                         (builtin, &args[..])
-                        && let ExprKind::MethodCall { receiver: locale, name, .. } = &language.kind
+                        && let ExprKind::MethodCall { receiver: locale, name, .. } =
+                            &self.argument(language).kind
                         && name == crate::program::LOCALE_LANGUAGE.1
                     {
                         out.insert(locale.id, None);
@@ -537,7 +552,7 @@ impl Messages<'_> {
         if selector.ty != Type::String {
             return;
         }
-        // The JDK's temps are the walk of its slots (`jdk_switch_temps`), or else the slot that
+        // The JDK's temps are the walk of its slots (`jdk_temps`), or else the slot that
         // is certain (`jdk_switch_slot`).
         let local = self.names.get(self.outermost, selector.pos, NameKind::Temp, "s$").map(str::to_string);
         // In the code of a lambda, javac's method for the body has that local in its table of
@@ -673,6 +688,11 @@ impl Messages<'_> {
             // `(s = a).next`: the class file keeps a copy of the value it stores (`dup`), which the
             // JVM follows back to where the value came from.
             ExprKind::Assign { op: None, target: Place::Var(_), value } => return self.source(value, detail),
+            // The iterator of a for-each loop, javac's own local `i$`; in the JDK's code, the walk
+            // of its slots (`jdk_temps`).
+            ExprKind::Var(_) if let Some(at) = self.iterator(e) => {
+                self.names.get(self.outermost, at, NameKind::Temp, "i$")?.to_string()
+            }
             ExprKind::Var(name) if self.jdk => self.jdk_local(name)?,
             // `i++` or `--i` of an `int` local: `iinc` and a load of the local, which the JVM
             // shows by its name.
@@ -739,6 +759,14 @@ impl Messages<'_> {
             _ => return None,
         };
         Some(Source::Shown(shown))
+    }
+
+    /// The argument that `e` reads, where it is a local that holds one; else `e`.
+    fn argument<'e>(&'e self, e: &'e Expr) -> &'e Expr {
+        match &e.kind {
+            ExprKind::Var(name) => self.arguments.get(name.as_str()).copied().unwrap_or(e),
+            _ => e,
+        }
     }
 
     /// The receiver that `e` reads, where it is a local that holds one, or the call of a block that
@@ -1160,6 +1188,25 @@ impl Messages<'_> {
             outer = o;
         }
         Some(JavaField::Named(format!("this${depth}")))
+    }
+
+    /// The position of the collection of the for-each loop whose iterator `e` is, where javac's
+    /// local for it starts (`ClassFileNames::iterators`).
+    fn iterator(&self, e: &Expr) -> Option<Pos> {
+        let ExprKind::Var(name) = &e.kind else { return None };
+        let key = (self.class.types[self.method.class].name.clone(), e.pos);
+        let at = *self.class.class_file.iterators.get(&key)?;
+        // The loop's own local, not one of the body's that starts there.
+        let declared = self.method.body.iter().any(|s| {
+            let mut found = false;
+            visit_stmt(s, &mut |_| {}, &mut |s| {
+                if let Stmt::Local { name: local, pos, init: Some(init), .. } = s {
+                    found |= local == name && *pos == e.pos && init.pos == at;
+                }
+            });
+            found
+        });
+        declared.then_some(at)
     }
 
     /// The name of the local `name` of a method of the JDK in its source, which its class file

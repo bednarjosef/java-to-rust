@@ -264,8 +264,8 @@ in the module of their package:
   (`Main$1Counter.Tally`), capturing what they read like local classes (`member_outers`).
 
 `getName` gives javac's binary name (`Main$1Labeler`, `Main$1`); `getSimpleName` of an anonymous
-class is `""`. A lambda's class name is `Main$$Lambda`, the JVM's name without its varying
-suffix.
+class is `""`. A lambda's class name is `Main$$Lambda` (`p.Outer$Inner$$Lambda` in a member
+class), the JVM's name without its varying suffix.
 
 ### 2.6 Generic outers
 

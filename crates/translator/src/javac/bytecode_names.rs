@@ -117,27 +117,31 @@ fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<Bytecod
 }
 
 impl BytecodeNames {
-    /// Adds the temps of the string `switch`es of the JDK's code (`jdk_switch_temps`), which
-    /// `java/BytecodeNames.java` does not compile.
-    pub fn add_jdk_switch_temps(&mut self, temps: SwitchTemps) {
-        for (class, pos, text) in temps {
-            self.entries.insert((class, pos, NameKind::Temp, "s$".to_string()), Some(text));
+    /// Adds the temps of the JDK's code (`jdk_temps`), which `java/BytecodeNames.java` does not
+    /// compile.
+    pub fn add_jdk_temps(&mut self, temps: JdkTemps) {
+        for (class, pos, name, text) in temps {
+            self.entries.insert((class, pos, NameKind::Temp, name.to_string()), Some(text));
         }
     }
 }
 
-/// The temps of string `switch`es, by outermost class and position, with their text.
-pub type SwitchTemps = Vec<(String, Pos, String)>;
+/// The temps of javac's own in the JDK's code, by outermost class and position, with javac's name
+/// for the variable (`s$` or `i$`) and the JVM's text for it.
+pub type JdkTemps = Vec<(String, Pos, &'static str, String)>;
 
-/// The temps of the string `switch`es in `trees`, the JDK's units (see `unit_switch_temps`).
-pub fn jdk_switch_temps(trees: &[&Value]) -> SwitchTemps {
-    trees.iter().flat_map(|tree| unit_switch_temps(tree)).collect()
+/// The temps of `trees`, the JDK's units (see `unit_temps`).
+pub fn jdk_temps(trees: &[&Value]) -> JdkTemps {
+    trees.iter().flat_map(|tree| unit_temps(tree)).collect()
 }
 
-/// The JVM's names of the strings that the string `switch`es of a unit of the JDK's code switch
-/// on: javac keeps the string in a variable of its own (`s$`, then the case's index in `tmp$`)
-/// and calls its `hashCode()`, so a null string is `<localN>` in the message, a slot that the
-/// JDK's class files (compiled with `-g`) leave unnamed. The slot is the code generator's: the
+/// The JVM's names of the variables of javac's own in a unit of the JDK's code whose value a
+/// `NullPointerException`'s message can name, which the JDK's class files (compiled with `-g`)
+/// leave unnamed, so that a null one is `<localN>` in the message: the string that a string
+/// `switch` switches on, which javac keeps in a variable (`s$`, then the case's index in `tmp$`)
+/// and calls `hashCode()` on, and the iterator of a for-each loop over an `Iterable` (`i$`), at
+/// the position of the collection, which `iterator()` is called on and whose `hasNext()` and
+/// `next()` are called. The slot is the code generator's: the
 /// parameters' (`this` first), then the variables of the blocks around the `switch`, each in the
 /// next slot when it is declared (before its initializer runs) and freed at the end of its block,
 /// two for a `long` or `double`, and the variables that javac adds itself: a for-each loop's
@@ -149,7 +153,7 @@ pub fn jdk_switch_temps(trees: &[&Value]) -> SwitchTemps {
 /// a try-with-resources, in a method with patterns, in an expression whose own temps javac
 /// declares (a compound assignment, an increment), and in the cases of a `switch` expression
 /// with a `try`, whose stack javac keeps in variables.
-fn unit_switch_temps(unit: &Value) -> SwitchTemps {
+fn unit_temps(unit: &Value) -> JdkTemps {
     let mut out = Vec::new();
     for class in unit["typeDecls"].as_array().into_iter().flatten() {
         let Some(name) = class["symbol"]["type"].as_str() else { continue };
@@ -160,7 +164,7 @@ fn unit_switch_temps(unit: &Value) -> SwitchTemps {
 }
 
 /// The temps of the methods of `class` and of the classes in it.
-fn classes(class: &Value, outermost: &str, out: &mut Vec<(String, Pos, String)>) {
+fn classes(class: &Value, outermost: &str, out: &mut JdkTemps) {
     for member in class["members"].as_array().into_iter().flatten() {
         match member["kind"].as_str() {
             Some("METHOD") => {
@@ -186,7 +190,7 @@ fn classes(class: &Value, outermost: &str, out: &mut Vec<(String, Pos, String)>)
 }
 
 /// The classes declared in the code under `v` (not its members, which `classes` walks).
-fn nested_classes(v: &Value, outermost: &str, out: &mut Vec<(String, Pos, String)>, top: bool) {
+fn nested_classes(v: &Value, outermost: &str, out: &mut JdkTemps, top: bool) {
     match v {
         Value::Object(fields) => {
             if !top && matches!(v["kind"].as_str(), Some("CLASS" | "INTERFACE" | "ENUM" | "RECORD")) {
@@ -243,6 +247,14 @@ fn has_try(v: &Value) -> bool {
     }
 }
 
+/// The position of the tree `v`.
+fn position(v: &Value) -> Pos {
+    Pos::new(
+        v["line"].as_u64().unwrap_or_default() as usize,
+        v["column"].as_u64().unwrap_or_default() as usize,
+    )
+}
+
 /// The slots a variable declaration takes: two for a `long` or a `double`.
 fn size(variable: &Value) -> usize {
     match variable["symbol"]["type"].as_str() {
@@ -254,7 +266,7 @@ fn size(variable: &Value) -> usize {
 /// The walk of a method's code, with the next free slot.
 struct SwitchSlots<'a> {
     outermost: &'a str,
-    out: &'a mut Vec<(String, Pos, String)>,
+    out: &'a mut JdkTemps,
     next: usize,
 }
 
@@ -298,9 +310,13 @@ impl SwitchSlots<'_> {
             }
             "ENHANCED_FOR_LOOP" => {
                 // The array, or the iterator, then its length and index.
+                let array = s["expression"]["javaType"].as_str().is_some_and(|t| t.ends_with("[]"));
+                if !array {
+                    let pos = position(&s["expression"]);
+                    self.out.push((self.outermost.to_string(), pos, "i$", format!("<local{}>", self.next)));
+                }
                 self.next += 1;
                 self.expression(&s["expression"]);
-                let array = s["expression"]["javaType"].as_str().is_some_and(|t| t.ends_with("[]"));
                 self.next += if array { 2 } else { 0 };
                 self.next += size(&s["variable"]);
                 self.statement(&s["statement"]);
@@ -375,11 +391,8 @@ impl SwitchSlots<'_> {
             selector = &selector["expression"];
         }
         if selector["javaType"].as_str() == Some("java.lang.String") {
-            let pos = Pos::new(
-                selector["line"].as_u64().unwrap_or_default() as usize,
-                selector["column"].as_u64().unwrap_or_default() as usize,
-            );
-            self.out.push((self.outermost.to_string(), pos, format!("<local{}>", self.next)));
+            let pos = position(selector);
+            self.out.push((self.outermost.to_string(), pos, "s$", format!("<local{}>", self.next)));
             // The string's, whose initializer the selector is, then the case's index.
             self.next += 1;
             self.expression(selector);

@@ -71,7 +71,7 @@ mod switch;
 mod sync;
 mod system;
 mod varargs;
-pub(crate) use argument_order::{RECEIVER, held_local, ordered_call};
+pub(crate) use argument_order::{ARGUMENT, RECEIVER, held_local, ordered_call};
 pub use arrays::runtime_arrays_call;
 use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
@@ -390,6 +390,10 @@ fn kind_words(kind: &str) -> String {
     kind.to_lowercase().replace('_', " ")
 }
 
+/// The calls noted while lowering (`Lowering::calls`): by the class whose code calls, the
+/// call's position and the method's name, the position of the first argument and the method.
+type NotedCalls = std::collections::HashMap<(String, Pos, String), (Option<Pos>, Option<CallName>)>;
+
 struct Lowering<'t> {
     next_id: Cell<ExprId>,
     /// Index of the class whose members are being lowered: `this` and unqualified names refer to it.
@@ -421,8 +425,10 @@ struct Lowering<'t> {
     static_qualifiers: RefCell<std::collections::HashMap<(String, Pos, String), Option<String>>>,
     /// With the position of the first argument of the call first noted at each key, until a
     /// second differs (`chained_calls`).
-    calls: RefCell<std::collections::HashMap<(String, Pos, String), (Option<Pos>, Option<CallName>)>>,
-    chained_calls: RefCell<std::collections::HashMap<(String, Pos, String, Pos), Option<CallName>>>,
+    calls: RefCell<NotedCalls>,
+    chained_calls: RefCell<crate::ast::ChainedCalls>,
+    /// See `ClassFileNames::iterators`.
+    iterators: RefCell<std::collections::HashMap<(String, Pos), Pos>>,
     /// The binary name of the anonymous class of the enum constant's body whose method is being
     /// lowered (`constant_bodies`), which javac names that body's own methods by (`note_call`).
     body_class: RefCell<Option<String>>,

@@ -58,6 +58,7 @@ impl<'t> Lowering<'t> {
             static_qualifiers: Default::default(),
             calls: Default::default(),
             chained_calls: Default::default(),
+            iterators: Default::default(),
             body_class: Default::default(),
             renamed_locals: Default::default(),
             covariant: Default::default(),
@@ -341,6 +342,7 @@ impl<'t> Lowering<'t> {
             outer_fields,
             calls: self.calls.take().into_iter().map(|(key, (_, named))| (key, named)).collect(),
             chained_calls: self.chained_calls.take(),
+            iterators: self.iterators.take(),
             renamed_locals: self.renamed_locals.take(),
         }
     }

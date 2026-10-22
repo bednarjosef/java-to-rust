@@ -449,7 +449,8 @@ are javac's own rather than a copy of its rules. A program whose sources are a m
 JDK has too (javac's `jdk.compiler`) compiles as part of that module (`--patch-module`), as the
 unnamed module may not hold its packages. A lambda's body is a method whose first
 parameters are its captures; a local or anonymous class reads a captured local as
-`this.val$x`; javac's own locals are named too (the `s$` of a string `switch`). The rest of the
+`this.val$x`; javac's own locals are named too (the `s$` of a string `switch`, the iterator
+`i$` of a for-each loop, whose calls start at the collection as javac's do). The rest of the
 message follows the JVM's rules (`analysis/npe_messages.rs`): a field chain up to five steps
 back, an element with its index when that is a constant, a local or a call (`[...]` otherwise),
 no `because` for the value of `c ? a : b`, no message for a pattern switch's
@@ -468,8 +469,9 @@ chain do (`b.append('0').append(1)`), are told apart by their first argument
 unboxing as the call it is (`java.lang.Integer.intValue()`), the JDK's constructors that fail
 inside (`new String(s)`, `new StringBuilder(s)`), a static by the class that declares it, an
 inner class's outer object as `this$0`, an enum field kept as a table (`lower/enum_tables.rs`) as
-the field it is, a string `switch`'s temporary as `<localN>` from the slots javac would give
-(`javac::jdk_switch_temps`), in an argument too, and a null locale of `toLowerCase(Locale)`,
+the field it is, a string `switch`'s temporary and a for-each loop's iterator as `<localN>` from
+the slots javac would give (`javac::jdk_temps`), in an argument too, and a null locale of
+`toLowerCase(Locale)`,
 for which the JDK's code throws an exception without a message. The receiver of an unbound method reference has no message, as the
 JVM's hidden frame gives none. The translator's own `java.lang` classes (`Standard.java`) have no
 known message from their code; where the JDK's code has a dereference that may fail, they throw

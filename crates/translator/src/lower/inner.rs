@@ -242,7 +242,10 @@ impl<'t> Lowering<'t> {
             Some(n) if n.kind == NestKind::Local => Origin::Local { method: n.method, binary },
             Some(n) if n.kind == NestKind::Anonymous => Origin::Anonymous { method: n.method, binary },
             Some(n) if n.kind == NestKind::Lambda => {
-                let binary = format!("{}$$Lambda", self.types[self.lambda_holder(t)].javac);
+                // Named after the binary name of the class that holds it: `p.Outer$Inner$$Lambda`.
+                let holder = self.lambda_holder(t);
+                let holder = self.binary_name(holder).unwrap_or_else(|| self.types[holder].javac.clone());
+                let binary = format!("{holder}$$Lambda");
                 Origin::Lambda { method: n.method, binary }
             }
             // A hoisted type's method is not kept: nothing reads it.

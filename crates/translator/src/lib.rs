@@ -37,7 +37,8 @@ pub fn translate_with_notes(java: &str) -> Result<(String, Vec<ast::Note>), Erro
     let mut facts = analysis::analyze(&class)?;
     // A `catch` reads the message of a `NullPointerException`: it names the class file's code.
     if facts.npe_message_read.is_some() {
-        analysis::npe_messages(&class, &mut facts, &javac::source_names(java)?)?;
+        analysis::npe_messages(&class, &mut facts, &javac::source_names(java)?)
+            .map_err(|mut e| e.remove(0))?;
     }
     Ok((codegen::generate(&class, &facts)?, notes))
 }

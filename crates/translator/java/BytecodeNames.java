@@ -39,8 +39,9 @@ import javax.tools.*;
  * for a lambda's body starts with the locals it captures) or {@code <localN>} (its slot); not
  * javac's own variables, whose names have a {@code $};
  * <li>{@code temp}: a variable that javac adds for a statement, holding the value of the
- * expression that starts there ({@code arr$}, the array of a for-each loop; {@code s$}, the
- * string of a switch), named as a local;
+ * expression that starts there ({@code arr$}, the array of a for-each loop; {@code i$}, its
+ * iterator, at the start of the collection; {@code s$}, the string of a switch), named as a
+ * local;
  * <li>{@code call}: a call of the method {@code NAME}, {@code TEXT} being the method as the class
  * file refers to it, {@code Main$Box.size()};
  * <li>{@code static}: a static field, {@code Main$Box.shared}.
@@ -304,7 +305,13 @@ public class BytecodeNames {
                 }
             }.scan(body);
             new TreeScanner() {
+                /** Where the source has the variables that lowering added: where their values start. */
+                private final Map<Symbol, JCTree> temps = new HashMap<>();
+
                 private void entry(JCTree at, String kind, String name, String text) {
+                    if (!starts.containsKey(at) && at instanceof JCIdent id && temps.containsKey(id.sym)) {
+                        at = temps.get(id.sym);
+                    }
                     long[] start = starts.get(at);
                     if (start == null) {
                         // A name that lowering wrote anew, such as a lambda's captured local in
@@ -319,6 +326,14 @@ public class BytecodeNames {
                         text = null;
                     }
                     entries.put(key, text);
+                }
+
+                /** {@code e} as the source has it: without the casts that erasure added. */
+                private JCTree written(JCTree e) {
+                    while (!starts.containsKey(e) && (e instanceof JCTypeCast || e instanceof JCParens)) {
+                        e = e instanceof JCTypeCast cast ? cast.expr : ((JCParens) e).expr;
+                    }
+                    return e;
                 }
 
                 private String local(VarSymbol v) {
@@ -354,7 +369,15 @@ public class BytecodeNames {
                 public void visitVarDef(JCVariableDecl t) {
                     // A variable that lowering added, which the attributed tree does not have.
                     if (t.sym != null && !starts.containsKey(t) && t.init != null) {
-                        entry(TreeInfo.skipParens(t.init), "temp", t.name.toString().replaceAll("[0-9]", ""), local(t.sym));
+                        // A call that lowering wrote, such as the `iterator()` of a for-each loop
+                        // (`i$`), starts where its receiver does.
+                        JCTree init = TreeInfo.skipParens(t.init);
+                        if (!starts.containsKey(init) && init instanceof JCMethodInvocation call
+                                && call.meth instanceof JCFieldAccess f) {
+                            init = written(f.selected);
+                        }
+                        temps.put(t.sym, init);
+                        entry(init, "temp", t.name.toString().replaceAll("[0-9]", ""), local(t.sym));
                     }
                     super.visitVarDef(t);
                 }
@@ -365,7 +388,7 @@ public class BytecodeNames {
                         Type site = t.meth instanceof JCFieldAccess f ? f.selected.type : c.sym.type;
                         // A call that lowering wrote, such as the `iterator()` of a for-each
                         // loop, starts where its receiver does.
-                        JCTree at = starts.containsKey(t) || !(t.meth instanceof JCFieldAccess f) ? t : f.selected;
+                        JCTree at = starts.containsKey(t) || !(t.meth instanceof JCFieldAccess f) ? t : written(f.selected);
                         entry(at, "call", m.name.toString(), member(m, site));
                     }
                     super.visitApply(t);
