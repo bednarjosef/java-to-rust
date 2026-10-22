@@ -96,6 +96,69 @@ pub fn service_providers<'a>(roots: impl IntoIterator<Item = &'a PathBuf> + Clon
     out
 }
 
+/// The modules of the JDK that the JVM's boot loader defines (Java 26). The translation's
+/// `java.lang.Module` has the same list (`java/patches/java/lang/Module.java`).
+const BOOT_MODULES: &[&str] = &[
+    "java.base",
+    "java.datatransfer",
+    "java.desktop",
+    "java.instrument",
+    "java.logging",
+    "java.management",
+    "java.management.rmi",
+    "java.naming",
+    "java.prefs",
+    "java.rmi",
+    "java.security.sasl",
+    "java.xml",
+    "jdk.jfr",
+    "jdk.management",
+    "jdk.management.agent",
+    "jdk.management.jfr",
+    "jdk.naming.rmi",
+    "jdk.net",
+    "jdk.nio.mapmode",
+    "jdk.sctp",
+    "jdk.unsupported",
+];
+
+/// The modules of the JDK that the JVM's platform loader defines (Java 26), as in `Module.java`.
+const PLATFORM_MODULES: &[&str] = &[
+    "java.compiler",
+    "java.net.http",
+    "java.scripting",
+    "java.security.jgss",
+    "java.smartcardio",
+    "java.sql",
+    "java.sql.rowset",
+    "java.transaction.xa",
+    "java.xml.crypto",
+    "jdk.accessibility",
+    "jdk.charsets",
+    "jdk.crypto.cryptoki",
+    "jdk.dynalink",
+    "jdk.httpserver",
+    "jdk.localedata",
+    "jdk.naming.dns",
+    "jdk.security.auth",
+    "jdk.security.jgss",
+    "jdk.xml.dom",
+    "jdk.zipfs",
+];
+
+/// The name HotSpot gives the class loader of the named module `module`: `bootstrap` and
+/// `platform` for the JDK's modules of those loaders, `app` (the system class loader) for any
+/// other.
+pub fn loader_name(module: &str) -> &'static str {
+    if BOOT_MODULES.contains(&module) {
+        "bootstrap"
+    } else if PLATFORM_MODULES.contains(&module) {
+        "platform"
+    } else {
+        "app"
+    }
+}
+
 /// What a module declares and what its root holds, which the translation's `java.lang.Module`
 /// answers with (`java/patches/java/lang/Module.java`, `lower/modules.rs`). The unnamed module,
 /// whose name is empty, holds the roots without a `module-info.java`.

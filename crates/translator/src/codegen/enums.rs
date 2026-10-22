@@ -282,6 +282,15 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The arm of a `match` on a value of the enum of `t` for an object that is no enum's
+    /// constant, which fails the cast to `Enum` that Java makes.
+    fn not_enum_arm(&mut self, t: usize) -> String {
+        self.need(Need::CastSource(t));
+        let (source, failed) = (self.runtime("CastSource"), self.runtime("cast_failed"));
+        let base = self.runtime("BASE");
+        format!("other => {failed}({source}::cast_class(&other), (\"java.lang.Enum\", {base}))")
+    }
+
     /// An enum's builtin on an `Enum` that is an `Object` (of the enum of type `t`): a `match`
     /// on the enums it can be.
     fn erased_enum_builtin(&mut self, builtin: Builtin, args: &'a [Expr], t: usize) -> Code {
@@ -294,7 +303,7 @@ impl<'a> Gen<'a> {
             let obj = g.object(e);
             let mut arms: Vec<String> =
                 enums.iter().map(|&c| format!("{}(e) => *e as i32", g.variant(t, c))).collect();
-            arms.push(format!("_ => {}(\"java.lang.Enum\")", g.runtime("cast_failed")));
+            arms.push(g.not_enum_arm(t));
             // Borrowed, the constant is a reference however the `Enum` is held.
             format!("(match &({obj}) {{ {} }})", arms.join(", "))
         };
@@ -308,7 +317,7 @@ impl<'a> Gen<'a> {
                 let obj = self.object(&args[0]);
                 let mut arms: Vec<String> =
                     enums.iter().map(|&c| format!("{}(e) => e.enum_name()", self.variant(t, c))).collect();
-                arms.push(format!("_ => {}(\"java.lang.Enum\")", self.runtime("cast_failed")));
+                arms.push(self.not_enum_arm(t));
                 Code::new(format!("match {obj} {{ {} }}", arms.join(", ")), LOWEST)
             }
             _ => unreachable!("not a builtin of an erased enum: {builtin:?}"),

@@ -270,8 +270,22 @@ fn lower_into<'t>(
         class_file,
         notes,
         annotation_classes,
+        module_labels: module_labels(reach),
     };
     Ok((class, lowering.real.clone(), failed))
+}
+
+/// `Class::module_labels` of the named modules among the roots; a package in two roots is the
+/// first's, as the class path would have it.
+fn module_labels(reach: &Reach) -> std::collections::HashMap<String, String> {
+    let mut labels = std::collections::HashMap::new();
+    for m in reach.modules.iter().filter(|m| !m.name.is_empty()) {
+        let label = format!("module {} of loader '{}'", m.name, crate::program::loader_name(&m.name));
+        for package in &m.packages {
+            labels.entry(package.clone()).or_insert_with(|| label.clone());
+        }
+    }
+    labels
 }
 
 /// The classes nested in `decl`, a class that is not translated, that are translated all the

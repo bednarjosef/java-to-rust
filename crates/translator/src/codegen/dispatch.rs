@@ -42,6 +42,17 @@ pub(super) enum Need {
     /// `as_<t>()` on the enum of `s`: the object as a value of type `t` if it is one, as
     /// `(s, t)`.
     Narrow(usize, usize),
+    /// `runtime_class()`: the `java::Class` of the object's class (see `class_values`).
+    RuntimeClass(usize),
+    /// `runtime_class_name()`: the binary name of the object's class.
+    RuntimeClassName(usize),
+    /// `runtime_type_names()`: the binary names of the object's class and of every class and
+    /// interface above it (see `class_values::instance_names`).
+    RuntimeTypeNames(usize),
+    /// `object_identity_hash()`: `System.identityHashCode` of the object.
+    IdentityHash(usize),
+    /// `java::CastSource`: the object's class as a `ClassCastException` names it.
+    CastSource(usize),
 }
 
 /// How a value of one class type becomes a value of another, in a cast or an `instanceof`.
@@ -60,7 +71,15 @@ impl<'a> Gen<'a> {
     pub(super) fn need(&self, need: Need) {
         let mut needs = self.needs.borrow_mut();
         match need {
-            Need::Base(t) | Need::BaseMut(t) | Need::Dispatch(t, _) | Need::Display(t) => {
+            Need::Base(t)
+            | Need::BaseMut(t)
+            | Need::Dispatch(t, _)
+            | Need::Display(t)
+            | Need::RuntimeClass(t)
+            | Need::RuntimeClassName(t)
+            | Need::RuntimeTypeNames(t)
+            | Need::IdentityHash(t)
+            | Need::CastSource(t) => {
                 needs.insert(Need::Enum(t));
             }
             Need::NullableText(t) => {
@@ -342,19 +361,18 @@ impl<'a> Gen<'a> {
             return self.failing_cast(to, value, checked);
         }
         self.need(Need::Narrow(s, t));
+        self.need(Need::CastSource(s));
         let name = self.as_name(t);
-        if let Some(text) = self.enum_cast(value, s, to, Some(name.clone()), checked.is_some()) {
-            return self.cast_result(text, checked, self.nullable(value));
-        }
         let cast = self.runtime(if checked.is_some() { "try_cast" } else { "cast" });
-        let target = rust_string(&self.binary_name(t));
+        let target = self.cast_class(t);
         let text = if self.nullable(value) {
             let option = self.object_place(value);
             let enum_name = struct_name(&self.class.types[s].name);
-            format!("{option}.as_ref().map(|o| {cast}({enum_name}::{name}(o), {target}))")
+            format!("{option}.as_ref().map(|o| {cast}(o, {enum_name}::{name}, {target}))")
         } else {
             let obj = self.object(value);
-            format!("{cast}({obj}.{name}(), {target})")
+            let obj = super::class_values::borrow_of(&obj);
+            format!("{cast}({obj}, |o| o.{name}(), {target})")
         };
         self.cast_result(text, checked, self.nullable(value))
     }
@@ -363,32 +381,33 @@ impl<'a> Gen<'a> {
     /// (unless the value is null).
     fn failing_cast(&mut self, to: Type, value: &'a Expr, checked: Option<ExprId>) -> Code {
         let t = self.type_of(to).expect("a cast to a type of the program");
-        if let Some(s) = self.enum_of(value)
-            && let Some(text) = self.enum_cast(value, s, to, None, checked.is_some())
-        {
-            return self.cast_result(text, checked, self.nullable(value));
-        }
+        let target = self.cast_class(t);
+        let ty = self.ty_name(to);
+        // The class of the object `o`: its variant's, or the one class it can be.
+        let (from, binding) = match self.enum_of(value) {
+            Some(s) => {
+                self.need(Need::CastSource(s));
+                (format!("{}::cast_class(&o)", self.runtime("CastSource")), "o")
+            }
+            None => (self.cast_class(self.value_class(value)), "_"),
+        };
         if checked.is_some() {
-            let ty = self.ty_name(to);
-            let fail =
-                format!("{}(None::<{ty}>, {})", self.runtime("try_cast"), rust_string(&self.binary_name(t)));
+            let fail = format!("Err::<{ty}, _>({}({from}, {target}))", self.runtime("cast_exception"));
             let text = if self.nullable(value) {
-                format!("{}.as_ref().map(|_| {fail})", self.object_place(value))
+                format!("{}.as_ref().map(|{binding}| {fail})", self.object_place(value))
             } else {
-                format!("{{ let _ = {}; {fail} }}", self.expr(value).text)
+                format!("{{ let {binding} = &{}; {fail} }}", self.expr(value).at(UNARY))
             };
             return self.cast_result(text, checked, self.nullable(value));
         }
-        let failed = format!("{}({})", self.runtime("cast_failed"), rust_string(&self.binary_name(t)));
+        let failed = format!("{}({from}, {target})", self.runtime("cast_failed"));
         if self.nullable(value) {
             let option = self.object_place(value);
-            let ty = self.ty_name(to);
-            return Code::atom(format!("{option}.as_ref().map(|_| -> {ty} {{ {failed} }})"));
+            return Code::atom(format!("{option}.as_ref().map(|{binding}| -> {ty} {{ {failed} }})"));
         }
         // The value is typed, as `cast_failed` returns `!` and a local it initializes may be used.
-        let v = self.expr(value).text;
-        let ty = self.ty_name(to);
-        Code::atom(format!("{{ let _ = {v}; None::<{ty}>.unwrap_or_else(|| {failed}) }}"))
+        let v = self.expr(value).at(UNARY);
+        Code::atom(format!("{{ let {binding} = &{v}; None::<{ty}>.unwrap_or_else(|| {failed}) }}"))
     }
 
     /// `value instanceof T`.
@@ -500,11 +519,12 @@ impl<'a> Gen<'a> {
             let object = self.object_index().expect("an `Object[]` in a program that uses `Object`");
             let string = self.type_of(Type::String).expect("strings among `Object`'s runtime classes");
             self.need(Need::Narrow(object, string));
+            self.need(Need::CastSource(object));
             let (cast, name) = (self.runtime("cast"), self.as_name(string));
-            let target = rust_string("java.lang.String");
+            let target = self.cast_class(string);
             (
-                format!("{cast}(s.{name}(), {target})"),
-                format!("s.as_ref().map(|o| {cast}(o.{name}(), {target}))"),
+                format!("{cast}(&s, |o| o.{name}(), {target})"),
+                format!("s.as_ref().map(|o| {cast}(o, |o| o.{name}(), {target}))"),
             )
         };
         let each = match (from_nullable, to_nullable) {
@@ -741,6 +761,47 @@ impl<'a> Gen<'a> {
                     None => descriptor,
                 }
             }
+        }
+    }
+
+    /// Class `c` as a `ClassCastException` names it (`java::CastClass`): its binary name and its
+    /// module, `("Main$Dog", java::APP)`.
+    pub(super) fn cast_class(&mut self, c: usize) -> String {
+        let name = rust_string(&self.binary_name(c));
+        let module = self.cast_module(c);
+        format!("({name}, {module})")
+    }
+
+    /// The module and class loader of class `c` as HotSpot names them with the class: the JDK's
+    /// `java.base` (`java::BASE`) for the classes that the runtime holds, an array's element's,
+    /// and for any other class its package's (`Class::module_labels`), else the unnamed module of
+    /// the system class loader (`java::APP`).
+    fn cast_module(&mut self, c: usize) -> String {
+        if let Some(ty) = self.runtime_of(c).or_else(|| self.class.array_of(c)) {
+            return self.type_module(ty);
+        }
+        let decl = &self.class.types[c];
+        let jdk = matches!(decl.name.as_str(), OBJECT | COMPARABLE | ENUM | NUMBER | CHAR_SEQUENCE);
+        if jdk || decl.origin == Origin::Object {
+            return self.runtime("BASE");
+        }
+        match self.class.module_labels.get(&decl.package) {
+            Some(label) if label == "module java.base of loader 'bootstrap'" => self.runtime("BASE"),
+            Some(label) => rust_string(label),
+            None => self.runtime("APP"),
+        }
+    }
+
+    /// `cast_module` of the class of the values of type `ty`; an array's is its element's, and
+    /// a primitive's (in an array) `java.base`.
+    fn type_module(&mut self, ty: Type) -> String {
+        match ty {
+            Type::Array(element) => self.type_module(*element),
+            Type::Class(..) | Type::Enum(_) => match self.class.type_of(ty) {
+                Some(c) if self.runtime_of(c).is_none() => self.cast_module(c),
+                _ => self.runtime("BASE"),
+            },
+            _ => self.runtime("BASE"),
         }
     }
 
@@ -1257,6 +1318,7 @@ impl<'a> Gen<'a> {
         if self.wanted.contains(&Need::NullableText(t)) {
             self.nullable_text_impl(t, &variants);
         }
+        self.class_value_impls(t, &variants);
         self.raised_impl(t);
         self.chain_enum_items(t, &variants);
     }
@@ -1656,15 +1718,30 @@ impl<'a> Gen<'a> {
             // An enum's constants compare by their ordinals.
             None => "*o as i32 - *b as i32".to_string(),
         };
-        let name = self.binary_name(c);
-        let failed = format!("{}({})", self.runtime("cast_failed"), rust_string(&name));
-        let Some(e) = self.enum_for(comparable) else { return failed };
+        let target = self.cast_class(c);
+        let failed = |g: &mut Self, from: String| format!("{}({from}, {target})", g.runtime("cast_failed"));
+        let e = match self.rep(comparable) {
+            hierarchy::Rep::Enum(e) => e,
+            // Every `Comparable` is of the one class `x`.
+            hierarchy::Rep::Object(x) => {
+                let from = self.cast_class(x);
+                return failed(self, from);
+            }
+        };
         let variant = self.variant(e, c);
         let pattern = if optional { format!("Some({variant}(b))") } else { format!("{variant}(b)") };
         if !optional && self.enum_variants(e).len() == 1 {
             return format!("{{ let {pattern} = {place}; {compare} }}");
         }
-        format!("match {place} {{ {pattern} => {compare}, _ => {failed} }}")
+        // Any other object fails the cast to `c` that `compareTo` makes; null fails first.
+        self.need(Need::CastSource(e));
+        let from = format!("{}::cast_class(&b)", self.runtime("CastSource"));
+        let fail = failed(self, from);
+        if optional {
+            let other = format!("{}(b.as_ref())", self.runtime("non_null"));
+            return format!("match {place} {{ {pattern} => {compare}, b => {{ let b = {other}; {fail} }} }}");
+        }
+        format!("match {place} {{ {pattern} => {compare}, b => {fail} }}")
     }
 
     /// `Object`'s `equals` or `hashCode` (method `r`) for a value of class `c` bound to `o`
@@ -2163,6 +2240,54 @@ impl<'a> Gen<'a> {
         });
         self.indent -= 1;
         self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// The methods of the enum of `t` that answer for the object's class, each written once here
+    /// rather than as a `match` over every variant wherever it is used: `Object`'s enum has a
+    /// variant for every class that the program creates, and javac's has thousands.
+    fn class_value_impls(&mut self, t: usize, variants: &[usize]) {
+        let wanted = |need: Need| self.wanted.contains(&need);
+        let methods = [
+            (Need::RuntimeClass(t), "runtime_class", "java::Class"),
+            (Need::RuntimeClassName(t), "runtime_class_name", "&'static str"),
+            (Need::RuntimeTypeNames(t), "runtime_type_names", "&'static [&'static str]"),
+            (Need::IdentityHash(t), "object_identity_hash", "i32"),
+        ];
+        let methods: Vec<_> = methods.into_iter().filter(|&(need, ..)| wanted(need)).collect();
+        let name = struct_name(&self.class.types[t].name);
+        if wanted(Need::CastSource(t)) {
+            self.gap();
+            let (source, class) = (self.runtime("CastSource"), self.runtime("CastClass"));
+            self.line(&format!("impl {source} for {name} {{"));
+            self.indent += 1;
+            self.line(&format!("fn cast_class(&self) -> {class} {{"));
+            self.indent += 1;
+            self.match_arms(t, variants, &|g: &mut Self, c| (g.cast_class(c), false));
+            self.indent -= 1;
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
+        }
+        if methods.is_empty() {
+            return;
+        }
+        self.gap();
+        self.line(&format!("impl {name} {{"));
+        self.indent += 1;
+        for (need, method, ret) in methods {
+            self.line(&format!("pub(crate) fn {method}(&self) -> {ret} {{"));
+            self.indent += 1;
+            self.match_arms(t, variants, &|g: &mut Self, c| match need {
+                Need::RuntimeClass(_) => (g.decl_class(c), false),
+                Need::RuntimeClassName(_) => (rust_string(&g.java_class_name(c, false)), false),
+                Need::RuntimeTypeNames(_) => (g.names_list(c), false),
+                _ => (g.value_hash(c, "o"), true),
+            });
+            self.indent -= 1;
+            self.line("}");
+        }
         self.indent -= 1;
         self.line("}");
     }

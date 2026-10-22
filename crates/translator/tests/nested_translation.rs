@@ -271,7 +271,7 @@ fn for_each_over_an_iterable_is_the_iterator_loop() {
         &[
             "let it = A::iterator(&a);",
             "'outer: while it.borrow().has_next() {",
-            "let s = { let object = &({ let value = it.borrow_mut().next(); value }); java::cast_from(object.as_string(), \"java.lang.String\", || match &object { Object::String(_) => \"java.lang.String\" }) };",
+            "let s = java::cast(&(({ let value = it.borrow_mut().next(); value })), |o| o.as_string(), (\"java.lang.String\", java::BASE));",
             "continue 'outer;",
         ],
     );

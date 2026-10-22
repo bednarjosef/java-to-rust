@@ -130,7 +130,18 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let class_file = lowering.class_file_names(&types);
         let notes = lowering.notes.take();
         let annotation_classes = lowering.annotation_classes.take();
-        let class = Class { name, types, methods, hierarchy, raised, class_file, notes, annotation_classes };
+        let module_labels = Default::default();
+        let class = Class {
+            name,
+            types,
+            methods,
+            hierarchy,
+            raised,
+            class_file,
+            notes,
+            annotation_classes,
+            module_labels,
+        };
         Ok((class, lowering.real.clone(), failed))
     })
 }

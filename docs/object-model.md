@@ -62,9 +62,13 @@ enum, `Rep::Enum`) and `Home` (where a method's body is emitted: a class's `impl
 struct, an enum, a free function, or nowhere for an abstract method).
 
 `codegen/dispatch.rs` writes the enums. Each item of an enum (`base()`, `base_mut()`, a
-dispatcher, a body on the enum, a `to_x()` or `as_x()` conversion, `Display`) is a `Need`, and
-is written only when some code uses it: the generator writes the program again with the items
-asked for until no new one is asked for (two or three passes), so an enum has no dead code.
+dispatcher, a body on the enum, a `to_x()` or `as_x()` conversion, `Display`, and the methods
+that answer for the object's class: `runtime_class()`, `runtime_class_name()`,
+`runtime_type_names()` and `object_identity_hash()`) is a `Need`, and is written only when some
+code uses it: the generator writes the program again with the items asked for until no new one
+is asked for (two or three passes), so an enum has no dead code. A `match` over every variant is
+written once, in such a method, and not at each use: `Object`'s enum has a variant for every
+class whose objects the program creates (javac's has thousands).
 
 Terms:
 
@@ -102,7 +106,9 @@ Naming:
 - A variant is named after its class's simple name (`Shape::Circle`), with the outer classes'
   names when two variants of one enum would share one. Runtime variants are `String`,
   `Integer`, ..., `IntArray`, `StringBuilder` and so on.
-- Accessors are `base()` and `base_mut()`; conversions `to_<type>()` and `as_<type>()`.
+- Accessors are `base()` and `base_mut()`; conversions `to_<type>()` and `as_<type>()`. A Java
+  method whose name would be `base`, `base_mut`, `clone` or one of the class methods above gets
+  a suffix (`base_2`, `clone_2`).
 - An inherited body that a subclass overrides is emitted under `<m>_in_<declaring class>`
   (`to_string_in_shape`, `withdraw_in_account`) so that `super` calls reach it; a method that
   nothing below overrides keeps its own name.
@@ -286,11 +292,15 @@ or its subclass does not initialize the class again (`codegen/statics.rs::init_c
   (`lower/negated_patterns.rs`). A read anywhere else is rejected: "a pattern variable used here
   not supported yet". A pattern variable may be assigned, except one of a record or switch
   pattern.
-- A downcast `(Circle) s` is `java::cast(s.as_circle(), "Circle")`, which returns the value or
-  throws `ClassCastException` (`java::cast_failed`: "cannot be cast to class ..."; the message
-  names only the target class), except a downcast of an enum whose classes are all in `java.base`
-  (strings, boxes, standard classes), which names both classes as HotSpot does (`java::cast_from`,
-  `codegen/class_cast.rs`).
+- A downcast `(Circle) s` is `java::cast(&s, |o| o.as_circle(), ("Circle", java::APP))`, which
+  returns the value or throws `ClassCastException` with HotSpot's message: "class Square cannot
+  be cast to class Circle (Square and Circle are in unnamed module of loader 'app')", or with each
+  class's module of its own when they differ. The object's class comes from the enum's
+  `java::CastSource`, a `match` written once per enum; the target's is written at the cast. A
+  class's module is its package's named module, with the loader the JVM gives it (`bootstrap`,
+  `platform`, or `app`, `program::loader_name`), or the unnamed module of the system class loader;
+  the runtime's own classes (strings, boxes, arrays of primitives) are `java.base`'s, and an array
+  is in its element's module.
   A cast whose operand's class is known and not below the target
   always fails, and is written as that failure. A cast or test to a supertype is the implicit
   upcast.

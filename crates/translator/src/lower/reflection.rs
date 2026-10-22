@@ -148,10 +148,11 @@ impl<'t> Lowering<'t> {
                 lowered.len() == fixed + 1 && matches!(lowered[fixed].ty, Type::Null | Type::Array(_));
             if !direct {
                 let rest: Vec<Expr> = lowered.split_off(fixed);
+                // A `Class[]` may be an `Object[]` (`covariant`), whose elements convert to `Object`.
                 let packed = if rest.is_empty() {
                     ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)])
                 } else {
-                    ExprKind::ArrayLit(rest)
+                    ExprKind::ArrayLit(rest.into_iter().map(|e| self.convert(e, array.element())).collect())
                 };
                 lowered.push(self.synth(packed, pos, array));
             }
@@ -258,7 +259,9 @@ impl<'t> Lowering<'t> {
                     let classes = if providers.is_empty() {
                         ExprKind::NewArray(vec![self.synth(ExprKind::Int(0), pos, Type::Int)])
                     } else {
-                        ExprKind::ArrayLit(providers.into_iter().map(literal).collect())
+                        ExprKind::ArrayLit(
+                            providers.into_iter().map(|p| self.convert(literal(p), ret.element())).collect(),
+                        )
                     };
                     let body = vec![Stmt::Yield(self.synth(classes, pos, ret))];
                     cases.push(Case { labels: vec![CaseLabel::Value(label)], body });
@@ -494,7 +497,8 @@ impl<'t> Lowering<'t> {
             let kind = if types.is_empty() {
                 ExprKind::NewArray(vec![int(0)])
             } else {
-                ExprKind::ArrayLit(types.into_iter().map(literal).collect())
+                let element = params[at].element();
+                ExprKind::ArrayLit(types.into_iter().map(|t| self.convert(literal(t), element)).collect())
             };
             self.synth(kind, pos, params[at])
         };
