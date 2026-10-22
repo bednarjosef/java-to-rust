@@ -446,6 +446,11 @@ impl<'t> Lowering<'t> {
             args.insert(0, receiver);
             return self.as_char_sequence(node, Builtin::Builder(op), args);
         }
+        // A range of a program class that implements `CharSequence` is a range of that interface.
+        if op == BuilderOp::Append && args.len() == 3 && matches!(args[0].ty, Type::Class(..)) {
+            let first = args.remove(0);
+            args.insert(0, self.convert(first, Type::class(CHAR_SEQUENCE)));
+        }
         let shown = match op {
             BuilderOp::Append if args.len() == 1 => Some(0),
             BuilderOp::Insert if args.len() == 2 => Some(1),
