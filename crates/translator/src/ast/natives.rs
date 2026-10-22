@@ -206,6 +206,19 @@ pub enum Native {
     CopyMemory {
         swap: bool,
     },
+    /// `Unsafe.allocateMemory0(bytes)`: a block of memory outside the heap, by its address
+    /// (`java::allocate_native`, see the runtime's `native_memory`).
+    AllocateNative,
+    /// The system's page size, `UnsafeConstants.PAGE_SIZE` of the translator's
+    /// (`java/patches/jdk/internal/misc/UnsafeConstants.java`).
+    PageSize,
+    /// `Unsafe.reallocateMemory0(address, bytes)`.
+    ReallocateNative,
+    /// `Unsafe.freeMemory0(address)`.
+    FreeNative,
+    /// `Unsafe.setMemory0(base, offset, bytes, value)`: in an array of primitives held as an
+    /// `Object`, or with a null base at an address outside the heap.
+    SetMemory,
     /// `CRC32.update(crc, b)`.
     Crc32Update,
     /// `CRC32.updateBytes0(crc, b, off, len)`.
@@ -281,6 +294,13 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
             "copySwapMemory0",
             "(java.lang.Object,long,java.lang.Object,long,long,long)void",
         ) => Native::CopyMemory { swap: true },
+        ("jdk.internal.misc.Unsafe", "allocateMemory0", "(long)long") => Native::AllocateNative,
+        ("jdk.internal.misc.UnsafeConstants", "pageSize0", "()int") => Native::PageSize,
+        ("jdk.internal.misc.Unsafe", "reallocateMemory0", "(long,long)long") => Native::ReallocateNative,
+        ("jdk.internal.misc.Unsafe", "freeMemory0", "(long)void") => Native::FreeNative,
+        ("jdk.internal.misc.Unsafe", "setMemory0", "(java.lang.Object,long,long,byte)void") => {
+            Native::SetMemory
+        }
         ("java.util.zip.CRC32", "update", "(int,int)int") => Native::Crc32Update,
         ("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int") => Native::Crc32UpdateBytes,
         ("java.util.zip.Inflater", "init", "(boolean)long") => Native::InflateInit,

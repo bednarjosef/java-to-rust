@@ -59,7 +59,7 @@ pub fn tree(source: &str) -> Result<Value, Error> {
         return Err(
             match (line.and_then(|l| l.parse().ok()), column.and_then(|c| c.parse().ok()), message) {
                 (Some(line), Some(column), Some(message)) => {
-                    Error { pos: Pos { line, column }, message: message.trim().to_string() }
+                    Error { pos: Pos::new(line, column), message: message.trim().to_string() }
                 }
                 _ => fail(stderr.trim().to_string()),
             },
@@ -153,7 +153,7 @@ fn compile_error(stderr: &[u8]) -> (Option<String>, Error) {
             // The lines of the same message, indented, below its first.
             let details = lines.take_while(|l| l.starts_with(char::is_whitespace));
             let message = missing_module(message, details).unwrap_or_else(|| message.trim().to_string());
-            return (Some(file.to_string()), Error { pos: Pos { line, column }, message });
+            return (Some(file.to_string()), Error { pos: Pos::new(line, column), message });
         }
     }
     fail(stderr.trim().to_string())
@@ -192,15 +192,22 @@ pub struct Session {
 
 impl Session {
     /// Starts javac on the program's files, with `sourcepath`, `module_info` and `patches` as in
-    /// `program_tree`, and returns their units, in the order given. A compile
-    /// error is returned with the file it is in.
+    /// `program_tree`, and returns their units, in the order given. A compile error is returned
+    /// with the file it is in; with `keep_going` (for a census), javac goes on past compile errors
+    /// instead, which it prints to standard error, and marks the piece of code that each is in
+    /// with `"javacError"` (see `JavaTree.markErrors`).
     pub fn start(
         files: &[PathBuf],
         sourcepath: &[PathBuf],
         module_info: Option<&Path>,
         patches: Option<&Path>,
+        keep_going: bool,
     ) -> Result<(Session, Vec<Value>), (Option<String>, Error)> {
-        let mut child = program_command(files, sourcepath, module_info, patches)?
+        let mut command = program_command(files, sourcepath, module_info, patches)?;
+        if keep_going {
+            command.arg("--keep-going");
+        }
+        let mut child = command
             .arg("--serve")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -210,10 +217,17 @@ impl Session {
         crate::timings::javac_process(Some(child.id()));
         let input = child.stdin.take();
         let output = BufReader::new(child.stdout.take().expect("stdout is piped"));
-        let mut stderr = child.stderr.take().expect("stderr is piped");
+        let mut stderr = BufReader::new(child.stderr.take().expect("stderr is piped"));
         let errors = std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
+            let mut line = Vec::new();
+            while stderr.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
+                // The errors that javac goes on past are passed on as they come.
+                if keep_going {
+                    let _ = std::io::stderr().write_all(&line);
+                }
+                bytes.append(&mut line);
+            }
             bytes
         });
         let mut session =

@@ -119,7 +119,8 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let hierarchy = Hierarchy::new(&types, &methods);
         let raised = lowering.raised_objects(&types, &methods);
         let name = first.str("simpleName").to_string();
-        let class = Class { name, types, methods, hierarchy, raised };
+        let class_file = lowering.class_file_names(&types);
+        let class = Class { name, types, methods, hierarchy, raised, class_file };
         Ok((class, lowering.real.clone(), failed))
     })
 }
@@ -151,7 +152,7 @@ impl<'t> Node<'t> {
 
     fn pos(self) -> Pos {
         let at = |f: &str| self.0[f].as_u64().unwrap_or(0) as usize;
-        Pos { line: at("line"), column: at("column") }
+        Pos::new(at("line"), at("column"))
     }
 
     fn get(self, field: &str) -> Option<Node<'t>> {
@@ -327,6 +328,10 @@ struct Lowering<'t> {
     /// The array types whose arrays become `Object`s or are cast back from them: each is a
     /// runtime class beside `Object` (see `object::object_types`).
     object_arrays: std::cell::RefCell<Vec<Type>>,
+    /// The class that names each static field read, and the methods of `String` that calls name
+    /// (see `Class::class_file`).
+    static_qualifiers: RefCell<std::collections::HashMap<(String, Pos, String), Option<String>>>,
+    calls: RefCell<std::collections::HashMap<(String, Pos, String), Option<CallName>>>,
     /// The atomic updates of fields through `Unsafe` that the code makes, each a method that
     /// lowering adds to the field's class (see `handles`).
     field_updates: RefCell<Vec<handles::FieldUpdateMethod>>,
@@ -622,6 +627,7 @@ impl<'t> Lowering<'t> {
     }
 
     fn block(&self, node: Node<'t>) -> Result<Vec<Stmt>, Error> {
+        self.javac_error(node)?;
         let mut out = Vec::new();
         // The `if`s that test a property that is never set run only their `else` branch.
         let unset = crate::program::unset_property_ifs(node.0);
@@ -740,6 +746,7 @@ impl<'t> Lowering<'t> {
     }
 
     fn expr(&self, node: Node<'t>) -> Result<Expr, Error> {
+        self.javac_error(node)?;
         if let Some(code) = self.reference_native(node)? {
             return Ok(code);
         }
@@ -1028,6 +1035,7 @@ impl<'t> Lowering<'t> {
     fn call(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let select = node.child("methodSelect")?;
         let Some(symbol) = node.symbol() else { return unsupported(node, "this call") };
+        self.note_call(node, &symbol, select);
         if let Some(kind) = self.handle_access(node, &symbol)? {
             return Ok(kind);
         }

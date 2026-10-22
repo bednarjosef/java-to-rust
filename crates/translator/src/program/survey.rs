@@ -767,8 +767,7 @@ fn span(node: &Value) -> (Pos, Pos) {
         match node {
             Value::Object(fields) => {
                 if let Some(line) = node["line"].as_u64() {
-                    let pos =
-                        Pos { line: line as usize, column: node["column"].as_u64().unwrap_or(0) as usize };
+                    let pos = Pos::new(line as usize, node["column"].as_u64().unwrap_or(0) as usize);
                     let key = |p: Pos| (p.line, p.column);
                     if key(pos) < key(span.0) {
                         span.0 = pos;
@@ -787,7 +786,7 @@ fn span(node: &Value) -> (Pos, Pos) {
             _ => {}
         }
     }
-    let mut span = (Pos { line: usize::MAX, column: usize::MAX }, Pos::default());
+    let mut span = (Pos::new(usize::MAX, usize::MAX), Pos::default());
     visit(node, &mut span);
     span
 }

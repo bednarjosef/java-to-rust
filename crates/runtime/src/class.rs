@@ -119,6 +119,21 @@ impl Class {
         Some(std::iter::once(first).chain(nested).collect::<Vec<_>>().join("."))
     }
 
+    /// `descriptorString()`: the class's type descriptor, `I`, `[I` or `Ljava/lang/String;`.
+    pub fn descriptor_string(&self) -> String {
+        if self.kind == Kind::Primitive {
+            return match self.name {
+                "boolean" => "Z".to_string(),
+                "long" => "J".to_string(),
+                name => name[..1].to_uppercase(),
+            };
+        }
+        if self.component.is_some() {
+            return self.name.replace('.', "/");
+        }
+        format!("L{};", self.name.replace('.', "/"))
+    }
+
     /// `getPackageName()`: the package of the class, of an array's element class, `java.lang`
     /// for a primitive type and `""` for the unnamed package.
     pub fn get_package_name(&self) -> String {
@@ -254,5 +269,10 @@ mod tests {
         assert_eq!(in_local.get_package_name(), "");
         assert_eq!(Class::INT.get_package_name(), "java.lang");
         assert_eq!(Class::STRING.get_package_name(), "java.lang");
+        assert_eq!(inner.descriptor_string(), "La/b/Outer$Inner;");
+        assert_eq!(inners.descriptor_string(), "[La/b/Outer$Inner;");
+        assert_eq!(Class::INT.descriptor_string(), "I");
+        assert_eq!(Class::BOOLEAN_PRIMITIVE.descriptor_string(), "Z");
+        assert_eq!(Class::LONG_PRIMITIVE.descriptor_string(), "J");
     }
 }

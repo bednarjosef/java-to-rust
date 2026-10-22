@@ -156,8 +156,10 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `java/nio/file/TempFileHelper.java` | names from `java.util.Random` instead of `SecureRandom` |
 | `java/util/PropertyResourceBundle.java` | reads a stream through `TranslatedPropertyFiles` |
 | `java/util/ServiceLoader.java` | the providers the translator read from the sources |
+| `jdk/internal/foreign/Utils.java` | no method handles of address layouts; `makeRawSegmentViewVarHandle` throws |
 | `jdk/internal/jimage/BasicImageReader.java` | reads the image's index and resources into arrays instead of mapping the file |
 | `jdk/internal/jrtfs/JrtFileAttributes.java`, `JrtFileSystem.java`, `SystemImage.java` | the `jrt:` file system without `%tc`, `CodeSource` and exploded images |
+| `jdk/internal/misc/UnsafeConstants.java` | the values the JVM injects: 8-byte little-endian addresses, unaligned access, 64-byte cache lines, the system's page size |
 | `jdk/internal/misc/CarrierThreadLocal.java`, `TerminatingThreadLocal.java` | thread-locals without the JVM's carrier threads and identity maps |
 | `jdk/internal/util/ByteArray.java` | shifts bytes instead of using array views |
 | `jdk/internal/util/Exceptions.java` | `%s` formatting of its own, and no wait for `VM.isBooted` |

@@ -265,6 +265,28 @@ impl<'t> Lowering<'t> {
         self.synth(kind, pos, ty)
     }
 
+    /// Declares the lambdas and method references in the methods of the constants' bodies of enum
+    /// `class` as those of the enum's method that each overrides, whose code it becomes
+    /// (`constant_bodies`): `this` in them is the constant, and the override's parameters are
+    /// locals of that method.
+    pub(super) fn declare_body_lambdas(&mut self, class: usize) -> Result<(), Error> {
+        let constants: Vec<Node<'t>> =
+            self.types[class].node.list("members").filter(|m| is_enum_constant(*m)).collect();
+        for constant in constants {
+            let Some(body) = constant.get("initializer").and_then(|i| i.get("classBody")) else { continue };
+            for member in body.list("members").filter(|m| m.kind() == "METHOD" && m.str("name") != "<init>") {
+                let (name, sig) = (member.str("name"), member.symbol().map_or("", |s| s.ty));
+                // One that overrides none of the enum's methods is rejected by `constant_bodies`.
+                let base =
+                    self.methods.iter().position(|m| m.owner == class && m.name == name && m.sig == sig);
+                if let Some(base) = base {
+                    self.declare_lambdas(member, class, Some(base))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Moves the methods of the constants' bodies of enum `class` into the enum's methods, as arms
     /// of a switch on `this`.
     pub(super) fn constant_bodies(&self, class: usize, methods: &mut [Method]) -> Result<(), Error> {

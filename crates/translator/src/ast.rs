@@ -1,7 +1,7 @@
 //! The Java syntax tree the translator works on: a typed subset of Java, lowered from javac's
 //! attributed tree (`lower.rs`), so every expression has its Java type and calls are resolved.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{LazyLock, Mutex};
 
@@ -237,10 +237,43 @@ impl fmt::Display for Type {
 }
 
 /// A position in the Java source, 1-based, for error messages.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+///
+/// `unit` is the source file it is in, as the index of javac's unit, where it is known: the
+/// program stamps it on the code of each class once lowering is done (`program::stamp_units`), so
+/// that an error an analysis or the generator reports at an expression names its file, where a
+/// line and column alone may be those of code in another file. Positions compare by line and
+/// column alone, as those that javac's class files give (`javac::bytecode_names`) have no unit.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Pos {
     pub line: usize,
     pub column: usize,
+    pub unit: Option<u32>,
+}
+
+impl Pos {
+    pub fn new(line: usize, column: usize) -> Pos {
+        Pos { line, column, unit: None }
+    }
+
+    /// Whether `self` and `other` are the same place: the same line and column, in the same unit
+    /// where both know theirs.
+    pub fn same_place(self, other: Pos) -> bool {
+        self == other && (self.unit.is_none() || other.unit.is_none() || self.unit == other.unit)
+    }
+}
+
+impl PartialEq for Pos {
+    fn eq(&self, other: &Pos) -> bool {
+        (self.line, self.column) == (other.line, other.column)
+    }
+}
+
+impl Eq for Pos {}
+
+impl std::hash::Hash for Pos {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.line, self.column).hash(state);
+    }
 }
 
 /// The translated file: its classes, and every method and constructor of all of them in one list,
@@ -256,6 +289,38 @@ pub struct Class {
     /// the program could catch them, `message` a `String` variable: how a failure of the runtime
     /// becomes the program's exception (see `lower/exceptions.rs`).
     pub raised: Vec<Expr>,
+    /// What the class files name that lowering knows from javac's tree.
+    pub class_file: ClassFileNames,
+}
+
+/// What the class files that javac writes name, where lowering knows it from javac's tree: the
+/// JDK's code, which `javac::BytecodeNames` does not compile, needs it for the messages of its
+/// `NullPointerException`s (`analysis::npe_messages`).
+#[derive(Default)]
+pub struct ClassFileNames {
+    /// The class that names each static field read, by the class whose code reads it, the
+    /// position and the field's name: javac names a field `C.f` by `C`, which may be a subclass
+    /// of the field's own class. `None` where two reads there differ.
+    pub static_qualifiers: HashMap<(String, Pos, String), Option<String>>,
+    /// The field that holds the enclosing instance of an inner, local or anonymous class, by the
+    /// class's name: `this$0`, or `this$1` in a class whose enclosing class is itself an inner
+    /// class, and so on.
+    pub outer_fields: HashMap<String, String>,
+    /// The method that each call names, by the class whose code calls it, the call's
+    /// position and the method's name. `None` where two calls there differ, or where the class
+    /// is not certain.
+    pub calls: HashMap<(String, Pos, String), Option<CallName>>,
+}
+
+/// A method as a call in a class file names it, in javac's names: the class that javac names it
+/// by (the class the call names, the erasure of the receiver's static type, or
+/// `java.lang.Object` for an instance method of `Object`), its name, and the erasures of its
+/// parameters' types (`int`, `java.lang.String`, `java.util.Map.Entry[]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallName {
+    pub class: String,
+    pub name: String,
+    pub params: Vec<String>,
 }
 
 /// What kind of type a declaration is.
@@ -902,6 +967,8 @@ pub enum ClassOp {
     /// `getCanonicalName()`, `null` for a local or anonymous class.
     GetCanonicalName,
     GetPackageName,
+    /// `descriptorString()`: `I`, `[I`, `Ljava/lang/String;`.
+    DescriptorString,
     /// `isAnnotation()`: false, as a translation has no class values of annotation types (their
     /// class literals are rejected, and no object's class is one).
     IsAnnotation,

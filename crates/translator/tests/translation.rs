@@ -3100,6 +3100,52 @@ fn the_census_reports_every_rejection_not_only_the_first() {
 }
 
 #[test]
+fn a_census_that_keeps_going_rejects_the_code_that_javac_reports_errors_in() {
+    let dir = write_sources(
+        "census_keep_going",
+        &[
+            (
+                "p/Main.java",
+                "package p;\npublic class Main {\n    static int count = Gone.value;\n    public static void main(String[] a) {\n        System.out.println(Other.fine() + count);\n        Other.bad();\n        Runnable r = () -> System.out.println(Other.fine());\n        r.run();\n        new Broken().run();\n    }\n}\n",
+            ),
+            (
+                "p/Other.java",
+                "package p;\nclass Other {\n    @Missing\n    static int fine() { return 4; }\n    static void bad() { System.out.println(missing()); }\n}\n",
+            ),
+            (
+                "p/Broken.java",
+                "package p;\nclass Broken extends Unknown {\n    void run() { System.out.println(1); }\n}\n",
+            ),
+        ],
+    );
+    let mut program =
+        java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    // Without it, the first compile error stops the census.
+    let error = java_to_rust::census_program(&program).err().expect("the sources have compile errors");
+    assert!(error.to_string().contains("cannot find symbol"), "{error}");
+    program.keep_going = true;
+    let census = census(&program);
+    // The method, the field's initializer and the class that have the errors are rejected; the
+    // rest translates, `fine` too, whose annotation is missing: annotations are left out.
+    assert_contains(
+        &census.report,
+        &[
+            "javac reports a compile error (compiler.err.cant.resolve.location)",
+            "at p/Main.java:3:",
+            "at p/Other.java:5:",
+            "at p/Broken.java:2:",
+        ],
+    );
+    let pieces = census.json["pieces"].as_array().expect("pieces");
+    let errors = |name: &str| {
+        let piece =
+            pieces.iter().find(|p| p["name"] == name).unwrap_or_else(|| panic!("no {name} in {pieces:?}"));
+        piece["errors"].as_array().expect("errors").len()
+    };
+    assert_eq!((errors("fine"), errors("main"), errors("bad")), (0, 0, 1));
+}
+
+#[test]
 fn the_census_rejects_a_class_whose_declaration_is_rejected_with_its_code_and_goes_on() {
     let dir = write_sources(
         "census_class",
@@ -5233,4 +5279,44 @@ fn a_class_that_is_a_char_sequence_through_an_interface_gets_the_default_get_cha
         }",
     );
     assert_contains(&rust, &["java::check_from_to_index(", "java::check_index("]);
+}
+
+/// Two files with code at the same line and column, of which the analyses reject one: the error
+/// names its own file, and the census rejects that file's method alone.
+#[test]
+fn an_analysis_error_names_its_file_where_another_file_has_code_at_its_position() {
+    let class = |name: &str, pattern: &str| {
+        format!(
+            "package p;\nclass {name} {{\n    static void split(String[] a) {{\n        try {{ System.out.println(\"a,b\".split({pattern}).length); }}\n        catch (RuntimeException e) {{ System.out.println(\"bad pattern\"); }}\n    }}\n}}\n"
+        )
+    };
+    let dir = write_sources(
+        "census_same_place",
+        &[
+            (
+                "p/Main.java",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        Fine.split(a);\n        Rank.split(a);\n    }\n}\n",
+            ),
+            // The same text but for the pattern, a constant that compiles, which cannot throw.
+            ("p/Fine.java", &class("Fine", "\"[,]\"")),
+            ("p/Rank.java", &class("Rank", "a[0]")),
+        ],
+    );
+    let program = java_to_rust::Program { main: "p.Main".into(), sources: vec![dir], ..Default::default() };
+    let error = java_to_rust::translate_program(&program).expect_err("a dynamic pattern's failure is caught");
+    assert!(error.to_string().contains("p/Rank.java:4:"), "{error}");
+    let census = census(&program);
+    assert_contains(
+        &census.report,
+        &["  Program: 3 pieces; 2 (66.7%) translate, 1 rejected.", "at p/Rank.java:4:"],
+    );
+    let pieces = census.json["pieces"].as_array().expect("pieces");
+    let errors = |class: &str| {
+        let piece = pieces
+            .iter()
+            .find(|p| p["class"] == class && p["name"] == "split")
+            .unwrap_or_else(|| panic!("no {class}.split in {pieces:?}"));
+        piece["errors"].as_array().expect("errors").len()
+    };
+    assert_eq!((errors("p.Fine"), errors("p.Rank")), (0, 1));
 }

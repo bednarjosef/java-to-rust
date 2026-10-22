@@ -182,7 +182,7 @@ impl Walk<'_> {
     }
 
     /// Method `m` is walked again, on every object that it was walked on.
-    fn rescan(&self, m: usize) {
+    pub(super) fn rescan(&self, m: usize) {
         let mut state = self.state.borrow_mut();
         let contexts = state.contexts.get(&m).cloned().unwrap_or_default();
         for ctx in contexts {
