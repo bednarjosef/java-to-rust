@@ -484,7 +484,8 @@ parameter that holds the builder sees it change, `reverse` keeps surrogate pairs
 chain is Rust's chain (`sb.append_str("a").append(1)`), the handle cloned only where the builder
 is used as a value. A builder held as an `Object` (from a `Supplier<StringBuilder>`, in a
 collection) is the same handle in `Object`'s `StringBuilder` variant: `==`, `equals` and
-`hashCode` are its identity's, and it prints as its text.
+`hashCode` are its identity's, and it prints as its text. In a program with threads it is a
+`java::SharedStringBuilder`, the same handle around a lock, so that threads may share it.
 
 `split`, `replaceAll`, `replaceFirst` and `matches` run a small backtracking regular expression
 engine with a literal fast path: literals and escapes, `.`, `\d \s \w` and their negations, the
@@ -1027,8 +1028,8 @@ Each construct below is rejected at translation with an error that names it:
 - the `java.util` collections and interfaces (`Map`, `List`, `HashMap`, `ArrayList`), `asList`
   and streams;
 - of threads: `wait(millis, nanos)`, thread groups beyond their name, parent and handler,
-  `ThreadLocal` and the `java.util.concurrent` classes; a `StringBuilder`, or a box compared by
-  identity, that threads may share; `synchronized` on a string, a box, an array, an enum
+  `ThreadLocal` and the `java.util.concurrent` classes; a box compared by identity that
+  threads may share; `synchronized` on a string, a box, an array, an enum
   constant or a `Class` other than a class literal, where the monitor would be kept.
 
 Also rejected: `Scanner` (it reaches `java.util.regex`, which needs

@@ -1699,7 +1699,8 @@ impl<'a> Gen<'a> {
         }
         for &c in variants {
             let payload = self.payload(c);
-            if !(payload.starts_with("Rc<") || payload.starts_with("Arc<java::Locked<")) {
+            let builder = matches!(payload.as_str(), "java::StringBuilder" | "java::SharedStringBuilder");
+            if !(payload.starts_with("Rc<") || payload.starts_with("Arc<java::Locked<") || builder) {
                 return;
             }
         }

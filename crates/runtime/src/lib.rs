@@ -64,7 +64,7 @@ mod vm;
 pub use allocator::{Allocator, release_thread_cache};
 pub use arguments::main_args;
 pub use boxed::*;
-pub use builder::{StringBuilder, same_builder};
+pub use builder::{Builder, BuilderCell, SharedStringBuilder, StringBuilder, same_builder};
 pub use catching::catching;
 pub use ceil_div::*;
 pub use chains::{Chain, Link, Unlink, drop_links};

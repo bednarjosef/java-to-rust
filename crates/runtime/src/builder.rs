@@ -7,15 +7,84 @@
 //! Each method borrows the cell only while it runs, so its arguments may read the builder
 //! (`sb.append(sb.length())`), and the methods return the builder for chaining
 //! (`sb.append(a).append(b)`).
+//!
+//! The cell is an `Rc<RefCell<..>>` in a program without threads (`StringBuilder`), and an
+//! `Arc<java::Locked<..>>` in one with threads (`SharedStringBuilder`), whose builders several
+//! threads may reach, as its arrays are `java::SharedArray`s. Both have the same methods.
 
+use crate::Locked;
 use crate::string::from_units;
 use crate::throw;
 use std::cell::RefCell;
 use std::fmt::{self, Write};
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
+use std::sync::Arc;
 
-#[derive(Clone, Default)]
-pub struct StringBuilder(Rc<RefCell<Vec<u16>>>);
+/// The shared cell of a builder's code units.
+pub trait BuilderCell: Clone {
+    type Units<'a>: Deref<Target = Vec<u16>>
+    where
+        Self: 'a;
+    type UnitsMut<'a>: DerefMut<Target = Vec<u16>>
+    where
+        Self: 'a;
+    fn new(units: Vec<u16>) -> Self;
+    fn units(&self) -> Self::Units<'_>;
+    fn units_mut(&self) -> Self::UnitsMut<'_>;
+    /// The cell's address, the builder's identity.
+    fn address(&self) -> *const u8;
+}
+
+impl BuilderCell for Rc<RefCell<Vec<u16>>> {
+    type Units<'a> = std::cell::Ref<'a, Vec<u16>>;
+    type UnitsMut<'a> = std::cell::RefMut<'a, Vec<u16>>;
+    fn new(units: Vec<u16>) -> Self {
+        Rc::new(RefCell::new(units))
+    }
+    fn units(&self) -> Self::Units<'_> {
+        self.borrow()
+    }
+    fn units_mut(&self) -> Self::UnitsMut<'_> {
+        self.borrow_mut()
+    }
+    fn address(&self) -> *const u8 {
+        Rc::as_ptr(self) as *const u8
+    }
+}
+
+impl BuilderCell for Arc<Locked<Vec<u16>>> {
+    type Units<'a> = crate::Ref<'a, Vec<u16>>;
+    type UnitsMut<'a> = crate::RefMut<'a, Vec<u16>>;
+    fn new(units: Vec<u16>) -> Self {
+        Arc::new(Locked::new(units))
+    }
+    fn units(&self) -> Self::Units<'_> {
+        self.borrow()
+    }
+    fn units_mut(&self) -> Self::UnitsMut<'_> {
+        self.borrow_mut()
+    }
+    fn address(&self) -> *const u8 {
+        Arc::as_ptr(self) as *const u8
+    }
+}
+
+/// A builder whose code units are in the cell `C`.
+#[derive(Clone)]
+pub struct Builder<C>(C);
+
+/// The builder of a program without threads.
+pub type StringBuilder = Builder<Rc<RefCell<Vec<u16>>>>;
+
+/// The builder of a program with threads.
+pub type SharedStringBuilder = Builder<Arc<Locked<Vec<u16>>>>;
+
+impl<C: BuilderCell> Default for Builder<C> {
+    fn default() -> Self {
+        Builder(C::new(Vec::new()))
+    }
+}
 
 /// The UTF-16 units of a code point, which must be valid, as `Character.toChars` makes them.
 fn code_point_units(cp: i32) -> Vec<u16> {
@@ -55,61 +124,61 @@ fn out_of_bounds(message: String) -> ! {
     throw("java.lang.StringIndexOutOfBoundsException", &message)
 }
 
-impl StringBuilder {
+impl<C: BuilderCell> Builder<C> {
     /// `new StringBuilder()`.
-    pub fn new() -> StringBuilder {
-        StringBuilder::default()
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// `new StringBuilder(capacity)`.
-    pub fn with_capacity(capacity: i32) -> StringBuilder {
+    pub fn with_capacity(capacity: i32) -> Self {
         if capacity < 0 {
             throw("java.lang.NegativeArraySizeException", &capacity.to_string());
         }
-        StringBuilder(Rc::new(RefCell::new(Vec::with_capacity(capacity as usize))))
+        Builder(C::new(Vec::with_capacity(capacity as usize)))
     }
 
     /// `new StringBuilder(s)`.
-    pub fn from_text(s: &str) -> StringBuilder {
-        let b = StringBuilder::new();
+    pub fn from_text(s: &str) -> Self {
+        let b = Self::new();
         b.append_str(s);
         b
     }
 
     /// `a == b`: whether two handles name the same builder.
-    pub fn same(&self, other: &StringBuilder) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
+    pub fn same(&self, other: &Self) -> bool {
+        self.0.address() == other.0.address()
     }
 
     /// `sb.append(s)` of a string.
     pub fn append_str(&self, s: &str) -> &Self {
-        let _ = Units(&mut self.0.borrow_mut()).write_str(s);
+        let _ = Units(&mut self.0.units_mut()).write_str(s);
         self
     }
 
     /// `sb.append(x)` of a value whose `Display` is Java's text for it, such as an `int` or a
     /// `java::Double`. It must not read this builder, which is borrowed meanwhile.
     pub fn append<T: fmt::Display>(&self, value: T) -> &Self {
-        let _ = write!(Units(&mut self.0.borrow_mut()), "{value}");
+        let _ = write!(Units(&mut self.0.units_mut()), "{value}");
         self
     }
 
     /// `sb.append(c)` of a `char`.
     pub fn append_char(&self, c: u16) -> &Self {
-        self.0.borrow_mut().push(c);
+        self.0.units_mut().push(c);
         self
     }
 
     /// `sb.append(other)` of a builder, which may be this one.
-    pub fn append_builder(&self, other: &StringBuilder) -> &Self {
-        let copy = other.0.borrow().clone();
-        self.0.borrow_mut().extend_from_slice(&copy);
+    pub fn append_builder(&self, other: &Self) -> &Self {
+        let copy = other.0.units().clone();
+        self.0.units_mut().extend_from_slice(&copy);
         self
     }
 
     /// `sb.append(chars)` of a `char[]`.
     pub fn append_chars(&self, chars: &[u16]) -> &Self {
-        self.0.borrow_mut().extend_from_slice(chars);
+        self.0.units_mut().extend_from_slice(chars);
         self
     }
 
@@ -180,7 +249,7 @@ impl StringBuilder {
     }
 
     fn insert_units(&self, offset: i32, units: &[u16]) -> &Self {
-        let mut value = self.0.borrow_mut();
+        let mut value = self.0.units_mut();
         self.check_offset(offset, value.len());
         let at = offset as usize;
         value.splice(at..at, units.iter().copied());
@@ -211,15 +280,15 @@ impl StringBuilder {
     }
 
     /// `sb.insert(offset, other)` of a builder, which may be this one.
-    pub fn insert_builder(&self, offset: i32, other: &StringBuilder) -> &Self {
-        let copy = other.0.borrow().clone();
+    pub fn insert_builder(&self, offset: i32, other: &Self) -> &Self {
+        let copy = other.0.units().clone();
         self.insert_units(offset, &copy)
     }
 
     /// `sb.reverse()`: the code units in reverse order, except that each surrogate pair stays a
     /// pair.
     pub fn reverse(&self) -> &Self {
-        let mut value = self.0.borrow_mut();
+        let mut value = self.0.units_mut();
         value.reverse();
         let mut i = 0;
         while i + 1 < value.len() {
@@ -241,20 +310,20 @@ impl StringBuilder {
 
     /// `sb.charAt(index)`.
     pub fn char_at(&self, index: i32) -> u16 {
-        let value = self.0.borrow();
+        let value = self.0.units();
         value[Self::check_index(index, value.len())]
     }
 
     /// `sb.setCharAt(index, c)`.
     pub fn set_char_at(&self, index: i32, c: u16) {
-        let mut value = self.0.borrow_mut();
+        let mut value = self.0.units_mut();
         let i = Self::check_index(index, value.len());
         value[i] = c;
     }
 
     /// `sb.deleteCharAt(index)`.
     pub fn delete_char_at(&self, index: i32) -> &Self {
-        let mut value = self.0.borrow_mut();
+        let mut value = self.0.units_mut();
         let i = Self::check_index(index, value.len());
         value.remove(i);
         drop(value);
@@ -272,7 +341,7 @@ impl StringBuilder {
 
     /// `sb.delete(start, end)`.
     pub fn delete(&self, start: i32, end: i32) -> &Self {
-        let mut value = self.0.borrow_mut();
+        let mut value = self.0.units_mut();
         let (start, end) = Self::range(start, end, value.len());
         value.drain(start..end);
         drop(value);
@@ -281,7 +350,7 @@ impl StringBuilder {
 
     /// `sb.replace(start, end, s)`.
     pub fn replace(&self, start: i32, end: i32, s: &str) -> &Self {
-        let mut value = self.0.borrow_mut();
+        let mut value = self.0.units_mut();
         let (start, end) = Self::range(start, end, value.len());
         value.splice(start..end, s.encode_utf16());
         drop(value);
@@ -290,12 +359,12 @@ impl StringBuilder {
 
     /// `sb.length()`.
     pub fn length(&self) -> i32 {
-        self.0.borrow().len() as i32
+        self.0.units().len() as i32
     }
 
     /// `sb.isEmpty()`.
     pub fn is_empty(&self) -> bool {
-        self.0.borrow().is_empty()
+        self.0.units().is_empty()
     }
 
     /// `sb.setLength(len)`: cut, or padded with `'\0'`.
@@ -303,20 +372,20 @@ impl StringBuilder {
         if len < 0 {
             out_of_bounds(format!("String index out of range: {len}"));
         }
-        self.0.borrow_mut().resize(len as usize, 0);
+        self.0.units_mut().resize(len as usize, 0);
     }
 
     /// `sb.ensureCapacity(minimumCapacity)`: room for that many characters; a capacity that is
     /// not positive asks for nothing.
     pub fn ensure_capacity(&self, minimum: i32) {
-        let mut value = self.0.borrow_mut();
+        let mut value = self.0.units_mut();
         let more = usize::try_from(minimum).unwrap_or(0).saturating_sub(value.len());
         value.reserve(more);
     }
 
     /// `sb.indexOf(s, from)`.
     pub fn index_of(&self, s: &str, from: i32) -> i32 {
-        let value = self.0.borrow();
+        let value = self.0.units();
         let target: Vec<u16> = s.encode_utf16().collect();
         let from = from.clamp(0, value.len() as i32) as usize;
         if target.len() > value.len() - from {
@@ -329,7 +398,7 @@ impl StringBuilder {
 
     /// `sb.lastIndexOf(s, from)`.
     pub fn last_index_of(&self, s: &str, from: i32) -> i32 {
-        let value = self.0.borrow();
+        let value = self.0.units();
         let target: Vec<u16> = s.encode_utf16().collect();
         let from = (from as i64).min(value.len() as i64 - target.len() as i64);
         if from < 0 {
@@ -340,7 +409,7 @@ impl StringBuilder {
 
     /// `sb.substring(start, end)`.
     pub fn substring(&self, start: i32, end: i32) -> String {
-        let value = self.0.borrow();
+        let value = self.0.units();
         if start < 0 || start > end || end as usize > value.len() {
             out_of_bounds(format!("Range [{start}, {end}) out of bounds for length {}", value.len()));
         }
@@ -363,7 +432,7 @@ impl StringBuilder {
     pub fn repeat_code_point(&self, cp: i32, count: i32) -> &Self {
         if check_count(count) {
             let units = code_point_units(cp);
-            self.0.borrow_mut().extend(units.iter().cycle().take(units.len() * count as usize));
+            self.0.units_mut().extend(units.iter().cycle().take(units.len() * count as usize));
         }
         self
     }
@@ -372,44 +441,44 @@ impl StringBuilder {
     pub fn repeat_str(&self, s: &str, count: i32) -> &Self {
         if check_count(count) {
             let units: Vec<u16> = s.encode_utf16().collect();
-            self.0.borrow_mut().extend(units.iter().cycle().take(units.len() * count as usize));
+            self.0.units_mut().extend(units.iter().cycle().take(units.len() * count as usize));
         }
         self
     }
 
     /// `sb.repeat(other, count)` of a builder, which may be this one.
-    pub fn repeat_builder(&self, other: &StringBuilder, count: i32) -> &Self {
+    pub fn repeat_builder(&self, other: &Self, count: i32) -> &Self {
         if check_count(count) {
-            let copy = other.0.borrow().clone();
-            self.0.borrow_mut().extend(copy.iter().cycle().take(copy.len() * count as usize));
+            let copy = other.0.units().clone();
+            self.0.units_mut().extend(copy.iter().cycle().take(copy.len() * count as usize));
         }
         self
     }
 
     /// `sb.codePointAt(index)`.
     pub fn code_point_at(&self, index: i32) -> i32 {
-        crate::string::code_point_at_units(&self.0.borrow(), index)
+        crate::string::code_point_at_units(&self.0.units(), index)
     }
 
     /// `sb.codePointBefore(index)`.
     pub fn code_point_before(&self, index: i32) -> i32 {
-        crate::string::code_point_before_units(&self.0.borrow(), index)
+        crate::string::code_point_before_units(&self.0.units(), index)
     }
 
     /// `sb.codePointCount(begin, end)`.
     pub fn code_point_count(&self, begin: i32, end: i32) -> i32 {
-        crate::string::code_point_count_units(&self.0.borrow(), begin, end)
+        crate::string::code_point_count_units(&self.0.units(), begin, end)
     }
 
     /// `sb.offsetByCodePoints(index, offset)`.
     pub fn offset_by_code_points(&self, index: i32, offset: i32) -> i32 {
-        crate::string::offset_by_code_points_units(&self.0.borrow(), index, offset)
+        crate::string::offset_by_code_points_units(&self.0.units(), index, offset)
     }
 
     /// `sb.getChars(begin, end, dst, dst_begin)`: the units `begin..end` into `dst` from
     /// `dst_begin`.
     pub fn get_chars(&self, begin: i32, end: i32, dst: &mut [u16], dst_begin: i32) {
-        let value = self.0.borrow();
+        let value = self.0.units();
         if begin < 0 || begin > end || end as usize > value.len() {
             out_of_bounds(format!("Range [{begin}, {end}) out of bounds for length {}", value.len()));
         }
@@ -447,8 +516,8 @@ impl StringBuilder {
     }
 
     /// `a.compareTo(b)`: the difference of the first code units that differ, or of the lengths.
-    pub fn compare_to(&self, other: &StringBuilder) -> i32 {
-        let (a, b) = (self.0.borrow().clone(), other.0.borrow().clone());
+    pub fn compare_to(&self, other: &Self) -> i32 {
+        let (a, b) = (self.0.units().clone(), other.0.units().clone());
         match a.iter().zip(&b).find(|(x, y)| x != y) {
             Some((x, y)) => *x as i32 - *y as i32,
             None => a.len() as i32 - b.len() as i32,
@@ -457,7 +526,7 @@ impl StringBuilder {
 }
 
 /// `a == b` on builders that may be null.
-pub fn same_builder(a: Option<&StringBuilder>, b: Option<&StringBuilder>) -> bool {
+pub fn same_builder<C: BuilderCell>(a: Option<&Builder<C>>, b: Option<&Builder<C>>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => a.same(b),
         (a, b) => a.is_none() && b.is_none(),
@@ -466,15 +535,24 @@ pub fn same_builder(a: Option<&StringBuilder>, b: Option<&StringBuilder>) -> boo
 
 /// `sb.toString()`, and how a builder prints.
 /// A builder's identity is its cell's address, which `identity_hash` hashes.
-impl crate::Handle for StringBuilder {
+impl<C: BuilderCell> crate::Handle for Builder<C> {
     fn address(&self) -> *const u8 {
-        Rc::as_ptr(&self.0) as *const u8
+        self.0.address()
     }
 }
 
-impl fmt::Display for StringBuilder {
+/// A builder's monitor is its cell's: the lock of a shared builder, which is also the lock its
+/// methods take, as an object's is (see monitor.rs).
+impl<C: BuilderCell + crate::HasMonitor> crate::HasMonitor for Builder<C> {
+    #[inline]
+    fn monitor(&self) -> crate::MonitorOf<'_> {
+        self.0.monitor()
+    }
+}
+
+impl<C: BuilderCell> fmt::Display for Builder<C> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for c in char::decode_utf16(self.0.borrow().iter().copied()) {
+        for c in char::decode_utf16(self.0.units().iter().copied()) {
             f.write_char(c.unwrap_or('?'))?;
         }
         Ok(())
@@ -504,6 +582,20 @@ mod tests {
         let sb = StringBuilder::from_text("a😀b");
         sb.reverse();
         assert_eq!(sb.to_string(), "b😀a");
+    }
+
+    #[test]
+    fn a_shared_builder_is_seen_changed_by_another_thread() {
+        let sb = SharedStringBuilder::from_text("ab");
+        let other = sb.clone();
+        std::thread::spawn(move || {
+            other.append_str("cd");
+        })
+        .join()
+        .unwrap();
+        sb.append_builder(&sb.clone());
+        assert_eq!(sb.to_string(), "abcdabcd");
+        assert!(same_builder(Some(&sb), Some(&sb.clone())));
     }
 
     #[test]
