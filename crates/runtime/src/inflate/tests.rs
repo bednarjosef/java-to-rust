@@ -2,6 +2,7 @@
 //! expected text is the input of the zlib call that made the stream.
 
 use super::*;
+use crate::{allocate_native, read_native, write_native};
 
 const STORED_RAW: &[u8] = &[
     0x01, 0x11, 0x00, 0xee, 0xff, 0x73, 0x74, 0x6f, 0x72, 0x65, 0x64, 0x20, 0x62, 0x6c, 0x6f, 0x63, 0x6b,
@@ -251,4 +252,112 @@ fn errors_are_the_same_in_pieces() {
     let mut stream = Stream::new(false);
     assert_eq!(inflate_in(&mut stream, TOO_FAR, 1, 8), Err("invalid distance too far back"));
     assert_eq!(inflate_in(&mut Stream::new(true), BAD_HEADER, 1, 8), Err("incorrect header check"));
+}
+
+/// The packed result of `inflate_bytes`: the bytes written, `finished` and `needDict`.
+fn written_of(packed: i64) -> usize {
+    ((packed >> 31) & 0x7fff_ffff) as usize
+}
+
+fn finished(packed: i64) -> bool {
+    (packed >> 62) & 1 == 1
+}
+
+fn need_dict(packed: i64) -> bool {
+    packed < 0
+}
+
+fn unsigned(bytes: &[i8]) -> Vec<u8> {
+    bytes.iter().map(|&b| b as u8).collect()
+}
+
+/// `STORED_ZLIB` with its input and its output in memory outside the heap, as a direct buffer
+/// gives them: the same text, and the same packed result as the array form.
+#[test]
+fn buffer_output_gets_the_text() {
+    let input = signed(STORED_ZLIB);
+    let mut reference = vec![0i8; 64];
+    let expected = inflate_bytes(inflate_init(false), &input, &mut reference, 0, 64).unwrap();
+
+    let output = allocate_native(64);
+    let packed = inflate_bytes_buffer(inflate_init(false), &input, output, 64).unwrap();
+    assert_eq!(packed, expected);
+    assert_eq!(written_of(packed), STORED_TEXT.len());
+    assert!(finished(packed));
+    assert_eq!(read_native(output, STORED_TEXT.len()), STORED_TEXT);
+}
+
+#[test]
+fn buffer_input_is_read_from_memory() {
+    let input = allocate_native(FIXED_ZLIB.len() as i64);
+    write_native(input, FIXED_ZLIB);
+    let mut output = vec![0i8; 64];
+    let packed = inflate_buffer_bytes(inflate_init(false), input, FIXED_ZLIB.len() as i32, &mut output, 4, 60)
+        .unwrap();
+    assert_eq!(written_of(packed), FIXED_TEXT.len());
+    assert!(finished(packed));
+    assert_eq!(unsigned(&output[4..4 + FIXED_TEXT.len()]), FIXED_TEXT);
+}
+
+#[test]
+fn buffer_input_and_output_in_memory() {
+    let input = allocate_native(FIXED_ZLIB.len() as i64);
+    write_native(input, FIXED_ZLIB);
+    let output = allocate_native(64);
+    let packed = inflate_buffer_buffer(inflate_init(false), input, FIXED_ZLIB.len() as i32, output, 64).unwrap();
+    assert_eq!(written_of(packed), FIXED_TEXT.len());
+    assert!(finished(packed));
+    assert_eq!(read_native(output, FIXED_TEXT.len()), FIXED_TEXT);
+}
+
+/// A stream that asks for a dictionary, given as memory outside the heap, and then the rest of
+/// its input, also outside the heap.
+#[test]
+fn dictionary_in_memory_then_the_rest() {
+    let addr = inflate_init(false);
+    let input = allocate_native(DICT_ZLIB.len() as i64);
+    write_native(input, DICT_ZLIB);
+    let output = allocate_native(64);
+    let packed = inflate_buffer_buffer(addr, input, DICT_ZLIB.len() as i32, output, 64).unwrap();
+    assert!(need_dict(packed));
+    assert_eq!(packed & 0x7fff_ffff, 6);
+    assert_eq!(inflate_adler(addr) as u32, DICT_ID);
+
+    let dict = allocate_native(DICT.len() as i64);
+    write_native(dict, DICT);
+    inflate_set_dictionary_buffer(addr, dict, DICT.len() as i32).unwrap();
+    let rest = &DICT_ZLIB[6..];
+    let rest_at = allocate_native(rest.len() as i64);
+    write_native(rest_at, rest);
+    let packed = inflate_buffer_buffer(addr, rest_at, rest.len() as i32, output, 64).unwrap();
+    assert!(finished(packed));
+    assert_eq!(written_of(packed), DICT_TEXT.len());
+    assert_eq!(read_native(output, DICT_TEXT.len()), DICT_TEXT);
+    inflate_end(addr);
+}
+
+#[test]
+fn dictionary_in_memory_refused_when_wrong() {
+    let addr = inflate_init(false);
+    let input = allocate_native(DICT_ZLIB.len() as i64);
+    write_native(input, DICT_ZLIB);
+    let output = allocate_native(64);
+    let packed = inflate_buffer_buffer(addr, input, DICT_ZLIB.len() as i32, output, 64).unwrap();
+    assert!(need_dict(packed));
+    let wrong = allocate_native(4);
+    write_native(wrong, b"nope");
+    assert!(inflate_set_dictionary_buffer(addr, wrong, 4).is_err());
+    inflate_end(addr);
+}
+
+/// No bytes are read or written, so an address that is no block's is no error for them.
+#[test]
+fn empty_buffers_touch_no_memory() {
+    let addr = inflate_init(false);
+    let mut output = vec![0i8; 8];
+    let packed = inflate_buffer_bytes(addr, 0, 0, &mut output, 0, 8).unwrap();
+    assert_eq!((written_of(packed), finished(packed)), (0, false));
+    let packed = inflate_bytes_buffer(addr, &[], 0, 0).unwrap();
+    assert_eq!(written_of(packed), 0);
+    inflate_end(addr);
 }
