@@ -98,6 +98,7 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
             seen: HashSet::new(),
             waiting: HashMap::new(),
             contexts: HashMap::new(),
+            glued: HashSet::new(),
             known: known::Knowledge::default(),
             unknown: None,
             live: LiveMethods {
@@ -248,6 +249,8 @@ struct State {
     waiting: HashMap<usize, Vec<usize>>,
     /// The objects that each method has been walked on, by method.
     contexts: HashMap<usize, Vec<usize>>,
+    /// The classes whose objects the runtime has been handed (`glue`).
+    glued: HashSet<usize>,
     /// The values that the walk knows (`known`).
     known: known::Knowledge,
     /// The first thing that the walk met that the facts do not answer.
@@ -446,6 +449,10 @@ impl Walk<'_> {
         let classes: Vec<usize> =
             if flow.any { self.values.concretes_of(ty).to_vec() } else { flow.classes.iter().collect() };
         for c in classes {
+            // Handing the runtime an object of a class again calls nothing new.
+            if !self.state.borrow_mut().glued.insert(c) {
+                continue;
+            }
             for &g in &self.glue {
                 if let Some(target) = self.values.implementation(self.class, g, c) {
                     self.enter(target, c, STATIC, None);
