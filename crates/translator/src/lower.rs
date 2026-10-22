@@ -521,6 +521,11 @@ impl<'t> Lowering<'t> {
                 Ok(Type::class(&self.types[t].name))
             }
             "<nulltype>" => Ok(Type::Null),
+            // javac gives no name to the intersection of a `?:`'s branch types, such as
+            // `Serializable & Comparable<?>` for an enum and a string: the value is an `Object`.
+            "" if matches!(node.kind(), "CONDITIONAL_EXPRESSION" | "PARENTHESIZED") => {
+                self.ty(node, "java.lang.Object")
+            }
             // `this` in the body of an enum constant, which is the constant.
             _ if name.starts_with("<anonymous ") && self.enum_index(&name[11..name.len() - 1]).is_some() => {
                 Ok(Type::enum_type(&name[11..name.len() - 1]))
