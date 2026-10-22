@@ -14,8 +14,9 @@
 //! - `REJECTED` keys, whose value the translation cannot match, are rejected: the command line of
 //!   the run, and `user.timezone`, which the JDK sets once `TimeZone` first runs.
 //!
-//! The key must be a string literal, a constant, or a local of the method that is declared once
-//! with a string literal and never assigned again (`FileSystems` names its key so).
+//! A key that is a string literal, a constant, or a local of the method that is declared once
+//! with a string literal and never assigned again (`FileSystems` names its key so) has its value
+//! in the translation; any other key is a `switch` over the keys of a plain run.
 //! `System.getProperties()` (in a whole program)
 //! is the translator's `java.lang.TranslatedProperties.all()`
 //! (`java/overlay/java/lang/TranslatedProperties.java`), a `Properties` of every key of a plain run,
@@ -245,6 +246,36 @@ impl<'t> Lowering<'t> {
                 };
                 return Ok(Some(ExprKind::Bool(included)));
             }
+            // `Security.getProperty(key)`: the JDK's security property of that name
+            // (`conf/security/java.security`), or null, as no program of the translation sets one.
+            // A key that is no constant is a `switch` over the file's keys.
+            ("java.security.Security", "getProperty", "(java.lang.String)java.lang.String") => {
+                let Some(properties) = security_properties() else {
+                    return unsupported(
+                        node,
+                        "`Security.getProperty` without the JDK's security properties to read",
+                    );
+                };
+                if let Some(key) = self.constant_text(node.list("arguments").next()) {
+                    return Ok(Some(
+                        properties.get(&key).map_or(ExprKind::Null, |v| ExprKind::Str(v.clone())),
+                    ));
+                }
+                let pos = node.pos();
+                let mut keys: Vec<&String> = properties.keys().collect();
+                keys.sort();
+                let mut cases = Vec::new();
+                for key in keys {
+                    let label = self.synth(ExprKind::Str(key.clone()), pos, Type::String);
+                    let value = self.synth(ExprKind::Str(properties[key].clone()), pos, Type::String);
+                    cases
+                        .push(Case { labels: vec![CaseLabel::Value(label)], body: vec![Stmt::Yield(value)] });
+                }
+                let null = self.synth(ExprKind::Null, pos, Type::Null);
+                cases.push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Yield(null)] });
+                let selector = std::mem::replace(&mut args[0], self.synth(ExprKind::Null, pos, Type::String));
+                return Ok(Some(ExprKind::Switch { selector: Box::new(selector), cases }));
+            }
             // `Runtime.version().feature()`, the release of the JDK the translator ran with
             // (`java.specification.version`, `26`), as the source versions of javac's code ask it,
             // without making the version (`Runtime.version()` parses it, see `REDIRECTED_CALLS`).
@@ -290,10 +321,7 @@ impl<'t> Lowering<'t> {
             }
         };
         let Some(key) = key else {
-            return unsupported(
-                node,
-                "`System.getProperty` with a key that is not a string literal or a constant",
-            );
+            return self.computed_property(node, args).map(Some);
         };
         let property = match property(&key) {
             Ok(property) => property,
@@ -310,22 +338,8 @@ impl<'t> Lowering<'t> {
                 "a default of `System.getProperty` that is not a literal or a variable",
             );
         }
-        match property {
-            Property::Run("java.home") => {
-                let fallback = self.synth(ExprKind::Str(jdk_home()), node.pos(), Type::String);
-                return Ok(Some(ExprKind::Builtin(
-                    Builtin::Native(Native::SystemProperty("java.home")),
-                    vec![fallback],
-                )));
-            }
-            Property::Run(name) => {
-                return Ok(Some(ExprKind::Builtin(
-                    Builtin::Native(Native::SystemProperty(name)),
-                    Vec::new(),
-                )));
-            }
-            Property::Fixed(value) => return Ok(Some(ExprKind::Str(value))),
-            Property::Unset => {}
+        if let Some(value) = self.property_value(node, property) {
+            return Ok(Some(value));
         }
         // An unknown key: the default if there is one, else null.
         Ok(Some(match args.get_mut(1) {
@@ -336,6 +350,66 @@ impl<'t> Lowering<'t> {
 }
 
 impl<'t> Lowering<'t> {
+    /// The value of a property that is set, `None` for one that is unset.
+    fn property_value(&self, node: Node<'t>, property: Property) -> Option<ExprKind> {
+        match property {
+            Property::Run("java.home") => {
+                let fallback = self.synth(ExprKind::Str(jdk_home()), node.pos(), Type::String);
+                Some(ExprKind::Builtin(Builtin::Native(Native::SystemProperty("java.home")), vec![fallback]))
+            }
+            Property::Run(name) => {
+                Some(ExprKind::Builtin(Builtin::Native(Native::SystemProperty(name)), Vec::new()))
+            }
+            Property::Fixed(value) => Some(ExprKind::Str(value)),
+            Property::Unset => None,
+        }
+    }
+
+    /// `System.getProperty(key)` or `getProperty(key, default)` of a key that code computes
+    /// (`InetAddressCachePolicy` passes its keys to a method of its own): a `switch` over the
+    /// keys of a plain run (those of `System.getProperties()`), each with the value that a read of
+    /// it as a constant gives, and the default, or null, for any other key. The `REJECTED` keys
+    /// are not among them, as they are not among `System.getProperties()`'s, and so have the
+    /// default too. The default must be a literal or a variable, as Java evaluates it whatever the
+    /// key is.
+    fn computed_property(&self, node: Node<'t>, args: &mut [Expr]) -> Result<ExprKind, Error> {
+        let Some(jdk) = jdk_properties() else {
+            return unsupported(
+                node,
+                "`System.getProperty` without a `java` on the path to read the JDK's values from",
+            );
+        };
+        if let Some(default) = args.get(1)
+            && !matches!(default.kind, ExprKind::Str(_) | ExprKind::Null | ExprKind::Var(_))
+        {
+            return unsupported(
+                node,
+                "a default of `System.getProperty` that is not a literal or a variable",
+            );
+        }
+        let pos = node.pos();
+        let mut keys: Vec<&str> = jdk.keys().map(String::as_str).chain(KEYS.iter().copied()).collect();
+        keys.push("java.class.path");
+        keys.retain(|key| !REJECTED.contains(key));
+        keys.sort_unstable();
+        keys.dedup();
+        let mut cases = Vec::new();
+        for key in keys {
+            let Ok(property) = property(key) else { continue };
+            let Some(value) = self.property_value(node, property) else { continue };
+            let label = self.synth(ExprKind::Str(key.to_string()), pos, Type::String);
+            let value = self.synth(value, pos, Type::String);
+            cases.push(Case { labels: vec![CaseLabel::Value(label)], body: vec![Stmt::Yield(value)] });
+        }
+        let unset = match args.get_mut(1) {
+            Some(default) => std::mem::replace(default, self.synth(ExprKind::Null, pos, Type::String)),
+            None => self.synth(ExprKind::Null, pos, Type::Null),
+        };
+        cases.push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Yield(unset)] });
+        let selector = std::mem::replace(&mut args[0], self.synth(ExprKind::Null, pos, Type::String));
+        Ok(ExprKind::Switch { selector: Box::new(selector), cases })
+    }
+
     /// `Integer.getInteger(key)`, `getInteger(key, default)` and `Long.getLong` likewise: the
     /// property's value decoded as a number, or the default (null without one) when the property
     /// is unset or is no number. The key must be a constant, as for `System.getProperty`, and one

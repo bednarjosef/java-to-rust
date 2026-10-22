@@ -57,6 +57,8 @@ pub enum Native {
     /// `System.getProperty(key)` for a key whose value does not depend on the JVM (see
     /// `lower/system.rs`), by its literal key.
     SystemProperty(&'static str),
+    /// `System.getenv(name)`: the variable of the environment the program runs in, or null.
+    Getenv,
     /// `Runtime.getRuntime().totalMemory()`, `freeMemory()` and `maxMemory()`.
     TotalMemory,
     FreeMemory,
@@ -162,6 +164,11 @@ pub enum Native {
     /// a system call of `java.nio.file` on the bytes of a path, which records its `errno` rather
     /// than failing (`java_runtime::unix`, `UNIX_CALLS`).
     Unix(&'static str),
+    /// A native of the translator's `java.net.TranslatedNet`
+    /// (`java/overlay/java/net/TranslatedNet.java`) by its name, or `InetAddress`'s tests of the
+    /// address families: a call of the C library's name service on the bytes of a name or an
+    /// address, which records its error rather than failing (`java_runtime::net`, `NET_CALLS`).
+    Net(&'static str),
     /// The natives of the stream under the translator's `System.out` and `System.err` objects
     /// (`java/overlay/java/io/StandardOutput.java`), the runtime's buffered standard output and
     /// error (`java_runtime::out`): `write0(fd, b)`, `writeBytes0(fd, b, off, len)`,
@@ -229,6 +236,18 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
     Some(match (class, name, signature) {
         // Registering a class's natives with the JVM, and looking up the fields they use.
         (_, "registerNatives" | "initIDs", "()void") => Native::Nothing,
+        // The lookups of the fields that the JVM's networking code sets.
+        (
+            "java.net.InetAddress"
+            | "java.net.Inet4Address"
+            | "java.net.Inet6Address"
+            | "java.net.NetworkInterface",
+            "init",
+            "()void",
+        ) => Native::Nothing,
+        // Whether the system makes sockets of each address family (`java_runtime::net`).
+        ("java.net.InetAddress", "isIPv4Available", "()boolean") => Native::Net("isIPv4Available"),
+        ("java.net.InetAddress", "isIPv6Supported", "()boolean") => Native::Net("isIPv6Supported"),
         // Registers `getNanoTimeAdjustment`, and nothing else.
         ("jdk.internal.misc.VM", "initialize", "()void") => Native::Nothing,
         ("jdk.internal.misc.VM", "getNanoTimeAdjustment", "(long)long") => Native::NanoTimeAdjustment,
@@ -392,6 +411,27 @@ pub const UNIX_CALLS: &[(&str, &str)] = &[
     ("truncate", "unix_truncate"),
     ("sync", "unix_sync"),
 ];
+
+/// The translator's class of the name service calls of `java.net`.
+pub const NET_DISPATCHER: &str = "java.net.TranslatedNet";
+
+/// The natives of `NET_DISPATCHER` that the runtime implements (`Native::Net`), and the two of
+/// `InetAddress` that it answers itself, with the runtime's function of each.
+pub const NET_CALLS: &[(&str, &str)] = &[
+    ("lookup0", "net_lookup"),
+    ("lastError0", "net_last_error"),
+    ("errorText0", "net_error_text"),
+    ("hostname0", "net_hostname"),
+    ("hostOf0", "net_host_of"),
+    ("bound0", "net_bound"),
+    ("isIPv4Available", "net_ipv4_available"),
+    ("isIPv6Supported", "net_ipv6_supported"),
+];
+
+/// The name of a native of `NET_DISPATCHER` that the runtime implements, as `NET_CALLS` has it.
+pub fn net_call(name: &str) -> Option<&'static str> {
+    NET_CALLS.iter().find(|(n, _)| *n == name).map(|(n, _)| *n)
+}
 
 /// The name of a native of `UNIX_DISPATCHER` that the runtime implements, as `UNIX_CALLS` has it.
 pub fn unix_call(name: &str) -> Option<&'static str> {
