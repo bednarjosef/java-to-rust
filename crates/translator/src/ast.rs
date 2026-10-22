@@ -237,10 +237,43 @@ impl fmt::Display for Type {
 }
 
 /// A position in the Java source, 1-based, for error messages.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+///
+/// `unit` is the source file it is in, as the index of javac's unit, where it is known: the
+/// program stamps it on the code of each class once lowering is done (`program::stamp_units`), so
+/// that an error an analysis or the generator reports at an expression names its file, where a
+/// line and column alone may be those of code in another file. Positions compare by line and
+/// column alone, as those that javac's class files give (`javac::bytecode_names`) have no unit.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Pos {
     pub line: usize,
     pub column: usize,
+    pub unit: Option<u32>,
+}
+
+impl Pos {
+    pub fn new(line: usize, column: usize) -> Pos {
+        Pos { line, column, unit: None }
+    }
+
+    /// Whether `self` and `other` are the same place: the same line and column, in the same unit
+    /// where both know theirs.
+    pub fn same_place(self, other: Pos) -> bool {
+        self == other && (self.unit.is_none() || other.unit.is_none() || self.unit == other.unit)
+    }
+}
+
+impl PartialEq for Pos {
+    fn eq(&self, other: &Pos) -> bool {
+        (self.line, self.column) == (other.line, other.column)
+    }
+}
+
+impl Eq for Pos {}
+
+impl std::hash::Hash for Pos {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.line, self.column).hash(state);
+    }
 }
 
 /// The translated file: its classes, and every method and constructor of all of them in one list,

@@ -530,7 +530,8 @@ field that is not final is accepted as long as only the constructor sets it. An 
 `toString` is its `Display`, while `name()` stays the constant's name. A constant with a body
 (`PLUS { int apply(int a, int b) { return a + b; } }`) overrides the enum's methods, so each
 overridden method becomes a `match self` with an arm per overriding constant and the enum's own
-body (if it is not abstract) for the rest. `valueOf` of a name that is no constant throws
+body (if it is not abstract) for the rest; a lambda or method reference in an override is one of
+the enum's method, capturing the constant as `this`. `valueOf` of a name that is no constant throws
 `IllegalArgumentException` with Java's message (`No enum constant Main.Size.HUGE`), which a
 `catch` can take (`Size::try_enum_value_of(s)?`). `Enum.valueOf(cls, name)` with a class value,
 as javac's annotation proxies call it, tests the class against each of the program's enums and

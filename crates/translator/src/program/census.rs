@@ -88,6 +88,7 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
         // As a translation does, only what can run counts (the unresolved calls are found again
         // below, where they are stubbed).
         Ok(mut class) => {
+            super::stamp_units(&mut class, &lowered.units);
             let (running, _) = phase("live methods", || super::narrow(&mut class, lowered.rejected));
             rejections.extend(running.into_iter().map(rejection));
             (Some(class), None)
@@ -233,19 +234,25 @@ impl Stubs {
     /// nothing to stub.
     fn stub(&mut self, class: &mut Class, units: &[Option<usize>], error: Error) -> Rejection {
         let pos = error.pos;
-        let mut rejection = Rejection { unit: None, anchor: None, error };
+        // An error at a position with its unit is in that unit's code alone (`Pos::unit`).
+        let known = pos.unit.map(|u| u as usize);
+        let mut rejection = Rejection { unit: known, anchor: None, error };
         // The code that lowering provides has no position of its own.
         if pos == Pos::default() {
             return rejection;
         }
+        let in_unit = |t: usize| known.is_none() || units.get(t).copied().flatten() == known;
         let at = |e: &Expr| {
             let mut here = false;
-            visit_expr(e, &mut |x| here |= x.pos == pos);
+            visit_expr(e, &mut |x| here |= x.pos.same_place(pos));
             here
         };
         let mut abstracts = Vec::new();
         for (index, method) in class.methods.iter_mut().enumerate() {
-            let here = std::cell::Cell::new(method.pos == pos);
+            if !in_unit(method.class) {
+                continue;
+            }
+            let here = std::cell::Cell::new(method.pos.same_place(pos));
             for s in &method.body {
                 let mut statement = |s: &Stmt| {
                     if let Stmt::Local { pos: at, .. } | Stmt::Return(_, at) = s {
@@ -272,6 +279,9 @@ impl Stubs {
             }
         }
         for (t, decl) in class.types.iter_mut().enumerate() {
+            if !in_unit(t) {
+                continue;
+            }
             for field in decl.fields.iter_mut().chain(&mut decl.statics) {
                 // An error at a field's declaration (its type) is placed in the field's unit.
                 if field.pos == pos && rejection.unit.is_none() {

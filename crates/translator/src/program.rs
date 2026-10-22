@@ -107,6 +107,7 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
     let units = kept;
     let file = |unit: Option<usize>| unit.map(|u| units[u].file.clone());
     let mut class = lowered.class.map_err(|(unit, error)| ProgramError { file: file(unit), error })?;
+    stamp_units(&mut class, &lowered.units);
     if let Err(rejected) = phase("live methods", || keep_live(&mut class, lowered.rejected)) {
         let file = file(rejected.unit).or_else(|| locate(&units, &class, rejected.error.pos));
         return Err(ProgramError { file, error: rejected.error });
@@ -339,11 +340,37 @@ impl Unit {
     }
 }
 
-/// The file of the code at `pos` that an analysis or the generator rejected, which the error
-/// does not carry: the unit of the classes whose methods have code there, when they agree on one
-/// (a line and column of one file may be that of another file's code too).
+/// Stamps on the positions of the code of each class the unit it is in (`Pos::unit`): those of
+/// the methods, of the expressions in them and of the fields' initializers. `units` is the unit
+/// of each type, `None` for the types that lowering provides.
+pub(crate) fn stamp_units(class: &mut crate::ast::Class, units: &[Option<usize>]) {
+    use crate::ast::{rewrite_expr, rewrite_stmt};
+    let unit_of = |t: usize| units.get(t).copied().flatten().and_then(|u| u32::try_from(u).ok());
+    for method in &mut class.methods {
+        let unit = unit_of(method.class);
+        method.pos.unit = unit;
+        method.body.iter_mut().for_each(|s| rewrite_stmt(s, &mut |x| x.pos.unit = unit));
+    }
+    for (t, decl) in class.types.iter_mut().enumerate() {
+        let unit = unit_of(t);
+        for field in decl.fields.iter_mut().chain(&mut decl.statics) {
+            field.pos.unit = unit;
+            if let Some(init) = &mut field.init {
+                rewrite_expr(init, &mut |x| x.pos.unit = unit);
+            }
+        }
+    }
+}
+
+/// The file of the code at `pos` that an analysis or the generator rejected: the unit stamped on
+/// the position (`stamp_units`), or for a position without one, the unit of the classes whose
+/// methods have code there, when they agree on one (a line and column of one file may be that of
+/// another file's code too).
 fn locate(units: &[Unit], class: &crate::ast::Class, pos: Pos) -> Option<String> {
     use crate::ast::{visit_expr, visit_stmt};
+    if let Some(unit) = pos.unit {
+        return units.get(unit as usize).map(|u| u.file.clone());
+    }
     let mut files = std::collections::BTreeSet::new();
     for method in &class.methods {
         let mut here = method.pos == pos;
