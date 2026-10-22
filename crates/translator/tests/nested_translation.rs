@@ -386,10 +386,11 @@ fn an_anonymous_subclass_takes_its_superclasses_explicit_enclosing_instance() {
 }
 
 #[test]
-fn an_inner_superclass_whose_constructor_calls_an_override_is_rejected() {
-    // The object would have to exist before its enclosing instance is set (the second
-    // constructor form of `analysis/whole_objects.rs`), and `outer` has no zero value.
-    let error = java_to_rust::translate(
+fn an_inner_superclass_whose_constructor_calls_an_override_gets_its_enclosing_instance_first() {
+    // The object exists before the superclass's constructor runs (the second constructor form of
+    // `analysis/whole_objects.rs`), and it is built with its enclosing instance, which javac
+    // sets before `super(..)`, so the override reads it set.
+    let rust = translate(
         "class A {
             int total = 5;
             class Base {
@@ -404,10 +405,38 @@ fn an_inner_superclass_whose_constructor_calls_an_override_is_rejected() {
                 System.out.println(new A().new Derived().label);
             }
         }",
-    )
-    .expect_err("the superclass's constructor runs the subclass's method");
-    assert!(
-        error.to_string().contains("in a class with an enclosing instance or captured locals"),
-        "{error}"
     );
+    assert_contains(
+        &rust,
+        &[
+            "fn new(outer: Rc<A>) -> ABaseFields {",
+            "ADerived { base: ABaseFields::new(outer.clone()) }",
+            "format!(\"derived {}\", self.base.outer.total)",
+        ],
+    );
+}
+
+#[test]
+fn an_enclosing_instance_built_in_super_for_a_superclass_built_whole_is_rejected() {
+    // The zero object is built with the superclass's enclosing instance before `super(..)`
+    // runs; one that `super(..)` computes rather than passes on as a parameter is not supported.
+    let error = java_to_rust::translate(
+        "class A {
+            int total = 5;
+            class Base {
+                final String label;
+                Base() { label = describe(); }
+                String describe() { return \"base \" + total; }
+            }
+            static class Outside extends Base {
+                Outside() { new A().super(); }
+                String describe() { return \"outside\"; }
+            }
+            public static void main(String[] args) {
+                System.out.println(new Outside().label);
+            }
+        }",
+    )
+    .expect_err("the enclosing instance is computed in `super(..)`");
+    assert!(error.to_string().contains("that a constructor does not pass on as they are"), "{error}");
 }

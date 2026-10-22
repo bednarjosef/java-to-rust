@@ -510,8 +510,8 @@ fn new(r: f64) -> Circle {
   }
   ```
 
-  A class with subclasses that has an enclosing instance or captured locals and needs this form
-  is still rejected: its synthetic fields would have to be set before the superclass's part.
+  The zero object of a class with an enclosing instance or captured locals is built with them
+  (javac sets them before `super(..)`), from the constructor's parameters that pass them on.
 - A class whose own constructors use `this` as a value keeps today's non-plain form
   (`codegen/objects.rs::constructor`): `let obj = Rc::new(RefCell::new(Circle { base:
   BaseFields::new("circle"), r: 0.0 }));` then `field_inits`, then the body on `this`.
@@ -1399,7 +1399,7 @@ numbers written into the commit message.
 
 - **Superclass constructors that leak `this` or call overridable methods**: their class tree gets
   the second constructor form (1.4), which runs each constructor body on the whole object; such
-  a class with an enclosing instance or captured locals is still rejected. JDK: the stream
+  one whose enclosing instance or captured locals `super(..)` computes is rejected. JDK: the stream
   pipeline's `AbstractPipeline` constructor links the previous stage to `this` and calls the
   overridable `opIsStateful()`, so the stream classes use that form.
 - **Field-level versus object-level misclassification**: an object-level body is always
