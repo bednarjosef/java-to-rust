@@ -484,8 +484,9 @@ parameter that holds the builder sees it change, `reverse` keeps surrogate pairs
 chain is Rust's chain (`sb.append_str("a").append(1)`), the handle cloned only where the builder
 is used as a value. A builder held as an `Object` (from a `Supplier<StringBuilder>`, in a
 collection) is the same handle in `Object`'s `StringBuilder` variant: `==`, `equals` and
-`hashCode` are its identity's, and it prints as its text. In a program with threads it is a
-`java::SharedStringBuilder`, the same handle around a lock, so that threads may share it.
+`hashCode` are its identity's, and it prints as its text. Where two threads may reach builders,
+each is a `java::SharedStringBuilder`, the same handle around a lock, so that threads may share
+it.
 
 `split`, `replaceAll`, `replaceFirst` and `matches` run a small backtracking regular expression
 engine with a literal fast path: literals and escapes, `.`, `\d \s \w` and their negations, the

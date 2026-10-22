@@ -198,6 +198,32 @@ fn a_string_builder_of_a_program_without_threads_stays_local() {
 }
 
 #[test]
+fn a_string_builder_that_no_other_thread_reaches_stays_local() {
+    // The worker and main build their own texts; only strings cross threads.
+    let rust = translate(
+        "class A {
+            static String result;
+            public static void main(String[] args) throws InterruptedException {
+                Thread t = new Thread(() -> {
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < 3; i++) sb.append(i);
+                    result = sb.toString();
+                });
+                t.start();
+                t.join();
+                StringBuilder mine = new StringBuilder(\"main \");
+                synchronized (mine) {
+                    mine.append(result);
+                }
+                System.out.println(mine);
+            }
+        }",
+    );
+    assert_contains(&rust, &["java::StringBuilder::new()", "java::StringBuilder::from_text(\"main \")"]);
+    assert_lacks(&rust, &["SharedStringBuilder", "java::enter("]);
+}
+
+#[test]
 fn a_closure_that_threads_share_is_an_arc_that_any_thread_may_call() {
     // `Step` reaches the thread through the lambda's capture; `Local` stays on the main thread.
     let rust = translate(

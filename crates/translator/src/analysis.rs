@@ -59,6 +59,9 @@ pub struct Facts {
     /// The classes, by type index, whose objects two threads may reach: `Arc`s, with a
     /// `java::Locked` unless immutable.
     pub thread_shared: HashSet<usize>,
+    /// Whether two threads may reach a `StringBuilder`, whose builders are then all
+    /// `java::SharedStringBuilder`s (see `threads::shares_builders`).
+    pub shared_builders: bool,
     /// The methods of those classes that must not borrow their object for the whole call, and
     /// the methods that use the kept monitor of `this` (see `monitors`).
     pub long_methods: HashSet<usize>,
@@ -313,6 +316,7 @@ fn representation(class: &Class, facts: &mut Facts) {
     facts.interrupts = threads::interrupts(class);
     if facts.threaded {
         facts.thread_shared = threads::thread_shared(class);
+        facts.shared_builders = threads::shares_builders(class, &facts.thread_shared);
         facts.long_methods = threads::long_methods(class, &facts.thread_shared);
     }
     facts.monitors = monitors::observed(class);
