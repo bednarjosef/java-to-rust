@@ -113,6 +113,9 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.AbstractStringBuilder#append(java.lang.CharSequence,int,int)java.lang.AbstractStringBuilder",
             "java.lang.StringBuilder#append(java.lang.CharSequence,int,int)java.lang.StringBuilder",
             "java.lang.StringBuffer#append(java.lang.CharSequence,int,int)java.lang.StringBuffer",
+            // A replacement's reference to a group that the pattern lacks.
+            "java.lang.String#replaceAll",
+            "java.lang.String#replaceFirst",
         ],
     ),
     // A call, a field access, an array access or a switch on a reference that may be null.
@@ -137,6 +140,9 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StringBuilder#repeat",
             // A malformed escape sequence (`StringOp::TranslateEscapes`).
             "java.lang.String#translateEscapes",
+            // A replacement with a dangling escape or a malformed reference to a group.
+            "java.lang.String#replaceAll",
+            "java.lang.String#replaceFirst",
             "java.lang.Object#wait",
             // A range the wrong way round (`ArraysOp::ranged`).
             "java.util.Arrays#fill",
