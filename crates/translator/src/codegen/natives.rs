@@ -306,10 +306,14 @@ impl<'a> Gen<'a> {
         let name = self.thread_name(name);
         let local = self.local(var);
         let set = self.runtime("set_current_thread");
+        // The call is outside the `try`s of the starting code, and outside the `java::catching`
+        // of one around the start.
         let attempts = std::mem::take(&mut self.attempts);
+        let catching = std::mem::take(&mut self.catching_now);
         let throwing = std::mem::replace(&mut self.throwing, false);
         let body = self.expr(run).text;
         self.attempts = attempts;
+        self.catching_now = catching;
         self.throwing = throwing;
         let start = self.runtime("start_thread");
         Code::atom(format!(
@@ -326,9 +330,11 @@ impl<'a> Gen<'a> {
     fn install_uncaught(&mut self, args: &'a [Expr]) -> Code {
         let throwable = self.throwable_type();
         let attempts = std::mem::take(&mut self.attempts);
+        let catching = std::mem::take(&mut self.catching_now);
         let throwing = std::mem::replace(&mut self.throwing, false);
         let body = self.expr(&args[0]).text;
         self.attempts = attempts;
+        self.catching_now = catching;
         self.throwing = throwing;
         let raised: Vec<String> =
             self.facts.raised_classes.iter().map(|&c| rust_string(&self.class.types[c].name)).collect();

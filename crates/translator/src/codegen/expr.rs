@@ -443,6 +443,14 @@ impl<'a> Gen<'a> {
                 if let ExprKind::NewArray(sizes) = &value.kind
                     && value.ty != *to =>
             {
+                // The `new` is written here rather than by `expr`, which would run it inside
+                // `java::catching` where a `catch` sees its exception.
+                if self.facts.catching.contains_key(&value.id) && self.catching_now.insert(value.id) {
+                    let mark = self.out.len();
+                    let code = self.new_object_rows(*to, value.ty, sizes);
+                    self.catching_now.remove(&value.id);
+                    return self.caught(value.id, code, mark);
+                }
                 self.new_object_rows(*to, value.ty, sizes)
             }
             ExprKind::ArrayLit(items) => self.array_lit(e.ty, items),
