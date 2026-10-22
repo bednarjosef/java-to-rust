@@ -128,6 +128,21 @@ made from; the translated one gets that JDK as `JAVA_HOME`, to read the platform
 `SLOT` names a command to run the translated javac under (the build-slot limiter), and
 `JAVAC_CHECK_OUT` the directory that keeps each case's outputs for a look after a failure.
 
+`scripts/javac-check.sh TRANSLATED_JAVAC --corpus [PATTERN]` runs the corpus instead, one case at a
+time: each file of `corpus/features`, `corpus/threads` and `corpus/whole-program` on its own, each
+file of `corpus/programs` on its own and all of them together, and each project with a `src/`
+directory (`corpus/projects/*` and the multi-file `corpus/whole-program/*`) with all its sources.
+A case is named by its directory and file names joined with a dash (`features-CodePoints`,
+`projects-anonymous`), and `PATTERN` is a shell pattern that the names must match (`features-*`).
+It prints one line for each case that differs, saying what differs (`exit`, `stdout`, `stderr`, or
+the number of class files that differ, with the work directory of the case), and a summary:
+`N cases, M identical, K known, J differ`. The exit status is 0 only when nothing differs.
+
+`scripts/javac-check/known-differences` lists the cases expected to differ, one per line: the name,
+then a one-line reason. They are reported as `KNOWN` and do not fail the run; a listed case that is
+identical is reported as `NOTE`, to be removed from the list. The list holds the four cases whose
+only difference is the class files of lone surrogate char literals (see docs/supported-java.md).
+
 javac itself is never patched, as it is the program under test. Its census keeps the rejection
 of `new DigestInputStream` in `Main.showClass` (Main.java:485), which is only reached with the
 hidden `-XDshowClass` option and ends the program loudly there; translating `MessageDigest`
