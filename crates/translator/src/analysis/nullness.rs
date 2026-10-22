@@ -72,7 +72,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                     elements.push(x.ty.element());
                 }
                 // A copy of `System.arraycopy` stores the source's nulls in the destination.
-                ExprKind::Builtin(Builtin::Native(Native::ArrayCopy), args) if matches!((args[0].ty, args[2].ty), (Type::Array(s), Type::Array(_)) if facts.nullable_elements.contains(&*s)) =>
+                ExprKind::Builtin(Builtin::Native(Native::ArrayCopy), args) if matches!((args[0].ty, args[2].ty), (Type::Array(s), Type::Array(_)) if facts.nullable_elements.contains(s)) =>
                 {
                     elements.push(args[2].ty.element());
                 }
