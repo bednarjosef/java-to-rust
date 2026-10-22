@@ -300,15 +300,17 @@ constant (constants are singletons), `false` across variants. `==` on enum value
 `Rc::ptr_eq` and `java::same`.
 
 A string or a box inside `Object` is a plain value whose identity the translation does not
-keep, so `==` between two `Object`s is rejected where both sides may be strings or boxes. Never
-compare by value where Java compares references. Whether a side may be one is a points-to
+keep, so `==` between two `Object`s where both sides may be strings or boxes is
+`java::same_object` (`Facts::identity_checks`): different values are different objects, and two
+equal ones end the program (`java::unkept_identity`), as Java may or may not see one object in
+them. Never compare by value where Java compares references. Whether a side may be one is a points-to
 analysis (`analysis/object_values.rs`): it follows, until nothing changes, whether each
 variable, parameter, return value, field, static and array element type may hold a string or a
 box, and which classes its objects may be of; each instance method is followed once per class
 whose objects run it, with `this` of that class. An expression of one of the program's own
 classes is never a string or a box, because its Rust type holds none. What the analysis does
 not follow (a library call's result, the parameters of `equals` or `compareTo` that the runtime
-may call) may be anything. Two exceptions are accepted on purpose:
+may call) may be anything. Where comparing the values gives Java's answer, they are compared:
 
 - the shortcut `a == b || a.equals(b)` (also with an assignment in an operand, as
   `HashMap.getNode` writes it), since the result is `equals`'s either way;

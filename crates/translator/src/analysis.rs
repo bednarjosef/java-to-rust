@@ -180,6 +180,11 @@ pub struct Facts {
     /// The boxed kinds (`Type::Boxed` of the primitive) whose identity `==` observes: their boxes
     /// are shared objects. Every other boxed kind is its primitive value.
     pub faithful_boxes: HashSet<Type>,
+    /// The `==` and `!=` (by expression id) on two `Object` values that may both be strings or
+    /// boxes, whose identity the translation does not keep: compared at run time, where values
+    /// that are not equal are different objects and equal ones end the program
+    /// (`java::unkept_identity`), as Java may or may not see one object in them.
+    pub identity_checks: HashSet<ExprId>,
     /// The classes with subclasses (indexes into `Class::types`) whose fields are a struct of
     /// their own, `<Name>Fields`, that the structs of their subclasses embed as `base`.
     pub fields_structs: HashSet<usize>,
@@ -289,7 +294,10 @@ pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, V
     facts.early_static_reads =
         phase("analysis: early static reads", || early_reads::early_reads(class, &facts.eager_init));
     phase("analysis: nullness", || nullness::analyze(class, &mut facts));
-    checked(phase("analysis: object values", || patterns::check_object_values(class, &facts)))?;
+    let (identity_checks, object_values) =
+        phase("analysis: object values", || patterns::check_object_values(class, &facts));
+    checked(object_values)?;
+    facts.identity_checks = identity_checks;
     phase("analysis: boxing", || boxing::analyze(class, &mut facts));
     if facts.threaded {
         checked(phase("analysis: threads", || threads::check(class, &facts)))?;

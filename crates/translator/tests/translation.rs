@@ -4546,33 +4546,34 @@ fn a_class_extending_number_implements_it_and_byte_value_narrows_int_value() {
 }
 
 #[test]
-fn identity_of_object_values_that_may_be_strings_is_rejected() {
-    let err = java_to_rust::translate(
+fn identity_of_object_values_that_may_be_strings_is_checked_at_run_time() {
+    // Different values are different objects; equal ones end the program, as the translation
+    // does not keep their identity.
+    let rust = translate(
         "class M { public static void main(String[] x) { Object a = \"s\"; Object b = \"s\"; System.out.println(a == b); } }",
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("`==` on `Object` values that may be strings or boxes not supported yet"),
-        "{err}"
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::same_object(Some(&a), Some(&b))",
+            "impl java::SameObject for Object {",
+            "(Object::String(a), Object::String(b)) => a == b && java::unkept_identity(),",
+        ],
     );
 }
 
 #[test]
 fn identity_of_object_values_follows_what_flows_into_them() {
     // Only program objects reach `same`'s parameters, so `==` is plain identity; once a box may
-    // reach both sides, it is rejected again.
+    // reach both sides, it is checked at run time.
     let program = |arg: &str| {
         format!(
             "class M {{ static boolean same(Object a, Object b) {{ return a == b; }}
                 public static void main(String[] x) {{ Object m = {arg}; System.out.println(same(m, {arg})); }} }}"
         )
     };
-    java_to_rust::translate(&program("new M()")).unwrap();
-    let err = java_to_rust::translate(&program("1")).unwrap_err();
-    assert!(
-        err.to_string().contains("`==` on `Object` values that may be strings or boxes not supported yet"),
-        "{err}"
-    );
+    assert!(!translate(&program("new M()")).contains("same_object"));
+    assert!(translate(&program("1")).contains("java::same_object("));
 }
 
 #[test]

@@ -342,7 +342,7 @@ impl<'a> Gen<'a> {
             ExprKind::Binary(op, l, r) if is_null_test(*op, l, r) => self.null_test(*op, l, r),
             ExprKind::Binary(BinOp::And, ..) if let Some(code) = self.bound_and(e) => code,
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if matches!(l.ty, Type::Class(..)) => {
-                self.identity(*op, l, r)
+                self.identity(e.id, *op, l, r)
             }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
                 if l.ty == Type::JavaClass || r.ty == Type::JavaClass =>

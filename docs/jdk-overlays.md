@@ -156,6 +156,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `java/nio/file/TempFileHelper.java` | names from `java.util.Random` instead of `SecureRandom` |
 | `java/util/PropertyResourceBundle.java` | reads a stream through `TranslatedPropertyFiles` |
 | `java/util/ServiceLoader.java` | the providers the translator read from the sources |
+| `java/util/WeakHashMap.java` | matches a key by reading the referent, `k == key \|\| key.equals(k)`, instead of `refersTo` |
 | `jdk/internal/foreign/Utils.java` | no method handles of address layouts; `makeRawSegmentViewVarHandle` throws |
 | `jdk/internal/jimage/BasicImageReader.java` | reads the image's index and resources into arrays instead of mapping the file |
 | `jdk/internal/jrtfs/JrtFileAttributes.java`, `JrtFileSystem.java`, `SystemImage.java` | the `jrt:` file system without `%tc`, `CodeSource` and exploded images |
