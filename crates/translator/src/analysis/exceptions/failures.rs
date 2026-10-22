@@ -775,6 +775,8 @@ pub(super) fn runtime_failures(
                         | Builtin::Unsigned(UnsignedOp::Parse, _)
                         | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported | CharsetOp::Equals)
                         | Builtin::Native(Native::SystemIdentityHash)
+                        // The JVM's `getSystemTimeZoneID` gives null for a null Java home.
+                        | Builtin::Native(Native::SystemTimeZoneId)
                         // The expected and the new element of an atomic update may be null.
                         | Builtin::ElementUpdate(_)
                 );
