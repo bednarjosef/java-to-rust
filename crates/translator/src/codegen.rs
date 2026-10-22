@@ -59,6 +59,7 @@ use primitives::*;
 use switch::{Frame, Kind};
 
 mod array_writes;
+mod arraycopy;
 mod arrays;
 mod java_arrays;
 mod java_objects;
@@ -220,12 +221,23 @@ fn generate_with(
         Some(_) => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
         None => format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name),
     };
+    // With threads a static holds objects that must be `Send`, which Rust proves through every
+    // field of every class the object reaches: javac's `Arc<Locked<..>>` chains go deeper than
+    // the default limit of 128.
+    let header = if g.facts.threaded {
+        format!("{header}#![recursion_limit = \"{RECURSION_LIMIT}\"]\n\n")
+    } else {
+        header
+    };
     let tree = g.program(&live, header);
     g.check_dereferences();
     g.check_casts();
     g.check_catching();
     (tree, g.needs.take(), g.rejected, g.closures)
 }
+
+/// How deep rustc follows a trait such as `Send` through the fields of nested types.
+const RECURSION_LIMIT: u32 = 1024;
 
 /// The crate root's allocator: the runtime's, which caches small blocks (runtime `allocator.rs`),
 /// as Java programs make and drop many small objects.

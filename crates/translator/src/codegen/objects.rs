@@ -844,7 +844,10 @@ impl<'a> Gen<'a> {
         if self.displays(index) {
             let obj = self.handle_object(handle, e, index);
             if self.lazy_text && !(self.printing && !self.quiet_text(e, 0)) {
-                return (obj, false);
+                // A thread-shared object's `java::Locked` borrow is not `Display`, so its
+                // `toString` gives the text.
+                let shared = !self.is_plain(e) && self.is_thread_shared(e);
+                return (if shared { format!("{obj}.to_string()") } else { obj }, false);
             }
             return (format!("{obj}.to_string()"), false);
         }
@@ -1336,11 +1339,10 @@ impl<'a> Gen<'a> {
             while names.contains(&temp) {
                 temp.push('_');
             }
-            // A string that may be null, read from a borrowed object, is borrowed from the
-            // borrow's guard, which ends with the `let`: the string is copied out first.
-            if let Some(owned) = text.strip_suffix(".as_deref()")
-                && owned.contains(".borrow()")
-            {
+            // A string that may be null is borrowed by `as_deref`, so it is bound as an owned value
+            // first: the value of `x()?` is a temporary that the `let` would drop, and a string read
+            // from a borrowed object is borrowed from the borrow's guard, which ends with the `let`.
+            if let Some(owned) = text.strip_suffix(".as_deref()") {
                 let value = format!("{temp}_value");
                 lines.push(format!("let {value} = {owned}.clone();"));
                 lines.push(format!("let {temp} = {value}.as_deref();"));
@@ -1387,9 +1389,23 @@ impl<'a> Gen<'a> {
         if !self.lazy_text || (self.printing && !self.quiet_text(e, 0)) {
             return self.method_call(e, index, &[]);
         }
-        // The object is formatted through its `Display`.
+        // The object is formatted through its `Display`. A `java::Locked` borrow has none, so a
+        // thread-shared object is converted by its `toString`, as `method_call` does.
         let obj = self.object(e);
-        Code::atom(if self.is_plain(e) { obj } else { format!("{obj}.borrow()") })
+        Code::atom(if self.is_plain(e) {
+            obj
+        } else if self.is_thread_shared(e) {
+            format!("{obj}.borrow().to_string()")
+        } else {
+            format!("{obj}.borrow()")
+        })
+    }
+
+    /// Whether `e` is an object of a class whose objects threads share: a `java::Locked` borrow of
+    /// it is not `Display`.
+    fn is_thread_shared(&self, e: &Expr) -> bool {
+        matches!(&e.ty, Type::Class(name, _) if self.class.type_index(self.rep_name(name))
+            .is_some_and(|t| self.facts.thread_shared.contains(&t)))
     }
 
     /// A call of a `toString` that is a plain method.
@@ -1827,9 +1843,14 @@ impl<'a> Gen<'a> {
 
     /// Whether method `index` is a `toString` that becomes the class's `Display` implementation:
     /// it borrows its object without changing it and never returns null, and it is what an object
-    /// of the struct it is emitted in runs.
+    /// of the struct it is emitted in runs. A Java enum's `toString` is a method of its own, which
+    /// its `Display` calls, and which may not be `to_string` (javac's `KindName` has the
+    /// `toString(Locale, Messages)` of `Formattable` too).
     pub(super) fn displays(&self, index: usize) -> bool {
         let m = &self.class.methods[index];
+        if self.class.types[m.class].kind == TypeKind::Enum {
+            return false;
+        }
         let runs = match self.homes[index] {
             Home::Class(c) => hierarchy::to_string_impl(self.class, c) == Some(index),
             Home::Fields(_) => true,

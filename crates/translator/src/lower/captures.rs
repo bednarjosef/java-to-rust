@@ -271,10 +271,15 @@ impl<'t> Lowering<'t> {
     /// The instance of class `target` (or of a subclass) that the code of the current class
     /// reaches: `this`, or the chain of `outer` fields to the enclosing class that is one.
     pub(super) fn enclosing_instance(&self, target: usize, pos: Pos) -> Result<Expr, Error> {
+        self.enclosing_instance_where(pos, |class| self.is_subclass(class, target))
+    }
+
+    /// The instance of the innermost class around the code (this one's too) that `reached` takes.
+    fn enclosing_instance_where(&self, pos: Pos, reached: impl Fn(usize) -> bool) -> Result<Expr, Error> {
         let mut class = self.current.get();
         let mut value = self.synth(ExprKind::This, pos, self.self_type(class));
         let mut first = true;
-        while !self.is_subclass(class, target) {
+        while !reached(class) {
             let Some(nested) = self.nesting(class).filter(|n| n.outer) else {
                 return error(pos, "no enclosing instance of this class here");
             };
@@ -330,13 +335,15 @@ impl<'t> Lowering<'t> {
         Some(at)
     }
 
-    /// `Outer.this` (`node`): the instance of the enclosing class `Outer`.
+    /// `Outer.this` (`node`): the instance of the enclosing class `Outer`, which is that class
+    /// itself, not a subclass: in an anonymous `new JCPrimitiveType(..) { .. }` in
+    /// `JCPrimitiveType`'s code, `JCPrimitiveType.this` is the enclosing instance.
     pub(super) fn qualified_this(&self, node: Node<'t>) -> Option<Result<Expr, Error>> {
         if node.str("identifier") != "this" {
             return None;
         }
         let class = node.get("expression")?.symbol().and_then(|s| self.type_index(&raw(s.ty)))?;
-        Some(self.enclosing_instance(class, node.pos()))
+        Some(self.enclosing_instance_where(node.pos(), |c| c == class))
     }
 }
 
@@ -639,7 +646,11 @@ impl<'t> Walk<'_, 't> {
                     .and_then(|e| e.symbol())
                     .filter(|s| crate::program::CLASS_KINDS.contains(&s.kind));
                 match (node.str("identifier"), class.and_then(|s| l.type_index(&raw(s.ty)))) {
-                    ("this", Some(class)) => self.need(class),
+                    // `Outer.this` is `Outer`'s instance, though this class is a subclass of it.
+                    ("this", Some(class)) if class != self.class && !self.found.needs.contains(&class) => {
+                        self.found.needs.push(class)
+                    }
+                    ("this", Some(_)) => {}
                     // `Outer.super.m()` runs on the enclosing instance of `Outer`, as `Outer.this` does.
                     ("super", Some(class))
                         if l.types[class].node.kind() != "INTERFACE" && class != self.class =>

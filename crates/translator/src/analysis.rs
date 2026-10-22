@@ -344,8 +344,9 @@ fn representation(class: &Class, facts: &mut Facts) {
     facts.long_methods.extend(monitor_methods);
     let reach = borrowing::reach(class);
     facts.immutable = objects::immutable_classes(class);
-    // An object whose monitor is kept has a lock, or an address that stays.
-    facts.immutable.retain(|c| !monitor_classes.contains(c));
+    // An object whose monitor is kept has a lock, or an address that stays; so does every other
+    // object of its class tree, which is immutable together or not at all.
+    objects::remove_families(class, &mut facts.immutable, &monitor_classes);
     loop {
         facts.field_level = hierarchy::field_level(
             class,

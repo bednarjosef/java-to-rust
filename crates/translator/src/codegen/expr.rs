@@ -368,14 +368,8 @@ impl<'a> Gen<'a> {
             // Enums of which one may be null (`analysis::nullness`): `Option`s, equal when both
             // are null or both are the same constant. So are two boxes of a kind whose equal
             // values are one object (`Boolean` and `Byte`, see `analysis::boxing`).
-            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
-                if (matches!((l.ty, r.ty), (Type::Enum(_), Type::Enum(_)))
-                    || matches!(l.ty, Type::Boxed(_)) && r.ty == l.ty)
-                    && (self.nullable(l) || self.nullable(r)) =>
-            {
-                let (a, b) = (self.optional_to(l, l.ty), self.optional_to(r, r.ty));
-                let symbol = if *op == BinOp::Eq { "==" } else { "!=" };
-                Code::new(format!("{} {symbol} {}", a.at(CMP + 1), b.at(CMP + 1)), CMP)
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if self.optional_equality(l, r) => {
+                self.optional_equality_code(*op, l, r)
             }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if bool_test(l, r).is_some() => {
                 self.bool_comparison(*op, l, r)
@@ -755,14 +749,14 @@ impl<'a> Gen<'a> {
                 if self.catching_now.contains(&id) {
                     return Code::atom(format!("{{ let never: std::convert::Infallible = {throw}; never }}"));
                 }
-                Code::atom(throw)
+                Code::never(throw)
             }
             Builtin::MissingResource => {
                 let (class, name) = (self.value(&args[0], Type::String), self.value(&args[1], Type::String));
                 let message =
                     "java.lang.InternalError: the resource {} of {} is not part of the translated program";
                 let format = format!("format!({message:?}, {}, {})", name.text, class.text);
-                Code::atom(format!("{}({format})", self.runtime("throw_uncaught")))
+                Code::never(format!("{}({format})", self.runtime("throw_uncaught")))
             }
             Builtin::MonitorEnter => self.null_check(&args[0]),
             Builtin::ClassName { simple } => self.class_name(&args[0], simple),

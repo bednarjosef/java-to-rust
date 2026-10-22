@@ -186,11 +186,17 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
     }
     for i in 0..class.methods.len() {
         let m = &class.methods[i];
+        // A class's struct may hold the methods of both homes (`JarFileFields` has ZipFile's
+        // `getEntry` and JarFile's own, of a JarFile that no code creates).
+        let same_struct = |home: Home, c: usize| matches!(home, Home::Class(d) | Home::Fields(d) if d == c);
         let shadowed = match homes[i] {
-            Home::Class(c) => {
+            // A constructor's name already holds its class (`construct_error_string`), and its
+            // calls name it so.
+            _ if m.is_ctor => false,
+            Home::Class(c) | Home::Fields(c) => {
                 c != m.class
                     && (0..class.methods.len())
-                        .any(|o| o != i && homes[o] == Home::Class(c) && names[o] == names[i])
+                        .any(|o| o != i && same_struct(homes[o], c) && names[o] == names[i])
             }
             Home::Enum(t) => {
                 (m.name == "toString" && m.params.is_empty())

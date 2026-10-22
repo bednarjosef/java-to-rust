@@ -510,8 +510,22 @@ impl<'t> Lowering<'t> {
             methods.push(clinit);
         }
         let mut writes = enums::EnumFieldWrites::default();
-        for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
-            let finished = self.finish_enum(index, types, methods, &mut writes);
+        let enum_indices: Vec<usize> =
+            (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM").collect();
+        // Every enum's constant bodies come first: a body's method may read another enum's fields,
+        // and that enum's tables must rewrite the read, so the methods must all exist before any
+        // enum takes its form.
+        let made: Vec<Result<Vec<Vec<Field>>, Error>> = enum_indices
+            .iter()
+            .map(|&index| {
+                self.constant_bodies(index, methods).and_then(|()| {
+                    writes.forget(methods, index);
+                    self.constant_body_fields(index)
+                })
+            })
+            .collect();
+        for (index, bodies) in enum_indices.into_iter().zip(made) {
+            let finished = self.finish_enum(index, types, methods, bodies, &mut writes);
             // The enum's own methods may have changed.
             writes.forget(methods, index);
             if let Err(e) = finished {
@@ -526,17 +540,16 @@ impl<'t> Lowering<'t> {
         Ok(())
     }
 
-    /// The constant bodies and the constants of enum `index`.
+    /// The constants of enum `index`, with its constant bodies' fields `bodies` (see `finish_types`).
     fn finish_enum(
         &self,
         index: usize,
         types: &mut [TypeDecl],
         methods: &mut Vec<Method>,
+        bodies: Result<Vec<Vec<Field>>, Error>,
         writes: &mut enums::EnumFieldWrites,
     ) -> Result<(), Error> {
-        self.constant_bodies(index, methods)?;
-        writes.forget(methods, index);
-        let bodies = self.constant_body_fields(index)?;
+        let bodies = bodies?;
         let own_fields = types[index].fields.len();
         let pure = self.check_enum(index, methods, writes).and_then(|()| {
             self.add_body_fields(&bodies, &mut types[index].fields)?;
@@ -629,6 +642,22 @@ impl<'t> Lowering<'t> {
             let (first, last) = self.synthetic_params(info.owner)?;
             first.into_iter().chain(params).chain(last).collect()
         } else if is_ctor {
+            // A declared parameter named as the enclosing instance's (an anonymous
+            // `new ClassType(outer, ..) { .. }` takes its superclass's parameter names) is renamed.
+            let mut params = params;
+            if self.nesting(info.owner).is_some_and(|n| n.outer)
+                && let Some(p) = params.iter_mut().find(|p| p.name == inner::OUTER)
+            {
+                let renamed = format!("{}_arg", inner::OUTER);
+                p.name = renamed.clone();
+                for stmt in &mut body {
+                    enum_tables::rewrite_stmt(stmt, &mut |e| {
+                        if matches!(&e.kind, ExprKind::Var(v) if v == inner::OUTER) {
+                            e.kind = ExprKind::Var(renamed.clone());
+                        }
+                    });
+                }
+            }
             self.constructor_prologue(node, info.owner, &mut body)?;
             self.run_initializer_blocks(info.owner, &mut body)?;
             self.start_constructor(info.owner, &mut body)?;
@@ -798,6 +827,12 @@ impl<'t> Lowering<'t> {
             "EXPRESSION_STATEMENT" => match self.expr(node.child("expression")?)? {
                 // A native that does nothing here, such as `registerNatives()`, leaves no trace.
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
+                // A store in a covariant array, whose value is not used.
+                Expr { kind: ExprKind::Cast(_, assign), .. }
+                    if matches!(assign.kind, ExprKind::Assign { .. }) =>
+                {
+                    Stmt::Expr(*assign)
+                }
                 e => Stmt::Expr(e),
             },
             // Reachability skipped the other branch (`program::live_branch`).
@@ -912,7 +947,10 @@ impl<'t> Lowering<'t> {
                     None => self.ty(node, node.java_type())?,
                 };
                 let target = self.target(variable)?;
-                // An element of a covariant array is an `Object` (see `covariant`).
+                // An element of a covariant array is an `Object` (see `covariant`), and so is the
+                // assignment's value, cast back to javac's type where it is used (an expression
+                // statement drops the cast).
+                let declared = to;
                 let to = match &target {
                     Place::Index(array, _) => match array.ty {
                         Type::Array(element) if Self::is_object(*element) => *element,
@@ -920,10 +958,13 @@ impl<'t> Lowering<'t> {
                     },
                     _ => to,
                 };
-                ExprKind::Assign {
-                    op: None,
-                    target,
-                    value: Box::new(self.convert(self.expr(node.child("expression")?)?, to)),
+                let value = Box::new(self.convert(self.expr(node.child("expression")?)?, to));
+                let assign = ExprKind::Assign { op: None, target, value };
+                if to != declared && declared.is_reference() {
+                    let inner = self.synth(assign, node.pos(), to);
+                    ExprKind::Cast(declared, Box::new(inner))
+                } else {
+                    assign
                 }
             }
             kind if kind.ends_with("_ASSIGNMENT") => {

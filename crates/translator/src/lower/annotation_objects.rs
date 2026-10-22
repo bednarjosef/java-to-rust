@@ -55,7 +55,8 @@ impl<'t> Lowering<'t> {
             return Ok(None);
         }
         let pos = node.pos();
-        let strings = Type::array(Type::String);
+        // An `Object[]` where `String[]` is covariant (`covariant`), its strings stored as objects.
+        let strings = self.covariant_array(Type::array(Type::String));
         let local = self.fresh_name("annotation");
         let var = || self.synth(ExprKind::Var(local.clone()), pos, Type::JavaClass);
         let mut chain = self.synth(ExprKind::Null, pos, Type::Null);
@@ -68,7 +69,10 @@ impl<'t> Lowering<'t> {
             let members = decl
                 .list("members")
                 .filter(|m| m.kind() == "METHOD")
-                .map(|m| self.synth(ExprKind::Str(m.str("name").to_string()), pos, Type::String))
+                .map(|m| {
+                    let name = self.synth(ExprKind::Str(m.str("name").to_string()), pos, Type::String);
+                    self.convert(name, strings.element())
+                })
                 .collect();
             let array = self.synth(ExprKind::ArrayLit(members), pos, strings);
             self.annotation_classes.borrow_mut().insert(name.clone());

@@ -314,7 +314,7 @@ fn ctors_set(methods: &[Method], index: usize, name: &str) -> bool {
 }
 
 /// Calls `f` on every expression in `stmt`, inner expressions first.
-fn rewrite_stmt(stmt: &mut Stmt, f: &mut dyn FnMut(&mut Expr)) {
+pub(super) fn rewrite_stmt(stmt: &mut Stmt, f: &mut dyn FnMut(&mut Expr)) {
     match stmt {
         Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _) => rewrite(e, f),
         Stmt::Yield(e) | Stmt::Throw(e) => rewrite(e, f),

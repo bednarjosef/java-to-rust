@@ -34,8 +34,10 @@
 //! around the call are not looked for in its own code. The JDK's static initializers run on the
 //! JDK's own constants and flags, and so none of the program's code: one lets out nothing.
 
+mod conditions;
 mod entry;
 mod failures;
+use conditions::condition_points;
 use failures::format_may_fail;
 mod field_inits;
 pub(super) mod guards;
@@ -1085,6 +1087,7 @@ fn stmt_points(
     match s {
         Stmt::If { cond, then, otherwise } => {
             expr_points(class, facts, m, cond, frames, safe, out);
+            condition_points(facts, m, cond, frames, safe, out);
             // A branch that a known condition never takes raises nothing (see `guards`).
             let known = guards::known_condition(class, &facts.static_writes, cond);
             let then_safe = narrowed(safe, cond, true, |v| assigns_stmt(then, v));
@@ -1100,8 +1103,14 @@ fn stmt_points(
         }
         Stmt::While { cond, body } => {
             expr_points(class, facts, m, cond, frames, safe, out);
+            condition_points(facts, m, cond, frames, safe, out);
             let body_safe = narrowed(safe, cond, true, |v| assigns_stmt(body, v));
             stmt_points(class, facts, m, body, frames, &body_safe, out);
+        }
+        Stmt::DoWhile { body, cond } => {
+            stmt_points(class, facts, m, body, frames, safe, out);
+            expr_points(class, facts, m, cond, frames, safe, out);
+            condition_points(facts, m, cond, frames, safe, out);
         }
         Stmt::For { init, cond, update, body } => {
             for i in init {
@@ -1110,6 +1119,7 @@ fn stmt_points(
             let body_safe = match cond {
                 Some(c) => {
                     expr_points(class, facts, m, c, frames, safe, out);
+                    condition_points(facts, m, c, frames, safe, out);
                     narrowed(safe, c, true, |v| assigns_stmt(body, v))
                 }
                 None => safe.to_vec(),
@@ -1355,6 +1365,7 @@ fn expr_points(
         }
         ExprKind::Conditional(c, a, b) => {
             expr_points(class, facts, m, c, frames, safe, out);
+            condition_points(facts, m, c, frames, safe, out);
             let a_safe = narrowed(safe, c, true, |v| assigns(a, v));
             expr_points(class, facts, m, a, frames, &a_safe, out);
             let b_safe = narrowed(safe, c, false, |v| assigns(b, v));

@@ -94,8 +94,11 @@ impl<'a> Gen<'a> {
         let base_part = base.map(|b| {
             let values = inits.iter().flatten().copied().chain(leading.iter().map(|&(_, v)| v));
             // A borrow in `super(...)` (the enclosing instance's enclosing instance, read through
-            // the `outer` parameter) lasts to the end of the literal, which may move what it borrows.
-            let borrows = b.contains(".borrow()") && !leading.is_empty();
+            // the `outer` parameter, or a field of a parameter's superclass through `base()`, as
+            // javac's `new AssignItem(lhs)` reads `lhs.typecode`) lasts to the end of the literal,
+            // which may move what it borrows.
+            let borrows =
+                [".borrow()", ".base()", ".base_mut()"].iter().any(|r| b.contains(r)) && !leading.is_empty();
             if sequential || borrows || values.into_iter().any(has_effects) {
                 let temp = self.temp("base");
                 self.line(&format!("let {temp} = {b};"));
@@ -286,8 +289,10 @@ impl<'a> Gen<'a> {
             }),
             _ => false,
         };
-        let once = rest.iter().any(|s| assigns_once(s) || once_per_case(s))
-            && rest.iter().filter(|s| assigns_stmt(s, name)).count() == 1;
+        // The one statement that assigns it does so once (a later switch that does not assign it
+        // at all, as after javac's `modifiersOpt` loop, is not that statement).
+        let assigning: Vec<&Stmt> = rest.iter().filter(|s| assigns_stmt(s, name)).collect();
+        let once = matches!(assigning[..], [s] if assigns_once(s) || once_per_case(s));
         if !once {
             return self.local_is_mut(ty, name, rest);
         }

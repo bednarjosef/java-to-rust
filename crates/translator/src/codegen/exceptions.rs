@@ -60,6 +60,14 @@ pub(super) fn completes(stmt: &Stmt) -> bool {
             (completes_all(body) || catches.iter().any(|c| completes_all(&c.body)))
                 && finally.as_deref().is_none_or(completes_all)
         }
+        // A switch with a `default` whose last group ends abruptly, and that no `break` leaves,
+        // as javac's Lower ends its code of an operator with a `return` in each case.
+        Stmt::Switch { cases, .. } => {
+            let default = cases.iter().any(|c| c.labels.iter().any(|l| matches!(l, CaseLabel::Default)));
+            !default
+                || cases.last().is_none_or(|c| completes_all(&c.body))
+                || cases.iter().any(|c| c.body.iter().any(|s| breaks_out_of(s, None)))
+        }
         _ => true,
     }
 }
@@ -479,6 +487,11 @@ impl<'a> Gen<'a> {
         self.ty_name(Type::class("java.lang.Throwable"))
     }
 
+    /// Whether the program has exceptions: `Throwable` is among its classes.
+    pub(super) fn has_throwable(&self) -> bool {
+        self.class.type_index("java.lang.Throwable").is_some()
+    }
+
     /// The runtime's function `name` that ends the program with an uncaught exception, which
     /// shows the exception through its `Display`.
     pub(super) fn uncaught(&mut self, name: &str) -> String {
@@ -771,7 +784,9 @@ impl<'a> Gen<'a> {
         match self.innermost_attempt() {
             Some((label, completion)) => format!("break '{label} {}", self.thrown(completion, e)),
             None if self.throwing => format!("return Err({e})"),
-            None => format!("{}({e})", self.uncaught("uncaught")),
+            // `throw_uncaught` returns `!`, so that Rust sees the arm end the code (a local that
+            // the `Ok` arm sets is set after the `match`).
+            None => format!("{}({e})", self.uncaught("throw_uncaught")),
         }
     }
 

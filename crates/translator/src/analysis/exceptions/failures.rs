@@ -11,6 +11,12 @@ fn object_checked(object: &Expr) -> bool {
     matches!(object.ty, Type::Class(..) | Type::Enum(_))
 }
 
+/// Whether a `System.arraycopy` has an array of objects as its source, which may be an array of
+/// another type than the destination (the `Object`-typed copy of `codegen/natives.rs`).
+fn object_copy(args: &[Expr]) -> bool {
+    matches!(args.first().map(|a| &a.ty), Some(Type::Class(name, _)) if *name == OBJECT)
+}
+
 /// Whether every object that a value of type `s` may be (`Facts::flows`, which decides the
 /// variants of its enum) is of a class under `t`, so that a cast of it to `t` cannot fail: the
 /// JDK's `((TreeMap<E,?>) m).keyIterator()` in `TreeMap.KeySet`, whose `m` is only ever a `TreeMap`
@@ -455,6 +461,9 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
         // operand, the access of the element, does (`lower::handles`).
         Builtin::ElementUpdate(_) | Builtin::ByteView { .. } => &[],
         Builtin::ArraysCopyOf => &["java.lang.NegativeArraySizeException"],
+        Builtin::Native(Native::ArrayCopy) if object_copy(args) => {
+            &["java.lang.ArrayIndexOutOfBoundsException", "java.lang.ArrayStoreException"]
+        }
         Builtin::Native(Native::ArrayCopy) => &["java.lang.ArrayIndexOutOfBoundsException"],
         // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
         Builtin::Arrays(op) if op.ranged() => &["java.lang.ArrayIndexOutOfBoundsException"],
@@ -756,6 +765,11 @@ pub(super) fn runtime_failures(
                     }
                 }
                 out.push(("java.lang.ArrayIndexOutOfBoundsException", "this call of the library", true, x.id));
+                // An array of objects may be of another type than the destination's: the copy's
+                // checked form returns the mismatch (`codegen/dispatch.rs`).
+                if object_copy(args) {
+                    out.push(("java.lang.ArrayStoreException", "this call of the library", true, x.id));
+                }
             }
             // The string is dereferenced first (a null one is the checked `NullPointerException`),
             // then the indices, the radix and the digits are read.

@@ -6,7 +6,8 @@
 //! the classes of the program that have the annotation `name` themselves (none of the three is
 //! `@Inherited`), each giving its `value` as strings: `{ Class c = ..; yield c.equals(A.class) ?
 //! new String[] {"*"} : c.equals(B.class) ? .. : null; }`. A value is a string literal, an array
-//! of them, a constant, or an enum constant, which gives its name; any other is rejected.
+//! of them, a constant, or an enum constant, which gives its name; any other is rejected. Where
+//! `String[]` is an `Object[]` (`covariant`), the arrays are `Object[]`s of the strings.
 
 use super::*;
 
@@ -29,14 +30,17 @@ impl<'t> Lowering<'t> {
             return unsupported(node, "`TranslatedProcessorAnnotations.values0` of a computed annotation");
         };
         let pos = node.pos();
-        let strings = Type::array(Type::String);
+        // An `Object[]` where `String[]` is covariant (`covariant`), its strings stored as objects.
+        let strings = self.covariant_array(Type::array(Type::String));
         let local = self.fresh_name("processor");
         let var = || self.synth(ExprKind::Var(local.clone()), pos, Type::JavaClass);
         let mut chain = self.synth(ExprKind::Null, pos, Type::Null);
         for t in (0..self.types.len()).rev() {
             let Some(values) = self.annotation_values(self.types[t].node, annotation)? else { continue };
-            let values =
-                values.into_iter().map(|v| self.synth(ExprKind::Str(v), pos, Type::String)).collect();
+            let values = values
+                .into_iter()
+                .map(|v| self.convert(self.synth(ExprKind::Str(v), pos, Type::String), strings.element()))
+                .collect();
             let array = self.synth(ExprKind::ArrayLit(values), pos, strings);
             let test = self.class_equals(node, var(), t)?;
             chain = self.synth(

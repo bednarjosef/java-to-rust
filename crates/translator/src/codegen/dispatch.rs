@@ -16,6 +16,7 @@
 //! Each item of an enum is written only when some code uses it. The generator learns which by
 //! generating the program until no new item is asked for (see `generate`).
 
+use super::arraycopy::CopyCall;
 use super::*;
 use std::collections::BTreeSet;
 
@@ -271,7 +272,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The binary name of type `t`, as the JVM shows it: `shapes.Outer$Inner`.
-    fn binary_name(&self, t: usize) -> String {
+    pub(super) fn binary_name(&self, t: usize) -> String {
         let decl = &self.class.types[t];
         if let Some(array) = self.class.array_of(t) {
             return self.descriptor(array);
@@ -522,22 +523,16 @@ impl<'a> Gen<'a> {
             [src_pos, dest_pos, length].iter().map(|e| self.value(e, Type::Int).text).collect();
         let (s, d) = (self.object(src), self.object(dest));
         let checked = self.facts.raising.contains(&id);
-        let copy = self.runtime(if checked { "try_arraycopy" } else { "arraycopy" });
-        let throw = if checked {
-            format!("Err::<(), _>({})", self.runtime("Exception::new"))
-        } else {
-            self.runtime("throw")
-        };
         // Names that no local of the method has, as `src` and `dest` may read one.
         let [p, q, n] = ["src_pos", "dest_pos", "length"].map(|base| self.temp(base));
-        let mut arms = Vec::new();
-        if let Some(t) = self.object_index() {
-            for c in self.enum_variants(t).into_iter().filter(|&c| self.class.array_of(c).is_some()) {
-                let variant = self.variant(t, c);
-                arms.push(format!("({variant}(src), {variant}(dest)) => {copy}(src, {p}, dest, {q}, {n}),"));
+        let arms = match self.object_index() {
+            Some(t) => {
+                let variants = self.enum_variants(t);
+                let call = CopyCall { pos: src.pos, checked, names: [p.as_str(), q.as_str(), n.as_str()] };
+                self.object_copy_arms(t, &variants, call)
             }
-        }
-        arms.push(format!("_ => {throw}(\"java.lang.ArrayStoreException\", \"arraycopy: type mismatch\"),"));
+            None => vec!["_ => unreachable!(),".to_string()],
+        };
         let code = Code::atom(format!(
             "{{ let ({p}, {q}, {n}) = ({}, {}, {}); match (&{s}, &{d}) {{ {} }} }}",
             ints[0],
@@ -860,7 +855,7 @@ impl<'a> Gen<'a> {
             if self.facts.nullable_returns.contains(&resolved) {
                 self.need(Need::NullableText(t));
                 let text = format!("{obj}.nullable_text()");
-                if throws {
+                if throws || !self.has_throwable() {
                     return Code::atom(text);
                 }
                 let uncaught = self.uncaught("uncaught");
@@ -892,13 +887,20 @@ impl<'a> Gen<'a> {
     }
 
     /// The name of the method of the enum of `t` that a call of `resolved` calls: the body
-    /// itself when every variant runs the one the enum has, else the dispatcher.
+    /// itself when every variant that can receive the call runs the one the enum has, else the
+    /// dispatcher. A variant outside the class that declares `resolved` cannot receive it
+    /// (`Throwable`'s `Exception`s for `Error`'s `construct<Name>` methods, see
+    /// `analysis::whole_objects`).
     pub(super) fn dispatch_name(&self, t: usize, resolved: usize) -> String {
         let h = &self.class.hierarchy;
+        let declared = self.class.methods[resolved].class;
         if let [only] = self.enum_targets(t, resolved)[..]
             && self.homes[only] == Home::Enum(t)
             && self.same_ret(only, resolved)
-            && self.enum_variants(t).into_iter().all(|c| h.implementation(resolved, c).is_some())
+            && self
+                .enum_variants(t)
+                .into_iter()
+                .all(|c| h.implementation(resolved, c).is_some() || !h.is_subtype(c, declared))
         {
             self.need(Need::Body(only));
             return self.fn_names[only].clone();
@@ -951,7 +953,13 @@ impl<'a> Gen<'a> {
                         while bound.contains(&temp) || temp == obj {
                             temp.push('_');
                         }
-                        lines.push(format!("let {temp} = {text};"));
+                        // A nullable string is bound as an owned value first, as `bound_call` does.
+                        if let Some(owned) = text.strip_suffix(".as_deref()") {
+                            lines.push(format!("let {temp}_value = {owned}.clone();"));
+                            lines.push(format!("let {temp} = {temp}_value.as_deref();"));
+                        } else {
+                            lines.push(format!("let {temp} = {text};"));
+                        }
                         bound.push(temp);
                     }
                     self.guarded = outer;
@@ -1926,27 +1934,34 @@ impl<'a> Gen<'a> {
 
     /// `nullable_text()`: what `toString` returns for an object of the enum of `t`, its null as
     /// `None`, or its exception; where an implementation may return null, the `Display` shows "null".
+    /// In a program without exceptions (no `Throwable`) it is the `Option` alone.
     fn nullable_text_impl(&mut self, t: usize, variants: &[usize]) {
         let name = struct_name(&self.class.types[t].name);
-        let throwable = self.throwable_type();
+        let fallible = self.has_throwable();
+        let ret = if fallible {
+            format!("Result<Option<String>, {}>", self.throwable_type())
+        } else {
+            "Option<String>".to_string()
+        };
         self.gap();
         self.line(&format!("impl {name} {{"));
         self.indent += 1;
-        self.line(&format!("pub(crate) fn nullable_text(&self) -> Result<Option<String>, {throwable}> {{"));
+        self.line(&format!("pub(crate) fn nullable_text(&self) -> {ret} {{"));
         self.indent += 1;
         let throws = self.enum_text_throws(t);
+        let ok = |text: String| if fallible { format!("Ok({text})") } else { text };
         self.match_arms(t, variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
             Some(i) if g.facts.throwing.contains(&i) || g.facts.nullable_returns.contains(&i) => {
                 let (call, uses) = g.arm_call(t, c, i, "");
                 let call = match (g.facts.throwing.contains(&i), g.facts.nullable_returns.contains(&i)) {
                     (true, true) => call,
                     (true, false) => format!("{call}.map(Some)"),
-                    (false, _) => format!("Ok({call})"),
+                    (false, _) => ok(call),
                 };
                 (call, uses)
             }
             _ if throws => ("self.try_text().map(Some)".to_string(), false),
-            _ => ("Ok(Some(self.to_string()))".to_string(), false),
+            _ => (ok("Some(self.to_string())".to_string()), false),
         });
         self.indent -= 1;
         self.line("}");
