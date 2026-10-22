@@ -686,3 +686,41 @@ A call may run any member of an override group, so the analyses treat the group 
   are rejected.
 - A class with subclasses that needs the whole-object constructor form, whose enclosing
   instance or captured locals a `super(..)` computes, is rejected (1.4).
+
+## 4. Plan: strings as WTF-8
+
+Not built yet. Today a translated string is a Rust `String` (or a shared `java::JStr`, an
+`Arc<str>`, see 1.6), which cannot hold a lone UTF-16 surrogate: one becomes `?` when it is
+stored (`runtime/src/string.rs`), which `known-failures/LoneSurrogateCompareTo.java`, the
+strings fuzzer's seeds 18, 51 and 396 and four javac cases (`scripts/javac-check/known-differences`)
+show. The plan stores every string as WTF-8, so that a string holds exactly Java's code units
+while normal text stays plain UTF-8 at no cost:
+
+- **The bytes.** WTF-8 is UTF-8 that also encodes a lone surrogate in UTF-8's 3-byte form
+  (`ED A0..BF ..`). A surrogate pair is always its 4-byte character, never two 3-byte halves, so
+  each Java string has exactly one encoding and equality and hashing stay byte comparisons. Text
+  without lone surrogates is byte for byte its UTF-8.
+- **The types** (`runtime/src/wtf8.rs`). `java::Wtf8` is the unsized string slice, a
+  `[u8]` that holds WTF-8, with the `str`-like methods the generator and the runtime use;
+  `java::JString` is the plain owned string (a `Vec<u8>`), and `java::JStr` the shared one
+  (an `Arc` of the same bytes); both deref to `Wtf8`. A `&str` converts to a `&Wtf8` for free;
+  a `&Wtf8` converts back to a `&str` after a check for lone surrogates, which the runtime folds
+  into the ASCII checks it already makes.
+- **Joining.** Appending text that starts with a low surrogate to text that ends with a high one
+  joins the two into their 4-byte character, as Java's UTF-16 shows them as one pair: a check of
+  the six bytes at the seam, in `JString`'s append and in concatenation (`java::concat!`, whose
+  parts are written as they are rather than through `format!`, which would show a lone surrogate
+  as `?`).
+- **Code units.** `charAt`, `substring` and the other unit-indexed methods keep their ASCII fast
+  paths; their other path decodes WTF-8 to units exactly and encodes a lone surrogate back
+  rather than `?` (`from_units`). A builder already holds UTF-16 units, so its `toString` becomes
+  exact.
+- **Output.** Printing encodes as Java's UTF-8 `PrintStream` does: a lone surrogate prints `?`.
+- **The generator.** `rust_type(String)` is `java::JString`, or `java::JStr` where strings are
+  shared; the runtime's string functions take `&Wtf8`; a literal is a `&'static Wtf8` view of
+  its UTF-8; a Java `char` that is a surrogate becomes its 3-byte form in a string.
+
+Steps, each keeping `scripts/check.sh` green: (1) the runtime types and their operations, with
+unit tests, unused; (2) the generator and the runtime's string functions switched over, with
+the corpus also run with `JAVA_TO_RUST_SHARED_STRINGS`; (3) the lone-surrogate cases above moved
+into the corpus, off `known-differences`, and javac timed before and after.
