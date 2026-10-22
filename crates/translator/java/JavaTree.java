@@ -96,9 +96,8 @@ public class JavaTree {
      * packages javac compiles only inside that module): all the sources are one module, that one
      * or the unnamed module (see {@link #oneModule}).
      *
-     * <p>With {@code --patches DIR}, a source file of the source path or of the files given that
-     * a patch in DIR names is read as the patch changes it (see {@link JdkPatch}): javac's own
-     * sources are the program's when javac is translated.
+     * <p>With {@code --patches DIR}, a source file of the source path that a patch in DIR names
+     * is read as the patch changes it (see {@link JdkPatch}).
      */
     private static void program(List<String> args) throws Exception {
         List<String> options = new ArrayList<>(List.of("-proc:none", "-Xlint:none", "-XDshould-stop.at=FLOW"));
@@ -106,12 +105,10 @@ public class JavaTree {
         boolean serve = false;
         File moduleInfo = null;
         java.nio.file.Path patches = null;
-        String sourcepath = "";
         for (int i = 0; i < args.size(); i++) {
             if (args.get(i).equals("--sourcepath") && i + 1 < args.size()) {
-                sourcepath = args.get(++i);
                 options.add("-sourcepath");
-                options.add(sourcepath);
+                options.add(args.get(++i));
             } else if (args.get(i).equals("--module-info") && i + 1 < args.size()) {
                 moduleInfo = new File(args.get(++i));
             } else if (args.get(i).equals("--patches") && i + 1 < args.size()) {
@@ -133,7 +130,7 @@ public class JavaTree {
         StandardJavaFileManager fileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8);
         JavaFileManager manager = JdkPatch.patching(oneModule(fileManager, moduleInfo), patches);
         JavacTask task = (JavacTask) compiler.getTask(null, manager, diagnostics,
-                options, null, JdkPatch.patched(files, sourcepath, fileManager, patches));
+                options, null, fileManager.getJavaFileObjectsFromFiles(files));
         // Units that javac loads from the source path are attributed too, but only reported here.
         Set<CompilationUnitTree> analyzed = new LinkedHashSet<>();
         task.addTaskListener(new TaskListener() {

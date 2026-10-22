@@ -128,6 +128,11 @@ made from; the translated one gets that JDK as `JAVA_HOME`, to read the platform
 `SLOT` names a command to run the translated javac under (the build-slot limiter), and
 `JAVAC_CHECK_OUT` the directory that keeps each case's outputs for a look after a failure.
 
+javac itself is never patched, as it is the program under test. Its census keeps the rejection
+of `new DigestInputStream` in `Main.showClass` (Main.java:485), which is only reached with the
+hidden `-XDshowClass` option and ends the program loudly there; translating `MessageDigest`
+through the JDK's own SHA code would lift it.
+
 ## Limits
 
 The hard limits from the project's earlier discussion apply to large projects in full: no code
