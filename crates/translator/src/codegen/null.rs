@@ -121,6 +121,16 @@ impl<'a> Gen<'a> {
         if self.borrowed_optional.contains(name) || plain_box { rust } else { format!("{rust}.as_deref()") }
     }
 
+    /// The possibly-null variable `name` as the `Option` that a null test binds: an array is its
+    /// own handle (`.clone()`), which the runtime's array functions take by reference, where
+    /// `as_ref()` would give a reference to a reference.
+    fn narrowed_source(&self, name: &str, ty: Type) -> String {
+        match ty {
+            Type::Array(_) => format!("{}.clone()", self.local(name)),
+            _ => self.option_source(name, ty),
+        }
+    }
+
     /// A possibly-null string as an `Option<&str>`.
     pub(super) fn option_ref(&mut self, e: &'a Expr) -> String {
         match &e.kind {
@@ -386,7 +396,7 @@ impl<'a> Gen<'a> {
                 self.line(&format!(
                     "if let Some({}) = {} {{",
                     self.local(name),
-                    self.option_source(name, ty)
+                    self.narrowed_source(name, ty)
                 ));
                 self.narrow(name)
             }
@@ -456,7 +466,11 @@ impl<'a> Gen<'a> {
                     texts.push(format!("let {} = {source}", self.pattern_binding(name, &source, ty)));
                 }
                 Some((name, ty)) => {
-                    texts.push(format!("let Some({}) = {}", self.local(name), self.option_source(name, ty)));
+                    texts.push(format!(
+                        "let Some({}) = {}",
+                        self.local(name),
+                        self.narrowed_source(name, ty)
+                    ));
                     narrowed.extend(self.narrow(name));
                 }
                 None => {
@@ -509,7 +523,7 @@ impl<'a> Gen<'a> {
                         rust_string(text)
                     )));
                 }
-                let head = format!("let Some({}) = {}", self.local(name), self.option_source(name, ty));
+                let head = format!("let Some({}) = {}", self.local(name), self.narrowed_source(name, ty));
                 (head, non_null, other, self.narrow(name).into_iter().collect())
             }
             None => {
@@ -596,13 +610,7 @@ impl<'a> Gen<'a> {
         {
             return None;
         }
-        // An array is bound as its own handle, which the runtime's array functions take by
-        // reference (`copy_of(&a, ..)`), as they take every other array.
-        let source = match ty {
-            Type::Array(_) => format!("{}.clone()", self.local(name)),
-            _ => self.option_source(name, ty),
-        };
-        self.line(&format!("let Some({}) = {source} else {{", self.local(name)));
+        self.line(&format!("let Some({}) = {} else {{", self.local(name), self.narrowed_source(name, ty)));
         self.nested(then);
         self.line("};");
         Some(name)
