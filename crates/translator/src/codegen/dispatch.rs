@@ -1232,7 +1232,8 @@ impl<'a> Gen<'a> {
         if self.runtime_of(c).is_none() {
             // A class of the program implements each of these, or inherits the default.
             let message = format!("`CharSequence.{}` of a class without one not supported yet", method.name);
-            self.rejected.push(Error { pos: method.pos, message });
+            let pos = self.class.methods.iter().find(|m| m.class == c).map_or(method.pos, |m| m.pos);
+            self.rejected.push(Error { pos, message });
             return "unreachable!()".to_string();
         }
         if method.name == "subSequence" {
