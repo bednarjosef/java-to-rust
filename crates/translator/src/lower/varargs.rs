@@ -36,7 +36,8 @@ impl<'t> Lowering<'t> {
         let direct = args.len() == params.len()
             && (passed == Some(Type::Null)
                 || passed == Some(ty)
-                || (of_variable || objects) && matches!(passed, Some(Type::Array(e)) if Self::of_objects(*e)));
+                || (of_variable || objects)
+                    && matches!(passed, Some(Type::Array(e)) if Self::of_objects(*e)));
         if direct {
             return Ok(args);
         }

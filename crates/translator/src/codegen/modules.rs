@@ -258,7 +258,11 @@ fn absolute(package: &str) -> String {
 /// would meet, so those take a `_`: the JDK's `java.util` is `java_::util`.
 fn module_name(segment: &str) -> String {
     match snake_case(segment) {
-        name if matches!(name.as_str(), "java" | "std" | "core" | "alloc" | "super" | "self" | "crate" | "main") => {
+        name if matches!(
+            name.as_str(),
+            "java" | "std" | "core" | "alloc" | "super" | "self" | "crate" | "main"
+        ) =>
+        {
             format!("{name}_")
         }
         name => name,

@@ -807,7 +807,9 @@ impl<'t> Lowering<'t> {
                 // A native that does nothing here, such as `registerNatives()`, leaves no trace.
                 Expr { kind: ExprKind::Builtin(Builtin::Native(Native::Nothing), _), .. } => return Ok(()),
                 // A store in a covariant array, whose value is not used.
-                Expr { kind: ExprKind::Cast(_, assign), .. } if matches!(assign.kind, ExprKind::Assign { .. }) => {
+                Expr { kind: ExprKind::Cast(_, assign), .. }
+                    if matches!(assign.kind, ExprKind::Assign { .. }) =>
+                {
                     Stmt::Expr(*assign)
                 }
                 e => Stmt::Expr(e),
