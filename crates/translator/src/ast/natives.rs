@@ -259,6 +259,13 @@ pub enum Native {
     UnmapFile,
     /// `UnixFileDispatcherImpl.allocationGranularity0()`: the page size.
     AllocationGranularity,
+    /// `LinuxNativeDispatcher.posix_fadvise(fd, offset, len, advice)`: `file_copy.rs`.
+    PosixFadvise,
+    /// `LinuxNativeDispatcher.directCopy0(dst, src, cancel)`: answers `IOStatus.UNSUPPORTED`.
+    DirectCopy,
+    /// `UnixFileSystem.bufferedCopy0(dst, src, address, size, cancel)`: copies through the buffer
+    /// at `address` (`file_copy.rs`).
+    BufferedCopy,
 }
 
 impl Native {
@@ -365,6 +372,14 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("sun.nio.ch.UnixFileDispatcherImpl", "unmap0", "(long,long)int") => Native::UnmapFile,
         // Nothing is written back: no mapping is writable or synchronous (`file_channels.rs`).
         ("java.nio.MappedMemoryUtils", "force0", "(java.io.FileDescriptor,long,long)void") => Native::Nothing,
+        // The copy of `Files.copy` (`file_copy.rs`): advice, the kernel's copy (not used), and
+        // the copy through a buffer, which `UnixFileSystem.copyFile` falls back to.
+        ("sun.nio.fs.LinuxNativeDispatcher", "init", "()void") => Native::Nothing,
+        ("sun.nio.fs.LinuxNativeDispatcher", "posix_fadvise", "(int,long,long,int)int") => {
+            Native::PosixFadvise
+        }
+        ("sun.nio.fs.LinuxNativeDispatcher", "directCopy0", "(int,int,long)int") => Native::DirectCopy,
+        ("sun.nio.fs.UnixFileSystem", "bufferedCopy0", "(int,int,long,int,long)void") => Native::BufferedCopy,
         ("jdk.internal.misc.Unsafe", "writeback0", "(long)void") => Native::Nothing,
         ("jdk.internal.misc.Unsafe", "writebackPreSync0", "()void") => Native::Nothing,
         ("jdk.internal.misc.Unsafe", "writebackPostSync0", "()void") => Native::Nothing,
@@ -478,7 +493,7 @@ pub const UNIX_DISPATCHER: &str = "sun.nio.fs.UnixNativeDispatcher";
 
 /// The natives of `UNIX_DISPATCHER` that the runtime implements (`Native::Unix`), with the
 /// runtime's function of each. The dispatcher's other natives (the calls relative to an open
-/// directory, extended attributes, `statvfs`, the mount table) are not among them.
+/// directory, extended attributes, the mount table) are not among them.
 pub const UNIX_CALLS: &[(&str, &str)] = &[
     ("lastError", "unix_last_error"),
     ("getcwd0", "unix_getcwd"),
@@ -495,6 +510,7 @@ pub const UNIX_CALLS: &[(&str, &str)] = &[
     ("symlink0", "unix_symlink"),
     ("stat0", "unix_stat"),
     ("fstat0", "unix_fstat"),
+    ("statvfs0", "unix_statvfs"),
     ("chown0", "unix_chown"),
     ("fchown0", "unix_fchown"),
     ("chmod0", "unix_chmod"),

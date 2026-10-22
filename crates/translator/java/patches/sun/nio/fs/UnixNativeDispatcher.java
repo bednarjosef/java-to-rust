@@ -14,8 +14,8 @@ package sun.nio.fs;
  * use too. The calls relative to an open directory ({@code openat}, {@code fdopendir} and the
  * others), which the JDK makes only where {@link #openatSupported} says so, fail with
  * {@code ENOSYS}. The calls on memory addresses (extended attributes, the mount table) and those
- * that look users and groups up by name or ask about a whole file system ({@code statvfs}) are
- * natives that the translator does not implement, so that a program that runs them is rejected.
+ * that look users and groups up by name are natives that the translator does not implement, so
+ * that a program that runs them is rejected.
  */
 class UnixNativeDispatcher {
     /** The number of fields {@code stat0} and {@code fstat0} fill (see {@link UnixFileAttributes}). */
@@ -403,13 +403,20 @@ class UnixNativeDispatcher {
     @Add
     private static native int getgrnam0(byte[] name) throws UnixException;
 
+    /** The number of fields {@code statvfs0} fills (see {@link UnixFileStoreAttributes}). */
+    @Add
+    static final int STATVFS_FIELDS = 4;
+
     @Replace
     static void statvfs(UnixPath path, UnixFileStoreAttributes attrs) throws UnixException {
-        statvfs0(path.getByteArrayForSysCalls(), attrs);
+        long[] fields = new long[STATVFS_FIELDS];
+        statvfs0(path.getByteArrayForSysCalls(), fields);
+        check();
+        attrs.fill(fields);
     }
 
     @Add
-    private static native void statvfs0(byte[] path, UnixFileStoreAttributes attrs) throws UnixException;
+    private static native void statvfs0(byte[] path, long[] fields);
 
     @Replace
     static byte[] strerror(int errnum) {
