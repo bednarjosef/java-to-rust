@@ -34,6 +34,7 @@ use crate::value::Value;
 use objects::{MethodInfo, TypeInfo};
 use std::cell::{Cell, RefCell};
 
+mod annotation_presence;
 mod arrays;
 mod boxing;
 mod by_name;
@@ -92,7 +93,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
     real_generics::retry(|real, covariant| {
         let mut lowering = Lowering::declare(&decls)?;
         let annotations = unit.list("typeDecls").filter(|n| n.kind() == "ANNOTATION_TYPE");
-        lowering.annotation_types.extend(annotations.map(|n| crate::program::class_name(n.0)));
+        lowering.annotation_types.extend(annotations.map(|n| (crate::program::class_name(n.0), n)));
         lowering.covariant = covariant.clone();
         lowering.standard = exceptions::Standard::select(decls.iter().map(|d| d.0));
         lowering.declare_standard()?;
@@ -480,9 +481,12 @@ struct Lowering<'t> {
     /// The methods of enums that a constant's body declares and that override nothing, which only
     /// that body's code calls (see `constant_bodies::body_methods`).
     body_helpers: std::collections::HashSet<usize>,
-    /// The annotation types (`@interface`) that were left out, by javac's name: an annotation
-    /// does nothing when the program runs, but a value of one is not translated.
-    annotation_types: std::collections::HashSet<String>,
+    /// The annotation types (`@interface`) that were left out, by javac's name, with their
+    /// declarations: an annotation does nothing when the program runs, but a value of one is not
+    /// translated, and `isAnnotationPresent` reads them (`annotation_presence`).
+    annotation_types: std::collections::HashMap<String, Node<'t>>,
+    /// In a whole program, the annotation types that are the library's (the JDK's).
+    library_annotations: std::collections::HashSet<String>,
     /// What each method asks about its caller (see `callers`).
     callers: callers::Callers,
 }
@@ -719,12 +723,12 @@ impl<'t> Lowering<'t> {
             "java.lang.Object" => unsupported(node, "Object"),
             // A value of an annotation type (what `getAnnotation(Documented.class)` returns) is
             // an `Annotation`, which is all the code may call on it.
-            _ if self.annotation_types.contains(name)
+            _ if self.annotation_types.contains_key(name)
                 && let Some(t) = self.type_index("java.lang.annotation.Annotation") =>
             {
                 Ok(self.self_type(t))
             }
-            _ if self.annotation_types.contains(name) => {
+            _ if self.annotation_types.contains_key(name) => {
                 unsupported(node, &format!("using the annotation type `{name}` other than as an annotation"))
             }
             _ => unsupported(node, &format!("type `{name}`")),

@@ -184,7 +184,9 @@ handles.
   `AbstractProcessor` reads of its processor's class (`@SupportedOptions`,
   `@SupportedAnnotationTypes`, `@SupportedSourceVersion`): its overlay reads them through the
   native `TranslatedProcessorAnnotations.values0`, which the translator writes from the program's
-  annotations (`lower/processors.rs`).
+  annotations (`lower/processors.rs`), and `isAnnotationPresent` of an annotation type's class
+  literal, a chain of tests of the class against those whose declarations have it
+  (`lower/annotation_presence.rs`).
 - **Module layers** other than the boot layer, which load code from a module path, and a
   module's `ModuleDescriptor`.
 - **A bundle of the program's own** (`ResourceBundle.getBundle` of a class of the program, as

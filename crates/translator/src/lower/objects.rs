@@ -81,6 +81,7 @@ impl<'t> Lowering<'t> {
             body_methods: Default::default(),
             body_helpers: Default::default(),
             annotation_types: Default::default(),
+            library_annotations: Default::default(),
             rejected_classes: Default::default(),
             callers: Default::default(),
         }
@@ -132,7 +133,7 @@ impl<'t> Lowering<'t> {
                 "EMPTY_STATEMENT" => {}
                 // Does nothing when the program runs (see `annotation_types`).
                 "ANNOTATION_TYPE" => {
-                    self.annotation_types.insert(crate::program::class_name(member.0));
+                    self.annotation_types.insert(crate::program::class_name(member.0), member);
                     self.nested_annotation_types.insert(crate::program::class_name(member.0));
                 }
                 "CLASS" | "ENUM" | "INTERFACE" | "RECORD" if in_local => {
@@ -498,7 +499,7 @@ impl<'t> Lowering<'t> {
                 Ok(ExprKind::Builtin(Builtin::ClassLiteral(primitive), Vec::new()))
             }
             None if let Some(owner) =
-                node.symbol().map(|s| s.owner).filter(|o| self.annotation_types.contains(*o)) =>
+                node.symbol().map(|s| s.owner).filter(|o| self.annotation_types.contains_key(*o)) =>
             {
                 unsupported(node, &format!("a field of the annotation type `{owner}`"))
             }

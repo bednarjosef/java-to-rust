@@ -107,6 +107,9 @@ impl<'t> Lowering<'t> {
             ("getInterfaces", []) if is_literal(receiver) && self.named_class(receiver) => {
                 return Ok(Some(self.literal_interfaces(node, receiver)?));
             }
+            ("isAnnotationPresent", [annotation]) => {
+                return Ok(Some(self.annotation_present(node, receiver, *annotation)?));
+            }
             ("getEnumConstants", []) => {
                 let class = self.expr(receiver)?;
                 return Ok(Some(self.class_enum_constants(node, class)?));
@@ -299,7 +302,7 @@ impl<'t> Lowering<'t> {
         let named = node.child("expression")?;
         // An annotation type's, whose binary name is its name where no class declares it.
         let name = named.java_type();
-        if self.annotation_types.contains(name) && !self.nested_annotation_types.contains(name) {
+        if self.annotation_types.contains_key(name) && !self.nested_annotation_types.contains(name) {
             self.annotation_classes.borrow_mut().insert(name.to_string());
             return Ok(ExprKind::Builtin(Builtin::ClassLiteral(Type::class(name)), Vec::new()));
         }
