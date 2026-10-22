@@ -126,9 +126,13 @@ impl<'t> Lowering<'t> {
     }
 
     /// The call `kind` of a builtin that makes a `String[]` (javac's type of `node`), as the
-    /// `Object[]` that `String[]` is where it is covariant.
+    /// `Object[]` that `String[]` is where it is covariant. The JDK's code that runs a call
+    /// (`lower::regex`) already makes the `Object[]`.
     pub(super) fn object_array_result(&self, node: Node<'t>, kind: ExprKind) -> ExprKind {
-        if !self.strings_covariant() || node.java_type() != "java.lang.String[]" {
+        if !self.strings_covariant()
+            || node.java_type() != "java.lang.String[]"
+            || !matches!(kind, ExprKind::Builtin(..))
+        {
             return kind;
         }
         let made = self.synth(kind, node.pos(), Type::array(Type::String));

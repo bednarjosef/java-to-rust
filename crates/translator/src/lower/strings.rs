@@ -243,7 +243,16 @@ impl<'t> Lowering<'t> {
                 }
             }
             StringOp::Split | StringOp::ReplaceAll | StringOp::ReplaceFirst | StringOp::Matches => {
-                if let Some(pattern) = self.constant_text(arg_nodes.first().copied()) {
+                let pattern = self.constant_text(arg_nodes.first().copied());
+                // A pattern that is not a constant is the JDK's `Pattern`'s, where the program
+                // has it (`lower::regex`).
+                if pattern.is_none()
+                    && let Some(receiver) = receiver
+                    && let Some(kind) = self.jdk_regex(node, op, receiver, &mut args)?
+                {
+                    return Ok(kind);
+                }
+                if let Some(pattern) = pattern {
                     let checked = match (op, self.constant_text(arg_nodes.get(1).copied())) {
                         (StringOp::ReplaceAll | StringOp::ReplaceFirst, Some(r)) => {
                             java_runtime::regex::check_replacement(&pattern, &r)

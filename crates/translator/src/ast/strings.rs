@@ -64,6 +64,10 @@ pub enum StringOp {
     ToString,
     /// `s.intern()`, as `Identity`.
     Intern,
+    /// The check of `s` for null that calling the method named (`matches`) with the parameters
+    /// shown (`String`) on it makes, as a statement: the receiver of a regular expression call
+    /// that the JDK's `Pattern` runs (`lower::regex`).
+    Receiver(&'static str, &'static str),
     /// `s.equals(x)` where `x` is no string (a box, a builder, an enum, an array, an object): never
     /// equal, after evaluating both and throwing on a null `s`.
     EqualsOther,

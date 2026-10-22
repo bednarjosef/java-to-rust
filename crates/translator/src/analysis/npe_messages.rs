@@ -417,14 +417,18 @@ impl Messages<'_> {
                         let message = "Cannot read the array length because \"a\" is null";
                         out.insert(args[0].id, Some(message.to_string()));
                     }
-                    // `new String(ascii, hibyte, offset, count)` and `new String(chars, ..)` of a
-                    // null array, which the JDK's constructor asks for its length.
+                    // `new String(ascii, hibyte, offset, count)`, `new String(chars, ..)` and `new
+                    // String(codePoints, offset, count)` of a null array, which the JDK's constructor asks for its length.
                     Builtin::String(StringOp::FromHighByte) => {
                         let message = "Cannot read the array length because \"ascii\" is null";
                         out.insert(args[0].id, Some(message.to_string()));
                     }
                     Builtin::String(StringOp::FromChars) => {
                         let message = "Cannot read the array length because \"value\" is null";
+                        out.insert(args[0].id, Some(message.to_string()));
+                    }
+                    Builtin::String(StringOp::FromCodePoints) => {
+                        let message = "Cannot read the array length because \"codePoints\" is null";
                         out.insert(args[0].id, Some(message.to_string()));
                     }
                     // `System.arraycopy` of a null, which the JVM's native code throws without
@@ -1215,6 +1219,7 @@ pub(crate) fn string_method(builtin: &Builtin, args: &[Expr]) -> Option<(&'stati
         (StringOp::HashCode, []) => fixed("hashCode", ""),
         (StringOp::ToString, []) => fixed("toString", ""),
         (StringOp::Intern, []) => fixed("intern", ""),
+        (StringOp::Receiver(name, params), []) => fixed(name, params),
         (StringOp::CodePointAt, [_]) => fixed("codePointAt", "int"),
         (StringOp::CodePointBefore, [_]) => fixed("codePointBefore", "int"),
         (StringOp::CodePointCount, [_, _]) => fixed("codePointCount", "int, int"),

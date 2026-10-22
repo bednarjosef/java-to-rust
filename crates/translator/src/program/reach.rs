@@ -1281,6 +1281,65 @@ pub const STRING_STREAMS: [(&str, &[JdkMethod]); 2] = [
     ),
 ];
 
+/// The JDK's methods that a regular expression call of `String` runs where its pattern is not a
+/// constant (see `lower::regex`), by the method of `String`: what the JDK's `String` calls, each
+/// called on what the one before returns.
+pub const REGEX_CALLS: [(&str, &[JdkMethod]); 4] = [
+    (
+        "matches",
+        &[("java.util.regex.Pattern", "matches", "(java.lang.String,java.lang.CharSequence)boolean")],
+    ),
+    (
+        "replaceAll",
+        &[
+            PATTERN_COMPILE,
+            PATTERN_MATCHER,
+            ("java.util.regex.Matcher", "replaceAll", "(java.lang.String)java.lang.String"),
+        ],
+    ),
+    (
+        "replaceFirst",
+        &[
+            PATTERN_COMPILE,
+            PATTERN_MATCHER,
+            ("java.util.regex.Matcher", "replaceFirst", "(java.lang.String)java.lang.String"),
+        ],
+    ),
+    (
+        "split",
+        &[
+            PATTERN_COMPILE,
+            ("java.util.regex.Pattern", "split", "(java.lang.CharSequence,int)java.lang.String[]"),
+        ],
+    ),
+];
+const PATTERN_COMPILE: JdkMethod =
+    ("java.util.regex.Pattern", "compile", "(java.lang.String)java.util.regex.Pattern");
+const PATTERN_MATCHER: JdkMethod =
+    ("java.util.regex.Pattern", "matcher", "(java.lang.CharSequence)java.util.regex.Matcher");
+
+/// The JDK's methods (`REGEX_CALLS`) that the call `node` runs, where it is a regular expression
+/// call of `String` whose pattern is not a constant.
+pub fn regex_call(node: &Value) -> Option<&'static [JdkMethod]> {
+    fn constant(node: &Value) -> bool {
+        match text(node, "kind") {
+            "STRING_LITERAL" => true,
+            "PARENTHESIZED" => constant(&node["expression"]),
+            "IDENTIFIER" | "MEMBER_SELECT" => {
+                text(node, "javaType") == "java.lang.String" && node["symbol"]["constant"].as_str().is_some()
+            }
+            _ => false,
+        }
+    }
+    let symbol = &node["symbol"];
+    if text(node, "kind") != "METHOD_INVOCATION" || text(symbol, "owner") != "java.lang.String" {
+        return None;
+    }
+    let (_, methods) = REGEX_CALLS.iter().find(|(name, _)| *name == text(symbol, "name"))?;
+    let pattern = node["arguments"].as_array()?.first()?;
+    (!constant(pattern)).then_some(*methods)
+}
+
 /// The methods that a for-each over an `Iterable` calls.
 pub const ITERATION: &[(&str, &str, &str)] = &[
     ("java.lang.Iterable", "iterator", "()java.util.Iterator<T>"),
@@ -2103,6 +2162,15 @@ impl<'t> Walk<'t> {
                 self.reflection_scan(value);
                 if recreated_exception(value).is_some() {
                     self.recreates_exceptions();
+                }
+                if let Some(methods) = regex_call(value) {
+                    for (class, method, signature) in methods {
+                        self.work.push(Item::Method((
+                            (*class).into(),
+                            (*method).into(),
+                            (*signature).into(),
+                        )));
+                    }
                 }
                 if let Some(field) = field_offset_named(value) {
                     self.work.push(Item::Field(field));
