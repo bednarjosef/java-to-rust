@@ -273,10 +273,14 @@ impl<'a> Gen<'a> {
             }
             Native::InflateInit
             | Native::InflateBytes
+            | Native::InflateBytesBuffer
+            | Native::InflateBufferBytes
+            | Native::InflateBufferBuffer
             | Native::InflateAdler
             | Native::InflateReset
             | Native::InflateEnd
-            | Native::InflateSetDictionary => self.inflate_native(native, args, id),
+            | Native::InflateSetDictionary
+            | Native::InflateSetDictionaryBuffer => self.inflate_native(native, args, id),
             Native::NoPendingReferences => Code::atom("false"),
             Native::SecureSeed => {
                 let num_bytes = self.value(&args[0], Type::Int).text;
