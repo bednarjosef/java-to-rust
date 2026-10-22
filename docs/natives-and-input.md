@@ -71,7 +71,7 @@ something a translated program does not have.
 | `UnixFileSystem` natives (`FILE_SYSTEM`) | `fs.rs` | `File`'s attributes, listing, creating, renaming, deleting; not `getSpace0` |
 | the translator's `sun.nio.fs.UnixNativeDispatcher` (`UNIX_CALLS`) | `unix.rs` | the system calls of `java.nio.file`, recording `errno` rather than failing |
 | `UnixNativeDispatcher.statvfs0` (the translator's patch, `long[]` fields) | `unix.rs`: `unix_statvfs` | the four fields `UnixFileStoreAttributes.fill` copies (block size, blocks, free and available blocks) |
-| `LinuxNativeDispatcher.init`, `posix_fadvise`; `UnixFileSystem.directCopy0`, `bufferedCopy0` | `file_copy.rs`, `codegen/file_copy.rs` | `init` does nothing; `posix_fadvise` checks the descriptor is open and gives 0, as its advice has no effect a program can see. `directCopy0` gives `UNSUPPORTED` (-4), so the JDK copies through `bufferedCopy0`, which moves the same bytes between the two descriptors (`copy_file_range` is not used); a failure there raises `java.io.IOException` where HotSpot raises `UnixException`, which `copyFile` turns into `FileSystemException` (only error paths differ) |
+| `LinuxNativeDispatcher.init`, `posix_fadvise`; `UnixFileSystem.directCopy0`, `bufferedCopy0` | `file_copy.rs`, `codegen/file_copy.rs` | `init` does nothing; `posix_fadvise` checks the descriptor is open and gives 0, as its advice has no effect a program can see. `directCopy0` gives `UNSUPPORTED` (-4), so the JDK copies through `bufferedCopy0`, which moves the same bytes between the two descriptors (`copy_file_range` is not used). The JDK's native is `bufferedCopy0Errno` in the translator's patch of `UnixFileSystem`: it answers the `errno` of a failed read or write, and `bufferedCopy` throws `UnixException(errno)` as HotSpot does, so `copyFile` raises the same `IOException` subclass and message (`NoSuchFileException`, `AccessDeniedException`, ...). `posix_fadvise` still raises `java.io.IOException` for a descriptor that is not open; `Files.copy` opens both descriptors first, so it is not reached from there |
 | the translator's `java.net.TranslatedNet` (`NET_CALLS`) | `net.rs` | the C library's name service |
 | `Unsafe.allocateMemory0`, `reallocateMemory0`, `freeMemory0`, `setMemory0`, `copyMemory0`, `copySwapMemory0`; `UnsafeConstants.pageSize0` | `native_memory.rs`, `java::copy_memory` | memory outside the heap by address, for direct buffers |
 | `FileDispatcherImpl.transferTo0`, `transferFrom0` | `file_channels.rs`: `UNSUPPORTED_CASE` | the JDK's `transferToArbitraryChannel` (or its `transferFrom` twin) copies through buffers at the same positions and counts, so `Files.copy` and `FileChannel.transferTo`/`transferFrom` give Java's bytes and positions; `copy_file_range` is not used |
@@ -304,8 +304,8 @@ decoders and encoders of the six standard charsets are translated all the same a
 `java/overlay/sun/nio/cs/TranslatedCoders.java` for `newDecoder()` and `newEncoder()`.
 `Charset.decode(ByteBuffer)`, `encode(CharBuffer)` and `encode(String)` are routed to the same coders
 (`program::CHARSET_CODINGS`), with `REPLACE` for malformed input, so they never throw, as in Java.
-The translation of them is checked only by lowering and generating code: no passing program reaches
-them yet (`FileChannelReadWrite` stops first, see "Not done" below).
+`corpus/whole-program/CharsetCodings.java` runs them on valid and malformed UTF-8, on ISO-8859-1
+text outside the charset, and on `Charset.encode(String)`, and matches Java.
 
 ### Readers and writers over byte streams
 
@@ -349,7 +349,9 @@ Not done:
 - Hand-writing the remaining natives as programs need them, keeping to the policy above (for
   example `UnixFileSystem.getSpace0`, which needs `statvfs`).
 - The extended attributes of `Files.copy` (`fsetxattr0` and its siblings), so
-  `FileChannelTransfers` does not translate yet: it stops there.
+  `FileChannelTransfers` does not translate yet: it stops there. Every program that calls
+  `Files.copy` stops there too, so the `NoSuchFileException` message of a copy is not checked in
+  the corpus yet.
 - The `CharSequence` enum of the object model has no variants when a program's only conversion of a
   `CharBuffer` to `CharSequence` is the translator's own call (`char_sequence_call`). The flow
   analysis (`analysis/hierarchy.rs` `flows`) records no edge for it, so the interface's methods have

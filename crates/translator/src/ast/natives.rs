@@ -263,8 +263,9 @@ pub enum Native {
     PosixFadvise,
     /// `LinuxNativeDispatcher.directCopy0(dst, src, cancel)`: answers `IOStatus.UNSUPPORTED`.
     DirectCopy,
-    /// `UnixFileSystem.bufferedCopy0(dst, src, address, size, cancel)`: copies through the buffer
-    /// at `address` (`file_copy.rs`).
+    /// `UnixFileSystem.bufferedCopy0Errno(dst, src, address, size, cancel)` (the patch's name for
+    /// the JDK's `bufferedCopy0`): copies through the buffer at `address`, and answers the `errno`
+    /// of a failed read or write (`file_copy.rs`).
     BufferedCopy,
 }
 
@@ -379,7 +380,9 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
             Native::PosixFadvise
         }
         ("sun.nio.fs.LinuxNativeDispatcher", "directCopy0", "(int,int,long)int") => Native::DirectCopy,
-        ("sun.nio.fs.UnixFileSystem", "bufferedCopy0", "(int,int,long,int,long)void") => Native::BufferedCopy,
+        ("sun.nio.fs.UnixFileSystem", "bufferedCopy0Errno", "(int,int,long,int,long)int") => {
+            Native::BufferedCopy
+        }
         ("jdk.internal.misc.Unsafe", "writeback0", "(long)void") => Native::Nothing,
         ("jdk.internal.misc.Unsafe", "writebackPreSync0", "()void") => Native::Nothing,
         ("jdk.internal.misc.Unsafe", "writebackPostSync0", "()void") => Native::Nothing,

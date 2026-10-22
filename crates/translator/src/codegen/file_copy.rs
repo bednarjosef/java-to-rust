@@ -1,6 +1,7 @@
 //! The natives of the JDK's file copy (`ast::Native::PosixFadvise`, `DirectCopy` and
-//! `BufferedCopy`), which the runtime's `file_copy` implements. A copy can fail, so the two that
-//! can go through `fallible`; `directCopy0` only answers a status.
+//! `BufferedCopy`), which the runtime's `file_copy` implements. `posix_fadvise` can fail, so it
+//! goes through `fallible`; `directCopy0` and `bufferedCopy0` answer a status or an `errno`, which
+//! the JDK's code (and the translator's patch of `UnixFileSystem`) turns into the exception.
 
 use super::*;
 
@@ -26,7 +27,10 @@ impl<'a> Gen<'a> {
                 let address = self.value(&args[2], Type::Long).text;
                 let size = self.value(&args[3], Type::Int).text;
                 let cancel = self.value(&args[4], Type::Long).text;
-                self.fallible(id, "buffered_copy", vec![dst, src, address, size, cancel])
+                Code::atom(format!(
+                    "{}({dst}, {src}, {address}, {size}, {cancel})",
+                    self.runtime("buffered_copy")
+                ))
             }
             _ => unreachable!("not a file copy native: {native:?}"),
         }
