@@ -935,7 +935,8 @@ impl<'t> Lowering<'t> {
             "CHAR_LITERAL" => self.char_literal(node)?,
             "FLOAT_LITERAL" => self.float_literal(node)?,
             "NULL_LITERAL" => ExprKind::Null,
-            "IDENTIFIER" => match self.alias(node) {
+            // `TRUE` and `FALSE` that a static import of `Boolean`'s names are its constants too.
+            "IDENTIFIER" => match self.alias(node).or_else(|| self.boolean_constant(node)) {
                 Some(value) => value,
                 None => self.name(node)?,
             },
