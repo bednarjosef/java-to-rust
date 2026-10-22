@@ -6,6 +6,15 @@
 
 use super::*;
 
+/// One `System.arraycopy` call, as its arms of the match need it: where the call is, whether a
+/// failure goes on from it (`checked`), and the names of the positions and the length.
+#[derive(Clone, Copy)]
+pub(super) struct CopyCall<'n> {
+    pub(super) pos: Pos,
+    pub(super) checked: bool,
+    pub(super) names: [&'n str; 3],
+}
+
 /// The name of a primitive type as HotSpot's messages give it: `int`.
 fn primitive_name(ty: Type) -> Option<&'static str> {
     Some(match ty {
@@ -24,35 +33,27 @@ fn primitive_name(ty: Type) -> Option<&'static str> {
 impl<'a> Gen<'a> {
     /// The arms of `match (&src, &dest)` for `System.arraycopy`, over the runtime classes
     /// `variants` of the enum of `t`. They cover every pair of classes, each in one arm: a
-    /// non-array source, then a non-array destination, then a pair of arrays. `names` are the
-    /// locals of the positions and the length.
-    pub(super) fn object_copy_arms(
-        &mut self,
-        t: usize,
-        variants: &[usize],
-        pos: Pos,
-        checked: bool,
-        names: [&str; 3],
-    ) -> Vec<String> {
+    /// non-array source, then a non-array destination, then a pair of arrays.
+    pub(super) fn object_copy_arms(&mut self, t: usize, variants: &[usize], call: CopyCall) -> Vec<String> {
         let arrays: Vec<(usize, Type)> =
             variants.iter().filter_map(|&c| self.element_of(c).map(|element| (c, element))).collect();
         let others: Vec<usize> = variants.iter().copied().filter(|&c| self.element_of(c).is_none()).collect();
         let mut arms = Vec::new();
         for &s in &others {
             let message = format!("arraycopy: source type {} is not an array", self.binary_name(s));
-            let body = self.mismatch(checked, &message);
+            let body = self.mismatch(call.checked, &message);
             arms.push(format!("({}(_), _) => {body},", self.variant(t, s)));
         }
         for &(s, _) in &arrays {
             for &d in &others {
                 let message = format!("arraycopy: destination type {} is not an array", self.binary_name(d));
-                let body = self.mismatch(checked, &message);
+                let body = self.mismatch(call.checked, &message);
                 arms.push(format!("({}(_), {}(_)) => {body},", self.variant(t, s), self.variant(t, d)));
             }
         }
         for &(s, es) in &arrays {
             for &(d, ed) in &arrays {
-                arms.push(self.array_pair_arm(t, variants, (s, d), (es, ed), pos, checked, names));
+                arms.push(self.array_pair_arm(t, variants, (s, d), (es, ed), call));
             }
         }
         arms
@@ -65,16 +66,15 @@ impl<'a> Gen<'a> {
         variants: &[usize],
         (s, d): (usize, usize),
         (es, ed): (Type, Type),
-        pos: Pos,
-        checked: bool,
-        [p, q, n]: [&str; 3],
+        call: CopyCall,
     ) -> String {
         let (vs, vd) = (self.variant(t, s), self.variant(t, d));
         let (pattern, body) = if s == d {
-            let copy = self.runtime(if checked { "try_arraycopy" } else { "arraycopy" });
+            let copy = self.runtime(if call.checked { "try_arraycopy" } else { "arraycopy" });
+            let [p, q, n] = call.names;
             (format!("({vs}(src), {vd}(dest))"), format!("{copy}(src, {p}, dest, {q}, {n})"))
         } else {
-            self.object_copy_between(t, variants, (s, d), (es, ed), pos, checked, [p, q, n])
+            self.object_copy_between(t, variants, (s, d), (es, ed), call)
         };
         format!("{pattern} => {body},")
     }
@@ -95,11 +95,9 @@ impl<'a> Gen<'a> {
         variants: &[usize],
         (s, d): (usize, usize),
         (es, ed): (Type, Type),
-        pos: Pos,
-        checked: bool,
-        names: [&str; 3],
+        call: CopyCall,
     ) -> (String, String) {
-        let [p, q, n] = names;
+        let CopyCall { pos, checked, names: [p, q, n] } = call;
         let (vs, vd) = (self.variant(t, s), self.variant(t, d));
         let mismatch = "arraycopy: type mismatch: can not copy";
         let message = match (primitive_name(es), primitive_name(ed)) {
@@ -141,8 +139,8 @@ impl<'a> Gen<'a> {
             });
             return (format!("({vs}(_), {vd}(_))"), "unreachable!()".to_string());
         };
-        let call = format!("{copy}(src, {p}, dest, {q}, {n}, {convert})");
-        let body = if checked { call } else { format!("{call}.unwrap_or_else({uncaught})") };
+        let copy_call = format!("{copy}(src, {p}, dest, {q}, {n}, {convert})");
+        let body = if checked { copy_call } else { format!("{copy_call}.unwrap_or_else({uncaught})") };
         (format!("({vs}(src), {vd}(dest))"), body)
     }
 

@@ -16,6 +16,7 @@
 //! Each item of an enum is written only when some code uses it. The generator learns which by
 //! generating the program until no new item is asked for (see `generate`).
 
+use super::arraycopy::CopyCall;
 use super::*;
 use std::collections::BTreeSet;
 
@@ -527,7 +528,8 @@ impl<'a> Gen<'a> {
         let arms = match self.object_index() {
             Some(t) => {
                 let variants = self.enum_variants(t);
-                self.object_copy_arms(t, &variants, src.pos, checked, [p.as_str(), q.as_str(), n.as_str()])
+                let call = CopyCall { pos: src.pos, checked, names: [p.as_str(), q.as_str(), n.as_str()] };
+                self.object_copy_arms(t, &variants, call)
             }
             None => vec!["_ => unreachable!(),".to_string()],
         };
