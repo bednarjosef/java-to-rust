@@ -707,6 +707,15 @@ pub(super) fn runtime_failures(
                     out.push((NPE, "this call", true, args[0].id));
                 }
             }
+            // The receiver, or else the argument, which `String.compareTo` reads: both are
+            // dereferenced with the checked form (`Gen::text_ref`), as a `catch` sees them.
+            Builtin::String(StringOp::CompareTo) => {
+                if args.first().is_some_and(null) {
+                    out.push((NPE, "this call", true, args[0].id));
+                } else if args.get(1).is_some_and(null) {
+                    out.push((NPE, "this compareTo", true, args[1].id));
+                }
+            }
             Builtin::StringCharAt => {
                 if args.first().is_some_and(null) {
                     out.push((NPE, "this call", true, args[0].id));
@@ -727,11 +736,18 @@ pub(super) fn runtime_failures(
                 }
                 out.push(("java.lang.NumberFormatException", "this decode", true, x.id));
             }
+            // The argument of a box's `compareTo`, which `Integer.compareTo` reads (`Gen::value`
+            // gives it the checked form, as a dereference). Only where the receiver is not null,
+            // since that fails first.
+            Builtin::Boxed(BoxedOp::Compare, _) => {
+                if !null(&args[0]) && args.get(1).is_some_and(null) {
+                    out.push((NPE, "this compareTo", true, args[1].id));
+                }
+            }
             Builtin::Boxed(
                 BoxedOp::Box
                 | BoxedOp::ToString
                 | BoxedOp::HexString
-                | BoxedOp::Compare
                 | BoxedOp::HashCode
                 | BoxedOp::Sum
                 | BoxedOp::FloatTest(_)

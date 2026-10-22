@@ -237,6 +237,10 @@ one could, `Gen::may_fail` picks the checked form, chosen by the same facts the 
   another class (`comparable.rs`, the bridge's cast), runs inside `java::catching(|| op)`
   (`crates/runtime/src/catching.rs`): inside it, the runtime's `throw` unwinds with the exception
   and `catching` returns it as an `Err`. A panic of anything else still unwinds.
+- **A null argument of `compareTo`** on a `String` or a box, raw or direct, is checked like a
+  dereference: `try_non_null_message` gives Java's message for the argument's class, and the
+  `Result` of `compare_to` passes it on with `?`. An enum's `compareTo` returns no `Result`, so
+  its raw call throws directly (see Differences from Java).
 
 `impl From<java::Exception> for Throwable` builds an object of the standard class with its
 `(String)` constructor, so `getMessage` and `toString` read as Java's. Lowering declares such a
@@ -487,7 +491,7 @@ local declared in a `finally` (javac copies the block, each copy with its own sl
 instance initializer (copied into every constructor), of a JDK local the translation may have
 renamed, of the enclosing instance of a nested class, a dereference in the code of `java.lang`,
 a failure of the runtime without the checked form (an unboxing the code does not write as a
-call, a library call given null), a dereference in the body of a method reference's class, and a
+call, a library call given null other than a `compareTo`'s argument), a dereference in the body of a method reference's class, and a
 field of a field of an enclosing instance.
 
 ## Differences from Java
@@ -502,6 +506,10 @@ field of a field of an enclosing instance.
 - With heap pollution (a raw or unchecked use that puts a value of another class in a generic
   place), Java's inserted cast fails and a `catch` may see it; the translation's ends the
   program instead.
+- A raw `Comparable` call of an enum's `compareTo` with a null argument throws its
+  `NullPointerException` straight out of the enum's `compare_to`, which returns no `Result`, so a
+  `catch (NullPointerException)` around that call does not see it: the program ends with exit
+  code 1 where Java prints the caught exception.
 - `toString`s of the JDK that throw (only for bugs) end the program even inside a `try` that
   would catch them.
 

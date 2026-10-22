@@ -18,6 +18,7 @@
 
 use super::arraycopy::CopyCall;
 use super::*;
+use crate::analysis::{ENUM_COMPARE_NULL, compare_null_message};
 use std::collections::BTreeSet;
 
 /// An item of the enum of a type that the code being generated uses.
@@ -1744,8 +1745,26 @@ impl<'a> Gen<'a> {
         let from = format!("{}::cast_class(&b)", self.runtime("CastSource"));
         let fail = failed(self, from);
         if optional {
-            let other = format!("{}(b.as_ref())", self.runtime("non_null"));
-            return format!("match {place} {{ {pattern} => {compare}, b => {{ let b = {other}; {fail} }} }}");
+            // A null argument fails inside the class's own `compareTo`, with that one's message: a
+            // string's or a box's as a `Result` that the `?` of `compare_to` passes on. An enum's
+            // `compare_to` returns no `Result`, so its NPE is thrown, which a `java::catching`
+            // around the call turns into the exception a `catch` sees.
+            let other = match self.runtime_of(c) {
+                Some(ty) => {
+                    let message = compare_null_message(ty.unboxed());
+                    let checked =
+                        format!("{}(b.as_ref(), {message:?})?", self.runtime("try_non_null_message"));
+                    format!("{{ let b = {checked}; {fail} }}")
+                }
+                None => {
+                    let throw = format!(
+                        "{}(\"java.lang.NullPointerException\", {ENUM_COMPARE_NULL:?})",
+                        self.runtime("throw")
+                    );
+                    format!("{{ {throw} }}")
+                }
+            };
+            return format!("match {place} {{ {pattern} => {compare}, b => {other} }}");
         }
         format!("match {place} {{ {pattern} => {compare}, b => {fail} }}")
     }
