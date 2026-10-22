@@ -523,7 +523,8 @@ pub const FALSE_CALLS: &[(&str, &str)] = &[("jdk.internal.vm.ContinuationSupport
 /// `Thread.isVirtual()` is false, and the branches that would park, unpark or ask a virtual
 /// thread (through the JVM's `JavaLangAccess`) never run. The receiver is not read, which differs
 /// from Java only where it is null, where Java would throw a `NullPointerException`; the JDK
-/// tests it first (`LockSupport.unpark`) or has the current thread.
+/// tests it first (`LockSupport.unpark`) or has the current thread (`Thread.currentThread()`,
+/// which is never null).
 pub const FALSE_INSTANCE_CALLS: &[(&str, &str)] = &[("java.lang.Thread", "isVirtual")];
 
 /// Static fields that only the class data sharing archive sets, through the native
@@ -709,7 +710,9 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
             let method = (text(symbol, "owner"), text(symbol, "name"));
             let receiver = &condition["methodSelect"]["expression"];
             let false_call = (FALSE_CALLS.contains(&method)
-                || FALSE_INSTANCE_CALLS.contains(&method) && receiver.is_object() && !has_effects(receiver))
+                || FALSE_INSTANCE_CALLS.contains(&method)
+                    && receiver.is_object()
+                    && !reading_has_effects(receiver))
                 && text(symbol, "type") == "()boolean";
             false_call || (sequential && sequential::is_parallel_test(condition))
         }
@@ -717,6 +720,16 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
         "GREATER_THAN" => sequential && sequential::has_children_test(condition),
         _ => false,
     }
+}
+
+/// Whether reading the receiver `value` of one of the `FALSE_INSTANCE_CALLS` has effects:
+/// `Thread.currentThread()` has none (`LockSupport.park` asks it whether it is virtual).
+fn reading_has_effects(value: &Value) -> bool {
+    let symbol = &value["symbol"];
+    let current_thread = text(value, "kind") == "METHOD_INVOCATION"
+        && (text(symbol, "owner"), text(symbol, "name"), text(symbol, "type"))
+            == ("java.lang.Thread", "currentThread", "()java.lang.Thread");
+    !current_thread && has_effects(value)
 }
 
 /// The branch of an `if` statement or a `?:` that can run when its condition is never true.
