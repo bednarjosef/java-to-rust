@@ -58,11 +58,10 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     let files = source_files(program)?;
     // As a translation first does: without the writes of `String` arrays as `Object` arrays.
     let (units, reach) = load(program, false)?;
-    let units: Vec<&Value> = units.iter().collect();
-    let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     // Panics are rejections in a census: they are reported with the rest, not printed.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
+    let trees: Vec<&Value> = units.iter().map(|u| &u["tree"]).collect();
     // The program's files are the first units (`load`).
     let lower = || lower::census_lower_program(&trees, files.len(), &reach, &program.main);
     let lowered = phase("lower", || std::panic::catch_unwind(lower));
@@ -79,14 +78,24 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
         .into_iter()
         .map(|r| Rejection { unit: r.unit, anchor: r.anchor, error: r.error })
         .collect();
-    let mut fatal = match lowered.class {
-        Err((unit, error)) => Some(Rejection { unit, anchor: None, error }),
-        Ok(mut class) => phase("analyze", || analyse(&mut class, &lowered.units, &mut rejections)),
+    let (class, mut fatal) = match lowered.class {
+        Err((unit, error)) => (None, Some(Rejection { unit, anchor: None, error })),
+        Ok(class) => (Some(class), None),
     };
-    std::panic::set_hook(hook);
+    // What the census needs of javac's trees is taken from them now, so that they are not held
+    // while the program is analysed: the pieces of code, the files, and the units of the
+    // rejections of lowering that have none. Those of the analyses and the generator get theirs
+    // from the stubs (`Stubs::stub`).
     locate(&trees, rejections.iter_mut().filter(|r| r.anchor.is_none()).chain(&mut fatal));
-    let scan = survey::scan(&units, &reach, program, &files);
-    let tally = Tally::new(&scan.pieces, &survey::unit_files(&units, program, &files), rejections, fatal);
+    let scan = survey::scan(&units.iter().collect::<Vec<_>>(), &reach, program, &files);
+    let unit_files = survey::unit_files(&units.iter().collect::<Vec<_>>(), program, &files);
+    drop(trees);
+    drop((units, reach));
+    if let Some(mut class) = class {
+        fatal = phase("analyze", || analyse(&mut class, &lowered.units, &mut rejections));
+    }
+    std::panic::set_hook(hook);
+    let tally = Tally::new(&scan.pieces, &unit_files, rejections, fatal);
     Ok(Census { report: tally.report(&scan, &program.main), json: tally.json(&scan, &program.main) })
 }
 
@@ -245,6 +254,10 @@ impl Stubs {
         }
         for (t, decl) in class.types.iter_mut().enumerate() {
             for field in decl.fields.iter_mut().chain(&mut decl.statics) {
+                // An error at a field's declaration (its type) is placed in the field's unit.
+                if field.pos == pos && rejection.unit.is_none() {
+                    rejection.unit = units.get(t).copied().flatten();
+                }
                 if field.init.as_ref().is_some_and(at) {
                     // A constant without its value is a static that starts at Java's default.
                     field.init = None;
