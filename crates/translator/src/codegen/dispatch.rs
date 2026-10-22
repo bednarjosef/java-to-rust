@@ -565,6 +565,9 @@ impl<'a> Gen<'a> {
         if let Some(shared) = self.class.shared_of(c) {
             return Some(shared);
         }
+        if self.class.types[c].kind == TypeKind::Runtime && self.class.types[c].name == CLASS_VALUE {
+            return Some(Type::JavaClass);
+        }
         (self.class.types[c].kind == TypeKind::Runtime)
             .then(|| runtime_type(&self.class.types[c].name))
             .flatten()
@@ -915,7 +918,20 @@ impl<'a> Gen<'a> {
     /// The text of a value of an enum, through its `Display`.
     pub(super) fn enum_text(&mut self, t: usize, obj: String) -> String {
         self.need(Need::Display(t));
+        if self.enum_text_throws(t) {
+            // A `toString` that throws is called, through `try_text`.
+            return self.passed_on(Code::atom(format!("{obj}.try_text()")));
+        }
         if self.lazy_text && !self.printing { obj } else { format!("{obj}.to_string()") }
+    }
+
+    /// Whether turning a value of the enum of `t` into text may throw an exception that the
+    /// program observes: some variant's `toString` throws.
+    pub(super) fn enum_text_throws(&self, t: usize) -> bool {
+        self.enum_variants(t)
+            .into_iter()
+            .filter_map(|c| hierarchy::to_string_impl(self.class, c))
+            .any(|i| self.facts.throwing.contains(&i))
     }
 
     /// Whether turning a value of the enum of `t` into text may write a shared object.
@@ -975,6 +991,9 @@ impl<'a> Gen<'a> {
         self.monitor_impl(t, &variants);
         if self.wanted.contains(&Need::Display(t)) {
             self.display_impl(t, &variants);
+            if self.enum_text_throws(t) {
+                self.try_text_impl(t, &variants);
+            }
         }
         self.raised_impl(t);
         self.chain_enum_items(t, &variants);
@@ -1197,25 +1216,61 @@ impl<'a> Gen<'a> {
         t.kind == TypeKind::Interface && t.name == COMPARABLE
     }
 
-    /// Whether method `r` is one of `CharSequence`'s own abstract `length()` and `charAt(int)`.
+    /// Whether method `r` is one of `CharSequence`'s own abstract methods.
     fn is_char_sequence_method(&self, r: usize) -> bool {
         let t = &self.class.types[self.class.methods[r].class];
         t.kind == TypeKind::Interface && t.name == CHAR_SEQUENCE
     }
 
-    /// `CharSequence`'s `length()`, `charAt(index)` or `subSequence(start, end)` (method `r`) for
-    /// a string or a builder of class `c` bound to `o`.
+    /// `CharSequence`'s `length()`, `charAt(index)`, `subSequence(start, end)` or `getChars(..)`
+    /// (method `r`) for a string or a builder of class `c` bound to `o`. What a string's throws
+    /// is thrown for a `java::catching` around the call (see `analysis::exceptions`), as a
+    /// builder's is.
     fn char_sequence_arm(&mut self, r: usize, c: usize) -> String {
         let method = &self.class.methods[r];
         let builder = self.runtime_of(c) == Some(Type::StringBuilder);
+        if self.runtime_of(c).is_none() {
+            // A class of the program implements each of these, or inherits the default.
+            let message = format!("`CharSequence.{}` of a class without one not supported yet", method.name);
+            self.rejected.push(Error { pos: method.pos, message });
+            return "unreachable!()".to_string();
+        }
         if method.name == "subSequence" {
             return self.sub_sequence_arm(r, builder);
+        }
+        if method.name == "getChars" {
+            return self.get_chars_arm(r, builder);
         }
         match (method.name.as_str(), builder) {
             ("length", true) => "o.length()".to_string(),
             ("length", false) => format!("{}(o)", self.runtime("string_length")),
             (_, true) => format!("o.char_at({})", self.local(&method.params[0].name)),
-            (_, false) => format!("{}(o, {})", self.runtime("char_at"), self.local(&method.params[0].name)),
+            (_, false) => {
+                let index = self.local(&method.params[0].name);
+                format!(
+                    "{}(o, {index}).unwrap_or_else(|e| {}(e))",
+                    self.runtime("try_char_at"),
+                    self.runtime("throw_exception")
+                )
+            }
+        }
+    }
+
+    /// `getChars(srcBegin, srcEnd, dst, dstBegin)` (method `r`) of a string or a builder bound to
+    /// `o`, whose `dst` may be null. What it throws is thrown for a `java::catching` around the
+    /// call (see `analysis::exceptions`).
+    fn get_chars_arm(&mut self, r: usize, builder: bool) -> String {
+        let method = &self.class.methods[r];
+        let names: Vec<String> = method.params.iter().map(|p| self.local(&p.name)).collect();
+        let [begin, end, dst, dst_begin] = &names[..] else { unreachable!("`getChars` has four parameters") };
+        let dst = match self.optional_var(r, method.params[2].ty, &method.params[2].name) {
+            true => format!("{dst}.as_ref()"),
+            false => format!("Some(&{dst})"),
+        };
+        if builder {
+            format!("o.sequence_get_chars({begin}, {end}, {dst}, {dst_begin})")
+        } else {
+            format!("{}(o, {begin}, {end}, {dst}, {dst_begin})", self.runtime("sequence_get_chars"))
         }
     }
 
@@ -1227,7 +1282,8 @@ impl<'a> Gen<'a> {
         let text = if builder {
             format!("o.substring({start}, {end})")
         } else {
-            format!("{}(o, {start}, {end})", self.runtime("substring"))
+            let thrown = self.runtime("throw_exception");
+            format!("{}(o, {start}, {end}).unwrap_or_else(|e| {thrown}(e))", self.runtime("try_substring"))
         };
         let char_sequence = method.class;
         let string =
@@ -1458,7 +1514,11 @@ impl<'a> Gen<'a> {
     pub(super) fn object_to_string(&mut self, receiver: &'a Expr) -> Code {
         let Some(t) = self.enum_of(receiver) else { return self.object_text(receiver) };
         self.need(Need::Display(t));
-        Code::atom(format!("{}.to_string()", self.object(receiver)))
+        let obj = self.object(receiver);
+        if self.enum_text_throws(t) {
+            return Code::atom(self.passed_on(Code::atom(format!("{obj}.try_text()"))));
+        }
+        Code::atom(format!("{obj}.to_string()"))
     }
 
     /// The hash code of a value of class `c`, reached through `handle`, a reference to what the
@@ -1474,6 +1534,10 @@ impl<'a> Gen<'a> {
             }
             return format!("{}({})", self.runtime("address_hash"), self.address(c, handle));
         };
+        // A class's hash is its identity's in Java: there is one class object for each class.
+        if ty == Type::JavaClass {
+            return format!("{handle}.hash_code()");
+        }
         let value = if self.faithful_box(ty) { format!("**{handle}") } else { format!("*{handle}") };
         let function = match ty.unboxed() {
             Type::String => return format!("{}({handle})", self.runtime("string_hash")),
@@ -1687,6 +1751,33 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
+    /// `try_text()`: the text of a value whose class's `toString` may throw, or its exception;
+    /// the other classes' text is their `Display`.
+    fn try_text_impl(&mut self, t: usize, variants: &[usize]) {
+        let name = struct_name(&self.class.types[t].name);
+        let throwable = self.throwable_type();
+        self.gap();
+        self.line(&format!("impl {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn try_text(&self) -> Result<String, {throwable}> {{"));
+        self.indent += 1;
+        self.match_arms(t, variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
+            Some(i) if g.facts.throwing.contains(&i) => {
+                let (call, uses) = g.arm_call(t, c, i, "");
+                if g.facts.nullable_returns.contains(&i) {
+                    (format!("{call}.map(|text| text.unwrap_or_else(|| \"null\".to_string()))"), uses)
+                } else {
+                    (call, uses)
+                }
+            }
+            _ => ("Ok(self.to_string())".to_string(), false),
+        });
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     /// How the `Display` of the enum of `t` shows an object of class `c` bound to `o`, whose
     /// `toString` is method `i`; and whether it uses `o`.
     fn display_arm(&mut self, t: usize, c: usize, i: usize) -> (String, bool) {
@@ -1706,7 +1797,15 @@ impl<'a> Gen<'a> {
             };
             return (format!("fmt::Display::fmt({shown}, f)"), true);
         }
-        let (text, uses) = self.arm_call(t, c, i, "");
+        let (mut text, uses) = self.arm_call(t, c, i, "");
+        // Where the runtime makes the text, what a `toString` throws ends the program (see
+        // `analysis::exceptions`); the generator's own text calls it (`try_text`).
+        if self.facts.throwing.contains(&i) {
+            if let Some(t) = self.class.type_index("java.lang.Throwable").and_then(|t| self.enum_for(t)) {
+                self.need(Need::Display(t));
+            }
+            text = format!("{text}.unwrap_or_else({})", self.runtime("uncaught"));
+        }
         // A `toString` that may return null shows "null", as `String.valueOf` does.
         if self.facts.nullable_returns.contains(&i) {
             return (format!("f.write_str({text}.as_deref().unwrap_or(\"null\"))"), uses);

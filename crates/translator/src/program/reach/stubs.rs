@@ -41,7 +41,7 @@ impl Walk<'_> {
 /// Whether the type `ty` is a class that is not translated and can be a stub: not generic, not
 /// an array, and in a package, at its top level or nested in another class
 /// (`ObjectInputStream.GetField`, which `readObject` methods declare).
-fn is_stub(ty: &str) -> bool {
+pub(super) fn is_stub(ty: &str) -> bool {
     let mut parts = ty.split('.');
     let in_package = parts.next().is_some_and(|first| first.starts_with(|c: char| c.is_lowercase()))
         && parts.any(|part| !part.starts_with(|c: char| c.is_lowercase()));

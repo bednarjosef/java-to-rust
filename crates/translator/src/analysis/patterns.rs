@@ -80,10 +80,12 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
         .into_iter()
         .any(|c| class.types[c].kind == TypeKind::Runtime && class.shared_of(c).is_none());
     // A static `Object` field that is only ever set to objects of the program's classes, such as
-    // the sentinel `ImmutableCollections.EMPTY = new Object()`, is never a string or a box.
+    // the sentinel `ImmutableCollections.EMPTY = new Object()`, or to a class, such as
+    // `ScopedValue.NEW_THREAD_BINDINGS = Thread.class`, is never a string or a box. (A class in an
+    // `Object` is compared as itself, and Java has one object for each class.)
     let object_of_class = |e: &Expr| {
         matches!(&e.kind, ExprKind::Cast(Type::Class(name, _), inner)
-            if *name == OBJECT && matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_) | Type::StringBuilder))
+            if *name == OBJECT && matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_) | Type::StringBuilder | Type::JavaClass))
     };
     let mut sentinels: HashSet<(usize, &str)> = HashSet::new();
     for (t, decl) in class.types.iter().enumerate() {
@@ -115,9 +117,10 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
     let may_be_value = |e: &Expr| match &e.kind {
         ExprKind::Null => false,
         ExprKind::Static { class, name } if sentinels.contains(&(*class, name.as_str())) => false,
-        ExprKind::Cast(Type::Class(name, _), inner) if *name == OBJECT => {
-            !matches!(inner.ty, Type::Class(..) | Type::Enum(_) | Type::Array(_) | Type::StringBuilder)
-        }
+        ExprKind::Cast(Type::Class(name, _), inner) if *name == OBJECT => !matches!(
+            inner.ty,
+            Type::Class(..) | Type::Enum(_) | Type::Array(_) | Type::StringBuilder | Type::JavaClass
+        ),
         _ => matches!(e.ty, Type::Class(name, _) if name == OBJECT),
     };
     let mut shortcuts = HashSet::new();

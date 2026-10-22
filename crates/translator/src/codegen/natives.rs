@@ -37,6 +37,15 @@ impl<'a> Gen<'a> {
                 let x = self.value(&args[0], Type::Float).text;
                 call(self, "float_to_int_bits", vec![x])
             }
+            // A class's identity is its own, as its hash is (`Class::hash_code`); a null one's is 0.
+            Native::SystemIdentityHash if args[0].ty == Type::JavaClass => {
+                let class = self.expr(&args[0]).at(ATOM);
+                if self.nullable(&args[0]) {
+                    Code::atom(format!("{class}.map_or(0, |c| c.hash_code())"))
+                } else {
+                    Code::atom(format!("{class}.hash_code()"))
+                }
+            }
             // A null object's is 0 (an enum's `enum_identity_hash` answers that itself).
             Native::SystemIdentityHash if self.enum_of(&args[0]).is_none() && self.nullable(&args[0]) => {
                 let option = format!("{}.as_ref()", self.object_place(&args[0]));
@@ -209,6 +218,9 @@ impl<'a> Gen<'a> {
             Native::Unix(name) => self.unix_native(name, args, ty),
             // The lowering drops its statement; anywhere else it is the unit it returns.
             Native::Nothing => Code::atom("()"),
+            Native::Missing { what } => {
+                Code::atom(format!("unreachable!(\"the native method {what} never runs\")"))
+            }
             Native::CdsConfigStatus => call(self, "cds_config_status", vec![]),
             Native::CdsRandomSeed => call(self, "cds_random_seed_for_dumping", vec![]),
             Native::ContinuationsSupported => call(self, "continuations_supported", vec![]),

@@ -549,6 +549,7 @@ impl<'t> Lowering<'t> {
             is_synchronized: node.has_flag("SYNCHRONIZED"),
             overrides: self.overrides(node),
             type_params: self.method_type_params(index),
+            jdk_code: false,
         })
     }
 

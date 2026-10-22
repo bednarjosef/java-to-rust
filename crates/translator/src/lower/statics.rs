@@ -120,6 +120,7 @@ impl<'t> Lowering<'t> {
             is_synchronized: false,
             overrides: Vec::new(),
             type_params: Vec::new(),
+            jdk_code: false,
         })
     }
 }

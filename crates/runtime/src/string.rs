@@ -513,18 +513,40 @@ pub fn try_get_chars(
 ) -> Result<(), crate::Exception> {
     const OUT: &str = "java.lang.StringIndexOutOfBoundsException";
     let units: Vec<u16> = s.encode_utf16().collect();
-    let len = units.len();
-    if begin < 0 || begin > end || end as i64 > len as i64 {
-        return Err(crate::Exception::new(OUT, format!("begin {begin}, end {end}, length {len}")));
-    }
+    check_begin_end(begin, end, units.len())?;
     let count = end - begin;
     if dst_begin < 0 || dst_begin as i64 + count as i64 > dst.len() as i64 {
-        let message = format!("offset {dst_begin}, count {count}, length {}", dst.len());
+        let message =
+            format!("Range [{dst_begin}, {dst_begin} + {count}) out of bounds for length {}", dst.len());
         return Err(crate::Exception::new(OUT, message));
     }
     let at = dst_begin as usize;
     dst[at..at + count as usize].copy_from_slice(&units[begin as usize..end as usize]);
     Ok(())
+}
+
+/// `s.getChars(begin, end, dst, dst_begin)` on a string held as a `CharSequence`, whose `dst`
+/// may be null: Java checks the range on the string before it reads `dst.length`. A failure is
+/// thrown (`crate::throw`), for a `java::catching` around the call.
+pub fn sequence_get_chars(
+    s: &str,
+    begin: i32,
+    end: i32,
+    dst: Option<&impl crate::Elements<u16>>,
+    dst_begin: i32,
+) {
+    let checked = match dst {
+        Some(dst) => try_get_chars(s, begin, end, &mut dst.items_mut(), dst_begin),
+        None => check_begin_end(begin, end, crate::string_length(s) as usize)
+            .and_then(|()| Err(null_destination())),
+    };
+    checked.unwrap_or_else(|e| crate::throw_exception(e))
+}
+
+/// The `NullPointerException` of the JDK's `getChars` given a null `dst`, which reads its length.
+pub(crate) fn null_destination() -> crate::Exception {
+    let message = "Cannot read the array length because \"dst\" is null";
+    crate::Exception::new("java.lang.NullPointerException", message)
 }
 
 /// `s.getBytes(begin, end, dst, dst_begin)`, the deprecated form that keeps the low byte of each

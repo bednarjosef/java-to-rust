@@ -118,6 +118,8 @@ pub enum BuilderOp {
     OffsetByCodePoints,
     /// `sb.getChars(srcBegin, srcEnd, dst, dstBegin)`.
     GetChars,
+    /// `sb.ensureCapacity(minimumCapacity)`, which leaves the text as it is.
+    EnsureCapacity,
 }
 
 impl BuilderOp {
