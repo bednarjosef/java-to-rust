@@ -110,9 +110,12 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
     let matches = |k: &Kind, t: usize| match k {
         Kind::Class(c) => h.is_subtype(*c, t),
+        // A failure not known exactly may be of any class of the JDK; one that is known is of
+        // its class, a standard one or one that `standard_subclass` knows the superclass of.
+        Kind::Runtime("?") => from_jdk(&class.types[t]),
         Kind::Runtime(name) => {
             let decl = &class.types[t].name;
-            crate::lower::is_standard(decl) && (*name == "?" || standard_subclass(name, decl))
+            decl == name || crate::lower::is_standard(decl) && standard_subclass(name, decl)
         }
     };
     let caught = |k: &Kind, frames: &[Frame]| frames.iter().any(|f| f.catches.iter().any(|&t| matches(k, t)));
@@ -317,7 +320,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 let seen_here = catcher.is_some()
                     || p.frames.iter().any(|f| f.finally)
                     || (!bugs_only[m] && observed(&Kind::Runtime(name), &seen[m]));
-                let raised_class = class.type_index(name).filter(|&c| class.hierarchy.is_concrete(c));
+                // Only a standard class has the constructor from a message that the runtime
+                // builds its objects with (`lower::exceptions`).
+                let raised_class = class
+                    .type_index(name)
+                    .filter(|&c| class.hierarchy.is_concrete(c) && crate::lower::is_standard(name));
                 if seen_here
                     && checked
                     && let Some(c) = raised_class
@@ -1233,11 +1240,15 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
     }
 }
 
-/// Whether `decl` is a class of the JDK, which no program may declare.
+/// Whether `decl` is a class of the JDK, which no program may declare. The classes that lowering
+/// provides (the standard exceptions, `Throwable`, `Thread`) have no package, but their JDK name.
 pub(super) fn from_jdk(decl: &TypeDecl) -> bool {
-    ["java", "javax", "jdk", "sun"]
-        .iter()
-        .any(|root| decl.package == *root || decl.package.starts_with(&format!("{root}.")))
+    let in_jdk = |name: &str| {
+        ["java", "javax", "jdk", "sun"]
+            .iter()
+            .any(|root| name.strip_prefix(root).is_some_and(|rest| rest.is_empty() || rest.starts_with('.')))
+    };
+    in_jdk(&decl.package) || decl.package.is_empty() && in_jdk(&decl.name)
 }
 
 /// The objects whose text an expression makes, which runs their `toString`.

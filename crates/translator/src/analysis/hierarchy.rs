@@ -345,7 +345,7 @@ fn declared_impl(class: &Class, c: usize, name: &str) -> Option<usize> {
 /// borrows only when it is short (`long` has those that are not; see `threads`).
 pub fn field_level(
     class: &Class,
-    reach: &[HashSet<&str>],
+    reach: &super::borrowing::Touched,
     immutable: &HashSet<String>,
     structs: &HashSet<usize>,
     long: &HashSet<usize>,
@@ -365,7 +365,7 @@ pub fn field_level(
             }
             let family: Vec<&str> = h.family(t).into_iter().map(|c| class.types[c].name.as_str()).collect();
             family.iter().all(|c| immutable.contains(*c))
-                || (!long.contains(&m) && !family.iter().any(|c| reach[m].contains(c)))
+                || (!long.contains(&m) && !family.iter().any(|c| reach.contains(m, c)))
         })
         .collect();
     loop {

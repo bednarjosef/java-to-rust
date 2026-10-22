@@ -673,6 +673,9 @@ impl<'t> Lowering<'t> {
                     }
                     Some(i) => methods[i].overrides.push(c.compare_to),
                     None if self.types[t].node.has_flag("ABSTRACT") => {}
+                    // Nor does a class whose objects the program never creates (`Year`, whose
+                    // static methods alone are reached): its `compareTo` never runs.
+                    None if self.reach.is_some_and(|r| !r.instantiated.contains(&self.types[t].javac)) => {}
                     // In a census, the class goes on without the bridge.
                     None => {
                         let pos = self.types[t].node.pos();

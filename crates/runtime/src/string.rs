@@ -719,7 +719,7 @@ pub fn strip_indent(s: &str) -> String {
 /// `new String(codePoints, offset, count)`, which throws for a range outside the array and for
 /// an invalid code point.
 pub fn from_code_points(points: &[i32], offset: i32, count: i32) -> String {
-    let range = range_of(points.len(), offset, count).unwrap_or_else(crate::uncaught);
+    let range = range_of(points.len(), offset, count).unwrap_or_else(|e| crate::throw_exception(e));
     let mut s = String::new();
     for &point in &points[range] {
         if !(0..=0x10FFFF).contains(&point) {
@@ -734,7 +734,7 @@ pub fn from_code_points(points: &[i32], offset: i32, count: i32) -> String {
 
 /// `new String(ascii, hibyte, offset, count)`: each `char` is `hibyte`'s low byte over a byte.
 pub fn from_high_byte(bytes: &[i8], hibyte: i32, offset: i32, count: i32) -> String {
-    let range = range_of(bytes.len(), offset, count).unwrap_or_else(crate::uncaught);
+    let range = range_of(bytes.len(), offset, count).unwrap_or_else(|e| crate::throw_exception(e));
     let high = ((hibyte & 0xff) as u16) << 8;
     let units: Vec<u16> = bytes[range].iter().map(|&b| high | u16::from(b as u8)).collect();
     from_units(&units)

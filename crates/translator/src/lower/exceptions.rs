@@ -39,7 +39,9 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
 /// The standard classes that the runtime raises and a translation can catch, each with the
 /// kinds of javac's tree of the operations that may raise it (a method call by its owner and
 /// name: `owner#name`, `owner#` for any method of the owner, or `METHOD_INVOCATION` for any
-/// call; `enum#valueOf` for the `valueOf` of any enum of the program).
+/// call; `owner#name(parameters)result` for one method of the name, by javac's signature;
+/// `owner#<init>` for a constructor; `enum#valueOf` for the `valueOf` of any enum of the
+/// program).
 const RAISED: &[(&str, &[&str])] = &[
     (
         "java.lang.ArithmeticException",
@@ -52,6 +54,10 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.Math#floorMod",
             "java.lang.StrictMath#floorDiv",
             "java.lang.StrictMath#floorMod",
+            "java.lang.Integer#divideUnsigned",
+            "java.lang.Integer#remainderUnsigned",
+            "java.lang.Long#divideUnsigned",
+            "java.lang.Long#remainderUnsigned",
         ],
     ),
     (
@@ -85,8 +91,13 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StringBuilder#offsetByCodePoints",
             "java.lang.AbstractStringBuilder#getChars",
             "java.lang.StringBuilder#getChars",
-            "java.lang.StringBuilder#append",
-            "java.lang.StringBuffer#append",
+            // A range of the characters or the text to append outside them.
+            "java.lang.AbstractStringBuilder#append(char[],int,int)java.lang.AbstractStringBuilder",
+            "java.lang.StringBuilder#append(char[],int,int)java.lang.StringBuilder",
+            "java.lang.StringBuffer#append(char[],int,int)java.lang.StringBuffer",
+            "java.lang.AbstractStringBuilder#append(java.lang.CharSequence,int,int)java.lang.AbstractStringBuilder",
+            "java.lang.StringBuilder#append(java.lang.CharSequence,int,int)java.lang.StringBuilder",
+            "java.lang.StringBuffer#append(java.lang.CharSequence,int,int)java.lang.StringBuffer",
         ],
     ),
     // A call, a field access, an array access or a switch on a reference that may be null.
@@ -100,6 +111,8 @@ const RAISED: &[(&str, &[&str])] = &[
         &[
             "enum#valueOf",
             "java.lang.Character#toChars",
+            // An invalid code point of `new String(codePoints, offset, count)`.
+            "java.lang.String#<init>",
             "java.lang.AbstractStringBuilder#appendCodePoint",
             "java.lang.StringBuilder#appendCodePoint",
             "java.lang.AbstractStringBuilder#repeat",
@@ -136,6 +149,24 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StringBuilder#codePointBefore",
             "java.lang.AbstractStringBuilder#getChars",
             "java.lang.StringBuilder#getChars",
+            "java.lang.AbstractStringBuilder#insert",
+            "java.lang.StringBuilder#insert",
+            "java.lang.AbstractStringBuilder#charAt",
+            "java.lang.StringBuilder#charAt",
+            "java.lang.AbstractStringBuilder#setCharAt",
+            "java.lang.StringBuilder#setCharAt",
+            "java.lang.AbstractStringBuilder#deleteCharAt",
+            "java.lang.StringBuilder#deleteCharAt",
+            "java.lang.AbstractStringBuilder#delete",
+            "java.lang.StringBuilder#delete",
+            "java.lang.AbstractStringBuilder#replace",
+            "java.lang.StringBuilder#replace",
+            "java.lang.AbstractStringBuilder#setLength",
+            "java.lang.StringBuilder#setLength",
+            "java.lang.AbstractStringBuilder#substring",
+            "java.lang.StringBuilder#substring",
+            // A range outside the array that a `String` is made from.
+            "java.lang.String#<init>",
         ],
     ),
     // The natives of the descriptor streams (`fd.rs`): reading or writing a closed or failing
@@ -169,6 +200,8 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.io.RandomAccessFile#open0",
         ],
     ),
+    // A charset's name that the runtime does not know.
+    ("java.io.UnsupportedEncodingException", &["java.lang.String#getBytes", "java.lang.String#<init>"]),
     (
         "java.lang.NumberFormatException",
         &[
@@ -322,14 +355,23 @@ pub fn standard_local_name(name: &str) -> &str {
     name
 }
 
-/// Whether the standard class `name` is the standard class `ancestor` or a subclass of it.
+/// The classes that are not standard but that the runtime raises (`regex.rs`), each with its
+/// standard superclass. A translation cannot catch them: a `catch` that would is rejected.
+const RAISED_NOT_STANDARD: &[(&str, &str)] =
+    &[("java.util.regex.PatternSyntaxException", "java.lang.IllegalArgumentException")];
+
+/// Whether the standard class `name` (or one of `RAISED_NOT_STANDARD`) is the standard class
+/// `ancestor` or a subclass of it.
 pub fn standard_subclass(name: &str, ancestor: &str) -> bool {
     let mut at = Some(name.to_string());
     while let Some(c) = at {
         if c == ancestor {
             return true;
         }
-        at = template_type(&c).and_then(|d| d["extendsClause"]["javaType"].as_str()).map(str::to_string);
+        at = template_type(&c)
+            .and_then(|d| d["extendsClause"]["javaType"].as_str())
+            .or_else(|| RAISED_NOT_STANDARD.iter().find(|(n, _)| *n == c).map(|(_, s)| *s))
+            .map(str::to_string);
     }
     false
 }
@@ -515,6 +557,11 @@ impl Uses {
                         }
                         self.operations.insert(kind.clone());
                         self.operations.insert(format!("{owner}#{}", text(symbol, "name")));
+                        self.operations.insert(format!(
+                            "{owner}#{}{}",
+                            text(symbol, "name"),
+                            text(symbol, "type")
+                        ));
                         self.operations.insert(format!("{owner}#"));
                         // `E.valueOf(String)` of an enum `E` of the program.
                         if text(symbol, "name") == "valueOf"
@@ -523,6 +570,11 @@ impl Uses {
                         {
                             self.operations.insert("enum#valueOf".to_string());
                         }
+                    }
+                    // A constructor, by its class, as `owner#<init>`.
+                    "NEW_CLASS" => {
+                        self.operations.insert(format!("{owner}#<init>"));
+                        self.operations.insert(kind);
                     }
                     _ => _ = self.operations.insert(kind),
                 }

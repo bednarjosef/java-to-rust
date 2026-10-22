@@ -21,7 +21,7 @@
 use super::Facts;
 use super::hierarchy::{Home, home, to_string_impl};
 use crate::ast::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 pub struct Borrowing {
@@ -44,26 +44,121 @@ pub struct Borrowing {
 /// handle other than its `this`, directly or through what it calls.
 pub struct Reach<'c> {
     scans: Vec<Scan<'c>>,
-    pub reach: Vec<HashSet<&'c str>>,
+    pub reach: Touched<'c>,
+}
+
+/// The classes whose objects each method may touch through a handle other than its `this`,
+/// directly or through what it calls. The methods that call each other (a strongly connected
+/// component of the calls) touch the same classes, and share one set.
+pub struct Touched<'c> {
+    ids: HashMap<&'c str, usize>,
+    names: Vec<&'c str>,
+    /// The component of each method, by index into `sets`.
+    component: Vec<usize>,
+    /// The classes of each component, by the bits of their ids.
+    sets: Vec<Vec<u64>>,
+}
+
+impl<'c> Touched<'c> {
+    /// Whether method `m` may touch an object of the class `name`.
+    pub fn contains(&self, m: usize, name: &str) -> bool {
+        self.ids.get(name).is_some_and(|&i| self.sets[self.component[m]][i / 64] >> (i % 64) & 1 == 1)
+    }
+
+    /// The classes whose objects method `m` may touch.
+    pub fn names(&self, m: usize) -> impl Iterator<Item = &'c str> + '_ {
+        let set = &self.sets[self.component[m]];
+        (0..self.names.len()).filter(move |&i| set[i / 64] >> (i % 64) & 1 == 1).map(|i| self.names[i])
+    }
 }
 
 pub fn reach(class: &Class) -> Reach<'_> {
     let scans: Vec<Scan> = class.methods.iter().map(|m| scan(class, m)).collect();
-    let mut reach: Vec<HashSet<&str>> = scans.iter().map(|s| s.touches.clone()).collect();
-    loop {
-        let mut changed = false;
-        for m in 0..scans.len() {
+    let mut ids: HashMap<&str, usize> = HashMap::new();
+    let mut names = Vec::new();
+    for &name in scans.iter().flat_map(|s| &s.touches) {
+        ids.entry(name).or_insert_with(|| {
+            names.push(name);
+            names.len() - 1
+        });
+    }
+    let words = names.len().div_ceil(64);
+    // A component comes after those it calls, whose sets are complete when it is reached.
+    let components = components(scans.len(), &|m| scans[m].calls.iter().map(|&(callee, _)| callee).collect());
+    let mut component = vec![0; scans.len()];
+    let mut sets: Vec<Vec<u64>> = Vec::with_capacity(components.len());
+    for (k, members) in components.iter().enumerate() {
+        for &m in members {
+            component[m] = k;
+        }
+        let mut set = vec![0u64; words];
+        for &m in members {
+            for name in &scans[m].touches {
+                let i = ids[name];
+                set[i / 64] |= 1 << (i % 64);
+            }
             for &(callee, _) in &scans[m].calls {
-                let extra: Vec<&str> = reach[callee].difference(&reach[m]).copied().collect();
-                changed |= !extra.is_empty();
-                reach[m].extend(extra);
+                if component[callee] != k {
+                    set.iter_mut().zip(&sets[component[callee]]).for_each(|(a, b)| *a |= b);
+                }
             }
         }
-        if !changed {
-            break;
+        sets.push(set);
+    }
+    Reach { scans, reach: Touched { ids, names, component, sets } }
+}
+
+/// The strongly connected components of the graph of `n` nodes with the edges `edges`, each
+/// after every component that it reaches (Tarjan's algorithm, without recursion).
+fn components(n: usize, edges: &dyn Fn(usize) -> Vec<usize>) -> Vec<Vec<usize>> {
+    const UNSEEN: usize = usize::MAX;
+    let (mut index, mut low, mut on_stack) = (vec![UNSEEN; n], vec![0; n], vec![false; n]);
+    let (mut stack, mut out, mut next) = (Vec::new(), Vec::new(), 0);
+    for root in 0..n {
+        if index[root] != UNSEEN {
+            continue;
+        }
+        index[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        let mut frames: Vec<(usize, Vec<usize>, usize)> = vec![(root, edges(root), 0)];
+        while let Some(frame) = frames.last_mut() {
+            let v = frame.0;
+            if frame.2 < frame.1.len() {
+                let w = frame.1[frame.2];
+                frame.2 += 1;
+                if index[w] == UNSEEN {
+                    index[w] = next;
+                    low[w] = next;
+                    next += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    frames.push((w, edges(w), 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(u, ..)) = frames.last() {
+                low[u] = low[u].min(low[v]);
+            }
+            if low[v] == index[v] {
+                let mut members = Vec::new();
+                while let Some(w) = stack.pop() {
+                    on_stack[w] = false;
+                    members.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                out.push(members);
+            }
         }
     }
-    Reach { scans, reach }
+    out
 }
 
 /// The implementation that a call on `this` runs in method `m` whose object is of concrete class
@@ -97,7 +192,7 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
             Home::Class(c) => {
                 always(c)
                     || (!scans[m].this_as_value
-                        && !reach[m].contains(name(c))
+                        && !reach.contains(m, name(c))
                         && !facts.long_methods.contains(&m))
             }
             Home::Fields(_) => true,
@@ -173,7 +268,7 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
         .collect();
     // Immutable and owned objects have no `RefCell` to borrow.
     let shared = |c: &str| !facts.immutable.contains(c) && !facts.owned.contains(c);
-    let isolated = (0..scans.len()).filter(|&m| !reach[m].iter().any(|c| shared(c))).collect();
+    let isolated = (0..scans.len()).filter(|&m| !reach.names(m).any(shared)).collect();
     let mut writers: HashSet<usize> = (0..scans.len())
         .filter(|&m| {
             let method = &class.methods[m];
