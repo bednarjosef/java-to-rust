@@ -396,7 +396,7 @@ fn set_before_use(class: &Class, index: usize, name: &str) -> bool {
                 if i == 0
                     && let Stmt::Expr(Expr { kind: ExprKind::SuperInit { args, resolved: Some(r) }, .. }) =
                         stmt
-                    && !args.iter().any(|a| reads(a))
+                    && !args.iter().any(&reads)
                     && keeps_this(class, *r, 0)
                 {
                     continue;
