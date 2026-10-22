@@ -159,7 +159,7 @@ impl<'a> Gen<'a> {
             counts
         };
         let (simple, in_package) = (count(&|c| self.simple_name(c)), count(&|c| self.in_package_name(c)));
-        let names: HashMap<usize, String> = variants
+        let mut names: HashMap<usize, String> = variants
             .iter()
             .map(|&c| {
                 let name = if simple[&self.simple_name(c)] <= 1 {
@@ -172,6 +172,17 @@ impl<'a> Gen<'a> {
                 (c, name)
             })
             .collect();
+        // One class's simple name can be another's name in its package (`ClassReader.ProxyType`
+        // and `Proxy.Type`, both `ProxyType`): such variants take their whole names.
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for &c in variants.iter() {
+            *seen.entry(names[&c].clone()).or_default() += 1;
+        }
+        for &c in variants.iter() {
+            if seen[&names[&c]] > 1 {
+                names.insert(c, self.full_variant_name(c));
+            }
+        }
         let names = std::rc::Rc::new(names);
         self.variant_names.borrow_mut().insert(t, names.clone());
         names
@@ -1636,6 +1647,9 @@ impl<'a> Gen<'a> {
             _ => ".borrow()",
         };
         match self.homes[i] {
+            // A Java enum's constant is a `Copy` value whose methods take it by value: through
+            // the reference, `to_string(locale, messages)` would be `ToString`'s.
+            Home::Class(_) if self.class.types[c].kind == TypeKind::Enum => (format!("(*o).{name}({args})"), true),
             Home::Class(_) if self.facts.self_methods.contains(&i) || self.holds_value(c) => {
                 (format!("o{borrow}.{name}({args})"), true)
             }
