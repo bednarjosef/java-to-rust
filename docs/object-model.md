@@ -292,11 +292,15 @@ or its subclass does not initialize the class again (`codegen/statics.rs::init_c
   (`lower/negated_patterns.rs`). A read anywhere else is rejected: "a pattern variable used here
   not supported yet". A pattern variable may be assigned, except one of a record or switch
   pattern.
-- A downcast `(Circle) s` is `java::cast(s.as_circle(), "Circle")`, which returns the value or
-  throws `ClassCastException` (`java::cast_failed`: "cannot be cast to class ..."; the message
-  names only the target class), except a downcast of an enum whose classes are all in `java.base`
-  (strings, boxes, standard classes), which names both classes as HotSpot does (`java::cast_from`,
-  `codegen/class_cast.rs`).
+- A downcast `(Circle) s` is `java::cast(&s, |o| o.as_circle(), ("Circle", java::APP))`, which
+  returns the value or throws `ClassCastException` with HotSpot's message: "class Square cannot
+  be cast to class Circle (Square and Circle are in unnamed module of loader 'app')", or with each
+  class's module of its own when they differ. The object's class comes from the enum's
+  `java::CastSource`, a `match` written once per enum; the target's is written at the cast. A
+  class's module is its package's named module, with the loader the JVM gives it (`bootstrap`,
+  `platform`, or `app`, `program::loader_name`), or the unnamed module of the system class loader;
+  the runtime's own classes (strings, boxes, arrays of primitives) are `java.base`'s, and an array
+  is in its element's module.
   A cast whose operand's class is known and not below the target
   always fails, and is written as that failure. A cast or test to a supertype is the implicit
   upcast.

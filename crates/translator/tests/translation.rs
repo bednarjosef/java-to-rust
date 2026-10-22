@@ -4520,8 +4520,8 @@ fn downcasts_are_checked() {
     assert_contains(
         &rust,
         &[
-            "let r = java::cast(all[1].as_rect(), \"Rect\");",
-            "java::cast(s.as_unit(), \"Unit\") as i32",
+            "let r = java::cast(&all[1], |o| o.as_rect(), (\"Rect\", java::APP));",
+            "java::cast(&s, |o| o.as_unit(), (\"Unit\", java::APP)) as i32",
             "    fn as_unit(&self) -> Option<Unit> {\n        match self {\n            Shape::Unit(o) => Some(*o),",
         ],
     );
@@ -4597,7 +4597,7 @@ fn object_values_are_an_enum() {
             "enum Object {\n    Key(Rc<Key>),\n    Plain(Rc<Plain>),\n    String(String),\n    Integer(i32),\n}",
             "let s = Object::String(String::from(\"text\"));",
             "let n = Object::Integer(5);",
-            "let back = java::cast(n.as_integer(), \"java.lang.Integer\");",
+            "let back = java::cast(&n, |o| o.as_integer(), (\"java.lang.Integer\", java::BASE));",
             "if let Some(s) = o.as_string() {",
         ],
     );
@@ -4737,7 +4737,9 @@ fn use_sites_check_cast() {
     // cast does.
     assert_contains(
         &rust,
-        &["let x = java::cast(b.borrow().get().as_integer(), \"java.lang.Integer\").wrapping_add(1);"],
+        &[
+            "let x = java::cast(&b.borrow().get(), |o| o.as_integer(), (\"java.lang.Integer\", java::BASE)).wrapping_add(1);",
+        ],
     );
 }
 
@@ -4752,7 +4754,7 @@ fn bounded_type_variables_erase_to_the_bound() {
             "fn max(a: Comparable, b: Comparable) -> Comparable {",
             "enum Comparable {\n    Point(Rc<Point>),\n    String(String),\n}",
             "Comparable::Point(o) => o.compare_to(other),",
-            "Comparable::String(o) => match &other { Comparable::String(b) => java::compare_to(o, b), _ => java::cast_failed(\"java.lang.String\") },",
+            "Comparable::String(o) => match &other { Comparable::String(b) => java::compare_to(o, b), b => java::cast_failed(java::CastSource::cast_class(b), (\"java.lang.String\", java::BASE)) },",
         ],
     );
 }
@@ -4782,7 +4784,7 @@ fn a_type_variable_with_several_bounds_is_cast_to_the_later_bound_it_calls() {
         &[
             "fn max(a: Object, b: Object) -> Object {",
             // The argument, a cast that may fail, is computed before the receiver's check.
-            "let receiver_0 = java::cast(a.as_comparable(), \"Comparable\");",
+            "let receiver_0 = java::cast(&a, |o| o.as_comparable(), (\"Comparable\", java::BASE));",
             "receiver_0.compare_to(",
             "t.name()",
         ],
@@ -4809,7 +4811,7 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
         &[
             "IntArray(java::Array<i32>),",
             "let held = Object::IntArray(cell.clone());",
-            "java::cast(held.as_int_array(), \"[I\")",
+            "java::cast(&held, |o| o.as_int_array(), (\"[I\", java::BASE))",
             "(Object::IntArray(a), Object::IntArray(b)) => Rc::ptr_eq(a, b),",
             "Object::IntArray(o) => java::identity_hash(o),",
         ],
@@ -4862,7 +4864,7 @@ fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at
             "String(String),",
             "fn first(a: &[Object]) -> Object {",
             "let words: java::Array<Object> = java::from_vec((&java::from_vec(java::split(\"b a\", \" \", 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>());",
-            "java::join(\",\", &java::from_vec((&words.borrow()).iter().map(|s| java::cast(s.as_string(), \"java.lang.String\")).collect::<Vec<_>>()).borrow())",
+            "java::join(\",\", &java::from_vec((&words.borrow()).iter().map(|s| java::cast(&s, |o| o.as_string(), (\"java.lang.String\", java::BASE))).collect::<Vec<_>>()).borrow())",
         ],
     );
 }
@@ -4886,8 +4888,8 @@ fn an_enum_array_passed_for_a_type_variables_array_is_an_object_array_of_its_con
         &rust,
         &[
             "let days: Vec<Option<Object>> = vec![Some(Object::Day(MainDay::Mon)), Some(Object::Day(MainDay::Tue))];",
-            "java::non_null(last(&days).as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\"))) as i32",
-            "some[0].as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\")).is_none()",
+            "java::non_null(last(&days).as_ref().map(|o| java::cast(o, Object::as_day, (\"Main$Day\", java::APP)))) as i32",
+            "some[0].as_ref().map(|o| java::cast(o, Object::as_day, (\"Main$Day\", java::APP))).is_none()",
         ],
     );
 }
@@ -5000,7 +5002,7 @@ fn an_array_of_references_used_as_an_object_array_is_one_everywhere() {
             "fn count(xs: &[Object]) -> i32 {",
             "let vs: Vec<Object> = vec![Object::V(Rc::new(V::new(1)))];",
             "count(&vs)",
-            "java::cast(vs[0].as_v(), \"V\").n",
+            "java::cast(&vs[0], |o| o.as_v(), (\"V\", java::APP)).n",
         ],
     );
 }
@@ -5016,7 +5018,7 @@ fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
             "fn next_integer(&mut self) -> i32 {",
             "fn next(&mut self) -> Object {\n        Object::Integer(self.next_integer())\n    }",
             "fn compare_to_point(&self, o: &Rc<Point>) -> i32 {",
-            "fn compare_to(&self, other: Comparable) -> i32 {\n        self.compare_to_point(&java::cast(other.as_point(), \"Point\"))\n    }",
+            "fn compare_to(&self, other: Comparable) -> i32 {\n        self.compare_to_point(&java::cast(&other, |o| o.as_point(), (\"Point\", java::APP)))\n    }",
         ],
     );
 }
@@ -5025,7 +5027,10 @@ fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
 fn wildcards_and_raw_types_erase() {
     let rust = translate(GENERICS);
     // `? extends Shape` is `Shape`, and a raw `Box` is the class itself.
-    assert_contains(&rust, &["java::cast(b.borrow().get().as_shape(), \"Shape\").sides()", "let raw = b;"]);
+    assert_contains(
+        &rust,
+        &["java::cast(&b.borrow().get(), |o| o.as_shape(), (\"Shape\", java::APP)).sides()", "let raw = b;"],
+    );
 }
 
 #[test]
@@ -5040,7 +5045,7 @@ fn a_string_array_passed_as_an_array_of_a_type_variable_is_an_object_array() {
         &[
             "fn first(xs: &[Object]) -> Object {",
             "let s: Vec<Object> = vec![Object::String(String::from(\"a\"))];",
-            "java::cast_from(object.as_string(), \"java.lang.String\", || match &object { Object::String(_) => \"java.lang.String\" })",
+            "java::cast(&first(&s), |o| o.as_string(), (\"java.lang.String\", java::BASE))",
         ],
     );
 }

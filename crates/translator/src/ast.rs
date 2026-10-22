@@ -299,6 +299,10 @@ pub struct Class {
     /// The annotation types (`@interface`) whose class literals the code has, by binary name:
     /// a `java::Class` of each, which `isAnnotation()`. The types themselves are left out.
     pub annotation_classes: std::collections::BTreeSet<String>,
+    /// The module and class loader of each package of a named module, as HotSpot names them with
+    /// a class in a `ClassCastException` ("module java.base of loader 'bootstrap'"). A package
+    /// that is not here is in the unnamed module of the system class loader.
+    pub module_labels: std::collections::HashMap<String, String>,
 }
 
 /// An assumption of the translation at a place of the program: the method (index into

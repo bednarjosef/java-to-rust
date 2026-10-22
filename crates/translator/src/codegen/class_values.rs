@@ -25,6 +25,14 @@ pub(super) fn method_on(obj: &str, method: &str) -> String {
     }
 }
 
+/// A borrow of `obj`: `&obj`, with `obj` in parentheses unless it is a plain path, field or call.
+pub(super) fn borrow_of(obj: &str) -> String {
+    match plain(obj) {
+        true => format!("&{obj}"),
+        false => format!("&({obj})"),
+    }
+}
+
 /// Whether `text` is a path, a field or a call, which a method call can follow as it is.
 fn plain(text: &str) -> bool {
     !text.is_empty()
