@@ -2200,9 +2200,10 @@ fn a_catch_around_a_printf_of_an_object_whose_to_string_throws_is_rejected() {
 }
 
 #[test]
-fn a_catch_around_the_default_text_of_an_object_whose_hash_code_throws_is_rejected() {
-    // `Object`'s `toString` shows the `hashCode`, which may throw what the `catch` catches.
-    let error = java_to_rust::translate(
+fn a_hash_code_that_the_default_text_of_an_object_shows_passes_its_exception_on() {
+    // `Object`'s `toString` shows the `hashCode`, which may throw what the `catch` catches: the
+    // generator makes the text with a call of it, whose exception leaves the `try` block.
+    let rust = translate(
         "public class A {
             static class Item {
                 public int hashCode() { throw new IllegalStateException(\"no hash\"); }
@@ -2215,11 +2216,10 @@ fn a_catch_around_the_default_text_of_an_object_whose_hash_code_throws_is_reject
                 }
             }
         }",
-    )
-    .expect_err("a hashCode whose exception a catch around the text sees");
-    assert!(
-        error.to_string().ends_with("catching an exception that this toString may throw not supported yet"),
-        "{error}"
+    );
+    assert_contains(
+        &rust,
+        &["java::default_text(\"A$Item\", java::or_break!(Rc::new(AItem::new()).hash_code(), 'attempt))"],
     );
 }
 
