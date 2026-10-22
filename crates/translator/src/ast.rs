@@ -701,9 +701,10 @@ pub enum Builtin {
     /// is of no class of the translated program, which throws a `ClassNotFoundException` that
     /// says so, through `java::catching`.
     UnknownClass,
-    /// `[class, name]`: `Class.getResourceAsStream(name)`. A translated program has no resources
-    /// (the JDK's data files are not in its source), so the program ends with an `InternalError`
-    /// that nothing catches. `class` is the name of the class, a string literal.
+    /// `[class, name]`: `Class.getResourceAsStream(name)` and `getResource(name)`. A translated
+    /// program has no resources (the JDK's data files are not in its source), so the program ends
+    /// with an `InternalError` that nothing catches. `class` is the name of the class, a string
+    /// literal. `Class.getProtectionDomain()` is one too, of the name `(its protection domain)`.
     MissingResource,
     /// `[]`: runs the static initialization of the class, as its first use would, for
     /// `Class.forName` with a name that the code spells out (`lower::by_name`).

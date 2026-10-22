@@ -118,5 +118,12 @@ public class ClassComparisons {
         System.out.println(m.getClass() == Money.class && !m.getClass().equals(Point.class));
         System.out.println(sameOrNull(Dog.class, Dog.class) + " " + sameOrNull(Dog.class, Cat.class) + " "
                 + sameOrNull(null, Dog.class));
+        // The descriptors that class files write, and the component of an array's class.
+        Class<?>[] described = { String.class, int.class, int[][].class, Point[].class, Dog.class, boolean.class };
+        for (Class<?> type : described) {
+            System.out.print(type.descriptorString() + " ");
+        }
+        System.out.println(int[].class.componentType() + " " + String.class.componentType() + " "
+                + (Point[].class.componentType() == Point.class));
     }
 }
