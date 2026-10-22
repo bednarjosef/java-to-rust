@@ -419,10 +419,16 @@ struct Lowering<'t> {
     /// The class that names each static field read, and the methods of `String` that calls name
     /// (see `Class::class_file`).
     static_qualifiers: RefCell<std::collections::HashMap<(String, Pos, String), Option<String>>>,
-    calls: RefCell<std::collections::HashMap<(String, Pos, String), Option<CallName>>>,
+    /// With the position of the first argument of the call first noted at each key, until a
+    /// second differs (`chained_calls`).
+    calls: RefCell<std::collections::HashMap<(String, Pos, String), (Option<Pos>, Option<CallName>)>>,
+    chained_calls: RefCell<std::collections::HashMap<(String, Pos, String, Pos), Option<CallName>>>,
     /// The binary name of the anonymous class of the enum constant's body whose method is being
     /// lowered (`constant_bodies`), which javac names that body's own methods by (`note_call`).
     body_class: RefCell<Option<String>>,
+    /// The Java name of each local that `local_names` renamed (see `Class::class_file`).
+    renamed_locals:
+        RefCell<std::collections::HashMap<(String, Pos), std::collections::HashMap<String, String>>>,
     /// The atomic updates of fields through `Unsafe` that the code makes, each a method that
     /// lowering adds to the field's class (see `handles`).
     field_updates: RefCell<Vec<handles::FieldUpdateMethod>>,
@@ -581,7 +587,8 @@ impl<'t> Lowering<'t> {
         let method = self.method_in_scope(index);
         self.method_ctx.set(outer);
         let mut method = method?;
-        local_names::distinct_locals(&mut method);
+        let renamed = local_names::distinct_locals(&mut method).into_iter().collect();
+        self.renamed_locals.borrow_mut().insert((self.types[method.class].name.clone(), method.pos), renamed);
         self.share_element_reads(&mut method);
         self.arguments_before_receivers(&mut method);
         Ok(method)

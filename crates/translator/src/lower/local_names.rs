@@ -14,8 +14,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 /// Renames the locals of `method` that share a name with a parameter or an earlier local of
-/// another type.
-pub(super) fn distinct_locals(method: &mut Method) {
+/// another type, and returns each new name with the Java name it stands for.
+pub(super) fn distinct_locals(method: &mut Method) -> Vec<(String, String)> {
     // Every declaration, by name, with its types in order of appearance.
     let mut found: HashMap<String, Vec<Type>> = HashMap::new();
     for p in &method.params {
@@ -69,7 +69,7 @@ pub(super) fn distinct_locals(method: &mut Method) {
         }
     }
     if renames.is_empty() {
-        return;
+        return Vec::new();
     }
     // A declaration that the walk does not see, one inside a switch expression's cases, would
     // leave its uses with the wrong name: such a name is left as it is.
@@ -91,7 +91,7 @@ pub(super) fn distinct_locals(method: &mut Method) {
     }
     renames.retain(|(name, _), _| outside.get(name) == all.get(name));
     if renames.is_empty() {
-        return;
+        return Vec::new();
     }
     let mut walk = Walk { renames, current: HashMap::new() };
     for p in &method.params {
@@ -100,6 +100,7 @@ pub(super) fn distinct_locals(method: &mut Method) {
     for stmt in &mut method.body {
         walk.stmt(stmt);
     }
+    walk.renames.into_iter().map(|((name, _), fresh)| (fresh, name)).collect()
 }
 
 /// The names that statement `s` itself declares.

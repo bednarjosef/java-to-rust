@@ -285,7 +285,18 @@ impl Messages<'_> {
                         true => (args[0].ty == Type::String).then(|| format!("String.{method}({params})")),
                         false => self.call(x.pos, method),
                     };
-                    return add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                    add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                    // A null locale of `toLowerCase(Locale)` or `toUpperCase(Locale)`, whose
+                    // language lowering reads (`case_in_locale`): the JDK's code throws a
+                    // `NullPointerException` with no message for it.
+                    if let (Builtin::String(StringOp::ToLowerCase | StringOp::ToUpperCase), [_, language]) =
+                        (builtin, &args[..])
+                        && let ExprKind::MethodCall { receiver: locale, name, .. } = &language.kind
+                        && name == crate::program::LOCALE_LANGUAGE.1
+                    {
+                        out.insert(locale.id, None);
+                    }
+                    return;
                 }
                 // A method of a builder, named as the call names it: by the receiver's type,
                 // `java.lang.StringBuilder.ensureCapacity(int)` (or `StringBuffer`), with the
@@ -294,7 +305,7 @@ impl Messages<'_> {
                     && let Some(name) = builder_method(*op)
                 {
                     let call = match self.jdk {
-                        true => self.named_call(x.pos, name).flatten(),
+                        true => self.named_call(x, name).flatten(),
                         false => self.call(x.pos, name),
                     };
                     return add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
@@ -316,6 +327,18 @@ impl Messages<'_> {
                 if let Builtin::GetClass | Builtin::ClassName { .. } = builtin {
                     return add(&args[0], Some("Cannot invoke \"Object.getClass()\"".to_string()));
                 }
+                // `o.toString()` where the class does not declare it, which javac names as
+                // `Object`'s, or as `Enum`'s on an `Enum` (`lower::object::object_call`).
+                if let Builtin::ObjectText = builtin {
+                    let call = match (self.jdk, &args[0].kind) {
+                        (true, ExprKind::Cast(_, inner)) if matches!(inner.ty, Type::Class(n, _) if n == ENUM) => {
+                            Some("java.lang.Enum.toString()".to_string())
+                        }
+                        (true, _) => Some("Object.toString()".to_string()),
+                        (false, _) => self.call(x.pos, "toString"),
+                    };
+                    return add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                }
                 // An enum's own methods, of an enum that may be null. A null argument of
                 // `compareTo` fails in `Enum.compareTo`, the JDK's code (`-g`, so its local has
                 // its name).
@@ -326,7 +349,11 @@ impl Messages<'_> {
                     _ => None,
                 };
                 if let Some(method) = enum_method {
-                    add(&args[0], self.call(x.pos, method).map(|m| format!("Cannot invoke \"{m}\"")));
+                    let call = match self.jdk {
+                        true => self.named_call(x, method).flatten(),
+                        false => self.call(x.pos, method),
+                    };
+                    add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
                     if let (Builtin::EnumCompareTo, Some(other)) = (builtin, args.get(1)) {
                         let failure = "Cannot invoke \"Object.getClass()\" because \"other\" is null";
                         out.insert(other.id, Some(failure.to_string()));
@@ -729,7 +756,7 @@ impl Messages<'_> {
             ExprKind::MethodCall { name, .. } => self.call(e.pos, name).or_else(|| self.jdk_call(e)),
             ExprKind::Call { name, .. } => self.call(e.pos, name).or_else(|| {
                 // A static method of the JDK, as lowering found javac names it.
-                let named = self.jdk.then(|| self.named_call(e.pos, name).flatten()).flatten();
+                let named = self.jdk.then(|| self.named_call(e, name).flatten()).flatten();
                 named.or_else(|| self.jdk_static_call(e))
             }),
             _ => None,
@@ -801,7 +828,7 @@ impl Messages<'_> {
             return None;
         }
         // As lowering found javac names it, where it noted the call.
-        if let Some(Some(named)) = self.named_call(x.pos, name) {
+        if let Some(Some(named)) = self.named_call(x, name) {
             return Some(named);
         }
         // javac leaves a method that `Object` declares as `Object`'s, whatever the receiver
@@ -826,12 +853,24 @@ impl Messages<'_> {
         Some(format!("{owner}.{name}({})", params?.join(", ")))
     }
 
-    /// The method that the call at `pos` names, as the JVM shows it,
+    /// The method that the call `x` names, as the JVM shows it,
     /// `java.util.Properties.getProperty(String)`, where lowering noted the call
     /// (`Class::class_file`): `Some(None)` where it is not certain.
-    fn named_call(&self, pos: Pos, name: &str) -> Option<Option<String>> {
-        let key = (self.class.types[self.method.class].name.clone(), pos, name.to_string());
-        let named = self.class.class_file.calls.get(&key)?;
+    fn named_call(&self, x: &Expr, name: &str) -> Option<Option<String>> {
+        let key = (self.class.types[self.method.class].name.clone(), x.pos, name.to_string());
+        let mut named = self.class.class_file.calls.get(&key)?;
+        // One of calls that start alike, by its first argument.
+        let first = match &x.kind {
+            ExprKind::MethodCall { args, .. } | ExprKind::Call { args, .. } => args.first(),
+            ExprKind::Builtin(_, args) => args.get(1),
+            _ => None,
+        };
+        if named.is_none()
+            && let Some(first) = first
+            && let Some(chained) = self.class.class_file.chained_calls.get(&(key.0, key.1, key.2, first.pos))
+        {
+            named = chained;
+        }
         Some(named.as_ref().and_then(|call| {
             let params: Option<Vec<String>> = call.params.iter().map(|p| self.shown_class(p)).collect();
             Some(format!("{}.{}({})", self.shown_class(&call.class)?, call.name, params?.join(", ")))
@@ -1124,10 +1163,15 @@ impl Messages<'_> {
     }
 
     /// The name of the local `name` of a method of the JDK in its source, which its class file
-    /// has; `None` for one that the translation may have renamed (`s2` for a second `s`, see
-    /// `lower::local_names`).
+    /// has: the Java name of one that lowering renamed (`s2` for a second `s`, see
+    /// `lower::local_names`). In a method that lowering did not record, a name that may be a
+    /// renamed one has none.
     fn jdk_local(&self, name: &str) -> Option<String> {
         let method = self.method;
+        let key = (self.class.types[method.class].name.clone(), method.pos);
+        if let Some(renamed) = self.class.class_file.renamed_locals.get(&key) {
+            return Some(renamed.get(name).map_or(name, String::as_str).to_string());
+        }
         let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
         if base != name && !method.params.iter().any(|p| p.name == name) {
             let mut declared = method.params.iter().any(|p| p.name == base);

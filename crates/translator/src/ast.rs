@@ -326,6 +326,14 @@ pub struct ClassFileNames {
     /// position and the method's name. `None` where two calls there differ, or where the class
     /// is not certain.
     pub calls: HashMap<(String, Pos, String), Option<CallName>>,
+    /// The calls that `calls` has as `None` because two calls of the method at the position
+    /// differ, as in a chain `b.append('0').append(1)`, whose calls all start where `b` does: by
+    /// the position of the call's first argument too.
+    pub chained_calls: HashMap<(String, Pos, String, Pos), Option<CallName>>,
+    /// The locals that lowering renamed in each method it lowered, by the method's class and
+    /// position: the Java name of each by its new name (`s` for `s2`, a second `s` of another
+    /// type). A new name is never one that the method's source uses.
+    pub renamed_locals: HashMap<(String, Pos), HashMap<String, String>>,
 }
 
 /// A method as a call in a class file names it, in javac's names: the class that javac names it

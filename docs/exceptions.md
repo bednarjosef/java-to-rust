@@ -457,16 +457,20 @@ no `because` for the value of `c ? a : b`, no message for a pattern switch's
 (`(s = a).next` fails `because "a" is null`).
 
 **The JDK's code** is taken to be compiled with local names, as the JDK is, so its messages name
-its locals (`because "original" is null`). A call of the JDK's is named by the erasure of its
+its locals (`because "original" is null`), by their Java names where lowering renamed them
+(`ClassFileNames::renamed_locals`). A call of the JDK's is named by the erasure of its
 receiver's type and its descriptor, with type variables erased as javac does; a method that
 `Object` declares stays `Object`'s, and an enum constant body's call of its own method is named
 by the body's anonymous class (`java.time.temporal.IsoFields$Field$1.rangeRefinedBy(...)`), whose
-binary name the tree gives. Also covered: `String` methods by the overload javac chose,
+binary name the tree gives. Calls of one method that start at the same place, as the calls of a
+chain do (`b.append('0').append(1)`), are told apart by their first argument
+(`ClassFileNames::chained_calls`). Also covered: `String` methods by the overload javac chose,
 unboxing as the call it is (`java.lang.Integer.intValue()`), the JDK's constructors that fail
 inside (`new String(s)`, `new StringBuilder(s)`), a static by the class that declares it, an
 inner class's outer object as `this$0`, an enum field kept as a table (`lower/enum_tables.rs`) as
-the field it is, and a string `switch`'s temporary as `<localN>` from the slots javac would give
-(`javac::jdk_switch_temps`). The receiver of an unbound method reference has no message, as the
+the field it is, a string `switch`'s temporary as `<localN>` from the slots javac would give
+(`javac::jdk_switch_temps`), in an argument too, and a null locale of `toLowerCase(Locale)`,
+for which the JDK's code throws an exception without a message. The receiver of an unbound method reference has no message, as the
 JVM's hidden frame gives none. The translator's own `java.lang` classes (`Standard.java`) have no
 known message from their code; where the JDK's code has a dereference that may fail, they throw
 the JDK's message themselves. The overlays of `java.lang` (`Module`, `ModuleLayer`,

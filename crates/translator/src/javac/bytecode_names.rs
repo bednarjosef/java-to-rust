@@ -142,9 +142,13 @@ pub fn jdk_switch_temps(trees: &[&Value]) -> SwitchTemps {
 /// next slot when it is declared (before its initializer runs) and freed at the end of its block,
 /// two for a `long` or `double`, and the variables that javac adds itself: a for-each loop's
 /// array, length and index, or its iterator; a `synchronized` block's lock; an enclosing string
-/// `switch`'s two. A `switch` in code whose slots this does not follow is left out: in a
-/// constructor, initializer or lambda, in a `finally` block or a try-with-resources, in a method
-/// with patterns, and a `switch` expression with values on the stack before it (an argument).
+/// `switch`'s two. Each of javac's own is declared before the expression that it holds runs, as
+/// a variable is. A `switch` expression's string is in the next slot whatever is on the stack
+/// (javac declares it in a `LetExpr` around the `switch`). A `switch` in code whose slots this
+/// does not follow is left out: in a constructor, initializer or lambda, in a `finally` block or
+/// a try-with-resources, in a method with patterns, in an expression whose own temps javac
+/// declares (a compound assignment, an increment), and in the cases of a `switch` expression
+/// with a `try`, whose stack javac keeps in variables.
 fn unit_switch_temps(unit: &Value) -> SwitchTemps {
     let mut out = Vec::new();
     for class in unit["typeDecls"].as_array().into_iter().flatten() {
@@ -223,6 +227,22 @@ fn has_patterns(v: &Value) -> bool {
     }
 }
 
+/// Whether the code of the `switch` expression `s` has a `try` or a `synchronized` block,
+/// before which javac keeps the stack in variables of its own (`Gen.hasTry`).
+fn has_try(v: &Value) -> bool {
+    match v {
+        Value::Object(fields) => {
+            matches!(v["kind"].as_str(), Some("TRY" | "SYNCHRONIZED"))
+                || !matches!(
+                    v["kind"].as_str(),
+                    Some("CLASS" | "INTERFACE" | "ENUM" | "RECORD" | "LAMBDA_EXPRESSION")
+                ) && fields.iter().any(|(key, value)| key != "symbol" && has_try(value))
+        }
+        Value::Array(items) => items.iter().any(has_try),
+        _ => false,
+    }
+}
+
 /// The slots a variable declaration takes: two for a `long` or a `double`.
 fn size(variable: &Value) -> usize {
     match variable["symbol"]["type"].as_str() {
@@ -251,46 +271,48 @@ impl SwitchSlots<'_> {
             "VARIABLE" => {
                 // The variable's slot is taken before its initializer runs.
                 self.next += size(s);
-                self.expression(&s["initializer"], true);
+                self.expression(&s["initializer"]);
                 return;
             }
-            "EXPRESSION_STATEMENT" => self.expression(&s["expression"], false),
-            "RETURN" => self.expression(&s["expression"], true),
-            "THROW" => self.expression(&s["expression"], false),
+            "EXPRESSION_STATEMENT" => self.expression(&s["expression"]),
+            "RETURN" => self.expression(&s["expression"]),
+            "THROW" => self.expression(&s["expression"]),
             "IF" => {
-                self.expression(&s["condition"], false);
+                self.expression(&s["condition"]);
                 self.statement(&s["thenStatement"]);
                 self.statement(&s["elseStatement"]);
             }
             "WHILE_LOOP" | "DO_WHILE_LOOP" => {
-                self.expression(&s["condition"], false);
+                self.expression(&s["condition"]);
                 self.statement(&s["statement"]);
             }
             "FOR_LOOP" => {
                 for init in list(&s["initializer"]) {
                     self.statement(&init);
                 }
-                self.expression(&s["condition"], false);
+                self.expression(&s["condition"]);
                 for update in list(&s["update"]) {
                     self.statement(&update);
                 }
                 self.statement(&s["statement"]);
             }
             "ENHANCED_FOR_LOOP" => {
-                self.expression(&s["expression"], false);
+                // The array, or the iterator, then its length and index.
+                self.next += 1;
+                self.expression(&s["expression"]);
                 let array = s["expression"]["javaType"].as_str().is_some_and(|t| t.ends_with("[]"));
-                self.next += if array { 3 } else { 1 };
+                self.next += if array { 2 } else { 0 };
                 self.next += size(&s["variable"]);
                 self.statement(&s["statement"]);
             }
             "LABELED_STATEMENT" => self.statement(&s["statement"]),
             "SYNCHRONIZED" => {
-                self.expression(&s["expression"], false);
                 self.next += 1;
+                self.expression(&s["expression"]);
                 self.statement(&s["block"]);
             }
             "SWITCH" => self.switch(s),
-            "YIELD" => self.expression(&s["value"], false),
+            "YIELD" => self.expression(&s["value"]),
             "TRY" if list(&s["resources"]).is_empty() => {
                 self.statement(&s["block"]);
                 for catch in list(&s["catches"]) {
@@ -303,16 +325,45 @@ impl SwitchSlots<'_> {
         self.next = start;
     }
 
-    /// The `switch`es of an expression; `alone` when the value of a `switch` expression that is
-    /// all of it goes to an empty stack (an initializer, an assignment, a `return`).
-    fn expression(&mut self, e: &Value, alone: bool) {
-        match e["kind"].as_str().unwrap_or_default() {
-            "PARENTHESIZED" => self.expression(&e["expression"], alone),
-            "SWITCH_EXPRESSION" if alone => self.switch(e),
-            "ASSIGNMENT" if e["variable"]["kind"].as_str() == Some("IDENTIFIER") => {
-                self.expression(&e["expression"], true)
+    /// The `switch`es of an expression, through the expressions for which javac declares no
+    /// variables of its own: not into a lambda's body or a class's, which are other methods.
+    fn expression(&mut self, e: &Value) {
+        let parts: &[&str] = match e["kind"].as_str().unwrap_or_default() {
+            "SWITCH_EXPRESSION" => return self.switch(e),
+            "PARENTHESIZED" | "TYPE_CAST" | "MEMBER_SELECT" | "INSTANCE_OF" | "UNARY_PLUS"
+            | "UNARY_MINUS" | "BITWISE_COMPLEMENT" | "LOGICAL_COMPLEMENT" => &["expression"],
+            "ASSIGNMENT" => &["variable", "expression"],
+            "ARRAY_ACCESS" => &["expression", "index"],
+            "METHOD_INVOCATION" => &["methodSelect", "arguments"],
+            "NEW_CLASS" => &["enclosingExpression", "arguments"],
+            "NEW_ARRAY" => &["dimensions", "initializers"],
+            "CONDITIONAL_EXPRESSION" => &["condition", "trueExpression", "falseExpression"],
+            "PLUS"
+            | "MINUS"
+            | "MULTIPLY"
+            | "DIVIDE"
+            | "REMAINDER"
+            | "LEFT_SHIFT"
+            | "RIGHT_SHIFT"
+            | "UNSIGNED_RIGHT_SHIFT"
+            | "LESS_THAN"
+            | "GREATER_THAN"
+            | "LESS_THAN_EQUAL"
+            | "GREATER_THAN_EQUAL"
+            | "EQUAL_TO"
+            | "NOT_EQUAL_TO"
+            | "AND"
+            | "XOR"
+            | "OR"
+            | "CONDITIONAL_AND"
+            | "CONDITIONAL_OR" => &["leftOperand", "rightOperand"],
+            _ => &[],
+        };
+        for part in parts {
+            match &e[*part] {
+                Value::Array(items) => items.iter().for_each(|i| self.expression(i)),
+                one => self.expression(one),
             }
-            _ => {}
         }
     }
 
@@ -323,14 +374,22 @@ impl SwitchSlots<'_> {
         while selector["kind"].as_str() == Some("PARENTHESIZED") {
             selector = &selector["expression"];
         }
-        self.expression(selector, false);
         if selector["javaType"].as_str() == Some("java.lang.String") {
             let pos = Pos::new(
                 selector["line"].as_u64().unwrap_or_default() as usize,
                 selector["column"].as_u64().unwrap_or_default() as usize,
             );
             self.out.push((self.outermost.to_string(), pos, format!("<local{}>", self.next)));
-            self.next += 2;
+            // The string's, whose initializer the selector is, then the case's index.
+            self.next += 1;
+            self.expression(selector);
+            self.next += 1;
+        } else {
+            self.expression(selector);
+        }
+        if s["kind"].as_str() == Some("SWITCH_EXPRESSION") && has_try(s) {
+            self.next = start;
+            return;
         }
         let cases = s["cases"].as_array().cloned().unwrap_or_default();
         // The statements of the old form's cases share a block; a rule's body is its own.
@@ -349,7 +408,7 @@ impl SwitchSlots<'_> {
                 }
                 body => {
                     self.next = shared;
-                    self.expression(body, false);
+                    self.expression(body);
                 }
             }
         }

@@ -57,7 +57,9 @@ impl<'t> Lowering<'t> {
             field_updates: Default::default(),
             static_qualifiers: Default::default(),
             calls: Default::default(),
+            chained_calls: Default::default(),
             body_class: Default::default(),
+            renamed_locals: Default::default(),
             covariant: Default::default(),
             object: None,
             plain_object: None,
@@ -337,7 +339,9 @@ impl<'t> Lowering<'t> {
         ClassFileNames {
             static_qualifiers: self.static_qualifiers.take(),
             outer_fields,
-            calls: self.calls.take(),
+            calls: self.calls.take().into_iter().map(|(key, (_, named))| (key, named)).collect(),
+            chained_calls: self.chained_calls.take(),
+            renamed_locals: self.renamed_locals.take(),
         }
     }
 
@@ -393,14 +397,33 @@ impl<'t> Lowering<'t> {
             params,
         });
         let mut calls = self.calls.borrow_mut();
+        let mut chained = self.chained_calls.borrow_mut();
+        let first = node.list("arguments").next().map(|a| a.pos());
         let key = (self.types[self.current.get()].name.clone(), node.pos(), symbol.name.to_string());
-        match calls.get(&key) {
-            Some(known) if *known != named => {
-                calls.insert(key, None);
+        let mut chain = |at: Option<Pos>, named: &Option<CallName>| {
+            let Some(at) = at else { return };
+            let key = (key.0.clone(), key.1, key.2.clone(), at);
+            match chained.get(&key) {
+                Some(known) if known != named => {
+                    chained.insert(key, None);
+                }
+                Some(_) => {}
+                None => {
+                    chained.insert(key, named.clone());
+                }
+            }
+        };
+        match calls.get_mut(&key) {
+            // A second call there, of another method or another class: each by its first
+            // argument, the first one's once.
+            Some((at, known)) if *known != named => {
+                chain(at.take(), known);
+                chain(first, &named);
+                *known = None;
             }
             Some(_) => {}
             None => {
-                calls.insert(key, named);
+                calls.insert(key, (first, named));
             }
         }
     }
