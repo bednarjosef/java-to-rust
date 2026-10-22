@@ -47,6 +47,8 @@ struct Resolver {
     imports: BTreeSet<String>,
     /// The packages of other modules that the item being written names ("" for the crate root).
     refers: BTreeSet<String>,
+    /// The classes that the item being written names, by qualified name.
+    names: BTreeSet<String>,
 }
 
 /// Names that a module of the program cannot be called by through a `use` line, as they mean
@@ -89,6 +91,7 @@ impl Resolver {
             current: None,
             imports: BTreeSet::new(),
             refers: BTreeSet::new(),
+            names: BTreeSet::new(),
         }
     }
 
@@ -185,12 +188,16 @@ fn set_current(package: &str) {
         r.current = Some(package.to_string());
         r.imports.clear();
         r.refers.clear();
+        r.names.clear();
     });
 }
 
-/// The packages that the item written since the last call names.
-fn take_refers() -> BTreeSet<String> {
-    with(|r| std::mem::take(&mut r.refers)).unwrap_or_default()
+/// The packages of other modules and the classes that an item names.
+type Named = (BTreeSet<String>, BTreeSet<String>);
+
+/// What the item written since the last call names.
+fn take_refers() -> Named {
+    with(|r| (std::mem::take(&mut r.refers), std::mem::take(&mut r.names))).unwrap_or_default()
 }
 
 /// The path prefix that names a class from the module being written (empty inside its own
@@ -205,16 +212,24 @@ pub(super) fn split(name: &str) -> (String, &str) {
     if crate::lower::is_standard(name) || provided {
         let simple = crate::lower::standard_local_name(name);
         let nested = with(|r| match r.current.as_deref() {
+            None => false,
             Some(current) if !current.is_empty() => {
+                r.names.insert(name.to_string());
                 r.refers.insert(String::new());
                 true
             }
-            _ => false,
+            Some(_) => {
+                r.names.insert(name.to_string());
+                false
+            }
         });
         return (if nested == Some(true) { "crate::".to_string() } else { String::new() }, simple);
     }
     with(|r| {
         let package = r.packages.get(name)?.clone();
+        if r.current.is_some() {
+            r.names.insert(name.to_string());
+        }
         Some((r.prefix(&package), local_name(name, &package)))
     })
     .flatten()
@@ -336,7 +351,7 @@ impl<'a> Gen<'a> {
         let outer_traits = std::mem::take(&mut self.traits);
         self.indent = 0;
         // Each piece the generator writes is an item: the text it added, and what it named.
-        let mut items: Vec<(Origin, usize, BTreeSet<String>)> = Vec::new();
+        let mut items: Vec<(Origin, usize, Named)> = Vec::new();
         let mut item = |g: &mut Self, origin: Origin, start: usize| {
             if g.out.len() > start {
                 items.push((origin, start, take_refers()));
@@ -425,7 +440,7 @@ impl<'a> Gen<'a> {
         let items = items
             .into_iter()
             .zip(texts)
-            .map(|((origin, _, refers), text)| Item { origin, text, refers })
+            .map(|((origin, _, (refers, names)), text)| Item { origin, text, refers, names })
             .collect();
         modules.push(Module { package: package.to_string(), path: path.clone(), uses, items });
         let prefix = if package.is_empty() { String::new() } else { format!("{package}.") };

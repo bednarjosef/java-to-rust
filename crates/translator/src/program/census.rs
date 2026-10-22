@@ -30,6 +30,7 @@
 use super::survey::{self, Part, Piece};
 use super::{Program, ProgramError, load, source_files};
 use crate::ast::{Builtin, Class, Error, Expr, ExprKind, Method, Pos, Stmt, Type, visit_expr, visit_stmt};
+use crate::output::ModuleTree;
 use crate::{analysis, codegen, lower};
 use serde_json::{Value, json};
 use std::cmp::Reverse;
@@ -39,10 +40,12 @@ use std::fmt::Write;
 /// Up to this many example places per message.
 const EXAMPLES: usize = 3;
 
-/// The census: the text report, and the same census as JSON.
+/// The census: the text report, and the same census as JSON; and the modules that the generator
+/// wrote last, with every rejected piece of code stubbed, if it got that far.
 pub struct Census {
     pub report: String,
     pub json: Value,
+    pub modules: Option<ModuleTree>,
 }
 
 /// An error that the census recorded and went on past: the unit of the code it is in (`None`
@@ -99,12 +102,14 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     let unit_files = survey::unit_files(&units.iter().collect::<Vec<_>>(), program, &files);
     drop(trees);
     drop((units, reach));
+    let mut modules = None;
     if let Some(mut class) = class {
-        fatal = phase("analyze", || analyse(&mut class, &lowered.units, &mut rejections));
+        fatal = phase("analyze", || analyse(&mut class, &lowered.units, &mut rejections, &mut modules));
     }
     std::panic::set_hook(hook);
     let tally = Tally::new(&scan.pieces, &unit_files, rejections, fatal);
-    Ok(Census { report: tally.report(&scan, &program.main), json: tally.json(&scan, &program.main) })
+    let (report, json) = (tally.report(&scan, &program.main), tally.json(&scan, &program.main));
+    Ok(Census { report, json, modules })
 }
 
 /// An analysis or the generator, run for its errors.
@@ -112,7 +117,13 @@ type Pass<'a> = &'a dyn Fn(&mut Class) -> Result<(), Vec<Error>>;
 
 /// Runs the analyses and the generator over the lowered program until they pass, stubbing the
 /// code of each error; the error that ends it early, if one does.
-fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Rejection>) -> Option<Rejection> {
+fn analyse(
+    class: &mut Class,
+    units: &[Option<usize>],
+    rejections: &mut Vec<Rejection>,
+    modules: &mut Option<ModuleTree>,
+) -> Option<Rejection> {
+    let generated: std::cell::RefCell<Option<ModuleTree>> = Default::default();
     let mut stubs = Stubs { next_id: next_id(class) + 1, stubbed: HashSet::new() };
     // The check for null enums changes nothing, and `whole_objects` changes the program only when
     // it passes: an error of theirs that no stub takes away is recorded, and the census goes on
@@ -138,10 +149,9 @@ fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Reje
                 analysis::analyze_tolerating(class, &tolerated)
             })?;
             codegen::catch_panics(true);
-            let generated =
-                crate::timings::phase("census: generator", || codegen::generate_all(class, &facts));
+            let tree = crate::timings::phase("census: generator", || codegen::generate_all(class, &facts));
             codegen::catch_panics(false);
-            generated.map(drop)
+            tree.map(|tree| *generated.borrow_mut() = Some(tree))
         },
     ];
     for (index, pass) in passes.into_iter().enumerate() {
@@ -200,6 +210,7 @@ fn analyse(class: &mut Class, units: &[Option<usize>], rejections: &mut Vec<Reje
             }
         }
     }
+    *modules = generated.take();
     None
 }
 

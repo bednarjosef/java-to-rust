@@ -54,6 +54,8 @@ pub struct Item {
     pub text: String,
     /// The Java packages of the other modules that the item names ("" for the crate root).
     pub refers: BTreeSet<String>,
+    /// The Java classes that the item names, by qualified name, in its module and in others.
+    pub names: BTreeSet<String>,
 }
 
 /// What an item was made from.
@@ -94,6 +96,21 @@ pub struct SourceFile {
     pub text: String,
 }
 
+impl Origin {
+    /// What the item was made from, in words, and its class, if it was made from one.
+    pub fn describe(&self) -> (&'static str, Option<&str>) {
+        match self {
+            Origin::Class(c) => ("class", Some(c)),
+            Origin::ClassEnum(c) => ("class enum", Some(c)),
+            Origin::Enum(c) => ("enum", Some(c)),
+            Origin::Statics => ("statics", None),
+            Origin::Monitors => ("monitors", None),
+            Origin::Function(c) => ("function", Some(c)),
+            Origin::Main => ("main", None),
+        }
+    }
+}
+
 impl Module {
     /// The text of the module's items.
     pub fn items_text(&self) -> String {
@@ -131,6 +148,35 @@ impl ModuleTree {
     pub fn one_file(&self) -> String {
         let body = self.inline(0);
         format!("{}{body}\n{}", self.header, self.footer)
+    }
+
+    /// The modules and what each of their items names, as JSON, for planning a split into crates
+    /// (`--modules-json`): per module its package and lines, per item what it was made from, its
+    /// lines, and the packages and classes it names.
+    pub fn dependencies(&self) -> serde_json::Value {
+        let lines = |text: &str| text.lines().count();
+        let modules: Vec<serde_json::Value> = self
+            .modules
+            .iter()
+            .map(|m| {
+                let items: Vec<serde_json::Value> = m
+                    .items
+                    .iter()
+                    .map(|item| {
+                        let (kind, class) = item.origin.describe();
+                        serde_json::json!({
+                            "kind": kind,
+                            "class": class,
+                            "lines": lines(&item.text),
+                            "packages": item.refers,
+                            "classes": item.names,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "package": m.package, "lines": lines(&m.items_text()), "items": items })
+            })
+            .collect();
+        serde_json::json!({ "modules": modules })
     }
 
     /// The direct children of module `index`, by index.
