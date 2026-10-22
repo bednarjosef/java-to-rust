@@ -1584,17 +1584,23 @@ impl<'a> Gen<'a> {
 
     /// The monitor of an object of the type, where the program keeps the monitors of its objects
     /// (`synchronized (node)` on a `ConcurrentHashMap` bin): the monitor of the variant's handle.
-    /// A type with a variant that is not such a handle (a value, or an immutable object shared as
-    /// it is) has none.
+    /// A variant that is not such a handle (a value, such as a string or a box held as an
+    /// `Object`, or an immutable object shared as it is) has none, and ends the program
+    /// (`java::unkept_monitor`): `synchronized (LOCK)` on an `Object` that is a plain object
+    /// keeps its monitor although the type's other values have none.
     fn monitor_impl(&mut self, t: usize, variants: &[usize]) {
         if variants.is_empty() || !self.facts.kept_monitor_of(t) {
             return;
         }
-        for &c in variants {
-            let payload = self.payload(c);
-            if !(payload.starts_with("Rc<") || payload.starts_with("Arc<java::Locked<")) {
-                return;
-            }
+        let handles: Vec<bool> = variants
+            .iter()
+            .map(|&c| {
+                let payload = self.payload(c);
+                payload.starts_with("Rc<") || payload.starts_with("Arc<java::Locked<")
+            })
+            .collect();
+        if !handles.contains(&true) {
+            return;
         }
         let name = struct_name(&self.class.types[t].name);
         let (has, of) = (self.runtime("HasMonitor"), self.runtime("MonitorOf"));
@@ -1605,9 +1611,14 @@ impl<'a> Gen<'a> {
         self.indent += 1;
         self.line("match self {");
         self.indent += 1;
-        for &c in variants {
+        let unkept = self.runtime("unkept_monitor");
+        for (&c, handle) in variants.iter().zip(handles) {
             let v = self.variant(t, c);
-            self.line(&format!("{v}(o) => {has}::monitor(o),"));
+            if handle {
+                self.line(&format!("{v}(o) => {has}::monitor(o),"));
+            } else {
+                self.line(&format!("{v}(_) => {unkept}(),"));
+            }
         }
         self.indent -= 1;
         self.line("}");

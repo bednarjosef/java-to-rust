@@ -25,6 +25,14 @@ pub enum MonitorOf<'a> {
     Local(usize),
 }
 
+/// Ends the program at a monitor of a value whose identity the translation does not keep: a
+/// string, a box or a class held as an `Object` that the program locks, waits on or notifies.
+pub fn unkept_monitor() -> ! {
+    crate::exception::die(
+        "a monitor of a string, a box or a class held as an Object, which the translation does not keep",
+    )
+}
+
 /// A value whose object has a monitor: a handle, or the enum of a class type, which the
 /// translation implements it for by matching the variant.
 pub trait HasMonitor {
