@@ -903,6 +903,8 @@ pub enum BoxedOp {
     Unbox,
     /// `Integer.toString(i)` or `x.toString()`.
     ToString,
+    /// `Double.toHexString(d)` or `Float.toHexString(f)`: the hexadecimal form of the value.
+    HexString,
     /// `Integer.compare(a, b)` or `x.compareTo(y)`.
     Compare,
     /// `Integer.hashCode(i)` or `x.hashCode()`.

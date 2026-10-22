@@ -34,6 +34,7 @@ pub(super) fn is_boxed_method(name: &str) -> bool {
             | "parseBoolean"
             | "valueOf"
             | "toString"
+            | "toHexString"
             | "compare"
             | "hashCode"
             | "equals"
@@ -109,6 +110,7 @@ impl<'t> Lowering<'t> {
                     BoxedOp::HashCode
                 }
             }
+            ("toHexString", true) => BoxedOp::HexString,
             ("compare", true) => BoxedOp::Compare,
             ("sum", true) => BoxedOp::Sum,
             ("isNaN", _) => BoxedOp::FloatTest("is_nan"),
@@ -141,6 +143,7 @@ impl<'t> Lowering<'t> {
             | BoxedOp::Box
             | BoxedOp::Unbox
             | BoxedOp::ToString
+            | BoxedOp::HexString
             | BoxedOp::HashCode
             | BoxedOp::FloatTest(_) => 1,
             BoxedOp::ParseRadix | BoxedOp::Compare | BoxedOp::Equals | BoxedOp::Sum | BoxedOp::Logical(_) => {

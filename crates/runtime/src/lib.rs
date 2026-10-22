@@ -33,6 +33,7 @@ mod float;
 mod float_parse;
 pub mod format;
 mod fs;
+mod hex_float;
 mod inflate;
 mod initializer;
 mod integer;
@@ -75,6 +76,7 @@ pub use exception::*;
 pub use fd::*;
 pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
+pub use hex_float::{double_to_hex_string, float_to_hex_string};
 pub use format::{Arg, format, format_objects};
 pub use fs::*;
 pub use inflate::{
