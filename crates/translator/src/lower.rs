@@ -82,6 +82,7 @@ pub use exceptions::{
     is_standard, standard_field_type, standard_local_name, standard_names, standard_subclass,
 };
 pub use functional::is_functional;
+pub(crate) use inner::OUTER;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
 pub use program::{Lowered, Rejected, census_lower_program, lower_program, tolerant_lower_program};
@@ -400,6 +401,10 @@ struct Lowering<'t> {
     current: Cell<usize>,
     /// The method being lowered, whose type variables are in scope.
     method_ctx: Cell<Option<usize>>,
+    /// Whether the code being lowered is a field initializer or an initializer block that runs in
+    /// a constructor, which reads the enclosing instance and the captured locals from the fields,
+    /// as javac's code for it does, not from the constructor's parameters.
+    initializing: Cell<bool>,
     /// The class and method whose type variables a declared type is read in, when that is not
     /// the code being lowered (see `generics::declared_type`).
     scope: Cell<Option<(usize, Option<usize>)>>,

@@ -77,9 +77,10 @@ Lowering (`lower/inner.rs`) then desugars each class as javac does, so there are
 expression kinds: a field `outer` (first in the struct) and a field per captured local; every
 constructor takes the enclosing instance first and the captured locals last, and stores them
 before anything else runs; every `new`, `this(..)` and `super(..)` passes them. A captured local
-is read as its field (its constructor parameter, inside a constructor), and a member of an
-enclosing class as a chain of `outer` fields (`this.outer.outer`). The analyses and the
-generator see only fields, parameters and arguments they already handle.
+is read as its field, and a member of an enclosing class as a chain of `outer` fields
+(`this.outer.outer`), except that a constructor's own code reads the parameters (`outer.outer`),
+as javac's does; the initializers that a constructor runs read the fields, as javac's do too.
+The analyses and the generator see only fields, parameters and arguments they already handle.
 
 In the AST (`ast.rs`), a `TypeDecl` has `outer: Option<usize>` (the enclosing class whose
 instance its objects hold) and `captures: Vec<Capture>`, where a `Capture` names the local, the

@@ -45,6 +45,7 @@ impl<'t> Lowering<'t> {
             next_id: Cell::new(0),
             current: Cell::new(0),
             method_ctx: Cell::new(None),
+            initializing: Cell::new(false),
             scope: Cell::new(None),
             in_ctor: Cell::new(false),
             ret: Cell::new(Type::Void),

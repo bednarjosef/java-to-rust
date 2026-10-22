@@ -694,6 +694,7 @@ impl Messages<'_> {
             ExprKind::Var(_) if let Some(at) = self.iterator(e) => {
                 self.names.get(self.outermost, at, NameKind::Temp, "i$")?.to_string()
             }
+            ExprKind::Var(name) if self.is_outer_param(name) => self.outer_param(self.method.class)?,
             ExprKind::Var(name) if self.jdk => self.jdk_local(name)?,
             // `i++` or `--i` of an `int` local: `iinc` and a load of the local, which the JVM
             // shows by its name.
@@ -1080,13 +1081,49 @@ impl Messages<'_> {
         self.names.get(self.outermost, pos, NameKind::Call, name).map(str::to_string)
     }
 
+    /// Whether the local `name` is the constructor's parameter that holds the enclosing instance
+    /// (`lower::OUTER`), which the translation reads in the constructor's own code, as javac's
+    /// does.
+    fn is_outer_param(&self, name: &str) -> bool {
+        let method = self.method;
+        let mut declared = false;
+        for s in &method.body {
+            visit_stmt(s, &mut |_| {}, &mut |s| {
+                if let Stmt::Local { name: local, .. } | Stmt::ForEach { name: local, .. } = s {
+                    declared |= local == name;
+                }
+            });
+        }
+        name == crate::lower::OUTER
+            && method.is_ctor
+            && self.class.types[method.class].outer.is_some()
+            && method.params.first().is_some_and(|p| p.name == name)
+            && !declared
+    }
+
+    /// The parameter of a constructor of class `class` that holds the enclosing instance, as the
+    /// JVM names it: the first, `<parameter1>`, which nothing assigns; in the JDK's code (`-g`), by
+    /// its name, that of the field it sets (`this$0`).
+    fn outer_param(&self, class: usize) -> Option<String> {
+        if !self.jdk {
+            return Some("<parameter1>".to_string());
+        }
+        match self.this_field(class)? {
+            JavaField::Named(name) => Some(name),
+            _ => None,
+        }
+    }
+
     /// The field `name` of `object` as the class file has it; `None` where that is not certain.
     /// The translation adds fields to a nested class for its enclosing instance and for the locals
     /// it captures. javac does too for a local or anonymous class (`val$x`, `this$0`), which reads
-    /// them through `this` except in its constructors (where it reads its parameters), but not for
-    /// a lambda, whose body is a method of the enclosing class that takes the captured locals as
-    /// parameters.
+    /// them through `this`, but not for a lambda, whose body is a method of the enclosing class
+    /// that takes the captured locals as parameters. Both read the parameters instead in the code
+    /// of a constructor, and the fields in the initializers it runs.
     fn java_field(&self, object: &Expr, name: &str) -> Option<JavaField> {
+        if let Some(param) = self.lambda_outer_param(object, name) {
+            return Some(JavaField::Captured(param));
+        }
         let synthetic = |t: usize| {
             let decl = &self.class.types[t];
             decl.captures.iter().any(|c| c.field == name)
@@ -1102,9 +1139,9 @@ impl Messages<'_> {
         let mut own = true;
         while let Some(c) = t {
             if synthetic(c) {
-                // A class's own, read through `this` outside a constructor (where javac reads its
-                // parameter instead); the enclosing instance of a member, local or anonymous
-                // class also through another object of it, which javac reads as a field too.
+                // A class's own, read through `this`; the enclosing instance of a member, local
+                // or anonymous class also through another object of it, which javac reads as a
+                // field too.
                 let this = matches!(object.kind, ExprKind::This);
                 let decl = &self.class.types[c];
                 let enclosing = decl.captures.iter().all(|c| c.field != name)
@@ -1112,7 +1149,7 @@ impl Messages<'_> {
                         decl.origin,
                         Origin::Member | Origin::Local { .. } | Origin::Anonymous { .. }
                     );
-                let through_this = c == self.method.class && this && !self.method.is_ctor;
+                let through_this = c == self.method.class && this;
                 if !own || !(through_this || (enclosing && !this)) {
                     return None;
                 }
@@ -1154,13 +1191,41 @@ impl Messages<'_> {
         Some(JavaField::Named(name.to_string()))
     }
 
+    /// The enclosing instance of the class whose constructor's code declares the lambda whose
+    /// code this is, read through the lambda's `this` (`object`) as its field `name`: javac's
+    /// method for the lambda takes the constructor's parameter (`outer_param`) as one of its own,
+    /// before the lambda's: the first when the lambda captures no local, which would come before
+    /// it or after it. `None` for another field, `Some(None)` where the parameter is not certain.
+    fn lambda_outer_param(&self, object: &Expr, name: &str) -> Option<Option<String>> {
+        let ExprKind::Field { object: this, name: field } = &object.kind else { return None };
+        let lambda = &self.class.types[self.method.class];
+        let Origin::Lambda { method: Some(m), .. } = lambda.origin else { return None };
+        let ctor = &self.class.methods[m];
+        let class = self.class.class_index(object.ty)?;
+        let decl = &self.class.types[class];
+        let outer = name.trim_end_matches('_') == "outer" && decl.captures.iter().all(|c| c.field != name);
+        if !(matches!(this.kind, ExprKind::This)
+            && ctor.is_ctor
+            && ctor.class == class
+            && lambda.outer == Some(class)
+            && decl.outer.is_some()
+            && outer
+            && matches!(self.java_field(this, field), Some(JavaField::This)))
+        {
+            return None;
+        }
+        if !lambda.captures.is_empty() {
+            return Some(None);
+        }
+        Some(self.outer_param(class))
+    }
+
     /// The enclosing instance of `object`, of an inner class of the JDK, as the class file reads
     /// it: javac gives each inner class a field of its own for it (`this$0`), which the class's
     /// code reads, while the translation may keep it in a superclass's of the same enclosing
     /// class. A member class's is read so through any object; a local or anonymous class's only
     /// through `this`, as the others are not certain. `None` for a value that is not an inner
-    /// class's, `Some(None)` where the name is not certain, as in a constructor, which reads its
-    /// parameter instead.
+    /// class's, `Some(None)` where the name is not certain.
     fn jdk_this_field(&self, object: &Expr) -> Option<Option<JavaField>> {
         let o = self.class.class_index(object.ty)?;
         let decl = &self.class.types[o];
@@ -1171,7 +1236,7 @@ impl Messages<'_> {
             Origin::Local { .. } | Origin::Anonymous { .. } => through_this,
             _ => return None,
         };
-        if !certain || through_this && self.method.is_ctor {
+        if !certain {
             return Some(None);
         }
         let mut t = decl.extends;

@@ -449,7 +449,9 @@ are javac's own rather than a copy of its rules. A program whose sources are a m
 JDK has too (javac's `jdk.compiler`) compiles as part of that module (`--patch-module`), as the
 unnamed module may not hold its packages. A lambda's body is a method whose first
 parameters are its captures; a local or anonymous class reads a captured local as
-`this.val$x`; javac's own locals are named too (the `s$` of a string `switch`, the iterator
+`this.val$x`; an inner class's constructor reads its enclosing instance from its first
+parameter (`<parameter1>.chk`), as does a lambda in it, which takes that as a parameter, while
+the initializers the constructor runs read the field (`this.this$0.chk`); javac's own locals are named too (the `s$` of a string `switch`, the iterator
 `i$` of a for-each loop, whose calls start at the collection as javac's do). A parameter that
 its method assigns is `<parameterN>` until the JVM sees it written: HotSpot walks the bytecode
 once, in order, carrying what it has seen forward along each jump, and stops at the failing
@@ -501,7 +503,9 @@ texts may differ, and a program whose `catch` reads one is not translated.
 `try`, and in the handler of any exception) name it differently, of a
 local declared in a `finally` (javac copies the block, each copy with its own slots) or in an
 instance initializer (copied into every constructor), of a JDK local the translation may have
-renamed, of the enclosing instance of a nested class, a dereference in the code of `java.lang`,
+renamed, of the enclosing instance of a nested class where javac's field or parameter for it is
+not certain (a superclass's field, a lambda in a constructor that captures locals too), of a
+local captured by a local class in its constructor's code, a dereference in the code of `java.lang`,
 a failure of the runtime without the checked form (an unboxing the code does not write as a
 call, a library call given null), any other dereference in the body of a method reference's class, and a
 field of a field of an enclosing instance.
