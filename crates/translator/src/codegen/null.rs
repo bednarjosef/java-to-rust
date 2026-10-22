@@ -112,9 +112,14 @@ impl<'a> Gen<'a> {
         if matches!(ty, Type::Class(..) | Type::StringBuilder | Type::Enum(_) | Type::Array(_)) {
             return format!("{rust}.as_ref()");
         }
-        // An `Option<i32>` is `Copy` and matches as it is; a faithful box is `as_deref`'d.
+        // An `Option<i32>` is `Copy` and matches as it is, and so does an `Option` of a class; a
+        // faithful box is `as_deref`'d.
         let plain_box = self.boxed.get(name).is_some_and(|&ty| !self.faithful_box(ty));
-        if self.borrowed_optional.contains(name) || plain_box { rust } else { format!("{rust}.as_deref()") }
+        if self.borrowed_optional.contains(name) || plain_box || ty == Type::JavaClass {
+            rust
+        } else {
+            format!("{rust}.as_deref()")
+        }
     }
 
     /// A possibly-null string as an `Option<&str>`.
