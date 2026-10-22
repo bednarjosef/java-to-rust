@@ -202,8 +202,9 @@ methods each thread runs, which does not exist yet (section 7).
 ### 2.4 Objects used as locks
 
 `new Object()` used as a lock is an `Arc<java::Locked<PlainObject>>`: a class whose values may be
-a kept lock is neither immutable nor owned, so it has a lock. Class monitors (static synchronized
-methods, `synchronized (C.class)`) are statics of the translation, `static C__MONITOR:
+a kept lock is neither immutable nor owned, and neither is any class of its tree, so that an enum
+over the tree reaches all its objects one way and each has a lock. Class monitors (static
+synchronized methods, `synchronized (C.class)`) are statics of the translation, `static C__MONITOR:
 java::Locked<()>`, entered with `java::enter_class(&C__MONITOR)`.
 
 ## 3. Monitors
