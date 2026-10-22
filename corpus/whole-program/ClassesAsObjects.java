@@ -1,4 +1,4 @@
-// Classes held as `Object`s: a sentinel compared by identity, keys of a map and a set, elements
+// Classes held as `Object`s: a sentinel compared by identity, two compared with `==`, keys of a map and a set, elements
 // of a list and an array, `instanceof Class`, casts back (one that fails), and their hash codes,
 // which agree with `System.identityHashCode`, as there is one object for each class.
 import java.util.*;
@@ -9,7 +9,12 @@ public class ClassesAsObjects {
     static Object pick(int i) {
         return switch (i) { case 0 -> String.class; case 1 -> "text"; case 2 -> 42; case 3 -> Shape.class; default -> new int[0].getClass(); };
     }
+    static Object classOf(Object value) {
+        return value.getClass();
+    }
     public static void main(String[] args) {
+        Object first = classOf("a"), second = classOf("b"), third = classOf(3);
+        System.out.println((first == second) + " " + (first == third) + " " + (classOf(new Circle(2)) == classOf(new Circle(3))));
         Object o = args.length > 5 ? "x" : MARK;
         System.out.println(o == MARK);
         System.out.println(o);
