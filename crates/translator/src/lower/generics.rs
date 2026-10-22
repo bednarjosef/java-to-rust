@@ -274,6 +274,7 @@ impl<'t> Lowering<'t> {
             return unsupported(node, "an array of a type variable used as an array of its argument");
         }
         let inner = self.synth(kind, node.pos(), declared);
+        self.erased_casts.borrow_mut().insert(inner.id);
         Ok(ExprKind::Cast(ty, Box::new(inner)))
     }
 }
