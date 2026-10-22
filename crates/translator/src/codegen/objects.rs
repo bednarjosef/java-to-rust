@@ -844,7 +844,10 @@ impl<'a> Gen<'a> {
         if self.displays(index) {
             let obj = self.handle_object(handle, e, index);
             if self.lazy_text && !(self.printing && !self.quiet_text(e, 0)) {
-                return (obj, false);
+                // A thread-shared object's `java::Locked` borrow is not `Display`, so its
+                // `toString` gives the text.
+                let shared = !self.is_plain(e) && self.is_thread_shared(e);
+                return (if shared { format!("{obj}.to_string()") } else { obj }, false);
             }
             return (format!("{obj}.to_string()"), false);
         }
