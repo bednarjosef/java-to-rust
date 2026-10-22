@@ -37,6 +37,7 @@ mod inflate;
 mod math;
 mod names;
 mod null;
+mod nullable_enums;
 mod object_clone;
 mod parse_range;
 mod primitives;
