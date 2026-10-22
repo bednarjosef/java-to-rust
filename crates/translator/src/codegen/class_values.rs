@@ -218,7 +218,8 @@ impl<'a> Gen<'a> {
         };
         let nullable = self.nullable(x);
         if let Some(t) = self.enum_of(x) {
-            let value = if nullable { self.option_ref(x) } else { self.expr(x).at(ATOM) };
+            // A value of the enum that may be null is matched as an `Option<&..>`.
+            let value = if nullable { self.enum_option(x) } else { self.expr(x).at(ATOM) };
             let mut arms = Vec::new();
             for c in self.enum_variants(t) {
                 let pattern = format!("{}(_)", self.variant(t, c));
