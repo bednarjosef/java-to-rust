@@ -22,6 +22,17 @@ pub fn immutable_classes(class: &Class) -> HashSet<String> {
         .collect()
 }
 
+/// Removes from `immutable` the families of the classes named in `classes`: a class tree is
+/// immutable together or not at all, so one class with a kept monitor makes its whole tree mutable.
+pub fn remove_families(class: &Class, immutable: &mut HashSet<String>, classes: &HashSet<String>) {
+    for name in classes {
+        let Some(t) = class.type_index(name) else { continue };
+        for f in class.hierarchy.family(t) {
+            immutable.remove(&class.types[f].name);
+        }
+    }
+}
+
 /// The immutable concrete classes with a method that calls on `this` a body living on the enum of
 /// a type: that call needs the object's handle to make the enum's value, which a method that
 /// borrows the object as `&self` does not have. Their class trees cannot be immutable.
