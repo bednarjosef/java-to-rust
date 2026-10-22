@@ -20,6 +20,27 @@ pub(super) fn boxed_type(name: &str) -> Option<Type> {
     Some(Type::boxed(primitive))
 }
 
+/// The primitive whose class the static field `TYPE` of a boxed class is, such as `int` for
+/// `Integer.TYPE`, which the JDK sets to `int.class`; `Void.TYPE` is `void.class`.
+pub(super) fn primitive_class_field(owner: &str, name: &str) -> Option<Type> {
+    if name != "TYPE" {
+        return None;
+    }
+    let primitive = match owner {
+        "java.lang.Integer" => Type::Int,
+        "java.lang.Long" => Type::Long,
+        "java.lang.Double" => Type::Double,
+        "java.lang.Boolean" => Type::Boolean,
+        "java.lang.Character" => Type::Char,
+        "java.lang.Byte" => Type::Byte,
+        "java.lang.Short" => Type::Short,
+        "java.lang.Float" => Type::Float,
+        "java.lang.Void" => Type::Void,
+        _ => return None,
+    };
+    Some(primitive)
+}
+
 /// Methods that the boxed classes share with `Character`, or have of their own: those of
 /// `Character` that are not in this list (`isDigit` and the like) go to `character_method`.
 pub(super) fn is_boxed_method(name: &str) -> bool {
