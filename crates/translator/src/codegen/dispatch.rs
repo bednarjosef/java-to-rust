@@ -804,16 +804,27 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// A call of instance method `resolved` on a value of the enum of `t`: the method of the
-    /// enum that runs what the object's class runs. `toString` is the enum's `Display`.
+    /// A call at `pos` of instance method `resolved` on a value of the enum of `t`: the method of
+    /// the enum that runs what the object's class runs. `toString` is the enum's `Display`.
     pub(super) fn enum_call(
         &mut self,
         t: usize,
+        pos: Pos,
         receiver: &'a Expr,
         resolved: usize,
         args: &'a [Expr],
     ) -> Code {
         let m = &self.class.methods[resolved];
+        // A class of the program that has none of `CharSequence`'s methods (`lower` links its own
+        // or the default `getChars`, so none should) rejects each call that may reach it, and
+        // the dispatcher's arm for it never runs.
+        if self.is_char_sequence_method(resolved)
+            && self.enum_variants(t).into_iter().any(|c| self.missing_sequence_method(resolved, c))
+        {
+            let message = format!("`CharSequence.{}` of a class without one not supported yet", m.name);
+            self.rejected.push(Error { pos, message });
+            return Code::atom("unreachable!()".to_string());
+        }
         if m.name == "toString" && m.params.is_empty() {
             self.need(Need::Display(t));
             let text = format!("{}.to_string()", self.object(receiver));
@@ -1225,6 +1236,12 @@ impl<'a> Gen<'a> {
         t.kind == TypeKind::Interface && t.name == CHAR_SEQUENCE
     }
 
+    /// Whether a value of class `c` has no method for `CharSequence`'s method `r`: it is no
+    /// string or builder, and no method of the program implements `r` for it.
+    fn missing_sequence_method(&self, r: usize, c: usize) -> bool {
+        self.runtime_of(c).is_none() && self.class.hierarchy.implementation(r, c).is_none()
+    }
+
     /// `CharSequence`'s `length()`, `charAt(index)`, `subSequence(start, end)` or `getChars(..)`
     /// (method `r`) for a string or a builder of class `c` bound to `o`. What a string's throws
     /// is thrown for a `java::catching` around the call (see `analysis::exceptions`), as a
@@ -1232,10 +1249,8 @@ impl<'a> Gen<'a> {
     fn char_sequence_arm(&mut self, r: usize, c: usize) -> String {
         let method = &self.class.methods[r];
         let builder = self.runtime_of(c) == Some(Type::StringBuilder);
-        if self.runtime_of(c).is_none() {
-            // A class of the program implements each of these, or inherits the default.
-            let message = format!("`CharSequence.{}` of a class without one not supported yet", method.name);
-            self.rejected.push(Error { pos: method.pos, message });
+        if self.missing_sequence_method(r, c) {
+            // Each call that may reach it is rejected (`enum_call`).
             return "unreachable!()".to_string();
         }
         if method.name == "subSequence" {

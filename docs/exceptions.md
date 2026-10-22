@@ -822,6 +822,23 @@ Decisions that changed during the implementation, step by step.
   variables as javac does; a method that `Object` declares stays `Object`'s
   (`Object.equals(Object)`), whatever the receiver. The JVM follows an assigned value back to
   where it came from (`(s = a).next` fails `because "a" is null`).
+  In the JDK's code also: a method of `String` by its parameter types as javac chose the
+  overload (`String.substring(int)`, `String.indexOf(String)`), unboxing as the call it is
+  (`java.lang.Integer.intValue()`), the JDK's constructors that fail inside (`new String(s)`,
+  `new String(bytes, ..)`, `new StringBuilder(s)`), a static field or call by the class that
+  declares it (`java.util.Locale.ROOT`; not a static call that the code reaches by
+  inheritance), an inner class's outer object as `this$0` (`this.this$1.this$0.vals`), a field of
+  an enum kept as a table (`lower/enum_tables.rs`) as the field it is (`flag.maskTable`), and the
+  temporary of a string `switch` as `<localN>`, from the slots that javac's code generator gives
+  the JDK's methods (`javac::jdk_switch_temps`, which follows `Gen`: parameters, block
+  variables in order and freed at the end of their block, a for-each loop's three or one, a
+  `synchronized` block's lock, an enclosing string `switch`'s two). The receiver of an unbound
+  method reference has no message, as the JVM's hidden frame gives none. `Class.forName` of a
+  null name throws the JDK's message itself (`Cannot invoke "String.length()" because "str" is
+  null`; none for `forName(module, name)` nor `ClassLoader.loadClass`). The overlays of
+  `java.lang` (`Module`, `ModuleLayer`, `TranslatedModules`, `TranslatedProperties`) get the
+  messages of their own code, as the other overlays do. Corpus:
+  `whole-program/NullClassNames.java`.
 - **Dereferences that never fail need no message**: besides the null tests of the exceptions
   analysis, a variable tested as it is assigned (`(k = e.getKey()) != null && k.equals(key)`),
   one that an `if (v == null) v = ..;` sets when it was null, and a static that the first

@@ -203,9 +203,20 @@ pub(super) fn check_object_values(class: &Class, facts: &super::Facts) -> Result
 /// - `DecimalFormatSymbols.initializeCurrency`: `data[1] == intlCurrencySymbol` tests the cached
 ///   code of the locale's currency, as `Currency.getCurrencyCode()` gave it. `Currency` keeps one
 ///   object per code, so Java's identity holds exactly when the codes are equal; and with another
-///   object, the symbol in `data[2]` would be computed again for the same currency and locale.
-const VALUE_SHORTCUTS: &[(&str, &str)] =
-    &[("java.util.Arrays", "deepEquals"), ("java.text.DecimalFormatSymbols", "initializeCurrency")];
+///   object, the symbol in `data[2]` would be computed again for the same currency and locale;
+/// - the compare-and-set of a `ConcurrentSkipListMap` node's value (`VAL.compareAndSet(n, v, r)`,
+///   the method that `lower::handles` makes of it), whose every caller expects the value it has
+///   just read from the same node (`v = n.val`). It fails in Java only where another thread has
+///   stored a value since: with an equal one, it succeeds here, as Java's retry, which reads that
+///   value and compares it as the first read was compared, would. A `ConcurrentSkipListSet`
+///   holds `Boolean.TRUE` as every value.
+const VALUE_SHORTCUTS: &[(&str, &str)] = &[
+    ("java.util.Arrays", "deepEquals"),
+    ("java.text.DecimalFormatSymbols", "initializeCurrency"),
+    // A silent difference from Java: an equal value in another box, stored by another thread
+    // between the read and the compare-and-set, makes it succeed here where Java's fails.
+    ("java.util.concurrent.ConcurrentSkipListMap.Node", "compareAndSetVal"),
+];
 
 /// `TreeMap`'s entries, whose keys `TreeMap`'s own code compares by identity.
 const SORTED_ENTRY: &str = "java.util.TreeMap.Entry";

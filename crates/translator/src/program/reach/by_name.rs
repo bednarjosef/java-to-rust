@@ -207,6 +207,10 @@ impl Walk<'_> {
     /// The reflection that reachable code finds classes and creates objects with
     /// (`module_for_name`, `created_from_class`), as the module's comment says.
     pub(super) fn reflective(&mut self, node: &Value) {
+        if module_for_name(node).is_some() {
+            let (method, signature) = super::IN_MODULE;
+            self.work.push(Item::Method((super::TRANSLATED_MODULES.into(), method.into(), signature.into())));
+        }
         match module_for_name(node) {
             Some(Some(name)) => self.work.push(Item::Class(name)),
             Some(None) if !self.finds_locale_data => {

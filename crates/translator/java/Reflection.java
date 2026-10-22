@@ -569,6 +569,28 @@ final class Constructor<T> {
         return c.getName();
     }
 
+    // `c.descriptorString()`: the class's descriptor, as a class file writes it. (Not reflection's,
+    // but answered the same way.) A hidden class is not in a translation.
+    static String descriptor(Class<?> c) {
+        if (c.isArray()) {
+            return c.getName().replace('.', '/');
+        }
+        if (c.isPrimitive()) {
+            switch (c.getName()) {
+                case "boolean": return "Z";
+                case "byte": return "B";
+                case "char": return "C";
+                case "short": return "S";
+                case "int": return "I";
+                case "long": return "J";
+                case "float": return "F";
+                case "double": return "D";
+                default: return "V";
+            }
+        }
+        return "L" + c.getName().replace('.', '/') + ";";
+    }
+
     static String typeNames(Class<?>[] types) {
         String out = "";
         for (int i = 0; i < types.length; i++) {

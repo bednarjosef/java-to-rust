@@ -74,6 +74,15 @@
 //! it, and which throws Java's `ArrayIndexOutOfBoundsException` when the value's bytes do not fit.
 //! A static method that returns such a handle of its parameters (`ByteArray.create`) makes one
 //! too. Any other use of a `VarHandle` is rejected.
+//!
+//! A `MethodHandle` constant of a constructor is a handle too, resolved when translating:
+//! `lookup.findConstructor(C.class, MethodType.methodType(void.class, P.class, ..))`, where the
+//! lookup is `MethodHandles.lookup()` or `privateLookupIn(D.class, ..)` of one (which only grant
+//! access), and the class, the lookup and the type may each be a local of the static block
+//! (`ExtendedMapMode` makes `FileChannel.MapMode`'s so). `(C) H.invoke(args)` and
+//! `invokeExact` are `new C(args)`, of the constructor that reachability found; the locals
+//! that only make it are left out with it. Any other use of a `MethodHandle` is rejected: the
+//! translation has no method handles at run time.
 
 use super::*;
 use crate::program::FieldUpdate;
@@ -116,6 +125,10 @@ const SCALE_OF: (&str, &str, &str) =
 /// The class whose methods make a `VarHandle` constant, and the class of `VarHandle`.
 const METHOD_HANDLES: &str = "java.lang.invoke.MethodHandles";
 const VAR_HANDLE: &str = "java.lang.invoke.VarHandle";
+
+/// The classes of a `MethodHandle` and of its type.
+const METHOD_HANDLE: &str = "java.lang.invoke.MethodHandle";
+const METHOD_TYPE: &str = "java.lang.invoke.MethodType";
 
 /// `Integer.numberOfLeadingZeros(int)`, which turns a power of two into its exponent.
 const LEADING_ZEROS: (&str, &str, &str) = ("java.lang.Integer", "numberOfLeadingZeros", "(int)int");
@@ -376,14 +389,20 @@ impl<'t> Lowering<'t> {
                         usize::from(handle.is_some_and(|args| args.first().is_some_and(|a| named(*a))));
                 });
             }
-            "java.lang.invoke.MethodHandles.Lookup" => {
-                if handles_call(init).is_none_or(|(name, args)| name != "lookup" || !args.is_empty()) {
+            "java.lang.invoke.MethodHandles.Lookup" | METHOD_TYPE => {
+                let made = match ty {
+                    METHOD_TYPE => self.constructor_type(init, Some(block)).is_some(),
+                    _ => self.lookup_value(init, Some(block)),
+                };
+                if !made {
                     return false;
                 }
                 walk(block.0, &mut |n| {
                     uses += usize::from(n.kind() == "IDENTIFIER" && n.str("name") == name);
                     let constant = n.kind() == "ASSIGNMENT"
-                        && n.get("variable").is_some_and(|v| self.var_handle(v).is_some());
+                        && n.get("variable").is_some_and(|v| {
+                            self.var_handle(v).is_some() || self.constructor_handle(v).is_some()
+                        });
                     if let Some(value) = n.get("expression").filter(|_| constant) {
                         walk(value.0, &mut |v| {
                             in_handles += usize::from(v.kind() == "IDENTIFIER" && v.str("name") == name)
@@ -670,6 +689,9 @@ impl<'t> Lowering<'t> {
         if self.var_handle(node).is_some() {
             return unsupported(node, "a `VarHandle` used as a value");
         }
+        if self.constructor_handle(node).is_some() {
+            return unsupported(node, "a constructor's `MethodHandle` used as a value");
+        }
         Ok(())
     }
 
@@ -680,6 +702,133 @@ impl<'t> Lowering<'t> {
             || self.var_handle_declaration(owner, member).is_some()
             || self.static_declaration(owner, member, false).is_some()
             || self.static_declaration(owner, member, true).is_some()
+            || self.constructor_handle_declaration(owner, member).is_some()
+    }
+
+    /// The class and the constructor's parameter types (as javac names them) that the static
+    /// final field `member` of class `owner` is the `MethodHandle` of, a call of `findConstructor`
+    /// (see the module's comment).
+    fn constructor_handle_declaration(
+        &self,
+        owner: usize,
+        member: Node<'t>,
+    ) -> Option<(usize, Vec<&'t str>)> {
+        if member.symbol().is_none_or(|s| s.ty != METHOD_HANDLE) {
+            return None;
+        }
+        let (value, block) = self.static_value(owner, member)?;
+        let ("findConstructor", args) = handles_call(value)? else { return None };
+        let [class, ty] = args[..] else { return None };
+        let lookup = plain(value).get("methodSelect")?.get("expression")?;
+        if !self.lookup_value(lookup, block) {
+            return None;
+        }
+        Some((self.offset_class(class, block)?, self.constructor_type(ty, block)?))
+    }
+
+    /// The constructor `MethodHandle` that the static field read `node` holds.
+    fn constructor_handle(&self, node: Node<'t>) -> Option<(usize, Vec<&'t str>)> {
+        let symbol =
+            plain(node).symbol().filter(|s| s.kind == "FIELD" && s.is_static && s.ty == METHOD_HANDLE)?;
+        let (owner, member) = self.static_field(&symbol)?;
+        self.constructor_handle_declaration(owner, member)
+    }
+
+    /// Whether `node` is a `Lookup` that only grants access: `MethodHandles.lookup()`, or
+    /// `privateLookupIn(C.class, l)` of one, or a local of the static block `block` whose value
+    /// is one.
+    fn lookup_value(&self, node: Node<'t>, block: Option<Node<'t>>) -> bool {
+        if let Some((name, args)) = handles_call(node) {
+            return match (name, &args[..]) {
+                ("lookup", []) => true,
+                ("privateLookupIn", [class, lookup]) => {
+                    self.offset_class(*class, block).is_some() && self.lookup_value(*lookup, block)
+                }
+                _ => false,
+            };
+        }
+        self.defined(plain(node), block).is_some_and(|(value, block)| self.lookup_value(value, block))
+    }
+
+    /// The parameter types of a constructor's `MethodType.methodType(void.class, P.class, ..)`,
+    /// or of a local of the static block `block` whose value is one.
+    fn constructor_type(&self, node: Node<'t>, block: Option<Node<'t>>) -> Option<Vec<&'t str>> {
+        let node = plain(node);
+        let Some(symbol) = node.symbol().filter(|_| node.kind() == "METHOD_INVOCATION") else {
+            let (value, block) = self.defined(node, block)?;
+            return self.constructor_type(value, block);
+        };
+        if (symbol.owner, symbol.name) != (METHOD_TYPE, "methodType") {
+            return None;
+        }
+        let literal = |n: Node<'t>| {
+            let n = plain(n);
+            (n.kind() == "MEMBER_SELECT" && n.str("identifier") == "class")
+                .then(|| n.get("expression"))
+                .flatten()
+                .map(|e| e.java_type())
+        };
+        let args: Vec<Node<'t>> = node.list("arguments").collect();
+        let (result, params) = args.split_first()?;
+        (literal(*result)? == "void").then_some(())?;
+        params.iter().map(|p| literal(*p)).collect()
+    }
+
+    /// `(C) H.invoke(args)` (or `invokeExact`) of a constructor `MethodHandle` `H` of `C`, the
+    /// cast `node`: `new C(args)`, of the constructor that reachability found. `None` for any
+    /// other cast.
+    pub(super) fn constructor_handle_call(
+        &self,
+        node: Node<'t>,
+        ty: Type,
+    ) -> Result<Option<ExprKind>, Error> {
+        let call = plain(node.child("expression")?);
+        let invoked = call.symbol().filter(|s| {
+            call.kind() == "METHOD_INVOCATION"
+                && s.owner == METHOD_HANDLE
+                && matches!(s.name, "invoke" | "invokeExact")
+        });
+        let receiver = invoked.and_then(|_| call.get("methodSelect")?.get("expression"));
+        let Some((class, params)) = receiver.and_then(|r| self.constructor_handle(r)) else {
+            return Ok(None);
+        };
+        if !matches!(ty, Type::Class(name, _) if self.type_index(name) == Some(class)) {
+            return unsupported(node, "a constructor's `MethodHandle` invoked as another class");
+        }
+        let args: Vec<Node<'t>> = call.list("arguments").collect();
+        if args.len() != params.len() {
+            return unsupported(node, "a constructor's `MethodHandle` invoked with other arguments");
+        }
+        let signature = format!("({})void", params.join(","));
+        let javac = &self.types[class].javac;
+        let reached = self.reach.is_none_or(|reach| {
+            reach.methods.contains(&(javac.clone(), "<init>".to_string(), signature.clone()))
+        });
+        let ctor =
+            self.methods.iter().position(|m| m.owner == class && m.name == "<init>" && m.sig == signature);
+        let Some(ctor) = ctor.filter(|_| reached) else {
+            return unsupported(
+                node,
+                "a constructor's `MethodHandle` of a constructor that is not translated",
+            );
+        };
+        let mut lowered = Vec::new();
+        for (arg, param) in args.iter().zip(&params) {
+            let param = self.ty(*arg, param)?;
+            lowered.push(self.convert(self.expr(*arg)?, param));
+        }
+        Ok(Some(ExprKind::New { class, args: lowered, ctor: Some(ctor) }))
+    }
+
+    /// Rejects a call of a `MethodHandle` that `constructor_handle_call` does not resolve.
+    pub(super) fn check_method_handle_call(&self, node: Node<'t>, symbol: &Symbol<'t>) -> Result<(), Error> {
+        if symbol.owner == METHOD_HANDLE {
+            return unsupported(
+                node,
+                &format!("`MethodHandle.{}` other than a constructor's, cast to its class", symbol.name),
+            );
+        }
+        Ok(())
     }
 
     /// What the static final field `member` of class `owner` is the `VarHandle` of.

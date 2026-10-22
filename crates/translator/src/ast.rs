@@ -742,9 +742,10 @@ pub enum Builtin {
     /// is of no class of the translated program, which throws a `ClassNotFoundException` that
     /// says so, through `java::catching`.
     UnknownClass,
-    /// `[class, name]`: `Class.getResourceAsStream(name)`. A translated program has no resources
-    /// (the JDK's data files are not in its source), so the program ends with an `InternalError`
-    /// that nothing catches. `class` is the name of the class, a string literal.
+    /// `[class, name]`: `Class.getResourceAsStream(name)` and `getResource(name)`. A translated
+    /// program has no resources (the JDK's data files are not in its source), so the program ends
+    /// with an `InternalError` that nothing catches. `class` is the name of the class, a string
+    /// literal. `Class.getProtectionDomain()` is one too, of the name `(its protection domain)`.
     MissingResource,
     /// `[]`: runs the static initialization of the class, as its first use would, for
     /// `Class.forName` with a name that the code spells out (`lower::by_name`).
@@ -957,6 +958,9 @@ pub enum BoxedOp {
     /// `Integer.parseInt(s, radix)`, `Long.parseLong(s, radix)` and `Integer.valueOf(s, radix)`:
     /// the same, read in the radix given as the second argument.
     ParseRadix,
+    /// `Integer.decode(s)`, `Long.decode`, `Short.decode` and `Byte.decode`: the boxed kind of
+    /// the result, read from a string with a sign and a prefix of its radix (`0x`, `#`, `0`).
+    Decode,
     /// `Integer.valueOf(i)`: the boxed kind of the result, from its primitive argument.
     Box,
     /// `x.intValue()` and the other `xValue()`: the result's primitive, from the receiver.

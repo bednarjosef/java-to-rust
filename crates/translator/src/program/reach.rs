@@ -83,6 +83,9 @@ pub struct Reach {
     /// The members that reflection looks up by name, as (the class it looks in, the member's
     /// name), `<init>` for constructors (`reflection.rs`).
     pub reflected: BTreeSet<(String, String)>,
+    /// The modules of a program with libraries, which its `java.lang.Module` answers with
+    /// (`modules::contents`, `lower/modules.rs`); set after reachability.
+    pub modules: Vec<super::modules::Contents>,
 }
 
 impl Reach {
@@ -172,13 +175,12 @@ pub const TRANSLATED_NESTED: &[&str] = &["java.lang.Runtime.Version", "java.lang
 /// which is reflection in all but name: a closed-world translation knows its classes. Some is
 /// translated all the same: `ResourceBundle`, whose locale data found by name are the classes of
 /// the program, and `ServiceLoader`, whose providers are those the sources declare (the
-/// translator's, `java/overlay/java/util/ServiceLoader.java`). (`java.lang.Module` is a prefix of
-/// `java.lang.ModuleLayer` too.)
+/// translator's, `java/overlay/java/util/ServiceLoader.java`), and `Module` and `ModuleLayer`,
+/// whose modules are those of the translation (`java/overlay/java/lang/Module.java`).
 pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.io.ObjectInputStream", "serialization"),
     ("java.io.ObjectOutputStream", "serialization"),
     ("java.io.ObjectStreamClass", "serialization"),
-    ("java.lang.Module", "class loading"),
     ("java.lang.invoke.", "reflection"),
     ("java.lang.reflect.", "reflection"),
     ("java.security.", "security"),
@@ -194,8 +196,13 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
 /// `Arrays.copyOf` and `Collection.toArray` need of it, not reflection. `Modifier` tests the bits
 /// of a member's modifiers. `Method`, `Field` and `Constructor` are the translator's own, over the
 /// reflection table (`reflection.rs`), and so is `InvocationTargetException`, which wraps the
-/// exceptions of what they call (`java/Standard.java`).
+/// exceptions of what they call (`java/Standard.java`). `TypeDescriptor` is the interface of
+/// descriptors that `java.lang.constant`'s `ClassDesc` and `MethodTypeDesc` implement, plain
+/// methods over the descriptor strings.
 pub const TRANSLATED_ANYWAY: &[&str] = &[
+    "java.lang.invoke.TypeDescriptor",
+    "java.lang.invoke.TypeDescriptor.OfField",
+    "java.lang.invoke.TypeDescriptor.OfMethod",
     // An action that `AccessController.doPrivileged` runs, which the translator's runs directly
     // (`REDIRECTED_CALLS`): a plain interface.
     "java.security.PrivilegedAction",
@@ -527,12 +534,15 @@ pub fn unsafe_field_access(class: &str, name: &str, signature: &str) -> Option<b
 /// equivalent of; it guards warnings through `PlatformLogger` that name a class by reflection.
 /// `ThreadLocal.TRACE_VTHREAD_LOCALS` is the property `jdk.traceVirtualThreadLocals`, which is
 /// unset (`UNSET_PROPERTIES`); it guards a `StackWalker` dump of where a virtual thread sets one.
+/// `ResourceBundle.TRACE_ON` is `Boolean.getBoolean("resource.bundle.debug")`, a `-D` property as
+/// `Tripwire`'s; it guards the tracing of how a bundle is found, which prints modules and classes.
 pub const FALSE_FLAGS: &[(&str, &str)] = &[
     ("java.io.FileInputStream", "jfrTracing"),
     ("java.lang.ThreadLocal", "TRACE_VTHREAD_LOCALS"),
     ("java.io.FileOutputStream", "jfrTracing"),
     ("java.io.RandomAccessFile", "jfrTracing"),
     ("java.lang.Throwable", "jfrTracing"),
+    ("java.util.ResourceBundle", "TRACE_ON"),
     ("java.util.Tripwire", "ENABLED"),
     ("java.util.stream.Tripwire", "ENABLED"),
     ("sun.nio.ch.FileChannelImpl", "jfrTracing"),
@@ -889,10 +899,42 @@ pub const TRANSLATED_LANG_ACCESS: &[&str] = &[
     "uncheckedGetBytesOrThrow",
     "uncheckedGetUTF16Char",
     "uncheckedPutCharUTF16",
+    "decodeASCII",
+    "uncheckedEncodeASCII",
 ];
 
 /// The class of `TRANSLATED_LANG_ACCESS`.
 pub const TRANSLATED_LANG_ACCESS_CLASS: &str = "jdk.internal.access.TranslatedLangAccess";
+
+/// The translator's `newDecoder` and `newEncoder` of a charset, by the name of the charset's
+/// method: a charset is the runtime's value (`lower::charsets`), whose coders are the JDK's,
+/// made by `java/overlay/sun/nio/cs/TranslatedCoders.java`.
+pub const CHARSET_CODERS: &[(&str, JdkMethod)] = &[
+    (
+        "newDecoder",
+        (
+            "sun.nio.cs.TranslatedCoders",
+            "newDecoder",
+            "(java.nio.charset.Charset)java.nio.charset.CharsetDecoder",
+        ),
+    ),
+    (
+        "newEncoder",
+        (
+            "sun.nio.cs.TranslatedCoders",
+            "newEncoder",
+            "(java.nio.charset.Charset)java.nio.charset.CharsetEncoder",
+        ),
+    ),
+];
+
+/// The translator's method that makes what the charset method `name` of type `signature` of
+/// the class `owner` (`Charset` or a standard charset's) makes (`CHARSET_CODERS`).
+pub fn charset_coder(owner: &str, name: &str, signature: &str) -> Option<JdkMethod> {
+    let charset = owner == "java.nio.charset.Charset" || owner.starts_with("sun.nio.cs.");
+    let coder = CHARSET_CODERS.iter().find(|(method, _)| *method == name).map(|&(_, m)| m)?;
+    (charset && signature.starts_with("()")).then_some(coder)
+}
 
 /// Static methods of the JDK whose calls are calls of a static method of the translator's
 /// (`java/overlay`) with the same type, by the JDK's method and the translator's class and name
@@ -975,6 +1017,37 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ),
         ("sun.nio.fs.TranslatedFiles", "newBufferedWriter"),
     ),
+    // The boot loader's unnamed module, classes and resources, and the JDK's class loaders, as
+    // the translation's modules have them (`java/lang/TranslatedModules.java`).
+    (
+        ("jdk.internal.loader.BootLoader", "getUnnamedModule", "()java.lang.Module"),
+        (TRANSLATED_MODULES, "bootUnnamedModule"),
+    ),
+    (
+        ("jdk.internal.loader.BootLoader", "loadClassOrNull", "(java.lang.String)java.lang.Class<?>"),
+        (TRANSLATED_MODULES, "bootClassOrNull"),
+    ),
+    (
+        ("jdk.internal.loader.BootLoader", "findResource", "(java.lang.String)java.net.URL"),
+        (TRANSLATED_MODULES, "bootResource"),
+    ),
+    (
+        ("jdk.internal.loader.ClassLoaders", "appClassLoader", "()java.lang.ClassLoader"),
+        (TRANSLATED_MODULES, "appClassLoader"),
+    ),
+    (
+        ("jdk.internal.loader.ClassLoaders", "platformClassLoader", "()java.lang.ClassLoader"),
+        (TRANSLATED_MODULES, "platformClassLoader"),
+    ),
+    // Whether a module may use a member of a class, which the JDK's reflection checks.
+    (
+        (
+            "jdk.internal.reflect.Reflection",
+            "verifyModuleAccess",
+            "(java.lang.Module,java.lang.Class<?>)boolean",
+        ),
+        (TRANSLATED_MODULES, "verifyModuleAccess"),
+    ),
     // The installed file-system providers, which the JDK loads with `ServiceLoader`; the
     // translator's are those of `java.base`.
     (
@@ -985,6 +1058,16 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ),
         ("sun.nio.fs.TranslatedFiles", "loadInstalledProviders"),
     ),
+    // Whether a network interface has an address, and the interface of a name, which the JVM
+    // asks the system for (`java/net/TranslatedNet.java`).
+    (
+        ("java.net.NetworkInterface", "boundInetAddress0", "(java.net.InetAddress)boolean"),
+        ("java.net.TranslatedNet", "boundInetAddress0"),
+    ),
+    (
+        ("java.net.NetworkInterface", "getByName0", "(java.lang.String)java.net.NetworkInterface"),
+        ("java.net.TranslatedNet", "getByName0"),
+    ),
     // The escaped octets of a URI's part decoded as UTF-8, which the JDK decodes with a
     // `CharsetDecoder` (`java/net/TranslatedURI.java`).
     (
@@ -992,6 +1075,39 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ("java.net.TranslatedURI", "decode"),
     ),
 ];
+
+/// The translator's class of the JDK's modules and class loaders as the translation has them
+/// (`java/overlay/java/lang/TranslatedModules.java`).
+pub const TRANSLATED_MODULES: &str = "java.lang.TranslatedModules";
+
+/// Calls of instance methods of `Class` and `ClassLoader` that give a module or a class loader,
+/// and the static methods of `TRANSLATED_MODULES` that a translation with the JDK's sources calls
+/// instead, with the receiver as the first argument (`lower/modules.rs`): a class's module is the
+/// translation's module of its package, and its class loader that module's.
+pub const MODULE_CALLS: &[(JdkMethod, (&str, &str))] = &[
+    (
+        ("java.lang.Class", "getModule", "()java.lang.Module"),
+        ("moduleOf", "(java.lang.Class<?>)java.lang.Module"),
+    ),
+    (
+        ("java.lang.Class", "getClassLoader", "()java.lang.ClassLoader"),
+        ("classLoaderOf", "(java.lang.Class<?>)java.lang.ClassLoader"),
+    ),
+    (
+        ("java.lang.ClassLoader", "getUnnamedModule", "()java.lang.Module"),
+        ("unnamedModule", "(java.lang.ClassLoader)java.lang.Module"),
+    ),
+];
+
+/// `Class.forName(module, name)` in a translation with the JDK's sources: the class that the
+/// name finds, if it is in the module (`lower::by_name`).
+pub const IN_MODULE: (&str, &str) = ("inModule", "(java.lang.Module,java.lang.Class<?>)java.lang.Class<?>");
+
+/// The method of `TRANSLATED_MODULES` that a call of the JDK's method `(owner, name, signature)`
+/// calls instead (`MODULE_CALLS`).
+pub fn module_call(owner: &str, name: &str, signature: &str) -> Option<(&'static str, &'static str)> {
+    MODULE_CALLS.iter().find(|((o, n, s), _)| (*o, *n, *s) == (owner, name, signature)).map(|(_, to)| *to)
+}
 
 /// The translator's class and method that a call of the JDK's method `(owner, name, signature)`
 /// calls instead (`REDIRECTED_CALLS`), where a variable-arity parameter is written as an array
@@ -1979,6 +2095,12 @@ impl<'t> Walk<'t> {
         for (_, (class, method, signature)) in STANDARD_CALLS.iter().filter(|(m, _)| *m == member) {
             self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
         }
+        // The translator's methods that give a class's module and class loader (`MODULE_CALLS`).
+        if text(symbol, "kind") == "METHOD"
+            && let Some((to, signature)) = module_call(member.0, member.1, member.2)
+        {
+            self.work.push(Item::Method((TRANSLATED_MODULES.into(), to.into(), signature.into())));
+        }
         match text(symbol, "kind") {
             "METHOD"
                 if owner == "java.lang.String"
@@ -2004,6 +2126,12 @@ impl<'t> Walk<'t> {
             "METHOD" if owner == "java.lang.System" && name == "getProperties" => {
                 let (class, method, signature) = TRANSLATED_PROPERTIES;
                 self.work.push(Item::Method((class.into(), method.into(), signature.into())));
+            }
+            // The coders of a charset (`CHARSET_CODERS`).
+            "METHOD"
+                if let Some((class, to, signature)) = charset_coder(&owner, &name, text(symbol, "type")) =>
+            {
+                self.work.push(Item::Method((class.into(), to.into(), signature.into())));
             }
             // The translator's methods that replace some of the JDK's (`REDIRECTED_CALLS`).
             "METHOD" if let Some((class, to)) = redirected_call(&owner, &name, text(symbol, "type")) => {
@@ -2376,24 +2504,25 @@ mod tests {
     fn class_loading_is_not_translated_and_reflect_array_is() {
         assert_eq!(untranslated("java.util.ServiceLoader"), None);
         assert_eq!(untranslated("java.util.ResourceBundle.Control"), None);
-        assert_eq!(untranslated("java.lang.ModuleLayer"), Some("class loading"));
+        assert_eq!(untranslated("java.lang.ModuleLayer"), None);
+        assert_eq!(untranslated("java.lang.invoke.MethodHandles"), Some("reflection"));
         assert_eq!(untranslated("jdk.internal.loader.BootLoader"), Some("class loading"));
         assert_eq!(untranslated("java.lang.reflect.Proxy"), Some("reflection"));
         assert_eq!(untranslated("java.lang.reflect.Method"), None);
         assert_eq!(untranslated("java.lang.reflect.Array"), None);
         assert_eq!(untranslated("java.lang.reflect.Modifier"), None);
         assert_eq!(untranslated("java.util.ArrayList"), None);
-        // Reachability stops at the module layer, and goes into `Array`.
+        // Reachability stops at method handles, and goes into `Array`.
         let unit = json!({"typeDecls": [
-            class("Main", &[("main", vec![call("java.lang.ModuleLayer", "boot"), call("java.lang.reflect.Array", "newInstance")])]),
-            class("java.lang.ModuleLayer", &[("boot", vec![call("Provider", "run")])]),
+            class("Main", &[("main", vec![call("java.lang.invoke.MethodHandles", "lookup"), call("java.lang.reflect.Array", "newInstance")])]),
+            class("java.lang.invoke.MethodHandles", &[("lookup", vec![call("Provider", "run")])]),
             class("java.lang.reflect.Array", &[("newInstance", vec![call("Other", "run")])]),
             class("Provider", &[("run", vec![])]),
             class("Other", &[("run", vec![])]),
         ]});
         let reach = reach(&[&unit], "Main").unwrap();
         let method = |class: &str| (class.to_string(), "run".to_string(), "()void".to_string());
-        assert!(!reach.classes.contains("java.lang.ModuleLayer"), "{reach:?}");
+        assert!(!reach.classes.contains("java.lang.invoke.MethodHandles"), "{reach:?}");
         assert!(!reach.methods.contains(&method("Provider")), "{reach:?}");
         assert!(reach.classes.contains("java.lang.reflect.Array"), "{reach:?}");
         assert!(reach.methods.contains(&method("Other")), "{reach:?}");

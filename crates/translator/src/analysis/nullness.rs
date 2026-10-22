@@ -302,6 +302,8 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
         ExprKind::Builtin(Builtin::Native(Native::FileSystem("list0")), _) => true,
         // `TimeZone.getSystemTimeZoneID` gives `null` when the system names no zone.
         ExprKind::Builtin(Builtin::Native(Native::SystemTimeZoneId), _) => true,
+        // `System.getenv` of a variable that is not set.
+        ExprKind::Builtin(Builtin::Native(Native::Getenv), _) => true,
         // A boxed field is always an `Option`: its default is `null`, and so is an assignment of
         // `null` to it.
         _ if matches!(e.ty, Type::Boxed(_))
