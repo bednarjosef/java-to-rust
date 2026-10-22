@@ -262,8 +262,12 @@ impl<'t> Lowering<'t> {
         {
             return Ok(Some(Place::Static { class, name: field.to_string() }));
         }
+        let Some(class) = self.type_index(symbol.owner).or_else(|| self.body_field_owner(&symbol)) else {
+            return Ok(None);
+        };
         // A stub class (`program::reach::stubs`) is declared with no fields, so its static fields
         // have no cells. A constant of one is its value, as for any library class (`select`).
+        // Other static fields of an untranslated class that has no type here are read by `select`.
         if symbol.is_static
             && let Some(feature) = crate::program::untranslated(symbol.owner)
             && !crate::program::provided(symbol.owner)
@@ -273,9 +277,6 @@ impl<'t> Lowering<'t> {
             }
             return unsupported(node, &format!("a static field of `{}` ({feature})", symbol.owner));
         }
-        let Some(class) = self.type_index(symbol.owner).or_else(|| self.body_field_owner(&symbol)) else {
-            return Ok(None);
-        };
         let receiver = match node.kind() {
             "IDENTIFIER" => None,
             "MEMBER_SELECT" => Some(node.child("expression")?),

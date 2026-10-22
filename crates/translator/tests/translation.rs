@@ -5464,17 +5464,18 @@ fn a_string_constant_compared_with_what_a_method_returns_is_compared_as_text_wit
 #[test]
 fn static_fields_of_stub_classes_are_rejected() {
     // A stub declares no fields (`program::reach::stubs`), so a static field read from the
-    // JDK's untranslated class is rejected, not written as a cell that is never declared.
+    // JDK's untranslated class is rejected, not written as a cell that is never declared. The
+    // stub is declared because reachable code calls its instance method.
     let dir = write_sources(
         "stub-static-field",
         &[
             (
                 "app/Main.java",
-                "package app;\nimport sun.security.util.SignatureFileVerifier;\npublic class Main {\n    static SignatureFileVerifier held;\n    public static void main(String[] a) { System.out.println(SignatureFileVerifier.LIMIT); }\n}\n",
+                "package app;\nimport sun.security.util.SignatureFileVerifier;\npublic class Main {\n    static SignatureFileVerifier held;\n    public static void main(String[] a) { System.out.println(SignatureFileVerifier.LIMIT + (held.isOk() ? 1 : 0)); }\n}\n",
             ),
             (
                 "lib/sun/security/util/SignatureFileVerifier.java",
-                "package sun.security.util;\npublic class SignatureFileVerifier {\n    public static final int LIMIT = Integer.getInteger(\"limit\", 16);\n    public static int limit() { return LIMIT; }\n}\n",
+                "package sun.security.util;\npublic class SignatureFileVerifier {\n    public static final int LIMIT = Integer.getInteger(\"limit\", 16);\n    public boolean isOk() { return true; }\n}\n",
             ),
         ],
     );
