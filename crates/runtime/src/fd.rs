@@ -67,7 +67,7 @@ fn process_stdin() -> std::mem::ManuallyDrop<File> {
 /// What `available()` of an open file says: the bytes from its position to its end for a regular
 /// file, and what a pipe, a terminal or a socket holds (`FIONREAD`) otherwise, as the JVM's
 /// `available0` answers.
-fn file_available(file: &File) -> io::Result<i32> {
+pub(crate) fn file_available(file: &File) -> io::Result<i32> {
     let meta = file.metadata()?;
     if meta.is_file() {
         let position = (&mut &*file).stream_position()?;

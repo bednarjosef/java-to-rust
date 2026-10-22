@@ -1,6 +1,8 @@
 //! The JDK methods that bottom out in the JVM, which the runtime implements by hand
 //! (`java_runtime::natives`, `math`, `fdlibm`, `out`, `fd`, `vm`).
 
+use super::{ChannelCall, channel_call, channel_nothing};
+
 /// A call into the native layer; its arguments are those of the `Builtin` that holds it, with
 /// the receiver first for instance methods.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,6 +182,8 @@ pub enum Native {
     /// A native that does nothing in a translated program, such as `registerNatives()`: its
     /// statement is dropped.
     Nothing,
+    /// A native of `sun.nio.ch` that a file channel calls (`ast/channels.rs`).
+    Channel(&'static ChannelCall),
     /// `CDS.getCDSConfigStatus()`.
     CdsConfigStatus,
     /// `CDS.getRandomSeedForDumping()`.
@@ -390,6 +394,8 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
         || (class == "java.io.UnixFileSystem" && FILE_SYSTEM.contains(&name))
         || (class == UNIX_DISPATCHER && unix_call(name).is_some())
         || (class == NET_DISPATCHER && net_call(name).is_some())
+        || channel_call(class, name).is_some()
+        || channel_nothing(class, name)
         || matches!(
             (class, name),
             (
