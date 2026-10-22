@@ -1285,6 +1285,8 @@ fn transparent(e: &Expr) -> Option<&Expr> {
             transparent(inner)
         }
         ExprKind::Cast(..) => None,
+        // The translation's copy of a `String[]` as an `Object[]` or back is the array to Java.
+        ExprKind::Builtin(Builtin::StringArrayOf | Builtin::ObjectArrayOf, args) => transparent(&args[0]),
         _ => Some(e),
     }
 }

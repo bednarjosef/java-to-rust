@@ -315,6 +315,10 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
                 || (!narrowed(b, false) && maybe_null(facts, m, b))
         }
         ExprKind::Cast(_, value) => maybe_null(facts, m, value),
+        // A copy of a `String[]` as an `Object[]` or back is null where the array is.
+        ExprKind::Builtin(Builtin::StringArrayOf | Builtin::ObjectArrayOf, args) => {
+            maybe_null(facts, m, &args[0])
+        }
         // A switch expression is null when a value it yields may be.
         ExprKind::Switch { cases, .. } => {
             let mut null = false;

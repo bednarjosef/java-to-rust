@@ -485,7 +485,8 @@ remember its element class, so:
 - storing an object of another class in it does not throw `ArrayStoreException`, and its
   `getClass()` is `Object[]`'s;
 - a `String[]` that is an `Object[]` is copied where the runtime's string builtins take or make
-  one (`Builtin::StringArrayOf`, `Builtin::ObjectArrayOf`), which only matters where the builtin
+  one (`Builtin::StringArrayOf`, `Builtin::ObjectArrayOf`; the copy of a null is null, so
+  `Arrays.equals` of two null fields is `true`), which only matters where the builtin
   keeps the array. `Arrays.sort` and `Arrays.fill` of one, which change it in place, run the
   JDK's code for an `Object[]` with the JDK's sources (`Reach::string_array_writes`) and are
   rejected without them ("a change in place of a `String[]` that is also an `Object[]`");

@@ -828,6 +828,9 @@ pub(super) fn runtime_failures(
                     Builtin::String(StringOp::EqualsIgnoreCase | StringOp::EqualsOther)
                         | Builtin::ArraysToString
                         | Builtin::Arrays(ArraysOp::Equals | ArraysOp::HashCode | ArraysOp::DeepToString)
+                        // The copy of a null `String[]` as an `Object[]`, or back, is null.
+                        | Builtin::StringArrayOf
+                        | Builtin::ObjectArrayOf
                         | Builtin::Boxed(BoxedOp::Equals, _)
                         // A null string is the `NumberFormatException` of `parse_radix` and
                         // `parse_unsigned`.

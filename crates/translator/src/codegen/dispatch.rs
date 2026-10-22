@@ -505,8 +505,15 @@ impl<'a> Gen<'a> {
             (true, true) => optional,
             (true, false) => format!("{}({optional})", self.runtime("non_null")),
         };
-        let slice = self.slice_of(e);
         let maker = self.array_maker("from_vec", ty);
+        // A null array's copy is null.
+        if self.nullable(e) {
+            let option = self.object_place(e);
+            return Code::atom(format!(
+                "{option}.as_ref().map(|a| {maker}((&a.borrow()).iter().map(|s| {each}).collect::<Vec<_>>()))"
+            ));
+        }
+        let slice = self.slice_of(e);
         Code::atom(format!("{maker}(({slice}).iter().map(|s| {each}).collect::<Vec<_>>())"))
     }
 
