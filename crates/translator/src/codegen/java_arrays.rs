@@ -162,6 +162,10 @@ impl<'a> Gen<'a> {
     /// print it.
     pub(super) fn show_closure(&mut self, elem: Type) -> String {
         match elem {
+            Type::String if super::shared_strings() && self.nullable_element(elem) => {
+                "|v| v.map_or_else(|| String::from(\"null\"), |v| v.text())".to_string()
+            }
+            Type::String if super::shared_strings() => "|v| v.text()".to_string(),
             Type::String if self.nullable_element(elem) => {
                 "|v| v.unwrap_or_else(|| String::from(\"null\"))".to_string()
             }

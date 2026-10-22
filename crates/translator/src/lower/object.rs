@@ -1107,7 +1107,7 @@ impl<'t> Lowering<'t> {
                 let args = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
                 Ok(call(receiver, symbol.name, args))
             }
-            "toString" => Ok(self.as_text(receiver).kind),
+            "toString" => Ok(self.value_of(receiver).kind),
             "isEmpty" => {
                 let length = self.synth(call(receiver, "length", Vec::new()), pos, Type::Int);
                 let zero = self.synth(ExprKind::Int(0), pos, Type::Int);

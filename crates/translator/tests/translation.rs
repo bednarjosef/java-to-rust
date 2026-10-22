@@ -1789,7 +1789,7 @@ fn annotation_types_used_as_values_are_rejected_where_the_code_uses_them() {
 }
 
 #[test]
-fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
+fn library_code_compares_strings_by_value_and_the_programs_own_code_by_their_sources() {
     let library = (
         "lib/lib/Tags.java",
         "package lib;\npublic class Tags {\n    public static boolean none(String tag) { return tag == \"\"; }\n    public static boolean differ(String a, String b) { return a != b; }\n}\n",
@@ -1806,7 +1806,8 @@ fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
         java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
     // Value equality, `Objects.equals`, of the two strings.
     assert_contains(&rust, &["tag == \"\"", "!(a == b)"]);
-    // The same comparison in the program's own code compares references, which it cannot.
+    // The same comparison in the program's own code is decided by where its strings come from:
+    // an argument of `main` is a new string, never the literal.
     let own = "package main;\npublic class Main {\n    public static void main(String[] a) {\n        System.out.println(a.length > 0 && a[0] == \"x\");\n    }\n}\n";
     let dir = write_sources("program-string-equality", &[("app/main/Main.java", own)]);
     let program = java_to_rust::Program {
@@ -1814,8 +1815,7 @@ fn library_code_compares_strings_by_value_and_the_programs_own_code_cannot() {
         sources: vec![dir.join("app")],
         ..Default::default()
     };
-    let err = java_to_rust::translate_program(&program).expect_err("== on the program's strings");
-    assert!(err.to_string().contains("== on strings compares references; not supported yet"), "{err}");
+    java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
 }
 
 #[test]
@@ -3040,18 +3040,18 @@ fn survey_json_writes_the_census_to_the_file_given() {
 }
 
 /// A program in package `p` whose `main` reaches three methods that the translator rejects, each
-/// for its own reason, and one that it translates.
+/// for its own reason, and others that it translates.
 fn census_sources(dir: &str) -> std::path::PathBuf {
     write_sources(
         dir,
         &[
             (
                 "p/Main.java",
-                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        Other.process();\n        Other.split(a);\n        Other.same();\n        Other.fine();\n    }\n}\n",
+                "package p;\npublic class Main {\n    public static void main(String[] a) {\n        Other.process();\n        Other.split(a);\n        Other.compare(new Name());\n        Other.fine();\n    }\n}\n",
             ),
             (
                 "p/Other.java",
-                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void same() {\n        String s = new String(\"x\");\n        System.out.println(s == \"x\");\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\n",
+                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void compare(Comparable<String> c) {\n        System.out.println(c.compareTo(\"x\"));\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\nclass Name implements Comparable<String> {\n    public int compareTo(String s) {\n        return s == \"x\" ? 0 : 1;\n    }\n}\n",
             ),
         ],
     )
@@ -3074,15 +3074,16 @@ fn the_census_reports_every_rejection_not_only_the_first() {
     assert!(error.to_string().ends_with("type `java.lang.ProcessBuilder` not supported yet"), "{error}");
     let census = census(&program);
     let report = &census.report;
-    // Lowering, an analysis and the generator each reject one method; `main` and `fine` translate.
+    // Lowering and two analyses each reject one method; `main`, `compare`, `fine` and `Name`'s
+    // constructor translate.
     assert_lacks(report, &["Incomplete"]);
     assert_contains(
         report,
         &[
-            "  Program: 5 pieces; 2 (40.0%) translate, 3 rejected.",
+            "  Program: 7 pieces; 4 (57.1%) translate, 3 rejected.",
             "type `…` not supported yet\n          at p/Other.java:4:9",
             "catching the `PatternSyntaxException` that this call of the library may throw not supported yet\n          at p/Other.java:7",
-            "== on strings compares references; not supported yet\n          at p/Other.java:12",
+            "`==` on strings, where a string may come from where the translation does not follow it: a parameter of a method that the runtime calls\n          at p/Other.java:19",
         ],
     );
     let pieces = census.json["pieces"].as_array().expect("pieces");
@@ -3092,7 +3093,7 @@ fn the_census_reports_every_rejection_not_only_the_first() {
         piece["errors"].as_array().expect("errors").len()
     };
     assert_eq!(
-        (errors("process"), errors("split"), errors("same"), errors("fine"), errors("main")),
+        (errors("process"), errors("split"), errors("compareTo"), errors("fine"), errors("main")),
         (1, 1, 1, 0, 0)
     );
     assert_eq!(census.json["complete"], true);
@@ -3110,14 +3111,14 @@ fn a_census_that_writes_its_translation_ends_the_program_in_rejected_code() {
     let census = census(&program);
     assert_eq!(census.json["totals"]["program"]["rejected"], 3);
     let rust = census.modules.expect("a translation").one_file();
-    // The methods that lowering, an analysis and the generator reject each end the program with
+    // The methods that lowering and two analyses reject each end the program with
     // the rejection; `fine` translates.
     assert_contains(
         &rust,
         &[
             "java::not_translated(\"p.Other.process: type `java.lang.ProcessBuilder` not supported yet (line 4)\")",
             "java::not_translated(\"p.Other.split: catching the `PatternSyntaxException`",
-            "java::not_translated(\"p.Other.same: == on strings compares references; not supported yet (line 12)\")",
+            "java::not_translated(\"p.Name.compareTo: `==` on strings, where a string may come from where the translation does not follow it: a parameter of a method that the runtime calls (line 19)\")",
             "java::println!(\"fine\")",
         ],
     );
@@ -3472,7 +3473,7 @@ fn initializer_blocks_run_in_constructors() {
 }
 
 #[test]
-fn intern_is_the_string_itself_and_string_identity_stays_rejected() {
+fn intern_is_the_string_itself_and_string_identity_follows_the_sources() {
     let rust = translate(
         "class A { public static void main(String[] a) {
             String s = \"x\" + a.length;
@@ -3481,18 +3482,17 @@ fn intern_is_the_string_itself_and_string_identity_stays_rejected() {
         } }",
     );
     assert_contains(&rust, &["let t = s.clone();", "s.len() as i32"]);
-    // A string is a value in the translation, so `==` on two strings, which compares references
-    // in Java, is rejected rather than guessed, unless Java interns both (what `intern` exists
-    // for), when the references are the same exactly when the text is.
+    // Two strings that Java interns are the same object exactly when their texts are equal.
     let rust = translate(
         "class A { public static void main(String[] a) { String s = \"x\"; System.out.println(s.intern() == \"x\"); } }",
     );
     assert_contains(&rust, &["s == \"x\""]);
-    let err = java_to_rust::translate(
+    // A new string is never a literal: only two nulls would be the same.
+    let rust = translate(
         "class A { public static void main(String[] a) { String s = new String(\"x\"); System.out.println(s == \"x\"); } }",
-    )
-    .expect_err("== on strings must be rejected");
-    assert!(err.to_string().contains("== on strings compares references; not supported yet"), "{err}");
+    );
+    assert_contains(&rust, &["java::println!(\"{}\", false & false);"]);
+    assert_lacks(&rust, &["java::JStr"]);
 }
 
 /// Stand-ins for JDK classes with natives, in packages that java.base does not export, so that
@@ -5429,10 +5429,11 @@ fn an_analysis_error_names_its_file_where_another_file_has_code_at_its_position(
 }
 
 #[test]
-fn a_string_constant_compared_with_what_a_method_returns_is_compared_as_text_with_a_note() {
+fn a_string_constant_compared_with_what_a_method_returns_is_compared_as_an_object() {
+    // `direct` returns the constant itself or a new string: only the objects decide, so every
+    // string of the program is shared, the literal interned.
     let java = "public class A {
         static final String ALL = \".*\";
-        static String pattern(String s) { return s.equals(\"*\") ? ALL : s.replace(\".\", \"\\\\.\"); }
         static String direct(String s) { if (s.isEmpty()) { return ALL; } return s + \"!\"; }
         public static void main(String[] args) {
             String p = direct(args.length > 0 ? args[0] : \"\");
@@ -5441,26 +5442,15 @@ fn a_string_constant_compared_with_what_a_method_returns_is_compared_as_text_wit
         }
     }";
     let (rust, notes) = java_to_rust::translate_with_notes(java).expect("translates");
-    assert_contains(&rust, &["java::println!(\"{}\", p == String::from(A_ALL));"]);
-    let messages: Vec<String> =
-        notes.iter().map(|n| format!("{}:{}: {}", n.pos.line, n.pos.column, n.message)).collect();
-    assert_eq!(messages.len(), 2, "{messages:?}");
-    assert!(
-        messages[0].starts_with(
-            "7:32: `==` on strings compared as text: assumes that no string that `A.direct` computes"
-        ),
-        "{messages:?}"
+    assert_contains(
+        &rust,
+        &[
+            "java::println!(\"{}\", java::same_str(&p, &",
+            "java::interned_literal(&LITERAL, A_ALL)",
+            "!java::same_str(&direct(",
+        ],
     );
-    // A string that the method does not return as the constant itself is still rejected.
-    let error = java_to_rust::translate(
-        "public class A {
-            static final String ALL = \".*\";
-            static String other(String s) { return s + \"!\"; }
-            public static void main(String[] args) { System.out.println(other(\"x\") == ALL); }
-        }",
-    )
-    .expect_err("the method never returns the constant");
-    assert!(error.to_string().contains("== on strings compares references"), "{error}");
+    assert_eq!(notes.len(), 0);
 }
 
 #[test]

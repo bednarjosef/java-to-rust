@@ -122,6 +122,9 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
         let file = file(rejected.unit).or_else(|| locate(&units, &class, rejected.error.pos));
         return Err(ProgramError { file, error: rejected.error });
     }
+    phase("string identity", || analysis::string_identity(&mut class))
+        .map_err(|mut errors| errors.remove(0))
+        .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
     phase("whole objects", || analysis::whole_objects(&mut class))
         .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
     let located = |error: Error| ProgramError { file: locate(&units, &class, error.pos), error };

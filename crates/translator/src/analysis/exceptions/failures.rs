@@ -457,6 +457,7 @@ fn library_failure(class: &Class, m: usize, builtin: &Builtin, args: &[Expr]) ->
         Builtin::Charset(_) => &[],
         // What an object's `toString` throws is a point of its own (`text_objects`).
         Builtin::ObjectText => &[],
+        Builtin::StringSame | Builtin::Kept(_) | Builtin::ValueOf => &[],
         // An atomic update of an element, and a view of a byte array's bytes, fail as their
         // operand, the access of the element, does (`lower::handles`).
         Builtin::ElementUpdate(_) | Builtin::ByteView { .. } => &[],
@@ -753,6 +754,9 @@ pub(super) fn runtime_failures(
             }
             // An atomic update of an element fails as its store does, which is its operand.
             Builtin::ElementUpdate(_) => {}
+            // Comparing strings, and the strings that the call or the text in them makes, fail as
+            // those operands do (`analysis::string_identity`).
+            Builtin::StringSame | Builtin::Kept(_) | Builtin::ValueOf => {}
             // A view of a byte array's bytes fails as its element access does, and also where
             // the index is in bounds but the bytes from it on are too few for the value.
             Builtin::ByteView { .. } => out.push((INDEX, "this array access", true, args[0].id)),

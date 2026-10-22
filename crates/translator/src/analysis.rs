@@ -36,6 +36,7 @@ mod owned;
 mod patterns;
 mod ranges;
 mod statics;
+mod string_identity;
 mod threads;
 mod whole_objects;
 
@@ -48,6 +49,8 @@ pub(crate) use npe_messages::{SEARCH_NULL_ELEMENT, SEARCH_NULL_KEY};
 
 pub use arrays::{RowIndex, Slice, SlicedLoop};
 pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
+pub use string_identity::string_identity;
+pub(crate) use string_identity::{Made, made, value_of_operand};
 pub use threads::array_family;
 pub use whole_objects::whole_objects;
 
@@ -545,6 +548,10 @@ pub fn reads_leading_fields(decl: &TypeDecl, leading: &[(usize, &Expr)]) -> bool
 }
 
 fn borrowed_params(class: &Class, facts: &mut Facts) {
+    // A shared string keeps its identity only as a `java::JStr`, which is passed as it is.
+    if class.shared_strings {
+        return;
+    }
     for (m, method) in class.methods.iter().enumerate() {
         for (i, p) in method.params.iter().enumerate() {
             if p.ty != Type::String || assigns_any(&method.body, &p.name) {

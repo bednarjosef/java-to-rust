@@ -140,7 +140,8 @@ fn analyse(
     // the generator that no stub takes away ends it. The generator reports every error it finds,
     // which are stubbed together.
     let tolerated: std::cell::RefCell<Vec<Error>> = Default::default();
-    let passes: [Pass; 3] = [
+    let passes: [Pass; 4] = [
+        &|class| crate::timings::phase("census: string identity", || analysis::string_identity(class)),
         &|class| {
             crate::timings::phase("census: whole objects", || analysis::whole_objects(class))
                 .map_err(|e| vec![e])

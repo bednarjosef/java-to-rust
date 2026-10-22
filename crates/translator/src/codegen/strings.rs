@@ -22,6 +22,17 @@ impl Steady {
 impl<'a> Gen<'a> {
     /// A string expression as a `&str`.
     pub(super) fn str_ref(&mut self, e: &'a Expr) -> String {
+        // A shared string's text, which `str`'s methods take as a pattern.
+        if super::shared_strings() {
+            return match &e.kind {
+                ExprKind::Str(s) => rust_string(s),
+                ExprKind::Var(name) => format!("{}.as_str()", self.local(name)),
+                ExprKind::Field { object, name } if self.field_in_place(object, name) => {
+                    format!("{}.as_str()", self.object_place(e))
+                }
+                _ => format!("{}.as_str()", self.expr(e).at(ATOM)),
+            };
+        }
         match &e.kind {
             ExprKind::Str(s) => rust_string(s),
             ExprKind::Var(name) if self.borrowed.contains(name) => self.local(name),
@@ -248,6 +259,16 @@ impl<'a> Gen<'a> {
             }
             _ => has_effects(e),
         }
+    }
+
+    /// The string that concatenating `parts` makes: a `format!`, made a new shared string where
+    /// the program's strings are shared.
+    pub(super) fn concat(&mut self, parts: Vec<Part>) -> Code {
+        let text = self.format("format!", parts);
+        if !super::shared_strings() {
+            return text;
+        }
+        Code::atom(format!("{}({})", self.runtime("JStr::new"), text.text))
     }
 
     /// A `format!`-style macro call over `parts`. Plain variables are inlined into the format

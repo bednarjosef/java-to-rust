@@ -145,7 +145,7 @@ impl<'a> Gen<'a> {
         if self.optional_var(self.method, Type::String, target) {
             return self.append_optional(name, value);
         }
-        if !mentions(value, target) {
+        if !mentions(value, target) && !super::shared_strings() {
             if value.ty == Type::String
                 && matches!(value.kind, ExprKind::Str(_) | ExprKind::Var(_))
                 && !self.nullable(value)
@@ -173,7 +173,7 @@ impl<'a> Gen<'a> {
         }
         let mut parts = vec![Part::Arg(Code::atom(name))];
         self.parts(value, &mut parts);
-        format!("{name} = {}", self.format("format!", parts).text)
+        format!("{name} = {}", self.concat(parts).text)
     }
 
     /// `x += 1` or `x -= 1` as a Rust statement.
@@ -248,6 +248,17 @@ impl<'a> Gen<'a> {
     }
 
     pub(super) fn expr(&mut self, e: &'a Expr) -> Code {
+        let code = self.expr_of(e);
+        // A string that the expression makes is shared where the program's strings are; a
+        // caught expression is written inside its `catching`.
+        let outside_catch = self.facts.catching.contains_key(&e.id) && !self.catching_now.contains(&e.id);
+        if super::shared_strings() && e.ty == Type::String && !outside_catch && self.discarded != Some(e.id) {
+            return self.shared_made(e, code);
+        }
+        code
+    }
+
+    fn expr_of(&mut self, e: &'a Expr) -> Code {
         if self.facts.catching.contains_key(&e.id) && self.catching_now.insert(e.id) {
             let mark = self.out.len();
             let code = self.expr(e);
@@ -270,11 +281,15 @@ impl<'a> Gen<'a> {
             ExprKind::Float(v) => Code::literal(Literal::Float(*v)),
             ExprKind::Char(c) => Code::literal(Literal::Char(*c)),
             ExprKind::Bool(b) => Code::atom(b.to_string()),
+            ExprKind::Str(s) if super::shared_strings() => Code::atom(self.string_literal(&rust_string(s))),
             ExprKind::Str(s) if s.is_empty() => Code::atom("String::new()"),
             ExprKind::Str(s) => Code::atom(format!("String::from({})", rust_string(s))),
             ExprKind::Var(name) => {
                 let rust = self.local(name);
                 match e.ty {
+                    Type::String if self.borrowed.contains(name) && super::shared_strings() => {
+                        Code::atom(format!("{rust}.clone()"))
+                    }
                     Type::String if self.borrowed.contains(name) => Code::atom(format!("{rust}.to_string()")),
                     // An object or array narrowed by a null check is a reference to the `Rc`.
                     Type::Class(..) | Type::StringBuilder | Type::Array(_)
@@ -337,7 +352,7 @@ impl<'a> Gen<'a> {
             ExprKind::Binary(BinOp::Add, ..) if e.ty == Type::String => {
                 let mut parts = Vec::new();
                 self.parts(e, &mut parts);
-                self.format("format!", parts)
+                self.concat(parts)
             }
             ExprKind::Binary(op, l, r) if is_null_test(*op, l, r) => self.null_test(*op, l, r),
             ExprKind::Binary(BinOp::And, ..) if let Some(code) = self.bound_and(e) => code,
@@ -679,7 +694,10 @@ impl<'a> Gen<'a> {
             // `printf`: the runtime prints what Java's `Formatter` writes, piece by piece.
             Builtin::Print if matches!(args[0].kind, ExprKind::Builtin(Builtin::Format, _)) => {
                 self.printing_format = true;
+                // It prints, and makes no string.
+                let discarded = self.discarded.replace(args[0].id);
                 let code = self.expr(&args[0]);
+                self.discarded = discarded;
                 self.printing_format = false;
                 code
             }
@@ -839,6 +857,9 @@ impl<'a> Gen<'a> {
             Builtin::Builder(op) => self.builder_call(id, op, args),
             Builtin::Format => self.format_builtin(args),
             Builtin::ObjectsEquals => self.objects_equals(args),
+            Builtin::StringSame => self.string_same(args),
+            Builtin::Kept(op) => self.kept(op, args),
+            Builtin::ValueOf => self.value_of(args),
             Builtin::NullChecked => self.null_checked(args),
             Builtin::Unmatched => self.unmatched(args),
             Builtin::ObjectsHashCode => self.objects_hash_code(args),

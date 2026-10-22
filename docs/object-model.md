@@ -327,6 +327,35 @@ may call) may be anything. Where comparing the values gives Java's answer, they 
 A box compared by identity as its own type (`Integer a == b`) is a shared `java::Boxed`
 object for that kind throughout the program (`analysis/boxing.rs`, `Facts::faithful_boxes`).
 
+`==` on two strings in the program's own code is decided by where each side's strings come from
+(`analysis/string_identity.rs`). The analysis follows the strings backward through locals,
+parameters, returns, fields, statics and array elements, through the program and the library
+code that a whole program translates, to their sources: an interned string (a literal or
+constant, `intern()`, an enum constant's name, a class's name, a canonical charset name), a new
+one (`new String`, a concatenation that is not constant, a builder's or `String.format`'s text
+that is not empty, a number's text), or one that Java keeps for a key (a system property,
+`System.lineSeparator()`, an environment variable, a class's simple or canonical name). The
+JDK's methods that return their receiver when nothing changes (`substring` of all of it, `trim`,
+`strip`, the case mappings, `replace`, `concat("")`, `repeat(1)`, `split` without a match) and
+`String.valueOf(o)` and `o.toString()` lead to what they may return. A string from a library
+call that the analysis does not follow rejects the comparison, naming the call. The comparison
+is then:
+
+- by text where both sides can only be interned strings;
+- `a == null && b == null` where no string can be on both sides: one side only interned and the
+  other only new, or a side that is only ever null;
+- otherwise by the objects at run time. Every string of the program is then a `java::JStr`, an
+  `Arc<str>` compared by address (`java::same_str`), and the program-wide switch
+  (`Class::shared_strings`) makes each place that makes a string make the object Java makes: a
+  literal is interned once (`java::interned_literal`), a new string is new, a method that may
+  return its receiver returns it when Java's would (`java::kept` and its siblings, with the
+  receiver held in a local), and what Java keeps per key is kept per key (`java::per_key`). A
+  class's simple name is kept by its text, so two classes of the same simple name share one, and
+  an environment variable by its value. A string held as an `Object` is compared the same way.
+
+Setting `JAVA_TO_RUST_SHARED_STRINGS` for a translation shares every program's strings, which
+checks the generator's shared strings against the corpus.
+
 ### 1.7 Object
 
 `java.lang.Object` is a synthetic interface type of the program, `OBJECT` (`lower/object.rs`),

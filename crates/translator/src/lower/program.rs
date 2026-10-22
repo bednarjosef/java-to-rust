@@ -270,6 +270,7 @@ fn lower_into<'t>(
         class_file,
         notes,
         annotation_classes,
+        shared_strings: false,
     };
     Ok((class, lowering.real.clone(), failed))
 }

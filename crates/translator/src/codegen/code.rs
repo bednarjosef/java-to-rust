@@ -161,6 +161,7 @@ pub(super) fn rust_type(ty: Type) -> &'static str {
         Type::Char => "u16",
         Type::Float => "f32",
         Type::Boolean => "bool",
+        Type::String if super::shared_strings() => "java::JStr",
         Type::String => "String",
         Type::Charset => "java::Charset",
         Type::JavaClass => "java::Class",

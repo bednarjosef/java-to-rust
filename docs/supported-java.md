@@ -111,12 +111,12 @@ never freed.
   `Charset.aliases()` and a `Charset` array element that may be null are rejected. In a whole program
   `newDecoder()`/`newEncoder()` give the JDK's own coders of the six charsets
   (`java/overlay/sun/nio/cs/TranslatedCoders.java`).
-- `==` on strings is rejected, except where Java's sharing makes identity equal to equal text:
-  both sides constants, `intern()` calls, or methods that return only such strings. A
-  constant compared with a call of a method that no other overrides and that returns that
-  constant on some path (or with a local set once from such a call) is compared as text, with
-  a note printed at translation: this is wrong only if a string that the method computes has
-  the constant's text.
+- `==` on strings compares what Java compares: by text where both sides can only be interned
+  strings, as null against null where no string can be on both sides, and otherwise by the
+  objects, with every string of the program shared as Java shares it (literals interned, new
+  strings new, the JDK methods that return their receiver returning it). A comparison of a
+  string from a library call that the translation does not follow is rejected, naming the call.
+  See [object-model.md](object-model.md), section 1.6.
 
 ## Classes and objects
 
@@ -161,7 +161,7 @@ Design: [object-model.md](object-model.md).
   prints the binary name and hash code (`Point@1b6d3586`). `new Object()` is `PlainObject`.
   `==` between two `Object`s that may both be strings or boxes is rejected, except in
   `a == b || a.equals(b)`; a points-to analysis (`analysis/object_values.rs`) decides which sides
-  may be.
+  may be. Where the program's strings are shared (above), strings in them compare as objects.
 - `Comparable`, `Number`, `CharSequence` and `java.lang.Enum` used as types are enums like
   `Object` over the program's implementors and the matching library values.
 - **Generics** translate erased, as javac compiles them, with javac's casts and bridge methods.

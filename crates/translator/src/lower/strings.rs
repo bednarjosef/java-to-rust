@@ -37,6 +37,18 @@ impl<'t> Lowering<'t> {
         self.synth(ExprKind::Binary(BinOp::Add, Box::new(empty), Box::new(x)), pos, Type::String)
     }
 
+    /// `String.valueOf(x)`: the text of `x` (`as_text`), as `Builtin::ValueOf` where `x` is a
+    /// string or an object, which the string may be.
+    pub(super) fn value_of(&self, x: Expr) -> Expr {
+        let pos = x.pos;
+        let reference = matches!(x.ty, Type::String | Type::Class(..));
+        let text = self.as_text(x);
+        if !reference {
+            return text;
+        }
+        self.synth(ExprKind::Builtin(Builtin::ValueOf, vec![text]), pos, Type::String)
+    }
+
     /// `s.chars()` and `s.lines()`: the JDK's methods over an array the runtime makes, of the
     /// string's UTF-16 code units or of its lines, which stream the same values with the same
     /// characteristics as the JDK's own spliterators. `chars()` is `Arrays.stream(units)`, which is
@@ -214,7 +226,7 @@ impl<'t> Lowering<'t> {
                 if !textual(x.ty) || x.ty == Type::Null {
                     return unsupported(node, "`String.valueOf` of an array");
                 }
-                return Ok(self.as_text(x).kind);
+                return Ok(self.value_of(x).kind);
             }
             "format" => return self.format_call(node, args, &arg_nodes, None),
             "formatted" => {

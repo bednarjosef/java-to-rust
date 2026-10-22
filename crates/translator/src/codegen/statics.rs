@@ -207,12 +207,12 @@ impl<'a> Gen<'a> {
     }
 
     /// The `const` read of a constant static field, or `None` for any other static field.
-    pub(super) fn constant_read(&self, class: usize, name: &str, ty: Type) -> Option<Code> {
+    pub(super) fn constant_read(&mut self, class: usize, name: &str, ty: Type) -> Option<Code> {
         let field = self.class.types[class].statics.iter().find(|f| f.name == name)?;
         if !field.constant {
             return None;
         }
         let cell = cell_name(&self.class.types[class], name);
-        Some(Code::atom(if ty == Type::String { format!("String::from({cell})") } else { cell }))
+        Some(Code::atom(if ty == Type::String { self.string_literal(&cell) } else { cell }))
     }
 }

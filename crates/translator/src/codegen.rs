@@ -71,6 +71,7 @@ mod owned;
 mod patterns;
 mod plain_arrays;
 mod range_loops;
+mod shared_strings;
 mod sliced_loops;
 mod sync;
 
@@ -92,6 +93,7 @@ pub fn generate_modules(class: &Class, facts: &Facts) -> Result<ModuleTree, Erro
 /// program is written, or else every method with a call that throws inside a closure. A census
 /// (`program/census.rs`) stubs them all at once.
 pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Error>> {
+    SHARED_STRINGS.set(class.shared_strings);
     // The enums of class types get the items that the code uses, which writing the code finds:
     // the program is written again until it asks for no item that was not written.
     let mut wanted = Needs::new();
@@ -112,6 +114,17 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Erro
         }
         wanted.extend(needs);
     }
+}
+
+thread_local! {
+    /// Whether the program being written has every string as a `java::JStr`
+    /// (`Class::shared_strings`): `rust_type` names its strings so.
+    static SHARED_STRINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the program being written has every string as a `java::JStr`.
+pub(crate) fn shared_strings() -> bool {
+    SHARED_STRINGS.get()
 }
 
 thread_local! {
@@ -211,6 +224,7 @@ fn generate_with(
         dereferenced: HashSet::new(),
         checked_cast: None,
         catching_now: HashSet::new(),
+        discarded: None,
         written: HashSet::new(),
         rejected: Vec::new(),
         closures: Vec::new(),
@@ -412,6 +426,9 @@ struct Gen<'a> {
     checked_cast: Option<ExprId>,
     /// The operations of `Facts::catching` being written inside `java::catching`.
     catching_now: HashSet<ExprId>,
+    /// The expression of the statement being written, whose value is not used: a string it
+    /// makes is not shared (`shared_made`).
+    discarded: Option<ExprId>,
     /// The methods whose bodies have been written. A body that is not, as no call needs it or
     /// it never runs, dereferences nothing.
     written: HashSet<usize>,

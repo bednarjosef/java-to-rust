@@ -59,6 +59,8 @@ struct Walk {
     /// The number of the statement being walked.
     statement: usize,
     uses: Vec<Use>,
+    /// How many string concatenations enclose the expression being walked.
+    concatenating: usize,
 }
 
 impl Walk {
@@ -209,6 +211,14 @@ impl Walk {
             | ExprKind::InstanceOf { value: x, .. }
             | ExprKind::Length(x)
             | ExprKind::Field { object: x, .. } => self.expr(x),
+            // The parts of a concatenation are the arguments of one `format!`, which borrows the
+            // variables it names until it is done.
+            ExprKind::Binary(BinOp::Add, l, r) if e.ty == Type::String => {
+                self.concatenating += 1;
+                self.expr(l);
+                self.expr(r);
+                self.concatenating -= 1;
+            }
             ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) => {
                 self.expr(l);
                 self.expr(r);
@@ -218,7 +228,7 @@ impl Walk {
                 // branch may move what the condition reads; a null test narrows the variable
                 // instead, which keeps it borrowed.
                 let outer = self.statement;
-                if !mentions_null(c) {
+                if !mentions_null(c) && self.concatenating == 0 {
                     self.statement = usize::MAX - self.uses.len();
                 }
                 self.expr(c);
