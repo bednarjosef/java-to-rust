@@ -302,6 +302,15 @@ impl<'c> Scan<'c> {
                     self.text(class, l, &mut allowed);
                     self.text(class, r, &mut allowed);
                 }
+                // A builder's `append(s, start, end)` calls `length` and `charAt` of `s`, which
+                // is never `this` itself (it is converted to a `CharSequence`).
+                ExprKind::Builtin(Builtin::Builder(BuilderOp::Append), args) if args.len() == 4 => {
+                    let callees = class.callees(x);
+                    if !callees.is_empty() {
+                        self.touch(class, args[1].ty);
+                        self.calls.extend(callees.into_iter().map(|c| (c, false)));
+                    }
+                }
                 _ => {}
             }
         });
