@@ -184,7 +184,14 @@ impl<'a> Gen<'a> {
             }
             BoxedOp::Compare => {
                 let a = self.value(&args[0], kind);
-                let b = self.value(&args[1], kind);
+                // A literal null throws as a dereference does; `None` alone states no type.
+                let b = match args[1].ty {
+                    Type::Null => {
+                        let none = format!("None::<{}>", rust_type(kind));
+                        Code::atom(self.dereference(&[args[1].id], &none))
+                    }
+                    _ => self.value(&args[1], kind),
+                };
                 match kind {
                     Type::Int | Type::Long => {
                         Code::new(format!("{}.cmp(&{}) as i32", a.at(ATOM), b.at(UNARY)), AS)
