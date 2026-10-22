@@ -211,6 +211,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::CdsRandomSeed
             | Native::ContinuationsSupported
             | Native::NanoTimeAdjustment
+            | Native::SystemTimeZoneId
+            | Native::SystemGmtOffsetId
             | Native::ArrayBaseOffset
             | Native::ArrayIndexScale(_)
             | Native::DescriptorHandle

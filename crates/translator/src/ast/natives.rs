@@ -195,6 +195,10 @@ pub enum Native {
     NoPendingReferences,
     /// `SecureRandom.getSeed(numBytes)`: seed bytes from the operating system (`random.rs`).
     SecureSeed,
+    /// `TimeZone.getSystemTimeZoneID(javaHome)`: the zone's name, or `null` (`time_zone.rs`).
+    SystemTimeZoneId,
+    /// `TimeZone.getSystemGMTOffsetID()`: the local offset from UTC as `GMT+hh:mm`.
+    SystemGmtOffsetId,
 }
 
 /// The native methods of translated JDK classes that the runtime implements and whose calls
@@ -207,6 +211,11 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         // Registers `getNanoTimeAdjustment`, and nothing else.
         ("jdk.internal.misc.VM", "initialize", "()void") => Native::Nothing,
         ("jdk.internal.misc.VM", "getNanoTimeAdjustment", "(long)long") => Native::NanoTimeAdjustment,
+        // The javaHome argument is only the place of the JDK's `tzmappings`, which is not read.
+        ("java.util.TimeZone", "getSystemTimeZoneID", "(java.lang.String)java.lang.String") => {
+            Native::SystemTimeZoneId
+        }
+        ("java.util.TimeZone", "getSystemGMTOffsetID", "()java.lang.String") => Native::SystemGmtOffsetId,
         ("jdk.internal.misc.CDS", "getCDSConfigStatus", "()int") => Native::CdsConfigStatus,
         ("jdk.internal.misc.CDS", "getRandomSeedForDumping", "()long") => Native::CdsRandomSeed,
         // Without an archive there is nothing to restore. Its argument is a class literal, which
@@ -420,6 +429,16 @@ mod tests {
         // Another overload, or another class's method of the same name, is not the native.
         assert_eq!(found("java.util.zip.CRC32", "update", "(byte[],int,int)void"), None);
         assert_eq!(found("jdk.internal.misc.Unsafe", "initialize", "()void"), None);
+        // `TimeZone`'s natives are private, so only `getDefault` calls them, and `java.util` cannot
+        // be stood in for; the mapping is checked here.
+        assert_eq!(
+            found("java.util.TimeZone", "getSystemTimeZoneID", "(java.lang.String)java.lang.String"),
+            Some(Native::SystemTimeZoneId)
+        );
+        assert_eq!(
+            found("java.util.TimeZone", "getSystemGMTOffsetID", "()java.lang.String"),
+            Some(Native::SystemGmtOffsetId)
+        );
         assert!(runtime_native("java.io.FileInputStream", "readBytes", "(byte[],int,int)int"));
         assert!(!runtime_native("java.lang.Throwable", "fillInStackTrace", "(int)java.lang.Throwable"));
     }
