@@ -779,7 +779,9 @@ impl<'a> Gen<'a> {
         match self.innermost_attempt() {
             Some((label, completion)) => format!("break '{label} {}", self.thrown(completion, e)),
             None if self.throwing => format!("return Err({e})"),
-            None => format!("{}({e})", self.uncaught("uncaught")),
+            // `throw_uncaught` returns `!`, so that Rust sees the arm end the code (a local that
+            // the `Ok` arm sets is set after the `match`).
+            None => format!("{}({e})", self.uncaught("throw_uncaught")),
         }
     }
 
