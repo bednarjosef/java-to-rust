@@ -644,7 +644,12 @@ impl<'a> Gen<'a> {
         // such as the default methods of an interface on a class that implements it without
         // objects, or the methods of a superclass whose values are all of another subclass.
         // Reach marks a method of a class without objects with a `NoObject` body.
+        // So does the factory of a class built whole (`analysis::whole_objects`) when no object
+        // of the class is created: its `construct<Name>` method is such a body.
+        let factory_without_objects = m.is_static
+            && matches!(&m.body[..], [Stmt::Local { init: Some(Expr { kind: ExprKind::New { class, .. }, .. }), .. }, ..] if !self.runs[*class]);
         let never_runs = !m.is_static && m.name != "<clinit>" && !self.runs[m.class]
+            || factory_without_objects
             || matches!(
                 &m.body[..],
                 [Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::NoObject { .. }, _), .. })]
