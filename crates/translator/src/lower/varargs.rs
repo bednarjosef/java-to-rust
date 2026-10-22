@@ -24,7 +24,8 @@ impl<'t> Lowering<'t> {
         let owner = self.methods[index].owner;
         let ty = self.declared_type(last, declared, owner, Some(index))?;
         // `f(xs)` with `xs` of the parameter's own array type passes it on, not as one element,
-        // and so does an array of references passed for `T...`, whose `T` javac infers from it.
+        // and so does an array of references or of an enum passed for `T...`, whose `T` javac
+        // infers from it (`EnumSet.of(ib, rest)` with an `InferenceBound[] rest`).
         let of_variable = declared.strip_suffix("[]").is_some_and(|element| {
             let declares = |node: Node<'t>| node.list("typeParameters").any(|p| p.str("name") == element);
             declares(self.methods[index].node) || declares(self.types[owner].node)
@@ -35,7 +36,7 @@ impl<'t> Lowering<'t> {
         let direct = args.len() == params.len()
             && (passed == Some(Type::Null)
                 || passed == Some(ty)
-                || (of_variable || objects) && matches!(passed, Some(Type::Array(e)) if e.is_reference()));
+                || (of_variable || objects) && matches!(passed, Some(Type::Array(e)) if Self::of_objects(*e)));
         if direct {
             return Ok(args);
         }
