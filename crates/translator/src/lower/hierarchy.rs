@@ -263,7 +263,14 @@ impl<'t> Lowering<'t> {
             // A primitive boxed into an interface that its box implements (`Serializable`,
             // `Constable`): the value is the box, as it is for `Object` and `Comparable`.
             (
-                Type::Int | Type::Long | Type::Byte | Type::Short | Type::Char | Type::Double | Type::Float | Type::Boolean,
+                Type::Int
+                | Type::Long
+                | Type::Byte
+                | Type::Short
+                | Type::Char
+                | Type::Double
+                | Type::Float
+                | Type::Boolean,
                 Type::Class(..),
             ) => true,
             _ => false,

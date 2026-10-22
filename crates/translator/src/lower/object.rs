@@ -698,7 +698,11 @@ impl<'t> Lowering<'t> {
             implements.extend(serializable);
             let constant = matches!(
                 name,
-                "java.lang.String" | "java.lang.Integer" | "java.lang.Long" | "java.lang.Float" | "java.lang.Double"
+                "java.lang.String"
+                    | "java.lang.Integer"
+                    | "java.lang.Long"
+                    | "java.lang.Float"
+                    | "java.lang.Double"
             );
             implements.extend(constable.filter(|_| constant));
             if let Some(n) = at.number.filter(|_| is_number_box(name)) {

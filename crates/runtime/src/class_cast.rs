@@ -22,7 +22,11 @@ pub fn cast_from<T>(value: Option<T>, to: &str, from: impl FnOnce() -> &'static 
 }
 
 /// `try_cast`, where a value of class `from` (named by `from()`) fails the cast to class `to`.
-pub fn try_cast_from<T>(value: Option<T>, to: &str, from: impl FnOnce() -> &'static str) -> Result<T, Exception> {
+pub fn try_cast_from<T>(
+    value: Option<T>,
+    to: &str,
+    from: impl FnOnce() -> &'static str,
+) -> Result<T, Exception> {
     value.ok_or_else(|| Exception::new("java.lang.ClassCastException", message(from(), to)))
 }
 
