@@ -52,6 +52,7 @@ mod libraries;
 mod local_types;
 mod modules;
 mod natives;
+mod negated_patterns;
 mod patterns;
 mod platform_logger;
 mod primitives;
@@ -692,14 +693,14 @@ impl<'t> Lowering<'t> {
                 Some(n) => self.single_stmt(n)?,
                 None => Stmt::Block(Vec::new()),
             },
-            "IF" => Stmt::If {
-                cond: self.expr(node.child("condition")?)?,
-                then: Box::new(self.single_stmt(node.child("thenStatement")?)?),
-                otherwise: match node.get("elseStatement") {
-                    Some(n) => Some(Box::new(self.single_stmt(n)?)),
+            "IF" => self.if_stmt(
+                self.expr(node.child("condition")?)?,
+                self.single_stmt(node.child("thenStatement")?)?,
+                match node.get("elseStatement") {
+                    Some(n) => Some(self.single_stmt(n)?),
                     None => None,
                 },
-            },
+            ),
             "WHILE_LOOP" => Stmt::While {
                 cond: self.expr(node.child("condition")?)?,
                 body: Box::new(self.single_stmt(node.child("statement")?)?),

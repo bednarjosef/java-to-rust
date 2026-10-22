@@ -585,8 +585,8 @@ impl<'a> Gen<'a> {
         texts.join(" && ")
     }
 
-    /// `if (!(x instanceof T name)) return ..;` (or `break`, `continue`): the rest of the block
-    /// sees `name`, bound with `let Some(name) = <x as a T> else { .. };`. Returns false, emitting
+    /// `if (!(x instanceof T name)) return ..;` (or `break`, `continue`, `throw`): the rest of the
+    /// block sees `name`, bound with `let Some(name) = <x as a T> else { .. };`. Returns false, emitting
     /// nothing, when `stmt` is not of that form or the rest does not read `name`.
     pub(super) fn early_pattern_exit(&mut self, stmt: &'a Stmt, rest: &[Stmt]) -> bool {
         let Stmt::If { cond, then, otherwise: None } = stmt else { return false };

@@ -6,8 +6,8 @@
 //! - an operand of an `&&` chain: the later operands, and when the chain is the condition of an
 //!   `if`, a `while` or a `?:`, the branch or body it guards;
 //! - `if (!(x instanceof T name)) .. else ..`: the else branch, and with no else branch and a
-//!   then branch that always leaves the block (`return`, `break`, `continue`), the rest of the
-//!   block.
+//!   then branch that always leaves the block (`return`, `break`, `continue`, `throw`), the rest
+//!   of the block.
 //!
 //! The statements of a switch expression are checked as a block of their own.
 //!
@@ -468,7 +468,7 @@ fn mentions_stmt(stmt: &Stmt, name: &str) -> bool {
 /// Whether `stmt` always leaves the block it is in.
 fn exits(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Return(..) | Stmt::Break | Stmt::Continue => true,
+        Stmt::Return(..) | Stmt::Break | Stmt::Continue | Stmt::Throw(_) => true,
         Stmt::Block(stmts) => stmts.last().is_some_and(exits),
         _ => false,
     }
