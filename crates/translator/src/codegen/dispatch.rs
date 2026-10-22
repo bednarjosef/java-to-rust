@@ -892,13 +892,20 @@ impl<'a> Gen<'a> {
     }
 
     /// The name of the method of the enum of `t` that a call of `resolved` calls: the body
-    /// itself when every variant runs the one the enum has, else the dispatcher.
+    /// itself when every variant that can receive the call runs the one the enum has, else the
+    /// dispatcher. A variant outside the class that declares `resolved` cannot receive it
+    /// (`Throwable`'s `Exception`s for `Error`'s `construct<Name>` methods, see
+    /// `analysis::whole_objects`).
     pub(super) fn dispatch_name(&self, t: usize, resolved: usize) -> String {
         let h = &self.class.hierarchy;
+        let declared = self.class.methods[resolved].class;
         if let [only] = self.enum_targets(t, resolved)[..]
             && self.homes[only] == Home::Enum(t)
             && self.same_ret(only, resolved)
-            && self.enum_variants(t).into_iter().all(|c| h.implementation(resolved, c).is_some())
+            && self
+                .enum_variants(t)
+                .into_iter()
+                .all(|c| h.implementation(resolved, c).is_some() || !h.is_subtype(c, declared))
         {
             self.need(Need::Body(only));
             return self.fn_names[only].clone();
