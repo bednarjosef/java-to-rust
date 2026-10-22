@@ -29,7 +29,7 @@ pub enum MonitorOf<'a> {
 /// string, a box or a class held as an `Object` that the program locks, waits on or notifies.
 pub fn unkept_monitor() -> ! {
     crate::exception::die(
-        "a monitor of a string, a box or a class held as an Object, which the translation does not keep",
+        "synchronizing on, waiting on or notifying a String, a boxed value or a Class held as an Object is not supported by the translation",
     )
 }
 
