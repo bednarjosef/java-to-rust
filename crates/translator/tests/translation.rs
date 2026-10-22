@@ -5509,3 +5509,14 @@ fn copies_between_arrays_of_other_classes_are_rejected() {
         "{error}"
     );
 }
+
+#[test]
+fn a_range_loop_bound_that_reads_a_shared_field_is_bound_before_the_loop() {
+    // The start reads `this`'s field through a borrow; Rust keeps that borrow for the whole loop,
+    // so the bound is read into a local first, as Java reads it once before the loop.
+    let rust = translate(
+        "public class Main {\n    static Main last;\n    int next = 2;\n    void end(int i) {\n        next++;\n        last = this;\n    }\n    void ends(int limit) {\n        for (int i = next; i < limit; i++) end(i);\n    }\n    public static void main(String[] a) {\n        new Main().ends(6);\n    }\n}\n",
+    );
+    assert_contains(&rust, &["let start = this.borrow().next;", "for i in start..limit {"]);
+    assert_lacks(&rust, &["for i in this.borrow()"]);
+}

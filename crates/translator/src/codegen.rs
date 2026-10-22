@@ -70,6 +70,7 @@ mod objects;
 mod owned;
 mod patterns;
 mod plain_arrays;
+mod range_loops;
 mod sliced_loops;
 mod sync;
 
