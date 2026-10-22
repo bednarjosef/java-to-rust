@@ -2,18 +2,23 @@
 // methods of `Throwable` that a translation can reproduce, in the subset of Java the translator
 // supports. `build.rs` prints their syntax tree with `JavaTree`, and lowering gives each class
 // its real package (`java.lang`, `java.util` or `java.io`) and adds the classes a program uses to it (see
-// `lower/exceptions.rs`). Stack traces and serialization are left out; `cause` is null where
-// Java's field holds the object itself to mean "not set yet", and `causeSet` tells the two apart
-// for `initCause`. `addSuppressed` does not reject itself or null here, and `initCause` neither a
-// second cause nor itself: this file cannot `throw`, since javac sees its `Throwable` as
-// unrelated to `java.lang.Throwable`, so `lower/suppress.rs` adds the checks.
+// `lower/exceptions.rs`). Serialization is left out, and so are stack frames: a stack trace is
+// empty unless `setStackTrace` gave it frames, as the specification of `getStackTrace` allows, and
+// `printStackTrace` prints what Java prints with that trace. `cause` is null where Java's field
+// holds the object itself to mean "not set yet", and `causeSet` tells the two apart for
+// `initCause`. `addSuppressed` does not reject itself or null here, `initCause` neither a second
+// cause nor itself, and `setStackTrace` and `StackTraceElement` no null: this file cannot `throw`,
+// since javac sees its `Throwable` as unrelated to `java.lang.Throwable`, so `lower/suppress.rs`
+// adds the checks.
 package standard;
 
 class Throwable {
     private String message;
     private Throwable cause;
     private boolean causeSet;
-    private Throwable[] suppressed = new Throwable[0];
+    // Null until an exception is suppressed, or until `setStackTrace` gives frames.
+    private Throwable[] suppressed;
+    private StackTraceElement[] stackTrace;
 
     public Throwable() {
     }
@@ -56,7 +61,7 @@ class Throwable {
     }
 
     public void addSuppressed(Throwable exception) {
-        Throwable[] own = suppressed;
+        Throwable[] own = ownSuppressed();
         Throwable[] more = new Throwable[own.length + 1];
         for (int i = 0; i < more.length; i++) {
             more[i] = i < own.length ? own[i] : exception;
@@ -65,7 +70,7 @@ class Throwable {
     }
 
     public Throwable[] getSuppressed() {
-        Throwable[] own = suppressed;
+        Throwable[] own = ownSuppressed();
         Throwable[] copy = new Throwable[own.length];
         for (int i = 0; i < own.length; i++) {
             copy[i] = own[i];
@@ -78,11 +83,199 @@ class Throwable {
         return message != null ? getClass().getName() + ": " + message : getClass().getName();
     }
 
-    public void printStackTrace() {
-        System.err.println(this);
-        for (Throwable c = getCause(); c != null; c = c.getCause()) {
-            System.err.println("Caused by: " + c);
+    public StackTraceElement[] getStackTrace() {
+        StackTraceElement[] own = ourStackTrace();
+        StackTraceElement[] copy = new StackTraceElement[own.length];
+        for (int i = 0; i < own.length; i++) {
+            copy[i] = own[i];
         }
+        return copy;
+    }
+
+    // `missing` names the first null frame, for the `NullPointerException` that
+    // `lower/suppress.rs` throws when it is not null.
+    public void setStackTrace(StackTraceElement[] stackTrace) {
+        String missing = nullFrame(stackTrace);
+        StackTraceElement[] copy = new StackTraceElement[stackTrace.length];
+        for (int i = 0; i < copy.length; i++) {
+            copy[i] = stackTrace[i];
+        }
+        this.stackTrace = copy;
+    }
+
+    private static String nullFrame(StackTraceElement[] stackTrace) {
+        for (int i = 0; i < stackTrace.length; i++) {
+            if (stackTrace[i] == null) {
+                return "stackTrace[" + i + "]";
+            }
+        }
+        return null;
+    }
+
+    // There are no frames to record.
+    public Throwable fillInStackTrace() {
+        return this;
+    }
+
+    // The fields' arrays, or empty ones while they are null (the null tests are of locals, which
+    // the nullness analysis follows).
+    private StackTraceElement[] ourStackTrace() {
+        StackTraceElement[] own = stackTrace;
+        return own != null ? own : new StackTraceElement[0];
+    }
+
+    private Throwable[] ownSuppressed() {
+        Throwable[] own = suppressed;
+        return own != null ? own : new Throwable[0];
+    }
+
+    // Java prints the lines of the trace with one `println` each; the text of them all with one
+    // is the same, as they end with the line separator.
+    public void printStackTrace() {
+        System.err.println(stackTraceText());
+    }
+
+    public void printStackTrace(java.io.PrintStream s) {
+        s.println(stackTraceText());
+    }
+
+    public void printStackTrace(java.io.PrintWriter s) {
+        s.println(stackTraceText());
+    }
+
+    // What `printStackTrace` prints, without the last line separator: Java's `printStackTrace`
+    // and `printEnclosedTrace`. The suppressed exceptions are read from the field, as Java's
+    // `getSuppressed` is final.
+    private String stackTraceText() {
+        StringBuilder out = new StringBuilder();
+        out.append(String.valueOf(this));
+        StackTraceElement[] trace = ourStackTrace();
+        for (int i = 0; i < trace.length; i++) {
+            out.append("\n\tat " + trace[i]);
+        }
+        Throwable[] seen = new Throwable[] {this};
+        Throwable[] own = ownSuppressed();
+        for (int i = 0; i < own.length; i++) {
+            seen = own[i].enclosedTrace(out, trace, "Suppressed: ", "\t", seen);
+        }
+        Throwable cause = getCause();
+        if (cause != null) {
+            seen = cause.enclosedTrace(out, trace, "Caused by: ", "", seen);
+        }
+        return out.toString();
+    }
+
+    // Appends the trace of an exception that another one's trace holds, as a cause or as
+    // suppressed, with the frames that it has in common with that one's `enclosing` elided; the
+    // exceptions printed so far are `seen`, and the result adds those printed here.
+    private Throwable[] enclosedTrace(
+            StringBuilder out, StackTraceElement[] enclosing, String caption, String prefix, Throwable[] seen) {
+        for (int i = 0; i < seen.length; i++) {
+            if (seen[i] == this) {
+                out.append("\n" + prefix + caption + "[CIRCULAR REFERENCE: " + this + "]");
+                return seen;
+            }
+        }
+        Throwable[] printed = new Throwable[seen.length + 1];
+        for (int i = 0; i < printed.length; i++) {
+            printed[i] = i < seen.length ? seen[i] : this;
+        }
+        StackTraceElement[] trace = ourStackTrace();
+        int m = trace.length - 1;
+        int n = enclosing.length - 1;
+        while (m >= 0 && n >= 0 && trace[m].sameFrame(enclosing[n])) {
+            m--;
+            n--;
+        }
+        int framesInCommon = trace.length - 1 - m;
+        out.append("\n" + prefix + caption + this);
+        for (int i = 0; i <= m; i++) {
+            out.append("\n" + prefix + "\tat " + trace[i]);
+        }
+        if (framesInCommon != 0) {
+            out.append("\n" + prefix + "\t... " + framesInCommon + " more");
+        }
+        Throwable[] own = ownSuppressed();
+        for (int i = 0; i < own.length; i++) {
+            printed = own[i].enclosedTrace(out, trace, "Suppressed: ", prefix + "\t", printed);
+        }
+        Throwable cause = getCause();
+        if (cause != null) {
+            printed = cause.enclosedTrace(out, trace, "Caused by: ", prefix, printed);
+        }
+        return printed;
+    }
+
+    // What the runtime prints after `Exception in thread "main" ` for an exception that nothing
+    // catches, which Java's thread group prints with `printStackTrace(System.err)`: the runtime
+    // has this once `installTrace0()` has run (see `lower/natives.rs`), and `uncaught0()` is the
+    // exception.
+    private static String uncaughtTrace() {
+        return uncaught0().stackTraceText();
+    }
+
+    private static native Throwable uncaught0();
+}
+
+// A frame of a stack trace, which only `setStackTrace` gives an exception: the class, the method,
+// the file and the line, without Java's class loader and module.
+final class StackTraceElement {
+    private String declaringClass;
+    private String methodName;
+    private String fileName;
+    private int lineNumber;
+
+    // `missing` is the message of the `NullPointerException` that `lower/suppress.rs` throws when
+    // it is not null, as Java's `Objects.requireNonNull` of the two names.
+    public StackTraceElement(String declaringClass, String methodName, String fileName, int lineNumber) {
+        String missing =
+                declaringClass == null ? "Declaring class is null" : methodName == null ? "Method name is null" : null;
+        this.declaringClass = declaringClass;
+        this.methodName = methodName;
+        this.fileName = fileName;
+        this.lineNumber = lineNumber;
+    }
+
+    public String getClassName() {
+        return declaringClass;
+    }
+
+    public String getMethodName() {
+        return methodName;
+    }
+
+    public String getFileName() {
+        return fileName;
+    }
+
+    public int getLineNumber() {
+        return lineNumber;
+    }
+
+    public boolean isNativeMethod() {
+        return lineNumber == -2;
+    }
+
+    public String toString() {
+        String place;
+        if (isNativeMethod()) {
+            place = "Native Method";
+        } else if (fileName == null) {
+            place = "Unknown Source";
+        } else if (lineNumber >= 0) {
+            place = fileName + ":" + lineNumber;
+        } else {
+            place = fileName;
+        }
+        return declaringClass + "." + methodName + "(" + place + ")";
+    }
+
+    // Java's `equals` of two elements, which `Throwable` compares (it has no `equals(Object)`).
+    boolean sameFrame(StackTraceElement e) {
+        return e.lineNumber == lineNumber
+                && e.declaringClass.equals(declaringClass)
+                && (methodName == null ? e.methodName == null : methodName.equals(e.methodName))
+                && (fileName == null ? e.fileName == null : fileName.equals(e.fileName));
     }
 }
 
@@ -121,6 +314,9 @@ class Error extends Throwable {
 }
 
 class LinkageError extends Error {
+    public LinkageError() {
+    }
+
     public LinkageError(String message, Throwable cause) {
         super(message, cause);
     }
@@ -137,6 +333,9 @@ class ExceptionInInitializerError extends LinkageError {
 }
 
 class NoClassDefFoundError extends LinkageError {
+    public NoClassDefFoundError() {
+    }
+
     public NoClassDefFoundError(String message, Throwable cause) {
         super(message, cause);
     }
@@ -302,13 +501,6 @@ class IllegalMonitorStateException extends RuntimeException {
         super(s);
     }
 
-    public IllegalMonitorStateException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public IllegalMonitorStateException(Throwable cause) {
-        super(cause);
-    }
 }
 
 class IndexOutOfBoundsException extends RuntimeException {
@@ -611,5 +803,28 @@ class MissingResourceException extends RuntimeException {
 
     public String getKey() {
         return key;
+    }
+}
+
+// A stack walker, which a translation has only to ask for the class of its caller: lowering
+// answers `getCallerClass()` where it is called, of a walker made with `RETAIN_CLASS_REFERENCE`
+// (see `lower/callers.rs`), so this class has nothing to hold. Its other methods walk frames,
+// which a translation does not have, and are rejected.
+final class StackWalker {
+    public enum Option {
+        RETAIN_CLASS_REFERENCE,
+        SHOW_REFLECT_FRAMES,
+        SHOW_HIDDEN_FRAMES
+    }
+
+    private StackWalker() {
+    }
+
+    public static StackWalker getInstance() {
+        return new StackWalker();
+    }
+
+    public static StackWalker getInstance(Option option) {
+        return new StackWalker();
     }
 }

@@ -2060,18 +2060,25 @@ fn an_enum_field_set_first_by_every_constructor_needs_no_initializer() {
 }
 
 #[test]
-fn an_enum_field_that_a_constructor_reads_before_setting_it_is_rejected() {
-    let error = java_to_rust::translate(
-        "public class A {
-            enum Color { RED, BLUE }
-            static class Paint {
-                private Color color;
-                Paint(Color color) { System.out.println(this.color); this.color = color; }
-            }
-            public static void main(String[] args) { new Paint(Color.BLUE); }
-        }",
-    )
-    .expect_err("a field read before it is set is null");
+fn an_enum_field_that_a_constructor_reads_before_setting_it_is_an_option() {
+    let program = |extra: &str| {
+        format!(
+            "public class A {{
+                enum Color {{ RED, BLUE }}
+                static class Paint {{
+                    private Color color;
+                    Paint(Color color) {{ System.out.println(this.color); this.color = color; }}
+                    {extra}
+                }}
+                public static void main(String[] args) {{ new Paint(Color.BLUE); }}
+            }}"
+        )
+    };
+    let rust = translate(&program(""));
+    assert_contains(&rust, &["color: Option<AColor>", "APaint { color: None }", "this.color = Some(color);"]);
+    // Used as an enum value, the field could be null there.
+    let error = java_to_rust::translate(&program("int order() { return color.ordinal(); }"))
+        .expect_err("a field that may be null used as an enum value");
     assert!(error.to_string().contains("null enums not supported yet"), "{error}");
 }
 
@@ -3368,6 +3375,10 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             public native int getInt(Object o, long offset);
             public native void putIntVolatile(Object o, long offset, int x);
             public final native boolean compareAndSetReference(Object o, long offset, Object expected, Object x);
+            public final native int getAndBitwiseOrInt(Object o, long offset, int mask);
+            public final native int getAndAddInt(Object o, long offset, int delta);
+            public native long staticFieldOffset(java.lang.reflect.Field f);
+            public native Object staticFieldBase(java.lang.reflect.Field f);
         }",
     ),
     (
@@ -3386,6 +3397,30 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             public Cell at(int i) { return (Cell) U.getReferenceAcquire(slots, BASE + (long) i * SCALE); }
             public void set(int i, Cell o) { U.putReferenceRelease(slots, ((long) i << SHIFT) + BASE, o); }
             public Cell stray(int i) { return (Cell) U.getReferenceAcquire(slots, BASE + i); }
+            static long slotOffset(int i) { return ((long) i << SHIFT) + BASE; }
+            public Cell take(int i) {
+                long k;
+                Cell c = (Cell) U.getReferenceAcquire(slots, k = slotOffset(i));
+                return c != null && U.compareAndSetReference(slots, k, c, null) ? c : null;
+            }
+            public Cell first() { return (Cell) U.getReferenceAcquire(slots, slotOffset(0)); }
+            private int flags;
+            private static final long FLAGS = U.objectFieldOffset(Slots.class, \"flags\");
+            public int mark(int bit) { return U.getAndBitwiseOrInt(this, FLAGS, bit); }
+            private static int made;
+            private static final Object MADE_BASE;
+            private static final long MADE;
+            static {
+                Class<Slots> klass = Slots.class;
+                try {
+                    java.lang.reflect.Field f = klass.getDeclaredField(\"made\");
+                    MADE_BASE = U.staticFieldBase(f);
+                    MADE = U.staticFieldOffset(f);
+                } catch (NoSuchFieldException e) {
+                    throw new Error(e);
+                }
+            }
+            public static int count() { return U.getAndAddInt(MADE_BASE, MADE, 1); }
         }",
     ),
     (
@@ -3532,6 +3567,31 @@ fn an_access_at_an_element_offset_is_the_element() {
         ],
     );
     assert_lacks(&rust, &["fn compare_and_set_reference", "fn get_reference_acquire"]);
+}
+
+#[test]
+fn offsets_computed_elsewhere_and_static_fields_are_handles_too() {
+    let rust = translate_with_natives(
+        "jdk-computed-handles",
+        "Slots s = new Slots(); s.set(0, new Slots.Cell(\"a\"));
+        System.out.println(s.first() + \" \" + s.take(0) + s.take(0) + s.mark(2) + s.mark(1) + Slots.count() + Slots.count());",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(
+        &rust,
+        &[
+            // A call of a method that returns an element offset is the element of its argument.
+            "java::get(&self.slots, 0)",
+            // A local that holds an element offset is Java's value: the index is computed back.
+            "java::compare_and_set_element(&array, java::div(k.wrapping_sub(java::array_base_offset()), \
+             java::array_index_scale(\"java.lang.Object\") as i64) as i32, ",
+            // A bitwise update of a field, and an update of a static field under the class's lock.
+            "fn get_and_bitwise_or_flags(",
+            "fn get_and_add_made(",
+        ],
+    );
+    // The reflection that names the static field is left out with its handles.
+    assert_lacks(&rust, &["get_declared_field", "MADE_BASE", "fn get_and_add_int"]);
 }
 
 #[test]
@@ -4952,4 +5012,97 @@ fn clone_of_another_object_is_rejected() {
     )
     .expect_err("only `super.clone()` is translated");
     assert!(err.to_string().contains("`clone` of an object other than `this`"), "{err}");
+}
+
+#[test]
+fn uncaught_exceptions_with_causes_are_printed_with_their_stack_trace() {
+    let with_cause = translate(
+        "class A { public static void main(String[] a) {
+            throw new IllegalStateException(\"outer\", new RuntimeException(\"inner\"));
+        } }",
+    );
+    assert_contains(&with_cause, &["java::set_trace_hook(", "fn stack_trace_text("]);
+    // An exception that has nothing more than its `toString()` is printed by it.
+    let plain = translate(
+        "class A { public static void main(String[] a) {
+            throw new IllegalStateException(\"plain\");
+        } }",
+    );
+    assert_lacks(&plain, &["set_trace_hook", "stack_trace_text"]);
+}
+
+#[test]
+fn stack_trace_overrides_that_java_runs_unseen_are_rejected() {
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
+    let filling = reject(
+        "class A { static class E extends RuntimeException {
+            public Throwable fillInStackTrace() { System.out.println(\"filled\"); return this; }
+        }
+        public static void main(String[] a) { new E(); } }",
+    );
+    assert!(filling.contains("a `fillInStackTrace` that does more than return the exception"), "{filling}");
+    let printing = reject(
+        "class A { static class E extends RuntimeException {
+            public void printStackTrace(java.io.PrintStream s) {}
+        }
+        public static void main(String[] a) { new E().printStackTrace(); } }",
+    );
+    assert!(printing.contains("overriding `Throwable.printStackTrace` of a stream or writer"), "{printing}");
+}
+
+#[test]
+fn a_static_method_asking_for_its_caller_gets_the_calling_class() {
+    let rust = translate(
+        "class A {
+            static String caller() {
+                return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass().getName();
+            }
+            static class B { static String name() { return caller(); } }
+            public static void main(String[] a) { System.out.println(caller() + B.name()); }
+        }",
+    );
+    assert_contains(&rust, &["fn caller(caller_class: java::Class)", "caller(java::Class::"]);
+    let reject = |java: &str| java_to_rust::translate(java).unwrap_err().to_string();
+    let instance = reject(
+        "class A {
+            String caller() { return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass().getName(); }
+            public static void main(String[] a) { System.out.println(new A().caller()); }
+        }",
+    );
+    assert!(
+        instance.contains("asking for the caller (`getCallerClass`) in a method that is not static"),
+        "{instance}"
+    );
+    let walked = reject(
+        "class A {
+            static long depth() { return StackWalker.getInstance().walk(frames -> frames.count()); }
+            public static void main(String[] a) { System.out.println(depth()); }
+        }",
+    );
+    assert!(walked.contains("StackWalker.walk"), "{walked}");
+}
+
+#[test]
+fn scalb_is_the_runtime_port_in_both_widths() {
+    let rust = translate(
+        "public class Main {
+            public static void main(String[] a) {
+                System.out.println(Math.scalb(1.5, 10) + StrictMath.scalb(2.0, 3));
+                System.out.println(Math.scalb(1.5f, -3));
+            }
+        }",
+    );
+    assert_contains(&rust, &["java::scalb(1.5, 10)", "java::scalb(2.0, 3)", "java::scalb_f32(1.5, -3)"]);
+}
+
+#[test]
+fn seeds_come_from_the_operating_system() {
+    let rust = translate(
+        "import java.security.SecureRandom;
+        public class Main {
+            public static void main(String[] a) { System.out.println(SecureRandom.getSeed(16).length); }
+        }",
+    );
+    assert_contains(&rust, &["or_throw(java::try_secure_seed(16))"]);
+    assert_lacks(&rust, &["SecureRandom"]);
 }

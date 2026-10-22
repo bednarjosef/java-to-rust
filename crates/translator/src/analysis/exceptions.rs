@@ -389,9 +389,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // form only.
     let npe = Kind::Runtime("java.lang.NullPointerException");
     let mut reading_tries = HashSet::new();
-    // A suppressed exception is read only through `getSuppressed` (the runtime's stack traces do
-    // not show it), so adding one to the exception that is thrown on (a try-with-resources'
-    // `closing` catch) reads neither, unless the program gets them back.
+    // A suppressed exception is read only through `getSuppressed`, and printed by a
+    // `printStackTrace` to a stream or a writer, which may be standard output (standard error, where
+    // `printStackTrace()` and uncaught exceptions print, is not compared). So adding one to the
+    // exception that is thrown on (a try-with-resources' `closing` catch) reads neither, unless
+    // the program gets them back or prints them so.
     let mut suppressed_read = false;
     for method in &class.methods {
         for s in &method.body {
@@ -399,8 +401,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 s,
                 &mut |e| {
                     visit_expr(e, &mut |x| {
-                        suppressed_read |=
-                            matches!(&x.kind, ExprKind::MethodCall { name, .. } if name == "getSuppressed")
+                        suppressed_read |= matches!(
+                            &x.kind,
+                            ExprKind::MethodCall { name, args, .. }
+                                if name == "getSuppressed" || name == "printStackTrace" && args.len() == 1
+                        )
                     })
                 },
                 &mut |_| {},
@@ -760,11 +765,10 @@ fn stmt_points(
                 ExprKind::Cast(_, inner) => inner,
                 _ => e,
             };
-            // A value that may be null throws a `NullPointerException` instead, by `throw` itself,
-            // unless an enclosing condition tested it.
-            if matches!(thrown.kind, ExprKind::Null)
-                || (maybe_null(facts, m, thrown) && !is_tested(thrown, safe))
-            {
+            // A value that may be null throws a `NullPointerException` instead when it is null, by
+            // `throw` itself, unless an enclosing condition tested it; `null` itself, only that.
+            let null = matches!(thrown.kind, ExprKind::Null);
+            if null || (maybe_null(facts, m, thrown) && !is_tested(thrown, safe)) {
                 let raise =
                     Raise::Runtime { class: "java.lang.NullPointerException", checked: true, id: thrown.id };
                 out.push(Point {
@@ -774,7 +778,8 @@ fn stmt_points(
                     frames: frames.clone(),
                     known: Vec::new(),
                 });
-            } else if let Some(t) = class.class_index(thrown.ty) {
+            }
+            if !null && let Some(t) = class.class_index(thrown.ty) {
                 out.push(Point {
                     raise: Raise::Throw(t),
                     pos: e.pos,
@@ -993,8 +998,22 @@ fn expr_points(
         // What a started thread runs raises nothing where the thread is started: an exception
         // that escapes it ends that thread (the runtime prints it), whatever catches the start.
         ExprKind::Builtin(Builtin::Native(Native::ThreadStart), args) => children.extend(&args[..4]),
-        // The runtime runs the dispatch of an uncaught exception later, on the thread it ends.
-        ExprKind::Builtin(Builtin::Native(Native::InstallUncaught), _) => {}
+        // The runtime runs the dispatch of an uncaught exception later, on the thread it ends, and
+        // makes the text of its stack trace there.
+        ExprKind::Builtin(Builtin::Native(Native::InstallUncaught | Native::InstallTrace), _) => {}
+        // The store of an atomic update of an element through `Unsafe` checks neither the array
+        // nor the index, as the JVM's does not (see `failures::library_failure`): its operands
+        // are evaluated, and the store raises nothing.
+        ExprKind::Builtin(Builtin::ElementUpdate(_), args) => {
+            for a in args {
+                match &a.kind {
+                    ExprKind::Assign { target: Place::Index(array, index), value, .. } => {
+                        children.extend([&**array, &**index, &**value])
+                    }
+                    _ => children.push(a),
+                }
+            }
+        }
         ExprKind::Call { args, .. }
         | ExprKind::Builtin(_, args)
         | ExprKind::New { args, .. }
@@ -1031,10 +1050,12 @@ fn text_objects(x: &Expr) -> Vec<&Expr> {
     let is_object = |a: &&Expr| matches!(a.ty, Type::Class(..));
     match &x.kind {
         ExprKind::Builtin(Builtin::ClassName { .. } | Builtin::ClassLiteralName { .. }, _) => Vec::new(),
-        // The class, identity or ordinal of an object, which no `toString` gives, and its monitor.
+        // The class, identity or ordinal of an object, which no `toString` gives, its monitor, and
+        // the `Thread` that a thread is given or starts with.
         ExprKind::Builtin(
             Builtin::MonitorEnter
             | Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. } | Native::HoldsLock)
+            | Builtin::Native(Native::SetCurrentThread | Native::ThreadStart)
             | Builtin::GetClass
             | Builtin::SameClass { .. }
             | Builtin::ClassMethod(_)

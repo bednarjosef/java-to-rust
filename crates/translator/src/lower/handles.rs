@@ -23,7 +23,8 @@
 //! volatile forms ask. Any other use of a handle is rejected.
 //!
 //! An atomic update through a handle, `U.compareAndSetInt(this, VALUE, expect, update)` and the
-//! get-and-add, get-and-set and compare-and-exchange forms of `int`, `long` and reference fields
+//! get-and-add, get-and-bitwise-or (and `And`, `Xor`), get-and-set and compare-and-exchange forms
+//! of `int`, `long` and reference fields
 //! (`program::FieldUpdate`), is a call of a method that lowering adds to the field's class, one
 //! per field and form: `compareAndSetValue(expected, value)` reads the field, compares and
 //! writes in its body. A method runs with its object borrowed, or in a program with threads with
@@ -35,7 +36,8 @@
 //! where `base` is `arrayBaseOffset(T[].class)`, `scale` is `arrayIndexScale(T[].class)` and
 //! `shift` is `31 - Integer.numberOfLeadingZeros(scale)`, each written out or read from a static
 //! final field (or, in a static block, a local) whose value is one of them, and `index` is an
-//! `int` widened to `long`, or a `long`. The offset names element `index` of the array the access
+//! `int` widened to `long`, or a `long`; of a `byte[]` or `boolean[]`, whose elements are a byte
+//! apart, it is also `base + index` (`DecimalDigits` writes `ARRAY_BYTE_BASE_OFFSET + charPos`). The offset names element `index` of the array the access
 //! is made on, which must be an array of `T`'s kind (references, or the same primitive), as the
 //! access must be. The values themselves stay what they are (`Unsafe`'s answers for a class
 //! literal, see `natives.rs`), so the static fields and the static block that compute them run as
@@ -46,8 +48,32 @@
 //! and for the compare forms the expected value first; the runtime's function for it
 //! (`java::compare_and_set_element`, ...) reads, compares and writes the element under one borrow
 //! of the array, which in a program with threads is one hold of the array's lock, so no other
-//! access of the array comes between the read and the write. Any other offset arithmetic, and an
-//! element offset that is computed into a variable first, is rejected.
+//! access of the array comes between the read and the write.
+//!
+//! An element offset may also be computed away from the access: by a static method whose body
+//! returns one of its parameter (`ForkJoinPool.slotOffset(i)`), whose call is the element at its
+//! argument, or into a `long` local that every assignment gives an element offset of one kind of
+//! array (`U.getReferenceAcquire(a, k = slotOffset(i))`, then `U.compareAndSetReference(a, k, t,
+//! null)`). The local holds the offset Java computes, from `Unsafe`'s answers for the base and
+//! scale, so the element's index is `(k - base) / scale`. Any other offset arithmetic is rejected.
+//!
+//! The offset of a static field (`staticFieldOffset(f)`, with `staticFieldBase(f)` as the object,
+//! of a field `f` that `getDeclaredField` finds, as `ForkJoinPool` finds `poolIds`) is a handle of
+//! that field: an access is of the static field, and an atomic update is a static method of its
+//! class that is `synchronized`, so it holds the class's lock in a program with threads. The
+//! `Field` local is left out with the handles it makes.
+//!
+//! A `VarHandle` constant (a static final field) is a handle as well: of a field
+//! (`MethodHandles.lookup().findVarHandle(C.class, "f", T.class)`, or `MhUtil.findVarHandle`), of
+//! the elements of an array (`arrayElementVarHandle(T[].class)`), or of the values whose bytes a
+//! `byte[]` holds (`byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN)`, as
+//! `DataOutputStream` and `DataInputStream` write and read numbers). Its `get`, `set`,
+//! `compareAndSet`, `getAndAdd` and the other accesses, in every memory mode, are those of
+//! `Unsafe` at the field or element; a view's `get` and `set` are `Builtin::ByteView`, whose
+//! operand is the access of the first byte (`a[i]`, or `a[i] = (byte) v`), so the analyses see
+//! it, and which throws Java's `ArrayIndexOutOfBoundsException` when the value's bytes do not fit.
+//! A static method that returns such a handle of its parameters (`ByteArray.create`) makes one
+//! too. Any other use of a `VarHandle` is rejected.
 
 use super::*;
 use crate::program::FieldUpdate;
@@ -59,6 +85,8 @@ pub(super) struct FieldUpdateMethod {
     field: String,
     ty: Type,
     update: FieldUpdate,
+    /// Whether the field is static, and so the method, which is synchronized on its class.
+    is_static: bool,
     /// The method's name, unique among those added, which its calls are found by until it has
     /// an index.
     name: String,
@@ -72,11 +100,22 @@ const OFFSET_OF: (&str, &str, &str) =
 pub const OFFSET_OF_FIELD: (&str, &str, &str) =
     ("jdk.internal.misc.Unsafe", "objectFieldOffset", "(java.lang.reflect.Field)long");
 
+/// `Unsafe.staticFieldOffset(Field)` and `staticFieldBase(Field)`, of the static field that
+/// `Class.getDeclaredField` finds.
+const STATIC_OFFSET_OF: (&str, &str, &str) =
+    ("jdk.internal.misc.Unsafe", "staticFieldOffset", "(java.lang.reflect.Field)long");
+const STATIC_BASE_OF: (&str, &str, &str) =
+    ("jdk.internal.misc.Unsafe", "staticFieldBase", "(java.lang.reflect.Field)java.lang.Object");
+
 /// `Unsafe.arrayBaseOffset(Class)` and `arrayIndexScale(Class)`.
 const BASE_OF: (&str, &str, &str) =
     ("jdk.internal.misc.Unsafe", "arrayBaseOffset", "(java.lang.Class<?>)long");
 const SCALE_OF: (&str, &str, &str) =
     ("jdk.internal.misc.Unsafe", "arrayIndexScale", "(java.lang.Class<?>)int");
+
+/// The class whose methods make a `VarHandle` constant, and the class of `VarHandle`.
+const METHOD_HANDLES: &str = "java.lang.invoke.MethodHandles";
+const VAR_HANDLE: &str = "java.lang.invoke.VarHandle";
 
 /// `Integer.numberOfLeadingZeros(int)`, which turns a power of two into its exponent.
 const LEADING_ZEROS: (&str, &str, &str) = ("java.lang.Integer", "numberOfLeadingZeros", "(int)int");
@@ -84,6 +123,16 @@ const LEADING_ZEROS: (&str, &str, &str) = ("java.lang.Integer", "numberOfLeading
 /// The primitive types, as javac names them and as the kinds of arrays and of `Unsafe`'s
 /// accesses; every other type is a reference.
 const PRIMITIVES: [&str; 8] = ["boolean", "byte", "short", "char", "int", "long", "float", "double"];
+
+/// `node`, or in the body of a static method that `bound` gives the arguments of the parameters
+/// of, the argument when `node` is a parameter; `None` for a parameter without one.
+fn bind<'t>(node: Node<'t>, bound: &[(&'t str, Node<'t>)]) -> Option<Node<'t>> {
+    let node = plain(node);
+    match node.symbol().filter(|s| s.kind == "PARAMETER" && node.kind() == "IDENTIFIER") {
+        Some(s) if !bound.is_empty() => bound.iter().find(|(name, _)| *name == s.name).map(|(_, a)| *a),
+        _ => Some(node),
+    }
+}
 
 /// The kind of the elements of an array, or of an access of `Unsafe`: a primitive type's name, or
 /// `reference`.
@@ -106,13 +155,18 @@ fn call_of<'t>(node: Node<'t>, method: (&str, &str, &str)) -> Option<Vec<Node<'t
     ((symbol.owner, symbol.name, symbol.ty) == method).then(|| node.list("arguments").collect())
 }
 
-/// The kind of the elements of the array class that the class literal `node` names.
+/// The kind of the elements of the array class that the class literal `node` names, or that a
+/// variable of that class's type holds, which can be no other class.
 fn literal_kind(node: Node) -> Option<Kind> {
     let node = plain(node);
-    if node.kind() != "MEMBER_SELECT" || node.str("identifier") != "class" {
+    let class = if node.kind() == "MEMBER_SELECT" && node.str("identifier") == "class" {
+        node.get("expression")?.java_type()
+    } else if node.kind() == "IDENTIFIER" {
+        node.java_type().strip_prefix("java.lang.Class<")?.strip_suffix('>')?
+    } else {
         return None;
-    }
-    let element = node.get("expression")?.java_type().strip_suffix("[]")?;
+    };
+    let element = class.strip_suffix("[]")?;
     Some(PRIMITIVES.into_iter().find(|p| *p == element).unwrap_or("reference"))
 }
 
@@ -166,12 +220,83 @@ fn assigns<'t>(node: Node<'t>, target: impl Fn(Node<'t>) -> bool) -> bool {
     variable.is_some_and(|v| target(plain(v)))
 }
 
+/// What a `VarHandle` constant reads and writes.
+#[derive(Clone, Copy)]
+enum VarHandleOf<'t> {
+    /// The field of a class (`findVarHandle`), by the class's index.
+    Field(usize, &'t str),
+    /// The elements of an array of this kind (`arrayElementVarHandle`).
+    Element(Kind),
+    /// The values of this kind whose bytes are those of a `byte[]`, in big-endian order or not
+    /// (`byteArrayViewVarHandle`).
+    ByteView(Kind, bool),
+}
+
+/// The method of `MethodHandles` (or of its `Lookup`) that `node` calls, and its arguments.
+fn handles_call<'t>(node: Node<'t>) -> Option<(&'t str, Vec<Node<'t>>)> {
+    let node = plain(node);
+    let symbol = node.symbol().filter(|_| node.kind() == "METHOD_INVOCATION")?;
+    let owner = symbol.owner.strip_prefix(METHOD_HANDLES)?;
+    matches!(owner, "" | ".Lookup").then(|| (symbol.name, node.list("arguments").collect()))
+}
+
+/// Whether `node` is `ByteOrder.BIG_ENDIAN` (`Some(true)`) or `ByteOrder.LITTLE_ENDIAN`.
+fn byte_order(node: Node) -> Option<bool> {
+    let symbol = plain(node).symbol().filter(|s| s.owner == "java.nio.ByteOrder")?;
+    match symbol.name {
+        "BIG_ENDIAN" => Some(true),
+        "LITTLE_ENDIAN" => Some(false),
+        _ => None,
+    }
+}
+
+/// The access that the method `name` of `VarHandle` makes: whether it writes (`Some(true)`) or
+/// reads (`Some(false)`), or else the atomic update it is.
+fn var_handle_method(name: &str) -> Option<(Option<bool>, Option<FieldUpdate>)> {
+    let update = |u| Some((None, Some(u)));
+    match name {
+        "get" | "getVolatile" | "getAcquire" | "getOpaque" => Some((Some(false), None)),
+        "set" | "setVolatile" | "setRelease" | "setOpaque" => Some((Some(true), None)),
+        "compareAndSet"
+        | "weakCompareAndSet"
+        | "weakCompareAndSetPlain"
+        | "weakCompareAndSetAcquire"
+        | "weakCompareAndSetRelease" => update(FieldUpdate::CompareAndSet),
+        "compareAndExchange" | "compareAndExchangeAcquire" | "compareAndExchangeRelease" => {
+            update(FieldUpdate::CompareAndExchange)
+        }
+        _ => {
+            let mode = |prefix: &str| {
+                name.strip_prefix(prefix).is_some_and(|m| matches!(m, "" | "Acquire" | "Release"))
+            };
+            if mode("getAndSet") {
+                update(FieldUpdate::GetAndSet)
+            } else if mode("getAndAdd") {
+                update(FieldUpdate::GetAndAdd)
+            } else if mode("getAndBitwiseOr") {
+                update(FieldUpdate::GetAndBitwise(BinOp::BitOr))
+            } else if mode("getAndBitwiseAnd") {
+                update(FieldUpdate::GetAndBitwise(BinOp::BitAnd))
+            } else if mode("getAndBitwiseXor") {
+                update(FieldUpdate::GetAndBitwise(BinOp::BitXor))
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// What an offset argument of `Unsafe` names.
 enum Offset<'t> {
     /// The field of a class, by the class's index.
     Field(usize, &'t str),
+    /// The static field of a class, by the class's index.
+    Static(usize, &'t str),
     /// The element of the array at this index (an `int`, or a `long`), of an array of this kind.
     Element(Node<'t>, Kind),
+    /// The element of an array of this kind whose offset this expression computes (see
+    /// `computed_offset`).
+    Computed(Node<'t>, Kind),
 }
 
 impl<'t> Lowering<'t> {
@@ -219,8 +344,56 @@ impl<'t> Lowering<'t> {
         };
         let symbol = e.get("variable").filter(|_| e.kind() == "ASSIGNMENT").and_then(|v| plain(v).symbol());
         let Some(symbol) = symbol.filter(|s| s.kind == "FIELD" && s.is_static) else { return false };
-        self.static_field(&symbol)
-            .is_some_and(|(owner, member)| self.handle_declaration(owner, member).is_some())
+        self.static_field(&symbol).is_some_and(|(owner, member)| self.is_handle(owner, member))
+    }
+
+    /// Whether `stmt`, a statement of `block`, declares a local that the block uses only to make
+    /// handles, whose definitions are left out (`handle_definition`), so that the local is left
+    /// out with them: a `Field` whose value is `getDeclaredField`, used only as the argument of
+    /// `staticFieldOffset(f)`, `staticFieldBase(f)` or `objectFieldOffset(f)`, or a
+    /// `MethodHandles.Lookup` whose value is `MethodHandles.lookup()`, used only in the values of
+    /// `VarHandle` constants (`SharedThreadContainer` finds its handles so).
+    pub(super) fn handle_field_local(&self, block: Node<'t>, stmt: Node<'t>) -> bool {
+        let Some(ty) = stmt.symbol().filter(|_| stmt.kind() == "VARIABLE").map(|s| s.ty) else {
+            return false;
+        };
+        let name = stmt.str("name");
+        let Some(init) = stmt.get("initializer").map(plain) else { return false };
+        let named = |n: Node| plain(n).kind() == "IDENTIFIER" && plain(n).str("name") == name;
+        let (mut uses, mut in_handles) = (0, 0);
+        match ty {
+            "java.lang.reflect.Field" => {
+                let found = init.symbol().filter(|_| init.kind() == "METHOD_INVOCATION");
+                if found.is_none_or(|s| (s.owner, s.name) != ("java.lang.Class", "getDeclaredField")) {
+                    return false;
+                }
+                walk(block.0, &mut |n| {
+                    uses += usize::from(n.kind() == "IDENTIFIER" && n.str("name") == name);
+                    let handle = [STATIC_OFFSET_OF, STATIC_BASE_OF, OFFSET_OF_FIELD]
+                        .into_iter()
+                        .find_map(|m| call_of(n, m));
+                    in_handles +=
+                        usize::from(handle.is_some_and(|args| args.first().is_some_and(|a| named(*a))));
+                });
+            }
+            "java.lang.invoke.MethodHandles.Lookup" => {
+                if handles_call(init).is_none_or(|(name, args)| name != "lookup" || !args.is_empty()) {
+                    return false;
+                }
+                walk(block.0, &mut |n| {
+                    uses += usize::from(n.kind() == "IDENTIFIER" && n.str("name") == name);
+                    let constant = n.kind() == "ASSIGNMENT"
+                        && n.get("variable").is_some_and(|v| self.var_handle(v).is_some());
+                    if let Some(value) = n.get("expression").filter(|_| constant) {
+                        walk(value.0, &mut |v| {
+                            in_handles += usize::from(v.kind() == "IDENTIFIER" && v.str("name") == name)
+                        });
+                    }
+                });
+            }
+            _ => return false,
+        }
+        uses == in_handles
     }
 
     /// The class and declaration of the static field that `symbol` names.
@@ -237,19 +410,44 @@ impl<'t> Lowering<'t> {
     /// or of `getDeclaredField` of a class and a name), is the offset of. `block` is the static
     /// block it is in, if any.
     fn field_offset(&self, value: Node<'t>, block: Option<Node<'t>>) -> Option<(usize, &'t str)> {
-        let (class, field) = if let Some(args) = call_of(value, OFFSET_OF) {
-            (*args.first()?, *args.get(1)?)
-        } else {
-            let get = plain(*call_of(value, OFFSET_OF_FIELD)?.first()?);
-            let symbol = get.symbol().filter(|_| get.kind() == "METHOD_INVOCATION")?;
-            if (symbol.owner, symbol.name) != ("java.lang.Class", "getDeclaredField") {
-                return None;
-            }
-            (get.get("methodSelect")?.get("expression")?, get.list("arguments").next()?)
+        let Some(args) = call_of(value, OFFSET_OF) else {
+            return self.declared_field(*call_of(value, OFFSET_OF_FIELD)?.first()?, block);
         };
-        let field = plain(field);
+        let field = plain(*args.get(1)?);
         let name = field.0["value"].as_str().filter(|_| field.kind() == "STRING_LITERAL")?;
-        Some((self.offset_class(class, block)?, name))
+        Some((self.offset_class(*args.first()?, block)?, name))
+    }
+
+    /// The class and the name of the field that `get` is: a call of `getDeclaredField` of a class
+    /// and a name, or a local of the static block `block` whose value is one.
+    fn declared_field(&self, get: Node<'t>, block: Option<Node<'t>>) -> Option<(usize, &'t str)> {
+        let get = plain(get);
+        let Some(symbol) = get.symbol().filter(|_| get.kind() == "METHOD_INVOCATION") else {
+            let (value, block) = self.defined(get, block)?;
+            return self.declared_field(value, block);
+        };
+        if (symbol.owner, symbol.name) != ("java.lang.Class", "getDeclaredField") {
+            return None;
+        }
+        let field = plain(get.list("arguments").next()?);
+        let name = field.0["value"].as_str().filter(|_| field.kind() == "STRING_LITERAL")?;
+        Some((self.offset_class(get.get("methodSelect")?.get("expression")?, block)?, name))
+    }
+
+    /// The static field that the static final field `member` of class `owner` is the handle of
+    /// (`staticFieldOffset`), or with `base`, the base of (`staticFieldBase`), which only an
+    /// access at that offset may use.
+    fn static_declaration(&self, owner: usize, member: Node<'t>, base: bool) -> Option<(usize, &'t str)> {
+        let (value, block) = self.static_value(owner, member)?;
+        let method = if base { STATIC_BASE_OF } else { STATIC_OFFSET_OF };
+        self.declared_field(*call_of(value, method)?.first()?, block)
+    }
+
+    /// The static field whose handle (or with `base`, whose base) the expression `node` reads.
+    fn static_handle(&self, node: Node<'t>, base: bool) -> Option<(usize, &'t str)> {
+        let symbol = plain(node).symbol().filter(|s| s.kind == "FIELD" && s.is_static)?;
+        let (owner, member) = self.static_field(&symbol)?;
+        self.static_declaration(owner, member, base)
     }
 
     /// The class that `node` names: a class literal, or a local of the static block `block` that
@@ -274,10 +472,15 @@ impl<'t> Lowering<'t> {
         }
         let block = block.filter(|_| symbol.kind == "LOCAL_VARIABLE" && node.kind() == "IDENTIFIER")?;
         let name = symbol.name;
-        let init = block
-            .list("statements")
-            .find(|s| s.kind() == "VARIABLE" && s.str("name") == name)?
-            .get("initializer")?;
+        // The local's declaration, the only one of that name in the block (in a `try` of it, say).
+        let mut declarations = Vec::new();
+        walk(block.0, &mut |n| {
+            if n.kind() == "VARIABLE" && n.str("name") == name {
+                declarations.push(n);
+            }
+        });
+        let [declaration] = declarations[..] else { return None };
+        let init = declaration.get("initializer")?;
         let mut written = false;
         walk(block.0, &mut |n| {
             written |= assigns(n, |v| v.kind() == "IDENTIFIER" && v.str("name") == name);
@@ -299,17 +502,42 @@ impl<'t> Lowering<'t> {
 
     /// The index and the kind of array of the element that `offset` names, when it is an element
     /// offset (see the module's comment).
-    fn element_offset(&self, offset: Node<'t>) -> Option<(Node<'t>, Kind)> {
+    /// In the body of a static method that `bound` gives the arguments of the parameters of, the
+    /// index must be a parameter, and is its argument.
+    fn element_offset(&self, offset: Node<'t>, bound: &[(&'t str, Node<'t>)]) -> Option<(Node<'t>, Kind)> {
         let offset = plain(offset);
+        // A call of a static method that returns an element offset (`ForkJoinPool.slotOffset(i)`).
+        if offset.kind() == "METHOD_INVOCATION" {
+            let args = offset.list("arguments").map(|a| bind(a, bound)).collect::<Option<Vec<_>>>()?;
+            let (_, returned, params) = self.single_return(offset, args)?;
+            return self.element_offset(returned, &params);
+        }
         if offset.kind() != "PLUS" {
             return None;
         }
+        let found = |index: Node<'t>, kind: Kind| match bound {
+            [] => Some((index, kind)),
+            _ => Some((bind(index, bound).filter(|i| !std::ptr::eq(i.0, index.0))?, kind)),
+        };
         let (l, r) = (offset.get("leftOperand")?, offset.get("rightOperand")?);
         let (base, scaled) = match self.array_base(l, None) {
             Some(kind) => (kind, r),
             None => (self.array_base(r, None)?, l),
         };
         let scaled = plain(scaled);
+        let int = |n: Node| matches!(n.java_type(), "int" | "short" | "char" | "byte");
+        // The elements of a `byte[]` or `boolean[]` are a byte apart: the index is not scaled
+        // (`ARRAY_BYTE_BASE_OFFSET + i`, where an `int` index is widened to the `long` base).
+        if matches!(base, "byte" | "boolean") && !matches!(scaled.kind(), "LEFT_SHIFT" | "MULTIPLY") {
+            let index = match scaled.kind() {
+                "TYPE_CAST" if scaled.java_type() == "long" => {
+                    scaled.get("expression").filter(|e| int(*e))?
+                }
+                _ if scaled.java_type() == "long" || int(scaled) => scaled,
+                _ => return None,
+            };
+            return found(index, base);
+        }
         let (l, r) = (scaled.get("leftOperand")?, scaled.get("rightOperand")?);
         let (index, kind) = match scaled.kind() {
             "LEFT_SHIFT" => (l, self.array_shift(r, None)?),
@@ -322,13 +550,76 @@ impl<'t> Lowering<'t> {
         // An `int` index widened before the arithmetic, which then cannot overflow, or a `long`.
         let index = plain(index);
         let index = match index.kind() {
-            "TYPE_CAST" if index.java_type() == "long" => index
-                .get("expression")
-                .filter(|e| matches!(e.java_type(), "int" | "short" | "char" | "byte"))?,
+            "TYPE_CAST" if index.java_type() == "long" => index.get("expression").filter(|e| int(*e))?,
             _ if index.java_type() == "long" => index,
             _ => return None,
         };
-        (kind == base).then_some((index, kind))
+        if kind != base {
+            return None;
+        }
+        found(index, kind)
+    }
+
+    /// The kind of array whose element offset the value of `offset` is, when the access is not
+    /// given the arithmetic itself: an assignment of an element offset (`k = slotOffset(i)`), or
+    /// a `long` local of the method being lowered that every assignment gives an element offset
+    /// of the same kind, as `ForkJoinPool` keeps one to compare and set the element it read.
+    /// Such a value is the real offset that Java computes, from `Unsafe`'s answers for the base
+    /// and scale, so the index is `(offset - base) / scale` (`computed_index`).
+    fn computed_offset(&self, offset: Node<'t>, depth: usize) -> Option<Kind> {
+        let offset = plain(offset);
+        if depth > 4 {
+            return None;
+        }
+        match offset.kind() {
+            "ASSIGNMENT" => self.computed_offset(offset.get("expression")?, depth + 1),
+            "IDENTIFIER" => {
+                let symbol = offset.symbol().filter(|s| s.kind == "LOCAL_VARIABLE" && s.ty == "long")?;
+                let body = self.methods[self.method_ctx.get()?].node.get("body")?;
+                let (mut kinds, mut other) = (Vec::new(), false);
+                walk(body.0, &mut |n| {
+                    let value = match n.kind() {
+                        "VARIABLE" if n.str("name") == symbol.name => n.get("initializer"),
+                        "ASSIGNMENT"
+                            if assigns(n, |v| v.kind() == "IDENTIFIER" && v.str("name") == symbol.name) =>
+                        {
+                            n.get("expression")
+                        }
+                        _ => {
+                            other |= assigns(n, |v| v.kind() == "IDENTIFIER" && v.str("name") == symbol.name);
+                            return;
+                        }
+                    };
+                    if let Some(value) = value {
+                        kinds.push(self.computed_offset(value, depth + 1));
+                    }
+                });
+                let first = *kinds.first()?;
+                (!other && kinds.iter().all(|k| *k == first)).then_some(first?)
+            }
+            _ => self.element_offset(offset, &[]).map(|(_, kind)| kind),
+        }
+    }
+
+    /// The body's one returned expression of the static method of the program that `call`
+    /// calls, with the class it is in and its parameters, each bound to its argument in `args`.
+    #[allow(clippy::type_complexity)]
+    fn single_return(
+        &self,
+        call: Node<'t>,
+        args: Vec<Node<'t>>,
+    ) -> Option<(usize, Node<'t>, Vec<(&'t str, Node<'t>)>)> {
+        let symbol = call.symbol().filter(|s| s.kind == "METHOD" && call.kind() == "METHOD_INVOCATION")?;
+        let class = self.type_index(symbol.owner)?;
+        let method = self.types[class].node.list("members").find(|m| {
+            m.kind() == "METHOD"
+                && m.has_flag("STATIC")
+                && m.symbol().is_some_and(|s| s.ty == symbol.ty)
+                && m.str("name") == symbol.name
+        })?;
+        let [ret] = &method.get("body")?.list("statements").collect::<Vec<_>>()[..] else { return None };
+        let returned = ret.get("expression").filter(|_| ret.kind() == "RETURN")?;
+        Some((class, returned, method.list("parameters").map(|p| p.str("name")).zip(args).collect()))
     }
 
     /// The kind of array whose base offset `node` is: `arrayBaseOffset(T[].class)`, or a static
@@ -367,13 +658,198 @@ impl<'t> Lowering<'t> {
         self.array_shift(value, block)
     }
 
-    /// Rejects a read of a field handle other than as the offset of an access (`node` names a
-    /// static field).
+    /// Rejects a read of a field handle other than as the offset of an access, or of a
+    /// `VarHandle` constant other than as the handle of one (`node` names a static field).
     pub(super) fn check_handle_use(&self, node: Node<'t>) -> Result<(), Error> {
-        match self.handle(node) {
-            Some(_) => unsupported(node, "a field offset used as a value"),
-            None => Ok(()),
+        if self.handle(node).is_some() || self.static_handle(node, false).is_some() {
+            return unsupported(node, "a field offset used as a value");
         }
+        if self.static_handle(node, true).is_some() {
+            return unsupported(node, "a static field's base used as a value");
+        }
+        if self.var_handle(node).is_some() {
+            return unsupported(node, "a `VarHandle` used as a value");
+        }
+        Ok(())
+    }
+
+    /// Whether the static field `member` of class `owner` is a handle: a field offset or a
+    /// `VarHandle` constant, which is no field of the translation.
+    pub(super) fn is_handle(&self, owner: usize, member: Node<'t>) -> bool {
+        self.handle_declaration(owner, member).is_some()
+            || self.var_handle_declaration(owner, member).is_some()
+            || self.static_declaration(owner, member, false).is_some()
+            || self.static_declaration(owner, member, true).is_some()
+    }
+
+    /// What the static final field `member` of class `owner` is the `VarHandle` of.
+    fn var_handle_declaration(&self, owner: usize, member: Node<'t>) -> Option<VarHandleOf<'t>> {
+        if member.symbol().is_none_or(|s| s.ty != VAR_HANDLE) {
+            return None;
+        }
+        let (value, block) = self.static_value(owner, member)?;
+        self.var_handle_value(value, block, &[], owner)
+    }
+
+    /// What the `VarHandle` that the static field read `node` holds reaches.
+    fn var_handle(&self, node: Node<'t>) -> Option<VarHandleOf<'t>> {
+        let symbol =
+            plain(node).symbol().filter(|s| s.kind == "FIELD" && s.is_static && s.ty == VAR_HANDLE)?;
+        let (owner, member) = self.static_field(&symbol)?;
+        self.var_handle_declaration(owner, member)
+    }
+
+    /// What the `VarHandle` that `value` makes reaches: a call of `arrayElementVarHandle` or
+    /// `byteArrayViewVarHandle` of an array class literal, of `findVarHandle` of a class literal
+    /// and a field's name, or of `MhUtil.findVarHandle` of a field of `owner` (the class of the
+    /// lookup); a call of a static method that returns one of those of its parameters (`bound`
+    /// gives their arguments), as `ByteArray.create(int[].class)` does; or a constant whose value
+    /// is one. `block` is the static block `value` is in, if any.
+    fn var_handle_value(
+        &self,
+        value: Node<'t>,
+        block: Option<Node<'t>>,
+        bound: &[(&str, Node<'t>)],
+        owner: usize,
+    ) -> Option<VarHandleOf<'t>> {
+        let value = plain(value);
+        // A parameter of the method whose body this is, or the node itself.
+        let arg = |n: Node<'t>| {
+            let n = plain(n);
+            n.symbol()
+                .filter(|s| s.kind == "PARAMETER" && n.kind() == "IDENTIFIER")
+                .and_then(|s| bound.iter().find(|(name, _)| *name == s.name))
+                .map_or(n, |(_, a)| *a)
+        };
+        let field_name = |n: Node<'t>| {
+            let n = arg(n);
+            n.0["value"].as_str().filter(|_| n.kind() == "STRING_LITERAL")
+        };
+        if let Some((name, args)) = handles_call(value) {
+            return match (name, &args[..]) {
+                ("arrayElementVarHandle", [class]) => Some(VarHandleOf::Element(literal_kind(arg(*class))?)),
+                ("byteArrayViewVarHandle", [class, order]) => {
+                    let kind = literal_kind(arg(*class))?;
+                    matches!(kind, "short" | "char" | "int" | "long" | "float" | "double")
+                        .then_some(VarHandleOf::ByteView(kind, byte_order(arg(*order))?))
+                }
+                ("findVarHandle", [class, name, _]) => {
+                    Some(VarHandleOf::Field(self.offset_class(arg(*class), block)?, field_name(*name)?))
+                }
+                _ => None,
+            };
+        }
+        let symbol = value.symbol().filter(|s| s.kind == "METHOD" && value.kind() == "METHOD_INVOCATION");
+        if let Some(symbol) = symbol {
+            let args: Vec<Node<'t>> = value.list("arguments").map(arg).collect();
+            if (symbol.owner, symbol.name) == ("jdk.internal.invoke.MhUtil", "findVarHandle") {
+                return match &args[..] {
+                    [_, name, _] => Some(VarHandleOf::Field(owner, field_name(*name)?)),
+                    [_, class, name, _] => {
+                        Some(VarHandleOf::Field(self.offset_class(*class, block)?, field_name(*name)?))
+                    }
+                    _ => None,
+                };
+            }
+            // A static method of the program whose body returns a handle made of its parameters.
+            let (class, returned, params) = self.single_return(value, args)?;
+            return self.var_handle_value(returned, None, &params, class);
+        }
+        let (value, block) = self.defined(value, block)?;
+        self.var_handle_value(value, block, &[], owner)
+    }
+
+    /// `H.get(a, i)`, `H.set(a, i, x)`, `H.compareAndSet(a, i, expected, x)` and the other
+    /// accesses of a `VarHandle` constant `H` (`o` for a field's, in place of `a, i`): the read,
+    /// write or atomic update of the element or field, as `Unsafe`'s at its offset, or of the
+    /// value in the bytes of a byte array (`Builtin::ByteView`). `None` for any other call.
+    pub(super) fn var_handle_access(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+    ) -> Result<Option<ExprKind>, Error> {
+        if symbol.owner != VAR_HANDLE {
+            return Ok(None);
+        }
+        let receiver = node.child("methodSelect")?.get("expression");
+        let (Some((put, update)), Some(handle)) =
+            (var_handle_method(symbol.name), receiver.and_then(|r| self.var_handle(r)))
+        else {
+            return unsupported(
+                node,
+                &format!("`VarHandle.{}` of a handle that is not a constant", symbol.name),
+            );
+        };
+        let args: Vec<Node> = node.list("arguments").collect();
+        let count = match handle {
+            VarHandleOf::Field(..) => 1,
+            _ => 2,
+        } + usize::from(put == Some(true))
+            + match update {
+                Some(FieldUpdate::CompareAndSet | FieldUpdate::CompareAndExchange) => 2,
+                Some(_) => 1,
+                None => 0,
+            };
+        if args.len() != count {
+            return unsupported(node, &format!("`VarHandle.{}` with {} arguments", symbol.name, args.len()));
+        }
+        let kind = match handle {
+            VarHandleOf::Field(class, field) => {
+                let (object, ty) = self.handle_field(node, symbol, args[0], class, field)?;
+                let place = Place::Field { object: Box::new(object), name: field.to_string() };
+                return self.access_at(node, place, ty, class, &args[1..], update, put).map(Some);
+            }
+            VarHandleOf::Element(kind) => {
+                let (array, index, ty) =
+                    self.handle_element(node, symbol, args[0], (args[1], false), kind, None)?;
+                let place = Place::Index(Box::new(array), Box::new(index));
+                return self.access_at(node, place, ty, usize::MAX, &args[2..], update, put).map(Some);
+            }
+            VarHandleOf::ByteView(kind, big_endian) => (kind, big_endian),
+        };
+        if update.is_some() {
+            return unsupported(node, &format!("`VarHandle.{}` of a view of a byte array", symbol.name));
+        }
+        self.byte_view(node, symbol, &args, kind).map(Some)
+    }
+
+    /// The read or write (`args[2]`) of the value of kind `kind.0` in the bytes of the `byte[]`
+    /// `args[0]` from index `args[1]` on, in big-endian order when `kind.1`.
+    fn byte_view(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        args: &[Node<'t>],
+        kind: (Kind, bool),
+    ) -> Result<ExprKind, Error> {
+        let (array, index, _) = self.handle_element(node, symbol, args[0], (args[1], false), "byte", None)?;
+        let ty = match kind.0 {
+            "short" => Type::Short,
+            "char" => Type::Char,
+            "int" => Type::Int,
+            "long" => Type::Long,
+            "float" => Type::Float,
+            _ => Type::Double,
+        };
+        let pos = node.pos();
+        let place = Place::Index(Box::new(array), Box::new(index));
+        let builtin = Builtin::ByteView { ty, big_endian: kind.1 };
+        if let Some(value) = args.get(2) {
+            let value = self.convert(self.expr(*value)?, ty);
+            let value = self.synth(ExprKind::Cast(Type::Byte, Box::new(value)), pos, Type::Byte);
+            let store = self.synth(
+                ExprKind::Assign { op: None, target: place, value: Box::new(value) },
+                pos,
+                Type::Byte,
+            );
+            return Ok(ExprKind::Builtin(builtin, vec![store]));
+        }
+        let element = match place {
+            Place::Index(array, index) => self.synth(ExprKind::Index(array, index), pos, Type::Byte),
+            _ => unreachable!("a view's element"),
+        };
+        let read = self.synth(ExprKind::Builtin(builtin, vec![element]), pos, ty);
+        Ok(self.convert(read, self.ty(node, node.java_type())?).kind)
     }
 
     /// `U.get<Kind><Mode>(o, OFFSET)` and `U.put<Kind><Mode>(o, OFFSET, x)` of a field handle:
@@ -394,11 +870,13 @@ impl<'t> Lowering<'t> {
             return Ok(None);
         }
         let args: Vec<Node> = node.list("arguments").collect();
-        let offset = match self.handle(args[1]) {
-            Some((class, field)) => Offset::Field(class, field),
-            None => match self.element_offset(args[1]) {
-                Some((index, kind)) => Offset::Element(index, kind),
-                None => {
+        let offset = match (self.handle(args[1]), self.static_handle(args[1], false)) {
+            (Some((class, field)), _) => Offset::Field(class, field),
+            (_, Some((class, field))) => Offset::Static(class, field),
+            _ => match (self.element_offset(args[1], &[]), self.computed_offset(args[1], 0)) {
+                (Some((index, kind)), _) => Offset::Element(index, kind),
+                (_, Some(kind)) => Offset::Computed(args[1], kind),
+                _ => {
                     let what = "an offset that is neither a field's nor an array element's";
                     return unsupported(node, &format!("`Unsafe.{}` with {what}", symbol.name));
                 }
@@ -409,37 +887,60 @@ impl<'t> Lowering<'t> {
                 let (object, ty) = self.handle_field(node, symbol, args[0], class, field)?;
                 (Place::Field { object: Box::new(object), name: field.to_string() }, ty, class)
             }
-            Offset::Element(index, kind) => {
-                let (array, index, ty) = self.handle_element(node, symbol, args[0], index, kind)?;
+            Offset::Static(class, field) => {
+                let ty = self.static_handle_field(node, symbol, args[0], class, field)?;
+                (Place::Static { class, name: field.to_string() }, ty, class)
+            }
+            Offset::Element(index, kind) | Offset::Computed(index, kind) => {
+                let access = Some(access_kind(symbol.ty));
+                let computed = matches!(offset, Offset::Computed(..));
+                let (array, index, ty) =
+                    self.handle_element(node, symbol, args[0], (index, computed), kind, access)?;
                 (Place::Index(Box::new(array), Box::new(index)), ty, usize::MAX)
             }
         };
+        self.access_at(node, place, ty, class, &args[2..], update, put).map(Some)
+    }
+
+    /// The access of `Unsafe` or of a `VarHandle` `node` at `place`, of type `ty`, a field of class
+    /// `class` or an element: the read, the write of `values[0]` (`put`), or the atomic update
+    /// `update` with `values` as its operands.
+    #[allow(clippy::too_many_arguments)]
+    fn access_at(
+        &self,
+        node: Node<'t>,
+        place: Place,
+        ty: Type,
+        class: usize,
+        values: &[Node<'t>],
+        update: Option<FieldUpdate>,
+        put: Option<bool>,
+    ) -> Result<ExprKind, Error> {
         let ret = self.ty(node, node.java_type())?;
         if let Some(update) = update {
-            let operands = args[2..]
-                .iter()
-                .map(|a| Ok(self.stored(self.expr(*a)?, ty)))
-                .collect::<Result<_, Error>>()?;
+            let operands =
+                values.iter().map(|a| Ok(self.stored(self.expr(*a)?, ty))).collect::<Result<_, Error>>()?;
             let call = match place {
                 Place::Field { object, name } => {
-                    self.field_update(*object, class, &name, ty, update, operands)
+                    self.field_update(Some(*object), class, &name, ty, update, operands)
                 }
+                Place::Static { name, .. } => self.field_update(None, class, &name, ty, update, operands),
                 place => self.element_update(node, place, ty, update, operands)?,
             };
             let result = if update == FieldUpdate::CompareAndSet { Type::Boolean } else { ty };
             let call = self.synth(call, node.pos(), result);
-            return Ok(Some(self.convert(call, ret).kind));
+            return Ok(self.convert(call, ret).kind);
         }
         if put == Some(true) {
-            let value = self.stored(self.expr(args[2])?, ty);
-            return Ok(Some(ExprKind::Assign { op: None, target: place, value: Box::new(value) }));
+            let value = self.stored(self.expr(values[0])?, ty);
+            return Ok(ExprKind::Assign { op: None, target: place, value: Box::new(value) });
         }
         let read = match place {
             Place::Index(array, index) => ExprKind::Index(array, index),
             place => objects::read(place),
         };
         let read = self.synth(read, node.pos(), ty);
-        Ok(Some(self.convert(read, ret).kind))
+        Ok(self.convert(read, ret).kind)
     }
 
     /// `U.compareAndSet<Kind>(o, OFFSET, expected, x)` or another atomic update of field `field`
@@ -447,20 +948,23 @@ impl<'t> Lowering<'t> {
     /// makes it (see the module's comment).
     fn field_update(
         &self,
-        object: Expr,
+        object: Option<Expr>,
         class: usize,
         field: &str,
         ty: Type,
         update: FieldUpdate,
         operands: Vec<Expr>,
     ) -> ExprKind {
-        let name = self.update_method_name(class, field, ty, update);
-        ExprKind::MethodCall {
-            receiver: Box::new(object),
-            name,
-            args: operands,
-            resolved: None,
-            is_super: false,
+        let name = self.update_method_name(class, field, ty, update, object.is_none());
+        match object {
+            Some(object) => ExprKind::MethodCall {
+                receiver: Box::new(object),
+                name,
+                args: operands,
+                resolved: None,
+                is_super: false,
+            },
+            None => ExprKind::Call { name, args: operands, resolved: None },
         }
     }
 
@@ -476,15 +980,19 @@ impl<'t> Lowering<'t> {
         mut operands: Vec<Expr>,
     ) -> Result<ExprKind, Error> {
         // The runtime compares by identity what the generator can: objects, arrays, enums and
-        // numbers. An `Object` may hold a string, which compares by value.
+        // numbers. (An `Object` that may hold a string or a box is rejected by
+        // `analysis::patterns`, as `==` on it is.)
         if matches!(ty, Type::String | Type::StringBuilder | Type::Boxed(_) | Type::JavaClass)
-            || Self::is_object(ty)
             || self.param_owner(ty).is_some()
         {
             return unsupported(node, &format!("an atomic update of an element of a `{ty}[]`"));
         }
         let value = Box::new(operands.pop().expect("an update has an operand"));
-        let op = (update == FieldUpdate::GetAndAdd).then_some(BinOp::Add);
+        let op = match update {
+            FieldUpdate::GetAndAdd => Some(BinOp::Add),
+            FieldUpdate::GetAndBitwise(op) => Some(op),
+            _ => None,
+        };
         let store = self.synth(ExprKind::Assign { op, target: place, value }, node.pos(), ty);
         operands.push(store);
         Ok(ExprKind::Builtin(Builtin::ElementUpdate(update), operands))
@@ -521,28 +1029,61 @@ impl<'t> Lowering<'t> {
         Ok((object, ty))
     }
 
+    /// The type of the static field `field` of class `class`, which an access of `Unsafe` at its
+    /// offset (`staticFieldOffset`) makes on `base`, which must be that field's base.
+    fn static_handle_field(
+        &self,
+        node: Node<'t>,
+        symbol: &Symbol<'t>,
+        base: Node<'t>,
+        class: usize,
+        field: &str,
+    ) -> Result<Type, Error> {
+        if self.static_handle(base, true).is_none_or(|b| b != (class, field)) {
+            return unsupported(
+                node,
+                &format!("`Unsafe.{}` on another base than its static field's", symbol.name),
+            );
+        }
+        let member = self.types[class]
+            .node
+            .list("members")
+            .find(|m| m.kind() == "VARIABLE" && m.str("name") == field && m.has_flag("STATIC"));
+        let Some(member) = member else {
+            return unsupported(
+                node,
+                &format!("the offset of `{field}`, which is not a static field of the class"),
+            );
+        };
+        self.declared_type(member, member.symbol().map_or("", |s| s.ty), class, None)
+    }
+
     /// The array (`array`, the first argument) and index of an access of `Unsafe` at an element
-    /// offset of an array of kind `kind` with index `index`, and the elements' type, which must be
-    /// of that kind, and of the access's.
+    /// offset of an array of kind `kind` with index `index.0` (or, when `index.1`, at the offset
+    /// that `index.0` computes, see `computed_offset`), and the elements' type, which must be of
+    /// that kind, and of the access's.
     fn handle_element(
         &self,
         node: Node<'t>,
         symbol: &Symbol<'t>,
         array: Node<'t>,
-        index: Node<'t>,
+        (index, computed): (Node<'t>, bool),
         kind: Kind,
+        access: Option<Kind>,
     ) -> Result<(Expr, Expr, Type), Error> {
         let array = self.expr(array)?;
+        let owner = symbol.owner.rsplit('.').next().unwrap_or_default();
         let Type::Array(element) = array.ty else {
             let what = "at an element offset of a value that is not an array";
-            return unsupported(node, &format!("`Unsafe.{}` {what}", symbol.name));
+            return unsupported(node, &format!("`{owner}.{}` {what}", symbol.name));
         };
         let element = *element;
-        if type_kind(element) != kind || access_kind(symbol.ty) != kind {
+        if type_kind(element) != kind || access.is_some_and(|a| a != kind) {
             let what = "at an element offset of an array of another type";
-            return unsupported(node, &format!("`Unsafe.{}` {what}", symbol.name));
+            return unsupported(node, &format!("`{owner}.{}` {what}", symbol.name));
         }
         let index = self.expr(index)?;
+        let index = if computed { self.computed_index(index, kind) } else { index };
         let index = match index.ty {
             Type::Long => {
                 let pos = index.pos;
@@ -551,6 +1092,21 @@ impl<'t> Lowering<'t> {
             _ => self.convert(index, Type::Int),
         };
         Ok((array, index, element))
+    }
+
+    /// The index of the element of an array of kind `kind` at the offset `offset`, a `long`:
+    /// `(offset - base) / scale`, of `Unsafe`'s base offset and index scale of such arrays.
+    fn computed_index(&self, offset: Expr, kind: Kind) -> Expr {
+        let pos = offset.pos;
+        let offset = self.convert(offset, Type::Long);
+        let native = |n| ExprKind::Builtin(Builtin::Native(n), Vec::new());
+        let base = self.synth(native(Native::ArrayBaseOffset), pos, Type::Long);
+        let element = if kind == "reference" { "java.lang.Object" } else { kind };
+        let scale = self.synth(native(Native::ArrayIndexScale(element)), pos, Type::Int);
+        let scale = self.convert(scale, Type::Long);
+        let from_base =
+            self.synth(ExprKind::Binary(BinOp::Sub, Box::new(offset), Box::new(base)), pos, Type::Long);
+        self.synth(ExprKind::Binary(BinOp::Div, Box::new(from_base), Box::new(scale)), pos, Type::Long)
     }
 
     /// `value`, to be stored in a field of type `ty`: cast to it from `Unsafe`'s `Object` or
@@ -565,7 +1121,14 @@ impl<'t> Lowering<'t> {
 
     /// The name of the method that makes the atomic update `update` of the field `field` of
     /// class `class`, of type `ty`, which `field_update_methods` adds.
-    fn update_method_name(&self, class: usize, field: &str, ty: Type, update: FieldUpdate) -> String {
+    fn update_method_name(
+        &self,
+        class: usize,
+        field: &str,
+        ty: Type,
+        update: FieldUpdate,
+        is_static: bool,
+    ) -> String {
         let mut updates = self.field_updates.borrow_mut();
         if let Some(u) = updates.iter().find(|u| u.class == class && u.field == field && u.update == update) {
             return u.name.clone();
@@ -575,6 +1138,9 @@ impl<'t> Lowering<'t> {
             FieldUpdate::GetAndSet => "getAndSet",
             FieldUpdate::CompareAndSet => "compareAndSet",
             FieldUpdate::CompareAndExchange => "compareAndExchange",
+            FieldUpdate::GetAndBitwise(BinOp::BitOr) => "getAndBitwiseOr",
+            FieldUpdate::GetAndBitwise(BinOp::BitAnd) => "getAndBitwiseAnd",
+            FieldUpdate::GetAndBitwise(_) => "getAndBitwiseXor",
         };
         let mut chars = field.chars();
         let capitalized: String =
@@ -584,7 +1150,14 @@ impl<'t> Lowering<'t> {
             .map(|n| if n == 1 { base.clone() } else { format!("{base}{n}") })
             .find(|n| !updates.iter().any(|u| &u.name == n))
             .expect("a free name");
-        updates.push(FieldUpdateMethod { class, field: field.to_string(), ty, update, name: name.clone() });
+        updates.push(FieldUpdateMethod {
+            class,
+            field: field.to_string(),
+            ty,
+            update,
+            is_static,
+            name: name.clone(),
+        });
         name
     }
 
@@ -601,7 +1174,8 @@ impl<'t> Lowering<'t> {
         for m in methods.iter_mut() {
             for s in &mut m.body {
                 rewrite_stmt(s, &mut |e| {
-                    if let ExprKind::MethodCall { name, resolved: resolved @ None, .. } = &mut e.kind
+                    if let ExprKind::MethodCall { name, resolved: resolved @ None, .. }
+                    | ExprKind::Call { name, resolved: resolved @ None, .. } = &mut e.kind
                         && let Some(&i) = index.get(name.as_str())
                     {
                         *resolved = Some(i);
@@ -617,6 +1191,9 @@ impl<'t> Lowering<'t> {
         let pos = Pos::default();
         let ty = u.ty;
         let field = || {
+            if u.is_static {
+                return Place::Static { class: u.class, name: u.field.clone() };
+            }
             let this = self.synth(ExprKind::This, pos, self.self_type(u.class));
             Place::Field { object: Box::new(this), name: u.field.clone() }
         };
@@ -634,8 +1211,9 @@ impl<'t> Lowering<'t> {
         };
         let boolean = |b: bool| self.synth(ExprKind::Bool(b), pos, Type::Boolean);
         let (params, result, body) = match u.update {
-            FieldUpdate::GetAndAdd => {
-                let sum = ExprKind::Binary(BinOp::Add, Box::new(var("old")), Box::new(var("delta")));
+            FieldUpdate::GetAndAdd | FieldUpdate::GetAndBitwise(_) => {
+                let op = if let FieldUpdate::GetAndBitwise(op) = u.update { op } else { BinOp::Add };
+                let sum = ExprKind::Binary(op, Box::new(var("old")), Box::new(var("delta")));
                 let sum = self.synth(sum, pos, ty);
                 (vec![param("delta")], ty, vec![old(), assign(sum), ret(var("old"))])
             }
@@ -663,12 +1241,13 @@ impl<'t> Lowering<'t> {
             ret: result,
             body,
             is_main: false,
-            is_static: false,
+            is_static: u.is_static,
             is_ctor: false,
             class: u.class,
             pos,
             is_abstract: false,
-            is_synchronized: false,
+            // A static field has no object whose lock the method holds: it holds its class's.
+            is_synchronized: u.is_static,
             overrides: Vec::new(),
             type_params: Vec::new(),
         }

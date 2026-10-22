@@ -1092,6 +1092,15 @@ impl<'a> Gen<'a> {
             return Code::atom(format!("{local}{clone}"));
         }
         let obj = self.object(object);
+        // A class without objects, such as an abstract class none of whose subclasses the program
+        // creates, is an empty enum, which may have no struct with the field: the read never runs.
+        if let Some(t) = self.enum_of(object)
+            && self.enum_variants(t).is_empty()
+        {
+            let name = struct_name(&self.class.types[t].name);
+            let never = format!("<_ as std::borrow::Borrow<{name}>>::borrow(&object)");
+            return Code::atom(format!("{{ let object = {obj}; match *{never} {{}} }}"));
+        }
         if self.is_plain(object) {
             return Code::atom(format!("{obj}.{}{clone}", self.field_path(object, name)));
         }
@@ -1262,6 +1271,18 @@ impl<'a> Gen<'a> {
             let mut temp = self.temp(&snake_case(&p.name));
             while names.contains(&temp) {
                 temp.push('_');
+            }
+            // A string that may be null, read from a borrowed object, is borrowed from the
+            // borrow's guard, which ends with the `let`: the string is copied out first.
+            if let Some(owned) = text.strip_suffix(".as_deref()")
+                && owned.contains(".borrow()")
+            {
+                let value = format!("{temp}_value");
+                lines.push(format!("let {value} = {owned}.clone();"));
+                lines.push(format!("let {temp} = {value}.as_deref();"));
+                names.extend([value, temp.clone()]);
+                bound.push(temp);
+                continue;
             }
             lines.push(format!("let {temp} = {text};"));
             names.push(temp.clone());

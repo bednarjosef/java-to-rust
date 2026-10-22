@@ -121,6 +121,8 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.util.Arrays#sort",
             "java.util.Arrays#copyOfRange",
             "java.util.Arrays#binarySearch",
+            // A negative count of seed bytes (`Native::SecureSeed`).
+            "java.security.SecureRandom#getSeed",
         ],
     ),
     // A monitor that the thread does not hold.
@@ -176,9 +178,26 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.io.FileInputStream#skip0",
             "java.io.FileOutputStream#write",
             "java.io.FileOutputStream#writeBytes",
+            "java.io.RandomAccessFile#read0",
+            "java.io.RandomAccessFile#readBytes0",
+            "java.io.RandomAccessFile#write0",
+            "java.io.RandomAccessFile#writeBytes0",
+            "java.io.RandomAccessFile#getFilePointer",
+            "java.io.RandomAccessFile#seek0",
+            "java.io.RandomAccessFile#length0",
+            "java.io.RandomAccessFile#setLength0",
+            "java.io.UnixFileSystem#createFileExclusively0",
+            "java.io.UnixFileSystem#canonicalize0",
         ],
     ),
-    ("java.io.FileNotFoundException", &["java.io.FileInputStream#open0", "java.io.FileOutputStream#open0"]),
+    (
+        "java.io.FileNotFoundException",
+        &[
+            "java.io.FileInputStream#open0",
+            "java.io.FileOutputStream#open0",
+            "java.io.RandomAccessFile#open0",
+        ],
+    ),
     // A charset's name that the runtime does not know.
     ("java.io.UnsupportedEncodingException", &["java.lang.String#getBytes", "java.lang.String#<init>"]),
     (
@@ -303,6 +322,18 @@ fn template_type(name: &str) -> Option<&'static Value> {
     template_types().iter().find(|(n, _)| n == name).map(|(_, d)| *d)
 }
 
+/// The class of the type of the field `field` of the standard class `class`, when it is one of the
+/// JDK's classes (not a primitive, nor a standard class).
+pub fn standard_field_type(class: &str, field: &str) -> Option<String> {
+    let member = template_type(class)?["members"]
+        .as_array()?
+        .iter()
+        .find(|m| m["kind"].as_str() == Some("VARIABLE") && m["name"].as_str() == Some(field))?;
+    let ty = member["symbol"]["type"].as_str()?;
+    let ty = ty.split('<').next().unwrap_or(ty).trim_end_matches("[]");
+    (ty.contains('.') && !is_standard(ty)).then(|| ty.to_string())
+}
+
 /// Whether `name` is the qualified name of a standard class the translator provides.
 pub fn is_standard(name: &str) -> bool {
     static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
@@ -374,6 +405,36 @@ fn init_cause_member() -> (String, String, String) {
     ("java.lang.Throwable".into(), "initCause".into(), "(java.lang.Throwable)java.lang.Throwable".into())
 }
 
+/// `Throwable.setStackTrace`.
+fn set_stack_trace_member() -> (String, String, String) {
+    ("java.lang.Throwable".into(), "setStackTrace".into(), "(java.lang.StackTraceElement[])void".into())
+}
+
+/// The constructor of `StackTraceElement`.
+fn frame_member() -> (String, String, String) {
+    let signature = "(java.lang.String,java.lang.String,java.lang.String,int)void";
+    ("java.lang.StackTraceElement".into(), "<init>".into(), signature.into())
+}
+
+/// Whether a program with these members may have an exception whose stack trace is more than its
+/// `toString()`: one with a cause, a suppressed exception or frames. An uncaught exception of such
+/// a program is printed with `Throwable.uncaughtTrace()` (see `Lowering::trace_hook`).
+fn longer_traces(members: &HashSet<(String, String, String)>) -> bool {
+    members.iter().any(|(class, name, signature)| {
+        class == "java.lang.Throwable"
+            && match name.as_str() {
+                "<init>" => signature.contains("java.lang.Throwable"),
+                "initCause" | "addSuppressed" | "setStackTrace" | "getCause" => true,
+                _ => false,
+            }
+    })
+}
+
+/// The method of `Throwable` that gives the text of an uncaught exception's stack trace, and the
+/// native that it reads the exception from.
+pub(super) const UNCAUGHT_TRACE: (&str, &str) = ("uncaughtTrace", "()java.lang.String");
+const UNCAUGHT_EXCEPTION: (&str, &str) = ("uncaught0", "()java.lang.Throwable");
+
 /// The classes that a static initializer's failure is seen as (see `lower/clinit_errors.rs`): a
 /// program that catches one of these, or a supertype of them, declares them, with the constructors
 /// that the rewritten `<clinit>` calls.
@@ -400,6 +461,24 @@ fn linkage_classes(uses: &mut Uses) {
     }
 }
 
+/// The signature of the constructor of the standard exception class `class` that makes a new one
+/// of it from another, as `ForkJoinTask.getException` chooses it (`program::recreated_exception`):
+/// the public one of a `Throwable`, else the public one without parameters.
+pub(super) fn recreating_constructor(class: &str) -> Option<&'static str> {
+    if !standard_subclass(class, "java.lang.Throwable") {
+        return None;
+    }
+    let decl = template_type(class)?;
+    let constructors: Vec<&str> = decl["members"]
+        .as_array()?
+        .iter()
+        .filter(|m| m["kind"] == "METHOD" && m["name"] == "<init>")
+        .filter(|m| m["modifiers"]["flags"].as_array().is_some_and(|f| f.iter().any(|f| f == "PUBLIC")))
+        .filter_map(|m| m["symbol"]["type"].as_str())
+        .collect();
+    ["(java.lang.Throwable)void", "()void"].into_iter().find(|s| constructors.contains(s))
+}
+
 /// The uses of the standard classes found in a tree.
 #[derive(Default)]
 struct Uses {
@@ -412,6 +491,9 @@ struct Uses {
     finally: bool,
     /// The operations that may fail, as `RAISED` names them.
     operations: HashSet<String>,
+    /// Whether the code makes a new exception of an exception's class
+    /// (`program::recreated_exception`).
+    recreates: bool,
 }
 
 impl Uses {
@@ -430,6 +512,7 @@ impl Uses {
                 let kind = text(v, "kind");
                 match kind.as_str() {
                     "TRY" => {
+                        self.recreates |= crate::program::recreated_exception(v).is_some();
                         self.finally |= !v["finallyBlock"].is_null();
                         // A try-with-resources catches a `Throwable` to add a failing `close`
                         // to the body's exception as suppressed (see `with_resource`).
@@ -579,17 +662,30 @@ impl Standard {
             // The operations of the standard members scanned so far may raise (`addSuppressed`
             // indexes an array), so the classes they raise are decided again on every round.
             raise_classes(&mut uses, &mut raised);
-            // The checks of `addSuppressed` and `initCause` throw these (see `lower/suppress.rs`).
-            let checked = [
-                (suppress_member(), super::suppress::CLASSES),
-                (init_cause_member(), super::suppress::CAUSE_CLASSES),
+            // The checks of `addSuppressed`, `initCause`, `setStackTrace` and `StackTraceElement`
+            // throw these (see `lower/suppress.rs`).
+            let checked: [(_, &[&str]); 4] = [
+                (suppress_member(), &super::suppress::CLASSES),
+                (init_cause_member(), &super::suppress::CAUSE_CLASSES),
+                (set_stack_trace_member(), &super::suppress::STACK_TRACE_CLASSES),
+                (frame_member(), &super::suppress::STACK_TRACE_CLASSES),
             ];
             for (member, classes) in checked {
                 if uses.members.contains(&member) {
-                    for class in classes {
+                    for &class in classes {
                         uses.classes.insert(class.into());
                         uses.members.insert((class.into(), "<init>".into(), "(java.lang.String)void".into()));
                         uses.instantiated.insert(class.into());
+                    }
+                }
+            }
+            // Each standard exception class whose objects are created has the constructor that
+            // makes a new one of it from another (see `recreate`).
+            if uses.recreates {
+                uses.members.insert(init_cause_member());
+                for class in uses.instantiated.clone() {
+                    if let Some(signature) = recreating_constructor(&class) {
+                        uses.members.insert((class, "<init>".into(), signature.into()));
                     }
                 }
             }
@@ -643,9 +739,14 @@ impl Standard {
             if uses.members.iter().any(|m| m.0 == "java.lang.Thread" && m.1 == "installUncaught0") {
                 uses.members.insert(("java.lang.Thread".into(), "dispatchUncaught".into(), "()void".into()));
             }
-            // A thread or thread group prints as its `toString`, which string conversion calls
-            // unseen.
-            for printed in ["java.lang.Thread", "java.lang.ThreadGroup"] {
+            if longer_traces(&uses.members) {
+                for (name, signature) in [UNCAUGHT_TRACE, UNCAUGHT_EXCEPTION] {
+                    uses.members.insert(("java.lang.Throwable".into(), name.into(), signature.into()));
+                }
+            }
+            // A thread, a thread group or a frame of a stack trace prints as its `toString`, which
+            // string conversion calls unseen.
+            for printed in ["java.lang.Thread", "java.lang.ThreadGroup", "java.lang.StackTraceElement"] {
                 if uses.classes.contains(printed) {
                     uses.members.insert((printed.into(), "toString".into(), "()java.lang.String".into()));
                 }
@@ -757,6 +858,20 @@ impl<'t> Lowering<'t> {
         out
     }
 
+    /// The statement at the start of `main` that gives the runtime the stack traces of uncaught
+    /// exceptions (`Native::InstallTrace`), in a program whose exceptions may have more of one
+    /// than their `toString()` (see `longer_traces`).
+    pub(super) fn trace_hook(&self, pos: Pos) -> Option<Stmt> {
+        let resolved = self.methods.iter().position(|m| {
+            self.types[m.owner].javac == "java.lang.Throwable" && (m.name, m.sig) == UNCAUGHT_TRACE
+        })?;
+        let call =
+            ExprKind::Call { name: UNCAUGHT_TRACE.0.to_string(), args: Vec::new(), resolved: Some(resolved) };
+        let call = self.synth(call, pos, Type::String);
+        let install = ExprKind::Builtin(Builtin::Native(Native::InstallTrace), vec![call]);
+        Some(Stmt::Expr(self.synth(install, pos, Type::Void)))
+    }
+
     /// Declares the standard classes that the program uses (see `Standard`).
     pub(super) fn declare_standard(&mut self) -> Result<(), Error> {
         // A standard class is an item of the crate's root named by its simple name, which a class
@@ -785,7 +900,10 @@ impl<'t> Lowering<'t> {
 
     /// `try { .. } catch (..) { .. } finally { .. }`, and try-with-resources (`resources`).
     pub(super) fn try_stmt(&self, node: Node<'t>) -> Result<Stmt, Error> {
-        let mut body = self.block(node.child("block")?)?;
+        let mut body = match self.recreation(node)? {
+            Some(body) => body,
+            None => self.block(node.child("block")?)?,
+        };
         let resources: Vec<Node<'t>> = node.list("resources").collect();
         for &resource in resources.iter().rev() {
             body = self.with_resource(resource, body)?;
@@ -1037,6 +1155,51 @@ impl<'t> Lowering<'t> {
             return unsupported(get_class, "getClass() of this type");
         }
         Ok(Some(ExprKind::Builtin(Builtin::ClassName { simple }, vec![object])))
+    }
+
+    /// Rejects the overrides of `Throwable`'s methods that Java runs where the translation does
+    /// not: `printStackTrace` with a stream or a writer, through which Java's `printStackTrace()`
+    /// and its uncaught exceptions print, and a `fillInStackTrace` that does more than return the
+    /// exception (Java's constructors run it; there are no frames to fill in).
+    pub(super) fn check_throwable_override(&self, node: Node<'t>) -> Result<(), Error> {
+        let Some(list) = node.get("symbol").and_then(|s| s.0["overrides"].as_array()) else { return Ok(()) };
+        let overridden = |name: &str, sig: &str| {
+            list.iter().any(|o| {
+                o["owner"] == "java.lang.Throwable"
+                    && node.str("name") == name
+                    && o["type"].as_str() == Some(sig)
+            })
+        };
+        if overridden("printStackTrace", "(java.io.PrintStream)void")
+            || overridden("printStackTrace", "(java.io.PrintWriter)void")
+        {
+            return unsupported(node, "overriding `Throwable.printStackTrace` of a stream or writer");
+        }
+        if overridden("fillInStackTrace", "()java.lang.Throwable") {
+            // `return this;` or `return super.fillInStackTrace();`.
+            let returned =
+                node.get("body").map(|b| b.list("statements").collect::<Vec<_>>()).and_then(
+                    |s| match s[..] {
+                        [r] if r.kind() == "RETURN" => r.get("expression"),
+                        _ => None,
+                    },
+                );
+            let trivial = returned.is_some_and(|e| {
+                e.kind() == "IDENTIFIER" && e.str("name") == "this"
+                    || e.kind() == "METHOD_INVOCATION"
+                        && e.list("arguments").next().is_none()
+                        && e.get("methodSelect").is_some_and(|s| {
+                            s.kind() == "MEMBER_SELECT"
+                                && s.str("identifier") == "fillInStackTrace"
+                                && s.get("expression")
+                                    .is_some_and(|r| r.kind() == "IDENTIFIER" && r.str("name") == "super")
+                        })
+            });
+            if !trivial {
+                return unsupported(node, "a `fillInStackTrace` that does more than return the exception");
+            }
+        }
+        Ok(())
     }
 
     /// Rejects a constructor or method of a standard class that the translator does not have,

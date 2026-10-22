@@ -262,13 +262,24 @@ pub fn compare_and_set_element<T>(
     value: T,
     same: impl FnOnce(&T, &T) -> bool,
 ) -> bool {
+    try_compare_and_set_element(a, i, expected, value, same).unwrap_or_else(|e| crate::throw_exception(e))
+}
+
+/// `compare_and_set_element` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_compare_and_set_element<T>(
+    a: &impl Elements<T>,
+    i: i32,
+    expected: T,
+    value: T,
+    same: impl FnOnce(&T, &T) -> bool,
+) -> Result<bool, Exception> {
     let mut items = a.items_mut();
-    let k = position(items.len(), i);
+    let k = try_position(items.len(), i)?;
     let swapped = same(&items[k], &expected);
     if swapped {
         items[k] = value;
     }
-    swapped
+    Ok(swapped)
 }
 
 /// `Unsafe.compareAndExchange<Kind>`: the old `a[i]`, which is now `value` if it was `expected`.
@@ -279,30 +290,136 @@ pub fn compare_and_exchange_element<T: Clone>(
     value: T,
     same: impl FnOnce(&T, &T) -> bool,
 ) -> T {
+    try_compare_and_exchange_element(a, i, expected, value, same)
+        .unwrap_or_else(|e| crate::throw_exception(e))
+}
+
+/// `compare_and_exchange_element` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_compare_and_exchange_element<T: Clone>(
+    a: &impl Elements<T>,
+    i: i32,
+    expected: T,
+    value: T,
+    same: impl FnOnce(&T, &T) -> bool,
+) -> Result<T, Exception> {
     let mut items = a.items_mut();
-    let k = position(items.len(), i);
+    let k = try_position(items.len(), i)?;
     let old = items[k].clone();
     if same(&old, &expected) {
         items[k] = value;
     }
-    old
+    Ok(old)
 }
 
 /// `Unsafe.getAndSet<Kind>`: the old `a[i]`, which is now `value`.
 pub fn get_and_set_element<T>(a: &impl Elements<T>, i: i32, value: T) -> T {
-    let mut items = a.items_mut();
-    let k = position(items.len(), i);
-    std::mem::replace(&mut items[k], value)
+    try_get_and_set_element(a, i, value).unwrap_or_else(|e| crate::throw_exception(e))
 }
 
-/// `Unsafe.getAndAdd<Kind>`: the old `a[i]`, which is now `add(old, delta)` (Java's wrapping
-/// addition).
-pub fn get_and_add_element<T: Copy>(a: &impl Elements<T>, i: i32, delta: T, add: fn(T, T) -> T) -> T {
+/// `get_and_set_element` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_get_and_set_element<T>(a: &impl Elements<T>, i: i32, value: T) -> Result<T, Exception> {
     let mut items = a.items_mut();
-    let k = position(items.len(), i);
+    let k = try_position(items.len(), i)?;
+    Ok(std::mem::replace(&mut items[k], value))
+}
+
+/// `Unsafe.getAndAdd<Kind>` (and the bitwise forms): the old `a[i]`, which is now
+/// `add(old, delta)` (Java's wrapping addition, or the bitwise operation).
+pub fn get_and_add_element<T: Copy>(a: &impl Elements<T>, i: i32, delta: T, add: fn(T, T) -> T) -> T {
+    try_get_and_add_element(a, i, delta, add).unwrap_or_else(|e| crate::throw_exception(e))
+}
+
+/// `get_and_add_element` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_get_and_add_element<T: Copy>(
+    a: &impl Elements<T>,
+    i: i32,
+    delta: T,
+    add: fn(T, T) -> T,
+) -> Result<T, Exception> {
+    let mut items = a.items_mut();
+    let k = try_position(items.len(), i)?;
     let old = items[k];
     items[k] = add(old, delta);
-    old
+    Ok(old)
+}
+
+/// A value that `MethodHandles.byteArrayViewVarHandle` reads from and writes to the bytes of a
+/// `byte[]`: a `short`, `char`, `int`, `long`, `float` or `double`, as its bytes in either order (a
+/// `float` or `double` as its raw bits, as Java's view does).
+pub trait ByteView: Sized {
+    /// The number of bytes.
+    const SIZE: usize;
+    fn from_bytes(bytes: &[i8], big_endian: bool) -> Self;
+    fn write_bytes(self, bytes: &mut [i8], big_endian: bool);
+}
+
+macro_rules! byte_view {
+    ($($t:ty),*) => {$(
+        impl ByteView for $t {
+            const SIZE: usize = std::mem::size_of::<$t>();
+            fn from_bytes(bytes: &[i8], big_endian: bool) -> Self {
+                let mut raw = [0u8; std::mem::size_of::<$t>()];
+                for (r, b) in raw.iter_mut().zip(bytes) {
+                    *r = *b as u8;
+                }
+                if big_endian { <$t>::from_be_bytes(raw) } else { <$t>::from_le_bytes(raw) }
+            }
+            fn write_bytes(self, bytes: &mut [i8], big_endian: bool) {
+                let raw = if big_endian { self.to_be_bytes() } else { self.to_le_bytes() };
+                for (b, r) in bytes.iter_mut().zip(raw) {
+                    *b = r as i8;
+                }
+            }
+        }
+    )*};
+}
+
+byte_view!(i16, u16, i32, i64, f32, f64);
+
+/// The first of the bytes of a view of `size` bytes at index `i` of an array of `len` bytes:
+/// Java checks `i` against `len - (size - 1)`, and names that length in its message.
+fn view_position(len: usize, size: usize, i: i32) -> Result<usize, Exception> {
+    let fits = len as i64 - (size as i64 - 1);
+    if i >= 0 && (i as i64) < fits {
+        return Ok(i as usize);
+    }
+    let message = format!("Index {i} out of bounds for length {fits}");
+    Err(Exception::new("java.lang.ArrayIndexOutOfBoundsException", message))
+}
+
+/// `VIEW.get(a, i)` of a `byteArrayViewVarHandle`: the value whose bytes are `a[i..]`.
+pub fn byte_view_get<V: ByteView>(a: &impl Elements<i8>, i: i32, big_endian: bool) -> V {
+    try_byte_view_get(a, i, big_endian).unwrap_or_else(|e| crate::throw_exception(e))
+}
+
+/// `byte_view_get` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_byte_view_get<V: ByteView>(
+    a: &impl Elements<i8>,
+    i: i32,
+    big_endian: bool,
+) -> Result<V, Exception> {
+    let items = a.items();
+    let k = view_position(items.len(), V::SIZE, i)?;
+    Ok(V::from_bytes(&items[k..k + V::SIZE], big_endian))
+}
+
+/// `VIEW.set(a, i, v)` of a `byteArrayViewVarHandle`: `v`'s bytes written to `a[i..]`, all of them
+/// or, when they do not fit, none.
+pub fn byte_view_set<V: ByteView>(a: &impl Elements<i8>, i: i32, v: V, big_endian: bool) {
+    try_byte_view_set(a, i, v, big_endian).unwrap_or_else(|e| crate::throw_exception(e))
+}
+
+/// `byte_view_set` where the program observes the `ArrayIndexOutOfBoundsException`.
+pub fn try_byte_view_set<V: ByteView>(
+    a: &impl Elements<i8>,
+    i: i32,
+    v: V,
+    big_endian: bool,
+) -> Result<(), Exception> {
+    let mut items = a.items_mut();
+    let k = view_position(items.len(), V::SIZE, i)?;
+    v.write_bytes(&mut items[k..k + V::SIZE], big_endian);
+    Ok(())
 }
 
 /// `a[i] op= ...` where the program observes the exceptions of the index or of `f` (a division

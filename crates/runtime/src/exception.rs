@@ -36,8 +36,9 @@ impl fmt::Display for Exception {
 }
 
 /// Ends the program the way an exception that nothing catches does: Java prints
-/// `Exception in thread "main" ` and the exception's `toString()` (then its stack, which a
-/// translation does not have) to standard error and exits with code 1. Generic in what it
+/// `Exception in thread "main" ` and the exception's stack trace (`uncaught_text`: its
+/// `toString()`, then its causes and suppressed exceptions, without frames) to standard error and
+/// exits with code 1. Generic in what it
 /// "returns", so that it fits anywhere a value is expected: `f().unwrap_or_else(java::uncaught)`.
 pub fn uncaught<T>(e: impl fmt::Display + 'static) -> T {
     die(e)
@@ -74,7 +75,7 @@ pub(crate) fn die(e: impl fmt::Display + 'static) -> ! {
     }
     let name =
         if crate::thread::threads_started() { crate::thread::current_record().name() } else { "main".into() };
-    crate::out::eprint_text(&format!("Exception in thread \"{name}\" {e}\n"));
+    crate::out::eprint_text(&format!("Exception in thread \"{name}\" {}\n", crate::uncaught_text(&e)));
     crate::thread::await_threads();
     crate::drain_stdout();
     std::process::exit(1)

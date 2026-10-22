@@ -166,6 +166,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         // A negative time (and an interrupt, which `runtime_failures` adds in a program that
         // interrupts).
         Builtin::Native(Native::Sleep { .. }) => &["java.lang.IllegalArgumentException"],
+        // A negative count.
+        Builtin::Native(Native::SecureSeed) => &["java.lang.IllegalArgumentException"],
         // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail, but for
         // the interrupt of `join0`, which `runtime_failures` adds.
         Builtin::Native(
@@ -179,6 +181,7 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::CurrentThread
             | Native::ThreadStart
             | Native::ThreadAlive
+            | Native::ThreadState
             | Native::ThreadJoin
             | Native::ThreadRename
             | Native::ThreadInterrupt
@@ -188,7 +191,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::Unpark
             | Native::InstallUncaught
             | Native::UncaughtException
-            | Native::PrintUncaught,
+            | Native::PrintUncaught
+            | Native::InstallTrace,
         ) => &[],
         // A monitor that the thread does not hold (and for `wait` a negative timeout, and an
         // interrupt, which `runtime_failures` adds).
@@ -224,11 +228,24 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::ArrayIndexScale(_)
             | Native::DescriptorHandle
             | Native::DescriptorAppend
-            | Native::Crc32Update,
+            | Native::FullFence
+            | Native::Crc32Update
+            | Native::NoPendingReferences,
         ) => &[],
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
         // of a closed descriptor does nothing.
-        Builtin::Native(Native::FileOpenRead | Native::FileOpenWrite) => &["java.io.FileNotFoundException"],
+        Builtin::Native(Native::FileOpenRead | Native::FileOpenWrite | Native::FileOpenRandom) => {
+            &["java.io.FileNotFoundException"]
+        }
+        Builtin::Native(Native::FileSeek | Native::FileSetLength) => &["java.io.IOException"],
+        // `java.io.File`'s questions answer `false` or 0 where they fail.
+        Builtin::Native(Native::FileSystem(name)) => {
+            if matches!(*name, "createFileExclusively0" | "canonicalize0") {
+                &["java.io.IOException"]
+            } else {
+                &[]
+            }
+        }
         Builtin::Native(
             Native::FileRead
             | Native::FileReadBytes
@@ -277,6 +294,9 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Charset(_) => &[],
         // What an object's `toString` throws is a point of its own (`text_objects`).
         Builtin::ObjectText => &[],
+        // An atomic update of an element, and a view of a byte array's bytes, fail as their
+        // operand, the access of the element, does (`lower::handles`).
+        Builtin::ElementUpdate(_) | Builtin::ByteView { .. } => &[],
         Builtin::ArraysCopyOf => &["java.lang.NegativeArraySizeException"],
         Builtin::Native(Native::ArrayCopy) => &["java.lang.ArrayIndexOutOfBoundsException"],
         // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
@@ -303,9 +323,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         // what it cannot write, as `PrintStream` does.
         Builtin::StringArrayOf | Builtin::ObjectArrayOf | Builtin::ArraysFill => &[],
         Builtin::Native(Native::ErrPrint { .. }) => &[],
-        // `Unsafe`'s updates of an element at an offset and `CRC32.updateBytes0` run on what the
-        // JDK's code has checked already, as the JVM's do.
-        Builtin::ElementUpdate(_) | Builtin::Native(Native::Crc32UpdateBytes) => &[],
+        // `CRC32.updateBytes0` runs on what the JDK's code has checked already, as the JVM's does.
+        Builtin::Native(Native::Crc32UpdateBytes) => &[],
         _ => &["?"],
     }
 }
@@ -450,7 +469,10 @@ pub(super) fn runtime_failures(
                 | BoxedOp::Logical(_),
                 _,
             ) => {}
-            Builtin::MonitorEnter => out.push((NPE, "this synchronized", true, args[0].id)),
+            // Only a lock that may be null throws, as a dereference does: the code generator
+            // checks no other (`codegen::sync`).
+            Builtin::MonitorEnter if null(&args[0]) => out.push((NPE, "this synchronized", true, args[0].id)),
+            Builtin::MonitorEnter => {}
             // A class that is not the object's; a `catch` sees it through `java::catching`.
             Builtin::ClassCheck => out.push(("java.lang.ClassCastException", "this cast", false, x.id)),
             // An object of a class that is not `Cloneable` refuses to be copied.
@@ -475,6 +497,11 @@ pub(super) fn runtime_failures(
                     out.push(("java.lang.ArithmeticException", "this division", true, x.id));
                 }
             }
+            // An atomic update of an element fails as its store does, which is its operand.
+            Builtin::ElementUpdate(_) => {}
+            // A view of a byte array's bytes fails as its element access does, and also where
+            // the index is in bounds but the bytes from it on are too few for the value.
+            Builtin::ByteView { .. } => out.push((INDEX, "this array access", true, args[0].id)),
             // Each array that may be null is dereferenced with the checked form, then the
             // positions are checked, with the checked form of the copy.
             Builtin::Native(Native::ArrayCopy) => {
@@ -516,6 +543,8 @@ pub(super) fn runtime_failures(
                         | Builtin::Bits(BitsOp::ParseRadix, _)
                         | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
                         | Builtin::Native(Native::SystemIdentityHash)
+                        // The expected and the new element of an atomic update may be null.
+                        | Builtin::ElementUpdate(_)
                 );
                 // Appending or inserting a null string, builder or boxed value writes "null" (the
                 // generator's `appended`); a null `char[]` throws.
@@ -537,7 +566,13 @@ pub(super) fn runtime_failures(
                 };
                 // Only the first may be the receiver, which is dereferenced with the checked
                 // form; the code generator rejects a call that does not (`check_dereferences`).
-                if !takes_null && checked.iter().any(null) {
+                // The buffer of a descriptor native, after its descriptor, is dereferenced with the
+                // checked form (`Gen::handle`).
+                if let Builtin::Native(Native::FileReadBytes | Native::FileWriteBytes) = builtin {
+                    if null(&args[1]) {
+                        out.push((NPE, "this call", true, args[1].id));
+                    }
+                } else if !takes_null && checked.iter().any(null) {
                     let receiver = !checked[1..].iter().any(null);
                     out.push((NPE, "this call", receiver, if receiver { args[0].id } else { x.id }));
                 }
@@ -545,7 +580,9 @@ pub(super) fn runtime_failures(
                 if !failures.is_empty() && !constant_pattern(class, builtin, args) {
                     let checked = matches!(
                         builtin,
-                        Builtin::String(StringOp::Substring | StringOp::FromChars | StringOp::GetChars)
+                        Builtin::String(
+                            StringOp::Substring | StringOp::FromChars | StringOp::GetChars | StringOp::FromBytes
+                        )
                             | Builtin::ArraysCopyOf
                             | Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _)
                             | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
@@ -564,6 +601,11 @@ pub(super) fn runtime_failures(
                                     | Native::FileWriteBytes
                                     | Native::FileLength
                                     | Native::FilePosition
+                                    | Native::FileOpenRandom
+                                    | Native::FileSeek
+                                    | Native::FileSetLength
+                                    | Native::FileSystem(_)
+                                    | Native::SecureSeed
                             )
                     ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })));
                     for &failure in failures {

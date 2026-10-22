@@ -369,7 +369,7 @@ impl<'a> Gen<'a> {
             // `if (!(x instanceof T name)) .. else { .. }`
             Some((value, ty, name)) => {
                 let source = self.pattern_source(value, ty);
-                self.line(&format!("if let Some({}) = {source} {{", self.local(name)));
+                self.line(&format!("if let Some({}) = {source} {{", self.pattern_binding(name, &source)));
                 None
             }
             None => {
@@ -444,7 +444,7 @@ impl<'a> Gen<'a> {
                 _ if bound => {
                     let (value, ty, name) = pattern(part).expect("a pattern");
                     let source = self.pattern_source(value, ty);
-                    texts.push(format!("let Some({}) = {source}", self.local(name)));
+                    texts.push(format!("let Some({}) = {source}", self.pattern_binding(name, &source)));
                 }
                 Some((name, ty)) => {
                     texts.push(format!("let Some({}) = {}", self.local(name), self.option_source(name, ty)));
@@ -567,7 +567,7 @@ impl<'a> Gen<'a> {
             return false;
         }
         let source = self.pattern_source(value, ty);
-        self.line(&format!("let Some({}) = {source} else {{", self.local(name)));
+        self.line(&format!("let Some({}) = {source} else {{", self.pattern_binding(name, &source)));
         self.nested(then);
         self.line("};");
         true
