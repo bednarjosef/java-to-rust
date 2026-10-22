@@ -22,10 +22,10 @@
 //!
 //! The `toString` that making an object's text runs is such a call where the generator makes the
 //! text (`"" + o`, `println(o)`, `String.valueOf(o)`, `append(o)`, `String.format`): it calls the
-//! `toString` of the program, and what that throws goes on from there. Elsewhere (the `hashCode`
-//! that `Object`'s `toString` shows, the text of an enum's constant, the message of an exception,
-//! `printf`, the objects that other library calls show) the text is made through `Display`,
-//! which has no way to return an exception, so what it throws ends the program there, as an
+//! `toString` of the program, or the `hashCode` of the program that `Object`'s `toString` shows,
+//! and what that throws goes on from there. Elsewhere (the text of an enum's constant, the message
+//! of an exception, `printf`, the objects that other library calls show) the text is made through
+//! `Display`, which has no way to return an exception, so what it throws ends the program there, as an
 //! exception that nothing catches does; where a `toString` that the program wrote may throw what
 //! a `catch` around such a text, or around a call on the way to it, would catch, the program is
 //! rejected. The JDK's own `toString`s throw only for bugs (a collection changed while it is
@@ -36,6 +36,7 @@
 
 mod entry;
 mod failures;
+use failures::format_may_fail;
 mod field_inits;
 pub(super) mod guards;
 
@@ -101,6 +102,38 @@ struct Seen {
     all: bool,
 }
 
+/// Rejects a `printf` or `format` of a `PrintStream` object whose format may fail. The text is
+/// formatted before the stream's `formattedText` prints it (`lower::strings`), so a specifier
+/// that fails as it prints would leave nothing printed, where Java's `Formatter` has written the
+/// text before it to the stream. (`System.out.printf` prints that text, see
+/// `java::print_format`.)
+fn printf_of_streams(class: &Class, reject: &mut impl FnMut(Pos, &str)) {
+    let (owner, name, _) = crate::program::PRINT_FORMATTED;
+    for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::MethodCall { resolved: Some(r), args, .. } = &x.kind
+                            && class.methods[*r].name == name
+                            && class.types[class.methods[*r].class].name == owner
+                            && let ExprKind::Builtin(Builtin::Format, format) = &args[0].kind
+                            && format_may_fail(class, format)
+                        {
+                            reject(
+                                x.pos,
+                                "`printf` of a `PrintStream` object with a format that may fail not supported yet",
+                            );
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+}
+
 /// Every error found, in the order of the code; the first is the one a translation reports.
 pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>> {
     if class.type_index("java.lang.Throwable").is_none() {
@@ -110,6 +143,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     facts.initialized_statics = initialized_statics(class, facts);
     let mut errors = Vec::new();
     let mut reject = |pos: Pos, message: &str| errors.push(Error { pos, message: message.to_string() });
+    printf_of_streams(class, &mut reject);
     let h = &class.hierarchy;
     let mut points: Vec<Vec<Point>> =
         (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
@@ -136,9 +170,16 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 && crate::lower::rewritten_clinit(&class.types[method.class])
         })
         .collect();
+    // The classes whose objects a `throw` of a value of type `t` throws: those under `t` that are
+    // `Throwable`s, since a value of a type variable or of `Object` (as the JDK's generic code
+    // throws, `throw (X) e`) is one all the same.
+    let throwable = class.type_index("java.lang.Throwable");
+    let thrown = |t: usize| -> Vec<usize> {
+        h.concretes(t).into_iter().filter(|&c| throwable.is_some_and(|w| h.is_subtype(c, w))).collect()
+    };
     let raised = |p: &Point, escapes: &[BTreeSet<Kind>]| -> BTreeSet<Kind> {
         match &p.raise {
-            Raise::Throw(t) => h.concretes(*t).into_iter().map(Kind::Class).collect(),
+            Raise::Throw(t) => thrown(*t).into_iter().map(Kind::Class).collect(),
             Raise::Call(callees) => callees.iter().flat_map(|&c| escapes[c].iter().cloned()).collect(),
             Raise::Runtime { class, .. } => BTreeSet::from([Kind::Runtime(class)]),
             Raise::Text(_) => BTreeSet::new(),
@@ -155,7 +196,6 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // (`URISyntaxException(input, reason, index)` throws for a null input or an index below -1),
     // and which the JDK's code that throws them never gives such arguments.
     let jdk: Vec<bool> = class.methods.iter().map(|m| from_jdk(&class.types[m.class])).collect();
-    let throwable = class.type_index("java.lang.Throwable");
     let bugs_only: Vec<bool> = class
         .methods
         .iter()
@@ -190,9 +230,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             .map(|ps| {
                 ps.iter()
                     .map(|p| match &p.raise {
-                        Raise::Throw(t) => {
-                            h.concretes(*t).into_iter().map(|c| number(Kind::Class(c))).collect()
-                        }
+                        Raise::Throw(t) => thrown(*t).into_iter().map(|c| number(Kind::Class(c))).collect(),
                         Raise::Runtime { class, .. } => Bits::from_iter([number(Kind::Runtime(class))]),
                         Raise::Call(_) | Raise::Text(_) => Bits::default(),
                     })
@@ -255,6 +293,12 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             }
             if !jdk[m] {
                 program = out.clone();
+            }
+            // A static initializer of the JDK runs none of the program's code (see `bugs_only`),
+            // also one that keeps its failures as exceptions (`guarded`): the program's exceptions
+            // that its calls seem to reach through interfaces never escape it.
+            if jdk[m] && initializer[m] {
+                program = Bits::default();
             }
             if bugs_only[m] {
                 if initializer[m] {
@@ -1258,12 +1302,12 @@ fn expr_points(
     let calls_text = generator_text(x);
     for object in text_objects(x) {
         let shown = to_string_impls(class, object.ty);
-        // Where the generator makes the text itself, a `toString` of the program is a call, whose
-        // exception goes on from there; the `hashCode` that `Object`'s `toString` shows, and the
-        // text that the runtime makes, go through `Display`.
+        // Where the generator makes the text itself, a `toString` of the program, or the
+        // `hashCode` of the program that `Object`'s `toString` shows, is a call, whose exception
+        // goes on from there; the text that the runtime makes goes through `Display`.
         let (calls, shown): (Vec<usize>, Vec<usize>) = shown.into_iter().partition(|&i| {
             calls_text
-                && class.methods[i].name == "toString"
+                && matches!(class.methods[i].name.as_str(), "toString" | "hashCode")
                 && !from_jdk(&class.types[class.methods[i].class])
         });
         if !calls.is_empty() {
@@ -1410,6 +1454,28 @@ pub fn text_objects(x: &Expr) -> Vec<&Expr> {
             | Builtin::Native(Native::IdentityHash | Native::SystemIdentityHash),
             _,
         ) => Vec::new(),
+        // A copy, comparison, hash, clone or null check of an object, a fill or sort of an array,
+        // `Unsafe`'s memory and atomic updates: none of them makes the object's text. Of the
+        // natives, only `System.err`'s `print` does.
+        ExprKind::Builtin(
+            Builtin::ObjectClone
+            | Builtin::ObjectsEquals
+            | Builtin::ObjectsHashCode
+            | Builtin::NullChecked
+            | Builtin::Unmatched
+            | Builtin::RawMemory { .. }
+            | Builtin::ElementUpdate(_)
+            | Builtin::ByteView { .. }
+            | Builtin::ArraysFill
+            | Builtin::ArraysSort,
+            _,
+        ) => Vec::new(),
+        ExprKind::Builtin(Builtin::Native(native), _) if !matches!(native, Native::ErrPrint { .. }) => {
+            Vec::new()
+        }
+        // A range of a `CharSequence` that a builder appends is read with its `length` and
+        // `charAt` (`codegen::char_sequence`), or is a string's or a builder's.
+        ExprKind::Builtin(Builtin::Builder(BuilderOp::Append), args) if args.len() == 4 => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
             [&**l, &**r].into_iter().filter(is_object).collect()

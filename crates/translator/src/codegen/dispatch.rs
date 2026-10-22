@@ -488,7 +488,7 @@ impl<'a> Gen<'a> {
             (true, false) => format!("{}({optional})", self.runtime("non_null")),
         };
         let slice = self.slice_of(e);
-        let maker = self.array_maker("from_vec");
+        let maker = self.array_maker("from_vec", ty);
         Code::atom(format!("{maker}(({slice}).iter().map(|s| {each}).collect::<Vec<_>>())"))
     }
 
@@ -940,11 +940,12 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether turning a value of the enum of `t` into text may throw an exception that the
-    /// program observes: some variant's `toString` throws.
+    /// program observes: some variant's `toString` throws, or the `hashCode` that `Object`'s
+    /// `toString` shows.
     pub(super) fn enum_text_throws(&self, t: usize) -> bool {
         self.enum_variants(t)
             .into_iter()
-            .filter_map(|c| hierarchy::to_string_impl(self.class, c))
+            .filter_map(|c| hierarchy::to_string_impl(self.class, c).or_else(|| self.hash_index(c)))
             .any(|i| self.facts.throwing.contains(&i))
     }
 
@@ -1433,8 +1434,8 @@ impl<'a> Gen<'a> {
         let place = if self.facts.borrowed_objects.contains(&(r, 0)) { other } else { format!("&{other}") };
         let same = match self.runtime_of(c).map(Type::unboxed) {
             Some(Type::Double | Type::Float) => "o.to_bits() == b.to_bits()",
-            // Arrays are `Arc`s in a program with threads, as `array_identity` compares them.
-            Some(Type::Array(_)) if self.facts.threaded => "Arc::ptr_eq(o, b)",
+            // A `java::SharedArray` is an `Arc`, as `array_identity` compares them.
+            Some(ty @ Type::Array(_)) if self.shared_array_type(ty) => "Arc::ptr_eq(o, b)",
             Some(Type::Array(_)) => "Rc::ptr_eq(o, b)",
             Some(Type::StringBuilder) => "o.same(b)",
             // A box whose identity is kept (`java::Boxed`) compares the values it holds.
@@ -1673,7 +1674,9 @@ impl<'a> Gen<'a> {
                     _ if faithful => &same_box,
                     _ if floating && self.holds_value(c) => &same_bits,
                     _ if self.holds_value(c) && !array => "a == b",
-                    _ if self.facts.thread_shared.contains(&c) || array && self.facts.threaded => {
+                    _ if self.facts.thread_shared.contains(&c)
+                        || array && self.runtime_of(c).is_some_and(|ty| self.shared_array_type(ty)) =>
+                    {
                         "Arc::ptr_eq(a, b)"
                     }
                     _ => "Rc::ptr_eq(a, b)",
@@ -1783,8 +1786,9 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
-    /// `try_text()`: the text of a value whose class's `toString` may throw, or its exception;
-    /// the other classes' text is their `Display`.
+    /// `try_text()`: the text of a value whose class's `toString`, or the `hashCode` that
+    /// `Object`'s `toString` shows, may throw, or its exception; the other classes' text is their
+    /// `Display`.
     fn try_text_impl(&mut self, t: usize, variants: &[usize]) {
         let name = struct_name(&self.class.types[t].name);
         let throwable = self.throwable_type();
@@ -1801,6 +1805,12 @@ impl<'a> Gen<'a> {
                 } else {
                     (call, uses)
                 }
+            }
+            None if g.hash_index(c).is_some_and(|i| g.facts.throwing.contains(&i)) => {
+                let i = g.hash_index(c).expect("a hashCode that throws");
+                let (call, uses) = g.arm_call(t, c, i, "");
+                let text = g.default_text(c, "hash".to_string());
+                (format!("{call}.map(|hash| {text})"), uses)
             }
             _ => ("Ok(self.to_string())".to_string(), false),
         });

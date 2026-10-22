@@ -25,20 +25,55 @@ fn only_under(class: &Class, facts: &Facts, s: usize, t: usize) -> bool {
     })
 }
 
+/// Whether `cond` being true (`when` true) or false (`when` false) means that local `v` is not
+/// null: `v != null`, or `v == null` for false, alone or in a chain of `&&` (`||`).
+fn checks_null(cond: &Expr, v: &str, when: bool) -> bool {
+    let is_v = |e: &Expr| matches!(&e.kind, ExprKind::Var(n) if n == v);
+    match &cond.kind {
+        ExprKind::Binary(op @ (BinOp::Ne | BinOp::Eq), a, b)
+            if (*op == BinOp::Ne) == when
+                && (is_v(a) && matches!(b.kind, ExprKind::Null)
+                    || is_v(b) && matches!(a.kind, ExprKind::Null)) =>
+        {
+            true
+        }
+        ExprKind::Binary(BinOp::And, a, b) if when => checks_null(a, v, when) || checks_null(b, v, when),
+        ExprKind::Binary(BinOp::Or, a, b) if !when => checks_null(a, v, when) || checks_null(b, v, when),
+        _ => false,
+    }
+}
+
 /// Whether `builtin` is a regular expression call whose pattern (and replacement) are constants
-/// that compile, so that it never throws.
+/// that compile, or whose pattern is `Pattern.quote`'s, which matches its text and has no groups,
+/// so that it never throws.
 fn constant_pattern(class: &Class, builtin: &Builtin, args: &[Expr]) -> bool {
     let text = |i: usize| args.get(i).and_then(|a| crate::analysis::constants::text(class, a));
+    let quoted = args.get(1).is_some_and(|a| {
+        matches!(a.kind, ExprKind::Call { resolved: Some(m), .. }
+            if class.methods[m].name == "quote"
+                && class.types[class.methods[m].class].name == "java.util.regex.Pattern")
+    });
     match builtin {
         Builtin::String(StringOp::Split | StringOp::Matches) => {
-            text(1).is_some_and(|p| java_runtime::regex::never_fails(p, None))
+            quoted || text(1).is_some_and(|p| java_runtime::regex::never_fails(p, None))
         }
         Builtin::String(StringOp::ReplaceAll | StringOp::ReplaceFirst) => match (text(1), text(2)) {
             (Some(p), Some(r)) => java_runtime::regex::never_fails(p, Some(r)),
+            (None, Some(r)) if quoted => java_runtime::regex::never_fails("", Some(r)),
             _ => false,
         },
         _ => false,
     }
+}
+
+/// Whether `String.format` with `args` (the format first) may throw: unless its format is a
+/// literal, or a `static final` constant, that fits its arguments' types, which then never throws;
+/// the arguments in an `Object[]` are as many as the array has.
+pub(in crate::analysis) fn format_may_fail(class: &Class, args: &[Expr]) -> bool {
+    !crate::analysis::constants::text(class, &args[0]).is_some_and(|format| {
+        !args[1..].iter().any(|a| matches!(a.ty, Type::Array(_)))
+            && java_runtime::format::never_fails(format, &format_samples(&args[1..]))
+    })
 }
 
 /// An argument of the runtime's `format` of each argument's kind, as the code generator passes
@@ -381,9 +416,16 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | CodePointOp::NumericValue
             | CodePointOp::Digit,
         ) => &[],
-        // A name that is not a charset: `UnsupportedCharsetException`, `IllegalCharsetNameException`
-        // or, for null, `IllegalArgumentException`. Not checked, so a catch of it is rejected.
-        Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported) => &["?"],
+        // A name that is not a charset's, or a malformed one, or for null an
+        // `IllegalArgumentException` (`charset.rs`).
+        Builtin::Charset(CharsetOp::ForName) => &[
+            "java.nio.charset.UnsupportedCharsetException",
+            "java.nio.charset.IllegalCharsetNameException",
+            "java.lang.IllegalArgumentException",
+        ],
+        Builtin::Charset(CharsetOp::IsSupported) => {
+            &["java.nio.charset.IllegalCharsetNameException", "java.lang.IllegalArgumentException"]
+        }
         Builtin::Charset(_) => &[],
         // What an object's `toString` throws is a point of its own (`text_objects`).
         Builtin::ObjectText => &[],
@@ -394,31 +436,22 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Native(Native::ArrayCopy) => &["java.lang.ArrayIndexOutOfBoundsException"],
         // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
         Builtin::Arrays(op) if op.ranged() => &["java.lang.ArrayIndexOutOfBoundsException"],
-        // A literal format that fits its arguments' types never throws; the arguments in an
-        // `Object[]` are as many as the array has.
-        Builtin::Format => match &args[0].kind {
-            ExprKind::Str(format)
-                if !args[1..].iter().any(|a| matches!(a.ty, Type::Array(_)))
-                    && java_runtime::format::never_fails(format, &format_samples(&args[1..])) =>
-            {
-                &[]
-            }
-            // What the runtime's `format` raises (`format.rs`); a format it does not support ends
-            // the program.
-            _ => &[
-                "java.util.DuplicateFormatFlagsException",
-                "java.util.FormatFlagsConversionMismatchException",
-                "java.util.IllegalFormatArgumentIndexException",
-                "java.util.IllegalFormatCodePointException",
-                "java.util.IllegalFormatConversionException",
-                "java.util.IllegalFormatFlagsException",
-                "java.util.IllegalFormatPrecisionException",
-                "java.util.IllegalFormatWidthException",
-                "java.util.MissingFormatArgumentException",
-                "java.util.MissingFormatWidthException",
-                "java.util.UnknownFormatConversionException",
-            ],
-        },
+        Builtin::Format if !format_may_fail(class, args) => &[],
+        // What the runtime's `format` raises (`format.rs`); a format it does not support ends the
+        // program.
+        Builtin::Format => &[
+            "java.util.DuplicateFormatFlagsException",
+            "java.util.FormatFlagsConversionMismatchException",
+            "java.util.IllegalFormatArgumentIndexException",
+            "java.util.IllegalFormatCodePointException",
+            "java.util.IllegalFormatConversionException",
+            "java.util.IllegalFormatFlagsException",
+            "java.util.IllegalFormatPrecisionException",
+            "java.util.IllegalFormatWidthException",
+            "java.util.MissingFormatArgumentException",
+            "java.util.MissingFormatWidthException",
+            "java.util.UnknownFormatConversionException",
+        ],
         // A zero divisor.
         Builtin::Unsigned(UnsignedOp::Divide | UnsignedOp::Remainder, _) => {
             let nonzero = matches!(args[1].kind, ExprKind::Int(v) if v != 0)
@@ -433,6 +466,31 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         // `CRC32.updateBytes0` runs on what the JDK's code has checked already, as the JVM's does.
         Builtin::Native(Native::Crc32UpdateBytes) => &[],
         _ => &["?"],
+    }
+}
+
+/// Whether `array[index]` is a row of a table of an enum in table form (`lower/enum_tables.rs`):
+/// `fOfConstants[e.ordinal()]` of a constant `e` of that enum, or `fOfConstants[constantOrdinal]`
+/// in one of its constant builders. The enum's initialization makes its tables before it builds
+/// its constants, so a table that a constant's row is read from is never null, even while the
+/// initialization runs; and a table has a row for each constant, so neither index is ever out
+/// of its bounds.
+fn table_row(class: &Class, m: usize, array: &Expr, index: &Expr) -> bool {
+    let ExprKind::Static { class: t, name } = &array.kind else { return false };
+    let decl = &class.types[*t];
+    if decl.kind != TypeKind::Enum || crate::lower::tabled_field(name).is_none() {
+        return false;
+    }
+    match &index.kind {
+        ExprKind::Builtin(Builtin::EnumOrdinal, args) => {
+            matches!(args.first().map(|a| a.ty), Some(Type::Enum(e)) if e == decl.name)
+        }
+        ExprKind::Var(name) => {
+            name == crate::lower::TABLE_ORDINAL
+                && class.methods.get(m).is_some_and(|method| method.class == *t)
+                && class.builds_constants(m)
+        }
+        _ => false,
     }
 }
 
@@ -484,11 +542,12 @@ pub(super) fn runtime_failures(
                 out.push(("java.lang.ArithmeticException", "this division", true, x.id));
             }
         }
-        ExprKind::Index(array, _) => {
-            if null(array) {
+        ExprKind::Index(array, index) => {
+            let row = table_row(class, m, array, index);
+            if null(array) && !row {
                 out.push((NPE, "this array access", true, array.id));
             }
-            if !facts.in_bounds.contains(&x.id) {
+            if !facts.in_bounds.contains(&x.id) && !row {
                 out.push((INDEX, "this array access", true, x.id));
             }
         }
@@ -821,13 +880,14 @@ pub(super) fn runtime_failures(
         },
         _ => {}
     }
-    if let ExprKind::Assign { target: Place::Index(array, _), .. }
-    | ExprKind::IncDec { target: Place::Index(array, _), .. } = &x.kind
+    if let ExprKind::Assign { target: Place::Index(array, index), .. }
+    | ExprKind::IncDec { target: Place::Index(array, index), .. } = &x.kind
     {
-        if null(array) {
+        let row = table_row(class, m, array, index);
+        if null(array) && !row {
             out.push((NPE, "this array access", true, array.id));
         }
-        if !facts.in_bounds.contains(&x.id) {
+        if !facts.in_bounds.contains(&x.id) && !row {
             out.push((INDEX, "this array access", true, x.id));
         }
     }
@@ -871,14 +931,20 @@ pub(super) fn runtime_failures(
     }
     // A box that may be null is unboxed by arithmetic and comparisons, but not by `==` or `!=`
     // with an operand that is no primitive (`v == null`), which compares references.
+    // The right operand of `&&` (`||`) runs once the left one is true (false): `v != null && v`
+    // unboxes a `v` that is not null.
     if let ExprKind::Binary(op, l, r) = &x.kind {
         for (operand, other) in [(l, r), (r, l)] {
             let reference =
                 matches!(op, BinOp::Eq | BinOp::Ne) && !(other.ty.is_numeric() || other.ty == Type::Boolean);
+            let checked = std::ptr::eq(operand, r)
+                && matches!(&r.kind, ExprKind::Var(v) if checks_null(l, v, *op == BinOp::And))
+                && matches!(op, BinOp::And | BinOp::Or);
             if matches!(operand.ty, Type::Boxed(_))
                 && null(operand)
                 && !matches!(x.ty, Type::String)
                 && !reference
+                && !checked
             {
                 out.push((NPE, "this unboxing", false, x.id));
             }

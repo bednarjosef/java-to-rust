@@ -286,14 +286,17 @@ impl<'a> Gen<'a> {
             return;
         }
         match init {
+            // A `try` block carries its value out (see `exceptions::carried_out`).
+            None if self.try_assigned.contains(name) && self.try_start(ty).is_none() => {
+                let ty_text = self.ty_name(ty);
+                self.unset_locals.insert(name.to_string(), ty);
+                self.line(&format!("let mut {rust}: {ty_text};"));
+            }
             None if self.try_assigned.contains(name) => {
                 // Rust cannot tell that a `try` block or its `catch` clauses assign it before it is
                 // read, as Java can: it starts as the value Java would give a field.
                 let ty_text = self.ty_name(ty);
-                let value = match ty {
-                    Type::Array(_) => self.placeholder(ty, false),
-                    _ => exceptions::default_value(ty).unwrap_or("todo!()").to_string(),
-                };
+                let value = self.try_start(ty).unwrap_or_else(|| "todo!()".to_string());
                 self.line("#[allow(unused_assignments)]");
                 self.line(&format!("let {mutable}{rust}: {ty_text} = {value};"));
             }

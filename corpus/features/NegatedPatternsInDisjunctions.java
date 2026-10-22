@@ -1,5 +1,6 @@
 // A negated pattern in an `||` chain: its variable is in scope in the later operands of the
-// chain and in the else branch, where every operand was false and so the pattern matched.
+// chain and in the else branch, where every operand was false and so the pattern matched; and
+// after an `if` without an else branch whose then branch leaves the block, in the rest of it.
 
 public class NegatedPatternsInDisjunctions {
     static int complaints = 0;
@@ -34,6 +35,23 @@ public class NegatedPatternsInDisjunctions {
         }
     }
 
+    // As javac's Types.isUnconditionallyExactValueBased: the rest of the block reads it.
+    static String exact(Object constant, boolean numeric) {
+        if (!(constant instanceof Number value) || !numeric) return "not exact";
+        int whole = value.intValue();
+        return "exact " + whole + (whole == value.doubleValue() ? "" : " of " + value);
+    }
+
+    // Both a later operand and the rest of the block, in a loop whose `continue` leaves it.
+    static int lengths(Object[] values) {
+        int total = 0;
+        for (Object v : values) {
+            if (v == null || !(v instanceof String s) || s.isEmpty()) continue;
+            total += s.length();
+        }
+        return total;
+    }
+
     public static void main(String[] args) {
         check(42);
         check("abc");
@@ -49,5 +67,10 @@ public class NegatedPatternsInDisjunctions {
         System.out.println(size(7, false));
         System.out.println(size(-7, true));
         System.out.println(size("7", true));
+        System.out.println(exact(3, true));
+        System.out.println(exact(2.5, true));
+        System.out.println(exact(4, false));
+        System.out.println(exact("4", true));
+        System.out.println(lengths(new Object[] {"ab", null, 3, "", "cde"}));
     }
 }

@@ -2200,9 +2200,10 @@ fn a_catch_around_a_printf_of_an_object_whose_to_string_throws_is_rejected() {
 }
 
 #[test]
-fn a_catch_around_the_default_text_of_an_object_whose_hash_code_throws_is_rejected() {
-    // `Object`'s `toString` shows the `hashCode`, which may throw what the `catch` catches.
-    let error = java_to_rust::translate(
+fn a_hash_code_that_the_default_text_of_an_object_shows_passes_its_exception_on() {
+    // `Object`'s `toString` shows the `hashCode`, which may throw what the `catch` catches: the
+    // generator makes the text with a call of it, whose exception leaves the `try` block.
+    let rust = translate(
         "public class A {
             static class Item {
                 public int hashCode() { throw new IllegalStateException(\"no hash\"); }
@@ -2215,11 +2216,10 @@ fn a_catch_around_the_default_text_of_an_object_whose_hash_code_throws_is_reject
                 }
             }
         }",
-    )
-    .expect_err("a hashCode whose exception a catch around the text sees");
-    assert!(
-        error.to_string().ends_with("catching an exception that this toString may throw not supported yet"),
-        "{error}"
+    );
+    assert_contains(
+        &rust,
+        &["java::default_text(\"A$Item\", java::or_break!(Rc::new(AItem::new()).hash_code(), 'attempt))"],
     );
 }
 
@@ -3345,10 +3345,8 @@ fn format_arguments_keep_their_java_types() {
     );
     assert_contains(
         &rust,
-        &[
-            "java::print!(\"{}\", java::format(\"%d %s %.2f%n\", &[java::Arg::Long(big), java::Arg::Str(\"x\"), \
-           java::Arg::Double(1.5)]));",
-        ],
+        &["java::print_format(\"%d %s %.2f%n\", &[java::Arg::Long(big), java::Arg::Str(\"x\"), \
+           java::Arg::Double(1.5)]);"],
     );
 }
 
@@ -4223,17 +4221,14 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
         } }",
     );
     assert_contains(&rust, &["java::catching(|| ", "\"java.util.MissingFormatArgumentException\""]);
-    // One whose class is not known is not: a charset's name, which may be unsupported or illegal.
-    let err = reject(
+    // So does a charset's name, which may be unsupported or illegal.
+    let rust = translate(
         "class A { public static void main(String[] a) {
             try { System.out.println(java.nio.charset.Charset.forName(a[0])); }
             catch (RuntimeException e) { System.out.println(\"bad charset\"); }
         } }",
     );
-    assert!(
-        err.contains("catching an exception that this call of the library may throw not supported yet"),
-        "{err}"
-    );
+    assert_contains(&rust, &["java::catching(|| ", "\"java.nio.charset.UnsupportedCharsetException\""]);
     // Nor is a `PatternSyntaxException`, which is not one of the standard classes; a `catch` that
     // cannot see it is fine.
     let err = reject(
@@ -4442,8 +4437,10 @@ fn downcasts_are_checked() {
 }
 
 #[test]
-fn pattern_variables_are_read_only_where_the_translation_binds_them() {
-    let err = java_to_rust::translate(
+fn a_negated_pattern_in_an_or_chain_binds_its_variable_for_the_rest_of_the_block() {
+    // The `if` is turned around, with the rest of the block as its then branch
+    // (`lower/negated_patterns.rs`).
+    let rust = java_to_rust::translate(
         "interface S {}
         class A implements S { int v = 1; }
         class B implements S {}
@@ -4455,8 +4452,8 @@ fn pattern_variables_are_read_only_where_the_translation_binds_them() {
             public static void main(String[] x) { System.out.println(f(new A()) + f(new B())); }
         }",
     )
-    .unwrap_err();
-    assert!(err.to_string().contains("a pattern variable used here not supported yet"), "{err}");
+    .unwrap();
+    assert!(rust.contains("if let Some(a) = s.as_a() && !(a.v == 0) {"), "{rust}");
 }
 
 #[test]

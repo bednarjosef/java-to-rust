@@ -167,7 +167,7 @@ impl<'a> Gen<'a> {
                 } else {
                     parts
                 };
-                Code::atom(format!("{}({parts})", self.array_maker("from_vec")))
+                Code::atom(format!("{}({parts})", self.array_maker("from_vec", Type::array(Type::String))))
             }
             StringOp::Join => self.join(args),
             StringOp::EqualsIgnoreCase => {
@@ -188,7 +188,7 @@ impl<'a> Gen<'a> {
             StringOp::ToCharArray => {
                 let s = self.text_ref(&args[0]);
                 let units = call(self, "units", vec![s]).text;
-                Code::atom(format!("{}({units})", self.array_maker("from_vec")))
+                Code::atom(format!("{}({units})", self.array_maker("from_vec", Type::array(Type::Char))))
             }
             StringOp::GetChars => {
                 let s = self.text_ref(&args[0]);
@@ -243,7 +243,7 @@ impl<'a> Gen<'a> {
                 let units = call(self, "units", vec![s]).text;
                 Code::atom(format!(
                     "{}({units}.into_iter().map(i32::from).collect())",
-                    self.runtime("from_vec")
+                    self.array_maker("from_vec", Type::array(Type::Int))
                 ))
             }
             StringOp::JoinRange => {
@@ -266,7 +266,7 @@ impl<'a> Gen<'a> {
                 };
                 Code::atom(format!(
                     "{}({lines}.into_iter().map(|line| {line}).collect())",
-                    self.array_maker("from_vec")
+                    self.array_maker("from_vec", Type::array(Type::class(OBJECT)))
                 ))
             }
             StringOp::FromChars => {
@@ -292,7 +292,7 @@ impl<'a> Gen<'a> {
                     None => format!("{}::Utf8", self.runtime("Charset")),
                 };
                 let bytes = call(self, "get_bytes", vec![s, charset]).text;
-                Code::atom(self.made_array(bytes))
+                Code::atom(self.made_array(bytes, Type::array(Type::Byte)))
             }
             StringOp::FromBytes => {
                 let bytes = self.slice_of(&args[0]);
@@ -395,7 +395,10 @@ impl<'a> Gen<'a> {
     /// `NullPointerException`, and a chained call is the `&Self` it returns.
     pub(super) fn builder_recv(&mut self, e: &'a Expr) -> String {
         match &e.kind {
-            ExprKind::Builtin(Builtin::Builder(op), args) if op.chains() => {
+            // One that may fail where a `catch` sees it runs inside `java::catching` (`expr`).
+            ExprKind::Builtin(Builtin::Builder(op), args)
+                if op.chains() && !self.facts.catching.contains_key(&e.id) =>
+            {
                 self.builder_call(e.id, *op, args).text
             }
             _ if self.nullable(e) => {
@@ -593,6 +596,7 @@ impl<'a> Gen<'a> {
 
     /// `String.format(format, args...)` as `java::format`, each argument as a `java::Arg`.
     pub(super) fn format_builtin(&mut self, args: &'a [Expr]) -> Code {
+        let printing = std::mem::take(&mut self.printing_format);
         let format = self.text_ref(&args[0]);
         // The arguments in an `Object[]`, by their text (see `java::format_objects`).
         if let [_, array] = args
@@ -606,7 +610,7 @@ impl<'a> Gen<'a> {
                 self.rejected.push(Error { pos: array.pos, message: message.to_string() });
             }
             let slice = self.slice_of(array);
-            let f = self.runtime("format_objects");
+            let f = self.runtime(if printing { "print_format_objects" } else { "format_objects" });
             // Elements that are never null are not `Option`s.
             let text = if self.nullable_element(*element) {
                 "o.as_ref().map(|o| o.to_string())"
@@ -617,7 +621,7 @@ impl<'a> Gen<'a> {
             return Code::atom(format!("{f}({format}, &{texts})"));
         }
         let values: Vec<String> = args[1..].iter().map(|a| self.format_arg(a)).collect();
-        let f = self.runtime("format");
+        let f = self.runtime(if printing { "print_format" } else { "format" });
         Code::atom(format!("{f}({format}, &[{}])", values.join(", ")))
     }
 

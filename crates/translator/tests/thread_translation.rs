@@ -128,7 +128,7 @@ fn a_thread_object_is_never_borrowed_across_a_join() {
 }
 
 #[test]
-fn arrays_of_a_threaded_program_are_shared_arrays() {
+fn arrays_that_another_thread_reaches_are_shared_arrays() {
     let rust = translate(
         "class A {
             static class Filler extends Thread {
@@ -146,6 +146,33 @@ fn arrays_of_a_threaded_program_are_shared_arrays() {
         }",
     );
     assert_contains(&rust, &["out: java::SharedArray<i64>,", "java::shared_filled(4, 0i64)"]);
+}
+
+#[test]
+fn arrays_that_no_other_thread_reaches_stay_local() {
+    // Only `long[]`s cross to the worker; the main thread's `int[]` and `char[]` stay `Rc`s.
+    let rust = translate(
+        "class A {
+            static class Filler extends Thread {
+                private final long[] out;
+                Filler(long[] out) { this.out = out; }
+                public void run() { for (int i = 0; i < out.length; i++) out[i] = i; }
+            }
+            public static void main(String[] args) throws InterruptedException {
+                long[] values = new long[4];
+                Filler f = new Filler(values);
+                f.start();
+                f.join();
+                int[] counts = new int[3];
+                char[] word = \"abc\".toCharArray();
+                for (char c : word) counts[c - 'a'] += values[3];
+                int[] alias = counts;
+                System.out.println(counts[2] + \" \" + (alias == counts) + \" \" + word.length);
+            }
+        }",
+    );
+    assert_contains(&rust, &["out: java::SharedArray<i64>,", "java::filled(3, 0)", "Rc::ptr_eq("]);
+    assert_lacks(&rust, &["java::SharedArray<i32>", "java::SharedArray<u16>", "shared_filled(3"]);
 }
 
 #[test]
@@ -195,6 +222,32 @@ fn a_string_builder_of_a_program_without_threads_stays_local() {
     );
     assert_contains(&rust, &["java::StringBuilder::from_text(\"a\")"]);
     assert_lacks(&rust, &["SharedStringBuilder", "java::enter"]);
+}
+
+#[test]
+fn a_string_builder_that_no_other_thread_reaches_stays_local() {
+    // The worker and main build their own texts; only strings cross threads.
+    let rust = translate(
+        "class A {
+            static String result;
+            public static void main(String[] args) throws InterruptedException {
+                Thread t = new Thread(() -> {
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < 3; i++) sb.append(i);
+                    result = sb.toString();
+                });
+                t.start();
+                t.join();
+                StringBuilder mine = new StringBuilder(\"main \");
+                synchronized (mine) {
+                    mine.append(result);
+                }
+                System.out.println(mine);
+            }
+        }",
+    );
+    assert_contains(&rust, &["java::StringBuilder::new()", "java::StringBuilder::from_text(\"main \")"]);
+    assert_lacks(&rust, &["SharedStringBuilder", "java::enter("]);
 }
 
 #[test]

@@ -21,6 +21,7 @@ mod boxing;
 pub(crate) mod closure;
 pub mod closures;
 mod constants;
+mod early_reads;
 mod exceptions;
 pub mod hierarchy;
 mod indexing;
@@ -47,6 +48,7 @@ pub(crate) use npe_messages::{SEARCH_NULL_ELEMENT, SEARCH_NULL_KEY};
 
 pub use arrays::{RowIndex, Slice, SlicedLoop};
 pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
+pub use threads::array_family;
 pub use whole_objects::whole_objects;
 
 #[derive(Default)]
@@ -59,6 +61,12 @@ pub struct Facts {
     /// The classes, by type index, whose objects two threads may reach: `Arc`s, with a
     /// `java::Locked` unless immutable.
     pub thread_shared: HashSet<usize>,
+    /// Whether two threads may reach a `StringBuilder`, whose builders are then all
+    /// `java::SharedStringBuilder`s (see `threads::shares_builders`).
+    pub shared_builders: bool,
+    /// The families of the arrays that two threads may reach (`threads::array_family`), whose
+    /// arrays are `java::SharedArray`s; every other array is a `java::Array`.
+    pub shared_arrays: HashSet<Type>,
     /// The methods of those classes that must not borrow their object for the whole call, and
     /// the methods that use the kept monitor of `this` (see `monitors`).
     pub long_methods: HashSet<usize>,
@@ -107,6 +115,10 @@ pub struct Facts {
     /// is initialized: their cell starts empty, as there is no object to start it with, so it is
     /// an `Option` that is written with `Some` and read with `java::non_null`.
     pub placeholder_statics: HashSet<(usize, String)>,
+    /// The reads of a static that may run during its class's initialization, before the
+    /// initializer sets it (see `early_reads`): a read of a static of `placeholder_statics` there
+    /// may be null, and is its cell's `Option`.
+    pub early_static_reads: HashSet<ExprId>,
     /// Statics that are never null where code reads them, though the nullness analysis lets
     /// them be: a static set nowhere else, which the first statements of its class's static
     /// initializer set to a value that is not null, as `ForkJoinPool`'s `U = Unsafe.getUnsafe()`.
@@ -274,6 +286,8 @@ pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, V
         [main] => Some(main.class),
         _ => None,
     };
+    facts.early_static_reads =
+        phase("analysis: early static reads", || early_reads::early_reads(class, &facts.eager_init));
     phase("analysis: nullness", || nullness::analyze(class, &mut facts));
     checked(phase("analysis: object values", || patterns::check_object_values(class, &facts)))?;
     phase("analysis: boxing", || boxing::analyze(class, &mut facts));
@@ -313,6 +327,8 @@ fn representation(class: &Class, facts: &mut Facts) {
     facts.interrupts = threads::interrupts(class);
     if facts.threaded {
         facts.thread_shared = threads::thread_shared(class);
+        facts.shared_builders = threads::shares_builders(class, &facts.thread_shared);
+        facts.shared_arrays = threads::shared_arrays(class, &facts.thread_shared);
         facts.long_methods = threads::long_methods(class, &facts.thread_shared);
     }
     facts.monitors = monitors::observed(class);

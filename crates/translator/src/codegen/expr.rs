@@ -299,6 +299,13 @@ impl<'a> Gen<'a> {
                 }
             }
             ExprKind::Field { object, name } => self.field_read(object, name, e.ty),
+            // A read during its class's initialization, which may see the static still empty.
+            ExprKind::Static { class, name } if self.facts.early_static_reads.contains(&e.id) => {
+                match self.placeholder_read(*class, name, e.ty) {
+                    Some(read) => read,
+                    None => self.static_read(*class, name, e.ty),
+                }
+            }
             ExprKind::Static { class, name } => self.static_read(*class, name, e.ty),
             ExprKind::New { args, ctor, .. } => {
                 let ctor = ctor.expect("constructors are resolved by the checker");
@@ -662,6 +669,13 @@ impl<'a> Gen<'a> {
             Builtin::Arrays(op) => self.arrays_op(op, args, id),
             Builtin::ElementUpdate(update) => self.element_update_call(update, args),
             Builtin::ByteView { ty, big_endian } => self.byte_view_call(ty, big_endian, args),
+            // `printf`: the runtime prints what Java's `Formatter` writes, piece by piece.
+            Builtin::Print if matches!(args[0].kind, ExprKind::Builtin(Builtin::Format, _)) => {
+                self.printing_format = true;
+                let code = self.expr(&args[0]);
+                self.printing_format = false;
+                code
+            }
             Builtin::Println | Builtin::Print => {
                 let mut parts = Vec::new();
                 let outer = std::mem::replace(&mut self.printing, true);

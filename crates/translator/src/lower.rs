@@ -648,7 +648,7 @@ impl<'t> Lowering<'t> {
             }
             self.stmt_into(stmt, &mut out)?;
         }
-        Ok(out)
+        Ok(self.exits_into_rest(out))
     }
 
     /// A statement in a position that takes one statement, such as the body of an `if`.

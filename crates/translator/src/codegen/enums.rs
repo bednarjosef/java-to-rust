@@ -39,8 +39,7 @@ impl<'a> Gen<'a> {
         if nullable {
             return "None".to_string();
         }
-        // The arrays of a program with threads are `SharedArray`s.
-        if matches!(ty, Type::Array(_)) && self.facts.threaded {
+        if matches!(ty, Type::Array(_)) && self.shared_array_type(ty) {
             return "java::shared_from_vec(Vec::new())".to_string();
         }
         let Type::Enum(name) = ty else { return default_value(ty).to_string() };
@@ -171,6 +170,11 @@ impl<'a> Gen<'a> {
         match self.enum_to_string(index) {
             // The path names the enum's own method: on `&self`, `ToString::to_string` would be
             // found first, which is this `Display`.
+            // A `toString` that may return null shows "null", as Java's string conversion does.
+            Some(m) if self.facts.nullable_returns.contains(&m) => self.line(&format!(
+                "f.write_str(Self::{}(*self).as_deref().unwrap_or(\"null\"))",
+                self.fn_names[m]
+            )),
             Some(m) => self.line(&format!("f.write_str(&Self::{}(*self))", self.fn_names[m])),
             None => self.line("write!(f, \"{}\", self.enum_name())"),
         }

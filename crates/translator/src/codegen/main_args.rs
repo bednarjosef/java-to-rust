@@ -31,6 +31,6 @@ impl<'a> Gen<'a> {
     /// The command-line arguments as an array of type `ty` (`from_vec(main_args())`).
     pub(super) fn main_args(&mut self, ty: Type) -> Code {
         let args = self.main_args_vec(ty);
-        Code::atom(format!("{}({args})", self.array_maker("from_vec")))
+        Code::atom(format!("{}({args})", self.array_maker("from_vec", ty)))
     }
 }
