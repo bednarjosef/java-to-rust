@@ -20,7 +20,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,6 +31,28 @@ const WATCHDOG: Duration = Duration::from_secs(20);
 thread_local! {
     /// A byte whose address identifies the thread while it lives.
     static TOKEN: u8 = const { 0 };
+}
+
+/// Whether the process has started a second thread (`begin_threads`). Until it has, the one
+/// thread that runs takes and gives back every lock with plain stores (`RawLock::acquire`).
+///
+/// Only a running thread sets it, before it spawns the new one, so a thread that reads `false`
+/// is the only thread there is: the spawner reads its own write, and every thread spawned later
+/// sees it through the spawn's happens-before edge. A relaxed load is therefore enough.
+static THREADS: AtomicBool = AtomicBool::new(false);
+
+/// The process is about to start a second thread: from now on every lock takes the atomic path.
+/// Called by the thread that spawns it, before it spawns it (`thread::start_thread`). The locks
+/// that this thread holds, taken with plain stores, are seen as held by the new thread, as the
+/// spawn orders those stores before everything the new thread does.
+pub(crate) fn begin_threads() {
+    THREADS.store(true, Ordering::SeqCst);
+}
+
+/// Whether only one thread runs: no thread has been started (`THREADS`).
+#[inline]
+fn alone() -> bool {
+    !THREADS.load(Ordering::Relaxed)
 }
 
 /// The calling thread's token: never 0, and different from every other live thread's.
@@ -114,7 +136,11 @@ impl RawLock {
             self.depth.set(self.depth.get() + 1);
             return;
         }
-        if self.owner.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        // The only thread: no other holds the lock, and none can race for it. The lock is left
+        // as the atomic path leaves it, so it may be released after another thread starts.
+        if alone() {
+            self.owner.store(me, Ordering::Relaxed);
+        } else if self.owner.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
             self.wait(me);
         }
         self.depth.set(1);
@@ -170,6 +196,12 @@ impl RawLock {
         let depth = self.depth.get() - 1;
         self.depth.set(depth);
         if depth == 0 {
+            // The only thread: no other waits for the lock (none can have started since it was
+            // taken without this thread starting it, and then `alone` is false).
+            if alone() {
+                self.owner.store(0, Ordering::Relaxed);
+                return;
+            }
             self.owner.store(0, Ordering::SeqCst);
             let bucket = bucket(self as *const RawLock as usize);
             if bucket.waiters.load(Ordering::SeqCst) > 0 {
@@ -189,12 +221,16 @@ impl RawLock {
         if self.owner.load(Ordering::Relaxed) == me {
             self.depth.set(self.depth.get() + 1);
         } else {
-            if self.owner.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            if alone() {
+                self.owner.store(me, Ordering::Relaxed);
+            } else if self.owner.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
                 self.blocked(me);
             }
             self.depth.set(1);
         }
-        self.entered.fetch_add(1, Ordering::Relaxed);
+        // Only the holder writes `entered`; another thread reads it only to tell a monitor from
+        // a data lock while it waits.
+        self.entered.store(self.entered.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
     }
 
     /// Waits for the monitor as a `BLOCKED` thread.
@@ -206,7 +242,7 @@ impl RawLock {
     /// Exits the monitor that `enter` entered.
     #[inline]
     pub(crate) fn exit(&self) {
-        self.entered.fetch_sub(1, Ordering::Relaxed);
+        self.entered.store(self.entered.load(Ordering::Relaxed) - 1, Ordering::Relaxed);
         self.release();
     }
 
@@ -476,6 +512,7 @@ mod tests {
 
     #[test]
     fn threads_take_turns() {
+        crate::locked::begin_threads();
         let racy = Arc::new(Locked::new(0i64));
         let guarded = Arc::new(Locked::new(0i64));
         let threads: Vec<_> = (0..4)
@@ -503,6 +540,7 @@ mod tests {
 
     #[test]
     fn a_held_lock_makes_others_wait() {
+        crate::locked::begin_threads();
         let o = Arc::new(Locked::new(Vec::new()));
         let held = o.borrow_mut();
         let other = {
