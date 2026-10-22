@@ -28,7 +28,7 @@
 
 use super::inner::NestKind;
 use super::*;
-use serde_json::json;
+use crate::value::json;
 use std::collections::HashSet;
 
 /// A lambda or method reference of the code being lowered, and its synthetic class.

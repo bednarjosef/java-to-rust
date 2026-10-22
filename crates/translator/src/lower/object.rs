@@ -218,7 +218,7 @@ fn mentions_object(v: &Value, real: &HashSet<*const Value>) -> bool {
             // An `Enum` is an `Object` too.
             let is_enum = |t: &str| t == "java.lang.Enum" || t.starts_with("java.lang.Enum<");
             names.iter().any(|n| {
-                fields.get(*n).and_then(Value::as_str).is_some_and(|t| t.contains("java.lang.Object"))
+                fields.get(n).and_then(Value::as_str).is_some_and(|t| t.contains("java.lang.Object"))
             }) || fields.get("javaType").and_then(Value::as_str).is_some_and(is_enum)
                 // `Enum.hashCode()` is `Object`'s (see `enums`).
                 || fields.get("owner").and_then(Value::as_str) == Some("java.lang.Enum")
@@ -264,10 +264,10 @@ impl<'t> Lowering<'t> {
         if let Some(clash) = self.types.iter().find(|t| t.name == PLAIN_OBJECT) {
             return unsupported(clash.node, &format!("a class named `{PLAIN_OBJECT}`"));
         }
-        let ctor = serde_json::json!({"kind": "METHOD", "name": "<init>", "modifiers": [],
+        let ctor = crate::value::json!({"kind": "METHOD", "name": "<init>", "modifiers": [],
             "parameters": [], "body": {"kind": "BLOCK", "statements": []},
             "symbol": {"kind": "CONSTRUCTOR", "name": "<init>", "owner": PLAIN_OBJECT, "type": "()void"}});
-        let decl = serde_json::json!({"kind": "CLASS", "simpleName": PLAIN_OBJECT, "modifiers": [],
+        let decl = crate::value::json!({"kind": "CLASS", "simpleName": PLAIN_OBJECT, "modifiers": [],
             "members": [ctor], "symbol": {"kind": "CLASS", "name": PLAIN_OBJECT, "owner": "",
             "type": PLAIN_OBJECT}});
         self.plain_object = Some(self.types.len());

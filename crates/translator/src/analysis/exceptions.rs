@@ -22,10 +22,10 @@
 //!
 //! The `toString` that making an object's text runs is such a call where the generator makes the
 //! text (`"" + o`, `println(o)`, `String.valueOf(o)`, `append(o)`, `String.format`): it calls the
-//! `toString` of the program, and what that throws goes on from there. Elsewhere (the `hashCode`
-//! that `Object`'s `toString` shows, the text of an enum's constant, the message of an exception,
-//! `printf`, the objects that other library calls show) the text is made through `Display`,
-//! which has no way to return an exception, so what it throws ends the program there, as an
+//! `toString` of the program, or the `hashCode` of the program that `Object`'s `toString` shows,
+//! and what that throws goes on from there. Elsewhere (the text of an enum's constant, the message
+//! of an exception, `printf`, the objects that other library calls show) the text is made through
+//! `Display`, which has no way to return an exception, so what it throws ends the program there, as an
 //! exception that nothing catches does; where a `toString` that the program wrote may throw what
 //! a `catch` around such a text, or around a call on the way to it, would catch, the program is
 //! rejected. The JDK's own `toString`s throw only for bugs (a collection changed while it is
@@ -119,7 +119,7 @@ fn printf_of_streams(class: &Class, reject: &mut impl FnMut(Pos, &str)) {
                             && class.methods[*r].name == name
                             && class.types[class.methods[*r].class].name == owner
                             && let ExprKind::Builtin(Builtin::Format, format) = &args[0].kind
-                            && format_may_fail(format)
+                            && format_may_fail(class, format)
                         {
                             reject(
                                 x.pos,
@@ -1302,12 +1302,12 @@ fn expr_points(
     let calls_text = generator_text(x);
     for object in text_objects(x) {
         let shown = to_string_impls(class, object.ty);
-        // Where the generator makes the text itself, a `toString` of the program is a call, whose
-        // exception goes on from there; the `hashCode` that `Object`'s `toString` shows, and the
-        // text that the runtime makes, go through `Display`.
+        // Where the generator makes the text itself, a `toString` of the program, or the
+        // `hashCode` of the program that `Object`'s `toString` shows, is a call, whose exception
+        // goes on from there; the text that the runtime makes goes through `Display`.
         let (calls, shown): (Vec<usize>, Vec<usize>) = shown.into_iter().partition(|&i| {
             calls_text
-                && class.methods[i].name == "toString"
+                && matches!(class.methods[i].name.as_str(), "toString" | "hashCode")
                 && !from_jdk(&class.types[class.methods[i].class])
         });
         if !calls.is_empty() {
@@ -1454,6 +1454,28 @@ pub fn text_objects(x: &Expr) -> Vec<&Expr> {
             | Builtin::Native(Native::IdentityHash | Native::SystemIdentityHash),
             _,
         ) => Vec::new(),
+        // A copy, comparison, hash, clone or null check of an object, a fill or sort of an array,
+        // `Unsafe`'s memory and atomic updates: none of them makes the object's text. Of the
+        // natives, only `System.err`'s `print` does.
+        ExprKind::Builtin(
+            Builtin::ObjectClone
+            | Builtin::ObjectsEquals
+            | Builtin::ObjectsHashCode
+            | Builtin::NullChecked
+            | Builtin::Unmatched
+            | Builtin::RawMemory { .. }
+            | Builtin::ElementUpdate(_)
+            | Builtin::ByteView { .. }
+            | Builtin::ArraysFill
+            | Builtin::ArraysSort,
+            _,
+        ) => Vec::new(),
+        ExprKind::Builtin(Builtin::Native(native), _) if !matches!(native, Native::ErrPrint { .. }) => {
+            Vec::new()
+        }
+        // A range of a `CharSequence` that a builder appends is read with its `length` and
+        // `charAt` (`codegen::char_sequence`), or is a string's or a builder's.
+        ExprKind::Builtin(Builtin::Builder(BuilderOp::Append), args) if args.len() == 4 => Vec::new(),
         ExprKind::Builtin(_, args) => args.iter().filter(is_object).collect(),
         ExprKind::Binary(BinOp::Add, l, r) if x.ty == Type::String => {
             [&**l, &**r].into_iter().filter(is_object).collect()

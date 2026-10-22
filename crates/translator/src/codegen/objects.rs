@@ -812,10 +812,13 @@ impl<'a> Gen<'a> {
         let Some(index) = self.to_string_index(e) else {
             let c = self.struct_class(e).expect("an object has a class type");
             let hash = match self.hash_index(c) {
-                Some(i) => {
+                // A `hashCode` that throws passes its exception on, as `object_text`'s does.
+                Some(i) if self.facts.throwing.contains(&i) => {
                     let call = self.handle_call(handle, e, i);
-                    self.shown_hash(i, call)
+                    let text = self.default_text(c, "hash".to_string());
+                    return (format!("{call}.map(|hash| {text})"), true);
                 }
+                Some(i) => self.handle_call(handle, e, i),
                 None => format!("{}({})", self.runtime("address_hash"), self.address(c, handle)),
             };
             return (self.default_text(c, hash), false);

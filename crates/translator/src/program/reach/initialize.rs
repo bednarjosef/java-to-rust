@@ -8,7 +8,7 @@
 //! (`lower::by_name`).
 
 use super::{Item, MethodKey, Walk, strip_arguments, text};
-use serde_json::Value;
+use crate::value::Value;
 
 /// Whether the call `node` is `Lookup.ensureInitialized(c)`.
 pub fn is_ensure_initialized(node: &Value) -> bool {

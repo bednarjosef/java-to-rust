@@ -26,15 +26,22 @@ fn only_under(class: &Class, facts: &Facts, s: usize, t: usize) -> bool {
 }
 
 /// Whether `builtin` is a regular expression call whose pattern (and replacement) are constants
-/// that compile, so that it never throws.
+/// that compile, or whose pattern is `Pattern.quote`'s, which matches its text and has no groups,
+/// so that it never throws.
 fn constant_pattern(class: &Class, builtin: &Builtin, args: &[Expr]) -> bool {
     let text = |i: usize| args.get(i).and_then(|a| crate::analysis::constants::text(class, a));
+    let quoted = args.get(1).is_some_and(|a| {
+        matches!(a.kind, ExprKind::Call { resolved: Some(m), .. }
+            if class.methods[m].name == "quote"
+                && class.types[class.methods[m].class].name == "java.util.regex.Pattern")
+    });
     match builtin {
         Builtin::String(StringOp::Split | StringOp::Matches) => {
-            text(1).is_some_and(|p| java_runtime::regex::never_fails(p, None))
+            quoted || text(1).is_some_and(|p| java_runtime::regex::never_fails(p, None))
         }
         Builtin::String(StringOp::ReplaceAll | StringOp::ReplaceFirst) => match (text(1), text(2)) {
             (Some(p), Some(r)) => java_runtime::regex::never_fails(p, Some(r)),
+            (None, Some(r)) if quoted => java_runtime::regex::never_fails("", Some(r)),
             _ => false,
         },
         _ => false,
@@ -42,12 +49,13 @@ fn constant_pattern(class: &Class, builtin: &Builtin, args: &[Expr]) -> bool {
 }
 
 /// Whether `String.format` with `args` (the format first) may throw: unless its format is a
-/// literal that fits its arguments' types, which then never throws; the arguments in an
-/// `Object[]` are as many as the array has.
-pub(in crate::analysis) fn format_may_fail(args: &[Expr]) -> bool {
-    !matches!(&args[0].kind, ExprKind::Str(format)
-        if !args[1..].iter().any(|a| matches!(a.ty, Type::Array(_)))
-            && java_runtime::format::never_fails(format, &format_samples(&args[1..])))
+/// literal, or a `static final` constant, that fits its arguments' types, which then never throws;
+/// the arguments in an `Object[]` are as many as the array has.
+pub(in crate::analysis) fn format_may_fail(class: &Class, args: &[Expr]) -> bool {
+    !crate::analysis::constants::text(class, &args[0]).is_some_and(|format| {
+        !args[1..].iter().any(|a| matches!(a.ty, Type::Array(_)))
+            && java_runtime::format::never_fails(format, &format_samples(&args[1..]))
+    })
 }
 
 /// An argument of the runtime's `format` of each argument's kind, as the code generator passes
@@ -403,7 +411,7 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Native(Native::ArrayCopy) => &["java.lang.ArrayIndexOutOfBoundsException"],
         // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
         Builtin::Arrays(op) if op.ranged() => &["java.lang.ArrayIndexOutOfBoundsException"],
-        Builtin::Format if !format_may_fail(args) => &[],
+        Builtin::Format if !format_may_fail(class, args) => &[],
         // What the runtime's `format` raises (`format.rs`); a format it does not support ends the
         // program.
         Builtin::Format => &[

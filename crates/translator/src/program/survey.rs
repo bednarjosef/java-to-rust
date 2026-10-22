@@ -24,7 +24,7 @@ use super::reach::{
     strip_arguments, symbol_type, text, untranslated,
 };
 use crate::ast::{Pos, runtime_native};
-use serde_json::{Value, json};
+use crate::value::{Value, json};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write;
@@ -36,7 +36,7 @@ const EXAMPLES: usize = 3;
 /// The survey: the text report, and the same census as JSON.
 pub struct Survey {
     pub report: String,
-    pub json: Value,
+    pub json: serde_json::Value,
 }
 
 /// Whether code is the program's own or comes from a library root.
@@ -111,7 +111,7 @@ fn canonical(path: &Path) -> PathBuf {
 /// and its `tree`; `files` are the program's own files.
 pub fn survey(units: &[&Value], reach: &Reach, program: &Program, files: &[PathBuf]) -> Survey {
     let census = scan(units, reach, program, files);
-    Survey { report: census.report(reach, &program.main), json: census.json(reach, &program.main) }
+    Survey { report: census.report(reach, &program.main), json: (&census.json(reach, &program.main)).into() }
 }
 
 /// The name of each unit's file relative to the root it came from, as the survey prints it.
