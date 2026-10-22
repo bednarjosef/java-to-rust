@@ -27,7 +27,8 @@ pub fn double_to_hex_string(d: f64) -> String {
     // bit 48 is forced on: the digit that stays is then the one at bit 48 or above.
     let zeros = ((significand | 1 << 48).trailing_zeros() / 4) as usize;
     let (lead, exponent) = if biased == 0 { ('0', -1022) } else { ('1', biased as i32 - 1023) };
-    let digits: String = (zeros..13).rev().map(|i| HEX[((significand >> (4 * i)) & 0xf) as usize] as char).collect();
+    let digits: String =
+        (zeros..13).rev().map(|i| HEX[((significand >> (4 * i)) & 0xf) as usize] as char).collect();
     format!("{sign}0x{lead}.{digits}p{exponent}")
 }
 

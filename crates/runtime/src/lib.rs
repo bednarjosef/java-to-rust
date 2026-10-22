@@ -76,9 +76,9 @@ pub use exception::*;
 pub use fd::*;
 pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
-pub use hex_float::{double_to_hex_string, float_to_hex_string};
 pub use format::{Arg, format, format_objects};
 pub use fs::*;
+pub use hex_float::{double_to_hex_string, float_to_hex_string};
 pub use inflate::{
     inflate_adler, inflate_bytes, inflate_end, inflate_init, inflate_reset, inflate_set_dictionary,
 };
