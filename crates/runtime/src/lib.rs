@@ -47,6 +47,7 @@ mod locked;
 mod math;
 mod monitor;
 mod native_memory;
+mod copy_refs;
 mod natives;
 mod net;
 mod null;
@@ -81,6 +82,7 @@ pub use code_point::{
     is_valid_code_point, low_surrogate, to_chars, to_code_point,
 };
 pub use code_point_chars::*;
+pub use copy_refs::*;
 pub use exact::*;
 pub use exception::*;
 pub use fd::*;
