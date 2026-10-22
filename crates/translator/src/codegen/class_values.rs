@@ -166,6 +166,7 @@ impl<'a> Gen<'a> {
             ClassOp::HashCode => "hash_code",
             ClassOp::GetCanonicalName => "get_canonical_name",
             ClassOp::GetPackageName => "get_package_name",
+            ClassOp::DescriptorString => "descriptor_string",
             ClassOp::DesiredAssertionStatus | ClassOp::IsAnnotation => {
                 return Code::new(format!("{{ let _ = {class}; false }}"), LOWEST);
             }

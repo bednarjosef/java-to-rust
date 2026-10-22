@@ -139,6 +139,7 @@ impl<'t> Lowering<'t> {
             ("desiredAssertionStatus", 0) => ClassOp::DesiredAssertionStatus,
             ("getCanonicalName", 0) => ClassOp::GetCanonicalName,
             ("getPackageName", 0) => ClassOp::GetPackageName,
+            ("descriptorString", 0) => ClassOp::DescriptorString,
             ("isAnnotation", 0) => ClassOp::IsAnnotation,
             ("equals", 1) => ClassOp::Equals,
             _ => return unsupported(node, &format!("`Class.{}` (reflection)", symbol.name)),

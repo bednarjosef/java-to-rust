@@ -901,6 +901,8 @@ pub enum ClassOp {
     /// `getCanonicalName()`, `null` for a local or anonymous class.
     GetCanonicalName,
     GetPackageName,
+    /// `descriptorString()`: `I`, `[I`, `Ljava/lang/String;`.
+    DescriptorString,
     /// `isAnnotation()`: false, as a translation has no class values of annotation types (their
     /// class literals are rejected, and no object's class is one).
     IsAnnotation,

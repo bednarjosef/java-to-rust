@@ -19,6 +19,10 @@ class Throwable {
     // Null until an exception is suppressed, or until `setStackTrace` gives frames.
     private Throwable[] suppressed;
     private StackTraceElement[] stackTrace;
+    // Set by a constructor with `enableSuppression` or `writableStackTrace` false: then
+    // `addSuppressed` and `setStackTrace` keep nothing.
+    private boolean unsuppressible;
+    private boolean unwritable;
 
     public Throwable() {
     }
@@ -37,6 +41,14 @@ class Throwable {
         this.message = cause == null ? null : cause.toString();
         this.cause = cause;
         this.causeSet = true;
+    }
+
+    protected Throwable(String message, Throwable cause, boolean enableSuppression, boolean writableStackTrace) {
+        this.message = message;
+        this.cause = cause;
+        this.causeSet = true;
+        this.unsuppressible = !enableSuppression;
+        this.unwritable = !writableStackTrace;
     }
 
     public String getMessage() {
@@ -61,6 +73,9 @@ class Throwable {
     }
 
     public void addSuppressed(Throwable exception) {
+        if (unsuppressible) {
+            return;
+        }
         Throwable[] own = ownSuppressed();
         Throwable[] more = new Throwable[own.length + 1];
         for (int i = 0; i < more.length; i++) {
@@ -100,7 +115,9 @@ class Throwable {
         for (int i = 0; i < copy.length; i++) {
             copy[i] = stackTrace[i];
         }
-        this.stackTrace = copy;
+        if (!unwritable) {
+            this.stackTrace = copy;
+        }
     }
 
     private static String nullFrame(StackTraceElement[] stackTrace) {
@@ -294,6 +311,10 @@ class Exception extends Throwable {
     public Exception(Throwable cause) {
         super(cause);
     }
+
+    protected Exception(String message, Throwable cause, boolean enableSuppression, boolean writableStackTrace) {
+        super(message, cause, enableSuppression, writableStackTrace);
+    }
 }
 
 class Error extends Throwable {
@@ -310,6 +331,10 @@ class Error extends Throwable {
 
     public Error(Throwable cause) {
         super(cause);
+    }
+
+    protected Error(String message, Throwable cause, boolean enableSuppression, boolean writableStackTrace) {
+        super(message, cause, enableSuppression, writableStackTrace);
     }
 }
 
@@ -401,6 +426,10 @@ class RuntimeException extends Exception {
 
     public RuntimeException(Throwable cause) {
         super(cause);
+    }
+
+    protected RuntimeException(String message, Throwable cause, boolean enableSuppression, boolean writableStackTrace) {
+        super(message, cause, enableSuppression, writableStackTrace);
     }
 }
 
