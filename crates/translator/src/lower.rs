@@ -6,7 +6,6 @@
 mod code_point;
 mod covariant;
 mod element_reads;
-mod enum_nulls;
 mod enum_tables;
 mod enums;
 mod exceptions;
@@ -78,11 +77,6 @@ pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
 pub use program::{Lowered, Rejected, census_lower_program, lower_program, tolerant_lower_program};
 
-/// Checks that no enum of the program can be null: the translation has no null enums.
-pub fn check_enum_nulls(class: &Class) -> Result<(), Error> {
-    enums::check_nulls(class)
-}
-
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
     charsets::check(unit)?;
@@ -125,7 +119,6 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let raised = lowering.raised_objects(&types, &methods);
         let name = first.str("simpleName").to_string();
         let class = Class { name, types, methods, hierarchy, raised };
-        enums::check_nulls(&class)?;
         Ok((class, lowering.real.clone(), failed))
     })
 }

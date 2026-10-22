@@ -26,11 +26,9 @@ impl<'a> Gen<'a> {
         {
             return false;
         }
-        // A cast of a narrowed variable is not null either. (A cast to an enum never is: a null
-        // there ends the program, see `java::null_enum`.)
+        // A cast of a narrowed variable is not null either.
         if let ExprKind::Cast(_, value) = &e.kind
             && nullable_type(e.ty)
-            && !matches!(e.ty, Type::Enum(_))
         {
             return self.nullable(value);
         }
@@ -142,7 +140,7 @@ impl<'a> Gen<'a> {
             _ if matches!(e.ty, Type::Boxed(_)) => self.expr(e).text,
             // A class is `Copy`, so an `Option` of one is too, and so is a charset.
             _ if matches!(e.ty, Type::JavaClass | Type::Charset) => self.expr(e).at(ATOM),
-            // So is an enum, read from a field, an element or a call (see `lower::enum_nulls`).
+            // So is an enum, read from a field, an element or a call.
             _ if matches!(e.ty, Type::Enum(_)) && !matches!(e.kind, ExprKind::Var(_)) => {
                 self.expr(e).at(ATOM)
             }
@@ -167,6 +165,18 @@ impl<'a> Gen<'a> {
         self.dereference(&[e.id], &option)
     }
 
+    /// An enum value that a call, a builtin or a switch uses: one that may be null is an `Option`
+    /// of the enum, which is `Copy`, unwrapped where it is used, so that null throws
+    /// `NullPointerException` (in the checked form where a `catch` or a `finally` sees it, see
+    /// `dereference`).
+    pub(super) fn enum_value(&mut self, e: &'a Expr) -> Code {
+        if !matches!(e.ty, Type::Enum(_)) || !self.nullable(e) {
+            return self.expr(e);
+        }
+        let option = self.expr(e).at(ATOM);
+        Code::atom(self.dereference(&[e.id], &option))
+    }
+
     /// `x == null` and `x != null` for a string.
     pub(super) fn null_test(&mut self, op: BinOp, l: &'a Expr, r: &'a Expr) -> Code {
         let other = if matches!(l.kind, ExprKind::Null) { r } else { l };
@@ -178,7 +188,7 @@ impl<'a> Gen<'a> {
         {
             // A cast to an enum of a value that may be null, such as an element of an enum's
             // array that is an `Object[]` (`lower::covariant`): the checked cast as an `Option`,
-            // which is `None` for null rather than ending the program (`java::null_enum`).
+            // which is `None` for null.
             let test = if matches!(op, BinOp::Ne) { "is_some" } else { "is_none" };
             let option = self.checked_class_cast(other.id, *to, value);
             return Code::atom(format!("{}.{test}()", option.at(ATOM)));

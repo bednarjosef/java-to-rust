@@ -547,8 +547,8 @@ over the program's enums, like `Object`; `ordinal()`, `name()`, `compareTo` and
 `getDeclaringClass()` on it match on the enums it can be, and `equals` and `hashCode` of any enum
 constant are `Object`'s identity ones, and the constants of an enum's class,
 which the JDK reads through `SharedSecrets`, are those of the program's enum whose class it is. A
-cast to an enum of a value that may be null (a key from a generic collection) ends the program
-if the value is null, as an enum that comes out of an `Object` is never an `Option`.
+cast to an enum of a value that may be null (a key from a generic collection) is an `Option` of
+the enum, as any enum value that may be null is.
 
 ### Analyses
 
@@ -577,11 +577,12 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   Dereferencing null throws `NullPointerException` through `java::non_null`, and printing or
   concatenating it gives `null` (`java::or_null`). `==` on objects compares identity:
   `Rc::ptr_eq(&a, &b)`, or `java::same(a.as_ref(), b.as_ref())` where either may be null.
-  An enum local, field, array element or return value that the program sets to null (or the
-  elements of `new E[n]`, and a field that no constructor sets first, which start null) is an
-  `Option` of the enum, compared with `kinds[i] == Some(Kind::Dead)`; such a value may only be
-  stored (in a local too), returned, tested against null, compared, printed or dropped, and any
-  other use of it is rejected (`lower/enum_nulls.rs`).
+  An enum local, parameter, field, array element or return value that may be null (the program
+  sets it to null, or it is an element of `new E[n]` or a field that a constructor may leave
+  unset, which start null) is an `Option` of the enum, which is `Copy`, compared with
+  `kinds[i] == Some(Kind::Dead)`. Where it is used as an enum (a call, `ordinal()`, `name()`,
+  `compareTo`, a `switch`) it is unwrapped with `java::non_null`, which throws
+  `NullPointerException` for null, with Java's message where a `catch` reads it.
 - Arrays (`int[]`, `long[]`, `double[]`, `boolean[]`, `String[]`, and arrays of arrays) are shared
   references in the faithful form, `java::Array<T>`: a shared cell whose clones see each other's
   writes. The aliasing analysis (`analysis/arrays.rs`) finds local arrays that no other name can

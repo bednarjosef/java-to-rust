@@ -358,7 +358,7 @@ impl<'a> Gen<'a> {
             {
                 self.boxed_identity(*op, l, r)
             }
-            // Enums of which one may be null (see `lower::enum_nulls`): `Option`s, equal when both
+            // Enums of which one may be null (`analysis::nullness`): `Option`s, equal when both
             // are null or both are the same constant.
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
                 if matches!((l.ty, r.ty), (Type::Enum(_), Type::Enum(_)))
@@ -454,12 +454,12 @@ impl<'a> Gen<'a> {
                 self.expr(value)
             }
             ExprKind::Cast(to @ Type::Class(..), value) => self.checked_class_cast(e.id, *to, value),
-            // A cast to an enum of a value that may be null, which an enum value is not.
+            // A cast to an enum of a value that may be null: an `Option` of the enum, `None` for
+            // null (`analysis::maybe_null`).
             ExprKind::Cast(to @ Type::Enum(_), value)
                 if matches!(value.ty, Type::Class(..)) && self.nullable(value) =>
             {
-                let option = self.checked_class_cast(e.id, *to, value).text;
-                Code::atom(format!("{}({option})", self.runtime("null_enum")))
+                self.checked_class_cast(e.id, *to, value)
             }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
             // string, a builder, a box, an array or a class.

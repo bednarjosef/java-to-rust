@@ -2086,14 +2086,13 @@ fn an_enum_field_that_a_constructor_reads_before_setting_it_is_an_option() {
     };
     let rust = translate(&program(""));
     assert_contains(&rust, &["color: Option<AColor>", "APaint { color: None }", "this.color = Some(color);"]);
-    // Used as an enum value, the field could be null there.
-    let error = java_to_rust::translate(&program("int order() { return color.ordinal(); }"))
-        .expect_err("a field that may be null used as an enum value");
-    assert!(error.to_string().contains("null enums not supported yet"), "{error}");
+    // Used as an enum value, the field is unwrapped, which throws for null.
+    let rust = translate(&program("int order() { return color.ordinal(); }"));
+    assert_contains(&rust, &["java::non_null(self.color) as i32"]);
 }
 
 #[test]
-fn an_enum_element_that_may_be_null_is_an_option_and_used_as_a_value_is_rejected() {
+fn an_enum_element_that_may_be_null_is_an_option_unwrapped_where_used_as_a_value() {
     let rust = translate(
         "public class A {
             enum Kind { TOP, DEAD }
@@ -2105,8 +2104,13 @@ fn an_enum_element_that_may_be_null_is_an_option_and_used_as_a_value_is_rejected
         }",
     );
     assert_contains(&rust, &["vec![None; 2]", "kinds[1] == Some(AKind::Dead)"]);
-    for use_ in ["kinds[0].ordinal()", "switch (kinds[0]) { default -> 0; }", "take(kinds[0])"] {
-        let error = java_to_rust::translate(&format!(
+    let uses = [
+        ("kinds[0].ordinal()", "java::non_null(kinds[0]) as i32"),
+        ("switch (kinds[0]) { default -> 0; }", "match java::non_null(kinds[0])"),
+        ("take(kinds[0])", "fn take(_k: Option<AKind>) -> i32"),
+    ];
+    for (use_, expected) in uses {
+        let rust = translate(&format!(
             "public class A {{
                 enum Kind {{ TOP, DEAD }}
                 static int take(Kind k) {{ return 1; }}
@@ -2115,9 +2119,8 @@ fn an_enum_element_that_may_be_null_is_an_option_and_used_as_a_value_is_rejected
                     System.out.println({use_});
                 }}
             }}"
-        ))
-        .expect_err("an element that may be null used as an enum value");
-        assert!(error.to_string().contains("null enums not supported yet"), "{use_}: {error}");
+        ));
+        assert_contains(&rust, &[expected]);
     }
 }
 
@@ -4394,17 +4397,18 @@ fn pattern_variables_are_read_only_where_the_translation_binds_them() {
 }
 
 #[test]
-fn a_cast_of_a_value_that_may_be_null_to_an_enum_ends_the_program_on_null() {
+fn a_cast_of_a_value_that_may_be_null_to_an_enum_is_an_option_of_the_enum() {
     let rust = java_to_rust::translate(
         "interface S {}
         enum E implements S { X }
         class M {
             static S pick(int i) { return i == 0 ? null : E.X; }
-            public static void main(String[] x) { E e = (E) pick(1); System.out.println(e); }
+            public static void main(String[] x) { E e = (E) pick(1); System.out.println(e.ordinal()); }
         }",
     )
     .unwrap();
-    assert!(rust.contains("java::null_enum("), "{rust}");
+    assert!(rust.contains("let e: Option<E> = pick(1).as_ref().map("), "{rust}");
+    assert!(rust.contains("java::non_null(e) as i32"), "{rust}");
 }
 
 const OBJECTS: &str = "
@@ -4728,7 +4732,7 @@ fn an_enum_array_passed_for_a_type_variables_array_is_an_object_array_of_its_con
         &rust,
         &[
             "let days: Vec<Option<Object>> = vec![Some(Object::Day(MainDay::Mon)), Some(Object::Day(MainDay::Tue))];",
-            "java::null_enum(last(&days).as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\"))) as i32",
+            "java::non_null(last(&days).as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\"))) as i32",
             "some[0].as_ref().map(|o| java::cast(Object::as_day(o), \"Main$Day\")).is_none()",
         ],
     );

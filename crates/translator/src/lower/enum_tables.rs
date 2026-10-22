@@ -42,8 +42,9 @@ impl<'t> Lowering<'t> {
             (constant_builder(&self.types[index].name), fields_builder(&self.types[index].name));
         let fields = std::mem::take(&mut types[index].fields);
         let count = self.enum_constant_names(index).count();
-        // The tables, at Java's default values: an enum-typed field holds a constant until its
-        // constructor sets it, as the translation has no null enum.
+        // The tables, at Java's default values. An enum-typed field that every constructor sets
+        // holds a constant until then, so that its table's elements need not be `Option`s; one
+        // that a constructor may leave unset starts as null.
         let mut creates = Vec::new();
         for field in &fields {
             let array = Type::array(field.ty);
@@ -55,14 +56,17 @@ impl<'t> Lowering<'t> {
                         return error(field.pos, "an enum field of an enum without constants");
                     };
                     if field.init.is_none() && !ctors_set(methods, index, &field.name) {
-                        return error(
+                        ExprKind::NewArray(vec![self.synth(
+                            ExprKind::Int(count as i32),
                             field.pos,
-                            "an enum field of an enum that a constructor may leave unset",
-                        );
+                            Type::Int,
+                        )])
+                    } else {
+                        let first = || {
+                            self.synth(ExprKind::EnumConstant { class: e, ordinal: 0 }, field.pos, field.ty)
+                        };
+                        ExprKind::ArrayLit((0..count).map(|_| first()).collect())
                     }
-                    let first =
-                        || self.synth(ExprKind::EnumConstant { class: e, ordinal: 0 }, field.pos, field.ty);
-                    ExprKind::ArrayLit((0..count).map(|_| first()).collect())
                 }
                 _ => ExprKind::NewArray(vec![self.synth(ExprKind::Int(count as i32), field.pos, Type::Int)]),
             };

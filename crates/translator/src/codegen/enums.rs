@@ -241,16 +241,17 @@ impl<'a> Gen<'a> {
             return self.erased_enum_builtin(builtin, args, t);
         }
         match builtin {
+            // An enum that may be null throws `NullPointerException` (`enum_value`).
             Builtin::EnumOrdinal => {
-                let obj = self.expr(&args[0]);
+                let obj = self.enum_value(&args[0]);
                 Code::new(format!("{} as i32", obj.cast_operand()), AS)
             }
             Builtin::EnumName => {
-                let obj = self.expr(&args[0]);
+                let obj = self.enum_value(&args[0]);
                 Code::atom(format!("{}.enum_name()", self.recv(&obj, args[0].ty)))
             }
             Builtin::EnumCompareTo => {
-                let (a, b) = (self.expr(&args[0]), self.expr(&args[1]));
+                let (a, b) = (self.enum_value(&args[0]), self.enum_value(&args[1]));
                 Code::atom(format!("({} as i32 - {} as i32)", a.cast_operand(), b.cast_operand()))
             }
             Builtin::EnumValueOf => {

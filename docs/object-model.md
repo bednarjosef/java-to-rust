@@ -1605,9 +1605,8 @@ Decisions that changed during the implementation, milestone by milestone.
   target always fails, and is written as that failure. A cast or test to a supertype is the
   implicit upcast that already existed.
 - A cast of a value that may be null to a Java enum (`(Suit) item` where `item` may be null) is
-  rejected ("casting a value that may be null to an enum not supported yet"): an enum is an
-  `Option` only in a local assigned `null` (`lower::enum_nulls`), and the cast would make one
-  anywhere.
+  the checked cast's `Option` of the enum, as any enum value that may be null is
+  (`analysis::nullness`).
 - `flows` has an edge for a pattern's binding, as for a cast: a class whose objects are bound by
   a pattern to a type becomes a variant of that type's enum.
 - `else if` conditions are let chains too (they were plain conditions), so
@@ -1809,9 +1808,9 @@ Generics are erased in lowering, and nothing after it knows they existed:
   translates as before. An array of an enum is covariant too (`Day.values()` passed for `E[]`
   of `<E extends Enum<E>>`, or as an `Enum<?>[]`, as `EnumSet` keeps its universe): where it is
   an `Object[]`, its constants are `Object`s (`values()` makes them so), cast back to the enum
-  where read. An enum value is never null in the translation, so a null element read as the
-  enum ends the program ("a null enum value"), while a test of one against `null` tests the
-  checked cast's `Option`.
+  where read. An element that may be null is read as an `Option` of the enum, as any enum value
+  that may be null is (`analysis::nullness`), and a test of one against `null` tests the checked
+  cast's `Option`.
 - An array as an `Object` value (`Object o = new int[2]`, the elements of a `Deque<int[]>`) is the
   plan's `Variant::Array`, done as a runtime class beside the strings and the boxes rather than a
   variant kind of its own: each array type that is converted to `Object` or cast back from it gets
@@ -1837,11 +1836,10 @@ Generics are erased in lowering, and nothing after it knows they existed:
   types throws even where every element would fit (an `Object[]` of `Integer`s into an
   `Integer[]`); arrays of references that meet are one `Object[]` type anyway.
 - A value read back out of a generic container is a cast from `Object` that may be null (the
-  container's array has null elements), so reading an enum back (`Suit s = list.get(0)`) is
-  rejected by the existing "casting a value that may be null to an enum"; strings, boxes and
-  classes read back fine. The enum-field check was too strict for the classes that hold enums: an
-  enum field without an initializer may now be set by any of the leading field assignments of
-  every constructor, not only the first statement (`lower::enums::set_before_use`).
+  container's array has null elements), so reading an enum back (`Suit s = list.get(0)`) gives
+  an `Option` of the enum; strings, boxes and classes read back fine. An enum field without an
+  initializer that every constructor sets among its leading field assignments is no `Option`
+  (`analysis::nullness`).
 - Intersection bounds (`T extends A & B`) were first rejected ("intersection types"). A type
   variable with several bounds now erases to its first bound, and the receiver of a call of a
   method that a later bound declares is cast to that bound (`lower::generics::receiver`), which is

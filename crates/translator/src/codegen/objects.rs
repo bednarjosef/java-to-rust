@@ -632,6 +632,9 @@ impl<'a> Gen<'a> {
             let option = format!("None::<{}>", self.ty_name(ty));
             return self.dereference(&[id, e.id], &option);
         }
+        if matches!(e.ty, Type::Enum(_)) {
+            return self.enum_value(e).text;
+        }
         let (text, place) = self.object_parts(e);
         if !(matches!(e.ty, Type::Class(..)) && self.nullable(e)) {
             return text;

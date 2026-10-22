@@ -111,7 +111,6 @@ fn translate_reached(program: &Program, string_array_writes: bool) -> Result<Mod
         let file = file(rejected.unit).or_else(|| locate(&units, &class, rejected.error.pos));
         return Err(ProgramError { file, error: rejected.error });
     }
-    lower::check_enum_nulls(&class).map_err(|error| ProgramError { file: None, error })?;
     phase("whole objects", || analysis::whole_objects(&mut class))
         .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
     let located = |error: Error| ProgramError { file: locate(&units, &class, error.pos), error };
