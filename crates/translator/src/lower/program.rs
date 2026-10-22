@@ -181,6 +181,12 @@ fn lower_into<'t>(
             } else if reach.classes.contains(&crate::program::class_name(decl.0)) {
                 let outer = (!package.is_empty()).then_some(package.as_str());
                 lowering.declare_type(decl, outer).map_err(|e| (Some(index), e))?;
+            } else {
+                // The classes nested in a runtime class that are the JDK's code all the same.
+                let outer = crate::program::class_name(decl.0);
+                for nested in translated_nested(decl, reach) {
+                    lowering.declare_type(nested, Some(&outer)).map_err(|e| (Some(index), e))?;
+                }
             }
         }
         unit_of.resize(lowering.types.len(), index);
@@ -189,9 +195,8 @@ fn lower_into<'t>(
     // The classes that are not translated but are types of variables, which are only ever null.
     for (class, methods) in &reach.stubs {
         lowering.declare_stub(class, methods).map_err(|e| (None, e))?;
-        let package = class.rsplit_once('.').map_or("", |(package, _)| package);
         unit_of.resize(lowering.types.len(), usize::MAX);
-        packages.resize(lowering.types.len(), package.to_string());
+        packages.resize(lowering.types.len(), super::stubs::stub_package(class));
     }
     // The standard exception classes that reachable code uses; they belong to no unit.
     let mut reachable = Vec::new();
@@ -220,7 +225,11 @@ fn lower_into<'t>(
     let decls: Vec<Node> = units
         .iter()
         .flat_map(|u| Node(u).list("typeDecls"))
-        .filter(|d| d.kind() != "ANNOTATION_TYPE" && reach.classes.contains(&crate::program::class_name(d.0)))
+        .flat_map(|d| match reach.classes.contains(&crate::program::class_name(d.0)) {
+            true if d.kind() != "ANNOTATION_TYPE" => vec![d],
+            true => Vec::new(),
+            false => translated_nested(d, reach),
+        })
         .collect();
     lowering.real = real.cloned().unwrap_or_else(|| lowering.candidates());
     let planned: Vec<Node> = decls.iter().copied().chain(lowering.functional_decls()).collect();
@@ -251,10 +260,32 @@ fn lower_into<'t>(
     Ok((class, lowering.real.clone(), failed))
 }
 
+/// The classes nested in `decl`, a class that is not translated, that are translated all the
+/// same and reachable (`program::TRANSLATED_NESTED`).
+fn translated_nested<'t>(decl: Node<'t>, reach: &Reach) -> Vec<Node<'t>> {
+    if !crate::program::provided(&crate::program::class_name(decl.0)) {
+        return Vec::new();
+    }
+    decl.list("members")
+        .filter(|m| {
+            let class = crate::program::class_name(m.0);
+            crate::program::CLASS_KINDS.contains(&m.kind())
+                && crate::program::TRANSLATED_NESTED.contains(&class.as_str())
+                && reach.classes.contains(&class)
+        })
+        .collect()
+}
+
 /// The members of a class declaration (and of its nested classes) that are reachable.
 fn reachable_members<'t>(decl: Node<'t>, reach: &Reach, out: &mut Vec<&'t Value>) {
     let class = crate::program::class_name(decl.0);
-    if decl.kind() == "ANNOTATION_TYPE" || !reach.classes.contains(&class) {
+    if decl.kind() != "ANNOTATION_TYPE" && !reach.classes.contains(&class) {
+        for nested in translated_nested(decl, reach) {
+            reachable_members(nested, reach, out);
+        }
+        return;
+    }
+    if decl.kind() == "ANNOTATION_TYPE" {
         return;
     }
     for member in decl.list("members") {

@@ -8,7 +8,8 @@
 //! deserialization reads a map from, and every call that copies a sorted map passes null.
 //!
 //! A static method, a constructor or a field of such a class stays out of reach, and a generic
-//! or array type of one is not a stub: what uses them is rejected as before.
+//! or array type of one is not a stub: what uses them is rejected as before. A class nested in
+//! one (`ObjectInputStream.GetField`) is a stub of its own, without its outer class.
 
 use super::{MethodKey, Walk, provided, strip_arguments, text, untranslated};
 use serde_json::Value;
@@ -38,11 +39,11 @@ impl Walk<'_> {
 }
 
 /// Whether the type `ty` is a class that is not translated and can be a stub: not generic, not
-/// an array, and in a package rather than nested in another class.
-fn is_stub(ty: &str) -> bool {
-    let Some((package, _)) = ty.rsplit_once('.') else { return false };
-    !ty.contains(['<', '[', '?', ' '])
-        && package.split('.').all(|part| part.starts_with(|c: char| c.is_lowercase()))
-        && untranslated(ty).is_some()
-        && !provided(ty)
+/// an array, and in a package, at its top level or nested in another class
+/// (`ObjectInputStream.GetField`, which `readObject` methods declare).
+pub(super) fn is_stub(ty: &str) -> bool {
+    let mut parts = ty.split('.');
+    let in_package = parts.next().is_some_and(|first| first.starts_with(|c: char| c.is_lowercase()))
+        && parts.any(|part| !part.starts_with(|c: char| c.is_lowercase()));
+    !ty.contains(['<', '[', '?', ' ']) && in_package && untranslated(ty).is_some() && !provided(ty)
 }

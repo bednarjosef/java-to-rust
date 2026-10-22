@@ -860,11 +860,22 @@ impl<'t> Lowering<'t> {
                 ExprKind::Cast(ty, Box::new(value))
             }
             "CONDITIONAL_EXPRESSION" => {
-                let ty = self.ty(node, node.java_type())?;
+                let condition = self.expr(node.child("condition")?)?;
+                let (yes, no) =
+                    (self.expr(node.child("trueExpression")?)?, self.expr(node.child("falseExpression")?)?);
+                // An argument `c ? s : t` of strings for a `CharSequence` parameter has javac's
+                // type of the parameter (a poly expression): it stays a string, which converts to
+                // the parameter where it is passed, as the string calls need (`String.replace`).
+                let strings = |e: &Expr| matches!(e.ty, Type::String | Type::Null);
+                let ty = if node.java_type() == "java.lang.CharSequence" && strings(&yes) && strings(&no) {
+                    Type::String
+                } else {
+                    self.ty(node, node.java_type())?
+                };
                 ExprKind::Conditional(
-                    Box::new(self.expr(node.child("condition")?)?),
-                    Box::new(self.convert(self.expr(node.child("trueExpression")?)?, ty)),
-                    Box::new(self.convert(self.expr(node.child("falseExpression")?)?, ty)),
+                    Box::new(condition),
+                    Box::new(self.convert(yes, ty)),
+                    Box::new(self.convert(no, ty)),
                 )
             }
             "METHOD_INVOCATION" => self.call(node)?,
@@ -920,6 +931,14 @@ impl<'t> Lowering<'t> {
         // `printf` returns its stream, which the translation has no type for; it is a statement.
         let ty = match kind {
             ExprKind::Builtin(Builtin::Print, _) if node.kind() == "METHOD_INVOCATION" => Type::Void,
+            // A `CharSequence` conditional of strings stays a string (see `CONDITIONAL_EXPRESSION`).
+            ExprKind::Conditional(_, ref yes, ref no)
+                if node.java_type() == "java.lang.CharSequence"
+                    && yes.ty == Type::String
+                    && no.ty == Type::String =>
+            {
+                Type::String
+            }
             _ => self.ty(node, node.java_type())?,
         };
         let kind = match node.kind() {
@@ -1209,6 +1228,12 @@ impl<'t> Lowering<'t> {
                         && m.sig == "()java.lang.Thread"
                 });
                 return Ok(ExprKind::Call { name: "currentThread".to_string(), args, resolved });
+            }
+            // Any other method of the JVM's `JavaLangAccess`, whose object is null in a
+            // translated program: rejected where it can run, rather than a `NullPointerException`
+            // there. The branches for virtual threads never run (`program::FALSE_INSTANCE_CALLS`).
+            ("jdk.internal.access.JavaLangAccess", name) => {
+                return unsupported(node, &format!("`JavaLangAccess.{name}`, which the JVM gives,"));
             }
             (
                 "java.lang.StringBuilder"

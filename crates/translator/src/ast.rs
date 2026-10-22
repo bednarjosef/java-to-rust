@@ -325,6 +325,9 @@ pub fn runtime_values() -> [(&'static str, Type); 9] {
 /// The runtime class of the `StringBuilder`s that become `Object`s.
 pub const STRING_BUILDER: &str = "java.lang.StringBuilder";
 
+/// The runtime class of the classes (`Class<?>` values) that become `Object`s.
+pub const CLASS_VALUE: &str = "java.lang.Class";
+
 /// The runtime class whose values are of type `ty`, a primitive standing for its box.
 pub fn runtime_name(ty: Type) -> Option<&'static str> {
     let ty = if ty.is_numeric() || ty == Type::Boolean { Type::boxed(ty) } else { ty };

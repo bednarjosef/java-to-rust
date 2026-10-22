@@ -81,7 +81,9 @@ fn unique_in(base: String, first: &mut HashSet<String>, second: &mut HashSet<Str
 pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashMap<usize, String>) {
     let h = &class.hierarchy;
     // Each class has its own `impl`, so names only need to be unique within their class tree.
-    let mut used = vec![HashSet::new(); class.types.len()];
+    // The enum of a class with subclasses has `base()`, the fields of the class (as
+    // `ByteBuffer`'s enum has beside the JDK's own `ByteBuffer.base()`, then `base_2`).
+    let mut used = vec![HashSet::from(["base".to_string()]); class.types.len()];
     let mut module_used: HashMap<&str, HashSet<String>> = HashMap::new();
     for m in class.methods.iter().filter(|m| m.is_main) {
         used[m.class].insert("main".to_string());

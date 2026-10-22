@@ -291,7 +291,11 @@ A small subset, end to end:
   its binary name with those of `x`'s class and of every class and interface above it, which the
   generator writes out for each class `x` may be of; a failed `cast` throws Java's
   `ClassCastException` (`Cannot cast java.lang.String to Main$Dog`), which a `catch` sees.
-  `Class.forName` of a constant name is that class, and of a computed one a `switch` over the
+  A class held as an `Object` (a key of a `Map<Class<?>, V>`, an element of a `List<Object>`,
+  a sentinel `static final Object NONE = Thread.class`) is the same value in `Object`'s `Class`
+  variant: Java has one object for each class, so `==`, `equals`, `hashCode` and
+  `System.identityHashCode` are the value's, and `instanceof Class` and a cast back test the
+  variant. `Class.forName` of a constant name is that class, and of a computed one a `switch` over the
   binary names of the classes that code can find by name; a name that is not in the translation
   throws Java's `ClassNotFoundException`, which says so. Reflection over the program's classes
   goes through a table of their members that the translation builds in, only for the classes and
@@ -307,8 +311,9 @@ A small subset, end to end:
   (`StackWalker.getInstance(RETAIN_CLASS_REFERENCE).getCallerClass()`, as logging libraries name a
   logger after it, or `Reflection.getCallerClass()` in the JDK's `@CallerSensitive` methods such as
   `ResourceBundle.getBundle`) gets that class from each call as a parameter more, since the
-  translator knows which class every call is in (`lower/callers.rs`). Asking anywhere else, and
-  walking the stack's frames (`StackWalker.walk`), is rejected.
+  translator knows which class every call is in (`lower/callers.rs`). Asking anywhere else (an
+  instance method, `main`, a lambda) is rejected where the question is asked, and so is walking
+  the stack's frames (`StackWalker.walk`).
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
   and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
   `super(message)`, `super(message, cause)`, fields, and overrides of `getMessage` and `toString`)
@@ -778,7 +783,11 @@ security and class loading (`Module`, `ModuleLayer`, `jdk.internal.loader`; `UNT
 `ResourceBundle` is translated, and `ServiceLoader`, `ClassLoader` and `URLClassLoader` are the
 translator's own, over the translation's classes). Library code
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
-`comparableClassFor` and parallel streams reach threads, so the boundary is needed. A program that
+`comparableClassFor` and parallel streams reach threads, so the boundary is needed. An
+untranslated class that is the type of a variable (the `ObjectInputStream` of
+`TreeMap.buildFromSorted`, the `ObjectInputStream.GetField` of a `readObject`) is a class without
+objects, so the variable is only ever null and a call on it throws a `NullPointerException`, as
+Java does with that null (`program/reach/stubs.rs`). A program that
 puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints the count).
 Annotations reach nothing, and neither does the code that Java Flight Recorder's flags guard
 (`jfrTracing` in `Throwable` and the file streams, which only JFR sets, by reflection), or the
@@ -857,12 +866,22 @@ translation cannot match are rejected: `sun.java.command` (the command line) and
 `Integer.getInteger` and `Long.getLong` read a property the same way and decode it as
 `Integer.decode` does, giving the default (or null) when it is unset or no number.
 `Runtime.version().feature()` is the release of the JDK the translator ran with
-(`java.specification.version`); a `Runtime.Version` itself is still rejected. Preview features are
-off, and there is no security manager, so the `jrt:` file system's permission check does nothing;
+(`java.specification.version`). `Runtime.version()` itself parses `java.runtime.version` once
+(`java/overlay/java/lang/TranslatedRuntime.java`) into the JDK's `Runtime.Version`, which is
+translated from its sources although `Runtime` is the runtime's; its `parse` matches a regular
+expression. Preview features are off, and there is no security manager: `SecurityManager` is a
+type whose only value is null, so `System.getSecurityManager()` is null and a test of a
+manager against null decides its branch, `AccessController.doPrivileged` of a `PrivilegedAction`
+runs the action (`java/overlay/java/lang/TranslatedAccessController.java`), and the `jrt:` file
+system's permission check does nothing;
 `SecurityProperties.includedInExceptions` reads the JDK's `conf/security/java.security`. The memory
 figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
 JVM's, and `gc()` does nothing, as `System.gc()` does. `Runtime.halt` flushes the output and exits without shutdown
-hooks. `onSpinWait` and `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
+hooks. Scoped values are the JDK's `ScopedValue` over the translator's `Thread`, which keeps a
+thread's bindings and its cache of values read, as the JVM does; a new thread has no bindings.
+The operation of a binding runs directly (`java/overlay/jdk/internal/vm/ScopedValueContainer.java`),
+as the JDK's runs it when no `StructuredTaskScope`, a preview API, is open. `onSpinWait` and
+`yield` are the platform's, and `Thread.sleep` (both forms) waits on the
 thread's record, which an interrupt wakes. The runtime's
 descriptor table (`fd.rs`) backs the `FileInputStream`, `FileOutputStream` and `FileDescriptor`
 natives (`open0`, `read0`, `readBytes`, `available0`, `skip0`, `length0`, `position0`,
@@ -913,6 +932,21 @@ do not check their arguments, and `Util.toString` gives null for null, where the
 and asynchronous file channels throw `UnsupportedOperationException`; and `statvfs` (a file
 store's space), the mount table, `getpwnam` and `getgrnam`, and the extended-attribute natives
 are rejected.
+
+The `jrt:` file system, through which javac reads the classes of the JDK, is the JDK's own
+(`jdk.internal.jrtfs`) over the image file `lib/modules` of the JDK in `java.home`; it is among
+the installed providers (`FileSystemProvider.installedProviders`, which the JDK finds with a
+`ServiceLoader`, gives the default provider and the jrt one: `TranslatedFiles.java`). The
+translator's image reader (`java/overlay/jdk/internal/jimage/BasicImageReader.java`) reads the
+index of the image into an array once, and each resource into an array of its own, through a
+`FileChannel`, where the JDK's maps the file into memory. What differs from Java: a compressed
+image (`jlink --compress`) and a JDK of exploded modules, as it is built, throw
+`UnsupportedOperationException`; the `toString` of a jrt file's attributes, which formats times
+with `%tc`, throws the same; and a failure of the image's reader is thrown as it is, not given as
+the reason of an `InvalidPathException`. `URI` decodes its escaped octets as UTF-8 itself
+(`java/overlay/java/net/TranslatedURI.java`), and `jdk.internal.util.Exceptions`, which puts the
+input and the index into a `URISyntaxException`, reads its categories of detail without waiting
+for the JVM's boot and fills only `%s` in its messages, refusing any other conversion.
 
 A native method of a translated JDK class is never lowered itself (javac marks it `native`); a
 call of one becomes the runtime function that `ast/natives.rs` names for its class, name and

@@ -66,7 +66,7 @@ impl<'t> Lowering<'t> {
             ("java.lang.Float", "floatToRawIntBits") => Native::FloatToRawIntBits,
             ("java.lang.Float", "intBitsToFloat") => Native::IntBitsToFloat,
             ("java.lang.System", "identityHashCode") => {
-                if !matches!(args[0].ty, Type::Class(..)) {
+                if !matches!(args[0].ty, Type::Class(..) | Type::JavaClass) {
                     return unsupported(node, "`System.identityHashCode` of anything but an object");
                 }
                 Native::SystemIdentityHash

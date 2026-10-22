@@ -203,7 +203,36 @@ impl<'a> Gen<'a> {
 
     /// The name of the conversion to the enum of `t`: `to_shape`.
     pub(super) fn to_name(&self, t: usize) -> String {
-        format!("to_{}", snake_case(&self.simple_name(t)).trim_end_matches('_'))
+        format!("to_{}", snake_case(&self.distinct_name(t)).trim_end_matches('_'))
+    }
+
+    /// The name of type `t` in the names of its conversions: its simple name, or with its outer
+    /// classes when another type has that simple name too (`ImageReaderNode` and
+    /// `ConcurrentHashMapNode`), or with its package as well when that is shared too.
+    fn distinct_name(&self, t: usize) -> String {
+        let simple = self.simple_name(t);
+        if !self.shared_names.contains(&simple) || self.class.array_of(t).is_some() {
+            return simple;
+        }
+        let in_package = self.in_package_name(t);
+        if !self.shared_names.contains(&in_package) {
+            return in_package;
+        }
+        self.full_variant_name(t)
+    }
+
+    /// The simple names, and the names with outer classes, that more than one type has.
+    pub(super) fn shared_names(&self) -> HashSet<String> {
+        let mut seen = HashSet::new();
+        let mut shared = HashSet::new();
+        for t in (0..self.class.types.len()).filter(|&t| self.class.array_of(t).is_none()) {
+            for name in [self.simple_name(t), format!("{}\0", self.in_package_name(t))] {
+                if !seen.insert(name.clone()) {
+                    shared.insert(name.trim_end_matches('\0').to_string());
+                }
+            }
+        }
+        shared
     }
 
     /// The simple name of type `t`, which names its variants and conversions: `Circle` for
@@ -221,7 +250,7 @@ impl<'a> Gen<'a> {
 
     /// The name of the checked conversion to type `t`: `as_circle`.
     fn as_name(&self, t: usize) -> String {
-        format!("as_{}", snake_case(&self.simple_name(t)).trim_end_matches('_'))
+        format!("as_{}", snake_case(&self.distinct_name(t)).trim_end_matches('_'))
     }
 
     /// The binary name of type `t`, as the JVM shows it: `shapes.Outer$Inner`.
@@ -536,6 +565,9 @@ impl<'a> Gen<'a> {
         if let Some(shared) = self.class.shared_of(c) {
             return Some(shared);
         }
+        if self.class.types[c].kind == TypeKind::Runtime && self.class.types[c].name == CLASS_VALUE {
+            return Some(Type::JavaClass);
+        }
         (self.class.types[c].kind == TypeKind::Runtime)
             .then(|| runtime_type(&self.class.types[c].name))
             .flatten()
@@ -781,7 +813,13 @@ impl<'a> Gen<'a> {
         let m = &self.class.methods[resolved];
         if m.name == "toString" && m.params.is_empty() {
             self.need(Need::Display(t));
-            return Code::atom(format!("{}.to_string()", self.object(receiver)));
+            let text = format!("{}.to_string()", self.object(receiver));
+            // A `toString` that an implementation may return null from is an `Option` where its
+            // value is used (`nullness`); the `Display` shows such a null as "null".
+            if self.facts.nullable_returns.contains(&resolved) {
+                return Code::atom(format!("Some({text})"));
+            }
+            return Code::atom(text);
         }
         let name = self.dispatch_name(t, resolved);
         let obj = self.object(receiver);
@@ -880,7 +918,20 @@ impl<'a> Gen<'a> {
     /// The text of a value of an enum, through its `Display`.
     pub(super) fn enum_text(&mut self, t: usize, obj: String) -> String {
         self.need(Need::Display(t));
+        if self.enum_text_throws(t) {
+            // A `toString` that throws is called, through `try_text`.
+            return self.passed_on(Code::atom(format!("{obj}.try_text()")));
+        }
         if self.lazy_text && !self.printing { obj } else { format!("{obj}.to_string()") }
+    }
+
+    /// Whether turning a value of the enum of `t` into text may throw an exception that the
+    /// program observes: some variant's `toString` throws.
+    pub(super) fn enum_text_throws(&self, t: usize) -> bool {
+        self.enum_variants(t)
+            .into_iter()
+            .filter_map(|c| hierarchy::to_string_impl(self.class, c))
+            .any(|i| self.facts.throwing.contains(&i))
     }
 
     /// Whether turning a value of the enum of `t` into text may write a shared object.
@@ -940,6 +991,9 @@ impl<'a> Gen<'a> {
         self.monitor_impl(t, &variants);
         if self.wanted.contains(&Need::Display(t)) {
             self.display_impl(t, &variants);
+            if self.enum_text_throws(t) {
+                self.try_text_impl(t, &variants);
+            }
         }
         self.raised_impl(t);
         self.chain_enum_items(t, &variants);
@@ -1461,7 +1515,11 @@ impl<'a> Gen<'a> {
     pub(super) fn object_to_string(&mut self, receiver: &'a Expr) -> Code {
         let Some(t) = self.enum_of(receiver) else { return self.object_text(receiver) };
         self.need(Need::Display(t));
-        Code::atom(format!("{}.to_string()", self.object(receiver)))
+        let obj = self.object(receiver);
+        if self.enum_text_throws(t) {
+            return Code::atom(self.passed_on(Code::atom(format!("{obj}.try_text()"))));
+        }
+        Code::atom(format!("{obj}.to_string()"))
     }
 
     /// The hash code of a value of class `c`, reached through `handle`, a reference to what the
@@ -1477,6 +1535,10 @@ impl<'a> Gen<'a> {
             }
             return format!("{}({})", self.runtime("address_hash"), self.address(c, handle));
         };
+        // A class's hash is its identity's in Java: there is one class object for each class.
+        if ty == Type::JavaClass {
+            return format!("{handle}.hash_code()");
+        }
         let value = if self.faithful_box(ty) { format!("**{handle}") } else { format!("*{handle}") };
         let function = match ty.unboxed() {
             Type::String => return format!("{}({handle})", self.runtime("string_hash")),
@@ -1690,6 +1752,33 @@ impl<'a> Gen<'a> {
         self.line("}");
     }
 
+    /// `try_text()`: the text of a value whose class's `toString` may throw, or its exception;
+    /// the other classes' text is their `Display`.
+    fn try_text_impl(&mut self, t: usize, variants: &[usize]) {
+        let name = struct_name(&self.class.types[t].name);
+        let throwable = self.throwable_type();
+        self.gap();
+        self.line(&format!("impl {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn try_text(&self) -> Result<String, {throwable}> {{"));
+        self.indent += 1;
+        self.match_arms(t, variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
+            Some(i) if g.facts.throwing.contains(&i) => {
+                let (call, uses) = g.arm_call(t, c, i, "");
+                if g.facts.nullable_returns.contains(&i) {
+                    (format!("{call}.map(|text| text.unwrap_or_else(|| \"null\".to_string()))"), uses)
+                } else {
+                    (call, uses)
+                }
+            }
+            _ => ("Ok(self.to_string())".to_string(), false),
+        });
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     /// How the `Display` of the enum of `t` shows an object of class `c` bound to `o`, whose
     /// `toString` is method `i`; and whether it uses `o`.
     fn display_arm(&mut self, t: usize, c: usize, i: usize) -> (String, bool) {
@@ -1709,7 +1798,15 @@ impl<'a> Gen<'a> {
             };
             return (format!("fmt::Display::fmt({shown}, f)"), true);
         }
-        let (text, uses) = self.arm_call(t, c, i, "");
+        let (mut text, uses) = self.arm_call(t, c, i, "");
+        // Where the runtime makes the text, what a `toString` throws ends the program (see
+        // `analysis::exceptions`); the generator's own text calls it (`try_text`).
+        if self.facts.throwing.contains(&i) {
+            if let Some(t) = self.class.type_index("java.lang.Throwable").and_then(|t| self.enum_for(t)) {
+                self.need(Need::Display(t));
+            }
+            text = format!("{text}.unwrap_or_else({})", self.runtime("uncaught"));
+        }
         // A `toString` that may return null shows "null", as `String.valueOf` does.
         if self.facts.nullable_returns.contains(&i) {
             return (format!("f.write_str({text}.as_deref().unwrap_or(\"null\"))"), uses);

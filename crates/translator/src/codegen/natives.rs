@@ -37,6 +37,15 @@ impl<'a> Gen<'a> {
                 let x = self.value(&args[0], Type::Float).text;
                 call(self, "float_to_int_bits", vec![x])
             }
+            // A class's identity is its own, as its hash is (`Class::hash_code`); a null one's is 0.
+            Native::SystemIdentityHash if args[0].ty == Type::JavaClass => {
+                let class = self.expr(&args[0]).at(ATOM);
+                if self.nullable(&args[0]) {
+                    Code::atom(format!("{class}.map_or(0, |c| c.hash_code())"))
+                } else {
+                    Code::atom(format!("{class}.hash_code()"))
+                }
+            }
             // A null object's is 0 (an enum's `enum_identity_hash` answers that itself).
             Native::SystemIdentityHash if self.enum_of(&args[0]).is_none() && self.nullable(&args[0]) => {
                 let option = format!("{}.as_ref()", self.object_place(&args[0]));

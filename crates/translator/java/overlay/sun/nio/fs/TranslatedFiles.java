@@ -11,7 +11,11 @@ import java.nio.file.FileSystem;
 import java.nio.file.Files;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.nio.file.spi.FileSystemProvider;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
+import jdk.internal.jrtfs.JrtFileSystemProvider;
 import jdk.internal.access.SharedSecrets;
 
 /**
@@ -85,5 +89,17 @@ public final class TranslatedFiles {
         throws IOException
     {
         return new BufferedWriter(new OutputStreamWriter(Files.newOutputStream(path, options), cs));
+    }
+
+    /**
+     * {@code FileSystemProvider.loadInstalledProviders()}: the providers besides the default one
+     * that the program's modules declare, which the JDK finds with {@code ServiceLoader}. A
+     * translation with the JDK's sources has {@code java.base}, whose only one is the provider of
+     * the {@code jrt:/} file system of the JDK's class library.
+     */
+    public static List<FileSystemProvider> loadInstalledProviders() {
+        List<FileSystemProvider> list = new ArrayList<>();
+        list.add(new JrtFileSystemProvider());
+        return list;
     }
 }

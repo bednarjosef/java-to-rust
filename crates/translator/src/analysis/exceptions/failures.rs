@@ -119,6 +119,7 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             // `valueOf(chars)` copies the whole array; only an offset and a count can be out of range.
             StringOp::FromChars if args.len() == 3 => &["java.lang.StringIndexOutOfBoundsException"],
             StringOp::Repeat => &["java.lang.IllegalArgumentException"],
+            StringOp::TranslateEscapes => &["java.lang.IllegalArgumentException"],
             StringOp::GetChars => &["java.lang.StringIndexOutOfBoundsException"],
             StringOp::CodePointAt | StringOp::CodePointBefore | StringOp::GetLowBytes => {
                 &["java.lang.StringIndexOutOfBoundsException"]
@@ -692,6 +693,7 @@ pub(super) fn runtime_failures(
                         builtin,
                         Builtin::String(
                             StringOp::Substring | StringOp::FromChars | StringOp::GetChars | StringOp::FromBytes
+                                | StringOp::TranslateEscapes
                         )
                             | Builtin::ArraysCopyOf
                             | Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _)
@@ -786,11 +788,12 @@ pub(super) fn runtime_failures(
     {
         out.push(("java.lang.ClassCastException", "this cast", true, x.id));
     }
-    // So may a cast of an object to a string, a box or an enum, unless an `instanceof` tested it.
+    // So may a cast of an object to a string, a box, an enum or a class, unless an `instanceof`
+    // tested it.
     if let ExprKind::Cast(to, value) = &x.kind
         && x.pos != value.pos
         && matches!(value.ty, Type::Class(..))
-        && matches!(to, Type::String | Type::Boxed(_) | Type::Enum(_))
+        && matches!(to, Type::String | Type::Boxed(_) | Type::Enum(_) | Type::JavaClass)
         && let Some(name) = instance_name(*to)
         && !matches!(&value.kind, ExprKind::Var(v) if safe.contains(&instance_fact(v, name)))
     {
