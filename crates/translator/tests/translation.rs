@@ -3007,7 +3007,7 @@ fn the_census_reports_every_rejection_not_only_the_first() {
         &[
             "  Program: 5 pieces; 2 (40.0%) translate, 3 rejected.",
             "type `…` not supported yet\n          at p/Other.java:4:9",
-            "catching an exception that this call of the library may throw not supported yet\n          at p/Other.java:7",
+            "catching the `PatternSyntaxException` that this call of the library may throw not supported yet\n          at p/Other.java:7",
             "== on strings compares references; not supported yet\n          at p/Other.java:12",
         ],
     );
@@ -4031,13 +4031,33 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     // One whose class is not known is not.
     let err = reject(
         "class A { public static void main(String[] a) {
-            try { System.out.println(\"a,b\".split(a[0]).length); }
-            catch (RuntimeException e) { System.out.println(\"bad pattern\"); }
+            try { System.out.println(\"a,b\".replaceAll(\",\", a[0])); }
+            catch (RuntimeException e) { System.out.println(\"bad replacement\"); }
         } }",
     );
     assert!(
         err.contains("catching an exception that this call of the library may throw not supported yet"),
         "{err}"
+    );
+    // Nor is a `PatternSyntaxException`, which is not one of the standard classes; a `catch` that
+    // cannot see it is fine.
+    let err = reject(
+        "class A { public static void main(String[] a) {
+            try { System.out.println(\"a,b\".split(a[0]).length); }
+            catch (RuntimeException e) { System.out.println(\"bad pattern\"); }
+        } }",
+    );
+    assert!(
+        err.contains(
+            "catching the `PatternSyntaxException` that this call of the library may throw not supported yet"
+        ),
+        "{err}"
+    );
+    translate(
+        "class A { public static void main(String[] a) {
+            try { System.out.println(Integer.parseInt(\"1,2\".replaceAll(a[0], \"\"))); }
+            catch (NumberFormatException e) { System.out.println(\"not a number\"); }
+        } }",
     );
     // A string that may be null is dereferenced with the checked form where a catch sees it.
     let rust = translate(

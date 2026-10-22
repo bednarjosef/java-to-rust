@@ -109,9 +109,12 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
     let matches = |k: &Kind, t: usize| match k {
         Kind::Class(c) => h.is_subtype(*c, t),
+        // A failure not known exactly may be of any class of the JDK; one that is known is of
+        // its class, a standard one or one that `standard_subclass` knows the superclass of.
+        Kind::Runtime("?") => from_jdk(&class.types[t]),
         Kind::Runtime(name) => {
             let decl = &class.types[t].name;
-            crate::lower::is_standard(decl) && (*name == "?" || standard_subclass(name, decl))
+            decl == name || crate::lower::is_standard(decl) && standard_subclass(name, decl)
         }
     };
     let caught = |k: &Kind, frames: &[Frame]| frames.iter().any(|f| f.catches.iter().any(|&t| matches(k, t)));
@@ -316,7 +319,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 let seen_here = catcher.is_some()
                     || p.frames.iter().any(|f| f.finally)
                     || (!bugs_only[m] && observed(&Kind::Runtime(name), &seen[m]));
-                let raised_class = class.type_index(name).filter(|&c| class.hierarchy.is_concrete(c));
+                // Only a standard class has the constructor from a message that the runtime
+                // builds its objects with (`lower::exceptions`).
+                let raised_class = class
+                    .type_index(name)
+                    .filter(|&c| class.hierarchy.is_concrete(c) && crate::lower::is_standard(name));
                 if seen_here
                     && checked
                     && let Some(c) = raised_class
@@ -1014,7 +1021,7 @@ pub(super) fn from_jdk(decl: &TypeDecl) -> bool {
     let in_jdk = |name: &str| {
         ["java", "javax", "jdk", "sun"]
             .iter()
-            .any(|root| name == *root || name.starts_with(&format!("{root}.")))
+            .any(|root| name.strip_prefix(root).is_some_and(|rest| rest.is_empty() || rest.starts_with('.')))
     };
     in_jdk(&decl.package) || decl.package.is_empty() && in_jdk(&decl.name)
 }
