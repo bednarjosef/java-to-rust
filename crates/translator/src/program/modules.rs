@@ -41,6 +41,59 @@ pub fn kept(modules: &[Module]) -> Option<&Path> {
     modules.iter().find(|m| m.name == "java.base").map(|m| m.file.as_path())
 }
 
+/// A service provider that the sources declare: the service and the provider, by qualified name
+/// (`a.B.C` for the binary name `a.B$C`), and whether a module declares it, so that its public
+/// static `provider()` makes it if it has one, rather than its constructor.
+pub type ServiceProvider = (String, String, bool);
+
+/// The service providers that the roots declare, in the order that `ServiceLoader` finds them:
+/// those of the modules' `provides S with P1, P2;`, then those of the files
+/// `META-INF/services/S`, one provider per line, `#` starting a comment, root by root (see
+/// `java/overlay/java/util/ServiceLoader.java`).
+pub fn service_providers<'a>(roots: impl IntoIterator<Item = &'a PathBuf> + Clone) -> Vec<ServiceProvider> {
+    let mut out: Vec<ServiceProvider> = Vec::new();
+    let mut add = |service: &str, provider: &str, modular: bool| {
+        let (service, provider) = (service.replace('$', "."), provider.replace('$', "."));
+        if !out.iter().any(|(s, p, _)| *s == service && *p == provider) {
+            out.push((service, provider, modular));
+        }
+    };
+    for root in roots.clone() {
+        let Ok(source) = std::fs::read_to_string(root.join("module-info.java")) else { continue };
+        let source = without_comments(&source);
+        let tokens = tokens(&source);
+        let mut rest = tokens.iter();
+        while let Some(token) = rest.next() {
+            if *token != "provides" {
+                continue;
+            }
+            let directive: Vec<&str> = rest.by_ref().take_while(|t| **t != ";").copied().collect();
+            if let [service, "with", providers @ ..] = &directive[..] {
+                providers.iter().filter(|p| **p != ",").for_each(|p| add(service, p, true));
+            }
+        }
+    }
+    for root in roots {
+        let Ok(files) = std::fs::read_dir(root.join("META-INF").join("services")) else { continue };
+        let mut files: Vec<PathBuf> = files.flatten().map(|f| f.path()).collect();
+        files.sort();
+        for file in files {
+            let (Some(service), Ok(text)) =
+                (file.file_name().and_then(|n| n.to_str()), std::fs::read_to_string(&file))
+            else {
+                continue;
+            };
+            for line in text.lines() {
+                let provider = line.split('#').next().unwrap_or_default().trim();
+                if !provider.is_empty() {
+                    add(service, provider, false);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The name of the module that `source` declares and the modules it requires.
 fn declaration(source: &str) -> Option<(String, Vec<String>)> {
     let source = without_comments(source);
@@ -159,7 +212,34 @@ fn system_modules() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::declaration;
+    use super::{declaration, service_providers};
+
+    #[test]
+    fn providers_come_from_provides_then_service_files() {
+        let root = std::env::temp_dir().join(format!("service-providers-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("META-INF/services")).unwrap();
+        std::fs::write(
+            root.join("module-info.java"),
+            "module m {\n    // provides commented.Out with x.Y;\n    provides a.Spi with a.One, a.Outer.Two;\n}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("META-INF/services/a.Spi"), "# providers\na.Three # the third\n\na.One\n")
+            .unwrap();
+        std::fs::write(root.join("META-INF/services/b.Other$Spi"), "b.Impl$Nested\n").unwrap();
+        let providers = service_providers(std::slice::from_ref(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+        let found: Vec<(&str, &str, bool)> =
+            providers.iter().map(|(s, p, m)| (s.as_str(), p.as_str(), *m)).collect();
+        assert_eq!(
+            found,
+            [
+                ("a.Spi", "a.One", true),
+                ("a.Spi", "a.Outer.Two", true),
+                ("a.Spi", "a.Three", false),
+                ("b.Other.Spi", "b.Impl.Nested", false)
+            ]
+        );
+    }
 
     #[test]
     fn a_declaration_names_its_module_and_what_it_requires() {

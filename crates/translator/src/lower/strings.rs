@@ -290,7 +290,7 @@ impl<'t> Lowering<'t> {
             None => arg_nodes.first().copied(),
         };
         if args[0].ty != Type::String {
-            return unsupported(node, "`String.format` with a locale");
+            return self.format_in_locale(node, arg_nodes);
         }
         // An array of objects passed for the varargs is the arguments themselves (`Object[]`, as
         // `LocaleResources.trace` passes its own); any other array is a single array argument,
@@ -308,6 +308,47 @@ impl<'t> Lowering<'t> {
             return error(node.pos(), format!("{why} not supported yet: \"{format}\""));
         }
         Ok(ExprKind::Builtin(Builtin::Format, args))
+    }
+
+    /// `String.format(locale, format, args...)` (and `printf` with a locale): what the JDK's code
+    /// runs, `new Formatter(locale).format(format, args).toString()`, with the JDK's `Formatter`,
+    /// which formats as the locale does.
+    fn format_in_locale(&self, node: Node<'t>, arg_nodes: &[Node<'t>]) -> Result<ExprKind, Error> {
+        let [new, format, text] = crate::program::FORMAT_IN_LOCALE;
+        let found = |(owner, name, sig): (&str, &str, &str)| {
+            self.methods.iter().any(|m| self.types[m.owner].javac == owner && m.name == name && m.sig == sig)
+        };
+        let Some((locale, rest)) =
+            arg_nodes.split_first().filter(|_| [new, format, text].into_iter().all(found))
+        else {
+            return error(
+                node.pos(),
+                "`String.format` with a locale formats with the JDK's `Formatter`: translate the program \
+                 with the JDK's sources (`--main` and `--library`) for it",
+            );
+        };
+        let (line, column) = (&node.0["line"], &node.0["column"]);
+        let symbol = |(owner, name, sig): (&str, &str, &str)| {
+            let kind = if name == "<init>" { "CONSTRUCTOR" } else { "METHOD" };
+            serde_json::json!({"kind": kind, "name": name, "owner": owner, "static": false, "type": sig,
+                "varargs": name == "format"})
+        };
+        let call = |receiver: serde_json::Value,
+                    method: (&str, &str, &str),
+                    args: Vec<serde_json::Value>,
+                    ty: &str| {
+            serde_json::json!({"kind": "METHOD_INVOCATION", "line": line, "column": column, "javaType": ty,
+                "arguments": args,
+                "methodSelect": {"kind": "MEMBER_SELECT", "line": line, "column": column,
+                    "identifier": method.1, "expression": receiver, "symbol": symbol(method)},
+                "symbol": symbol(method)})
+        };
+        let formatter = serde_json::json!({"kind": "NEW_CLASS", "line": line, "column": column,
+            "javaType": new.0, "arguments": [locale.0], "symbol": symbol(new)});
+        let formatted = call(formatter, format, rest.iter().map(|a| a.0.clone()).collect(), new.0);
+        let text = call(formatted, text, Vec::new(), "java.lang.String");
+        let text: &'t serde_json::Value = Box::leak(Box::new(text));
+        Ok(self.expr(Node(text))?.kind)
     }
 
     /// `System.out.printf(format, args...)` and `System.out.format`: printing the formatted text.
@@ -474,6 +515,12 @@ impl<'t> Lowering<'t> {
                 "java.lang.StringBuilder" | "java.lang.StringBuffer",
                 [] | [Type::Int | Type::String | Type::StringBuilder],
             ) => ExprKind::Builtin(Builtin::Builder(BuilderOp::New), args),
+            // The builder starts with the characters of a `CharSequence`; a null one throws.
+            ("java.lang.StringBuilder" | "java.lang.StringBuffer", [Type::Class(c, _)])
+                if *c == CHAR_SEQUENCE =>
+            {
+                ExprKind::Builtin(Builtin::Builder(BuilderOp::New), args)
+            }
             (owner, _) => return unsupported(node, &format!("this constructor of `{owner}`")),
         }))
     }

@@ -56,6 +56,7 @@ mod primitives;
 mod program;
 mod prologues;
 mod recreate;
+mod reflection;
 mod switch;
 mod sync;
 mod system;
@@ -397,8 +398,12 @@ impl<'t> Lowering<'t> {
             self.guard_clinit(index, &mut clinit, &mut types[index], methods.as_slice());
             methods.push(clinit);
         }
+        let mut writes = enums::EnumFieldWrites::default();
         for index in (0..types.len()).filter(|&t| self.types[t].node.kind() == "ENUM") {
-            if let Err(e) = self.finish_enum(index, types, methods) {
+            let finished = self.finish_enum(index, types, methods, &mut writes);
+            // The enum's own methods may have changed.
+            writes.forget(methods, index);
+            if let Err(e) = finished {
                 // In a census, an enum that lowering rejects keeps its constants without values.
                 self.reject_at(index, Some(self.types[index].node.pos()), e).map_err(|e| (index, e))?;
                 let names = self.enum_constant_names(index);
@@ -416,11 +421,13 @@ impl<'t> Lowering<'t> {
         index: usize,
         types: &mut [TypeDecl],
         methods: &mut Vec<Method>,
+        writes: &mut enums::EnumFieldWrites,
     ) -> Result<(), Error> {
         self.constant_bodies(index, methods)?;
+        writes.forget(methods, index);
         let bodies = self.constant_body_fields(index)?;
         let own_fields = types[index].fields.len();
-        let pure = self.check_enum(index, methods).and_then(|()| {
+        let pure = self.check_enum(index, methods, writes).and_then(|()| {
             self.add_body_fields(&bodies, &mut types[index].fields)?;
             self.enum_constants(index, &types[index].fields, methods, &bodies)
         });
@@ -554,13 +561,6 @@ impl<'t> Lowering<'t> {
             "java.lang.StringBuilder" | "java.lang.StringBuffer" => Ok(Type::StringBuilder),
             // An array of these (`Class<?>[]`, `Enum<?>[]`) is an array type, below.
             _ if name == "java.lang.Class" || generic_of(name, "java.lang.Class") => Ok(Type::JavaClass),
-            // A constructor without parameters, the only one that a translation creates objects
-            // with from a `Class` value, is its class (`by_name.rs`).
-            _ if name == "java.lang.reflect.Constructor"
-                || generic_of(name, "java.lang.reflect.Constructor") =>
-            {
-                Ok(Type::JavaClass)
-            }
             // A value of one of the program's enums (see `enums::enum_call`).
             _ if (name == "java.lang.Enum" || generic_of(name, "java.lang.Enum"))
                 && self.object.is_some_and(|at| at.enumeration.is_some()) =>
@@ -585,6 +585,11 @@ impl<'t> Lowering<'t> {
                 Ok(Type::class(&self.types[t].name))
             }
             "<nulltype>" => Ok(Type::Null),
+            // javac gives no name to the intersection of a `?:`'s branch types, such as
+            // `Serializable & Comparable<?>` for an enum and a string: the value is an `Object`.
+            "" if matches!(node.kind(), "CONDITIONAL_EXPRESSION" | "PARENTHESIZED") => {
+                self.ty(node, "java.lang.Object")
+            }
             // `this` in the body of an enum constant, which is the constant.
             _ if name.starts_with("<anonymous ") && self.enum_index(&name[11..name.len() - 1]).is_some() => {
                 Ok(Type::enum_type(&name[11..name.len() - 1]))
@@ -1083,6 +1088,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.blocker_call(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.reflection_native(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {

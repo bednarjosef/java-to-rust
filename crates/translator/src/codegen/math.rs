@@ -1,5 +1,6 @@
 //! The `Math` methods that throw on overflow or on bad bounds, and the ones that need the runtime's
-//! exact helpers: `addExact` and the rest, `clamp`, `copySign` and `nextDown`.
+//! exact helpers: `addExact` and the rest, `clamp`, `copySign`, `nextDown` and the products
+//! `multiplyHigh`, `unsignedMultiplyHigh` and `multiplyFull`.
 
 use super::*;
 
@@ -14,9 +15,11 @@ impl<'a> Gen<'a> {
             let n = self.value(&args[1], Type::Int).text;
             return Some(Code::atom(format!("{}({x}, {n})", self.runtime(&format!("scalb{float}")))));
         }
-        // `toIntExact` takes a `long`, and `clamp(long, int, int)` computes in `long`.
+        // `toIntExact` takes a `long`, and `clamp(long, int, int)` computes in `long`. The products
+        // take `long`s, except `multiplyFull`, which takes `int`s and returns the exact `long`.
         let operand = match name {
-            "toIntExact" => Type::Long,
+            "toIntExact" | "multiplyHigh" | "unsignedMultiplyHigh" => Type::Long,
+            "multiplyFull" => Type::Int,
             "clamp" if ty == Type::Int => Type::Long,
             "addExact" | "subtractExact" | "multiplyExact" | "negateExact" | "incrementExact"
             | "decrementExact" | "absExact" | "clamp" | "copySign" | "nextDown" => ty,
@@ -29,6 +32,10 @@ impl<'a> Gen<'a> {
         let code = match name {
             "copySign" => Code::atom(format!("{}.copysign({})", self.recv(&codes[0], operand), texts[1])),
             "nextDown" => Code::atom(format!("{}({})", self.runtime(&format!("next_down{float}")), texts[0])),
+            // The high and full halves of a product, which the runtime computes in `i128`.
+            "multiplyHigh" => self.exact_call("multiply_high", &texts),
+            "unsignedMultiplyHigh" => self.exact_call("unsigned_multiply_high", &texts),
+            "multiplyFull" => self.exact_call("multiply_full", &texts),
             "clamp" => {
                 let function = match operand {
                     Type::Float => "clamp_f32",

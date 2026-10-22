@@ -4,6 +4,21 @@
 
 use crate::ast::*;
 
+/// The text of a string literal, or of a read of a `static final` string constant.
+pub fn text<'c>(class: &'c Class, e: &'c Expr) -> Option<&'c str> {
+    match &e.kind {
+        ExprKind::Str(s) => Some(s),
+        ExprKind::Static { class: owner, name } => {
+            let field = class.types.get(*owner)?.statics.iter().find(|f| f.name == *name)?;
+            match &field.init.as_ref().filter(|_| field.constant)?.kind {
+                ExprKind::Str(s) => Some(s),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// The value of the static `name` of class `owner`, when it is an `int` or `long` constant.
 pub fn static_value(class: &Class, owner: usize, name: &str) -> Option<i128> {
     let field = class.types.get(owner)?.statics.iter().find(|f| f.name == name)?;

@@ -33,6 +33,8 @@ mod float;
 mod float_parse;
 pub mod format;
 mod fs;
+mod hex_float;
+mod inflate;
 mod initializer;
 mod integer;
 mod integer_parse;
@@ -51,6 +53,7 @@ mod statics;
 pub mod string;
 mod system;
 mod thread;
+mod time_zone;
 mod unix;
 mod unsigned;
 mod vm;
@@ -76,6 +79,10 @@ pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
 pub use format::{Arg, format, format_objects};
 pub use fs::*;
+pub use hex_float::{double_to_hex_string, float_to_hex_string};
+pub use inflate::{
+    inflate_adler, inflate_bytes, inflate_end, inflate_init, inflate_reset, inflate_set_dictionary,
+};
 pub use initializer::*;
 pub use integer::*;
 pub use integer_parse::{parse_radix, parse_small_radix, try_parse_radix, try_parse_small_radix};
@@ -97,6 +104,7 @@ pub use statics::*;
 pub use string::*;
 pub use system::*;
 pub use thread::*;
+pub use time_zone::*;
 pub use unix::*;
 pub use unsigned::{
     compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,

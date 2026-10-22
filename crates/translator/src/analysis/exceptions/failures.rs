@@ -24,13 +24,10 @@ fn only_under(class: &Class, facts: &Facts, s: usize, t: usize) -> bool {
     })
 }
 
-/// Whether `builtin` is a regular expression call whose pattern (and replacement) are literals
+/// Whether `builtin` is a regular expression call whose pattern (and replacement) are constants
 /// that compile, so that it never throws.
-fn constant_pattern(builtin: &Builtin, args: &[Expr]) -> bool {
-    let text = |i: usize| match args.get(i).map(|a| &a.kind) {
-        Some(ExprKind::Str(s)) => Some(s.as_str()),
-        _ => None,
-    };
+fn constant_pattern(class: &Class, builtin: &Builtin, args: &[Expr]) -> bool {
+    let text = |i: usize| args.get(i).and_then(|a| crate::analysis::constants::text(class, a));
     match builtin {
         Builtin::String(StringOp::Split | StringOp::Matches) => {
             text(1).is_some_and(|p| java_runtime::regex::never_fails(p, None))
@@ -65,46 +62,62 @@ fn format_samples(args: &[Expr]) -> Vec<java_runtime::format::Arg<'static>> {
 }
 
 /// What a method of the library that the runtime implements may throw besides a
-/// `NullPointerException` for a null argument: `None` when nothing, `"?"` when it is not known
-/// exactly.
-fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
+/// `NullPointerException` for a null argument, by standard class: none when nothing, `"?"` when
+/// it is not known exactly.
+fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static [&'static str] {
+    const SIOOBE: &str = "java.lang.StringIndexOutOfBoundsException";
     match builtin {
         Builtin::String(op) => match op {
-            StringOp::Substring => Some("java.lang.StringIndexOutOfBoundsException"),
+            StringOp::Substring => &["java.lang.StringIndexOutOfBoundsException"],
             // `valueOf(chars)` copies the whole array; only an offset and a count can be out of range.
-            StringOp::FromChars if args.len() == 3 => Some("java.lang.StringIndexOutOfBoundsException"),
-            StringOp::Repeat => Some("java.lang.IllegalArgumentException"),
-            StringOp::GetChars => Some("java.lang.StringIndexOutOfBoundsException"),
+            StringOp::FromChars if args.len() == 3 => &["java.lang.StringIndexOutOfBoundsException"],
+            StringOp::Repeat => &["java.lang.IllegalArgumentException"],
+            StringOp::GetChars => &["java.lang.StringIndexOutOfBoundsException"],
             StringOp::CodePointAt | StringOp::CodePointBefore | StringOp::GetLowBytes => {
-                Some("java.lang.StringIndexOutOfBoundsException")
+                &["java.lang.StringIndexOutOfBoundsException"]
             }
             StringOp::CodePointCount | StringOp::OffsetByCodePoints => {
-                Some("java.lang.IndexOutOfBoundsException")
+                &["java.lang.IndexOutOfBoundsException"]
             }
             // Encoding or decoding the whole text with a `Charset` (or the default one) never
             // fails; a charset's name may be unknown, and a range out of bounds.
             StringOp::GetBytes | StringOp::FromBytes
                 if args.len() == 1 || args.len() == 2 && args[1].ty == Type::Charset =>
             {
-                None
+                &[]
             }
-            // A range outside the array, decoded with a `Charset` or the default one.
-            StringOp::FromBytes if args.len() == 3 || args.len() == 4 && args[3].ty == Type::Charset => {
-                Some("java.lang.StringIndexOutOfBoundsException")
+            // A charset's name that is not one, and a range outside the text or the array.
+            StringOp::GetBytes | StringOp::FromBytes => {
+                let named = args.last().is_some_and(|a| a.ty == Type::String);
+                match (named, args.len() > 2) {
+                    (true, true) => &["java.io.UnsupportedEncodingException", SIOOBE],
+                    (true, false) => &["java.io.UnsupportedEncodingException"],
+                    (false, _) => &[SIOOBE],
+                }
             }
             // A range outside the array, an invalid code point.
-            StringOp::FromCodePoints | StringOp::FromHighByte => Some("?"),
-            // A malformed pattern, a bad group in a replacement, an unknown charset.
-            StringOp::ReplaceAll
-            | StringOp::ReplaceFirst
-            | StringOp::Matches
-            | StringOp::Split
-            | StringOp::GetBytes
-            | StringOp::FromBytes => Some("?"),
-            _ => None,
+            StringOp::FromCodePoints => &[SIOOBE, "java.lang.IllegalArgumentException"],
+            // `new String(ascii, hibyte)` copies the whole array.
+            StringOp::FromHighByte if args.len() == 2 => &[],
+            StringOp::FromHighByte => &[SIOOBE],
+            // A malformed pattern, and a bad group in a replacement, unless it is a constant
+            // without references to groups and escapes.
+            StringOp::ReplaceAll | StringOp::ReplaceFirst
+                if !crate::analysis::constants::text(class, &args[2])
+                    .is_some_and(|r| !r.contains(['$', '\\'])) =>
+            {
+                &["?"]
+            }
+            StringOp::ReplaceAll | StringOp::ReplaceFirst | StringOp::Matches | StringOp::Split => {
+                &["java.util.regex.PatternSyntaxException"]
+            }
+            _ => &[],
         },
+        // A range of the characters or the text that `append` appends outside them.
+        Builtin::Builder(BuilderOp::Append) if args.len() == 4 => &["java.lang.IndexOutOfBoundsException"],
         Builtin::Builder(
             BuilderOp::New
+            | BuilderOp::Append
             | BuilderOp::Reverse
             | BuilderOp::IndexOf
             | BuilderOp::LastIndexOf
@@ -112,49 +125,52 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | BuilderOp::ToString
             | BuilderOp::IsEmpty
             | BuilderOp::CompareTo,
-        ) => None,
-        // A range of the appended text (`args` has the builder first) out of its bounds.
-        Builtin::Builder(BuilderOp::Append) if args.len() == 4 => Some("java.lang.IndexOutOfBoundsException"),
-        Builtin::Builder(BuilderOp::Append) => None,
+        ) => &[],
         // A negative count, an invalid code point.
         Builtin::Builder(BuilderOp::AppendCodePoint | BuilderOp::Repeat) => {
-            Some("java.lang.IllegalArgumentException")
+            &["java.lang.IllegalArgumentException"]
         }
         Builtin::Builder(BuilderOp::CodePointAt | BuilderOp::CodePointBefore) => {
-            Some("java.lang.StringIndexOutOfBoundsException")
+            &["java.lang.StringIndexOutOfBoundsException"]
         }
         Builtin::Builder(BuilderOp::CodePointCount | BuilderOp::OffsetByCodePoints) => {
-            Some("java.lang.IndexOutOfBoundsException")
+            &["java.lang.IndexOutOfBoundsException"]
         }
         // Inserting at the start is always in bounds.
-        Builtin::Builder(BuilderOp::Insert) if matches!(args[1].kind, ExprKind::Int(0)) => None,
-        // An index out of the builder's bounds.
-        Builtin::Builder(_) => Some("?"),
-        Builtin::ArraysSort | Builtin::ArraysToString => None,
+        Builtin::Builder(BuilderOp::Insert) if matches!(args[1].kind, ExprKind::Int(0)) => &[],
+        // The destination range of `getChars` outside the array is an `IndexOutOfBoundsException`.
+        Builtin::Builder(BuilderOp::GetChars) => &[SIOOBE, "java.lang.IndexOutOfBoundsException"],
+        // An index out of the builder's bounds, which `AbstractStringBuilder` checks with
+        // `StringIndexOutOfBoundsException`.
+        Builtin::Builder(_) => &[SIOOBE],
+        Builtin::ArraysSort | Builtin::ArraysToString => &[],
         Builtin::Arrays(
             ArraysOp::Equals | ArraysOp::HashCode | ArraysOp::SortAll | ArraysOp::BinarySearch,
-        ) => None,
-        Builtin::Arrays(ArraysOp::DeepToString | ArraysOp::Clone) => None,
-        Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _) => Some("java.lang.NumberFormatException"),
+        ) => &[],
+        Builtin::Arrays(ArraysOp::DeepToString | ArraysOp::Clone) => &[],
+        Builtin::Bits(BitsOp::ParseRadix | BitsOp::ParseRange, _) => &["java.lang.NumberFormatException"],
         Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _) => {
-            Some("java.lang.NumberFormatException")
+            &["java.lang.NumberFormatException"]
         }
-        Builtin::EnumValueOf | Builtin::NotEnumClass => Some("java.lang.IllegalArgumentException"),
-        Builtin::Bits(..) => None,
-        Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => None,
-        Builtin::Unsigned(UnsignedOp::Compare | UnsignedOp::ToString | UnsignedOp::Widen, _) => None,
+        Builtin::EnumValueOf | Builtin::NotEnumClass => &["java.lang.IllegalArgumentException"],
+        Builtin::Bits(..) => &[],
+        Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => &[],
+        Builtin::Unsigned(UnsignedOp::Compare | UnsignedOp::ToString | UnsignedOp::Widen, _) => &[],
         // Overflow, and bounds the wrong way round.
         Builtin::Native(Native::Math { name, .. }) if name.ends_with("Exact") => {
-            Some("java.lang.ArithmeticException")
+            &["java.lang.ArithmeticException"]
         }
-        Builtin::Native(Native::Math { name: "clamp", .. }) => Some("java.lang.IllegalArgumentException"),
+        Builtin::Native(Native::Math { name: "clamp", .. }) => &["java.lang.IllegalArgumentException"],
         // The others are functions on numbers, which never throw.
-        Builtin::Native(Native::Math { .. }) => None,
+        Builtin::Native(Native::Math { .. }) => &[],
         // A negative time (and an interrupt, which `runtime_failures` adds in a program that
         // interrupts).
-        Builtin::Native(Native::Sleep { .. }) => Some("java.lang.IllegalArgumentException"),
+        Builtin::Native(Native::Sleep { .. }) => &["java.lang.IllegalArgumentException"],
         // A negative count.
-        Builtin::Native(Native::SecureSeed) => Some("java.lang.IllegalArgumentException"),
+        Builtin::Native(Native::SecureSeed) => &["java.lang.IllegalArgumentException"],
+        // Bad compressed data (`inflate.rs`), and a dictionary that the stream did not ask for.
+        Builtin::Native(Native::InflateBytes) => &["java.util.zip.DataFormatException"],
+        Builtin::Native(Native::InflateSetDictionary) => &["java.lang.IllegalArgumentException"],
         // `Thread`'s checks are in Java (`java/Threads.java`); its natives cannot fail, but for
         // the interrupt of `join0`, which `runtime_failures` adds.
         Builtin::Native(
@@ -180,13 +196,13 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::UncaughtException
             | Native::PrintUncaught
             | Native::InstallTrace,
-        ) => None,
+        ) => &[],
         // A monitor that the thread does not hold (and for `wait` a negative timeout, and an
         // interrupt, which `runtime_failures` adds).
         Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. }) => {
-            Some("java.lang.IllegalMonitorStateException")
+            &["java.lang.IllegalMonitorStateException"]
         }
-        Builtin::Native(Native::HoldsLock) => None,
+        Builtin::Native(Native::HoldsLock) => &[],
         // What the JVM answers about itself, the clock and the bits of numbers (`vm.rs`, `natives`).
         Builtin::Native(
             Native::DoubleToLongBits
@@ -211,25 +227,35 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::CdsRandomSeed
             | Native::ContinuationsSupported
             | Native::NanoTimeAdjustment
+            | Native::SystemTimeZoneId
+            | Native::SystemGmtOffsetId
             | Native::ArrayBaseOffset
             | Native::ArrayIndexScale(_)
             | Native::DescriptorHandle
             | Native::DescriptorAppend
             | Native::FullFence
             | Native::Crc32Update
+            | Native::InflateInit
+            | Native::InflateAdler
+            | Native::InflateReset
+            | Native::InflateEnd
             | Native::NoPendingReferences,
-        ) => None,
+        ) => &[],
         // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).
-        Builtin::Native(Native::Unix(_)) => None,
+        Builtin::Native(Native::Unix(_)) => &[],
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
         // of a closed descriptor does nothing.
         Builtin::Native(Native::FileOpenRead | Native::FileOpenWrite | Native::FileOpenRandom) => {
-            Some("java.io.FileNotFoundException")
+            &["java.io.FileNotFoundException"]
         }
-        Builtin::Native(Native::FileSeek | Native::FileSetLength) => Some("java.io.IOException"),
+        Builtin::Native(Native::FileSeek | Native::FileSetLength) => &["java.io.IOException"],
         // `java.io.File`'s questions answer `false` or 0 where they fail.
         Builtin::Native(Native::FileSystem(name)) => {
-            matches!(*name, "createFileExclusively0" | "canonicalize0").then_some("java.io.IOException")
+            if matches!(*name, "createFileExclusively0" | "canonicalize0") {
+                &["java.io.IOException"]
+            } else {
+                &[]
+            }
         }
         Builtin::Native(
             Native::FileRead
@@ -238,9 +264,9 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::FileSkip
             | Native::FileWrite
             | Native::FileWriteBytes,
-        ) => Some("java.io.IOException"),
-        Builtin::Native(Native::FileLength | Native::FilePosition) => Some("java.io.IOException"),
-        Builtin::Native(Native::FileClose | Native::FileIsRegular) => None,
+        ) => &["java.io.IOException"],
+        Builtin::Native(Native::FileLength | Native::FilePosition) => &["java.io.IOException"],
+        Builtin::Native(Native::FileClose | Native::FileIsRegular) => &[],
         // The standard streams drop what they cannot write, as `PrintStream` does.
         Builtin::Native(
             Native::StandardWrite
@@ -250,8 +276,8 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | Native::OutWrite
             | Native::OutFlush
             | Native::ErrFlush,
-        ) => None,
-        Builtin::CodePoint(CodePointOp::ToCharsInto) => Some("java.lang.IllegalArgumentException"),
+        ) => &[],
+        Builtin::CodePoint(CodePointOp::ToCharsInto) => &["java.lang.IllegalArgumentException"],
         Builtin::CodePoint(
             CodePointOp::CharCount
             | CodePointOp::ToCodePoint
@@ -272,20 +298,20 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
             | CodePointOp::ToLowerCase
             | CodePointOp::NumericValue
             | CodePointOp::Digit,
-        ) => None,
+        ) => &[],
         // A name that is not a charset: `UnsupportedCharsetException`, `IllegalCharsetNameException`
         // or, for null, `IllegalArgumentException`. Not checked, so a catch of it is rejected.
-        Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported) => Some("?"),
-        Builtin::Charset(_) => None,
+        Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported) => &["?"],
+        Builtin::Charset(_) => &[],
         // What an object's `toString` throws is a point of its own (`text_objects`).
-        Builtin::ObjectText => None,
+        Builtin::ObjectText => &[],
         // An atomic update of an element, and a view of a byte array's bytes, fail as their
         // operand, the access of the element, does (`lower::handles`).
-        Builtin::ElementUpdate(_) | Builtin::ByteView { .. } => None,
-        Builtin::ArraysCopyOf => Some("java.lang.NegativeArraySizeException"),
-        Builtin::Native(Native::ArrayCopy) => Some("java.lang.ArrayIndexOutOfBoundsException"),
+        Builtin::ElementUpdate(_) | Builtin::ByteView { .. } => &[],
+        Builtin::ArraysCopyOf => &["java.lang.NegativeArraySizeException"],
+        Builtin::Native(Native::ArrayCopy) => &["java.lang.ArrayIndexOutOfBoundsException"],
         // A range outside the array, or (`runtime_failures` adds it) the wrong way round.
-        Builtin::Arrays(op) if op.ranged() => Some("java.lang.ArrayIndexOutOfBoundsException"),
+        Builtin::Arrays(op) if op.ranged() => &["java.lang.ArrayIndexOutOfBoundsException"],
         // A literal format that fits its arguments' types never throws; the arguments in an
         // `Object[]` are as many as the array has.
         Builtin::Format => match &args[0].kind {
@@ -293,11 +319,24 @@ fn library_failure(builtin: &Builtin, args: &[Expr]) -> Option<&'static str> {
                 if !args[1..].iter().any(|a| matches!(a.ty, Type::Array(_)))
                     && java_runtime::format::never_fails(format, &format_samples(&args[1..])) =>
             {
-                None
+                &[]
             }
-            _ => Some("?"),
+            _ => &["?"],
         },
-        _ => Some("?"),
+        // A zero divisor.
+        Builtin::Unsigned(UnsignedOp::Divide | UnsignedOp::Remainder, _) => {
+            let nonzero = matches!(args[1].kind, ExprKind::Int(v) if v != 0)
+                || matches!(args[1].kind, ExprKind::Long(v) if v != 0);
+            if nonzero { &[] } else { &["java.lang.ArithmeticException"] }
+        }
+        // Copies of a whole array, an array filled whole (an `Object[]` of the translation takes
+        // any object, see `lower::covariant`), text written to the standard error, which drops
+        // what it cannot write, as `PrintStream` does.
+        Builtin::StringArrayOf | Builtin::ObjectArrayOf | Builtin::ArraysFill => &[],
+        Builtin::Native(Native::ErrPrint { .. }) => &[],
+        // `CRC32.updateBytes0` runs on what the JDK's code has checked already, as the JVM's does.
+        Builtin::Native(Native::Crc32UpdateBytes) => &[],
+        _ => &["?"],
     }
 }
 
@@ -411,7 +450,6 @@ pub(super) fn runtime_failures(
             | Builtin::Exit
             | Builtin::MainArgs
             | Builtin::NoObject { .. }
-            | Builtin::UnknownClass
             | Builtin::MissingResource
             | Builtin::InitializeClass { .. }
             | Builtin::ClassName { .. }
@@ -445,6 +483,7 @@ pub(super) fn runtime_failures(
             Builtin::Boxed(
                 BoxedOp::Box
                 | BoxedOp::ToString
+                | BoxedOp::HexString
                 | BoxedOp::Compare
                 | BoxedOp::HashCode
                 | BoxedOp::Sum
@@ -456,6 +495,8 @@ pub(super) fn runtime_failures(
             // checks no other (`codegen::sync`).
             Builtin::MonitorEnter if null(&args[0]) => out.push((NPE, "this synchronized", true, args[0].id)),
             Builtin::MonitorEnter => {}
+            // A class name that is not in the translation (`lower::by_name`).
+            Builtin::UnknownClass => out.push(("java.lang.ClassNotFoundException", "this class name", false, x.id)),
             // A class that is not the object's; a `catch` sees it through `java::catching`.
             Builtin::ClassCheck => out.push(("java.lang.ClassCastException", "this cast", false, x.id)),
             // An object of a class that is not `Cloneable` refuses to be copied.
@@ -562,9 +603,8 @@ pub(super) fn runtime_failures(
                     let receiver = !checked[1..].iter().any(null);
                     out.push((NPE, "this call", receiver, if receiver { args[0].id } else { x.id }));
                 }
-                if let Some(failure) = library_failure(builtin, args)
-                    && !constant_pattern(builtin, args)
-                {
+                let failures = library_failure(class, builtin, args);
+                if !failures.is_empty() && !constant_pattern(class, builtin, args) {
                     let checked = matches!(
                         builtin,
                         Builtin::String(
@@ -596,8 +636,13 @@ pub(super) fn runtime_failures(
                                     | Native::SecureSeed
                             )
                     ) || (facts.interrupts && matches!(builtin, Builtin::Native(Native::Sleep { .. })))
-                        || (matches!(builtin, Builtin::Builder(BuilderOp::Append)) && args.len() == 4);
-                    out.push((failure, "this call of the library", checked, x.id));
+                        // A range of a text, not of a `char[]`, has the checked form.
+                        || (matches!(builtin, Builtin::Builder(BuilderOp::Append))
+                            && args.len() == 4
+                            && !matches!(args[1].ty, Type::Array(_)));
+                    for &failure in failures {
+                        out.push((failure, "this call of the library", checked, x.id));
+                    }
                 }
                 if let Builtin::Arrays(op) = builtin
                     && op.ranged()

@@ -108,7 +108,11 @@ impl<'a> Gen<'a> {
             self.line("match self {");
             self.indent += 1;
             for c in constants {
-                let value = self.value(&c.values[f], field.ty).text;
+                // A census keeps the constants of an enum that lowering rejects, without values.
+                let value = match c.values.get(f) {
+                    Some(value) => self.value(value, field.ty).text,
+                    None => format!("unreachable!(\"the enum {} was rejected\")", decl.name),
+                };
                 self.line(&format!("{name}::{} => {value},", variant_name(&c.name)));
             }
             self.indent -= 1;
@@ -178,23 +182,29 @@ impl<'a> Gen<'a> {
 
     /// Whether a `valueOf` of the enum `index` is somewhere a `catch` or `finally` sees its failure.
     fn checked_value_of(&self, index: usize) -> bool {
-        let mut found = false;
-        for m in &self.class.methods {
-            for s in &m.body {
-                visit_stmt(
-                    s,
-                    &mut |e| {
-                        visit_expr(e, &mut |x| {
-                            found |= matches!(x.kind, ExprKind::Builtin(Builtin::EnumValueOf, _))
-                                && matches!(x.ty, Type::Enum(n) if *n == self.class.types[index].name)
-                                && self.facts.raising.contains(&x.id)
-                        })
-                    },
-                    &mut |_| {},
-                );
+        let checked = self.checked_value_ofs.get_or_init(|| {
+            let mut found = HashSet::new();
+            for m in &self.class.methods {
+                for s in &m.body {
+                    visit_stmt(
+                        s,
+                        &mut |e| {
+                            visit_expr(e, &mut |x| {
+                                if let (ExprKind::Builtin(Builtin::EnumValueOf, _), Type::Enum(n)) =
+                                    (&x.kind, x.ty)
+                                    && self.facts.raising.contains(&x.id)
+                                {
+                                    found.insert(n);
+                                }
+                            })
+                        },
+                        &mut |_| {},
+                    );
+                }
             }
-        }
-        found
+            found
+        });
+        checked.contains(self.class.types[index].name.as_str())
     }
 
     /// `try_enum_value_of`, the checked form of `enum_value_of`, whose failure is an exception the

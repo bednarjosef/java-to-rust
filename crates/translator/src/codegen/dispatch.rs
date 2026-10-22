@@ -84,7 +84,7 @@ impl<'a> Gen<'a> {
 
     /// The type whose enum represents the values of class `t`, if an enum does.
     pub(super) fn enum_for(&self, t: usize) -> Option<usize> {
-        match hierarchy::rep(self.class, self.facts, t) {
+        match self.rep(t) {
             hierarchy::Rep::Enum(t) => Some(t),
             hierarchy::Rep::Object(_) => None,
         }
@@ -102,10 +102,7 @@ impl<'a> Gen<'a> {
     /// The concrete classes whose objects the enum of type `t` holds, in `Class::types` order.
     pub(super) fn enum_variants(&self, t: usize) -> Vec<usize> {
         // An enum's constants exist without `new`.
-        hierarchy::variants(self.class, self.facts, t)
-            .into_iter()
-            .filter(|&c| self.live[c] || self.holds_value(c))
-            .collect()
+        self.variants(t).iter().copied().filter(|&c| self.live[c] || self.holds_value(c)).collect()
     }
 
     /// The path of the variant of class `c` in the enum of `t`: `Shape::Circle`. A variant is
@@ -114,21 +111,88 @@ impl<'a> Gen<'a> {
     /// (`JavaUtilStreamAbstractSetInEntrySet`).
     pub(super) fn variant(&self, t: usize, c: usize) -> String {
         self.need(Need::Enum(t));
-        let variants = hierarchy::variants(self.class, self.facts, t);
+        let names = self.variant_names_of(t);
+        let name = match names.get(&c) {
+            Some(name) => name.clone(),
+            None => self.variant_name(&self.variants(t), c),
+        };
+        format!("{}::{name}", struct_name(&self.class.types[t].name))
+    }
+
+    /// `hierarchy::rep`, worked out once for each type.
+    pub(super) fn rep(&self, t: usize) -> hierarchy::Rep {
+        if let Some(&rep) = self.reps.borrow().get(&t) {
+            return rep;
+        }
+        let rep = hierarchy::rep(self.class, self.facts, t);
+        self.reps.borrow_mut().insert(t, rep);
+        rep
+    }
+
+    /// `hierarchy::variants`, worked out once for each type.
+    pub(super) fn variants(&self, t: usize) -> std::rc::Rc<Vec<usize>> {
+        if let Some(variants) = self.variant_lists.borrow().get(&t) {
+            return variants.clone();
+        }
+        let variants = std::rc::Rc::new(hierarchy::variants(self.class, self.facts, t));
+        self.variant_lists.borrow_mut().insert(t, variants.clone());
+        variants
+    }
+
+    /// The names of the variants of the enum of `t`, made once for all of them.
+    fn variant_names_of(&self, t: usize) -> std::rc::Rc<HashMap<usize, String>> {
+        if let Some(names) = self.variant_names.borrow().get(&t) {
+            return names.clone();
+        }
+        let variants = self.variants(t);
+        let count = |name: &dyn Fn(usize) -> String| {
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for &o in variants.iter() {
+                *counts.entry(name(o)).or_default() += 1;
+            }
+            counts
+        };
+        let (simple, in_package) = (count(&|c| self.simple_name(c)), count(&|c| self.in_package_name(c)));
+        let names: HashMap<usize, String> = variants
+            .iter()
+            .map(|&c| {
+                let name = if simple[&self.simple_name(c)] <= 1 {
+                    self.simple_name(c)
+                } else if in_package[&self.in_package_name(c)] <= 1 {
+                    self.in_package_name(c)
+                } else {
+                    self.full_variant_name(c)
+                };
+                (c, name)
+            })
+            .collect();
+        let names = std::rc::Rc::new(names);
+        self.variant_names.borrow_mut().insert(t, names.clone());
+        names
+    }
+
+    /// The name of the variant for class `c` among `variants`: its simple name, unless another
+    /// variant shares it, then its name in its package, then its whole name.
+    fn variant_name(&self, variants: &[usize], c: usize) -> String {
         let shared = |name: &dyn Fn(usize) -> String| {
             let own = name(c);
             variants.iter().filter(|&&o| name(o) == own).count() > 1
         };
-        let simple = |c: usize| self.simple_name(c);
-        let in_package = |c: usize| modules::split(&self.class.types[c].name).1.replace(['.', '$'], "");
-        let name = if !shared(&simple) {
-            simple(c)
-        } else if !shared(&in_package) {
-            in_package(c)
+        if !shared(&|c| self.simple_name(c)) {
+            self.simple_name(c)
+        } else if !shared(&|c| self.in_package_name(c)) {
+            self.in_package_name(c)
         } else {
-            self.class.types[c].name.split(['.', '$']).map(capitalized).collect()
-        };
-        format!("{}::{name}", struct_name(&self.class.types[t].name))
+            self.full_variant_name(c)
+        }
+    }
+
+    fn in_package_name(&self, c: usize) -> String {
+        modules::split(&self.class.types[c].name).1.replace(['.', '$'], "")
+    }
+
+    fn full_variant_name(&self, c: usize) -> String {
+        self.class.types[c].name.split(['.', '$']).map(capitalized).collect()
     }
 
     /// `variant`, when the enum of `t` has a variant for class `c`: it has none when no object of
@@ -1222,9 +1286,7 @@ impl<'a> Gen<'a> {
         let Some(object) = self.object_index() else { return "false".to_string() };
         let Some(e) = self.enum_for(object) else {
             // Every `Object` is an object of one class.
-            if self.holds_value(c)
-                || hierarchy::rep(self.class, self.facts, object) != hierarchy::Rep::Object(c)
-            {
+            if self.holds_value(c) || self.rep(object) != hierarchy::Rep::Object(c) {
                 return "false".to_string();
             }
             return if optional {

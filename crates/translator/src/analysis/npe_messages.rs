@@ -227,6 +227,14 @@ impl Messages<'_> {
                         }
                         return;
                     }
+                    // `new StringBuilder(seq)` of a null `seq`, which the JDK's constructor
+                    // asks for its length (`-g`, so the parameter has its name).
+                    Builtin::Builder(BuilderOp::New) if matches!(args[0].ty, Type::Class(c, _) if c == CHAR_SEQUENCE) =>
+                    {
+                        let failure = "Cannot invoke \"java.lang.CharSequence.length()\"";
+                        out.insert(args[0].id, Some(format!("{failure} because \"seq\" is null")));
+                        return;
+                    }
                     // `synchronized` on a null.
                     Builtin::MonitorEnter => {
                         return add(&args[0], Some("Cannot enter synchronized block".to_string()));

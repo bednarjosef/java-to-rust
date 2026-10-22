@@ -34,12 +34,19 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("EOFException", "java.io"),
     ("UnsupportedEncodingException", "java.io"),
     ("UncheckedIOException", "java.io"),
+    ("InvocationTargetException", "java.lang.reflect"),
+    ("Method", "java.lang.reflect"),
+    ("Field", "java.lang.reflect"),
+    ("Constructor", "java.lang.reflect"),
+    ("DataFormatException", "java.util.zip"),
 ];
 
 /// The standard classes that the runtime raises and a translation can catch, each with the
 /// kinds of javac's tree of the operations that may raise it (a method call by its owner and
 /// name: `owner#name`, `owner#` for any method of the owner, or `METHOD_INVOCATION` for any
-/// call; `enum#valueOf` for the `valueOf` of any enum of the program).
+/// call; `owner#name(parameters)result` for one method of the name, by javac's signature;
+/// `owner#<init>` for a constructor; `enum#valueOf` for the `valueOf` of any enum of the
+/// program).
 const RAISED: &[(&str, &[&str])] = &[
     (
         "java.lang.ArithmeticException",
@@ -52,6 +59,10 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.Math#floorMod",
             "java.lang.StrictMath#floorDiv",
             "java.lang.StrictMath#floorMod",
+            "java.lang.Integer#divideUnsigned",
+            "java.lang.Integer#remainderUnsigned",
+            "java.lang.Long#divideUnsigned",
+            "java.lang.Long#remainderUnsigned",
         ],
     ),
     (
@@ -85,8 +96,13 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StringBuilder#offsetByCodePoints",
             "java.lang.AbstractStringBuilder#getChars",
             "java.lang.StringBuilder#getChars",
-            "java.lang.StringBuilder#append",
-            "java.lang.StringBuffer#append",
+            // A range of the characters or the text to append outside them.
+            "java.lang.AbstractStringBuilder#append(char[],int,int)java.lang.AbstractStringBuilder",
+            "java.lang.StringBuilder#append(char[],int,int)java.lang.StringBuilder",
+            "java.lang.StringBuffer#append(char[],int,int)java.lang.StringBuffer",
+            "java.lang.AbstractStringBuilder#append(java.lang.CharSequence,int,int)java.lang.AbstractStringBuilder",
+            "java.lang.StringBuilder#append(java.lang.CharSequence,int,int)java.lang.StringBuilder",
+            "java.lang.StringBuffer#append(java.lang.CharSequence,int,int)java.lang.StringBuffer",
         ],
     ),
     // A call, a field access, an array access or a switch on a reference that may be null.
@@ -95,12 +111,16 @@ const RAISED: &[(&str, &[&str])] = &[
         &["METHOD_INVOCATION", "MEMBER_SELECT", "ARRAY_ACCESS", "SWITCH", "SWITCH_EXPRESSION"],
     ),
     ("java.lang.ClassCastException", &["TYPE_CAST", "java.lang.Class#cast"]),
+    // A class name that is not in the translation (`lower::by_name`).
+    ("java.lang.ClassNotFoundException", &["java.lang.Class#forName"]),
     (
         "java.lang.IllegalArgumentException",
         &[
             "enum#valueOf",
             "java.lang.Enum#valueOf",
             "java.lang.Character#toChars",
+            // An invalid code point of `new String(codePoints, offset, count)`.
+            "java.lang.String#<init>",
             "java.lang.AbstractStringBuilder#appendCodePoint",
             "java.lang.StringBuilder#appendCodePoint",
             "java.lang.AbstractStringBuilder#repeat",
@@ -113,8 +133,12 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.util.Arrays#binarySearch",
             // A negative count of seed bytes (`Native::SecureSeed`).
             "java.security.SecureRandom#getSeed",
+            // A dictionary that the stream did not ask for (`inflate.rs`).
+            "java.util.zip.Inflater#setDictionary",
         ],
     ),
+    // Bad compressed data (`Native::InflateBytes`).
+    ("java.util.zip.DataFormatException", &["java.util.zip.Inflater#inflate"]),
     // A monitor that the thread does not hold.
     (
         "java.lang.IllegalMonitorStateException",
@@ -137,6 +161,24 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StringBuilder#codePointBefore",
             "java.lang.AbstractStringBuilder#getChars",
             "java.lang.StringBuilder#getChars",
+            "java.lang.AbstractStringBuilder#insert",
+            "java.lang.StringBuilder#insert",
+            "java.lang.AbstractStringBuilder#charAt",
+            "java.lang.StringBuilder#charAt",
+            "java.lang.AbstractStringBuilder#setCharAt",
+            "java.lang.StringBuilder#setCharAt",
+            "java.lang.AbstractStringBuilder#deleteCharAt",
+            "java.lang.StringBuilder#deleteCharAt",
+            "java.lang.AbstractStringBuilder#delete",
+            "java.lang.StringBuilder#delete",
+            "java.lang.AbstractStringBuilder#replace",
+            "java.lang.StringBuilder#replace",
+            "java.lang.AbstractStringBuilder#setLength",
+            "java.lang.StringBuilder#setLength",
+            "java.lang.AbstractStringBuilder#substring",
+            "java.lang.StringBuilder#substring",
+            // A range outside the array that a `String` is made from.
+            "java.lang.String#<init>",
         ],
     ),
     // The natives of the descriptor streams (`fd.rs`): reading or writing a closed or failing
@@ -170,6 +212,8 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.io.RandomAccessFile#open0",
         ],
     ),
+    // A charset's name that the runtime does not know.
+    ("java.io.UnsupportedEncodingException", &["java.lang.String#getBytes", "java.lang.String#<init>"]),
     (
         "java.lang.NumberFormatException",
         &[
@@ -207,15 +251,16 @@ fn package_of(simple: &str) -> &'static str {
     OTHER_PACKAGES.iter().find(|(s, _)| *s == simple).map_or("java.lang", |(_, p)| p)
 }
 
-/// The class declarations of `java/Standard.java` and `java/Threads.java`, renamed from the
-/// packages `standard` and `threads` to their real packages, as javac names the real classes in a
-/// program's tree.
+/// The class declarations of `java/Standard.java`, `java/Threads.java` and `java/Reflection.java`,
+/// renamed from the packages `standard`, `threads` and `reflection` to their real packages, as
+/// javac names the real classes in a program's tree.
 fn template() -> &'static [Value] {
     static DECLS: OnceLock<Vec<Value>> = OnceLock::new();
     DECLS.get_or_init(|| {
         let files = [
             ("standard", include_str!(concat!(env!("OUT_DIR"), "/standard.json"))),
             ("threads", include_str!(concat!(env!("OUT_DIR"), "/threads.json"))),
+            ("reflection", include_str!(concat!(env!("OUT_DIR"), "/reflection.json"))),
         ];
         let mut decls = Vec::new();
         for (package, text) in files {
@@ -323,14 +368,23 @@ pub fn standard_local_name(name: &str) -> &str {
     name
 }
 
-/// Whether the standard class `name` is the standard class `ancestor` or a subclass of it.
+/// The classes that are not standard but that the runtime raises (`regex.rs`), each with its
+/// standard superclass. A translation cannot catch them: a `catch` that would is rejected.
+const RAISED_NOT_STANDARD: &[(&str, &str)] =
+    &[("java.util.regex.PatternSyntaxException", "java.lang.IllegalArgumentException")];
+
+/// Whether the standard class `name` (or one of `RAISED_NOT_STANDARD`) is the standard class
+/// `ancestor` or a subclass of it.
 pub fn standard_subclass(name: &str, ancestor: &str) -> bool {
     let mut at = Some(name.to_string());
     while let Some(c) = at {
         if c == ancestor {
             return true;
         }
-        at = template_type(&c).and_then(|d| d["extendsClause"]["javaType"].as_str()).map(str::to_string);
+        at = template_type(&c)
+            .and_then(|d| d["extendsClause"]["javaType"].as_str())
+            .or_else(|| RAISED_NOT_STANDARD.iter().find(|(n, _)| *n == c).map(|(_, s)| *s))
+            .map(str::to_string);
     }
     false
 }
@@ -452,6 +506,9 @@ struct Uses {
     finally: bool,
     /// The operations that may fail, as `RAISED` names them.
     operations: HashSet<String>,
+    /// The calls of `getDeclaredField` that only make a field's handle (`handles.rs`), by
+    /// address: they are no lookups of reflection's.
+    handle_fields: HashSet<*const Value>,
     /// Whether the code makes a new exception of an exception's class
     /// (`program::recreated_exception`).
     recreates: bool,
@@ -467,6 +524,18 @@ impl Uses {
                     && is_standard(ty)
                 {
                     self.classes.insert(ty.to_string());
+                }
+                // `(T) Class.forName(n).getDeclaredConstructor().newInstance()` is a `switch`
+                // over the classes (`by_name.rs`), not reflection: only the name, the casts and
+                // the `ClassNotFoundException` of an unknown name are used.
+                if let Some(name) = crate::program::created_by_name(v) {
+                    for operation in
+                        ["TYPE_CAST", "METHOD_INVOCATION", "java.lang.Class#forName", "java.lang.Class#"]
+                    {
+                        self.operations.insert(operation.to_string());
+                    }
+                    self.scan(name);
+                    return;
                 }
                 let symbol = &v["symbol"];
                 let owner = text(symbol, "owner");
@@ -514,8 +583,34 @@ impl Uses {
                                 "()java.lang.Thread".into(),
                             ));
                         }
+                        // A field's handle: `Unsafe.objectFieldOffset(C.class.getDeclaredField(f))`.
+                        if owner == "jdk.internal.misc.Unsafe"
+                            && matches!(
+                                text(symbol, "name").as_str(),
+                                "objectFieldOffset" | "staticFieldOffset" | "staticFieldBase"
+                            )
+                            && let Some(argument) = v["arguments"].get(0)
+                        {
+                            self.handle_fields.insert(argument as *const Value);
+                        }
+                        // A lookup of reflection calls the translator's `Method`, `Field` or
+                        // `Constructor` (`reflection.rs`).
+                        if owner == "java.lang.Class" && !self.handle_fields.contains(&(v as *const Value)) {
+                            for member in super::reflection::lookup_members(&text(symbol, "name")) {
+                                self.classes.insert(member.0.clone());
+                                if member.1 == "<init>" {
+                                    self.instantiated.insert(member.0.clone());
+                                }
+                                self.members.insert(member);
+                            }
+                        }
                         self.operations.insert(kind.clone());
                         self.operations.insert(format!("{owner}#{}", text(symbol, "name")));
+                        self.operations.insert(format!(
+                            "{owner}#{}{}",
+                            text(symbol, "name"),
+                            text(symbol, "type")
+                        ));
                         self.operations.insert(format!("{owner}#"));
                         // `E.valueOf(String)` of an enum `E` of the program.
                         if text(symbol, "name") == "valueOf"
@@ -524,6 +619,16 @@ impl Uses {
                         {
                             self.operations.insert("enum#valueOf".to_string());
                         }
+                    }
+                    // A constructor, by its class, as `owner#<init>`.
+                    "NEW_CLASS" => {
+                        self.operations.insert(format!("{owner}#<init>"));
+                        self.operations.insert(kind);
+                    }
+                    // A local `Field` that only a field's handle uses (`handles.rs`).
+                    "VARIABLE" if text(symbol, "type") == "java.lang.reflect.Field" => {
+                        self.handle_fields.insert(&v["initializer"] as *const Value);
+                        self.operations.insert(kind);
                     }
                     _ => _ = self.operations.insert(kind),
                 }
@@ -695,9 +800,30 @@ impl Standard {
                     uses.members.insert(("java.lang.Throwable".into(), name.into(), signature.into()));
                 }
             }
+            // A `Field` that the program uses comes from a lookup, which a field's handle's local
+            // was not taken for (`Uses::handle_fields`).
+            if uses.members.iter().any(|m| m.0 == "java.lang.reflect.Field") {
+                for name in ["getDeclaredField", "getDeclaredFields"] {
+                    for member in super::reflection::lookup_members(name) {
+                        uses.classes.insert(member.0.clone());
+                        if member.1 == "<init>" {
+                            uses.instantiated.insert(member.0.clone());
+                        }
+                        uses.members.insert(member);
+                    }
+                }
+            }
             // A thread, a thread group or a frame of a stack trace prints as its `toString`, which
-            // string conversion calls unseen.
-            for printed in ["java.lang.Thread", "java.lang.ThreadGroup", "java.lang.StackTraceElement"] {
+            // string conversion calls unseen, and so do reflection's members that the program has.
+            let members =
+                ["java.lang.reflect.Method", "java.lang.reflect.Field", "java.lang.reflect.Constructor"];
+            let made = members.into_iter().filter(|c| uses.instantiated.contains(*c));
+            for printed in ["java.lang.Thread", "java.lang.ThreadGroup", "java.lang.StackTraceElement"]
+                .into_iter()
+                .filter(|c| uses.classes.contains(*c))
+                .chain(made)
+                .collect::<Vec<_>>()
+            {
                 if uses.classes.contains(printed) {
                     uses.members.insert((printed.into(), "toString".into(), "()java.lang.String".into()));
                 }

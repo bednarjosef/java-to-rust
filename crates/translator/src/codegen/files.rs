@@ -170,7 +170,7 @@ impl<'a> Gen<'a> {
     /// A call of a runtime function that returns `Result`, with the failure raised as Java's
     /// exception: where a `catch` or a `finally` may see it (`Facts::raising`), as a thrown
     /// exception that goes on from here, else as an uncaught one.
-    fn fallible(&mut self, id: ExprId, f: &str, args: Vec<String>) -> Code {
+    pub(super) fn fallible(&mut self, id: ExprId, f: &str, args: Vec<String>) -> Code {
         let call = format!("{}({})", self.runtime(f), args.join(", "));
         if self.facts.raising.contains(&id) {
             let checked = format!("{call}.map_err({})", self.runtime("Failure::exception"));

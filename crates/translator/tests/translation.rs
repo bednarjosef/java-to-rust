@@ -1547,11 +1547,11 @@ fn objects_created_from_a_class_name_are_of_the_classes_that_code_names() {
         &[
             "\"app.Circle\" => {",
             "Rc::new(Circle::new());",
-            "java::throw_uncaught(format!(\"java.lang.ClassNotFoundException: {} is not a class of the translated program\"",
+            "java::throw(\"java.lang.ClassNotFoundException\", &format!(\"{}, which is not in the translation\"",
         ],
     );
-    // No code names `Square`, so no name can create one.
-    assert_lacks(&rust, &["Square", "square"]);
+    // No code names `Square`, so no name can create one; and no reflection is needed.
+    assert_lacks(&rust, &["Square", "square", "Constructor"]);
 }
 
 #[test]
@@ -3014,7 +3014,7 @@ fn the_census_reports_every_rejection_not_only_the_first() {
         &[
             "  Program: 5 pieces; 2 (40.0%) translate, 3 rejected.",
             "type `…` not supported yet\n          at p/Other.java:4:9",
-            "catching an exception that this call of the library may throw not supported yet\n          at p/Other.java:7",
+            "catching the `PatternSyntaxException` that this call of the library may throw not supported yet\n          at p/Other.java:7",
             "== on strings compares references; not supported yet\n          at p/Other.java:12",
         ],
     );
@@ -4096,13 +4096,33 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
     // One whose class is not known is not.
     let err = reject(
         "class A { public static void main(String[] a) {
-            try { System.out.println(\"a,b\".split(a[0]).length); }
-            catch (RuntimeException e) { System.out.println(\"bad pattern\"); }
+            try { System.out.println(\"a,b\".replaceAll(\",\", a[0])); }
+            catch (RuntimeException e) { System.out.println(\"bad replacement\"); }
         } }",
     );
     assert!(
         err.contains("catching an exception that this call of the library may throw not supported yet"),
         "{err}"
+    );
+    // Nor is a `PatternSyntaxException`, which is not one of the standard classes; a `catch` that
+    // cannot see it is fine.
+    let err = reject(
+        "class A { public static void main(String[] a) {
+            try { System.out.println(\"a,b\".split(a[0]).length); }
+            catch (RuntimeException e) { System.out.println(\"bad pattern\"); }
+        } }",
+    );
+    assert!(
+        err.contains(
+            "catching the `PatternSyntaxException` that this call of the library may throw not supported yet"
+        ),
+        "{err}"
+    );
+    translate(
+        "class A { public static void main(String[] a) {
+            try { System.out.println(Integer.parseInt(\"1,2\".replaceAll(a[0], \"\"))); }
+            catch (NumberFormatException e) { System.out.println(\"not a number\"); }
+        } }",
     );
     // A string that may be null is dereferenced with the checked form where a catch sees it.
     let rust = translate(
@@ -5090,4 +5110,33 @@ fn seeds_come_from_the_operating_system() {
     );
     assert_contains(&rust, &["or_throw(java::try_secure_seed(16))"]);
     assert_lacks(&rust, &["SecureRandom"]);
+}
+
+#[test]
+fn a_builder_made_from_a_char_sequence_copies_its_text_and_rejects_program_classes() {
+    let rust = translate(
+        "public class Main {
+            public static void main(String[] a) {
+                CharSequence text = \"abc\";
+                CharSequence nothing = null;
+                System.out.println(new StringBuilder(text).append(new StringBuffer(nothing)));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::StringBuilder::from_text(&text.to_string())",
+            "java::StringBuilder::from_text(&java::non_null(nothing.as_ref()).to_string())",
+        ],
+    );
+    let program = "package app;\npublic class Main implements CharSequence {\n    public int length() { return 0; }\n    public char charAt(int i) { return 'x'; }\n    public CharSequence subSequence(int s, int e) { return this; }\n    public String toString() { return \"\"; }\n    public static void main(String[] a) {\n        CharSequence s = new Main();\n        System.out.println(new StringBuilder(s));\n    }\n}\n";
+    let dir = write_sources("builder-from-program-class", &[("app/Main.java", program)]);
+    let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+    let error =
+        java_to_rust::translate_program(&program).expect_err("a program class as a CharSequence").to_string();
+    assert!(
+        error.contains("creating a builder from a `CharSequence` that a program class implements"),
+        "{error}"
+    );
 }
