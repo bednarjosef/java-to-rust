@@ -545,10 +545,10 @@ impl<'t> Lowering<'t> {
         for t in (0..self.types.len()).filter(|&t| self.reflectable(t)) {
             match kind {
                 LookupKind::Constructor => {
-                    let creatable = matches!(self.types[t].node.kind(), "CLASS" | "RECORD") && {
-                        let (first, last) = self.synthetic_params(t)?;
-                        first.is_empty() && last.is_empty()
-                    };
+                    // Without synthetic parameters: no enclosing instance and no captured locals,
+                    // whose types are read where the class is declared.
+                    let creatable = matches!(self.types[t].node.kind(), "CLASS" | "RECORD")
+                        && self.nesting(t).is_none_or(|n| !n.outer && n.captures.is_empty());
                     if !creatable || !reflected(t, "<init>") {
                         continue;
                     }
@@ -635,10 +635,11 @@ impl<'t> Lowering<'t> {
         Ok(!main && params.into_iter().all(boxable) && ret.is_ok_and(|r| r == Type::Void || boxable(r)))
     }
 
-    /// The type that method `m` returns.
+    /// The type that method `m` returns, read where `m` is declared: the `E` of the anonymous
+    /// iterator that `Collections.singletonIterator` returns is the method's type variable.
     fn return_type(&self, node: Node<'t>, m: usize) -> Result<Type, Error> {
         let sig = self.methods[m].sig;
-        self.ty(node, sig.rsplit(')').next().unwrap_or_default())
+        self.declared_type(node, sig.rsplit(')').next().unwrap_or_default(), self.methods[m].owner, Some(m))
     }
 
     /// The type of the field that `decl` declares.

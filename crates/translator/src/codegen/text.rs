@@ -218,6 +218,10 @@ impl<'a> Gen<'a> {
                 parts.extend(args[1..].iter().map(|a| self.int_arg(a)));
                 call(self, f, parts)
             }
+            StringOp::TranslateEscapes => {
+                let s = self.text_ref(&args[0]);
+                self.may_fail(id, "translate_escapes", "", &s)
+            }
             StringOp::ContentEquals => {
                 let (a, b) = (self.text_ref(&args[0]), self.text_ref(&args[1]));
                 call(self, "content_equals", vec![a, b])
@@ -455,6 +459,8 @@ impl<'a> Gen<'a> {
                 if matches!(rest[0].ty, Type::Array(_)) {
                     let chars = self.slice_of(&rest[0]);
                     method("append_chars_range", vec![chars, start, end])
+                } else if matches!(rest[0].ty, Type::Class(..)) && !self.plain_sequence(&rest[0]) {
+                    self.program_range_call(id, &sb, &rest[0], &format!("{start}, {end}"))
                 } else {
                     let text = self.range_text(&rest[0]);
                     self.append_range_call(id, &sb, &format!("{text}, {start}, {end}"))
@@ -469,10 +475,14 @@ impl<'a> Gen<'a> {
             BuilderOp::Length => method("length", vec![]),
             BuilderOp::IsEmpty => method("is_empty", vec![]),
             BuilderOp::ToString => method("to_string", vec![]),
-            BuilderOp::CharAt | BuilderOp::DeleteCharAt | BuilderOp::SetLength => {
+            BuilderOp::CharAt
+            | BuilderOp::DeleteCharAt
+            | BuilderOp::SetLength
+            | BuilderOp::EnsureCapacity => {
                 let name = match op {
                     BuilderOp::CharAt => "char_at",
                     BuilderOp::DeleteCharAt => "delete_char_at",
+                    BuilderOp::EnsureCapacity => "ensure_capacity",
                     _ => "set_length",
                 };
                 let i = self.int_arg(&rest[0]);

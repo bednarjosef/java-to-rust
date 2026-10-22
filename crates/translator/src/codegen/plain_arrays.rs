@@ -490,7 +490,12 @@ impl<'a> Gen<'a> {
             return format!("{slot} = {new}");
         }
         // A value that may fail is computed outside a closure, where its failure can go on.
-        if !used && !mentions(rhs, root) && !mentions(index, root) && !rows_mention && !self.raises_in(rhs) {
+        if !used
+            && !mentions(rhs, root)
+            && !mentions(index, root)
+            && !rows_mention
+            && !self.update_raises(op, ty, rhs)
+        {
             let reference = self.path_ref(&path, true);
             let i = self.value(index, Type::Int).text;
             let old = self.fresh_name(&["old", "previous", "before"]);

@@ -48,6 +48,7 @@ mod natives;
 mod null;
 mod out;
 mod parse_range;
+mod preconditions;
 mod random;
 pub mod regex;
 mod scalb;
@@ -56,6 +57,7 @@ pub mod string;
 mod system;
 mod thread;
 mod time_zone;
+mod translate_escapes;
 mod unix;
 mod unsigned;
 mod vm;
@@ -101,6 +103,7 @@ pub use out::{
     standard_close, standard_flush, standard_write, standard_write_bytes, write_byte,
 };
 pub use parse_range::{parse_range, parse_unsigned_range, try_parse_range, try_parse_unsigned_range};
+pub use preconditions::*;
 pub use random::*;
 pub use regex::{matches_all, replace_all, replace_first, split};
 pub use scalb::*;
@@ -109,6 +112,7 @@ pub use string::*;
 pub use system::*;
 pub use thread::*;
 pub use time_zone::*;
+pub use translate_escapes::*;
 pub use unix::*;
 pub use unsigned::{
     compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,

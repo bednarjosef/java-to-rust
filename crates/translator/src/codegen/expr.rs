@@ -693,6 +693,11 @@ impl<'a> Gen<'a> {
                     Code::atom(format!("{throw}(\"java.lang.IllegalArgumentException\", &{message})"))
                 }
             }
+            Builtin::CheckFromToIndex | Builtin::CheckIndex => {
+                let values: Vec<String> = args.iter().map(|a| self.value(a, Type::Int).text).collect();
+                let name = if builtin == Builtin::CheckIndex { "check_index" } else { "check_from_to_index" };
+                self.may_fail(id, name, "", &values.join(", "))
+            }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
             Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty, id),
             Builtin::CodePoint(op) => self.code_point_builtin(op, args, id),

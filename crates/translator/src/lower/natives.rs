@@ -159,6 +159,11 @@ impl<'t> Lowering<'t> {
                         Native::InstallUncaught
                     }
                     Some(native) => native,
+                    // A whole program is rejected only where the native can run.
+                    None if self.reach.is_some() => {
+                        let what = Box::leak(format!("{owner}.{name}{}", symbol.ty).into_boxed_str());
+                        Native::Missing { what }
+                    }
                     None => {
                         return unsupported(node, &format!("native method `{owner}.{name}{}`", symbol.ty));
                     }

@@ -103,6 +103,7 @@ impl<'t> Lowering<'t> {
                 is_synchronized: false,
                 overrides: Vec::new(),
                 type_params: Vec::new(),
+                jdk_code: false,
             });
             methods.len() - 1
         });
@@ -185,6 +186,7 @@ impl<'t> Lowering<'t> {
                 is_synchronized: false,
                 overrides: Vec::new(),
                 type_params: Vec::new(),
+                jdk_code: false,
             }),
         }
         Ok(())

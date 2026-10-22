@@ -398,6 +398,13 @@ impl Walk<'_> {
                 self.write_field(m, object.ty, name, None)
             }
             ExprKind::Builtin(Builtin::InitializeClass { class: c }, _) => self.initialize(*c),
+            ExprKind::Builtin(Builtin::Native(Native::Missing { what }), _) => {
+                let message = format!("native method `{what}` not supported yet");
+                let unresolved = &mut self.state.borrow_mut().live.unresolved;
+                if !unresolved.iter().any(|e| e.pos == x.pos && e.message == message) {
+                    unresolved.push(Error { pos: x.pos, message });
+                }
+            }
             _ => {}
         }
         // An enum's objects are its constants, which its static initialization makes.

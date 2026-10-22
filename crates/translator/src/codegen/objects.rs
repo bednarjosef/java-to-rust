@@ -791,10 +791,15 @@ impl<'a> Gen<'a> {
     }
 
     /// The text of a non-null object of `e`'s class, reached through `handle`, a `&Rc<..>`: what
-    /// `object_text` gives for an object that may be null once it is not.
-    pub(super) fn handle_text(&mut self, handle: &str, e: &'a Expr) -> String {
+    /// `object_text` gives for an object that may be null once it is not; and whether it is the
+    /// `Result` of a `toString` that throws, which the caller passes on.
+    pub(super) fn handle_text(&mut self, handle: &str, e: &'a Expr) -> (String, bool) {
         if let Some(t) = self.enum_of(e) {
-            return self.enum_text(t, handle.to_string());
+            if self.enum_text_throws(t) {
+                self.need(Need::Display(t));
+                return (format!("{handle}.try_text()"), true);
+            }
+            return (self.enum_text(t, handle.to_string()), false);
         }
         let Some(index) = self.to_string_index(e) else {
             let c = self.struct_class(e).expect("an object has a class type");
@@ -805,17 +810,23 @@ impl<'a> Gen<'a> {
                 }
                 None => format!("{}({})", self.runtime("address_hash"), self.address(c, handle)),
             };
-            return self.default_text(c, hash);
+            return (self.default_text(c, hash), false);
         };
         if self.displays(index) {
             let obj = self.handle_object(handle, e, index);
             if self.lazy_text && !(self.printing && !self.quiet_text(e, 0)) {
-                return obj;
+                return (obj, false);
             }
-            return format!("{obj}.to_string()");
+            return (format!("{obj}.to_string()"), false);
         }
         let call = self.handle_call(handle, e, index);
-        self.null_text(index, call)
+        if !self.facts.throwing.contains(&index) {
+            return (self.null_text(index, call), false);
+        }
+        if self.facts.nullable_returns.contains(&index) {
+            return (format!("{call}.map(|text| text.unwrap_or_else(|| String::from(\"null\")))"), true);
+        }
+        (call, true)
     }
 
     /// The text that `call`, a call of `toString` method `index`, gives: `"null"` where it
@@ -1316,8 +1327,8 @@ impl<'a> Gen<'a> {
             let c = self.struct_class(e).expect("an object has a class type");
             let hash = match self.hash_index(c) {
                 Some(i) => {
-                    let call = self.method_call(e, i, &[]).text;
-                    self.shown_hash(i, call)
+                    let call = self.method_call(e, i, &[]);
+                    self.raising(call, i).text
                 }
                 None => {
                     let address = self.receiver_address(e, c);
@@ -1328,6 +1339,7 @@ impl<'a> Gen<'a> {
         };
         if !self.displays(index) {
             let call = self.text_call(e, index);
+            let call = self.raising(call, index);
             return Code::atom(self.null_text(index, call.text));
         }
         if !self.lazy_text || (self.printing && !self.quiet_text(e, 0)) {
@@ -1789,6 +1801,8 @@ impl<'a> Gen<'a> {
             && self.facts.self_methods.contains(&index)
             && !self.facts.mutating.contains(&index)
             && !self.facts.nullable_returns.contains(&index)
+            // `Display` cannot return an exception: one that throws is called (`object_text`).
+            && !self.facts.throwing.contains(&index)
     }
 
     /// Whether displaying an object of `e`'s class can neither print nor throw, so that printing

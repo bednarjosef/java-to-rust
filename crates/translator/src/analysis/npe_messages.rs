@@ -53,6 +53,8 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
         if jdk && decl.package == "java.lang" {
             continue;
         }
+        // `CharSequence`'s default `getChars` in a class of the program is the JDK's code too.
+        let jdk = jdk || method.jdk_code;
         let at = Messages { class, names, outermost: &outermost, method, jdk };
         for s in &method.body {
             visit_stmt(
@@ -443,6 +445,8 @@ impl Messages<'_> {
             Type::Float => "float".to_string(),
             Type::Boolean => "boolean".to_string(),
             Type::Array(element) => format!("{}[]", self.java_param(*element)?),
+            // The JVM writes `java.lang.String` without its package, as `Object`.
+            Type::String => "String".to_string(),
             // A parameter declared `Object`, or of a type variable whose erasure is `Object`, as
             // javac erases it in the descriptor too.
             Type::Class(..)

@@ -233,6 +233,9 @@ impl<'a> Gen<'a> {
             Native::Unix(name) => self.unix_native(name, args, ty),
             // The lowering drops its statement; anywhere else it is the unit it returns.
             Native::Nothing => Code::atom("()"),
+            Native::Missing { what } => {
+                Code::atom(format!("unreachable!(\"the native method {what} never runs\")"))
+            }
             Native::CdsConfigStatus => call(self, "cds_config_status", vec![]),
             Native::CdsRandomSeed => call(self, "cds_random_seed_for_dumping", vec![]),
             Native::ContinuationsSupported => call(self, "continuations_supported", vec![]),

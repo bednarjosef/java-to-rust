@@ -142,6 +142,37 @@ impl StringBuilder {
         Ok(self.append_chars(&units[start as usize..end as usize]))
     }
 
+    /// `sb.append(s, start, end)` of a `CharSequence` that a program class implements, where
+    /// `length` and `char_at` are its methods. `length` runs once and the range is checked on it;
+    /// then `char_at` runs for each index in order. The units are taken before the builder
+    /// changes, so a failure leaves the builder as it was, as Java's `append` does.
+    pub fn try_append_seq_range<E: From<crate::Exception>>(
+        &self,
+        start: i32,
+        end: i32,
+        length: Result<i32, E>,
+        mut char_at: impl FnMut(i32) -> Result<u16, E>,
+    ) -> Result<&Self, E> {
+        let len = length?;
+        if start < 0 || start > end || end > len {
+            let message = format!("Range [{start}, {end}) out of bounds for length {len}");
+            return Err(crate::Exception::new("java.lang.IndexOutOfBoundsException", message).into());
+        }
+        let units = (start..end).map(&mut char_at).collect::<Result<Vec<u16>, E>>()?;
+        Ok(self.append_chars(&units))
+    }
+
+    /// `append_seq_range` where the program does not observe the failure.
+    pub fn append_seq_range<E: From<crate::Exception> + std::fmt::Display + 'static>(
+        &self,
+        start: i32,
+        end: i32,
+        length: Result<i32, E>,
+        char_at: impl FnMut(i32) -> Result<u16, E>,
+    ) -> &Self {
+        self.try_append_seq_range(start, end, length, char_at).unwrap_or_else(crate::uncaught)
+    }
+
     fn check_offset(&self, offset: i32, len: usize) {
         if offset < 0 || offset as usize > len {
             out_of_bounds(format!("offset {offset}, length {len}"));
@@ -203,7 +234,7 @@ impl StringBuilder {
 
     fn check_index(index: i32, len: usize) -> usize {
         if index < 0 || index as usize >= len {
-            out_of_bounds(format!("index {index},length {len}"));
+            out_of_bounds(format!("Index {index} out of bounds for length {len}"));
         }
         index as usize
     }
@@ -275,6 +306,14 @@ impl StringBuilder {
         self.0.borrow_mut().resize(len as usize, 0);
     }
 
+    /// `sb.ensureCapacity(minimumCapacity)`: room for that many characters; a capacity that is
+    /// not positive asks for nothing.
+    pub fn ensure_capacity(&self, minimum: i32) {
+        let mut value = self.0.borrow_mut();
+        let more = usize::try_from(minimum).unwrap_or(0).saturating_sub(value.len());
+        value.reserve(more);
+    }
+
     /// `sb.indexOf(s, from)`.
     pub fn index_of(&self, s: &str, from: i32) -> i32 {
         let value = self.0.borrow();
@@ -303,7 +342,7 @@ impl StringBuilder {
     pub fn substring(&self, start: i32, end: i32) -> String {
         let value = self.0.borrow();
         if start < 0 || start > end || end as usize > value.len() {
-            out_of_bounds(format!("start {start}, end {end}, length {}", value.len()));
+            out_of_bounds(format!("Range [{start}, {end}) out of bounds for length {}", value.len()));
         }
         from_units(&value[start as usize..end as usize])
     }
@@ -387,6 +426,24 @@ impl StringBuilder {
         }
         let at = dst_begin as usize;
         dst[at..at + count].copy_from_slice(&value[begin as usize..end as usize]);
+    }
+
+    /// `sb.getChars(begin, end, dst, dst_begin)` on a builder held as a `CharSequence`, whose
+    /// `dst` may be null: Java checks the range on the builder before it reads `dst.length`.
+    pub fn sequence_get_chars(
+        &self,
+        begin: i32,
+        end: i32,
+        dst: Option<&impl crate::Elements<u16>>,
+        dst_begin: i32,
+    ) {
+        match dst {
+            Some(dst) => self.get_chars(begin, end, &mut dst.items_mut(), dst_begin),
+            None => {
+                self.substring(begin, end);
+                crate::throw_exception(crate::string::null_destination())
+            }
+        }
     }
 
     /// `a.compareTo(b)`: the difference of the first code units that differ, or of the lengths.
