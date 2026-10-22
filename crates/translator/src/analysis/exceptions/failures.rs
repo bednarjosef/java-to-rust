@@ -302,6 +302,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::RawMemory { .. } => &[],
         // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).
         Builtin::Native(Native::Unix(_)) => &[],
+        // So do the name service calls of `java.net` (`java_runtime::net`).
+        Builtin::Native(Native::Net(_)) => &[],
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
         // of a closed descriptor does nothing.
         Builtin::Native(Native::FileOpenRead | Native::FileOpenWrite | Native::FileOpenRandom) => {

@@ -919,6 +919,17 @@ and `end` does nothing, as without virtual threads. `jdk.internal.util.ByteArray
 `java.nio.file`) are its static methods of the same name
 (`java/overlay/jdk/internal/access/TranslatedLangAccess.java`).
 
+`InetAddress` looks names up through the system's name service, as the JVM's natives do: the
+JDK's `InetAddress`, `Inet4AddressImpl` and `Inet6AddressImpl` (`java/overlay/java/net`) call the
+translator's `java.net.TranslatedNet`, whose natives are libc's `getaddrinfo`, `getnameinfo`,
+`gethostname` and `getifaddrs` on the bytes of names and addresses (`net.rs`), and which makes the
+JDK's address objects of what they give, with the JDK's `UnknownHostException`s. Whether IPv4
+and IPv6 are available is tested once, as the JVM does when it starts. Nothing opens a connection:
+sockets, `isReachable` and the listing of network interfaces stay rejected. A hosts file that
+`jdk.net.hosts.file` names and a resolver of the program's own (`InetAddressResolverProvider`) throw
+`UnsupportedOperationException`; with the built-in resolver only, a lookup catches only its
+`UnknownHostException`, where the JDK's also wraps a custom resolver's `RuntimeException`.
+
 `java.nio.file` (`Files`, `Path`, `Paths`, directory streams, attributes) is the JDK's code over
 the translator's `sun.nio.fs.UnixNativeDispatcher` (`java/overlay/sun/nio/fs`), whose natives
 take paths as byte arrays, where the JDK's take addresses of native memory, and are `std::fs` and

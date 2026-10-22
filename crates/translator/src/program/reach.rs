@@ -1001,6 +1001,16 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ),
         ("sun.nio.fs.TranslatedFiles", "loadInstalledProviders"),
     ),
+    // Whether a network interface has an address, and the interface of a name, which the JVM
+    // asks the system for (`java/net/TranslatedNet.java`).
+    (
+        ("java.net.NetworkInterface", "boundInetAddress0", "(java.net.InetAddress)boolean"),
+        ("java.net.TranslatedNet", "boundInetAddress0"),
+    ),
+    (
+        ("java.net.NetworkInterface", "getByName0", "(java.lang.String)java.net.NetworkInterface"),
+        ("java.net.TranslatedNet", "getByName0"),
+    ),
     // The escaped octets of a URI's part decoded as UTF-8, which the JDK decodes with a
     // `CharsetDecoder` (`java/net/TranslatedURI.java`).
     (
