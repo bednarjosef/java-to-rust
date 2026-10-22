@@ -180,7 +180,11 @@ handles.
   file. The rest of the table needs nothing new.
 - **The report** of the lookups that cannot be resolved when translating is not written yet.
 - **Annotations read by reflection** (`getAnnotation`, javac's `AnnotationProxyMaker`), method
-  handles, `Proxy` and `java.lang.invoke` are still rejected.
+  handles, `Proxy` and `java.lang.invoke` are still rejected, except the three annotations that
+  `AbstractProcessor` reads of its processor's class (`@SupportedOptions`,
+  `@SupportedAnnotationTypes`, `@SupportedSourceVersion`): its overlay reads them through the
+  native `TranslatedProcessorAnnotations.values0`, which the translator writes from the program's
+  annotations (`lower/processors.rs`).
 - **Module layers** other than the boot layer, which load code from a module path, and a
   module's `ModuleDescriptor`.
 - **A bundle of the program's own** (`ResourceBundle.getBundle` of a class of the program, as

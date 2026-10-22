@@ -55,6 +55,7 @@ mod natives;
 mod patterns;
 mod platform_logger;
 mod primitives;
+mod processors;
 mod program;
 mod prologues;
 mod recreate;
@@ -1134,6 +1135,9 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.module_native(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.processor_annotations_native(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {

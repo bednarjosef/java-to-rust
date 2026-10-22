@@ -211,7 +211,7 @@ impl<'t> Lowering<'t> {
     }
 
     /// `class.equals(T.class)` of the class `t` of the program.
-    fn class_equals(&self, node: Node<'t>, class: Expr, t: usize) -> Result<Expr, Error> {
+    pub(super) fn class_equals(&self, node: Node<'t>, class: Expr, t: usize) -> Result<Expr, Error> {
         let literal = self.class_literal_of(node, t)?;
         let equals = ExprKind::Builtin(Builtin::ClassMethod(ClassOp::Equals), vec![class, literal]);
         Ok(self.synth(equals, node.pos(), Type::Boolean))
