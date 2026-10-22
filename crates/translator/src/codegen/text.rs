@@ -395,7 +395,10 @@ impl<'a> Gen<'a> {
     /// `NullPointerException`, and a chained call is the `&Self` it returns.
     pub(super) fn builder_recv(&mut self, e: &'a Expr) -> String {
         match &e.kind {
-            ExprKind::Builtin(Builtin::Builder(op), args) if op.chains() => {
+            // One that may fail where a `catch` sees it runs inside `java::catching` (`expr`).
+            ExprKind::Builtin(Builtin::Builder(op), args)
+                if op.chains() && !self.facts.catching.contains_key(&e.id) =>
+            {
                 self.builder_call(e.id, *op, args).text
             }
             _ if self.nullable(e) => {

@@ -52,6 +52,8 @@ const OTHER_PACKAGES: &[(&str, &str)] = &[
     ("Field", "java.lang.reflect"),
     ("Constructor", "java.lang.reflect"),
     ("DataFormatException", "java.util.zip"),
+    ("UnsupportedCharsetException", "java.nio.charset"),
+    ("IllegalCharsetNameException", "java.nio.charset"),
 ];
 
 /// The standard classes that the runtime raises and a translation can catch, each with the
@@ -167,7 +169,16 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.security.SecureRandom#getSeed",
             // A dictionary that the stream did not ask for (`inflate.rs`).
             "java.util.zip.Inflater#setDictionary",
+            // A null charset name.
+            "java.nio.charset.Charset#forName",
+            "java.nio.charset.Charset#isSupported",
         ],
+    ),
+    // A charset's name that is not one, or that the runtime does not know (`Builtin::Charset`).
+    ("java.nio.charset.UnsupportedCharsetException", &["java.nio.charset.Charset#forName"]),
+    (
+        "java.nio.charset.IllegalCharsetNameException",
+        &["java.nio.charset.Charset#forName", "java.nio.charset.Charset#isSupported"],
     ),
     // A format that the arguments do not fit (`Builtin::Format`).
     ("java.util.DuplicateFormatFlagsException", FORMATS),
