@@ -16,8 +16,13 @@ fn table(field: &str) -> String {
     format!("{field}OfConstants")
 }
 
+/// The field whose table is the static array `name`, if it is one.
+pub(crate) fn tabled_field(name: &str) -> Option<&str> {
+    name.strip_suffix("OfConstants").filter(|f| !f.is_empty())
+}
+
 /// The parameter of a constant builder that names the constant it builds.
-const ORDINAL: &str = "constantOrdinal";
+pub(crate) const ORDINAL: &str = "constantOrdinal";
 
 impl<'t> Lowering<'t> {
     /// Gives enum `index` the table form: its fields become static arrays, its constructors

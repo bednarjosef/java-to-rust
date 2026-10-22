@@ -361,6 +361,10 @@ impl Census {
                     } else if crate::program::caller_query(owner, name, text(symbol, "type")).is_some() {
                         let simple = owner.rsplit('.').next().unwrap_or(owner);
                         scan.calls.insert(format!("{simple}.{name}"));
+                    } else if crate::program::redirected_call(owner, name, text(symbol, "type")).is_some() {
+                        // The translator's method runs instead (`REDIRECTED_CALLS`).
+                        let simple = owner.rsplit('.').next().unwrap_or(owner);
+                        scan.calls.insert(format!("{simple}.{name}"));
                     } else if let Some(feature) = untranslated(owner) {
                         scan.feature(feature, node);
                         scan.calls.insert(format!("({feature}) {owner}.{name}"));

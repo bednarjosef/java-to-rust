@@ -50,10 +50,12 @@ mod java_arrays;
 mod java_objects;
 mod libraries;
 mod local_types;
+mod modules;
 mod natives;
 mod patterns;
 mod platform_logger;
 mod primitives;
+mod processors;
 mod program;
 mod prologues;
 mod recreate;
@@ -67,6 +69,7 @@ use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
 pub use census::panic_message;
 pub(crate) use clinit_errors::rewritten_clinit;
+pub(crate) use enum_tables::{ORDINAL as TABLE_ORDINAL, tabled_field};
 pub use exceptions::{
     is_standard, standard_field_type, standard_local_name, standard_names, standard_subclass,
 };
@@ -824,6 +827,9 @@ impl<'t> Lowering<'t> {
             "TYPE_CAST" if arrays::casts_component_array(node) => self.component_array(node)?,
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
+                if let Some(created) = self.constructor_handle_call(node, ty)? {
+                    return Ok(self.synth(created, node.pos(), ty));
+                }
                 let value = self.expr(node.child("expression")?)?;
                 if Self::is_object(value.ty) {
                     self.object_array(node, ty)?;
@@ -1034,10 +1040,14 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.var_handle_access(node, &symbol)? {
             return Ok(kind);
         }
+        self.check_method_handle_call(node, &symbol)?;
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);
         }
         if let Some(kind) = self.system_log(node, &symbol, select)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.module_call(node, &symbol, select)? {
             return Ok(kind);
         }
         if let Some(kind) = self.logger_query(node, &symbol)? {
@@ -1126,6 +1136,12 @@ impl<'t> Lowering<'t> {
             return Ok(kind);
         }
         if let Some(kind) = self.reflection_native(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.module_native(node, &symbol, &mut args)? {
+            return Ok(kind);
+        }
+        if let Some(kind) = self.processor_annotations_native(node, &symbol, &mut args)? {
             return Ok(kind);
         }
         if let Some(builtin) = self.native_call(node, &symbol, receiver, &mut args)? {

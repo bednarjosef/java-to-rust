@@ -754,7 +754,12 @@ few dozen of the JDK's units where javac by itself would attribute thousands (se
 whole programs" in docs/performance.md). A source or library root may be a module's, with a
 `module-info.java` (the JDK's are): the translation is of one closed program, so javac compiles
 every root as part of one module, `java.base` when the JDK's sources are a library and the
-unnamed module otherwise, and reads each class from its source (`program/modules.rs`). A
+unnamed module otherwise, and reads each class from its source (`program/modules.rs`). At run
+time the modules are what the roots declare: `Class.getModule()` is the named module of a root
+with a `module-info.java`, with the class loader the JVM gives it, or the unnamed module of the
+system class loader, and `Module` and `ModuleLayer.boot()` answer from the declarations as the
+JVM's boot layer does; defining a module layer throws, saying that code outside the translation
+cannot run (`java/overlay/java/lang/Module.java`). A
 package of a module whose sources are not given is an error that names the module to pass as
 `--library`.
 
@@ -789,10 +794,12 @@ is, extends or implements. It stops at the classes that the runtime provides (`S
 `StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`; `RUNTIME_CLASSES`),
 whose sources reach deep into the JVM, and at what is not
 translated: reflection (but not `java.lang.reflect.Array`, which is array code, nor `Method`,
-`Field` and `Constructor`, which the reflection table is), method handles, serialization,
-security and class loading (`Module`, `ModuleLayer`, `jdk.internal.loader`; `UNTRANSLATED`;
-`ResourceBundle` is translated, and `ServiceLoader`, `ClassLoader` and `URLClassLoader` are the
-translator's own, over the translation's classes). Library code
+`Field` and `Constructor`, which the reflection table is), method handles (but not the
+`VarHandle` constants and a constructor's `MethodHandle` constant, resolved when translating, see
+`lower/handles.rs`), serialization,
+security and class loading (`jdk.internal.loader`; `UNTRANSLATED`; `ResourceBundle` is
+translated, and `ServiceLoader`, `ClassLoader`, `URLClassLoader`, `Module` and `ModuleLayer` are
+the translator's own, over the translation's classes and modules). Library code
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
 `comparableClassFor` and parallel streams reach threads, so the boundary is needed. An
 untranslated class that is the type of a variable (the `ObjectInputStream` of
