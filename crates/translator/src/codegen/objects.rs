@@ -1386,9 +1386,23 @@ impl<'a> Gen<'a> {
         if !self.lazy_text || (self.printing && !self.quiet_text(e, 0)) {
             return self.method_call(e, index, &[]);
         }
-        // The object is formatted through its `Display`.
+        // The object is formatted through its `Display`. A `java::Locked` borrow has none, so a
+        // thread-shared object is converted by its `toString`, as `method_call` does.
         let obj = self.object(e);
-        Code::atom(if self.is_plain(e) { obj } else { format!("{obj}.borrow()") })
+        Code::atom(if self.is_plain(e) {
+            obj
+        } else if self.is_thread_shared(e) {
+            format!("{obj}.borrow().to_string()")
+        } else {
+            format!("{obj}.borrow()")
+        })
+    }
+
+    /// Whether `e` is an object of a class whose objects threads share: a `java::Locked` borrow of
+    /// it is not `Display`.
+    fn is_thread_shared(&self, e: &Expr) -> bool {
+        matches!(&e.ty, Type::Class(name, _) if self.class.type_index(self.rep_name(name))
+            .is_some_and(|t| self.facts.thread_shared.contains(&t)))
     }
 
     /// A call of a `toString` that is a plain method.
