@@ -1162,25 +1162,61 @@ impl<'a> Gen<'a> {
         t.kind == TypeKind::Interface && t.name == COMPARABLE
     }
 
-    /// Whether method `r` is one of `CharSequence`'s own abstract `length()` and `charAt(int)`.
+    /// Whether method `r` is one of `CharSequence`'s own abstract methods.
     fn is_char_sequence_method(&self, r: usize) -> bool {
         let t = &self.class.types[self.class.methods[r].class];
         t.kind == TypeKind::Interface && t.name == CHAR_SEQUENCE
     }
 
-    /// `CharSequence`'s `length()`, `charAt(index)` or `subSequence(start, end)` (method `r`) for
-    /// a string or a builder of class `c` bound to `o`.
+    /// `CharSequence`'s `length()`, `charAt(index)`, `subSequence(start, end)` or `getChars(..)`
+    /// (method `r`) for a string or a builder of class `c` bound to `o`. What a string's throws
+    /// is thrown for a `java::catching` around the call (see `analysis::exceptions`), as a
+    /// builder's is.
     fn char_sequence_arm(&mut self, r: usize, c: usize) -> String {
         let method = &self.class.methods[r];
         let builder = self.runtime_of(c) == Some(Type::StringBuilder);
+        if self.runtime_of(c).is_none() {
+            // A class of the program implements each of these, or inherits the default.
+            let message = format!("`CharSequence.{}` of a class without one not supported yet", method.name);
+            self.rejected.push(Error { pos: method.pos, message });
+            return "unreachable!()".to_string();
+        }
         if method.name == "subSequence" {
             return self.sub_sequence_arm(r, builder);
+        }
+        if method.name == "getChars" {
+            return self.get_chars_arm(r, builder);
         }
         match (method.name.as_str(), builder) {
             ("length", true) => "o.length()".to_string(),
             ("length", false) => format!("{}(o)", self.runtime("string_length")),
             (_, true) => format!("o.char_at({})", self.local(&method.params[0].name)),
-            (_, false) => format!("{}(o, {})", self.runtime("char_at"), self.local(&method.params[0].name)),
+            (_, false) => {
+                let index = self.local(&method.params[0].name);
+                format!(
+                    "{}(o, {index}).unwrap_or_else(|e| {}(e))",
+                    self.runtime("try_char_at"),
+                    self.runtime("throw_exception")
+                )
+            }
+        }
+    }
+
+    /// `getChars(srcBegin, srcEnd, dst, dstBegin)` (method `r`) of a string or a builder bound to
+    /// `o`, whose `dst` may be null. What it throws is thrown for a `java::catching` around the
+    /// call (see `analysis::exceptions`).
+    fn get_chars_arm(&mut self, r: usize, builder: bool) -> String {
+        let method = &self.class.methods[r];
+        let names: Vec<String> = method.params.iter().map(|p| self.local(&p.name)).collect();
+        let [begin, end, dst, dst_begin] = &names[..] else { unreachable!("`getChars` has four parameters") };
+        let dst = match self.optional_var(r, method.params[2].ty, &method.params[2].name) {
+            true => format!("{dst}.as_ref()"),
+            false => format!("Some(&{dst})"),
+        };
+        if builder {
+            format!("o.sequence_get_chars({begin}, {end}, {dst}, {dst_begin})")
+        } else {
+            format!("{}(o, {begin}, {end}, {dst}, {dst_begin})", self.runtime("sequence_get_chars"))
         }
     }
 
@@ -1192,7 +1228,8 @@ impl<'a> Gen<'a> {
         let text = if builder {
             format!("o.substring({start}, {end})")
         } else {
-            format!("{}(o, {start}, {end})", self.runtime("substring"))
+            let thrown = self.runtime("throw_exception");
+            format!("{}(o, {start}, {end}).unwrap_or_else(|e| {thrown}(e))", self.runtime("try_substring"))
         };
         let char_sequence = method.class;
         let string =

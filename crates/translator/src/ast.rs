@@ -456,6 +456,10 @@ pub struct Method {
     pub overrides: Vec<usize>,
     /// The type parameters of a generic method that is a Rust generic, as types of kind `Param`.
     pub type_params: Vec<Type>,
+    /// The code is the JDK's, though the class is the program's: `CharSequence`'s default
+    /// `getChars` in a class without one of its own (`lower::object`). Its class file is the
+    /// JDK's, which has the names of its locals.
+    pub jdk_code: bool,
 }
 
 pub struct Param {
@@ -737,6 +741,12 @@ pub enum Builtin {
     Arrays(ArraysOp),
     /// `s.charAt(i)`; the receiver is the first argument.
     StringCharAt,
+    /// `[from, to, length]`: `Objects.checkFromToIndex`, an `IndexOutOfBoundsException` when
+    /// `from..to` is not a range of `0..length`.
+    CheckFromToIndex,
+    /// `[index, length]`: `Objects.checkIndex`, an `IndexOutOfBoundsException` when `index` is
+    /// outside `0..length`.
+    CheckIndex,
     /// `Character.isDigit(char)` and the other `Character` methods on a `char`.
     CharIsDigit,
     CharIsLetter,
