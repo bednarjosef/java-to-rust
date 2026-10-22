@@ -67,6 +67,7 @@ use arrays::{is_array_length, reads_name};
 pub use captures::raw as raw_type;
 pub use census::panic_message;
 pub(crate) use clinit_errors::rewritten_clinit;
+pub(crate) use enum_tables::{ORDINAL as TABLE_ORDINAL, tabled_field};
 pub use exceptions::{
     is_standard, standard_field_type, standard_local_name, standard_names, standard_subclass,
 };

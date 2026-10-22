@@ -23,6 +23,10 @@
 
 use super::*;
 
+/// The message of the `NullPointerException` that `Class.forName(name)` and
+/// `Class.forName(name, initialize, loader)` throw for a null name.
+const FOR_NAME_NULL: &str = "Cannot invoke \"String.length()\" because \"str\" is null";
+
 impl<'t> Lowering<'t> {
     /// The creation that the cast `node` makes from the class name `name`:
     /// `{ String n = name; switch (n) { case "C" -> (T) new C(); .. default -> unknown(n) } }`.
@@ -55,8 +59,10 @@ impl<'t> Lowering<'t> {
         cases.push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Expr(unknown)] });
         let switch = self.synth(ExprKind::Switch { selector: Box::new(var()), cases }, pos, ty);
         let name = self.convert(self.expr(name)?, Type::String);
+        let given = self.fresh_name("given_name");
         let block = vec![
-            Stmt::Local { ty: Type::String, name: class_name.clone(), init: Some(name), pos },
+            Stmt::Local { ty: Type::String, name: given.clone(), init: Some(name), pos },
+            self.checked_name(&class_name, &given, Some(FOR_NAME_NULL), pos),
             Stmt::Yield(switch),
         ];
         Ok(ExprKind::Switch {
@@ -274,8 +280,11 @@ impl<'t> Lowering<'t> {
         cases.push(Case { labels: vec![CaseLabel::Default], body: vec![Stmt::Yield(null)] });
         let switch = self.synth(ExprKind::Switch { selector: Box::new(var()), cases }, pos, Type::JavaClass);
         let name = self.convert(self.expr(name_node)?, Type::String);
+        let given = self.fresh_name("given_name");
         let block = vec![
-            Stmt::Local { ty: Type::String, name: class_name.clone(), init: Some(name), pos },
+            Stmt::Local { ty: Type::String, name: given.clone(), init: Some(name), pos },
+            // `Objects.requireNonNull(name)`, whose exception has no message.
+            self.checked_name(&class_name, &given, None, pos),
             Stmt::Yield(switch),
         ];
         Ok(ExprKind::Switch {
@@ -304,7 +313,8 @@ impl<'t> Lowering<'t> {
         let mut block = Vec::new();
         let class_name = self.fresh_name("class_name");
         let name = self.convert(self.expr(arguments[0])?, Type::String);
-        block.push(Stmt::Local { ty: Type::String, name: class_name.clone(), init: Some(name), pos });
+        let given = self.fresh_name("given_name");
+        block.push(Stmt::Local { ty: Type::String, name: given.clone(), init: Some(name), pos });
         if let Some(loader) = arguments.get(2) {
             let loader = self.expr(*loader)?;
             if has_effects(&loader) {
@@ -312,6 +322,7 @@ impl<'t> Lowering<'t> {
             }
         }
         let var = || self.synth(ExprKind::Var(class_name.clone()), pos, Type::String);
+        block.push(self.checked_name(&class_name, &given, Some(FOR_NAME_NULL), pos));
         let mut cases = Vec::new();
         let found = |t: usize| match self.reach {
             Some(reach) => reach.named.contains(&self.types[t].javac).then(|| self.types[t].javac.clone()),
@@ -392,5 +403,50 @@ impl<'t> Lowering<'t> {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
             cases: vec![Case { labels: vec![CaseLabel::Default], body }],
         })
+    }
+
+    /// `String class_name = given != null ? given : throw new NullPointerException(message);`,
+    /// as the JDK's `Class.forName` throws for a null name, with its message or none, when the
+    /// program has that constructor; `class_name` is then never null, so the `switch` over it
+    /// does not check it again. Without the constructor, `String class_name = given;`: the
+    /// `switch` throws, with a message that the analysis gives only where it is certain
+    /// (`analysis/npe_messages.rs`).
+    fn checked_name(&self, class_name: &str, given: &str, message: Option<&str>, pos: Pos) -> Stmt {
+        let given = || self.synth(ExprKind::Var(given.to_string()), pos, Type::String);
+        let init = match self.null_name(message, pos) {
+            Some(throw) => {
+                let null = self.synth(ExprKind::Null, pos, Type::Null);
+                let cond = ExprKind::Binary(BinOp::Ne, Box::new(given()), Box::new(null));
+                let cond = self.synth(cond, pos, Type::Boolean);
+                let kind = ExprKind::Conditional(Box::new(cond), Box::new(given()), Box::new(throw));
+                self.synth(kind, pos, Type::String)
+            }
+            None => given(),
+        };
+        Stmt::Local { ty: Type::String, name: class_name.to_string(), init: Some(init), pos }
+    }
+
+    /// `switch (0) { default -> throw new NullPointerException(message); }`, a `String` that is
+    /// never given, when the program has that constructor.
+    fn null_name(&self, message: Option<&str>, pos: Pos) -> Option<Expr> {
+        const NULL: &str = "java.lang.NullPointerException";
+        let sig = if message.is_some() { "(java.lang.String)void" } else { "()void" };
+        let class = self.type_index(NULL)?;
+        if let Some(reach) = self.reach
+            && !reach.methods.contains(&(NULL.to_string(), "<init>".to_string(), sig.to_string()))
+        {
+            return None;
+        }
+        let ctor =
+            self.methods.iter().position(|m| m.owner == class && m.name == "<init>" && m.sig == sig)?;
+        let args = message
+            .map(|m| self.synth(ExprKind::Str(m.to_string()), pos, Type::String))
+            .into_iter()
+            .collect();
+        let new = self.synth(ExprKind::New { class, args, ctor: Some(ctor) }, pos, Type::class(NULL));
+        let throw = Stmt::Throw(self.convert(new, Type::class("java.lang.Throwable")));
+        let selector = Box::new(self.synth(ExprKind::Int(0), pos, Type::Int));
+        let cases = vec![Case { labels: vec![CaseLabel::Default], body: vec![throw] }];
+        Some(self.synth(ExprKind::Switch { selector, cases }, pos, Type::String))
     }
 }
