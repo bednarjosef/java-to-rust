@@ -48,6 +48,10 @@ pub struct Program {
     /// of code that each is in, the method, initializer or class (see `javac::Session::start`).
     /// For code that is known to have some, such as a decompiler's output.
     pub keep_going: bool,
+    /// For a census only: its translation is written, and each piece of rejected code in it ends
+    /// the program with the rejection's message, where a census otherwise leaves a rejected
+    /// initializer out (`lower::census_lower_program`, `census::Stubs`).
+    pub ends_rejected: bool,
 }
 
 /// A translation error with the file it is in, when it is in one.

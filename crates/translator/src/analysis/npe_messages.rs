@@ -808,6 +808,15 @@ impl Messages<'_> {
             "java.lang.String" => "String".to_string(),
             _ => match self.class.types.iter().position(|d| d.name == ty) {
                 Some(t) => self.java_class_at(t)?,
+                // A local or anonymous class of the JDK, by javac's name (`IsoFields.Field$1`).
+                None if let Some(decl) = self.class.types.iter().find(|d| {
+                    matches!(&d.origin, Origin::Local { binary, .. } | Origin::Anonymous { binary, .. } if binary == ty)
+                }) =>
+                {
+                    let rest = ty.strip_prefix(decl.package.as_str())?.strip_prefix('.')?;
+                    (super::exceptions::from_jdk(decl) && !decl.package.is_empty())
+                        .then(|| format!("{}.{}", decl.package, rest.replace('.', "$")))?
+                }
                 // A class that the program does not have: its name, unless it may be nested.
                 None => {
                     let segments: Vec<&str> = ty.split('.').collect();

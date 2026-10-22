@@ -94,12 +94,10 @@ impl<'t> Lowering<'t> {
         // The code of a class whose declaration is rejected is rejected with it.
         let owner = self.methods[index].owner;
         if let Some(error) = self.class_rejection(owner) {
+            let message = self.stub_message(index, &error);
             self.reject_at(owner, Some(self.methods[index].node.pos()), error)?;
             self.stubbed.borrow_mut().insert(index);
-            self.stubbing.set(true);
-            let stub = self.method(index);
-            self.stubbing.set(false);
-            return stub;
+            return self.stub(index, message);
         }
         if let Err(error) = self.javac_error(self.methods[index].node) {
             return self.stub_if_rejected(index, Err(error));
@@ -123,16 +121,46 @@ impl<'t> Lowering<'t> {
     fn stub_if_rejected(&self, index: usize, lowered: Result<Method, Error>) -> Result<Method, Error> {
         match lowered {
             Err(error) => {
+                let message = self.stub_message(index, &error);
                 let anchor = Some(self.methods[index].node.pos());
                 self.record(self.methods[index].owner, anchor, Some(index), error)?;
                 self.stubbed.borrow_mut().insert(index);
-                self.stubbing.set(true);
-                let stub = self.method(index);
-                self.stubbing.set(false);
-                stub
+                self.stub(index, message)
             }
             method => method,
         }
+    }
+
+    /// The stub of method `index`, whose body names the rejection `message`.
+    fn stub(&self, index: usize, message: String) -> Result<Method, Error> {
+        self.stubbing.set(true);
+        *self.stub_message.borrow_mut() = Some(message);
+        let stub = self.method(index);
+        self.stub_message.borrow_mut().take();
+        self.stubbing.set(false);
+        stub
+    }
+
+    /// What the stub of method `index`, rejected for `error`, says where it runs: the method, and
+    /// the rejection with its line.
+    fn stub_message(&self, index: usize, error: &Error) -> String {
+        let method = &self.methods[index];
+        format!(
+            "{}.{}: {} (line {})",
+            self.types[method.owner].javac, method.name, error.message, error.pos.line
+        )
+    }
+
+    /// The code in place of a rejected field initializer or initializer block of type `t` where a
+    /// census writes its translation (`ends_rejected`): a stub of type `ty` that ends the program
+    /// with the rejection, `error`.
+    pub(super) fn rejected_initializer(&self, t: usize, error: &Error, pos: Pos, ty: Type) -> Option<Expr> {
+        if !self.ends_rejected {
+            return None;
+        }
+        let message = format!("{}: {} (line {})", self.types[t].javac, error.message, error.pos.line);
+        let message = self.synth(ExprKind::Str(message), pos, Type::String);
+        Some(self.synth(ExprKind::Builtin(Builtin::NoObject { class: t }, vec![message]), pos, ty))
     }
 
     /// The declaration of type `t`, or in a census, when lowering rejects it, the declaration with
@@ -179,9 +207,12 @@ impl<'t> Lowering<'t> {
         }
     }
 
-    /// The body of a method that never runs: a dormant method's, or a stub's.
+    /// The body of a method that never runs: a dormant method's, or a stub's, which names its
+    /// rejection.
     pub(super) fn never(&self, class: usize, pos: Pos) -> Vec<Stmt> {
-        let never = ExprKind::Builtin(Builtin::NoObject { class }, Vec::new());
+        let message = self.stub_message.borrow().clone();
+        let message = message.map(|m| self.synth(ExprKind::Str(m), pos, Type::String));
+        let never = ExprKind::Builtin(Builtin::NoObject { class }, message.into_iter().collect());
         vec![Stmt::Expr(self.synth(never, pos, Type::Void))]
     }
 }

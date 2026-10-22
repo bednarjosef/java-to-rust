@@ -34,10 +34,14 @@ impl<'t> Lowering<'t> {
             .collect();
         let mut lowered = Vec::new();
         for block in blocks {
-            // In a census, a rejected block is left out of the constructor.
+            // In a census, a rejected block is left out of the constructor, or ends the program
+            // where the census writes its translation.
             let stmts = match self.block(block) {
                 Ok(stmts) => stmts,
                 Err(e) => {
+                    lowered.extend(
+                        self.rejected_initializer(owner, &e, block.pos(), Type::Void).map(Stmt::Expr),
+                    );
                     self.reject(owner, e)?;
                     continue;
                 }

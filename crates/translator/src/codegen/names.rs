@@ -3,10 +3,14 @@
 use super::*;
 use std::collections::BTreeSet;
 
+/// Rust's keywords, strict and reserved, which a snake-cased Java name can be: `Return` and `If`
+/// are names of javac's `TreeMaker`, though Java's own keywords never name anything.
 pub(super) const RUST_KEYWORDS: &[&str] = &[
-    "as", "async", "await", "box", "crate", "dyn", "fn", "gen", "impl", "in", "let", "loop", "macro",
-    "match", "mod", "move", "mut", "override", "priv", "pub", "ref", "self", "struct", "trait", "type",
-    "typeof", "unsafe", "unsized", "use", "virtual", "where", "yield", "become", "extern",
+    "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate", "do", "dyn",
+    "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl", "in", "let", "loop",
+    "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref", "return", "self", "static",
+    "struct", "super", "trait", "true", "try", "type", "typeof", "unsafe", "unsized", "use", "virtual",
+    "where", "while", "yield",
 ];
 
 /// `maxValue` becomes `max_value`, `HTTPServer` becomes `http_server`.
@@ -34,10 +38,16 @@ pub(super) fn snake_case(name: &str) -> String {
 }
 
 /// The Rust name of the field `name` of the class `decl`: `snake_case`, but `base_` for `base`
-/// in a subclass, whose struct may hold its superclass's fields as `base`.
+/// in a subclass, whose struct may hold its superclass's fields as `base`. Fields whose names
+/// differ only in case (javac's `Names.module` and `Names.Module`) are numbered after the first.
 pub(super) fn field_name(decl: &TypeDecl, name: &str) -> String {
     let field = snake_case(name);
-    if field == "base" && decl.extends.is_some() { "base_".to_string() } else { field }
+    let field = if field == "base" && decl.extends.is_some() { "base_".to_string() } else { field };
+    let mut same = decl.fields.iter().filter(|f| snake_case(&f.name) == snake_case(name));
+    match same.position(|f| f.name == name) {
+        Some(n) if n > 0 => format!("{field}_{}", n + 1),
+        _ => field,
+    }
 }
 
 pub(super) fn unique(base: String, used: &mut HashSet<String>) -> String {
@@ -90,8 +100,10 @@ pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashM
     // Each class has its own `impl`, so names only need to be unique within their class tree.
     // `base` and `base_mut` are taken in each: the enum of a class tree has methods of those
     // names, the fields of the object's class (`dispatch.rs`), beside a method of the JDK's own
-    // `base` (`ByteBuffer.base()`, then `base_2`).
-    let mut used = vec![HashSet::from(["base".to_string(), "base_mut".to_string()]); class.types.len()];
+    // `base` (`ByteBuffer.base()`, then `base_2`). So is `clone`, `Clone`'s, which copies a
+    // handle: a Java `clone()` (`CalendarDate.clone()`) is `clone_2`.
+    let taken = ["base", "base_mut", "clone"].map(String::from);
+    let mut used = vec![HashSet::from(taken); class.types.len()];
     let mut module_used: HashMap<&str, HashSet<String>> = HashMap::new();
     for m in class.methods.iter().filter(|m| m.is_main) {
         used[m.class].insert("main".to_string());

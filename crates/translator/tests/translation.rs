@@ -2714,7 +2714,7 @@ fn object_parameters_used_only_through_are_borrowed() {
     // `keep` returns its parameter, so it takes the handle itself.
     assert_contains(
         &rust,
-        &["fn twice(b: &Rc<RefCell<Box>>) {", "twice(&x);", "fn keep(b: Rc<RefCell<Box>>)"],
+        &["fn twice(b: &Rc<RefCell<Box_>>) {", "twice(&x);", "fn keep(b: Rc<RefCell<Box_>>)"],
     );
 }
 
@@ -3097,6 +3097,31 @@ fn the_census_reports_every_rejection_not_only_the_first() {
     );
     assert_eq!(census.json["complete"], true);
     assert_eq!(census.json["totals"]["program"]["rejected"], 3);
+}
+
+#[test]
+fn a_census_that_writes_its_translation_ends_the_program_in_rejected_code() {
+    let program = java_to_rust::Program {
+        main: "p.Main".into(),
+        sources: vec![census_sources("census_written")],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let census = census(&program);
+    assert_eq!(census.json["totals"]["program"]["rejected"], 3);
+    let rust = census.modules.expect("a translation").one_file();
+    // The methods that lowering, an analysis and the generator reject each end the program with
+    // the rejection; `fine` translates.
+    assert_contains(
+        &rust,
+        &[
+            "java::not_translated(\"p.Other.process: type `java.lang.ProcessBuilder` not supported yet (line 4)\")",
+            "java::not_translated(\"p.Other.split: catching the `PatternSyntaxException`",
+            "java::not_translated(\"p.Other.same: == on strings compares references; not supported yet (line 12)\")",
+            "java::println!(\"fine\")",
+        ],
+    );
+    assert_lacks(&rust, &["unreachable!"]);
 }
 
 #[test]
@@ -3861,7 +3886,7 @@ fn an_interface_is_an_enum_over_its_implementors() {
         &rust,
         &[
             "#[derive(Clone)]\nenum Shape {\n    Circle(Rc<Circle>),\n    Rect(Rc<RectFields>),\n    Square(Rc<Square>),\n    Color(Color),\n}",
-            "            Shape::Square(o) => o.base.area(),\n            Shape::Color(o) => o.area(),",
+            "            Shape::Square(o) => o.base.area(),\n            Shape::Color(o) => (*o).area(),",
             "Shape::Circle(Rc::new(Circle::new(1.0))), Shape::Rect(r.clone())",
             "&s == &Shape::Rect(r.clone())",
         ],
@@ -4696,10 +4721,10 @@ fn type_variables_erase_to_object() {
     assert_contains(
         &rust,
         &[
-            "struct Box {\n    value: Object,\n}",
+            "struct Box_ {\n    value: Object,\n}",
             "fn get(&self) -> Object {",
             "fn set(&mut self, v: Object) {",
-            "Box::new(Object::Integer(3))",
+            "Box_::new(Object::Integer(3))",
             "b.borrow_mut().set(Object::Integer(x));",
         ],
     );
@@ -5103,8 +5128,8 @@ fn a_class_that_reads_its_type_variable_stays_erased() {
             System.out.println(new Box<>(3).show() + bag.get(0)); } }",
     );
     // Text of a type variable's value and an unchecked cast need the erased classes.
-    assert_contains(&rust, &["struct Box {\n    v: Object,\n}", "struct Bag {"]);
-    assert!(!rust.contains("struct Box<T>") && !rust.contains("struct Bag<T>"), "{rust}");
+    assert_contains(&rust, &["struct Box_ {\n    v: Object,\n}", "struct Bag {"]);
+    assert!(!rust.contains("struct Box_<T>") && !rust.contains("struct Bag<T>"), "{rust}");
 }
 
 #[test]
