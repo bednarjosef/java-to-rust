@@ -256,7 +256,7 @@ struct State {
     /// The methods with a `catch` clause that catches no class with objects yet, by each type
     /// that the clause catches: they are walked again once an object of a class below it is
     /// created.
-    catching: HashMap<usize, Vec<usize>>,
+    catching: HashMap<usize, HashSet<usize>>,
     /// The classes whose objects the runtime has been handed (`glue`).
     glued: HashSet<usize>,
     /// The values that the walk knows (`known`).
@@ -394,10 +394,7 @@ impl Walk<'_> {
         }
         let mut state = self.state.borrow_mut();
         for t in waiting {
-            let methods = state.catching.entry(t).or_default();
-            if !methods.contains(&m) {
-                methods.push(m);
-            }
+            state.catching.entry(t).or_default().insert(m);
         }
         dead
     }
