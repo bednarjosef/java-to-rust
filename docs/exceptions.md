@@ -457,7 +457,9 @@ no `because` for the value of `c ? a : b`, no message for a pattern switch's
 **The JDK's code** is taken to be compiled with local names, as the JDK is, so its messages name
 its locals (`because "original" is null`). A call of the JDK's is named by the erasure of its
 receiver's type and its descriptor, with type variables erased as javac does; a method that
-`Object` declares stays `Object`'s. Also covered: `String` methods by the overload javac chose,
+`Object` declares stays `Object`'s, and an enum constant body's call of its own method is named
+by the body's anonymous class (`java.time.temporal.IsoFields$Field$1.rangeRefinedBy(...)`), whose
+binary name the tree gives. Also covered: `String` methods by the overload javac chose,
 unboxing as the call it is (`java.lang.Integer.intValue()`), the JDK's constructors that fail
 inside (`new String(s)`, `new StringBuilder(s)`), a static by the class that declares it, an
 inner class's outer object as `this$0`, an enum field kept as a table (`lower/enum_tables.rs`) as

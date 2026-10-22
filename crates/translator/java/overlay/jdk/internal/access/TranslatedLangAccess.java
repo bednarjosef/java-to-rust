@@ -121,6 +121,14 @@ final class TranslatedLangAccess {
     }
 
     /**
+     * The bytes of the string in UTF-8, as {@code ZipCoder} encodes an entry's name, or an
+     * {@code UnmappableCharacterException} where a character has none.
+     */
+    static byte[] getBytesUTF8OrThrow(String s) throws CharacterCodingException {
+        return uncheckedGetBytesOrThrow(s, StandardCharsets.UTF_8);
+    }
+
+    /**
      * The character at {@code index} of {@code bytes}, two bytes per character in the order of the
      * platform the translation runs on, little-endian (the JDK's {@code StringUTF16.getChar}).
      */

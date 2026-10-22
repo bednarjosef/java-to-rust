@@ -213,6 +213,14 @@ pub fn flows(
                 edges.insert((s, t));
             }
         }
+        // `Array.newArray` makes an array of any of the array classes as an `Object`.
+        ExprKind::Builtin(Builtin::Native(Native::ReflectNewArray), _) => {
+            if let Some(object) = index(e.ty) {
+                for c in (0..n).filter(|&c| class.array_of(c).is_some()) {
+                    edges.insert((c, object));
+                }
+            }
+        }
         ExprKind::Builtin(Builtin::MainArgs, _) => {
             if let (Some(s), Some(t)) = (index(Type::String), index(e.ty.element())) {
                 edges.insert((s, t));

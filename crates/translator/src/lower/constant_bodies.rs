@@ -150,7 +150,9 @@ impl<'t> Lowering<'t> {
         Ok(Some(ExprKind::MethodCall {
             receiver: Box::new(receiver),
             name: symbol.name.to_string(),
-            args: std::mem::take(args),
+            // An argument converts to its parameter's type, as `range(date)` passes a class's
+            // object for an interface.
+            args: self.convert_args(Some(resolved), std::mem::take(args))?,
             resolved: Some(resolved),
             is_super: false,
         }))
@@ -362,7 +364,10 @@ impl<'t> Lowering<'t> {
                 // its result.
                 let outer = self.method_ctx.replace(Some(base));
                 self.ret.set(methods[base].ret);
+                let binary = body.get("symbol").and_then(|s| s.0["binary"].as_str().map(str::to_string));
+                *self.body_class.borrow_mut() = binary;
                 let lowered = self.block(block);
+                self.body_class.borrow_mut().take();
                 self.method_ctx.set(outer);
                 stmts.extend(lowered?);
                 match overrides.iter_mut().find(|(m, _)| *m == base) {
