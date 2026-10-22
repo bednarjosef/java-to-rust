@@ -864,16 +864,18 @@ the home of the JDK the translator ran with. `java.class.path` is `.`. Any other
 on the translator's path sets (`java -XshowSettings:properties`: `java.version`, `java.vendor`,
 `file.encoding`, `user.language`, ...) has that JDK's value, fixed in the translation; a key it
 does not set (`java.locale.providers`, `java.util.currency.data`, the program's own) gives null,
-or the default given. The key must be a literal or a constant, and the two keys whose value the
-translation cannot match are rejected: `sun.java.command` (the command line) and
-`user.timezone` (set once `TimeZone` runs). In a whole program `System.getProperties()` is a
+or the default given. The two keys whose value the translation cannot match are rejected as
+literals or constants: `sun.java.command` (the command line) and `user.timezone` (set once
+`TimeZone` runs). A key that code computes is a `switch` over the keys of a plain run, in which
+those two are unset, as they are in `System.getProperties()`. In a whole program `System.getProperties()` is a
 `Properties` of the keys of a plain run, made once (`java/overlay/java/lang/TranslatedProperties.java`).
 `Integer.getInteger` and `Long.getLong` read a property the same way and decode it as
 `Integer.decode` does, giving the default (or null) when it is unset or no number.
 `Runtime.version().feature()` is the release of the JDK the translator ran with
 (`java.specification.version`); a `Runtime.Version` itself is still rejected. Preview features are
 off, and there is no security manager, so the `jrt:` file system's permission check does nothing;
-`SecurityProperties.includedInExceptions` reads the JDK's `conf/security/java.security`. The memory
+`SecurityProperties.includedInExceptions` and `Security.getProperty` read the JDK's
+`conf/security/java.security`. The memory
 figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
 JVM's, and `gc()` does nothing, as `System.gc()` does. `Runtime.halt` flushes the output and exits without shutdown
 hooks. `onSpinWait` and `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
