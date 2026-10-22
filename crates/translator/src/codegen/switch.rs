@@ -388,6 +388,9 @@ impl<'a> Gen<'a> {
         let text = if self.chars {
             let c = self.value(selector, Type::Char).text;
             format!("char::from_u32(u32::from({c}))")
+        } else if matches!(selector.ty, Type::Enum(_)) {
+            // An enum that may be null throws `NullPointerException` there, as Java's does.
+            self.enum_value(selector).text
         } else if selector.ty != Type::String {
             self.value(selector, selector.ty).typed()
         } else if self.nullable(selector) {

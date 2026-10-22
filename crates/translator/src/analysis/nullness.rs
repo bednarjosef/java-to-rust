@@ -130,7 +130,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                     fields.push((decl.name.clone(), f.name.clone()));
                 }
             }
-            for f in decl.statics.iter().filter(|f| may_be_unset(f.ty)) {
+            for f in decl.statics.iter().filter(|f| may_be_unset(f.ty) || matches!(f.ty, Type::Enum(_))) {
                 // An eagerly initialized static starts at a placeholder, which an object has not,
                 // so its cell starts empty; once the class is initialized, it holds the value.
                 if !f.init.as_ref().is_some_and(|e| !maybe_null(facts, usize::MAX, e)) {
@@ -189,7 +189,7 @@ fn may_be_unset(ty: Type) -> bool {
 }
 
 /// An enum field that starts as `null`, with no initializer or `null`: an `Option` unless every
-/// constructor sets it first (see `lower::enum_nulls`).
+/// constructor sets it first (`set_by_construction`).
 fn starts_null_enum(f: &Field) -> bool {
     matches!(f.ty, Type::Enum(_)) && f.init.as_ref().is_none_or(|e| matches!(e.kind, ExprKind::Null))
 }
@@ -224,9 +224,8 @@ pub fn nullable_var(facts: &Facts, m: usize, name: &str) -> bool {
     facts.nullable_vars.contains(&(m, name.to_string()))
 }
 
-/// The types whose values can be null: references, enums, which are only ever null where
-/// `lower::enum_nulls` allows, and charsets, the runtime's `Copy` values, which are `Option`s
-/// where they may be null as a `java::Class` is.
+/// The types whose values can be null: references, and enums and charsets, `Copy` values, which
+/// are `Option`s where they may be null as a `java::Class` is.
 pub fn nullable_type(ty: Type) -> bool {
     ty.is_reference() || matches!(ty, Type::Enum(_) | Type::Charset)
 }
@@ -249,8 +248,6 @@ pub fn maybe_null(facts: &Facts, m: usize, e: &Expr) -> bool {
             (!narrowed(a, true) && maybe_null(facts, m, a))
                 || (!narrowed(b, false) && maybe_null(facts, m, b))
         }
-        // A cast to an enum gives an enum value (see `java::null_enum`).
-        ExprKind::Cast(Type::Enum(_), _) => false,
         ExprKind::Cast(_, value) => maybe_null(facts, m, value),
         // A switch expression is null when a value it yields may be.
         ExprKind::Switch { cases, .. } => {
