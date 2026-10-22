@@ -451,6 +451,18 @@ impl Uses {
                 {
                     self.classes.insert(ty.to_string());
                 }
+                // `(T) Class.forName(n).getDeclaredConstructor().newInstance()` is a `switch`
+                // over the classes (`by_name.rs`), not reflection: only the name, the casts and
+                // the `ClassNotFoundException` of an unknown name are used.
+                if let Some(name) = crate::program::created_by_name(v) {
+                    for operation in
+                        ["TYPE_CAST", "METHOD_INVOCATION", "java.lang.Class#forName", "java.lang.Class#"]
+                    {
+                        self.operations.insert(operation.to_string());
+                    }
+                    self.scan(name);
+                    return;
+                }
                 let symbol = &v["symbol"];
                 let owner = text(symbol, "owner");
                 let kind = text(v, "kind");
