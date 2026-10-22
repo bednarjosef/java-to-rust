@@ -76,8 +76,9 @@ pub fn census_lower_program<'t>(
     program_units: usize,
     reach: &'t Reach,
     main: &str,
+    ends_rejected: bool,
 ) -> Lowered {
-    lower_going_on(units, program_units, reach, main, true)
+    lower_going_on(units, program_units, reach, main, Some(ends_rejected))
 }
 
 /// `census_lower_program` for the translation of a whole program, which keeps the methods that
@@ -90,20 +91,21 @@ pub fn tolerant_lower_program<'t>(
     reach: &'t Reach,
     main: &str,
 ) -> Lowered {
-    lower_going_on(units, program_units, reach, main, false)
+    lower_going_on(units, program_units, reach, main, None)
 }
 
-/// `census_lower_program`, which takes panics for rejections when `catch_panics`.
+/// `census_lower_program`, with `Some(ends_rejected)` for a census, which takes panics for
+/// rejections; `None` for a translation, which does not.
 fn lower_going_on<'t>(
     units: &[&'t Value],
     program_units: usize,
     reach: &'t Reach,
     main: &str,
-    catch_panics: bool,
+    census_of: Option<bool>,
 ) -> Lowered {
     let census = RefCell::new((Vec::new(), Vec::new()));
     let class = super::real_generics::retry(|real, covariant| {
-        lower_with(units, program_units, reach, main, real, covariant, Some((&census, catch_panics)))
+        lower_with(units, program_units, reach, main, real, covariant, Some((&census, census_of)))
     });
     let (rejected, units) = census.into_inner();
     Lowered { class, rejected, units }
@@ -121,13 +123,14 @@ fn lower_with<'t>(
     main: &str,
     real: Option<&super::real_generics::Real>,
     covariant: &super::covariant::Covariant,
-    census: Option<(&CensusSink, bool)>,
+    census: Option<(&CensusSink, Option<bool>)>,
 ) -> Result<(Class, super::real_generics::Real, super::real_generics::Real), (Option<usize>, Error)> {
     let mut lowering = Lowering::empty();
     lowering.covariant = covariant.clone();
     lowering.reach = Some(reach);
     lowering.census = census.map(|_| RefCell::default());
-    lowering.catch_panics = census.is_some_and(|(_, catch_panics)| catch_panics);
+    lowering.catch_panics = census.is_some_and(|(_, census_of)| census_of.is_some());
+    lowering.ends_rejected = census.is_some_and(|(_, census_of)| census_of == Some(true));
     let mut unit_of = Vec::new();
     let lowered = lower_into(&mut lowering, &mut unit_of, units, program_units, reach, main, real);
     let Some((census, _)) = census else { return lowered };

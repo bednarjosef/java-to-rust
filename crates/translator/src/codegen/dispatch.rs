@@ -36,6 +36,8 @@ pub(super) enum Need {
     Convert(usize, usize),
     /// The enum's `Display`.
     Display(usize),
+    /// `nullable_text()`: what the object's `toString` returns, null as `None`, or its exception.
+    NullableText(usize),
     /// `as_<t>()` on the enum of `s`: the object as a value of type `t` if it is one, as
     /// `(s, t)`.
     Narrow(usize, usize),
@@ -59,6 +61,10 @@ impl<'a> Gen<'a> {
         match need {
             Need::Base(t) | Need::BaseMut(t) | Need::Dispatch(t, _) | Need::Display(t) => {
                 needs.insert(Need::Enum(t));
+            }
+            Need::NullableText(t) => {
+                needs.insert(Need::Enum(t));
+                needs.insert(Need::Display(t));
             }
             Need::Convert(s, t) => {
                 needs.insert(Need::Enum(s));
@@ -153,7 +159,7 @@ impl<'a> Gen<'a> {
             counts
         };
         let (simple, in_package) = (count(&|c| self.simple_name(c)), count(&|c| self.in_package_name(c)));
-        let names: HashMap<usize, String> = variants
+        let mut names: HashMap<usize, String> = variants
             .iter()
             .map(|&c| {
                 let name = if simple[&self.simple_name(c)] <= 1 {
@@ -166,6 +172,17 @@ impl<'a> Gen<'a> {
                 (c, name)
             })
             .collect();
+        // One class's simple name can be another's name in its package (`ClassReader.ProxyType`
+        // and `Proxy.Type`, both `ProxyType`): such variants take their whole names.
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for &c in variants.iter() {
+            *seen.entry(names[&c].clone()).or_default() += 1;
+        }
+        for &c in variants.iter() {
+            if seen[&names[&c]] > 1 {
+                names.insert(c, self.full_variant_name(c));
+            }
+        }
         let names = std::rc::Rc::new(names);
         self.variant_names.borrow_mut().insert(t, names.clone());
         names
@@ -834,13 +851,26 @@ impl<'a> Gen<'a> {
         }
         if m.name == "toString" && m.params.is_empty() {
             self.need(Need::Display(t));
-            let text = format!("{}.to_string()", self.object(receiver));
-            // A `toString` that an implementation may return null from is an `Option` where its
-            // value is used (`nullness`); the `Display` shows such a null as "null".
+            let obj = self.object(receiver);
+            // A `toString` that may throw is a `Result` here, whose error the caller passes on
+            // (`raising`).
+            let throws = self.facts.throwing.contains(&resolved);
+            // One that an implementation may return null from is an `Option` where its value is
+            // used (`nullness`).
             if self.facts.nullable_returns.contains(&resolved) {
-                return Code::atom(format!("Some({text})"));
+                self.need(Need::NullableText(t));
+                let text = format!("{obj}.nullable_text()");
+                if throws {
+                    return Code::atom(text);
+                }
+                let uncaught = self.uncaught("uncaught");
+                return Code::atom(format!("{text}.unwrap_or_else({uncaught})"));
             }
-            return Code::atom(text);
+            return Code::atom(match (throws, self.enum_text_throws(t)) {
+                (true, true) => format!("{obj}.try_text()"),
+                (true, false) => format!("Ok::<_, {}>({obj}.to_string())", self.throwable_type()),
+                (false, _) => format!("{obj}.to_string()"),
+            });
         }
         let name = self.dispatch_name(t, resolved);
         let obj = self.object(receiver);
@@ -1017,6 +1047,9 @@ impl<'a> Gen<'a> {
             if self.enum_text_throws(t) {
                 self.try_text_impl(t, &variants);
             }
+        }
+        if self.wanted.contains(&Need::NullableText(t)) {
+            self.nullable_text_impl(t, &variants);
         }
         self.raised_impl(t);
         self.chain_enum_items(t, &variants);
@@ -1622,6 +1655,11 @@ impl<'a> Gen<'a> {
             _ => ".borrow()",
         };
         match self.homes[i] {
+            // A Java enum's constant is a `Copy` value whose methods take it by value: through
+            // the reference, `to_string(locale, messages)` would be `ToString`'s.
+            Home::Class(_) if self.class.types[c].kind == TypeKind::Enum => {
+                (format!("(*o).{name}({args})"), true)
+            }
             Home::Class(_) if self.facts.self_methods.contains(&i) || self.holds_value(c) => {
                 (format!("o{borrow}.{name}({args})"), true)
             }
@@ -1861,7 +1899,7 @@ impl<'a> Gen<'a> {
         self.gap();
         self.line(&format!("impl {name} {{"));
         self.indent += 1;
-        self.line(&format!("fn try_text(&self) -> Result<String, {throwable}> {{"));
+        self.line(&format!("pub(crate) fn try_text(&self) -> Result<String, {throwable}> {{"));
         self.indent += 1;
         self.match_arms(t, variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
             Some(i) if g.facts.throwing.contains(&i) => {
@@ -1879,6 +1917,36 @@ impl<'a> Gen<'a> {
                 (format!("{call}.map(|hash| {text})"), uses)
             }
             _ => ("Ok(self.to_string())".to_string(), false),
+        });
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// `nullable_text()`: what `toString` returns for an object of the enum of `t`, its null as
+    /// `None`, or its exception; where an implementation may return null, the `Display` shows "null".
+    fn nullable_text_impl(&mut self, t: usize, variants: &[usize]) {
+        let name = struct_name(&self.class.types[t].name);
+        let throwable = self.throwable_type();
+        self.gap();
+        self.line(&format!("impl {name} {{"));
+        self.indent += 1;
+        self.line(&format!("pub(crate) fn nullable_text(&self) -> Result<Option<String>, {throwable}> {{"));
+        self.indent += 1;
+        let throws = self.enum_text_throws(t);
+        self.match_arms(t, variants, &|g: &mut Self, c| match hierarchy::to_string_impl(g.class, c) {
+            Some(i) if g.facts.throwing.contains(&i) || g.facts.nullable_returns.contains(&i) => {
+                let (call, uses) = g.arm_call(t, c, i, "");
+                let call = match (g.facts.throwing.contains(&i), g.facts.nullable_returns.contains(&i)) {
+                    (true, true) => call,
+                    (true, false) => format!("{call}.map(Some)"),
+                    (false, _) => format!("Ok({call})"),
+                };
+                (call, uses)
+            }
+            _ if throws => ("self.try_text().map(Some)".to_string(), false),
+            _ => ("Ok(Some(self.to_string()))".to_string(), false),
         });
         self.indent -= 1;
         self.line("}");

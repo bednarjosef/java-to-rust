@@ -509,7 +509,7 @@ impl<'a> Gen<'a> {
 
     /// Treats the possibly-null `name` as a non-null `&str` from here on; returns it if it was not
     /// already, for `unnarrow`.
-    fn narrow(&mut self, name: &str) -> Option<String> {
+    pub(super) fn narrow(&mut self, name: &str) -> Option<String> {
         self.borrowed.insert(name.to_string()).then(|| name.to_string())
     }
 
@@ -633,7 +633,8 @@ impl<'a> Gen<'a> {
             return false;
         }
         let source = self.pattern_source(value, ty);
-        self.line(&format!("let {} = {source} else {{", self.pattern_binding(name, &source, ty)));
+        let binding = self.pattern_binding(name, &source, ty);
+        self.line(&format!("let {binding} = {} else {{", let_else_source(source)));
         self.nested(then);
         self.line("};");
         true
@@ -653,11 +654,18 @@ impl<'a> Gen<'a> {
         {
             return None;
         }
-        self.line(&format!("let Some({}) = {} else {{", self.local(name), self.narrowed_source(name, ty)));
+        let source = let_else_source(self.narrowed_source(name, ty));
+        self.line(&format!("let Some({}) = {source} else {{", self.local(name)));
         self.nested(then);
         self.line("};");
         Some(name)
     }
+}
+
+/// The value of a `let .. else`, in parentheses when it ends with a block, which Rust doesn't
+/// take before `else`.
+fn let_else_source(source: String) -> String {
+    if source.ends_with('}') { format!("({source})") } else { source }
 }
 
 /// The operands of the `&&`s of a chain that unbox a box, of those `&&`s in `catching`, each

@@ -241,6 +241,9 @@ impl<'a> Gen<'a> {
             | Native::MapFile
             | Native::UnmapFile
             | Native::AllocationGranularity => self.file_channel_native(native, args, id),
+            Native::PosixFadvise | Native::DirectCopy | Native::BufferedCopy => {
+                self.file_copy_native(native, args, id)
+            }
             // The lowering drops its statement; anywhere else it is the unit it returns.
             Native::Nothing => Code::atom("()"),
             Native::Missing { what } => {

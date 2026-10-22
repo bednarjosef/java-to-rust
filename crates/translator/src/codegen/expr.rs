@@ -492,6 +492,9 @@ impl<'a> Gen<'a> {
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
             ExprKind::Cast(ty, value) => self.value(value, *ty),
             ExprKind::Conditional(cond, a, b) => {
+                if let Some(code) = self.enum_conditional(e, cond, a, b) {
+                    return code;
+                }
                 if let Some(code) = self.narrowed_conditional(e, cond, a, b) {
                     return code;
                 }
@@ -734,6 +737,10 @@ impl<'a> Gen<'a> {
             }
             Builtin::MainArgs => self.main_args(ty),
             Builtin::StringArrayOf | Builtin::ObjectArrayOf => self.array_conversion(builtin, &args[0], ty),
+            // A census's stub of rejected code, with the rejection's message (`Builtin::NoObject`).
+            Builtin::NoObject { .. } if let [Expr { kind: ExprKind::Str(message), .. }] = args => {
+                Code::atom(format!("{}({})", self.runtime("not_translated"), code::rust_string(message)))
+            }
             Builtin::NoObject { class } => Code::atom(no_object(&self.class.types[class].name)),
             Builtin::InitializeClass { class } => match self.init_call(class) {
                 Some(init) => Code::atom(format!("{{ {init} }}")),

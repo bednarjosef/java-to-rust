@@ -72,10 +72,16 @@ impl<'t> Lowering<'t> {
                 continue;
             }
             match member.kind() {
-                // In a census, a rejected block or initializer is left out.
+                // In a census, a rejected block or initializer is left out, or ends the program
+                // where the census writes its translation.
                 "BLOCK" if self.keeps(member, &self.types[index].javac) => match self.block(member) {
                     Ok(block) => body.push(Stmt::Block(block)),
-                    Err(e) => self.reject(index, e)?,
+                    Err(e) => {
+                        body.extend(
+                            self.rejected_initializer(index, &e, member.pos(), Type::Void).map(Stmt::Expr),
+                        );
+                        self.reject(index, e)?
+                    }
                 },
                 // A field that nothing reads, whose initializer does nothing else, is not kept.
                 "VARIABLE"
@@ -87,6 +93,10 @@ impl<'t> Lowering<'t> {
                     let ty = match self.ty(member, member.symbol().map_or("", |s| s.ty)) {
                         Ok(ty) => ty,
                         Err(e) => {
+                            body.extend(
+                                self.rejected_initializer(index, &e, member.pos(), Type::Void)
+                                    .map(Stmt::Expr),
+                            );
                             self.reject(index, e)?;
                             continue;
                         }
@@ -95,6 +105,10 @@ impl<'t> Lowering<'t> {
                     let value = match self.expr(init) {
                         Ok(value) => Box::new(self.convert(value, ty)),
                         Err(e) => {
+                            body.extend(
+                                self.rejected_initializer(index, &e, member.pos(), Type::Void)
+                                    .map(Stmt::Expr),
+                            );
                             self.reject(index, e)?;
                             continue;
                         }

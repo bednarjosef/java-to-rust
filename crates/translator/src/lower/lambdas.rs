@@ -65,7 +65,9 @@ impl<'t> Lowering<'t> {
         class: usize,
         method: Option<usize>,
     ) -> Result<(), Error> {
-        let simple = |name: &str| name.rsplit('.').next().unwrap_or(name).to_string();
+        // An anonymous class is named after its place only later (`name_nested`): until then its
+        // name is javac's, `Resolve$MethodResolutionDiagHelper$2`, whose `$`s a Rust name can't hold.
+        let simple = |name: &str| name.rsplit('.').next().unwrap_or(name).replace('$', "");
         let place = match method.map(|m| self.methods[m].name) {
             Some(name) if name != "<init>" => capitalized(name),
             _ => simple(&self.types[class].name),

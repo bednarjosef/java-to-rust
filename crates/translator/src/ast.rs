@@ -783,7 +783,8 @@ pub enum Builtin {
     /// where it is covariant: a copy, which no other name sees.
     ObjectArrayOf,
     /// The body of an instance method of a class that has no objects (`Reach::dormant`): it never
-    /// runs.
+    /// runs. In a census, the stub of rejected code, whose argument (a string literal) names the
+    /// rejection where the census writes the translation, which ends the program with it there.
     NoObject {
         class: usize,
     },
