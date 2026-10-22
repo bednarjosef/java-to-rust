@@ -604,6 +604,17 @@ Decisions that changed during the implementation, step by step.
 - **A literal pattern that compiles** makes `split`, `matches`, `replaceAll` and
   `replaceFirst` (with a literal replacement) calls that never throw
   (`java_runtime::regex::never_fails`), so a handler around them does not block the program.
+  A replacement that is not such a literal may throw `IllegalArgumentException` (a dangling
+  escape, a malformed reference) or `IndexOutOfBoundsException` (a group the pattern lacks),
+  which a `catch` sees with Java's message; a pattern that is not a literal may also throw
+  `PatternSyntaxException`, which is not a standard class, so catching it is rejected.
+- **A format that is not a literal** (`String.format`, `formatted`, `printf`) may throw the
+  `java.util.IllegalFormatException` subclasses that the runtime's `format` raises, which are
+  standard classes (`java/Standard.java`): a `catch` sees them with Java's message. The runtime
+  builds them by a constructor from the message and a `raised` flag, since Java's constructors
+  take the flags, the conversion or the width instead; a raised one's getters answer null or
+  zero. Deviation: `printf` prints nothing of a format that fails, where Java prints the text
+  before the failing specifier.
 - **Still rejected**, with "catching the `X` that this ... may throw": a null dereference
   (`NullPointerException`, whose checked form would wrap every `non_null`), an array creation
   with a negative size, a `ClassCastException` of a downcast, the library calls that may fail

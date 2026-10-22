@@ -149,13 +149,24 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             // `new String(ascii, hibyte)` copies the whole array.
             StringOp::FromHighByte if args.len() == 2 => &[],
             StringOp::FromHighByte => &[SIOOBE],
-            // A malformed pattern, and a bad group in a replacement, unless it is a constant
-            // without references to groups and escapes.
+            // A malformed pattern, and a bad replacement, unless it is a constant without
+            // references to groups and escapes: a dangling escape or a malformed reference
+            // (`IllegalArgumentException`), or a group the pattern lacks
+            // (`IndexOutOfBoundsException`), as `java::regex`'s `parse_replacement` raises them.
             StringOp::ReplaceAll | StringOp::ReplaceFirst
                 if !crate::analysis::constants::text(class, &args[2])
                     .is_some_and(|r| !r.contains(['$', '\\'])) =>
             {
-                &["?"]
+                let pattern = crate::analysis::constants::text(class, &args[1]);
+                if pattern.is_some_and(|p| java_runtime::regex::never_fails(p, None)) {
+                    &["java.lang.IllegalArgumentException", "java.lang.IndexOutOfBoundsException"]
+                } else {
+                    &[
+                        "java.util.regex.PatternSyntaxException",
+                        "java.lang.IllegalArgumentException",
+                        "java.lang.IndexOutOfBoundsException",
+                    ]
+                }
             }
             StringOp::ReplaceAll | StringOp::ReplaceFirst | StringOp::Matches | StringOp::Split => {
                 &["java.util.regex.PatternSyntaxException"]
@@ -345,7 +356,10 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::OutFlush
             | Native::ErrFlush,
         ) => &[],
-        Builtin::CodePoint(CodePointOp::ToCharsInto) => &["java.lang.IllegalArgumentException"],
+        // A code point that is not valid (`java::to_chars`, `code_point_string`).
+        Builtin::CodePoint(CodePointOp::ToCharsInto | CodePointOp::ToChars | CodePointOp::ToString) => {
+            &["java.lang.IllegalArgumentException"]
+        }
         Builtin::CodePoint(
             CodePointOp::CharCount
             | CodePointOp::ToCodePoint
@@ -389,7 +403,21 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             {
                 &[]
             }
-            _ => &["?"],
+            // What the runtime's `format` raises (`format.rs`); a format it does not support ends
+            // the program.
+            _ => &[
+                "java.util.DuplicateFormatFlagsException",
+                "java.util.FormatFlagsConversionMismatchException",
+                "java.util.IllegalFormatArgumentIndexException",
+                "java.util.IllegalFormatCodePointException",
+                "java.util.IllegalFormatConversionException",
+                "java.util.IllegalFormatFlagsException",
+                "java.util.IllegalFormatPrecisionException",
+                "java.util.IllegalFormatWidthException",
+                "java.util.MissingFormatArgumentException",
+                "java.util.MissingFormatWidthException",
+                "java.util.UnknownFormatConversionException",
+            ],
         },
         // A zero divisor.
         Builtin::Unsigned(UnsignedOp::Divide | UnsignedOp::Remainder, _) => {

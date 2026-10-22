@@ -1826,8 +1826,8 @@ Generics are erased in lowering, and nothing after it knows they existed:
   when a builder is converted to `Object` or cast back, its variant holds the shared
   `java::StringBuilder`, `==`, `equals` and `hashCode` are the builder's identity (`same`,
   `identity_hash`), and it prints as its text (`ast::hierarchy::shared_of` gives the type of
-  either kind of runtime class). In a program with threads it is rejected, since the builder is
-  an `Rc` that an `Object` crossing threads cannot hold.
+  either kind of runtime class). In a program with threads the variant holds a
+  `java::SharedStringBuilder`, which may cross threads.
   `System.arraycopy` where the source or the destination is such an `Object` (the JDK's code
   generic over the kind of array, `SpinedBuffer.OfPrimitive`'s `T_ARR`) converts both to `Object`
   and matches their variants: two arrays of one type are copied as any two arrays are, anything

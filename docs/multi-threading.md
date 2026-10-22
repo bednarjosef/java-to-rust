@@ -1104,10 +1104,11 @@ worker ends), `ExitFromWorker.java` (`System.exit(3)` from a thread), `Interrupt
 - **Class monitors** are statics of the translation, `static C__MONITOR: java::Locked<()>`,
   entered with `java::enter_class(&C__MONITOR)` by static synchronized methods and
   `synchronized (C.class)`. `synchronized (o.getClass())` is rejected where it would be kept.
-- **Rejected where the monitor would be kept**: `synchronized` on a string, a box, an array, a
-  `StringBuilder` or a Java enum's constant (values, or `Rc`s without a lock), and `wait`,
-  `notify` or `holdsLock` on them anywhere. `synchronized (this)` in a constructor keeps no
-  monitor: no other thread has the object yet.
+- **Rejected where the monitor would be kept**: `synchronized` on a string, a box, an array or
+  a Java enum's constant (values, or `Rc`s without a lock), and `wait`, `notify` or `holdsLock`
+  on them anywhere. A `StringBuilder`'s monitor is its cell's: the lock of a
+  `java::SharedStringBuilder`, or the address of a `java::StringBuilder`'s `Rc`.
+  `synchronized (this)` in a constructor keeps no monitor: no other thread has the object yet.
 - **A lock read through another object** is taken out of it before the thread waits for its
   monitor (`java::enter(&{ this.borrow().lock.clone() })`), so that the thread does not hold the
   first object's data lock while it waits; the same holds for `wait` and `notify`.
@@ -1309,9 +1310,16 @@ Decisions that change during the implementation are recorded here, milestone by 
   mutable (`codegen/objects.rs`, `conflicts`), with a blocking native counting as one, so
   `java::join_thread(self.base().tid, 0)` reads the id in its own block first: the lock is never
   held while the thread waits for another.
-- **Not yet shared**: a `StringBuilder` or a box compared by identity (both `Rc`s) in a static or
-  in a field of a shared class is rejected (`analysis/threads.rs`, `check`) until the escape
-  milestone gives them shared forms. The closure does not follow the type arguments of a generic
+- **Shared builders**: in a program with threads every `StringBuilder` is a
+  `java::SharedStringBuilder`, its units in an `Arc<java::Locked<..>>`, as every array is a
+  `java::SharedArray`; its methods take the lock only while they run.
+  Pending: this is decided for the whole program, not per allocation site, so a builder that
+  never leaves its thread pays for a lock on every call (javac builds many). The narrowing to
+  come makes only the builders and arrays that the analysis sees escape to another thread, or
+  that are used as a monitor, shared, and keeps the others `Rc`s.
+- **Not yet shared**: a box compared by identity (an `Rc`) in a static or in a field of a shared
+  class is rejected (`analysis/threads.rs`, `check`) until the escape milestone gives it a shared
+  form. The closure does not follow the type arguments of a generic
   class yet; a program that needs it fails in rustc with `Rc<..> cannot be sent between threads
   safely` (4.4).
 - **A closure type that threads may share** (a functional interface whose values are only

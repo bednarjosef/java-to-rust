@@ -88,7 +88,10 @@ impl<'a> Gen<'a> {
                 self.class.class_index(ty).is_some_and(|t| self.facts.class_monitors.contains(&t))
             }
             ExprKind::This if self.this_form != ThisForm::Shared => false,
-            _ => matches!(lock.ty, Type::Class(..)) && self.facts.kept_monitor(self.class, lock.ty),
+            _ => {
+                matches!(lock.ty, Type::Class(..) | Type::StringBuilder)
+                    && self.facts.kept_monitor(self.class, lock.ty)
+            }
         }
     }
 

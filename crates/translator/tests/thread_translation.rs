@@ -149,45 +149,52 @@ fn arrays_of_a_threaded_program_are_shared_arrays() {
 }
 
 #[test]
-fn a_string_builder_that_threads_share_is_rejected() {
-    // A `StringBuilder` is an `Rc`, which no other thread may hold.
-    let error = java_to_rust::translate(
+fn a_string_builder_of_a_program_with_threads_is_shared() {
+    // Every builder of a program with threads is a `java::SharedStringBuilder`, its units behind a
+    // lock: in a static, in `Object`'s variant, and as the monitor of a `synchronized` block.
+    let rust = translate(
         "class A {
             static StringBuilder log = new StringBuilder();
-            public static void main(String[] args) throws InterruptedException {
-                Thread t = new Thread(() -> log.append(1));
-                t.start();
-                t.join();
-                System.out.println(log);
-            }
-        }",
-    )
-    .expect_err("a shared StringBuilder is not supported")
-    .to_string();
-    assert!(error.ends_with("a `StringBuilder` that threads may share not supported yet"), "{error}");
-}
-
-#[test]
-fn a_string_builder_as_an_object_in_a_program_with_threads_is_rejected() {
-    // `Object`'s variant would hold the builder's `Rc`, and an `Object` may cross threads.
-    let error = java_to_rust::translate(
-        "class A {
             static Object held;
             public static void main(String[] args) throws InterruptedException {
                 held = new StringBuilder(\"a\");
-                Thread t = new Thread(() -> System.out.println(\"x\"));
+                Thread t = new Thread(() -> log.append(1));
                 t.start();
                 t.join();
+                synchronized (log) {
+                    System.out.println(log);
+                }
                 System.out.println(held);
             }
         }",
-    )
-    .expect_err("a StringBuilder as an Object with threads is not supported")
-    .to_string();
-    assert!(
-        error.ends_with("a `StringBuilder` as an `Object` in a program with threads not supported yet"),
-        "{error}"
     );
+    assert_contains(
+        &rust,
+        &[
+            "static A_LOG: LazyLock<java::Locked<java::SharedStringBuilder>>",
+            "StringBuilder(java::SharedStringBuilder),",
+            "Object::StringBuilder(o) => java::HasMonitor::monitor(o),",
+            "let _monitor = java::enter(&A_LOG",
+        ],
+    );
+    assert_lacks(&rust, &["java::StringBuilder"]);
+}
+
+#[test]
+fn a_string_builder_of_a_program_without_threads_stays_local() {
+    let rust = translate(
+        "class A {
+            public static void main(String[] args) {
+                StringBuilder sb = new StringBuilder(\"a\");
+                synchronized (sb) {
+                    sb.append(1);
+                }
+                System.out.println(sb);
+            }
+        }",
+    );
+    assert_contains(&rust, &["java::StringBuilder::from_text(\"a\")"]);
+    assert_lacks(&rust, &["SharedStringBuilder", "java::enter"]);
 }
 
 #[test]
