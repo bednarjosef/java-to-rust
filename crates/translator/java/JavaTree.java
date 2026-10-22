@@ -75,7 +75,7 @@ public class JavaTree {
 
     /**
      * Whole-program mode: {@code java JavaTree --program [--sourcepath PATH] [--module-info FILE]
-     * FILE...} compiles all the files in one javac run, loading the other classes they use from the
+     * [--patches DIR] FILE...} compiles all the files in one javac run, loading the other classes they use from the
      * source path, and prints {@code {"units":[{"file":...,"tree":...},...]}}: the files given, in order, then every
      * unit javac loaded from the source path and attributed. Compile errors are printed as
      * {@code FILE:LINE:COLUMN: message}.
@@ -91,18 +91,24 @@ public class JavaTree {
      * except the one that {@code --module-info FILE} names (the JDK's {@code java.base}, whose
      * packages javac compiles only inside that module): all the sources are one module, that one
      * or the unnamed module (see {@link #oneModule}).
+     *
+     * <p>With {@code --patches DIR}, a source file of the source path that a patch in DIR names
+     * is read as the patch changes it (see {@link JdkPatch}).
      */
     private static void program(List<String> args) throws Exception {
         List<String> options = new ArrayList<>(List.of("-proc:none", "-Xlint:none", "-XDshould-stop.at=FLOW"));
         List<File> files = new ArrayList<>();
         boolean serve = false;
         File moduleInfo = null;
+        java.nio.file.Path patches = null;
         for (int i = 0; i < args.size(); i++) {
             if (args.get(i).equals("--sourcepath") && i + 1 < args.size()) {
                 options.add("-sourcepath");
                 options.add(args.get(++i));
             } else if (args.get(i).equals("--module-info") && i + 1 < args.size()) {
                 moduleInfo = new File(args.get(++i));
+            } else if (args.get(i).equals("--patches") && i + 1 < args.size()) {
+                patches = java.nio.file.Path.of(args.get(++i));
             } else if (args.get(i).equals("--serve")) {
                 serve = true;
             } else {
@@ -112,7 +118,8 @@ public class JavaTree {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         StandardJavaFileManager fileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8);
-        JavacTask task = (JavacTask) compiler.getTask(null, oneModule(fileManager, moduleInfo), diagnostics,
+        JavaFileManager manager = JdkPatch.patching(oneModule(fileManager, moduleInfo), patches);
+        JavacTask task = (JavacTask) compiler.getTask(null, manager, diagnostics,
                 options, null, fileManager.getJavaFileObjectsFromFiles(files));
         // Units that javac loads from the source path are attributed too, but only reported here.
         Set<CompilationUnitTree> analyzed = new LinkedHashSet<>();

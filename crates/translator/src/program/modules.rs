@@ -49,7 +49,7 @@ pub type ServiceProvider = (String, String, bool);
 /// The service providers that the roots declare, in the order that `ServiceLoader` finds them:
 /// those of the modules' `provides S with P1, P2;`, then those of the files
 /// `META-INF/services/S`, one provider per line, `#` starting a comment, root by root (see
-/// `java/overlay/java/util/ServiceLoader.java`).
+/// `java/patches/java/util/ServiceLoader.java`).
 pub fn service_providers<'a>(roots: impl IntoIterator<Item = &'a PathBuf> + Clone) -> Vec<ServiceProvider> {
     let mut out: Vec<ServiceProvider> = Vec::new();
     let mut add = |service: &str, provider: &str, modular: bool| {

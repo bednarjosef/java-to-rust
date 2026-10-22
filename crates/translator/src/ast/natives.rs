@@ -158,7 +158,7 @@ pub enum Native {
     /// whose `File` arguments are their paths (`java_runtime::fs`).
     FileSystem(&'static str),
     /// A native of the translator's `sun.nio.fs.UnixNativeDispatcher`
-    /// (`java/overlay/sun/nio/fs/UnixNativeDispatcher.java`) by its name (`open0`, `stat0`, ...):
+    /// (`java/patches/sun/nio/fs/UnixNativeDispatcher.java`) by its name (`open0`, `stat0`, ...):
     /// a system call of `java.nio.file` on the bytes of a path, which records its `errno` rather
     /// than failing (`java_runtime::unix`, `UNIX_CALLS`).
     Unix(&'static str),

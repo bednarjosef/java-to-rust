@@ -221,7 +221,7 @@ impl<'t> Lowering<'t> {
         }))
     }
 
-    /// A native of the translator's `ServiceLoader` (`java/overlay/java/util/ServiceLoader.java`)
+    /// A native of the translator's `ServiceLoader` (`java/patches/java/util/ServiceLoader.java`)
     /// over the providers that reachability found (`Reach::services`): `providers0(service)`, a
     /// `switch` over the service's binary name that gives the class literals of its providers,
     /// and `create0(type)`, a chain over the providers that makes one with its constructor

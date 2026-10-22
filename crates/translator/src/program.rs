@@ -193,7 +193,8 @@ fn load(program: &Program, string_array_writes: bool) -> Result<(Vec<Value>, Rea
     let (mut javac, mut reaching) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     let start = std::time::Instant::now();
     let (mut session, mut new) =
-        javac::Session::start(&files, &sourcepath(program), modules::kept(&modules)).map_err(javac_error)?;
+        javac::Session::start(&files, &sourcepath(program), modules::kept(&modules), patches(program))
+            .map_err(javac_error)?;
     javac += start.elapsed();
     // The units as javac gave them, and the copies of those whose records were completed.
     let (given, completed) = (Store::default(), Store::default());
@@ -388,7 +389,7 @@ pub fn survey_program(program: &Program) -> Result<Survey, ProgramError> {
 /// javac's trees of the program, with those of every library unit that javac loads for it.
 fn javac_tree(program: &Program, files: &[PathBuf]) -> Result<Value, ProgramError> {
     let modules = modules::modules(program.sources.iter().chain(&program.libraries));
-    javac::program_tree(files, &sourcepath(program), modules::kept(&modules))
+    javac::program_tree(files, &sourcepath(program), modules::kept(&modules), patches(program))
         .map_err(|(file, error)| modules::explain(ProgramError { file, error }, &modules))
 }
 
@@ -399,10 +400,20 @@ fn sourcepath(program: &Program) -> Vec<PathBuf> {
     program.sources.iter().cloned().chain(overlay).chain(program.libraries.iter().cloned()).collect()
 }
 
-/// The translator's classes of `java.io` for a translation with the JDK's sources, ahead of the
-/// JDK's on the source path: a `PrintStream` that the translation can take, and the objects that
-/// `System.in`, `System.out` and `System.err` are (see docs/natives-and-input.md).
+/// The translator's own classes for a translation with the JDK's sources, which the JDK does not
+/// have, ahead of the JDK's on the source path: the objects that `System.in`, `System.out` and
+/// `System.err` are (see docs/natives-and-input.md), and the classes that calls of the JDK are
+/// redirected to (`reach::REDIRECTED_CALLS`). See docs/jdk-overlays.md.
 const OVERLAY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/java/overlay");
+
+/// The translator's patches of the JDK's classes, which javac applies to the JDK's files as it
+/// reads them (`java/JdkPatch.java`), with libraries.
+fn patches(program: &Program) -> Option<&'static Path> {
+    (!program.libraries.is_empty()).then(|| Path::new(PATCHES))
+}
+
+/// See `patches`, and docs/jdk-overlays.md.
+pub const PATCHES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/java/patches");
 
 /// The program's own files: the given files and every `.java` file under the source roots, sorted
 /// and without duplicates. A root's `module-info.java` is not one: javac compiles every root as

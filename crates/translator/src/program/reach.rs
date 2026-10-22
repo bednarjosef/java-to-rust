@@ -172,7 +172,7 @@ pub const TRANSLATED_NESTED: &[&str] = &["java.lang.Runtime.Version", "java.lang
 /// which is reflection in all but name: a closed-world translation knows its classes. Some is
 /// translated all the same: `ResourceBundle`, whose locale data found by name are the classes of
 /// the program, and `ServiceLoader`, whose providers are those the sources declare (the
-/// translator's, `java/overlay/java/util/ServiceLoader.java`). (`java.lang.Module` is a prefix of
+/// translator's, `java/patches/java/util/ServiceLoader.java`). (`java.lang.Module` is a prefix of
 /// `java.lang.ModuleLayer` too.)
 pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.io.ObjectInputStream", "serialization"),
@@ -342,7 +342,7 @@ const REPLACED_BY_NAME: &[(&str, &str)] = &[
     ("java.io.PrintStream", "format"),
 ];
 
-/// The method of the translator's `PrintStream` (`java/overlay/java/io/PrintStream.java`) that
+/// The method of the translator's `PrintStream` (`java/patches/java/io/PrintStream.java`) that
 /// prints what a call of `printf` or `format` formatted.
 pub const PRINT_FORMATTED: (&str, &str, &str) =
     ("java.io.PrintStream", "formattedText", "(java.lang.String)java.io.PrintStream");
