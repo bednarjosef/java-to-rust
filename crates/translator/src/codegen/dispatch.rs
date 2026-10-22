@@ -765,9 +765,15 @@ impl<'a> Gen<'a> {
     }
 
     /// Class `c` as a `ClassCastException` names it (`java::CastClass`): its binary name and its
-    /// module, `("Main$Dog", java::APP)`.
+    /// module, `("Main$Dog", java::APP)`. The `Comparable` that the translation keeps under its
+    /// own name is `java.lang.Comparable` to HotSpot.
     pub(super) fn cast_class(&mut self, c: usize) -> String {
-        let name = rust_string(&self.binary_name(c));
+        let binary = if self.class.types[c].name == COMPARABLE {
+            "java.lang.Comparable".to_string()
+        } else {
+            self.binary_name(c)
+        };
+        let name = rust_string(&binary);
         let module = self.cast_module(c);
         format!("({name}, {module})")
     }

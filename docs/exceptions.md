@@ -233,7 +233,8 @@ one could, `Gen::may_fail` picks the checked form, chosen by the same facts the 
 - **A null dereference** (`Facts::null_checked`) uses the checked `non_null`
   (`java::try_non_null`, or `try_non_null_message` where the message is read, see below).
 - **Anything else of a standard class** (`Facts::catching`), such as `new int[n]` with a
-  negative size or `System.arraycopy`, runs inside `java::catching(|| op)`
+  negative size, `System.arraycopy`, or a `compareTo` of a raw `Comparable` whose argument is of
+  another class (`comparable.rs`, the bridge's cast), runs inside `java::catching(|| op)`
   (`crates/runtime/src/catching.rs`): inside it, the runtime's `throw` unwinds with the exception
   and `catching` returns it as an `Err`. A panic of anything else still unwinds.
 
