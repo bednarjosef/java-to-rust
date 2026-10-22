@@ -1113,6 +1113,9 @@ as its command-line arguments, on `java` and as the translated binary alike.
   translator's scale, output in several crates, reading build tools, dependencies' sources,
   generated sources, resources and tests, the library coverage they lean on, and working
   through their blockers.
+- [docs/minecraft-server.md](docs/minecraft-server.md): the Minecraft server as a target: how it is
+  decompiled and surveyed (`scripts/minecraft-server-survey.sh`), the first numbers, and its
+  blockers: the translator's memory first, then decompiled code that does not compile.
 - [docs/several-crates.md](docs/several-crates.md): splitting a translation into several crates:
   why the hierarchies' enums and Java's package cycles keep most code in one crate, how to find
   the groups that can be split off, and what a split would buy for javac.

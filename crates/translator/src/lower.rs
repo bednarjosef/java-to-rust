@@ -627,6 +627,7 @@ impl<'t> Lowering<'t> {
     }
 
     fn block(&self, node: Node<'t>) -> Result<Vec<Stmt>, Error> {
+        self.javac_error(node)?;
         let mut out = Vec::new();
         // The `if`s that test a property that is never set run only their `else` branch.
         let unset = crate::program::unset_property_ifs(node.0);
@@ -745,6 +746,7 @@ impl<'t> Lowering<'t> {
     }
 
     fn expr(&self, node: Node<'t>) -> Result<Expr, Error> {
+        self.javac_error(node)?;
         if let Some(code) = self.reference_native(node)? {
             return Ok(code);
         }

@@ -62,7 +62,7 @@ pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
     use crate::timings::phase;
     let files = source_files(program)?;
     // As a translation first does: without the writes of `String` arrays as `Object` arrays.
-    let (units, reach) = load(program, false)?;
+    let (units, reach) = load(program, false, program.keep_going)?;
     // Panics are rejections in a census: they are reported with the rest, not printed.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
