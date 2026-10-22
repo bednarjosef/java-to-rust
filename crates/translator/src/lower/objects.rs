@@ -321,9 +321,8 @@ impl<'t> Lowering<'t> {
     /// Notes the method that the call `node` names in the class file (`Class::class_file`):
     /// javac names it by the class that the call names it in, `C.m()`, or by the erasure of the
     /// receiver's static type (`Gen.binaryQualifier`), except an instance method of `Object`,
-    /// with the erasures of its parameters' types. An unqualified call names it by the class
-    /// whose code calls it only when that class declares it; elsewhere javac's `Lower` decides,
-    /// by rules not followed here.
+    /// with the erasures of its parameters' types. An unqualified call names it as javac names
+    /// a plain name (`plain_qualifier`).
     pub(super) fn note_call(&self, node: Node<'t>, symbol: &Symbol, select: Node<'t>) {
         if symbol.kind != "METHOD" {
             return;
@@ -343,9 +342,7 @@ impl<'t> Lowering<'t> {
                         && !receiver.ends_with(']');
                     (named && class).then(|| receiver.to_string())
                 }),
-                "IDENTIFIER" => {
-                    (self.types[self.current.get()].javac == symbol.owner).then(|| symbol.owner.to_string())
-                }
+                "IDENTIFIER" => self.plain_qualifier(symbol.owner).map(str::to_string),
                 _ => None,
             }
         };
@@ -382,17 +379,36 @@ impl<'t> Lowering<'t> {
         }
     }
 
+    /// The class that javac names a member of class `owner` by, that code reaches by its plain
+    /// name: the innermost class around the code that has it as a member, its own or inherited
+    /// (javac's `Lower` qualifies it with that class), or `owner` where none has (a static
+    /// import). `None` for an `owner` that the program does not have.
+    fn plain_qualifier<'a>(&'a self, owner: &'a str) -> Option<&'a str> {
+        let o = self.type_index(owner)?;
+        let mut around = std::iter::successors(Some(self.current.get()), |&t| self.enclosing_class(t));
+        Some(around.find(|&t| self.is_subclass(t, o)).map_or(owner, |t| self.types[t].javac.as_str()))
+    }
+
+    /// The class whose code declares class `t`: the class of a member class, or the class of the
+    /// code that declares a local or anonymous class or a lambda.
+    fn enclosing_class(&self, t: usize) -> Option<usize> {
+        if let Some(nested) = self.nesting(t) {
+            return Some(nested.enclosing);
+        }
+        let (outer, _) = self.types[t].javac.rsplit_once('.')?;
+        self.type_index(outer)
+    }
+
     /// Notes the class that names the static field `name` of `owner` that `node` reads, in the
     /// class file, where that is certain (`Class::static_qualifiers`): the class of `C.name`, as
-    /// javac names it (`Gen.binaryQualifier`), or `owner` when the code of `owner` itself reads
-    /// `name`. Elsewhere javac's `Lower` decides, by rules not followed here.
+    /// javac names it (`Gen.binaryQualifier`), and that of a plain `name` (`plain_qualifier`).
     fn note_static_qualifier(&self, node: Node<'t>, receiver: Option<Node<'t>>, owner: &str, name: &str) {
         let qualifier = match receiver {
             Some(r) => match r.symbol() {
                 Some(s) if matches!(s.kind, "CLASS" | "INTERFACE" | "ENUM" | "RECORD") => Some(r.java_type()),
                 _ => None,
             },
-            None => (self.types[self.current.get()].javac == owner).then_some(owner),
+            None => self.plain_qualifier(owner),
         };
         let qualifier = qualifier.map(|q| q.split('<').next().unwrap_or(q).to_string());
         let mut qualifiers = self.static_qualifiers.borrow_mut();
