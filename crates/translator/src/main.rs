@@ -1,13 +1,16 @@
 //! `java-to-rust Input.java` prints the Rust translation; `-o out.rs` writes it to a file and
-//! `--crate DIR` writes a Cargo project that can be built and run with `cargo run`.
+//! `--crate DIR` writes a Cargo project that can be built and run with `cargo run`. A whole
+//! program's project has a file per package (`output::Layout::FilePerModule`); printed or
+//! written with `-o`, it is one file.
 
+use java_to_rust::output::{Layout, SourceFile};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs> | --crate <directory>]
        java-to-rust [--timings] --main <package.Class> [--source <root>]... [--library <root>]... [<File.java>]...
                     [-o <output.rs> | --crate <directory> | --survey [--survey-json <file>]
-                     | --census [--census-json <file>]]";
+                     | --census [--census-json <file>]] [--modules-json <file>]";
 
 /// The stack that translation runs on: the trees of real code, and the recursion over them, can
 /// be deeper than the main thread's stack allows.
@@ -37,7 +40,14 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
     if args.iter().any(|a| {
         matches!(
             a.as_str(),
-            "--main" | "--source" | "--library" | "--survey" | "--survey-json" | "--census" | "--census-json"
+            "--main"
+                | "--source"
+                | "--library"
+                | "--survey"
+                | "--survey-json"
+                | "--census"
+                | "--census-json"
+                | "--modules-json"
         )
     }) {
         return run_program(&args);
@@ -51,16 +61,16 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
     };
     let java = std::fs::read_to_string(input).map_err(|e| format!("{input}: {e}"))?;
     let rust = java_to_rust::translate(&java).map_err(|e| format!("{input}:{e}"))?;
-    emit(output, input, &rust)
+    emit(output, input, &[SourceFile { path: "main.rs".into(), text: rust }])
 }
 
-/// Prints the translation, or writes it to a file (`-o`) or a Cargo project (`--crate`) named
-/// after `input`.
-fn emit(output: Option<(&str, &str)>, input: &str, rust: &str) -> Result<(), String> {
+/// Prints the translation, or writes it to a file (`-o`), or its files to a Cargo project
+/// (`--crate`) named after `input`. Printed or written to one file, `files` is one file.
+fn emit(output: Option<(&str, &str)>, input: &str, files: &[SourceFile]) -> Result<(), String> {
     match output {
-        None => print!("{rust}"),
-        Some(("-o", path)) => std::fs::write(path, rust).map_err(|e| format!("{path}: {e}"))?,
-        Some((_, dir)) => write_crate(Path::new(dir), input, rust).map_err(|e| format!("{dir}: {e}"))?,
+        None => print!("{}", files[0].text),
+        Some(("-o", path)) => std::fs::write(path, &files[0].text).map_err(|e| format!("{path}: {e}"))?,
+        Some((_, dir)) => write_crate(Path::new(dir), input, files).map_err(|e| format!("{dir}: {e}"))?,
     }
     Ok(())
 }
@@ -70,7 +80,9 @@ fn emit(output: Option<(&str, &str)>, input: &str, rust: &str) -> Result<(), Str
 /// only read from when the program uses them, and other arguments are single source files.
 /// `--survey` prints what the reachable code uses instead (`--survey-json` also writes it as JSON
 /// to a file), and `--census` what the translator rejects in it, past every rejection
-/// (`--census-json` also writes it as JSON).
+/// (`--census-json` also writes it as JSON). `--modules-json` writes the modules of the
+/// translation (of a census: with every rejected piece stubbed) and what their items name
+/// (`output::ModuleTree::dependencies`).
 fn run_program(args: &[String]) -> Result<(), String> {
     let mut program = java_to_rust::Program::default();
     let mut output = None;
@@ -78,6 +90,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
     let mut survey_json = None;
     let mut census = false;
     let mut census_json = None;
+    let mut modules_json = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().ok_or_else(|| format!("{arg} needs a value\n{USAGE}"));
@@ -92,6 +105,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
                 survey_json = Some(value()?);
             }
             "--census" => census = true,
+            "--modules-json" => modules_json = Some(value()?),
             "--census-json" => {
                 census = true;
                 census_json = Some(value()?);
@@ -110,6 +124,9 @@ fn run_program(args: &[String]) -> Result<(), String> {
             let json = serde_json::to_string_pretty(&census.json).map_err(|e| e.to_string())?;
             std::fs::write(&path, json + "\n").map_err(|e| format!("{path}: {e}"))?;
         }
+        if let (Some(path), Some(tree)) = (modules_json, &census.modules) {
+            write_dependencies(&path, tree)?;
+        }
         return Ok(());
     }
     if survey {
@@ -121,13 +138,28 @@ fn run_program(args: &[String]) -> Result<(), String> {
         }
         return Ok(());
     }
-    let rust = java_to_rust::translate_program(&program).map_err(|e| e.to_string())?;
+    let tree = java_to_rust::translate_program_modules(&program).map_err(|e| e.to_string())?;
+    if let Some(path) = modules_json {
+        write_dependencies(&path, &tree)?;
+    }
     let name = program.main.rsplit('.').next().unwrap_or("translated").to_string();
-    emit(output.as_ref().map(|(flag, path)| (*flag, path.as_str())), &name, &rust)
+    let layout = if output.as_ref().is_some_and(|(flag, _)| *flag == "--crate") {
+        Layout::FilePerModule
+    } else {
+        Layout::OneFile
+    };
+    emit(output.as_ref().map(|(flag, path)| (*flag, path.as_str())), &name, &tree.files(layout))
 }
 
-/// A Cargo project around the translation, depending on the runtime crate of this checkout.
-fn write_crate(dir: &Path, input: &str, rust: &str) -> std::io::Result<()> {
+/// Writes the modules of a translation and what their items name, as JSON, to `path`.
+fn write_dependencies(path: &str, tree: &java_to_rust::output::ModuleTree) -> Result<(), String> {
+    let json = serde_json::to_string(&tree.dependencies()).map_err(|e| e.to_string())?;
+    std::fs::write(path, json + "\n").map_err(|e| format!("{path}: {e}"))
+}
+
+/// A Cargo project around the translation's files, depending on the runtime crate of this
+/// checkout.
+fn write_crate(dir: &Path, input: &str, files: &[SourceFile]) -> std::io::Result<()> {
     let name = Path::new(input)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -144,5 +176,12 @@ fn write_crate(dir: &Path, input: &str, rust: &str) -> std::io::Result<()> {
             runtime.display().to_string()
         ),
     )?;
-    std::fs::write(dir.join("src/main.rs"), rust)
+    for file in files {
+        let path = dir.join("src").join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, &file.text)?;
+    }
+    Ok(())
 }

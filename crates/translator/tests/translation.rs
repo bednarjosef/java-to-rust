@@ -1476,14 +1476,16 @@ fn packages_become_nested_modules() {
     assert_contains(
         &rust,
         &[
-            "fn main() {\n    crate::com::example::app::main();\n}",
+            "use crate::com::example::app;\n\nfn main() {\n    app::main();\n}",
             "mod com {\n    pub(crate) mod example {\n        pub(crate) mod app {",
             "        pub(crate) mod util {\n            use std::fmt;\n\n            use java_runtime as java;",
-            // Imported, statically imported and fully qualified names are paths from the crate root.
-            "crate::com::example::util::Counter::new(\"clicks\")",
-            "crate::com::example::util::square(7)",
-            "crate::com::example::util::NUMBERS_LIMIT - crate::com::example::util::square(3)",
-            "crate::com::example::util::cube(3)",
+            // Imported, statically imported and fully qualified names are paths through the `use`
+            // line of their module.
+            "            use crate::com::example::util;\n",
+            "util::Counter::new(\"clicks\")",
+            "util::square(7)",
+            "util::NUMBERS_LIMIT - util::square(3)",
+            "util::cube(3)",
             // Names in the same package are not.
             "line(\"total\", clicks.total())",
             "x * square(x)",
@@ -1515,10 +1517,11 @@ fn classes_with_one_name_in_two_packages() {
     assert_contains(
         &rust,
         &[
-            "crate::com::shop::model::Item::new_string_i32(\"apple\", 3)",
-            "crate::com::shop::legacy::Item::new(7)",
-            "crate::com::shop::model::RegistryEntry::new(4)",
-            "crate::com::shop::model::REGISTRY_CREATED.get()",
+            // The packages inside `com.shop` are in scope in its module without a `use` line.
+            "model::Item::new_string_i32(\"apple\", 3)",
+            "legacy::Item::new(7)",
+            "model::RegistryEntry::new(4)",
+            "model::REGISTRY_CREATED.get()",
             "pub(crate) static COUNTER_HITS: Cell<i32>",
         ],
     );
@@ -1643,7 +1646,7 @@ fn library_roots_are_read_only_where_used() {
         java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
     assert_contains(
         &rust,
-        &["crate::lib::shout(\"hi\")", "mod lib {", "pub(crate) fn shout(s: &str) -> String"],
+        &["use crate::lib;", "lib::shout(\"hi\")", "mod lib {", "pub(crate) fn shout(s: &str) -> String"],
     );
     assert_lacks(&rust, &["unused", "Broken"]);
 }
@@ -1684,7 +1687,7 @@ fn library_roots_that_are_modules_are_read_as_sources() {
         java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
     assert_contains(
         &rust,
-        &["crate::org::lib::text::shout(\"hi\")", "pub(crate) fn shout(s: &str) -> String"],
+        &["use crate::org::lib::text;", "text::shout(\"hi\")", "pub(crate) fn shout(s: &str) -> String"],
     );
     let report = survey(&program).report;
     assert_contains(&report, &["  Library: 1 pieces; 1 (100.0%) reach nothing outside the sources."]);
@@ -3509,7 +3512,8 @@ fn natives_of_jdk_classes_become_runtime_calls() {
             "java::nano_time_adjustment(0)",
             "CONTINUATIONSUPPORT_SUPPORTED.set(java::continuations_supported());",
             // `main` initializes `Unsafe` in its package before reading its statics.
-            "{ crate::jdk::internal::misc::init_unsafe_(); crate::jdk::internal::misc::UNSAFE_ARRAY_INT_BASE_OFFSET.get() }",
+            "use crate::jdk::internal::misc;",
+            "{ misc::init_unsafe_(); misc::UNSAFE_ARRAY_INT_BASE_OFFSET.get() }",
         ],
     );
     // Registering natives, `VM.initialize` and restoring from an archive do nothing, and neither

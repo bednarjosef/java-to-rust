@@ -8,11 +8,12 @@ parts already planned elsewhere and adds what no other document covers yet.
 
 Whole-program mode already handles programs of several files and packages: `--main` names the
 class that starts the program, `--source` the source roots, `--library` roots read only for what
-is reached (the JDK's `java.base`). Packages become nested modules. The multi-file benchmarks of
+is reached (the JDK's `java.base`). Packages become modules, written as a file per package
+(`--crate`). The multi-file benchmarks of
 Are We Fast Yet (DeltaBlue, Havlak, CD, Richards and others) translate this way and match Java.
 
-What it does not do yet: scale far past a few thousand reached classes, write more than one file,
-read a build tool's project, carry resources, or make a library without a `main`.
+What it does not do yet: scale far past a few thousand reached classes, write more than one
+crate, read a build tool's project, carry resources, or make a library without a `main`.
 
 ## 1. The translator's own speed and memory
 
@@ -34,8 +35,11 @@ than ten times longer.
 
 ## 2. The shape of the output
 
-Today everything goes into one `main.rs`. For a large project rustc becomes the bottleneck: one
-crate of millions of lines takes an hour or more and a lot of memory to build.
+Today a whole program is one crate with a file per package. For a large project rustc becomes
+the bottleneck: one crate of millions of lines takes an hour or more and a lot of memory to
+build, and the files do not change that (rustc builds a crate as a whole, whatever its files).
+How far a split into crates can go is in [several-crates.md](several-crates.md): the enums of the
+class hierarchies and Java's package cycles keep most of a program in one crate.
 
 - **The translated JDK as its own crate** (also step 1 of [natural-rust.md](natural-rust.md)).
   It cannot simply be built once and reused: the translation sees the whole program, so the JDK's
@@ -47,7 +51,8 @@ crate of millions of lines takes an hour or more and a lot of memory to build.
 - **One crate per library and per group of packages**, so rustc builds them in parallel and a
   change rebuilds only the crates it touches. The cut follows the dependency graph between
   packages; cycles between packages are common in Java and must stay inside one crate.
-- **One file per package or class inside each crate**, so the output is readable and editors cope.
+- **One file per package inside each crate** (done for the one crate), so the output is
+  readable and editors cope; a file per class for very large packages is a different layout.
 - **Fewer copies of generic code**: real Rust generics are copied for every type they are used
   with, which multiplies compile time; the erased fallback is the tool to keep that in check
   where a generic class is used with many types.
@@ -122,7 +127,7 @@ this project already does.
 ## Order
 
 1. Measure time and memory per phase.
-2. Output in several files and crates, with the JDK as its own crate.
+2. Output in several crates, with the JDK as its own crate (several files: done).
 3. Summaries instead of bodies, and the compact transfer format.
 4. Every core; reaching less.
 5. Reading a project: build tool, source jars, generated sources, resources, several entry points.
