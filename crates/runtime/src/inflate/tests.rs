@@ -292,8 +292,9 @@ fn buffer_input_is_read_from_memory() {
     let input = allocate_native(FIXED_ZLIB.len() as i64);
     write_native(input, FIXED_ZLIB);
     let mut output = vec![0i8; 64];
-    let packed = inflate_buffer_bytes(inflate_init(false), input, FIXED_ZLIB.len() as i32, &mut output, 4, 60)
-        .unwrap();
+    let packed =
+        inflate_buffer_bytes(inflate_init(false), input, FIXED_ZLIB.len() as i32, &mut output, 4, 60)
+            .unwrap();
     assert_eq!(written_of(packed), FIXED_TEXT.len());
     assert!(finished(packed));
     assert_eq!(unsigned(&output[4..4 + FIXED_TEXT.len()]), FIXED_TEXT);
@@ -304,7 +305,8 @@ fn buffer_input_and_output_in_memory() {
     let input = allocate_native(FIXED_ZLIB.len() as i64);
     write_native(input, FIXED_ZLIB);
     let output = allocate_native(64);
-    let packed = inflate_buffer_buffer(inflate_init(false), input, FIXED_ZLIB.len() as i32, output, 64).unwrap();
+    let packed =
+        inflate_buffer_buffer(inflate_init(false), input, FIXED_ZLIB.len() as i32, output, 64).unwrap();
     assert_eq!(written_of(packed), FIXED_TEXT.len());
     assert!(finished(packed));
     assert_eq!(read_native(output, FIXED_TEXT.len()), FIXED_TEXT);
