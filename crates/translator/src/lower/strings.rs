@@ -412,7 +412,9 @@ impl<'t> Lowering<'t> {
             BuilderOp::Insert if args.len() == 2 => Some(1),
             BuilderOp::Append
                 if args.len() == 3
-                    && (char_sequence(args[0].ty) || args[0].ty == Type::array(Type::Char)) =>
+                    && (char_sequence(args[0].ty)
+                        || args[0].ty == Type::class(CHAR_SEQUENCE)
+                        || args[0].ty == Type::array(Type::Char)) =>
             {
                 None
             }
