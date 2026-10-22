@@ -1,7 +1,9 @@
 // The messages of a null field of an enclosing instance, which javac reads from the constructor's
 // parameter in the constructor's code (`<parameter1>.chk`), also in a lambda there, and from the
-// field in the initializers the constructor runs (`this.this$0.chk`). A lambda in a lambda reads
-// them as the one around it does, its body being a method of the same class.
+// field in the initializers the constructor runs (`this.this$0.chk`), as a captured local
+// (`this.val$v`). A lambda in a lambda reads them as the one around it does, its body being a
+// method of the same class.
+import java.util.Iterator;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -148,6 +150,35 @@ public class NullEnclosingInstances {
         }));
     }
 
+    static Iterable<String> wrap(Iterable<String> listed) {
+        return () -> new Iterator<String>() {
+            private final Iterator<String> original = listed.iterator();
+
+            public boolean hasNext() {
+                return original.hasNext();
+            }
+
+            public String next() {
+                return original.next();
+            }
+        };
+    }
+
+    static void capturedInInitializer(Object v) {
+        class Captured {
+            String s = v.toString();
+        }
+        new Captured();
+    }
+
+    static void capturedInBlock(Object v) {
+        new Object() {
+            {
+                v.hashCode();
+            }
+        };
+    }
+
     static void run(Runnable r) {
         try {
             r.run();
@@ -175,5 +206,8 @@ public class NullEnclosingInstances {
         run(() -> o.new Lambdas(one));
         run(() -> o.capturing(one, "s"));
         run(() -> o.deeper(one));
+        run(() -> wrap(null).iterator());
+        run(() -> capturedInInitializer(null));
+        run(() -> capturedInBlock(null));
     }
 }
