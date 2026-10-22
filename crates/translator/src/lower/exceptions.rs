@@ -135,6 +135,8 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StringBuilder#appendCodePoint",
             "java.lang.AbstractStringBuilder#repeat",
             "java.lang.StringBuilder#repeat",
+            // A malformed escape sequence (`StringOp::TranslateEscapes`).
+            "java.lang.String#translateEscapes",
             "java.lang.Object#wait",
             // A range the wrong way round (`ArraysOp::ranged`).
             "java.util.Arrays#fill",
