@@ -347,6 +347,7 @@ pub fn runtime_native(class: &str, name: &str, signature: &str) -> bool {
     declared_native(class, name, signature).is_some()
         || (class == "java.io.UnixFileSystem" && FILE_SYSTEM.contains(&name))
         || (class == UNIX_DISPATCHER && unix_call(name).is_some())
+        || (class == NET_DISPATCHER && net_call(name).is_some())
         || matches!(
             (class, name),
             (
@@ -554,5 +555,8 @@ mod tests {
         );
         assert!(runtime_native("java.io.FileInputStream", "readBytes", "(byte[],int,int)int"));
         assert!(!runtime_native("java.lang.Throwable", "fillInStackTrace", "(int)java.lang.Throwable"));
+        // The name service calls that the runtime answers (`NET_CALLS`), as the census lists them.
+        assert!(runtime_native(NET_DISPATCHER, "lookup0", "(byte[],int)byte[]"));
+        assert!(!runtime_native(NET_DISPATCHER, "connect0", "()void"));
     }
 }
