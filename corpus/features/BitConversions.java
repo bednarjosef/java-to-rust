@@ -58,5 +58,10 @@ public class BitConversions {
         System.out.println(next + " " + (next - x));
         int fbits = Float.floatToIntBits(1.0f / 3.0f);
         System.out.println(fbits + " " + Float.intBitsToFloat(fbits + 1));
+        // The bits in hexadecimal: normal, subnormal, zero, and the values that have no bits shown.
+        double[] shown = {x, -2.0, 0.1, -0.0, Double.MAX_VALUE, Double.MIN_VALUE, next, Double.NaN, Double.NEGATIVE_INFINITY};
+        for (double d : shown) {
+            System.out.println(Double.toHexString(d) + " " + Math.getExponent(d) + " " + Math.getExponent((float) d));
+        }
     }
 }

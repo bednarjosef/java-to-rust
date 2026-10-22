@@ -325,6 +325,9 @@ pub fn runtime_values() -> [(&'static str, Type); 9] {
 /// The runtime class of the `StringBuilder`s that become `Object`s.
 pub const STRING_BUILDER: &str = "java.lang.StringBuilder";
 
+/// The runtime class of the classes (`Class<?>` values) that become `Object`s.
+pub const CLASS_VALUE: &str = "java.lang.Class";
+
 /// The runtime class whose values are of type `ty`, a primitive standing for its box.
 pub fn runtime_name(ty: Type) -> Option<&'static str> {
     let ty = if ty.is_numeric() || ty == Type::Boolean { Type::boxed(ty) } else { ty };
@@ -456,6 +459,10 @@ pub struct Method {
     pub overrides: Vec<usize>,
     /// The type parameters of a generic method that is a Rust generic, as types of kind `Param`.
     pub type_params: Vec<Type>,
+    /// The code is the JDK's, though the class is the program's: `CharSequence`'s default
+    /// `getChars` in a class without one of its own (`lower::object`). Its class file is the
+    /// JDK's, which has the names of its locals.
+    pub jdk_code: bool,
 }
 
 pub struct Param {
@@ -737,6 +744,12 @@ pub enum Builtin {
     Arrays(ArraysOp),
     /// `s.charAt(i)`; the receiver is the first argument.
     StringCharAt,
+    /// `[from, to, length]`: `Objects.checkFromToIndex`, an `IndexOutOfBoundsException` when
+    /// `from..to` is not a range of `0..length`.
+    CheckFromToIndex,
+    /// `[index, length]`: `Objects.checkIndex`, an `IndexOutOfBoundsException` when `index` is
+    /// outside `0..length`.
+    CheckIndex,
     /// `Character.isDigit(char)` and the other `Character` methods on a `char`.
     CharIsDigit,
     CharIsLetter,
@@ -773,6 +786,14 @@ pub enum Builtin {
     /// The failure of `Enum.valueOf(c, s)` for a class `c` that is no enum of the program: an
     /// `IllegalArgumentException`, `<name> is not an enum class`, of the class's name.
     NotEnumClass,
+    /// `Unsafe`'s read (or with `put`, write) of a primitive of type `ty` at an offset of a base
+    /// that holds an array of primitives, by the array's bytes (`java::get_memory`): the
+    /// arguments are the base as an `Object`, the offset and, for a write, the value. An offset
+    /// outside the array, or a base that is null or no such array, ends the program.
+    RawMemory {
+        ty: Type,
+        put: bool,
+    },
     /// `Character.getNumericValue(c)`: the digit value of a letter or digit, or -1.
     CharNumericValue,
     /// A method of a boxed class (`Integer.parseInt`, `x.intValue()`), see `BoxedOp`, with the

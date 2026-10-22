@@ -15,6 +15,17 @@ impl<'a> Gen<'a> {
             let n = self.value(&args[1], Type::Int).text;
             return Some(Code::atom(format!("{}({x}, {n})", self.runtime(&format!("scalb{float}")))));
         }
+        // `getExponent(x)`: the unbiased exponent of a `double` or a `float`, read from its bits
+        // (the maximum plus one for NaN and the infinities, the minimum minus one for zero and
+        // the subnormals, as in Java).
+        if name == "getExponent" {
+            let operand = if args[0].ty == Type::Float { Type::Float } else { Type::Double };
+            let x = self.value(&args[0], operand);
+            let x = self.recv(&x, operand);
+            let (shift, mask, bias) =
+                if operand == Type::Float { (23, "0xff", 127) } else { (52, "0x7ff", 1023) };
+            return Some(Code::atom(format!("((({x}.to_bits() >> {shift}) & {mask}) as i32 - {bias})")));
+        }
         // `toIntExact` takes a `long`, and `clamp(long, int, int)` computes in `long`. The products
         // take `long`s, except `multiplyFull`, which takes `int`s and returns the exact `long`.
         let operand = match name {

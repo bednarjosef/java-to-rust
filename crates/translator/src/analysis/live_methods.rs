@@ -41,11 +41,18 @@
 //!   concatenation, every exception thrown or raised by the runtime, and every element of an
 //!   array given to a builtin (`object_values::handed`).
 //! - The exceptions that the runtime raises (`Class::raised`).
+//!
+//! What does not run of a method that does: the side of a branch whose condition has a value
+//! that the walk knows, such as a parameter that every call passes the same constant (`known`).
+//! The walk learns those values as it goes, and walks a method again when one it relied on
+//! changes.
 
 use super::object_values::{self, Flow, ObjectValues, STATIC};
 use crate::ast::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+
+mod known;
 
 /// What can run.
 pub struct LiveMethods {
@@ -90,6 +97,8 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
             work: Vec::new(),
             seen: HashSet::new(),
             waiting: HashMap::new(),
+            contexts: HashMap::new(),
+            known: known::Knowledge::default(),
             unknown: None,
             live: LiveMethods {
                 methods: HashSet::new(),
@@ -101,9 +110,10 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
             },
         }),
     };
+    walk.captured_fields();
     for (m, method) in class.methods.iter().enumerate() {
         if method.is_main {
-            walk.reach(m, STATIC);
+            walk.enter(m, STATIC, STATIC, None);
         }
     }
     for e in &class.raised {
@@ -113,9 +123,22 @@ pub fn live_methods(class: &Class) -> Result<LiveMethods, String> {
     loop {
         let next = walk.state.borrow_mut().work.pop();
         let Some((m, ctx)) = next else { break };
+        let env = walk.env(m);
+        walk.state.borrow_mut().known.env = env;
+        let dead = walk.dead(m);
+        let code = |e: &Expr| {
+            visit_expr(e, &mut |x| {
+                if dead.contains(&x.id) { walk.unresolved(x) } else { walk.expr(m, ctx, x) }
+            })
+        };
+        let statement = |s: &Stmt| match s {
+            Stmt::Throw(e) if dead.contains(&e.id) => {}
+            _ => walk.statement(m, ctx, s),
+        };
         for s in &class.methods[m].body {
-            visit_stmt(s, &mut |e| walk.code(m, ctx, e), &mut |s| walk.statement(m, ctx, s));
+            visit_stmt(s, &mut |e| code(e), &mut |s| statement(s));
         }
+        walk.state.borrow_mut().known.env.clear();
     }
     let Walk { state, supers, .. } = walk;
     let State { unknown, mut live, .. } = state.into_inner();
@@ -223,12 +246,23 @@ struct State {
     /// The instance methods called on objects of a class that no object of is created yet, by
     /// that class: they run once one is.
     waiting: HashMap<usize, Vec<usize>>,
+    /// The objects that each method has been walked on, by method.
+    contexts: HashMap<usize, Vec<usize>>,
+    /// The values that the walk knows (`known`).
+    known: known::Knowledge,
     /// The first thing that the walk met that the facts do not answer.
     unknown: Option<String>,
     live: LiveMethods,
 }
 
 impl Walk<'_> {
+    /// Method `m` is entered on an object of class `ctx` with the arguments `args` of method
+    /// `caller` (`None`: arguments that the walk does not see).
+    fn enter(&self, m: usize, ctx: usize, caller: usize, args: Option<&[Expr]>) {
+        self.pass(caller, m, args);
+        self.reach(m, ctx);
+    }
+
     /// Method `m` runs on an object of class `ctx`.
     fn reach(&self, m: usize, ctx: usize) {
         let method = &self.class.methods[m];
@@ -254,6 +288,7 @@ impl Walk<'_> {
         state.live.methods.insert(m);
         if state.seen.insert((m, ctx)) {
             state.work.push((m, ctx));
+            state.contexts.entry(m).or_default().push(ctx);
         }
     }
 
@@ -266,7 +301,7 @@ impl Walk<'_> {
             let class = self.class;
             for (m, method) in class.methods.iter().enumerate() {
                 if method.class == t && (method.name == "<clinit>" || class.builds_constants(m)) {
-                    self.reach(m, STATIC);
+                    self.enter(m, STATIC, STATIC, None);
                 }
             }
             let decl = &class.types[t];
@@ -293,13 +328,17 @@ impl Walk<'_> {
         if !self.state.borrow_mut().live.instantiated.insert(c) {
             return;
         }
+        self.created(c);
         let waiting = self.state.borrow_mut().waiting.remove(&c).unwrap_or_default();
         for m in waiting {
             self.reach(m, c);
         }
         for &t in &self.supers[c] {
-            for init in self.class.types[t].fields.iter().filter_map(|f| f.init.as_ref()) {
-                self.code(STATIC, c, init);
+            for field in &self.class.types[t].fields {
+                if let Some(init) = &field.init {
+                    self.code(STATIC, c, init);
+                    self.initialize_field(t, &field.name, init);
+                }
             }
         }
     }
@@ -320,30 +359,28 @@ impl Walk<'_> {
     /// What the expression `x` itself runs, not counting the expressions inside it.
     fn expr(&self, m: usize, ctx: usize, x: &Expr) {
         match &x.kind {
-            ExprKind::Call { resolved: None, name, .. }
-            | ExprKind::MethodCall { resolved: None, name, .. } => {
-                let message = format!("a call of `{name}` that lowering left unresolved");
-                self.state.borrow_mut().live.unresolved.push(Error { pos: x.pos, message });
+            ExprKind::Call { resolved: None, .. } | ExprKind::MethodCall { resolved: None, .. } => {
+                self.unresolved(x)
             }
-            ExprKind::Call { .. }
-            | ExprKind::MethodCall { .. }
-            | ExprKind::ThisCall { .. }
-            | ExprKind::SuperInit { .. } => {
+            ExprKind::Call { args, .. }
+            | ExprKind::MethodCall { args, .. }
+            | ExprKind::ThisCall { args, .. }
+            | ExprKind::SuperInit { args, .. } => {
                 for (target, c) in self.values.targets(self.class, m, ctx, x) {
-                    self.reach(target, c);
+                    self.enter(target, c, m, Some(args));
                 }
             }
-            ExprKind::New { class: c, ctor, .. } => {
+            ExprKind::New { class: c, ctor, args } => {
                 self.instantiate(*c);
                 match ctor {
-                    Some(r) => self.reach(*r, *c),
+                    Some(r) => self.enter(*r, *c, m, Some(args)),
                     // Without a constructor of its own, it runs those of its superclasses.
                     None => {
                         let ancestors = self.class.hierarchy.ancestors(*c);
                         let class = self.class;
                         for (r, method) in class.methods.iter().enumerate() {
                             if method.is_ctor && ancestors.contains(&method.class) {
-                                self.reach(r, *c);
+                                self.enter(r, *c, m, None);
                             }
                         }
                     }
@@ -354,7 +391,20 @@ impl Walk<'_> {
             }
             ExprKind::Assign { target: Place::Static { class: c, .. }, .. }
             | ExprKind::IncDec { target: Place::Static { class: c, .. }, .. } => self.initialize(*c),
+            ExprKind::Assign { op, target: Place::Field { object, name }, value } if known::tracked(x.ty) => {
+                self.write_field(m, object.ty, name, op.is_none().then_some(&**value))
+            }
+            ExprKind::IncDec { target: Place::Field { object, name }, .. } if known::tracked(x.ty) => {
+                self.write_field(m, object.ty, name, None)
+            }
             ExprKind::Builtin(Builtin::InitializeClass { class: c }, _) => self.initialize(*c),
+            ExprKind::Builtin(Builtin::Native(Native::Missing { what }), _) => {
+                let message = format!("native method `{what}` not supported yet");
+                let unresolved = &mut self.state.borrow_mut().live.unresolved;
+                if !unresolved.iter().any(|e| e.pos == x.pos && e.message == message) {
+                    unresolved.push(Error { pos: x.pos, message });
+                }
+            }
             _ => {}
         }
         // An enum's objects are its constants, which its static initialization makes.
@@ -366,6 +416,20 @@ impl Walk<'_> {
         }
         for (flow, ty) in object_values::handed(self.values, self.class, m, ctx, x) {
             self.glue(flow, ty);
+        }
+    }
+
+    /// A call that lowering left unresolved: where it can run, it rejects the program. One in code
+    /// that cannot run is reported too, as the translation of its method still has it.
+    fn unresolved(&self, x: &Expr) {
+        if let ExprKind::Call { resolved: None, name, .. }
+        | ExprKind::MethodCall { resolved: None, name, .. } = &x.kind
+        {
+            let message = format!("a call of `{name}` that lowering left unresolved");
+            let unresolved = &mut self.state.borrow_mut().live.unresolved;
+            if !unresolved.iter().any(|e| e.pos == x.pos && e.message == message) {
+                unresolved.push(Error { pos: x.pos, message });
+            }
         }
     }
 
@@ -384,7 +448,7 @@ impl Walk<'_> {
         for c in classes {
             for &g in &self.glue {
                 if let Some(target) = self.values.implementation(self.class, g, c) {
-                    self.reach(target, c);
+                    self.enter(target, c, STATIC, None);
                 }
             }
         }

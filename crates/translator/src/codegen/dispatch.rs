@@ -203,7 +203,36 @@ impl<'a> Gen<'a> {
 
     /// The name of the conversion to the enum of `t`: `to_shape`.
     pub(super) fn to_name(&self, t: usize) -> String {
-        format!("to_{}", snake_case(&self.simple_name(t)).trim_end_matches('_'))
+        format!("to_{}", snake_case(&self.distinct_name(t)).trim_end_matches('_'))
+    }
+
+    /// The name of type `t` in the names of its conversions: its simple name, or with its outer
+    /// classes when another type has that simple name too (`ImageReaderNode` and
+    /// `ConcurrentHashMapNode`), or with its package as well when that is shared too.
+    fn distinct_name(&self, t: usize) -> String {
+        let simple = self.simple_name(t);
+        if !self.shared_names.contains(&simple) || self.class.array_of(t).is_some() {
+            return simple;
+        }
+        let in_package = self.in_package_name(t);
+        if !self.shared_names.contains(&in_package) {
+            return in_package;
+        }
+        self.full_variant_name(t)
+    }
+
+    /// The simple names, and the names with outer classes, that more than one type has.
+    pub(super) fn shared_names(&self) -> HashSet<String> {
+        let mut seen = HashSet::new();
+        let mut shared = HashSet::new();
+        for t in (0..self.class.types.len()).filter(|&t| self.class.array_of(t).is_none()) {
+            for name in [self.simple_name(t), format!("{}\0", self.in_package_name(t))] {
+                if !seen.insert(name.clone()) {
+                    shared.insert(name.trim_end_matches('\0').to_string());
+                }
+            }
+        }
+        shared
     }
 
     /// The simple name of type `t`, which names its variants and conversions: `Circle` for
@@ -221,7 +250,7 @@ impl<'a> Gen<'a> {
 
     /// The name of the checked conversion to type `t`: `as_circle`.
     fn as_name(&self, t: usize) -> String {
-        format!("as_{}", snake_case(&self.simple_name(t)).trim_end_matches('_'))
+        format!("as_{}", snake_case(&self.distinct_name(t)).trim_end_matches('_'))
     }
 
     /// The binary name of type `t`, as the JVM shows it: `shapes.Outer$Inner`.
@@ -536,6 +565,9 @@ impl<'a> Gen<'a> {
         if let Some(shared) = self.class.shared_of(c) {
             return Some(shared);
         }
+        if self.class.types[c].kind == TypeKind::Runtime && self.class.types[c].name == CLASS_VALUE {
+            return Some(Type::JavaClass);
+        }
         (self.class.types[c].kind == TypeKind::Runtime)
             .then(|| runtime_type(&self.class.types[c].name))
             .flatten()
@@ -657,6 +689,18 @@ impl<'a> Gen<'a> {
         if matches!(value.kind, ExprKind::Null) {
             return Code::atom("None");
         }
+        // A string, a builder or a box as a value of a type of the program whose values do not
+        // include it, which `lower::hierarchy::convert` leaves to the generator.
+        if matches!(value.ty, Type::String | Type::StringBuilder | Type::Boxed(_))
+            && !self
+                .type_of(value.ty)
+                .zip(self.type_of(to))
+                .is_some_and(|(s, t)| self.class.hierarchy.is_subtype(s, t))
+        {
+            let message = format!("a `{}` as a `{to}` not supported yet", value.ty);
+            self.rejected.push(Error { pos: value.pos, message });
+            return Code::atom("unreachable!()");
+        }
         match self.narrowing(value, to) {
             Narrowing::Down(s) => return self.downcast(s, to, value, checked),
             Narrowing::Known(false) => return self.failing_cast(to, value, checked),
@@ -769,7 +813,13 @@ impl<'a> Gen<'a> {
         let m = &self.class.methods[resolved];
         if m.name == "toString" && m.params.is_empty() {
             self.need(Need::Display(t));
-            return Code::atom(format!("{}.to_string()", self.object(receiver)));
+            let text = format!("{}.to_string()", self.object(receiver));
+            // A `toString` that an implementation may return null from is an `Option` where its
+            // value is used (`nullness`); the `Display` shows such a null as "null".
+            if self.facts.nullable_returns.contains(&resolved) {
+                return Code::atom(format!("Some({text})"));
+            }
+            return Code::atom(text);
         }
         let name = self.dispatch_name(t, resolved);
         let obj = self.object(receiver);
@@ -1134,6 +1184,9 @@ impl<'a> Gen<'a> {
         if self.is_char_sequence_method(r) {
             return self.char_sequence_arm(r, c);
         }
+        if self.is_appendable_method(r) {
+            return self.appendable_arm(r, c);
+        }
         match self.class.methods[r].name.as_str() {
             "ordinal" => "*o as i32".to_string(),
             "name" => "o.enum_name()".to_string(),
@@ -1142,7 +1195,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The type of `Object`, when the program uses it.
-    fn object_index(&self) -> Option<usize> {
+    pub(super) fn object_index(&self) -> Option<usize> {
         self.class.types.iter().position(|d| d.kind == TypeKind::Interface && d.name == OBJECT)
     }
 
@@ -1163,25 +1216,61 @@ impl<'a> Gen<'a> {
         t.kind == TypeKind::Interface && t.name == COMPARABLE
     }
 
-    /// Whether method `r` is one of `CharSequence`'s own abstract `length()` and `charAt(int)`.
+    /// Whether method `r` is one of `CharSequence`'s own abstract methods.
     fn is_char_sequence_method(&self, r: usize) -> bool {
         let t = &self.class.types[self.class.methods[r].class];
         t.kind == TypeKind::Interface && t.name == CHAR_SEQUENCE
     }
 
-    /// `CharSequence`'s `length()`, `charAt(index)` or `subSequence(start, end)` (method `r`) for
-    /// a string or a builder of class `c` bound to `o`.
+    /// `CharSequence`'s `length()`, `charAt(index)`, `subSequence(start, end)` or `getChars(..)`
+    /// (method `r`) for a string or a builder of class `c` bound to `o`. What a string's throws
+    /// is thrown for a `java::catching` around the call (see `analysis::exceptions`), as a
+    /// builder's is.
     fn char_sequence_arm(&mut self, r: usize, c: usize) -> String {
         let method = &self.class.methods[r];
         let builder = self.runtime_of(c) == Some(Type::StringBuilder);
+        if self.runtime_of(c).is_none() {
+            // A class of the program implements each of these, or inherits the default.
+            let message = format!("`CharSequence.{}` of a class without one not supported yet", method.name);
+            self.rejected.push(Error { pos: method.pos, message });
+            return "unreachable!()".to_string();
+        }
         if method.name == "subSequence" {
             return self.sub_sequence_arm(r, builder);
+        }
+        if method.name == "getChars" {
+            return self.get_chars_arm(r, builder);
         }
         match (method.name.as_str(), builder) {
             ("length", true) => "o.length()".to_string(),
             ("length", false) => format!("{}(o)", self.runtime("string_length")),
             (_, true) => format!("o.char_at({})", self.local(&method.params[0].name)),
-            (_, false) => format!("{}(o, {})", self.runtime("char_at"), self.local(&method.params[0].name)),
+            (_, false) => {
+                let index = self.local(&method.params[0].name);
+                format!(
+                    "{}(o, {index}).unwrap_or_else(|e| {}(e))",
+                    self.runtime("try_char_at"),
+                    self.runtime("throw_exception")
+                )
+            }
+        }
+    }
+
+    /// `getChars(srcBegin, srcEnd, dst, dstBegin)` (method `r`) of a string or a builder bound to
+    /// `o`, whose `dst` may be null. What it throws is thrown for a `java::catching` around the
+    /// call (see `analysis::exceptions`).
+    fn get_chars_arm(&mut self, r: usize, builder: bool) -> String {
+        let method = &self.class.methods[r];
+        let names: Vec<String> = method.params.iter().map(|p| self.local(&p.name)).collect();
+        let [begin, end, dst, dst_begin] = &names[..] else { unreachable!("`getChars` has four parameters") };
+        let dst = match self.optional_var(r, method.params[2].ty, &method.params[2].name) {
+            true => format!("{dst}.as_ref()"),
+            false => format!("Some(&{dst})"),
+        };
+        if builder {
+            format!("o.sequence_get_chars({begin}, {end}, {dst}, {dst_begin})")
+        } else {
+            format!("{}(o, {begin}, {end}, {dst}, {dst_begin})", self.runtime("sequence_get_chars"))
         }
     }
 
@@ -1193,7 +1282,8 @@ impl<'a> Gen<'a> {
         let text = if builder {
             format!("o.substring({start}, {end})")
         } else {
-            format!("{}(o, {start}, {end})", self.runtime("substring"))
+            let thrown = self.runtime("throw_exception");
+            format!("{}(o, {start}, {end}).unwrap_or_else(|e| {thrown}(e))", self.runtime("try_substring"))
         };
         let char_sequence = method.class;
         let string =
@@ -1205,6 +1295,48 @@ impl<'a> Gen<'a> {
         };
         let value = format!("{}({text})", self.variant(char_sequence, string));
         if self.facts.nullable_returns.contains(&r) { format!("Some({value})") } else { value }
+    }
+
+    /// Whether method `r` is one of the JDK's `Appendable`'s own `append` methods, which a builder
+    /// answers (see `lower::object`).
+    fn is_appendable_method(&self, r: usize) -> bool {
+        let t = &self.class.types[self.class.methods[r].class];
+        t.kind == TypeKind::Interface && t.name == "java.lang.Appendable"
+    }
+
+    /// `Appendable`'s `append(csq)`, `append(csq, start, end)` or `append(c)` (method `r`) for a
+    /// builder of class `c` bound to `o`: the builder's own, which returns the builder itself. A
+    /// null `csq` appends `"null"`, as Java's does.
+    fn appendable_arm(&mut self, r: usize, c: usize) -> String {
+        let method = &self.class.methods[r];
+        let appendable = method.class;
+        if self.runtime_of(c) != Some(Type::StringBuilder) {
+            return "unreachable!()".to_string();
+        }
+        let names: Vec<String> = method.params.iter().map(|p| self.local(&p.name)).collect();
+        let append = match (&method.params[..], &names[..]) {
+            ([p], [x]) if p.ty == Type::Char => format!("o.append_char({x})"),
+            ([p, ..], [csq, rest @ ..]) if matches!(p.ty, Type::Class(..)) => {
+                if let Some(t) = self.type_of(p.ty) {
+                    self.need(Need::Display(t));
+                }
+                let text = if self.optional_var(r, p.ty, &p.name) {
+                    format!("match {csq} {{ Some(s) => s.to_string(), None => \"null\".to_string() }}")
+                } else {
+                    format!("{csq}.to_string()")
+                };
+                match rest {
+                    [] => format!("o.append_str(&{text})"),
+                    [start, end] => format!("o.append_range(&{text}, {start}, {end})"),
+                    _ => return "unreachable!()".to_string(),
+                }
+            }
+            _ => return "unreachable!()".to_string(),
+        };
+        let builder = format!("{}(o.clone())", self.variant(appendable, c));
+        let value =
+            if self.facts.nullable_returns.contains(&r) { format!("Some({builder})") } else { builder };
+        format!("{{ {append}; {value} }}")
     }
 
     /// Whether method `r` is one of `Number`'s own abstract `byteValue()` to `doubleValue()`.
@@ -1402,6 +1534,10 @@ impl<'a> Gen<'a> {
             }
             return format!("{}({})", self.runtime("address_hash"), self.address(c, handle));
         };
+        // A class's hash is its identity's in Java: there is one class object for each class.
+        if ty == Type::JavaClass {
+            return format!("{handle}.hash_code()");
+        }
         let value = if self.faithful_box(ty) { format!("**{handle}") } else { format!("*{handle}") };
         let function = match ty.unboxed() {
             Type::String => return format!("{}({handle})", self.runtime("string_hash")),

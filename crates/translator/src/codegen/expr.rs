@@ -462,9 +462,14 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({option})", self.runtime("null_enum")))
             }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
-            // string, a builder, a box or an array.
+            // string, a builder, a box, an array or a class.
             ExprKind::Cast(
-                to @ (Type::Enum(_) | Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_)),
+                to @ (Type::Enum(_)
+                | Type::String
+                | Type::StringBuilder
+                | Type::Boxed(_)
+                | Type::Array(_)
+                | Type::JavaClass),
                 value,
             ) if matches!(value.ty, Type::Class(..)) => self.checked_class_cast(e.id, *to, value),
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
@@ -672,6 +677,7 @@ impl<'a> Gen<'a> {
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty, id)
             }
+            Builtin::RawMemory { ty, put } => self.raw_memory(ty, put, args),
             Builtin::NotEnumClass => {
                 let name = self.str_ref(&args[0]);
                 let message = format!("format!(\"{{}} is not an enum class\", {name})");
@@ -686,6 +692,11 @@ impl<'a> Gen<'a> {
                     let throw = self.runtime("throw");
                     Code::atom(format!("{throw}(\"java.lang.IllegalArgumentException\", &{message})"))
                 }
+            }
+            Builtin::CheckFromToIndex | Builtin::CheckIndex => {
+                let values: Vec<String> = args.iter().map(|a| self.value(a, Type::Int).text).collect();
+                let name = if builtin == Builtin::CheckIndex { "check_index" } else { "check_from_to_index" };
+                self.may_fail(id, name, "", &values.join(", "))
             }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
             Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty, id),

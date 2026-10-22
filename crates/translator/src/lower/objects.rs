@@ -71,6 +71,7 @@ impl<'t> Lowering<'t> {
             catch_panics: false,
             stubbing: Cell::new(false),
             stubbed: Default::default(),
+            body_methods: Default::default(),
             annotation_types: Default::default(),
             rejected_classes: Default::default(),
             callers: Default::default(),
@@ -146,6 +147,9 @@ impl<'t> Lowering<'t> {
                 }
                 kind => return unsupported(member, &kind_words(kind)),
             }
+        }
+        if node.kind() == "ENUM" {
+            self.body_methods(index);
         }
         Ok(())
     }
@@ -360,6 +364,13 @@ impl<'t> Lowering<'t> {
         let args = self.packed_args(node, &symbol, args)?;
         self.check_standard_member(node, &symbol)?;
         let ctor = self.method_index(&symbol);
+        // A class that a whole program does not translate is only a type there, without
+        // constructors (`program::reach::stubs`): no object of it can be made.
+        if ctor.is_none()
+            && let Some(feature) = crate::program::untranslated(symbol.owner)
+        {
+            return unsupported(node, &format!("`new {}` ({feature})", symbol.owner));
+        }
         let args = self.convert_generic_args(node, ctor, args)?;
         let args = self.with_synthetic(self.creation_args(node, class)?, args);
         Ok(ExprKind::New { class, args, ctor })

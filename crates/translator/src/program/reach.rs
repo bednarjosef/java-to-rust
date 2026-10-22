@@ -159,6 +159,12 @@ pub const RUNTIME_CLASSES: &[&str] = &[
     "sun.util.logging.PlatformLogger",
 ];
 
+/// Classes nested in one of the `RUNTIME_CLASSES` that are translated from the JDK's sources all
+/// the same, as they are plain code over the JDK's other classes: `Runtime.Version`, a version
+/// string parsed and compared (`JarFile`'s and `ModulePath`'s release), with the pattern it
+/// parses with.
+pub const TRANSLATED_NESTED: &[&str] = &["java.lang.Runtime.Version", "java.lang.Runtime.VersionPattern"];
+
 /// What is not translated, by the prefix of qualified class names, with the feature it is:
 /// reachability stops there, as at the runtime's classes, and the survey counts its use. Library
 /// code reaches these on paths that only its data rules out, such as `TreeMap.addAll` reading
@@ -176,6 +182,8 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
     ("java.lang.invoke.", "reflection"),
     ("java.lang.reflect.", "reflection"),
     ("java.security.", "security"),
+    // There is no security manager (`System.getSecurityManager()` is null, see `lower::system`).
+    ("java.lang.SecurityManager", "security"),
     ("jdk.internal.loader.", "class loading"),
     ("jdk.internal.reflect.", "reflection"),
     ("sun.security.", "security"),
@@ -188,6 +196,9 @@ pub const UNTRANSLATED: &[(&str, &str)] = &[
 /// reflection table (`reflection.rs`), and so is `InvocationTargetException`, which wraps the
 /// exceptions of what they call (`java/Standard.java`).
 pub const TRANSLATED_ANYWAY: &[&str] = &[
+    // An action that `AccessController.doPrivileged` runs, which the translator's runs directly
+    // (`REDIRECTED_CALLS`): a plain interface.
+    "java.security.PrivilegedAction",
     "java.lang.reflect.Array",
     "java.lang.reflect.InvocationTargetException",
     "java.lang.reflect.Modifier",
@@ -219,9 +230,19 @@ pub const REPLACED_METHODS: &[(&str, &str, &str)] = &[
     ("jdk.internal.misc.Blocker", "begin", "()boolean"),
     ("jdk.internal.misc.Blocker", "begin", "(boolean)boolean"),
     ("jdk.internal.misc.Blocker", "end", "(boolean)void"),
-    // A translated program has no native library to load (`lower/libraries.rs`).
+    // A translated program has no native library to load, and no garbage collector whose
+    // collections a cleaner thread would wait for (`lower/libraries.rs`).
+    (
+        "jdk.internal.ref.CleanerImpl",
+        "start",
+        "(java.lang.ref.Cleaner,java.util.concurrent.ThreadFactory)void",
+    ),
     ("jdk.internal.loader.BootLoader", "loadLibrary", "(java.lang.String)void"),
     ("java.security.SecureRandom", "getSeed", "(int)byte[]"),
+    // Preview features are off in a plain run, and there is no security manager to check the
+    // `jrt:` file system's callers (`lower/system.rs`).
+    ("jdk.internal.misc.PreviewFeatures", "isPreviewEnabled", "()boolean"),
+    ("jdk.internal.jrtfs.JrtFileSystemProvider", "checkPermission", "()void"),
 ];
 
 /// A method, by class, name and javac's signature.
@@ -508,6 +529,15 @@ pub const FALSE_FLAGS: &[(&str, &str)] = &[
 /// `ReferenceQueue.poll` and other code under a lock do.
 pub const FALSE_CALLS: &[(&str, &str)] = &[("jdk.internal.vm.ContinuationSupport", "isSupported")];
 
+/// Instance methods without parameters that return `false` in every translated program, called
+/// on a receiver that reading has no effects: there are no virtual threads, so
+/// `Thread.isVirtual()` is false, and the branches that would park, unpark or ask a virtual
+/// thread (through the JVM's `JavaLangAccess`) never run. The receiver is not read, which differs
+/// from Java only where it is null, where Java would throw a `NullPointerException`; the JDK
+/// tests it first (`LockSupport.unpark`) or has the current thread (`Thread.currentThread()`,
+/// which is never null).
+pub const FALSE_INSTANCE_CALLS: &[(&str, &str)] = &[("java.lang.Thread", "isVirtual")];
+
 /// Static fields that only the class data sharing archive sets, through the native
 /// `CDS.initializeFromArchive` at the start of their class's static initializer, which then tests
 /// each against null once to build the value itself when the archive had none. The runtime's
@@ -664,11 +694,46 @@ pub fn live_branch(node: &Value, sequential: bool) -> Option<&Value> {
     if never_true(condition, sequential) {
         return Some(else_branch(node));
     }
-    archived_null_test(condition, true).then(|| then_branch(node))
+    (archived_null_test(condition, true) || stub_null_test(condition, true)).then(|| then_branch(node))
+}
+
+/// Whether `node` is `Runtime.version().feature()`, the release of the JDK, which the translation
+/// knows (`lower::system`).
+pub fn release_query(node: &Value) -> bool {
+    let symbol = &node["symbol"];
+    let receiver = &node["methodSelect"]["expression"];
+    text(node, "kind") == "METHOD_INVOCATION"
+        && (text(symbol, "owner"), text(symbol, "name"), text(symbol, "type"))
+            == ("java.lang.Runtime.Version", "feature", "()int")
+        && text(receiver, "kind") == "METHOD_INVOCATION"
+        && (text(&receiver["symbol"], "owner"), text(&receiver["symbol"], "name"))
+            == ("java.lang.Runtime", "version")
+}
+
+/// Whether `condition` is `x == null` (`equal`) or `x != null` of a value `x` of a stub's type
+/// (`stubs`), which is only ever null, and which it reads without effects: a variable, or
+/// `System.getSecurityManager()`. So `if (sm != null)` skips what a security manager would check.
+fn stub_null_test(condition: &Value, equal: bool) -> bool {
+    let kind = if equal { "EQUAL_TO" } else { "NOT_EQUAL_TO" };
+    let only_null = |v: &Value| {
+        let read = match text(v, "kind") {
+            "IDENTIFIER" => text(&v["symbol"], "kind") != "METHOD",
+            "METHOD_INVOCATION" => {
+                (text(&v["symbol"], "owner"), text(&v["symbol"], "name"))
+                    == ("java.lang.System", "getSecurityManager")
+            }
+            _ => false,
+        };
+        read && stubs::is_stub(text(v, "javaType"))
+    };
+    let null = |v: &Value| text(v, "kind") == "NULL_LITERAL";
+    let (left, right) = (&condition["leftOperand"], &condition["rightOperand"]);
+    text(condition, "kind") == kind && (only_null(left) && null(right) || null(left) && only_null(right))
 }
 
 /// Whether the condition of an `if` statement or a `?:` is never true, so that only its `else`
-/// branch can run: it reads one of the `FALSE_FLAGS` or calls one of the `FALSE_CALLS`, or, when the program's streams are all
+/// branch can run: it reads one of the `FALSE_FLAGS` or calls one of the `FALSE_CALLS` or
+/// `FALSE_INSTANCE_CALLS`, or, when the program's streams are all
 /// `sequential` (see `sequential.rs`), it is a pipeline's `isParallel()` or a test whether one
 /// of its nodes has children (`getChildCount() > 0`); alone, or as the first
 /// operand of `&&`, or as the second after one that only computes a value (the lowering drops the
@@ -687,14 +752,29 @@ pub fn never_true(condition: &Value, sequential: bool) -> bool {
         }
         "METHOD_INVOCATION" => {
             let symbol = &condition["symbol"];
-            let false_call = FALSE_CALLS.contains(&(text(symbol, "owner"), text(symbol, "name")))
+            let method = (text(symbol, "owner"), text(symbol, "name"));
+            let receiver = &condition["methodSelect"]["expression"];
+            let false_call = (FALSE_CALLS.contains(&method)
+                || FALSE_INSTANCE_CALLS.contains(&method)
+                    && receiver.is_object()
+                    && !reading_has_effects(receiver))
                 && text(symbol, "type") == "()boolean";
             false_call || (sequential && sequential::is_parallel_test(condition))
         }
-        "NOT_EQUAL_TO" => archived_null_test(condition, false),
+        "NOT_EQUAL_TO" => archived_null_test(condition, false) || stub_null_test(condition, false),
         "GREATER_THAN" => sequential && sequential::has_children_test(condition),
         _ => false,
     }
+}
+
+/// Whether reading the receiver `value` of one of the `FALSE_INSTANCE_CALLS` has effects:
+/// `Thread.currentThread()` has none (`LockSupport.park` asks it whether it is virtual).
+fn reading_has_effects(value: &Value) -> bool {
+    let symbol = &value["symbol"];
+    let current_thread = text(value, "kind") == "METHOD_INVOCATION"
+        && (text(symbol, "owner"), text(symbol, "name"), text(symbol, "type"))
+            == ("java.lang.Thread", "currentThread", "()java.lang.Thread");
+    !current_thread && has_effects(value)
 }
 
 /// The branch of an `if` statement or a `?:` that can run when its condition is never true.
@@ -791,6 +871,8 @@ pub const TRANSLATED_LANG_ACCESS: &[&str] = &[
     "start",
     "uncheckedNewStringOrThrow",
     "uncheckedGetBytesOrThrow",
+    "uncheckedGetUTF16Char",
+    "uncheckedPutCharUTF16",
 ];
 
 /// The class of `TRANSLATED_LANG_ACCESS`.
@@ -800,6 +882,19 @@ pub const TRANSLATED_LANG_ACCESS_CLASS: &str = "jdk.internal.access.TranslatedLa
 /// (`java/overlay`) with the same type, by the JDK's method and the translator's class and name
 /// (see `lower.rs`). Reachability goes to the translator's method, and not into the JDK's.
 pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
+    // The version of the JDK, which the JVM makes from the numbers of its build; the
+    // translator's parses `java.runtime.version`, which a plain run of that JDK has
+    // (`java/lang/TranslatedRuntime.java`).
+    (
+        ("java.lang.Runtime", "version", "()java.lang.Runtime.Version"),
+        ("java.lang.TranslatedRuntime", "version"),
+    ),
+    // An action run with the caller's privileges, which, with no security manager, is running it
+    // (`java/lang/TranslatedAccessController.java`).
+    (
+        ("java.security.AccessController", "doPrivileged", "<T>(java.security.PrivilegedAction<T>)T"),
+        ("java.lang.TranslatedAccessController", "doPrivileged"),
+    ),
     // The default file system, whose provider a property could name and reflection create (the
     // property is not set in a translated program, see `lower::system`), and which the JDK finds
     // by the URI `file:///` (`sun/nio/fs/TranslatedFiles.java`).
@@ -863,6 +958,22 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
             "(java.nio.file.Path,java.nio.charset.Charset,java.nio.file.OpenOption[])java.io.BufferedWriter",
         ),
         ("sun.nio.fs.TranslatedFiles", "newBufferedWriter"),
+    ),
+    // The installed file-system providers, which the JDK loads with `ServiceLoader`; the
+    // translator's are those of `java.base`.
+    (
+        (
+            "java.nio.file.spi.FileSystemProvider",
+            "loadInstalledProviders",
+            "()java.util.List<java.nio.file.spi.FileSystemProvider>",
+        ),
+        ("sun.nio.fs.TranslatedFiles", "loadInstalledProviders"),
+    ),
+    // The escaped octets of a URI's part decoded as UTF-8, which the JDK decodes with a
+    // `CharsetDecoder` (`java/net/TranslatedURI.java`).
+    (
+        ("java.net.URI", "decode", "(java.lang.String,boolean)java.lang.String"),
+        ("java.net.TranslatedURI", "decode"),
     ),
 ];
 
@@ -1276,6 +1387,15 @@ impl<'t> Walk<'t> {
         }
         let class = class_name(decl);
         if outside(&class) {
+            if provided(&class) {
+                for member in members(decl) {
+                    if CLASS_KINDS.contains(&text(member, "kind"))
+                        && TRANSLATED_NESTED.contains(&class_name(member).as_str())
+                    {
+                        self.declare(member, Some(&class));
+                    }
+                }
+            }
             return;
         }
         for member in members(decl) {
@@ -1655,6 +1775,9 @@ impl<'t> Walk<'t> {
                     }
                 }
             }
+            // `Runtime.version().feature()`, a constant of the translation (`lower::system`),
+            // which makes no version.
+            Value::Object(_) if release_query(value) => {}
             // The branch that never runs is not reached, and neither is the condition, which the
             // lowering drops: a flag's class need not exist.
             Value::Object(_) if let Some(branch) = live_branch(value, self.sequential) => {
@@ -1788,6 +1911,10 @@ impl<'t> Walk<'t> {
                 for (class, method, signature) in *methods {
                     self.work.push(Item::Method(((*class).into(), (*method).into(), (*signature).into())));
                 }
+            }
+            // The security manager, which is null: its type is a stub's (see `stubs`).
+            "METHOD" if owner == "java.lang.System" && name == "getSecurityManager" => {
+                self.stub_type("java.lang.SecurityManager");
             }
             // The translator's properties (see `lower::system`).
             "METHOD" if owner == "java.lang.System" && name == "getProperties" => {

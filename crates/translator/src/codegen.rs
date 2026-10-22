@@ -7,9 +7,11 @@
 use crate::analysis::Facts;
 use crate::analysis::hierarchy::{self, Home};
 use crate::ast::*;
+use crate::output::ModuleTree;
 use std::collections::{HashMap, HashSet};
 
 mod boxing;
+mod ceil_div;
 mod chains;
 mod char_sequence;
 mod character;
@@ -27,6 +29,7 @@ mod expr;
 mod field_inits;
 mod files;
 mod idiomatic;
+mod imports;
 mod inflate;
 mod math;
 mod names;
@@ -69,19 +72,25 @@ use arrays::name_part;
 use boxing::boxed_locals;
 use objects::*;
 
+/// The program as the text of one file (`output::Layout::OneFile`).
 pub fn generate(class: &Class, facts: &Facts) -> Result<String, Error> {
+    generate_modules(class, facts).map(|tree| tree.one_file())
+}
+
+/// The program as modules, one per package, for a layout to write.
+pub fn generate_modules(class: &Class, facts: &Facts) -> Result<ModuleTree, Error> {
     generate_all(class, facts).map_err(|mut errors| errors.remove(0))
 }
 
 /// The program, or what in it cannot be translated: every construct found, in the order the
 /// program is written, or else every method with a call that throws inside a closure. A census
 /// (`program/census.rs`) stubs them all at once.
-pub fn generate_all(class: &Class, facts: &Facts) -> Result<String, Vec<Error>> {
+pub fn generate_all(class: &Class, facts: &Facts) -> Result<ModuleTree, Vec<Error>> {
     // The enums of class types get the items that the code uses, which writing the code finds:
     // the program is written again until it asks for no item that was not written.
     let mut wanted = Needs::new();
     loop {
-        let (text, needs, rejected, closures) = generate_with(class, facts, &wanted);
+        let (tree, needs, rejected, closures) = generate_with(class, facts, &wanted);
         if !rejected.is_empty() {
             return Err(rejected);
         }
@@ -90,8 +99,10 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<String, Vec<Error>> 
             if !closures.is_empty() {
                 return Err(closures);
             }
-            exceptions::check_closures(&text).map_err(|e| vec![e])?;
-            return Ok(text);
+            for module in &tree.modules {
+                exceptions::check_closures(&module.items_text()).map_err(|e| vec![e])?;
+            }
+            return Ok(tree);
         }
         wanted.extend(needs);
     }
@@ -121,7 +132,11 @@ pub fn panicked_in() -> Option<Pos> {
 /// The program, with the enum items `wanted`, and the enum items that it uses; and what in it
 /// cannot be translated, and the methods with a call that throws inside a closure (see
 /// `exceptions::check_closures`).
-fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs, Vec<Error>, Vec<Error>) {
+fn generate_with(
+    class: &Class,
+    facts: &Facts,
+    wanted: &Needs,
+) -> (ModuleTree, Needs, Vec<Error>, Vec<Error>) {
     let live = live_types(class, facts);
     let modules = modules::enter(class);
     let homes: Vec<Home> = (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect();
@@ -138,6 +153,7 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         variant_lists: Default::default(),
         checked_value_ofs: Default::default(),
         group_names,
+        shared_names: HashSet::new(),
         live: live.clone(),
         runs: running_types(class, facts),
         wanted: wanted.clone(),
@@ -192,43 +208,17 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
         closures: Vec::new(),
         chains: chains::Chains::default(),
     };
+    g.shared_names = g.shared_names();
     g.chains = g.find_chains();
-    if modules.is_some() {
-        let text = g.program(&live);
-        g.check_dereferences();
-        g.check_casts();
-        g.check_catching();
-        return (text, g.needs.take(), g.rejected, g.closures);
-    }
-    for (index, _) in live.iter().enumerate().filter(|(_, live)| **live) {
-        g.type_items(index);
-    }
-    for t in 0..class.types.len() {
-        if wanted.contains(&Need::Enum(t)) {
-            g.type_enum_items(t);
-        }
-    }
-    // An enum is never built with `new`, so it is emitted whether or not a `new` names it.
-    for index in (0..class.types.len()).filter(|&t| class.types[t].enum_constants.is_some()) {
-        g.enum_items(index);
-    }
-    g.statics();
-    g.class_monitors();
-    for i in 0..class.methods.len() {
-        if g.emitted_free(i) {
-            g.gap();
-            g.method(i);
-        }
-    }
+    let header = match modules {
+        Some(_) => format!("// Translated from the Java program `{}` by java-to-rust.\n\n", class.name),
+        None => format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name),
+    };
+    let tree = g.program(&live, header);
     g.check_dereferences();
     g.check_casts();
     g.check_catching();
-    let mut header = format!("// Translated from the Java class `{}` by java-to-rust.\n\n", class.name);
-    let uses = modules::use_lines(&g.out);
-    if !uses.is_empty() {
-        header.push_str(&(uses.join("\n") + "\n"));
-    }
-    (header + &g.out + "\n" + ALLOCATOR, g.needs.take(), g.rejected, g.closures)
+    (tree, g.needs.take(), g.rejected, g.closures)
 }
 
 /// The crate root's allocator: the runtime's, which caches small blocks (runtime `allocator.rs`),
@@ -282,6 +272,9 @@ struct Gen<'a> {
     checked_value_ofs: std::cell::OnceCell<HashSet<&'static str>>,
     /// The name of each override group (by group id): the name of its dispatchers.
     group_names: HashMap<usize, String>,
+    /// The simple names of types, and those names with the outer classes, that more than one
+    /// type has: the conversions to such a type's enum are named with more (`as_name`).
+    shared_names: HashSet<String>,
     /// Which classes have a struct (see `live_types`).
     live: Vec<bool>,
     /// Which classes' instance methods can run (see `running_types`).
@@ -696,6 +689,11 @@ impl<'a> Gen<'a> {
         let mut used: HashSet<String> = HashSet::from(["java".to_string()]);
         if self.display {
             used.insert("f".into());
+        }
+        // A constructor builds its object in `obj` (`objects.rs`), which a parameter such as
+        // `CleanerImpl.PhantomCleanableRef`'s `obj` must not shadow.
+        if m.is_ctor {
+            used.insert("obj".into());
         }
         self.locals.clear();
         for name in java_names {

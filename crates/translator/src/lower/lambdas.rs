@@ -317,6 +317,7 @@ impl<'t> Lowering<'t> {
             is_synchronized: false,
             overrides,
             type_params: Vec::new(),
+            jdk_code: false,
         };
         self.current.set(l.class);
         self.in_ctor.set(index == l.ctor);

@@ -1,7 +1,7 @@
 //! The stubs of classes that a whole program does not translate but uses as types
-//! (`program::reach::stubs`): a class in its package with no constructors and no fields, whose
-//! instance methods are those that reachable code calls, with bodies that never run, since no
-//! object of the class exists.
+//! (`program::reach::stubs`): a class in its package, or nested in a class of it without that
+//! class, with no constructors and no fields, whose instance methods are those that reachable
+//! code calls, with bodies that never run, since no object of the class exists.
 
 use super::*;
 use serde_json::{Value, json};
@@ -15,14 +15,22 @@ impl<'t> Lowering<'t> {
         class: &str,
         methods: &BTreeSet<(String, String)>,
     ) -> Result<(), Error> {
-        let (package, simple) = class.rsplit_once('.').expect("a stub's class is in a package");
+        let (outer, simple) = class.rsplit_once('.').expect("a stub's class is in a package");
         let members: Vec<Value> =
             methods.iter().filter_map(|(name, sig)| stub_method(class, name, sig)).collect();
         let decl = json!({"kind": "CLASS", "simpleName": simple, "modifiers": [], "members": members,
             "extendsClause": null, "implementsClause": [], "typeParameters": [],
-            "symbol": {"kind": "CLASS", "name": simple, "owner": package, "type": class}});
-        self.declare_type(Node(Box::leak(Box::new(decl))), Some(package))
+            "symbol": {"kind": "CLASS", "name": simple, "owner": outer, "type": class}});
+        self.declare_type(Node(Box::leak(Box::new(decl))), Some(outer))
     }
+}
+
+/// The package of the stub `class`: its names up to the first class name (`java.io` of
+/// `java.io.ObjectInputStream.GetField`).
+pub(super) fn stub_package(class: &str) -> String {
+    let parts: Vec<&str> =
+        class.split('.').take_while(|part| part.starts_with(|c: char| c.is_lowercase())).collect();
+    parts.join(".")
 }
 
 /// The declaration of the instance method `name` of the stub `class`, with javac's signature

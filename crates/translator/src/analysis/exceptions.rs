@@ -147,14 +147,20 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     // static initializers, which run on the JDK's own constants and flags and so run none of the
     // program's code: one lets out nothing, although the calls of interfaces in it reach the
     // program's implementations too (`Function.apply` reaches each lambda of the program).
+    // So do the constructors of the JDK's exceptions, which test only their arguments
+    // (`URISyntaxException(input, reason, index)` throws for a null input or an index below -1),
+    // and which the JDK's code that throws them never gives such arguments.
     let jdk: Vec<bool> = class.methods.iter().map(|m| from_jdk(&class.types[m.class])).collect();
+    let throwable = class.type_index("java.lang.Throwable");
     let bugs_only: Vec<bool> = class
         .methods
         .iter()
         .enumerate()
         .map(|(i, m)| {
             let to_string = m.name == "toString" && m.params.is_empty() && !m.is_static;
-            jdk[i] && (to_string || initializer[i] && !guarded[i])
+            let exception_ctor =
+                m.is_ctor && throwable.is_some_and(|t| class.hierarchy.is_subtype(m.class, t));
+            jdk[i] && (to_string || exception_ctor || initializer[i] && !guarded[i])
         })
         .collect();
 
@@ -700,6 +706,7 @@ fn instance_name(ty: Type) -> Option<&'static str> {
     match ty {
         Type::Class(name, _) | Type::Enum(name) => Some(name),
         Type::String | Type::Boxed(_) => runtime_name(ty),
+        Type::JavaClass => Some(CLASS_VALUE),
         _ => None,
     }
 }
