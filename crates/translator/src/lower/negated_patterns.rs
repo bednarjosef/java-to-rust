@@ -15,6 +15,17 @@
 //!
 //! (Without an else branch, `s2` is an empty block.) `analysis::patterns` then checks the reads
 //! of `name` as those of any pattern in an `&&` chain.
+//!
+//! Without an else branch and with a then branch that always leaves the block, `name` is in scope
+//! in the rest of the block too, which then runs only where the pattern matched:
+//!
+//! ```text
+//! if (a || !(x instanceof T name)) return;     if (!a && x instanceof T name) {
+//! rest(name)                                       rest(name)
+//!                                              } else { return; }
+//! ```
+//!
+//! (`exits_into_rest`; one negated pattern alone is `let .. else` in the generator.)
 
 use super::*;
 
@@ -23,7 +34,7 @@ impl<'t> Lowering<'t> {
     /// a negated pattern whose variable a later operand or the else branch reads.
     pub(super) fn if_stmt(&self, cond: Expr, then: Stmt, otherwise: Option<Stmt>) -> Stmt {
         let mut operands = Vec::new();
-        disjuncts(&cond, &mut operands);
+        chain(&cond, BinOp::Or, &mut operands);
         let read_later = operands.iter().enumerate().any(|(i, operand)| {
             let Some(name) = negated_pattern(operand) else { return false };
             operands[i + 1..].iter().any(|later| mentions(later, name))
@@ -32,6 +43,49 @@ impl<'t> Lowering<'t> {
         if operands.len() < 2 || !read_later {
             return Stmt::If { cond, then: Box::new(then), otherwise: otherwise.map(Box::new) };
         }
+        self.turned(cond, then, otherwise)
+    }
+
+    /// The statements of a block, each `if` with an `||` chain that has a negated pattern, no
+    /// else branch and a then branch that leaves the block turned around with the rest of the
+    /// block as its new then branch, where the rest reads the pattern's variable.
+    pub(super) fn exits_into_rest(&self, mut stmts: Vec<Stmt>) -> Vec<Stmt> {
+        let at = stmts.iter().enumerate().position(|(i, s)| {
+            let Stmt::If { cond, then, otherwise } = s else { return false };
+            let rest = &stmts[i + 1..];
+            let read = |name: &str| rest.iter().any(|r| mentions_stmt(r, name));
+            match otherwise.as_deref() {
+                // As it is.
+                None if exits(then) => {
+                    let mut operands = Vec::new();
+                    chain(cond, BinOp::Or, &mut operands);
+                    operands.len() > 1 && operands.iter().filter_map(|o| negated_pattern(o)).any(read)
+                }
+                // As `if_stmt` turned it for a read in a later operand: an empty then branch.
+                Some(o) if exits(o) && matches!(&**then, Stmt::Block(b) if b.is_empty()) => {
+                    let mut operands = Vec::new();
+                    chain(cond, BinOp::And, &mut operands);
+                    operands.iter().any(
+                        |o| matches!(&o.kind, ExprKind::InstanceOf { binding: Some(name), .. } if read(name)),
+                    )
+                }
+                _ => false,
+            }
+        });
+        let Some(at) = at else { return stmts };
+        let rest = Stmt::Block(self.exits_into_rest(stmts.split_off(at + 1)));
+        let turned = match stmts.pop() {
+            Some(Stmt::If { cond, then, otherwise: None }) => self.turned(cond, *then, Some(rest)),
+            Some(Stmt::If { cond, otherwise, .. }) => Stmt::If { cond, then: Box::new(rest), otherwise },
+            _ => unreachable!("the `if` found above"),
+        };
+        stmts.push(turned);
+        stmts
+    }
+
+    /// `if (cond) then else otherwise` with `cond` an `||` chain, as `if (!a && ..) otherwise
+    /// else then`.
+    fn turned(&self, cond: Expr, then: Stmt, otherwise: Option<Stmt>) -> Stmt {
         let pos = cond.pos;
         let mut chain: Option<Expr> = None;
         for operand in into_disjuncts(cond) {
@@ -60,12 +114,12 @@ impl<'t> Lowering<'t> {
     }
 }
 
-/// The operands of the `||` chain that `e` is, left to right.
-fn disjuncts<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+/// The operands of the chain of `op` (`||` or `&&`) that `e` is, left to right.
+fn chain<'e>(e: &'e Expr, op: BinOp, out: &mut Vec<&'e Expr>) {
     match &e.kind {
-        ExprKind::Binary(BinOp::Or, l, r) => {
-            disjuncts(l, out);
-            disjuncts(r, out);
+        ExprKind::Binary(o, l, r) if *o == op => {
+            chain(l, op, out);
+            chain(r, op, out);
         }
         _ => out.push(e),
     }
@@ -91,6 +145,20 @@ fn negated_pattern(e: &Expr) -> Option<&str> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// Whether `stmt` always leaves the block it is in.
+fn exits(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(..)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::BreakLabel(_)
+        | Stmt::ContinueLabel(_)
+        | Stmt::Throw(_) => true,
+        Stmt::Block(stmts) => stmts.last().is_some_and(exits),
+        _ => false,
     }
 }
 
