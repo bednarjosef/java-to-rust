@@ -62,10 +62,13 @@ impl<'a> Gen<'a> {
         };
         // The appends give `&Self`, a borrow of the builder: where the builder is a temporary (a
         // `new StringBuilder`), that borrow must not leave the block or arm, so the block gives
-        // another handle to the builder instead.
+        // another handle to the builder instead. The builder is the scrutinee of a `match`, which
+        // keeps what it borrows from (`this.borrow().sb`) alive to the end of the block.
         let ty = self.builder_type();
         let sb = self.builder_ref(recv, sb);
-        let handle = |body: &str| format!("{{ let {builder}: &{ty} = {sb}; {body}; {builder}.clone() }}");
+        let handle = |body: &str| {
+            format!("match {sb} {{ held_ => {{ let {builder}: &{ty} = held_; {body}; {builder}.clone() }} }}")
+        };
         if self.nullable(s) {
             let option = self.expr(s);
             let null = self.append_range_call(id, &builder, &format!("\"null\", {range}"));
@@ -77,10 +80,7 @@ impl<'a> Gen<'a> {
             ));
         }
         let obj = self.object(s);
-        Code::atom(format!(
-            "{{ let {builder}: &{ty} = {sb}; let {seq} = &{obj}; {}; {builder}.clone() }}",
-            call.text
-        ))
+        Code::atom(handle(&format!("let {seq} = &{obj}; {}", call.text)))
     }
 
     /// The builder `sb`, which `builder_recv` gives for `recv`, as the `&java::…Builder` that a

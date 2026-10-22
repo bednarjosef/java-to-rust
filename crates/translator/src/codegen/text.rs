@@ -330,6 +330,8 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}.to_string()", self.deref(&args[0])))
             }
             StringOp::Identity | StringOp::ToString | StringOp::Intern => self.expr(&args[0]),
+            // A statement, which `effect` leaves out where the receiver is never null.
+            StringOp::Receiver(..) => self.null_check(&args[0]),
             StringOp::EqualsOther => {
                 // Never equal; the receiver still throws when it is null, after the argument runs.
                 let (receiver, other) = (&args[0], &args[1]);

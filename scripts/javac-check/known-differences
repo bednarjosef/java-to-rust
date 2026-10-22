@@ -1,0 +1,4 @@
+features-CharacterMethods lone surrogate char literal, see docs/supported-java.md
+features-CodePointCharacterTests lone surrogate char literal, see docs/supported-java.md
+features-CodePoints lone surrogate char literal, see docs/supported-java.md
+whole-program-CharacterFromJdk lone surrogate char literal, see docs/supported-java.md

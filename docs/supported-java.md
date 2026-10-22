@@ -96,7 +96,9 @@ never freed.
   backtracking engine in the runtime (`regex.rs`): literals, escapes, classes, `\R`, groups, back
   references, alternation, anchors, greedy and lazy quantifiers. Lookaround, flags, `\b`,
   `\p{..}`, possessive quantifiers and set intersections are rejected in a constant pattern and
-  throw `UnsupportedOperationException` in a computed one.
+  throw `UnsupportedOperationException` in a computed one. In a program translated with the
+  JDK's sources, a computed pattern is the JDK's own `Pattern`'s instead, as Java's `String`
+  calls it (`lower/regex.rs`).
 - **`String.format`** is Java's `Formatter` in the US locale for `%b %h %s %c %d %o %x %e %f %g
   %n %%` with indexes, flags, width and precision, rounding half up from the shortest decimal as
   Java does. Arguments keep their Java type (`java::Arg::Long(n)`), so a mismatch throws
@@ -229,8 +231,9 @@ Design: [closures-and-nested-classes.md](closures-and-nested-classes.md).
   sources, `asList`, `stream` and `equals(null, b)` are rejected.
 - `System.arraycopy` between arrays of the same element type, or between arrays held as
   `Object`s (throwing `ArrayStoreException` on a mismatch, with HotSpot's message). Between
-  `String[]` and `Object[]` it copies the elements. Between arrays of other reference types it
-  is rejected.
+  `String[]` and `Object[]` it copies the elements. Between arrays of classes (including `Object[]`)
+  it copies them with HotSpot's checks. Between `String[]` and a class's array, and between arrays
+  of arrays, it is rejected.
 
 ## Exceptions
 
