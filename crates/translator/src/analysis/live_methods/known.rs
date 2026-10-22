@@ -74,6 +74,8 @@ pub(super) struct Knowledge {
     instance_readers: HashMap<usize, HashSet<usize>>,
     /// The types that no value of the runtime can be and that only classes are below, by type.
     program_only: HashMap<usize, bool>,
+    /// Whether some implementation of each method only returns a literal, by method.
+    literal_groups: HashMap<usize, bool>,
     /// The parameters and locals of the method being walked (`STATIC`: none).
     pub(super) env: Env,
 }
@@ -355,11 +357,33 @@ impl Walk<'_> {
             ExprKind::MethodCall { resolved: Some(r), .. } | ExprKind::Call { resolved: Some(r), .. }
                 if !class.hierarchy.is_overridden(*r) =>
             {
-                let [Stmt::Return(Some(value), _)] = &class.methods[*r].body[..] else { return None };
-                if !matches!(value.kind, ExprKind::Int(_) | ExprKind::Long(_) | ExprKind::Bool(_)) {
-                    return None;
+                return self.literal_result(*r);
+            }
+            // A call without arguments whose implementations, in the classes below the receiver's
+            // type that have objects, all return the same literal, as every `ByteBuffer`'s
+            // `isDirect()` where no direct buffer is created.
+            ExprKind::MethodCall { resolved: Some(r), receiver, is_super: false, args, .. }
+                if m != STATIC
+                    && args.is_empty()
+                    && !class.methods[*r].is_static
+                    && self.literal_group(*r) =>
+            {
+                let t = class.class_index(receiver.ty)?;
+                let classes: Vec<usize> = {
+                    let mut state = self.state.borrow_mut();
+                    state.known.instance_readers.entry(t).or_default().insert(m);
+                    let live = &state.live.instantiated;
+                    class.hierarchy.concretes(t).into_iter().filter(|c| live.contains(c)).collect()
+                };
+                let mut value = None;
+                for c in classes {
+                    let v = self.literal_result(class.hierarchy.implementation(*r, c)?)?;
+                    if value.is_some_and(|known| known != v) {
+                        return None;
+                    }
+                    value = Some(v);
                 }
-                return self.known_in(STATIC, value, &Env::new());
+                value?
             }
             ExprKind::Assign { op: None, target: Place::Var(_), value } => return int(value),
             ExprKind::Cast(to, x) if tracked(*to) && tracked(x.ty) => {
@@ -400,6 +424,25 @@ impl Walk<'_> {
         };
         // Java's arithmetic wraps; within its type's range the value is exact.
         in_range(e.ty, v).then_some(v)
+    }
+
+    /// The literal that method `r` returns, when its body only returns one.
+    fn literal_result(&self, r: usize) -> Option<i128> {
+        let [Stmt::Return(Some(value), _)] = &self.class.methods[r].body[..] else { return None };
+        if !matches!(value.kind, ExprKind::Int(_) | ExprKind::Long(_) | ExprKind::Bool(_)) {
+            return None;
+        }
+        self.known_in(STATIC, value, &Env::new())
+    }
+
+    /// Whether some method of the group of method `r` only returns a literal.
+    fn literal_group(&self, r: usize) -> bool {
+        if let Some(&some) = self.state.borrow().known.literal_groups.get(&r) {
+            return some;
+        }
+        let some = self.class.hierarchy.group(r).into_iter().any(|g| self.literal_result(g).is_some());
+        self.state.borrow_mut().known.literal_groups.insert(r, some);
+        some
     }
 
     /// Whether no value of the runtime can be of type `t`, and every type below it is a class:

@@ -53,6 +53,8 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
         if jdk && decl.package == "java.lang" {
             continue;
         }
+        // `CharSequence`'s default `getChars` in a class of the program is the JDK's code too.
+        let jdk = jdk || method.jdk_code;
         let at = Messages { class, names, outermost: &outermost, method, jdk };
         for s in &method.body {
             visit_stmt(

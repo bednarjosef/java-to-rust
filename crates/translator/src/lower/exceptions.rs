@@ -82,6 +82,8 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.util.Arrays#sort",
             "java.util.Arrays#copyOfRange",
             "java.util.Arrays#binarySearch",
+            // The store of `CharSequence`'s default `getChars`, which its checks keep in bounds.
+            "java.lang.CharSequence#getChars",
         ],
     ),
     ("java.lang.NegativeArraySizeException", &["NEW_ARRAY", "java.util.Arrays#copyOf"]),
@@ -102,6 +104,8 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StringBuilder#offsetByCodePoints",
             "java.lang.AbstractStringBuilder#getChars",
             "java.lang.StringBuilder#getChars",
+            // The checks of `CharSequence`'s default `getChars`, and a builder's destination.
+            "java.lang.CharSequence#getChars",
             // A range of the characters or the text to append outside them.
             "java.lang.AbstractStringBuilder#append(char[],int,int)java.lang.AbstractStringBuilder",
             "java.lang.StringBuilder#append(char[],int,int)java.lang.StringBuilder",
@@ -183,6 +187,10 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.lang.StringBuilder#setLength",
             "java.lang.AbstractStringBuilder#substring",
             "java.lang.StringBuilder#substring",
+            // A string's or a builder's, as a `CharSequence`.
+            "java.lang.CharSequence#charAt",
+            "java.lang.CharSequence#subSequence",
+            "java.lang.CharSequence#getChars",
             // A range outside the array that a `String` is made from.
             "java.lang.String#<init>",
         ],

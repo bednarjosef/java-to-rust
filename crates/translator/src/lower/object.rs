@@ -19,10 +19,12 @@
 //! that it declares or inherits; `Number`'s own `byteValue()` and `shortValue()`, which narrow
 //! `intValue()`, are lowered to that narrowing for every `Number`, since the boxes' agree with it.
 //! `java.lang.CharSequence`, when the program uses it as a type (`StringJoiner`'s parameters),
-//! is another, `CHAR_SEQUENCE`, which strings and builders implement, with an abstract `length()`
-//! and `charAt(int)` that each answers as the runtime's string or builder does; its `toString()`
-//! is the value's text and its `isEmpty()` a zero length. The JDK's `CharSequence` is not
-//! translated, and its other methods are rejected.
+//! is another, `CHAR_SEQUENCE`, which strings and builders implement, with an abstract `length()`,
+//! `charAt(int)`, `subSequence(int, int)` and `getChars(int, int, char[], int)` that each answers
+//! as the runtime's string or builder does; a class of the program without a `getChars` gets the
+//! interface's default, written here as the JDK has it. Its `toString()` is the value's text and
+//! its `isEmpty()` a zero length. The JDK's `CharSequence` is not translated, and its other
+//! methods are rejected.
 //! The JDK's `java.lang.Appendable` is translated, and the runtime's builders implement it too,
 //! with its `append` methods answered by the builder's own (see `codegen::dispatch`), so that a
 //! builder passed as one (to `Formatter`, to `DateTimeFormatter.formatTo`) is one.
@@ -70,13 +72,30 @@ pub(super) const NUMBER_METHODS: [(&str, Type); 6] = [
     ("doubleValue", Type::Double),
 ];
 
-/// The abstract methods of `CharSequence`, in order, with the names of their `int` parameters and
-/// their result types (`None` for `CharSequence` itself).
-pub(super) const CHAR_SEQUENCE_METHODS: [(&str, &[&str], Option<Type>); 3] = [
+/// A method of `CharSequence`: its name, its parameters' names and types, and its result type
+/// (`None` for `CharSequence` itself).
+type SequenceMethod = (&'static str, &'static [(&'static str, Type)], Option<Type>);
+
+/// The methods of `CharSequence` that its values implement, in order. A class without a
+/// `getChars` of its own gets the interface's default (`default_get_chars`).
+pub(super) const CHAR_SEQUENCE_METHODS: [SequenceMethod; 4] = [
     ("length", &[], Some(Type::Int)),
-    ("charAt", &["index"], Some(Type::Char)),
-    ("subSequence", &["start", "end"], None),
+    ("charAt", &[("index", Type::Int)], Some(Type::Char)),
+    ("subSequence", &[("start", Type::Int), ("end", Type::Int)], None),
+    (
+        "getChars",
+        &[
+            ("srcBegin", Type::Int),
+            ("srcEnd", Type::Int),
+            ("dst", Type::Array(&Type::Char)),
+            ("dstBegin", Type::Int),
+        ],
+        Some(Type::Void),
+    ),
 ];
+
+/// The index of `getChars` in `CHAR_SEQUENCE_METHODS`.
+const GET_CHARS: usize = 3;
 
 /// Whether the declarations use `java.lang.CharSequence` as the type of a value, as `uses_number`
 /// tells for `Number`.
@@ -362,6 +381,7 @@ impl<'t> Lowering<'t> {
             is_synchronized: false,
             overrides: Vec::new(),
             type_params: Vec::new(),
+            jdk_code: false,
         };
         for m in methods.iter_mut().filter(|m| !m.is_static && !m.is_ctor) {
             match (m.name.as_str(), &m.params[..], m.ret) {
@@ -370,13 +390,17 @@ impl<'t> Lowering<'t> {
                 _ => {}
             }
         }
-        // The `length()`, `charAt(int)` and `subSequence(int, int)` that a class implementing
-        // `CharSequence` declares or inherits implement the interface's. A `subSequence` may
-        // return a subclass of `CharSequence` (`CharBuffer`'s returns a `CharBuffer`), which the
-        // dispatcher converts, or a string (javac's names return theirs), which a bridge converts.
+        // The `length()`, `charAt(int)`, `subSequence(int, int)` and `getChars(..)` that a class
+        // implementing `CharSequence` declares or inherits implement the interface's. A
+        // `subSequence` may return a subclass of `CharSequence` (`CharBuffer`'s returns a
+        // `CharBuffer`), which the dispatcher converts, or a string (javac's names return theirs),
+        // which a bridge converts. A class that has no `getChars` gets the interface's default,
+        // and then the `getChars` of its subclasses implement the interface's too.
+        let mut defaults: Vec<(usize, [Option<usize>; 2])> = Vec::new();
         if let Some(s) = at.char_sequence {
             for t in (0..self.types.len()).filter(|&t| self.implements_directly(t, "java.lang.CharSequence"))
             {
+                let mut implementations = [None; CHAR_SEQUENCE_METHODS.len()];
                 for (i, (name, params, ret)) in CHAR_SEQUENCE_METHODS.into_iter().enumerate() {
                     let mut class = Some(t);
                     while let Some(c) = class {
@@ -386,7 +410,7 @@ impl<'t> Lowering<'t> {
                                 && !m.is_static
                                 && !m.is_ctor
                                 && m.params.len() == params.len()
-                                && m.params.iter().all(|p| p.ty == Type::Int)
+                                && m.params.iter().zip(params).all(|(p, (_, ty))| p.ty == *ty)
                         });
                         if let Some(m) = found {
                             let returned = methods[m].ret;
@@ -409,10 +433,27 @@ impl<'t> Lowering<'t> {
                             if !methods[m].overrides.contains(&(s.methods + i)) {
                                 methods[m].overrides.push(s.methods + i);
                             }
+                            implementations[i] = Some(m);
                             break;
                         }
                         class = self.superclass(c)?;
                     }
+                }
+                if implementations[GET_CHARS].is_none() && self.types[t].node.kind() != "INTERFACE" {
+                    defaults.push((t, [implementations[0], implementations[1]]));
+                }
+            }
+            let (_, params, _) = CHAR_SEQUENCE_METHODS[GET_CHARS];
+            for method in methods.iter_mut().take(at.equals) {
+                let below_default =
+                    defaults.iter().any(|&(t, _)| method.class != t && self.is_subclass(method.class, t));
+                if below_default
+                    && method.name == "getChars"
+                    && !method.is_static
+                    && method.params.iter().map(|p| p.ty).eq(params.iter().map(|&(_, ty)| ty))
+                    && !method.overrides.contains(&(s.methods + GET_CHARS))
+                {
+                    method.overrides.push(s.methods + GET_CHARS);
                 }
             }
         }
@@ -459,13 +500,101 @@ impl<'t> Lowering<'t> {
         if let Some(s) = at.char_sequence {
             debug_assert_eq!(methods.len(), s.methods);
             for (name, params, ret) in CHAR_SEQUENCE_METHODS {
-                let params =
-                    params.iter().map(|name| Param { name: name.to_string(), ty: Type::Int }).collect();
+                let params = params.iter().map(|&(name, ty)| Param { name: name.to_string(), ty }).collect();
                 let ret = ret.unwrap_or(Type::class(CHAR_SEQUENCE));
                 methods.push(Method { class: s.decl, ..method(name, params, ret) });
             }
+            for (t, [length, char_at]) in defaults {
+                methods.push(self.default_get_chars(t, length, char_at, s.methods));
+            }
         }
         self.bridges(methods)
+    }
+
+    /// `CharSequence`'s default `getChars(srcBegin, srcEnd, dst, dstBegin)` in class `t`, as the
+    /// JDK writes it:
+    ///
+    /// ```java
+    /// Objects.checkFromToIndex(srcBegin, srcEnd, length());
+    /// Objects.checkIndex(dstBegin, dst.length - (srcEnd - srcBegin) + 1);
+    /// while (srcBegin < srcEnd)
+    ///     dst[dstBegin++] = charAt(srcBegin++);
+    /// ```
+    ///
+    /// `length` and `charAt` are the class's methods, when it has them, else the interface's,
+    /// whose first method is `first` (see `CHAR_SEQUENCE_METHODS`).
+    fn default_get_chars(
+        &self,
+        t: usize,
+        length: Option<usize>,
+        char_at: Option<usize>,
+        first: usize,
+    ) -> Method {
+        let pos = self.types[t].node.pos();
+        let (_, params, _) = CHAR_SEQUENCE_METHODS[GET_CHARS];
+        let var = |name: &str| {
+            self.synth(
+                ExprKind::Var(name.to_string()),
+                pos,
+                params.iter().find(|p| p.0 == name).expect("a parameter").1,
+            )
+        };
+        let int = |kind: ExprKind| self.synth(kind, pos, Type::Int);
+        let binary = |op: BinOp, l: Expr, r: Expr, ty: Type| {
+            self.synth(ExprKind::Binary(op, Box::new(l), Box::new(r)), pos, ty)
+        };
+        let call = |name: &str, resolved: usize, args: Vec<Expr>, ty: Type| {
+            let receiver = Box::new(self.synth(ExprKind::This, pos, self.self_type(t)));
+            let kind = ExprKind::MethodCall {
+                receiver,
+                name: name.to_string(),
+                args,
+                resolved: Some(resolved),
+                is_super: false,
+            };
+            self.synth(kind, pos, ty)
+        };
+        let post_increment = |name: &str| {
+            let target = Place::Var(name.to_string());
+            int(ExprKind::IncDec { target, increment: true, prefix: false })
+        };
+        let length = call("length", length.unwrap_or(first), Vec::new(), Type::Int);
+        let range = vec![var("srcBegin"), var("srcEnd"), length];
+        let check_range = self.synth(ExprKind::Builtin(Builtin::CheckFromToIndex, range), pos, Type::Void);
+        let count = binary(BinOp::Sub, var("srcEnd"), var("srcBegin"), Type::Int);
+        let room = binary(BinOp::Sub, int(ExprKind::Length(Box::new(var("dst")))), count, Type::Int);
+        let room = binary(BinOp::Add, room, int(ExprKind::Int(1)), Type::Int);
+        let check_index =
+            self.synth(ExprKind::Builtin(Builtin::CheckIndex, vec![var("dstBegin"), room]), pos, Type::Void);
+        let char_at =
+            call("charAt", char_at.unwrap_or(first + 1), vec![post_increment("srcBegin")], Type::Char);
+        let target = Place::Index(Box::new(var("dst")), Box::new(post_increment("dstBegin")));
+        let store =
+            self.synth(ExprKind::Assign { op: None, target, value: Box::new(char_at) }, pos, Type::Char);
+        let body = vec![
+            Stmt::Expr(check_range),
+            Stmt::Expr(check_index),
+            Stmt::While {
+                cond: binary(BinOp::Lt, var("srcBegin"), var("srcEnd"), Type::Boolean),
+                body: Box::new(Stmt::Expr(store)),
+            },
+        ];
+        Method {
+            name: "getChars".to_string(),
+            params: params.iter().map(|&(name, ty)| Param { name: name.to_string(), ty }).collect(),
+            ret: Type::Void,
+            body,
+            is_main: false,
+            is_static: false,
+            is_ctor: false,
+            class: t,
+            pos,
+            is_abstract: false,
+            is_synchronized: false,
+            overrides: vec![first + GET_CHARS],
+            type_params: Vec::new(),
+            jdk_code: true,
+        }
     }
 
     /// The methods that a class inherits from a superclass that does not implement the interface
@@ -778,6 +907,7 @@ impl<'t> Lowering<'t> {
             is_synchronized: false,
             overrides: vec![index],
             type_params: Vec::new(),
+            jdk_code: false,
         }
     }
 
@@ -946,9 +1076,9 @@ impl<'t> Lowering<'t> {
                 let index = self.expr(node.list("arguments").next().expect("`charAt` has an index"))?;
                 Ok(call(receiver, "charAt", vec![index]))
             }
-            "subSequence" => {
-                let range = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
-                Ok(call(receiver, "subSequence", range))
+            "subSequence" | "getChars" => {
+                let args = node.list("arguments").map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+                Ok(call(receiver, symbol.name, args))
             }
             "toString" => Ok(self.as_text(receiver).kind),
             "isEmpty" => {
