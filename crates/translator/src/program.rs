@@ -53,7 +53,9 @@ impl fmt::Display for ProgramError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.file {
             Some(file) => write!(f, "{file}:{}", self.error),
-            None => write!(f, "{}", self.error.message),
+            None if self.error.pos == Pos::default() => write!(f, "{}", self.error.message),
+            // A position whose file is not known, such as one that several of the JDK's files have.
+            None => write!(f, "{}", self.error),
         }
     }
 }
@@ -310,12 +312,18 @@ fn locate(units: &[&Value], class: &crate::ast::Class, pos: Pos) -> Option<Strin
         if !here {
             continue;
         }
-        // The unit that declares the class, or the class that it is nested in.
-        let name = &decl.name;
+        // The unit that declares the class, or the class that it is nested in; for the class of
+        // a lambda, a local or an anonymous class, the class whose code has it.
+        let name = match &decl.origin {
+            crate::ast::Origin::Lambda { binary, .. }
+            | crate::ast::Origin::Local { binary, .. }
+            | crate::ast::Origin::Anonymous { binary, .. } => binary.split('$').next().unwrap_or_default(),
+            _ => decl.name.as_str(),
+        };
         let unit = units.iter().find(|u| {
             u["tree"]["typeDecls"].as_array().into_iter().flatten().any(|d| {
                 let top = class_name(d);
-                name == &top || name.strip_prefix(top.as_str()).is_some_and(|r| r.starts_with(['.', '$']))
+                name == top || name.strip_prefix(top.as_str()).is_some_and(|r| r.starts_with(['.', '$']))
             })
         });
         files.insert(unit.and_then(|u| u["file"].as_str())?);

@@ -345,8 +345,19 @@ pub(super) fn runtime_failures(
     const NPE: &str = "java.lang.NullPointerException";
     const INDEX: &str = "java.lang.ArrayIndexOutOfBoundsException";
     let tested = |e: &Expr| is_tested(e, safe);
+    // A static that is never null where it is read, as it is or as the value of an assignment.
+    fn initialized(facts: &Facts, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Static { class, name } => facts.initialized_statics.contains(&(*class, name.clone())),
+            ExprKind::Assign { op: None, target: Place::Var(_), value } => initialized(facts, value),
+            ExprKind::Cast(to, value) if to.is_reference() => initialized(facts, value),
+            _ => false,
+        }
+    }
+    let initialized = |e: &Expr| initialized(facts, e);
     let null = |e: &Expr| {
-        (m != usize::MAX && !tested(e) && maybe_null(facts, m, e)) || matches!(e.kind, ExprKind::Null)
+        (m != usize::MAX && !tested(e) && !initialized(e) && maybe_null(facts, m, e))
+            || matches!(e.kind, ExprKind::Null)
     };
     let mut out = Vec::new();
     match &x.kind {

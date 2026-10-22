@@ -337,6 +337,19 @@ fn eval(class: &Class, e: &Expr, env: &HashMap<&str, Value>) -> Option<Value> {
                 _ => return None,
             },
         },
+        // A call of a method that nothing overrides and that only returns a constant, such as the
+        // translator's `Thread.isVirtual()`: its receiver and arguments are evaluated for their
+        // own failures where the call is.
+        ExprKind::MethodCall { resolved: Some(r), is_super: false, .. }
+        | ExprKind::Call { resolved: Some(r), .. }
+            if !class.hierarchy.is_overridden(*r) =>
+        {
+            let [Stmt::Return(Some(value), _)] = &class.methods[*r].body[..] else { return None };
+            if !matches!(value.kind, ExprKind::Int(_) | ExprKind::Long(_) | ExprKind::Bool(_)) {
+                return None;
+            }
+            return eval(class, value, &HashMap::new());
+        }
         ExprKind::NewArray(dims) => {
             let [d] = &dims[..] else { return None };
             return Some(Value::Array(int(d).filter(|&n| n >= 0)?));
