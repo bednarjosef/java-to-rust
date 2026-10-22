@@ -97,7 +97,7 @@ are immutable unless the program writes their fields after construction.
 
 In a method that returns `Result`, `return v` is `return Ok(v)`, a body that completes normally
 ends with `Ok(())`, `throw e` is `return Err(..)`, a call of a throwing method is `call?`, and an
-observed runtime failure is `java::try_op(..)?`. In a method that does not return `Result`, a
+observed runtime failure is a `java::try_` function of the runtime with `?` (`java::try_non_null(..)?`, `java::try_floor_div(..)?`). In a method that does not return `Result`, a
 call of one that does (because other callers observe it) is `call.unwrap_or_else(java::uncaught)`,
 and `throw e` where nothing catches it is `java::throw_uncaught(e)`: nothing here observes the
 exception, so ending the program at once is what propagating it would do.
