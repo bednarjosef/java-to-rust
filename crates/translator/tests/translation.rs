@@ -5040,7 +5040,7 @@ fn a_string_array_passed_as_an_array_of_a_type_variable_is_an_object_array() {
         &[
             "fn first(xs: &[Object]) -> Object {",
             "let s: Vec<Object> = vec![Object::String(String::from(\"a\"))];",
-            "java::cast(first(&s).as_string(), \"java.lang.String\")",
+            "java::cast_from(object.as_string(), \"java.lang.String\", || match &object { Object::String(_) => \"java.lang.String\" })",
         ],
     );
 }
