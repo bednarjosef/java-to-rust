@@ -42,6 +42,11 @@ plainer form only where it proves the meaning is the same:
 | string | Rust `String` | `&str` for a parameter never assigned; byte indexing for strings proven ASCII |
 | object in a threaded program | `Arc<java::Locked<C>>` | `Arc<C>` when immutable; `Rc<RefCell<C>>` when no other thread can reach it |
 
+Nullness analysis treats a field as not null when every constructor sets it to a non-null value
+before anything can read it. A static read while its own class's initialization is still under
+way, before the initializer sets it, may be null wherever its value goes
+(`analysis/early_reads.rs`).
+
 Objects are freed by reference counting, not by a garbage collector, so a cycle of objects is
 never freed.
 
@@ -95,9 +100,10 @@ never freed.
   `IllegalFormatConversionException`. `%t` and `%a` are rejected in a constant format.
 - **Charsets**: `getBytes` and `new String(bytes, ..)` for UTF-8, US-ASCII, ISO-8859-1, UTF-16,
   UTF-16BE and UTF-16LE (`charset.rs`). A `Charset` is an ordinary value; `forName` resolves
-  aliases and case as Java does, and `defaultCharset()` is UTF-8 (JEP 400). Other charsets,
-  `Charset.aliases()`, a `Charset` array element that may be null, and catching
-  `UnsupportedCharsetException` or `IllegalCharsetNameException` are rejected. In a whole program
+  aliases and case as Java does, and `defaultCharset()` is UTF-8 (JEP 400). An unknown or
+  malformed name throws `UnsupportedCharsetException` or `IllegalCharsetNameException` with
+  Java's message, which a `catch` sees. A constant name of another charset (`windows-1252`),
+  `Charset.aliases()` and a `Charset` array element that may be null are rejected. In a whole program
   `newDecoder()`/`newEncoder()` give the JDK's own coders of the six charsets
   (`java/overlay/sun/nio/cs/TranslatedCoders.java`).
 - `==` on strings is rejected, except where Java's sharing makes identity equal to equal text:

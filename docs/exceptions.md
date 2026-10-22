@@ -266,9 +266,12 @@ Specific cases:
   An operation run inside `java::catching` whose own code also passes a failure on is rejected
   too.
 
-What the analysis has no class for (`"?"` in `analysis/exceptions/failures.rs`, such as
-`Charset.forName`) is rejected wherever a handler would see it: "catching an exception that ...
-may throw not supported yet".
+- **Charset names**: `Charset.forName` and `isSupported` raise `UnsupportedCharsetException` and
+  `IllegalCharsetNameException` (standard classes, with the name as the message) and, for a null
+  name, `IllegalArgumentException`, which a `catch` sees as Java's does.
+
+What the analysis has no class for (`"?"` in `analysis/exceptions/failures.rs`) is rejected
+wherever a handler would see it: "catching an exception that ... may throw not supported yet".
 
 ## Static initializers
 

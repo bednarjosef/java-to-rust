@@ -21,6 +21,7 @@ mod boxing;
 pub(crate) mod closure;
 pub mod closures;
 mod constants;
+mod early_reads;
 mod exceptions;
 pub mod hierarchy;
 mod indexing;
@@ -110,6 +111,10 @@ pub struct Facts {
     /// is initialized: their cell starts empty, as there is no object to start it with, so it is
     /// an `Option` that is written with `Some` and read with `java::non_null`.
     pub placeholder_statics: HashSet<(usize, String)>,
+    /// The reads of a static that may run during its class's initialization, before the
+    /// initializer sets it (see `early_reads`): a read of a static of `placeholder_statics` there
+    /// may be null, and is its cell's `Option`.
+    pub early_static_reads: HashSet<ExprId>,
     /// Statics that are never null where code reads them, though the nullness analysis lets
     /// them be: a static set nowhere else, which the first statements of its class's static
     /// initializer set to a value that is not null, as `ForkJoinPool`'s `U = Unsafe.getUnsafe()`.
@@ -277,6 +282,8 @@ pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, V
         [main] => Some(main.class),
         _ => None,
     };
+    facts.early_static_reads =
+        phase("analysis: early static reads", || early_reads::early_reads(class, &facts.eager_init));
     phase("analysis: nullness", || nullness::analyze(class, &mut facts));
     checked(phase("analysis: object values", || patterns::check_object_values(class, &facts)))?;
     phase("analysis: boxing", || boxing::analyze(class, &mut facts));

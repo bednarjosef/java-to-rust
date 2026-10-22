@@ -702,6 +702,34 @@ class UnsupportedEncodingException extends IOException {
     }
 }
 
+// A charset's name that `Charset.forName` does not know, and one that is not a legal name
+// (`charset.rs`).
+class UnsupportedCharsetException extends IllegalArgumentException {
+    private String charsetName;
+
+    public UnsupportedCharsetException(String charsetName) {
+        super(charsetName == null ? "null" : charsetName);
+        this.charsetName = charsetName;
+    }
+
+    public String getCharsetName() {
+        return charsetName;
+    }
+}
+
+class IllegalCharsetNameException extends IllegalArgumentException {
+    private String charsetName;
+
+    public IllegalCharsetNameException(String charsetName) {
+        super(charsetName == null ? "null" : charsetName);
+        this.charsetName = charsetName;
+    }
+
+    public String getCharsetName() {
+        return charsetName;
+    }
+}
+
 class UncheckedIOException extends RuntimeException {
     public UncheckedIOException(String message, IOException cause) {
         super(message, nonNull(cause));

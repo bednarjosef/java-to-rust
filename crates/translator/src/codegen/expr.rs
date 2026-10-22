@@ -299,6 +299,13 @@ impl<'a> Gen<'a> {
                 }
             }
             ExprKind::Field { object, name } => self.field_read(object, name, e.ty),
+            // A read during its class's initialization, which may see the static still empty.
+            ExprKind::Static { class, name } if self.facts.early_static_reads.contains(&e.id) => {
+                match self.placeholder_read(*class, name, e.ty) {
+                    Some(read) => read,
+                    None => self.static_read(*class, name, e.ty),
+                }
+            }
             ExprKind::Static { class, name } => self.static_read(*class, name, e.ty),
             ExprKind::New { args, ctor, .. } => {
                 let ctor = ctor.expect("constructors are resolved by the checker");
