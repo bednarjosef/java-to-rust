@@ -3488,6 +3488,7 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             public native void putReferenceVolatile(Object o, long offset, Object x);
             public final Object getReferenceAcquire(Object o, long offset) { return getReferenceVolatile(o, offset); }
             public final void putReferenceRelease(Object o, long offset, Object x) { putReferenceVolatile(o, offset, x); }
+            public final void putReference(Object o, long offset, Object x) { putReferenceVolatile(o, offset, x); }
             public native int getInt(Object o, long offset);
             public native void putIntVolatile(Object o, long offset, int x);
             public final native boolean compareAndSetReference(Object o, long offset, Object expected, Object x);
@@ -3579,6 +3580,24 @@ const NATIVE_STAND_INS: &[(&str, &str)] = &[
             private static native boolean isSupported0();
         }",
     ),
+    (
+        "lib/jdk/internal/misc/Erasable.java",
+        "package jdk.internal.misc;
+        public class Erasable {
+            Object locals;
+            public Object locals() { return locals; }
+            public void set(Object o) { locals = o; }
+        }",
+    ),
+    (
+        "lib/jdk/internal/misc/Erasing.java",
+        "package jdk.internal.misc;
+        public final class Erasing extends Erasable {
+            private static final Unsafe U = Unsafe.getUnsafe();
+            private static final long LOCALS = U.objectFieldOffset(Erasable.class, \"locals\");
+            public void erase() { U.putReference(this, LOCALS, null); }
+        }",
+    ),
 ];
 
 /// Translates a `main` of these statements over the native stand-ins.
@@ -3663,6 +3682,19 @@ fn an_access_through_a_field_offset_is_the_field() {
         &["LAZY_VALUE", "LAZY_COUNT", "field_offset", "fn get_reference_acquire", "fn get_int"],
     );
     assert_contains(&rust, &["self.value", "self.count"]);
+}
+
+#[test]
+fn a_write_through_the_offset_of_a_superclass_field_is_the_field() {
+    // `InnocuousThread` erases the thread-locals of its `Thread` this way: the offset names a
+    // field of the superclass, and the object written is the subclass's.
+    let rust = translate_with_natives(
+        "jdk-superclass-handles",
+        "Erasing e = new Erasing(); e.set(\"set\"); e.erase(); System.out.println(e.locals());",
+    )
+    .unwrap_or_else(|e| panic!("translation failed: {e}"));
+    assert_contains(&rust, &["self.base.locals = None;"]);
+    assert_lacks(&rust, &["LOCALS", "field_offset", "fn put_reference"]);
 }
 
 #[test]
