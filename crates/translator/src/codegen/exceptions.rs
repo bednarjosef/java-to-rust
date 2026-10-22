@@ -97,12 +97,14 @@ fn breaks_out_of(stmt: &Stmt, label: Option<&str>) -> bool {
     walk(stmt, label, false)
 }
 
-/// The locals that a live `try` block assigns: Rust cannot tell that one declared without a value
-/// is assigned on every path to a read after the `try`, as Java can, so it is given one. A local
-/// declared inside the block (`for (Object e; ..)` in `ArrayList.batchRemove`) is read only there,
-/// where Rust follows its assignments as Java does.
+/// The locals that a live `try` block assigns and that are read outside it: Rust cannot tell that
+/// one declared without a value is assigned on every path to a read after the `try`, as Java can,
+/// so it is given one. A local declared inside the block (`for (Object e; ..)` in
+/// `ArrayList.batchRemove`), or read only there (`script` in `CharPredicates.forUnicodeScript`),
+/// is read where Rust follows its assignments as Java does.
 pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
-    fn assigned(stmts: &[Stmt], out: &mut HashSet<String>) {
+    // `all`: the method's body, for the reads of a local outside the block.
+    fn assigned(all: &[Stmt], stmts: &[Stmt], out: &mut HashSet<String>) {
         let mut found = HashSet::new();
         let mut declared = HashSet::new();
         for s in stmts {
@@ -124,11 +126,38 @@ pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
                 },
             );
         }
-        out.extend(found.into_iter().filter(|name| !declared.contains(name)));
+        out.extend(
+            found
+                .into_iter()
+                .filter(|name| !declared.contains(name) && reads(all, name) > reads(stmts, name)),
+        );
+    }
+    // The reads of local `name` in `stmts` (and of other locals of that name).
+    fn reads(stmts: &[Stmt], name: &str) -> usize {
+        let mut count = 0;
+        for s in stmts {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| match &x.kind {
+                        ExprKind::Var(v)
+                        | ExprKind::Assign { target: Place::Var(v), op: Some(_), .. }
+                        | ExprKind::IncDec { target: Place::Var(v), .. }
+                            if v == name =>
+                        {
+                            count += 1
+                        }
+                        _ => {}
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+        count
     }
     // Finds the `try` statements of `stmts`, including those in the cases of a switch expression,
     // which `visit_stmt` reaches only through an expression.
-    fn scan(facts: &Facts, stmts: &[Stmt], out: &mut HashSet<String>) {
+    fn scan(facts: &Facts, all: &[Stmt], stmts: &[Stmt], out: &mut HashSet<String>) {
         for s in stmts {
             let mut nested = HashSet::new();
             visit_stmt(
@@ -137,7 +166,7 @@ pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
                     visit_expr(e, &mut |x| {
                         if let ExprKind::Switch { cases, .. } = &x.kind {
                             for case in cases {
-                                scan(facts, &case.body, &mut nested);
+                                scan(facts, all, &case.body, &mut nested);
                             }
                         }
                     })
@@ -146,7 +175,7 @@ pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
                     Stmt::Try { body, finally: None, .. }
                         if facts.live_tries.contains(&(s as *const Stmt as usize)) =>
                     {
-                        assigned(body, out)
+                        assigned(all, body, out)
                     }
                     // The body and the `catch` clauses of a `try` with a `finally` are blocks whose
                     // ends Rust does not follow into the code after the `finally`, unless nothing
@@ -155,9 +184,9 @@ pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
                         if facts.raising_tries.contains(&(s as *const Stmt as usize))
                             || leaves_early(body, catches) != (false, false) =>
                     {
-                        assigned(body, out);
+                        assigned(all, body, out);
                         for catch in catches {
-                            assigned(&catch.body, out);
+                            assigned(all, &catch.body, out);
                         }
                     }
                     _ => {}
@@ -167,7 +196,7 @@ pub(super) fn try_assigned(facts: &Facts, body: &[Stmt]) -> HashSet<String> {
         }
     }
     let mut out = HashSet::new();
-    scan(facts, body, &mut out);
+    scan(facts, body, body, &mut out);
     out
 }
 
