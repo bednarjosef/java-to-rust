@@ -33,6 +33,13 @@ pub(super) fn snake_case(name: &str) -> String {
     out
 }
 
+/// The Rust name of the field `name` of the class `decl`: `snake_case`, but `base_` for `base`
+/// in a subclass, whose struct may hold its superclass's fields as `base`.
+pub(super) fn field_name(decl: &TypeDecl, name: &str) -> String {
+    let field = snake_case(name);
+    if field == "base" && decl.extends.is_some() { "base_".to_string() } else { field }
+}
+
 pub(super) fn unique(base: String, used: &mut HashSet<String>) -> String {
     let mut name = base.clone();
     let mut n = 2;

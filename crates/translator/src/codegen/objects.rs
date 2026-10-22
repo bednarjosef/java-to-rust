@@ -512,9 +512,12 @@ impl<'a> Gen<'a> {
         if let Some(t) = self.enum_of(object) {
             return self.enum_field_path(t, object.ty, name);
         }
-        let field = snake_case(name);
-        let (Some(s), Some(owner)) = (self.struct_class(object), self.class.field_owner(object.ty, name))
-        else {
+        let declared = self.class.field_owner(object.ty, name);
+        let field = match declared {
+            Some(owner) => field_name(&self.class.types[owner], name),
+            None => snake_case(name),
+        };
+        let (Some(s), Some(owner)) = (self.struct_class(object), declared) else {
             return field;
         };
         // A field of the struct's class that the expression's type does not have: `super.clone()`
@@ -524,6 +527,7 @@ impl<'a> Gen<'a> {
         } else {
             self.class.hierarchy.field_owner(s, name)
         };
+        let field = field_name(&self.class.types[owner], name);
         hierarchy::base_path(self.facts, self.class, s, owner) + &field
     }
 
@@ -1708,7 +1712,7 @@ impl<'a> Gen<'a> {
         }
         for f in &decl.fields {
             let ty = self.field_ty_name(f.ty, self.field_nullable(&decl.name, &f.name));
-            self.line(&format!("{}{}: {ty},", self.vis(), snake_case(&f.name)));
+            self.line(&format!("{}{}: {ty},", self.vis(), field_name(decl, &f.name)));
         }
         self.indent -= 1;
         self.line("}");
@@ -1888,7 +1892,7 @@ impl<'a> Gen<'a> {
             let nullable = self.field_nullable(name, &f.name);
             let value = self.field_value(f.init.as_ref().expect("filtered"), f.ty, nullable);
             self.guarded = outer;
-            let field = snake_case(&f.name);
+            let field = field_name(&class.types[index], &f.name);
             if by_value {
                 self.line(&format!("{}.{field} = {value};", self.this_name()));
             } else {
@@ -1937,7 +1941,7 @@ impl<'a> Gen<'a> {
                 fields.extend(decl.fields.iter().map(|f| {
                     format!(
                         "{}: {}",
-                        snake_case(&f.name),
+                        field_name(decl, &f.name),
                         self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name))
                     )
                 }));

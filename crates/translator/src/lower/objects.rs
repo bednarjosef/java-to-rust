@@ -188,13 +188,6 @@ impl<'t> Lowering<'t> {
         {
             // Moved initializers run in the constructors (see `inner`).
             let field = self.field(member, !rejected && !(moved && !member.has_flag("STATIC")))?;
-            // A subclass's struct holds its superclass's fields as `base`.
-            if !member.has_flag("STATIC")
-                && field.name.eq_ignore_ascii_case("base")
-                && self.superclass(index)?.is_some()
-            {
-                return unsupported(member, "a field named `base` in a subclass");
-            }
             if member.has_flag("STATIC") { statics.push(field) } else { fields.push(field) }
         }
         // An enum's constants need its constructors, which `lower` lowers after this.

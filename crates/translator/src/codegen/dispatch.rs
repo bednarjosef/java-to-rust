@@ -641,10 +641,13 @@ impl<'a> Gen<'a> {
 
     /// The path of field `name` of a value of the enum of `t` from what `base()` borrows.
     pub(super) fn enum_field_path(&self, t: usize, ty: Type, name: &str) -> String {
-        let field = snake_case(name);
         match (self.fields_root(t), self.class.field_owner(ty, name)) {
-            (Some(root), Some(owner)) => hierarchy::base_path(self.facts, self.class, root, owner) + &field,
-            _ => field,
+            (Some(root), Some(owner)) => {
+                hierarchy::base_path(self.facts, self.class, root, owner)
+                    + &field_name(&self.class.types[owner], name)
+            }
+            (None, Some(owner)) => field_name(&self.class.types[owner], name),
+            _ => snake_case(name),
         }
     }
 
