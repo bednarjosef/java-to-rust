@@ -3211,6 +3211,40 @@ fn the_census_rejects_a_class_whose_declaration_is_rejected_with_its_code_and_go
 }
 
 #[test]
+fn a_census_stubs_the_code_whose_null_pointer_message_is_not_certain() {
+    // `len` assigns its parameter, which the JVM may name either way; `main`'s message is certain.
+    let dir = write_sources(
+        "census_messages",
+        &[(
+            "Main.java",
+            "public class Main {\n    static int len(String s, boolean b) {\n        if (b) s = null;\n        return s.length();\n    }\n    public static void main(String[] args) {\n        String t = args.length > 3 ? \"a\" : null;\n        try { System.out.println(t.length() + len(t, false)); }\n        catch (NullPointerException e) { System.out.println(e.getMessage()); }\n    }\n}\n",
+        )],
+    );
+    let program = java_to_rust::Program {
+        main: "Main".into(),
+        sources: vec![dir],
+        ends_rejected: true,
+        ..Default::default()
+    };
+    let census = census(&program);
+    assert_contains(
+        &census.report,
+        &[
+            "  Program: 2 pieces; 1 (50.0%) translate, 1 rejected.",
+            "       1  the message of the `NullPointerException` of this dereference not supported yet\n          at Main.java:4:16\n",
+        ],
+    );
+    let rust = census.modules.expect("a translation").one_file();
+    assert_contains(
+        &rust,
+        &[
+            "java::not_translated(\"Main.len: the message of the `NullPointerException` of this dereference not supported yet (line 4)\")",
+            "Cannot invoke \\\"String.length()\\\" because \\\"<local1>\\\" is null",
+        ],
+    );
+}
+
+#[test]
 fn census_json_writes_the_census_to_the_file_given() {
     let dir = census_sources("census_cli");
     let json = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("census_cli.json");
