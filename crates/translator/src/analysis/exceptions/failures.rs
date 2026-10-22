@@ -410,8 +410,10 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
 
 /// Whether `array[index]` is a row of a table of an enum in table form (`lower/enum_tables.rs`):
 /// `fOfConstants[e.ordinal()]` of a constant `e` of that enum, or `fOfConstants[constantOrdinal]`
-/// in one of its constant builders. A table has a row for each constant, so neither index is
-/// ever out of its bounds.
+/// in one of its constant builders. The enum's initialization makes its tables before it builds
+/// its constants, so a table that a constant's row is read from is never null, even while the
+/// initialization runs; and a table has a row for each constant, so neither index is ever out
+/// of its bounds.
 fn table_row(class: &Class, m: usize, array: &Expr, index: &Expr) -> bool {
     let ExprKind::Static { class: t, name } = &array.kind else { return false };
     let decl = &class.types[*t];
@@ -480,10 +482,11 @@ pub(super) fn runtime_failures(
             }
         }
         ExprKind::Index(array, index) => {
-            if null(array) {
+            let row = table_row(class, m, array, index);
+            if null(array) && !row {
                 out.push((NPE, "this array access", true, array.id));
             }
-            if !facts.in_bounds.contains(&x.id) && !table_row(class, m, array, index) {
+            if !facts.in_bounds.contains(&x.id) && !row {
                 out.push((INDEX, "this array access", true, x.id));
             }
         }
@@ -804,10 +807,11 @@ pub(super) fn runtime_failures(
     if let ExprKind::Assign { target: Place::Index(array, index), .. }
     | ExprKind::IncDec { target: Place::Index(array, index), .. } = &x.kind
     {
-        if null(array) {
+        let row = table_row(class, m, array, index);
+        if null(array) && !row {
             out.push((NPE, "this array access", true, array.id));
         }
-        if !facts.in_bounds.contains(&x.id) && !table_row(class, m, array, index) {
+        if !facts.in_bounds.contains(&x.id) && !row {
             out.push((INDEX, "this array access", true, x.id));
         }
     }
