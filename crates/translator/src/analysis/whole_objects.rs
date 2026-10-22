@@ -233,11 +233,19 @@ pub fn whole_objects(class: &mut Class) -> Result<(), Error> {
             resolved: Some(m),
             is_super: false,
         };
-        let body = vec![
-            Stmt::Local { ty, name: obj(), init: Some(new), pos },
-            Stmt::Expr(rewrite.expr(call, pos, Type::Void)),
-            Stmt::Return(Some(rewrite.expr(ExprKind::Var(obj()), pos, ty)), pos),
-        ];
+        // The factory of a constructor that never runs never runs either: its `construct<Name>`
+        // is not written where the live ones are.
+        let body = match super::live_methods::never_runs(&class.methods[m]) {
+            true => {
+                let never = ExprKind::Builtin(Builtin::NoObject { class: t }, Vec::new());
+                vec![Stmt::Expr(rewrite.expr(never, pos, Type::Void))]
+            }
+            false => vec![
+                Stmt::Local { ty, name: obj(), init: Some(new), pos },
+                Stmt::Expr(rewrite.expr(call, pos, Type::Void)),
+                Stmt::Return(Some(rewrite.expr(ExprKind::Var(obj()), pos, ty)), pos),
+            ],
+        };
         let mut type_params = class.types[t].type_params.clone();
         type_params.extend(class.methods[m].type_params.iter().copied());
         let name = format!("new{}", simple_name(&class.types[t].name));
