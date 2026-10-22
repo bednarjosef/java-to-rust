@@ -888,6 +888,12 @@ pub const REDIRECTED_CALLS: &[(JdkMethod, (&str, &str))] = &[
         ),
         ("sun.nio.fs.TranslatedFiles", "newBufferedWriter"),
     ),
+    // The escaped octets of a URI's part decoded as UTF-8, which the JDK decodes with a
+    // `CharsetDecoder` (`java/net/TranslatedURI.java`).
+    (
+        ("java.net.URI", "decode", "(java.lang.String,boolean)java.lang.String"),
+        ("java.net.TranslatedURI", "decode"),
+    ),
 ];
 
 /// The translator's class and method that a call of the JDK's method `(owner, name, signature)`
