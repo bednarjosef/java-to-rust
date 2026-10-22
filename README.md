@@ -350,11 +350,13 @@ A small subset, end to end:
   `finally` first. A static initializer or a static field initializer that throws ends an uncaught
   program with `ExceptionInInitializerError`; where a `catch` of it, of `Error` or of `Throwable`
   observes it, the first use throws it and every later use throws `NoClassDefFoundError`. A
-  constructor or an instance field initializer that throws returns a `Result`, as a method does.
+  constructor or an instance field initializer that throws returns a `Result`, as a method does,
+  an exception's constructor too: what it throws goes on from the `new` in place of the exception
+  being built.
   Rejected for now, by name: try-with-resources over a library type (an `AutoCloseable` variable or
   lambda), catching or letting a `finally` see a null dereference, a negative array size, a failed
-  cast or a failure of the library other than these, a `toString`, a constructor of an exception or
-  an enum that throws something a caller catches (the JDK's own `toString`s throw only for bugs,
+  cast or a failure of the library other than these, a `toString`, a constructor of an enum that
+  throws something a caller catches (the JDK's own `toString`s throw only for bugs,
   such as a collection changed while it is shown, and those end the program even where a caller
   would catch them), and a `finally` that sees a static initializer's
   failure in a program that catches none of those classes. The design is in
