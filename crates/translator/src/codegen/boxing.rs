@@ -135,6 +135,16 @@ impl<'a> Gen<'a> {
                 let code = self.parse_radix(kind, &args[0], Some(&args[1]), id);
                 self.box_code_if_boxed(code, kind, ty)
             }
+            BoxedOp::Decode => {
+                let text = if self.nullable(&args[0]) {
+                    self.option_ref(&args[0])
+                } else {
+                    format!("Some({})", self.str_ref(&args[0]))
+                };
+                let function = if matches!(kind, Type::Short | Type::Byte) { "decode_small" } else { "decode" };
+                let code = self.may_fail(id, function, &format!("::<{}>", rust_type(kind)), &text);
+                self.box_code_if_boxed(code, kind, ty)
+            }
             BoxedOp::Box => {
                 let code = self.value(&args[0], kind);
                 self.box_code(code, kind)

@@ -87,7 +87,10 @@ pub use inflate::{
 };
 pub use initializer::*;
 pub use integer::*;
-pub use integer_parse::{parse_radix, parse_small_radix, try_parse_radix, try_parse_small_radix};
+pub use integer_parse::{
+    decode, decode_small, parse_radix, parse_small_radix, try_decode, try_decode_small, try_parse_radix,
+    try_parse_small_radix,
+};
 pub use java_arrays::*;
 pub use locked::{Locked, RawLock, Ref, RefMut};
 pub use math::*;

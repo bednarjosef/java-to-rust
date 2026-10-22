@@ -489,6 +489,15 @@ pub(super) fn runtime_failures(
             Builtin::Boxed(BoxedOp::Parse | BoxedOp::ParseRadix, _) => {
                 out.push(("java.lang.NumberFormatException", "this parse", true, x.id));
             }
+            // `decode` calls `isEmpty` on its string. The runtime gives the failure of a null one
+            // with Java's message, but only where nothing catches it, as a `NullPointerException`
+            // that a `catch` sees is a dereference's (`Facts::null_checked`).
+            Builtin::Boxed(BoxedOp::Decode, _) => {
+                if args.first().is_some_and(null) {
+                    out.push((NPE, "this decode", false, x.id));
+                }
+                out.push(("java.lang.NumberFormatException", "this decode", true, x.id));
+            }
             Builtin::Boxed(
                 BoxedOp::Box
                 | BoxedOp::ToString

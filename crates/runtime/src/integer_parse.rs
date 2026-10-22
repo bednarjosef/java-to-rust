@@ -43,6 +43,64 @@ pub fn parse_small_radix<T: TryFrom<i32>>(s: Option<&str>, radix: i32) -> T {
     try_parse_small_radix(s, radix).unwrap_or_else(uncaught)
 }
 
+/// `Integer.decode(s)` and `Long.decode(s)` for the integer type `T`: an optional sign, then a
+/// number in decimal, in hexadecimal after `0x`, `0X` or `#`, or in octal after a `0`, with
+/// Java's messages. Java parses the digits, and where that fails (as for the most negative value)
+/// the sign and the digits once more, whose failure is the one it throws. A null string throws
+/// `NullPointerException`, as `decode` calls `isEmpty` on it.
+pub fn try_decode<T: TryFrom<i128>>(s: Option<&str>) -> Result<T, Exception> {
+    let fail = |message: String| Exception::new("java.lang.NumberFormatException", message);
+    let Some(s) = s else {
+        let message = "Cannot invoke \"String.isEmpty()\" because \"nm\" is null".to_string();
+        return Err(Exception::new("java.lang.NullPointerException", message));
+    };
+    if s.is_empty() {
+        return Err(fail("Zero length string".to_string()));
+    }
+    let (negative, rest) = match s.as_bytes()[0] {
+        b'-' => (true, &s[1..]),
+        b'+' => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let (radix, digits) = if let Some(digits) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+        (16, digits)
+    } else if let Some(digits) = rest.strip_prefix('#') {
+        (16, digits)
+    } else if rest.len() > 1
+        && let Some(digits) = rest.strip_prefix('0')
+    {
+        (8, digits)
+    } else {
+        (10, rest)
+    };
+    if digits.starts_with(['-', '+']) {
+        return Err(fail("Sign character in wrong position".to_string()));
+    }
+    let constant = if negative { format!("-{digits}") } else { digits.to_string() };
+    let value = read(&constant, radix).map_err(fail)?;
+    T::try_from(value).map_err(|_| fail(for_input(&constant, radix)))
+}
+
+/// `try_decode` where the program does not observe the exception.
+pub fn decode<T: TryFrom<i128>>(s: Option<&str>) -> T {
+    try_decode(s).unwrap_or_else(uncaught)
+}
+
+/// `Short.decode(s)` and `Byte.decode(s)`, which decode an `int` and report a value out of the
+/// type's range with the value and the string.
+pub fn try_decode_small<T: TryFrom<i32>>(s: Option<&str>) -> Result<T, Exception> {
+    let value = try_decode::<i32>(s)?;
+    T::try_from(value).map_err(|_| {
+        let message = format!("Value {value} out of range from input {}", s.unwrap_or_default());
+        Exception::new("java.lang.NumberFormatException", message)
+    })
+}
+
+/// `try_decode_small` where the program does not observe the exception.
+pub fn decode_small<T: TryFrom<i32>>(s: Option<&str>) -> T {
+    try_decode_small(s).unwrap_or_else(uncaught)
+}
+
 /// The value of a string in `radix`, or Java's message for why it is rejected. Only the range of
 /// the target type can reject a number that is read, and `parse_radix` checks that.
 fn read(s: &str, radix: i32) -> Result<i128, String> {
@@ -141,6 +199,36 @@ mod tests {
         assert!(i64::try_from(read("9223372036854775808", 10).unwrap()).is_err());
         assert!(i64::try_from(read(&"9".repeat(200), 10).unwrap()).is_err());
         assert_eq!(i32::try_from(read("-2147483648", 10).unwrap()), Ok(i32::MIN));
+    }
+
+    #[test]
+    fn decodes_as_java_does() {
+        assert_eq!(try_decode::<i32>(Some("-0X1f")), Ok(-31));
+        assert_eq!(try_decode::<i32>(Some("#ff")), Ok(255));
+        assert_eq!(try_decode::<i32>(Some("010")), Ok(8));
+        assert_eq!(try_decode::<i32>(Some("-0")), Ok(0));
+        assert_eq!(try_decode::<i32>(Some("-0x80000000")), Ok(i32::MIN));
+        assert_eq!(try_decode::<i64>(Some("0x80000000")), Ok(0x8000_0000));
+        for (bad, text) in [
+            ("", "Zero length string"),
+            ("0x", "For input string: \"\" under radix 16"),
+            ("-", "For input string: \"-\""),
+            ("+", "For input string: \"\""),
+            ("--1", "Sign character in wrong position"),
+            ("0x-1", "Sign character in wrong position"),
+            ("08", "For input string: \"8\" under radix 8"),
+            ("0x80000000", "For input string: \"80000000\" under radix 16"),
+        ] {
+            assert_eq!(message(try_decode::<i32>(Some(bad))), format!("java.lang.NumberFormatException: {text}"));
+        }
+        assert_eq!(
+            message(try_decode_small::<i16>(Some("-0x80000000"))),
+            "java.lang.NumberFormatException: Value -2147483648 out of range from input -0x80000000"
+        );
+        assert_eq!(
+            message(try_decode::<i32>(None)),
+            "java.lang.NullPointerException: Cannot invoke \"String.isEmpty()\" because \"nm\" is null"
+        );
     }
 
     #[test]

@@ -417,6 +417,9 @@ A small subset, end to end:
     `parseUnsignedInt` with a radix or a range, `toUnsignedLong`, `toUnsignedInt`), which `Byte` and
     `Short` share. Their `NumberFormatException` and `IndexOutOfBoundsException` messages are Java's.
   - `Short` and `Byte`: `parseShort`/`parseByte` and `valueOf`, with or without a radix.
+  - `decode` of `Integer`, `Long`, `Short` and `Byte`: a sign, then a decimal, `0x`/`#`
+    hexadecimal or `0` octal number, with Java's messages (`integer_parse.rs`). The
+    `NullPointerException` of a null string is not caught yet.
   - `Character`: the code point methods (`toChars`, `toChars(int, char[], int)`, `toString(int)`,
     `charCount`, `toCodePoint`, `highSurrogate`/`lowSurrogate`, `isValidCodePoint`, ...), the tests
     `isWhitespace`, `isLetterOrDigit`, `isAlphabetic`, `isSpaceChar`, `isSurrogate`, `digit`,
