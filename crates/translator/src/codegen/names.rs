@@ -44,6 +44,18 @@ pub(super) fn unique(base: String, used: &mut HashSet<String>) -> String {
     name
 }
 
+/// `unique` among the names `used` and those `taken` in an enclosing scope, and taken in `used`.
+pub(super) fn unique_beside(base: String, used: &mut HashSet<String>, taken: &HashSet<String>) -> String {
+    let mut name = base.clone();
+    let mut n = 2;
+    while used.contains(&name) || taken.contains(&name) {
+        name = format!("{base}_{n}");
+        n += 1;
+    }
+    used.insert(name.clone());
+    name
+}
+
 /// `unique` among the names of two scopes, and taken in both.
 fn unique_in(base: String, first: &mut HashSet<String>, second: &mut HashSet<String>) -> String {
     let mut name = base.clone();
@@ -69,7 +81,9 @@ fn unique_in(base: String, first: &mut HashSet<String>, second: &mut HashSet<Str
 pub(super) fn method_names(class: &Class, homes: &[Home]) -> (Vec<String>, HashMap<usize, String>) {
     let h = &class.hierarchy;
     // Each class has its own `impl`, so names only need to be unique within their class tree.
-    let mut used = vec![HashSet::new(); class.types.len()];
+    // The enum of a class with subclasses has `base()`, the fields of the class (as
+    // `ByteBuffer`'s enum has beside the JDK's own `ByteBuffer.base()`, then `base_2`).
+    let mut used = vec![HashSet::from(["base".to_string()]); class.types.len()];
     let mut module_used: HashMap<&str, HashSet<String>> = HashMap::new();
     for m in class.methods.iter().filter(|m| m.is_main) {
         used[m.class].insert("main".to_string());

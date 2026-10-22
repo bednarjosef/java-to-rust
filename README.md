@@ -210,6 +210,7 @@ A small subset, end to end:
   instanceof Circle c` binds `c` with `if let`, a let chain, `let .. else` (for `if (!(x instanceof
   Circle c)) return ..;`) or `is_some_and`, and a downcast or a cast across interfaces is checked,
   throwing `ClassCastException` when it fails. A pattern variable read anywhere else is rejected.
+  One may be assigned (`n = n.next` in a loop), except one of a record or switch pattern.
   `Object` is an enum too, with a variant for each of the program's classes and enums whose values
   become `Object`s and one for each string or box (`Object::String(..)`, `Object::Integer(5)`), so
   `Object` variables, fields, parameters, arrays and varargs translate, with `instanceof` and casts
@@ -242,8 +243,10 @@ A small subset, end to end:
   `doubleValue()` run; `Number`'s `byteValue()` and `shortValue()` narrow `intValue()`, and a
   class that overrides them is rejected. `CharSequence` is such an enum too, over strings,
   builders and the program's classes that implement it: `length()`, `charAt` and `subSequence` run
-  the class's own, or the string's or builder's (a `subSequence` that returns a `String` is
-  rejected), and `toString()` gives the text. A method
+  the class's own, or the string's or builder's (a `subSequence` that returns a `String`, as
+  javac's names have it, gets a bridge that converts the string), and `toString()` gives the
+  text. `CharSequence.getChars` is rejected: Java runs the string's, the builder's or the
+  interface's default method by the object's class, and their exceptions differ. A method
   implementing one whose erased signature differs (`Integer next()` for `T next()`,
   `compareTo(Point)` for `Comparable`'s) gets the bridge javac writes, a method with the erased
   signature that converts and calls it. A type variable with several bounds (`T extends Object &
@@ -288,7 +291,11 @@ A small subset, end to end:
   its binary name with those of `x`'s class and of every class and interface above it, which the
   generator writes out for each class `x` may be of; a failed `cast` throws Java's
   `ClassCastException` (`Cannot cast java.lang.String to Main$Dog`), which a `catch` sees.
-  `Class.forName` of a constant name is that class, and of a computed one a `switch` over the
+  A class held as an `Object` (a key of a `Map<Class<?>, V>`, an element of a `List<Object>`,
+  a sentinel `static final Object NONE = Thread.class`) is the same value in `Object`'s `Class`
+  variant: Java has one object for each class, so `==`, `equals`, `hashCode` and
+  `System.identityHashCode` are the value's, and `instanceof Class` and a cast back test the
+  variant. `Class.forName` of a constant name is that class, and of a computed one a `switch` over the
   binary names of the classes that code can find by name; a name that is not in the translation
   throws Java's `ClassNotFoundException`, which says so. Reflection over the program's classes
   goes through a table of their members that the translation builds in, only for the classes and
@@ -304,8 +311,9 @@ A small subset, end to end:
   (`StackWalker.getInstance(RETAIN_CLASS_REFERENCE).getCallerClass()`, as logging libraries name a
   logger after it, or `Reflection.getCallerClass()` in the JDK's `@CallerSensitive` methods such as
   `ResourceBundle.getBundle`) gets that class from each call as a parameter more, since the
-  translator knows which class every call is in (`lower/callers.rs`). Asking anywhere else, and
-  walking the stack's frames (`StackWalker.walk`), is rejected.
+  translator knows which class every call is in (`lower/callers.rs`). Asking anywhere else (an
+  instance method, `main`, a lambda) is rejected where the question is asked, and so is walking
+  the stack's frames (`StackWalker.walk`).
 - **Exceptions** are values: `throw`, `try`/`catch` with catch clauses in order, subclass matching
   and multi-catch, rethrowing, nested `try`s, the program's own exception classes (with
   `super(message)`, `super(message, cause)`, fields, and overrides of `getMessage` and `toString`)
@@ -400,12 +408,13 @@ A small subset, end to end:
   `Byte`, `Short` and `Character` methods, `String`, `StringBuilder` and `StringBuffer`, and
   `String.format`, all hand-written in the runtime with Java's exact results:
   - `Math` and `StrictMath`: `floorDiv`, `floorMod`, the `*Exact` integer methods (they throw on
-    overflow), `round`, `rint`, `clamp`, `copySign`, `hypot`, `fma`, `ulp`, `nextUp`/`nextDown`,
-    `max`/`min` on every type, and the rest of the common ones.
+    overflow), `multiplyHigh`, `unsignedMultiplyHigh`, `multiplyFull`, `round`, `rint`, `clamp`,
+    `copySign`, `hypot`, `fma`, `ulp`, `nextUp`/`nextDown`, `max`/`min` on every type, and the rest
+    of the common ones.
   - `Double`, `Float` and `Boolean`: `isNaN`, `isInfinite`, `isFinite`, `compare`, `sum`,
     `max`/`min`, `parseDouble`, `parseFloat`, `parseBoolean`, `logicalAnd`/`logicalOr`/
-    `logicalXor`, and the `valueOf` of both with Java's grammar and rounding (whitespace,
-    suffixes, hexadecimal floats).
+    `logicalXor`, `toHexString` (`hex_float.rs`), and the `valueOf` of both with Java's grammar
+    and rounding (whitespace, suffixes, hexadecimal floats).
   - `Integer` and `Long`: parsing with a radix and over a `begin`/`end` range of a `String`
     (`parseInt(s, begin, end, radix)`, `valueOf(s, radix)`), the bit and radix methods
     (`toHexString`, `bitCount`, `numberOfLeadingZeros`, `toString(v, radix)`, ...), and the unsigned
@@ -493,7 +502,10 @@ name throws `UnsupportedCharsetException` or `IllegalCharsetNameException` with 
 which here ends the program uncaught with exit code 1, since the translation cannot catch them.
 `Charset.defaultCharset()` is UTF-8, as Java answers from version 18 on (JEP 400). The runtime
 knows only the six charsets above, so `forName` rejects other names, such as `windows-1252`, that
-Java supports. A `Charset` is never null. Encoding replaces unmappable characters as Java does,
+Java supports. A `Charset` may be null as a reference may (a field or a parameter given null,
+compared with null, printed as `null`); using a null one throws `NullPointerException`, with
+Java's message where a method of the charset is called. Only an array of charsets that would hold
+null is rejected. Encoding replaces unmappable characters as Java does,
 and decoding replaces malformed input as Java's `String` does (`crates/runtime/src/charset.rs`).
 
 #### Enums
@@ -507,7 +519,10 @@ field that is not final is accepted as long as only the constructor sets it. An 
 overridden method becomes a `match self` with an arm per overriding constant and the enum's own
 body (if it is not abstract) for the rest. `valueOf` of a name that is no constant throws
 `IllegalArgumentException` with Java's message (`No enum constant Main.Size.HUGE`), which a
-`catch` can take (`Size::try_enum_value_of(s)?`).
+`catch` can take (`Size::try_enum_value_of(s)?`). `Enum.valueOf(cls, name)` with a class value,
+as javac's annotation proxies call it, tests the class against each of the program's enums and
+takes that enum's `valueOf`; a class that is no enum throws `IllegalArgumentException` (`java.lang.String
+is not an enum class`).
 
 An enum whose constructor does more than set fields to constant values (a loop, a call, an
 argument that is another enum's constant or a static method's result, as the JDK's
@@ -735,11 +750,32 @@ system class loader, and `Module` and `ModuleLayer.boot()` answer from the decla
 JVM's boot layer does; defining a module layer throws, saying that code outside the translation
 cannot run (`java/overlay/java/lang/Module.java`). A
 package of a module whose sources are not given is an error that names the module to pass as
-`--library`. Packages become
-nested modules in one output file (`com.example.util` is `mod com { pub(crate) mod example
-{ pub(crate) mod util { .. } } }`); a class of another package is named by its path from the crate
-root, such as `crate::com::example::util::Counter::new(..)`, and items in packages are
-`pub(crate)`. A program without packages is written like a single file.
+`--library`.
+
+Each package becomes a Rust module (`com.example.util` is `com::example::util`), and the
+generator makes them as a tree of modules with their items (`output.rs`), which a layout writes.
+`--crate` writes a file per package, at the package's path:
+
+```
+src/main.rs                     the crate root: `fn main`, `Object`, `Throwable`, the standard
+                                exceptions, the unnamed package; declares the modules
+src/com/example/app.rs          the package com.example.app, with its nested and inner classes
+src/com/example/util.rs
+src/java_/util.rs               the JDK's java.util (`java` is the runtime crate's name)
+src/java_/util/function.rs
+```
+
+A package without classes of its own (`com`, `com.example`) is no file: `main.rs` declares the
+modules inside it inline (`mod com { pub(crate) mod example { pub(crate) mod app; .. } }`).
+Printed or written with `-o`, the same modules are inline modules of one file, and a program
+with no package or one is one file in every layout, as a translated single file is. A class of
+another package is named through a `use` line of its module (`use crate::com::example::util;`,
+then `util::Counter::new(..)`), or by its path from the crate root
+(`crate::java_::util::Optional`) when two modules have the same name; the crate root's items
+are named through `use crate::Object;` and the like. Items in packages are `pub(crate)`.
+`--modules-json FILE` also writes the modules and the classes and packages each item names (with
+`--census`, of the translation with every rejected piece stubbed), the data for planning a split
+into crates ([docs/several-crates.md](docs/several-crates.md)).
 
 Reachability dispatches calls as Java does: javac lists the methods each method overrides, and a
 call of an instance method also reaches its overriders in every class that an instantiated class
@@ -752,7 +788,11 @@ security and class loading (`jdk.internal.loader`; `UNTRANSLATED`; `ResourceBund
 translated, and `ServiceLoader`, `ClassLoader`, `URLClassLoader`, `Module` and `ModuleLayer` are
 the translator's own, over the translation's classes and modules). Library code
 reaches those on paths that only its data rules out, as `HashMap` reaches reflection through
-`comparableClassFor` and parallel streams reach threads, so the boundary is needed. A program that
+`comparableClassFor` and parallel streams reach threads, so the boundary is needed. An
+untranslated class that is the type of a variable (the `ObjectInputStream` of
+`TreeMap.buildFromSorted`, the `ObjectInputStream.GetField` of a `readObject`) is a class without
+objects, so the variable is only ever null and a call on it throws a `NullPointerException`, as
+Java does with that null (`program/reach/stubs.rs`). A program that
 puts one entry into a `HashMap` reaches 55 classes this way (`--survey` prints the count).
 Annotations reach nothing, and neither does the code that Java Flight Recorder's flags guard
 (`jfrTracing` in `Throwable` and the file streams, which only JFR sets, by reflection), or the
@@ -827,10 +867,26 @@ does not set (`java.locale.providers`, `java.util.currency.data`, the program's 
 or the default given. The key must be a literal or a constant, and the two keys whose value the
 translation cannot match are rejected: `sun.java.command` (the command line) and
 `user.timezone` (set once `TimeZone` runs). In a whole program `System.getProperties()` is a
-`Properties` of the keys of a plain run, made once (`java/overlay/java/lang/TranslatedProperties.java`). The memory
+`Properties` of the keys of a plain run, made once (`java/overlay/java/lang/TranslatedProperties.java`).
+`Integer.getInteger` and `Long.getLong` read a property the same way and decode it as
+`Integer.decode` does, giving the default (or null) when it is unset or no number.
+`Runtime.version().feature()` is the release of the JDK the translator ran with
+(`java.specification.version`). `Runtime.version()` itself parses `java.runtime.version` once
+(`java/overlay/java/lang/TranslatedRuntime.java`) into the JDK's `Runtime.Version`, which is
+translated from its sources although `Runtime` is the runtime's; its `parse` matches a regular
+expression. Preview features are off, and there is no security manager: `SecurityManager` is a
+type whose only value is null, so `System.getSecurityManager()` is null and a test of a
+manager against null decides its branch, `AccessController.doPrivileged` of a `PrivilegedAction`
+runs the action (`java/overlay/java/lang/TranslatedAccessController.java`), and the `jrt:` file
+system's permission check does nothing;
+`SecurityProperties.includedInExceptions` reads the JDK's `conf/security/java.security`. The memory
 figures of `Runtime` (`totalMemory`, `freeMemory`, `maxMemory`) are fixed plausible values, not the
-JVM's, and `gc()` does nothing. `Runtime.halt` flushes the output and exits without shutdown
-hooks. `onSpinWait` and `yield` are the platform's, and `Thread.sleep` (both forms) waits on the
+JVM's, and `gc()` does nothing, as `System.gc()` does. `Runtime.halt` flushes the output and exits without shutdown
+hooks. Scoped values are the JDK's `ScopedValue` over the translator's `Thread`, which keeps a
+thread's bindings and its cache of values read, as the JVM does; a new thread has no bindings.
+The operation of a binding runs directly (`java/overlay/jdk/internal/vm/ScopedValueContainer.java`),
+as the JDK's runs it when no `StructuredTaskScope`, a preview API, is open. `onSpinWait` and
+`yield` are the platform's, and `Thread.sleep` (both forms) waits on the
 thread's record, which an interrupt wakes. The runtime's
 descriptor table (`fd.rs`) backs the `FileInputStream`, `FileOutputStream` and `FileDescriptor`
 natives (`open0`, `read0`, `readBytes`, `available0`, `skip0`, `length0`, `position0`,
@@ -882,6 +938,21 @@ and asynchronous file channels throw `UnsupportedOperationException`; and `statv
 store's space), the mount table, `getpwnam` and `getgrnam`, and the extended-attribute natives
 are rejected.
 
+The `jrt:` file system, through which javac reads the classes of the JDK, is the JDK's own
+(`jdk.internal.jrtfs`) over the image file `lib/modules` of the JDK in `java.home`; it is among
+the installed providers (`FileSystemProvider.installedProviders`, which the JDK finds with a
+`ServiceLoader`, gives the default provider and the jrt one: `TranslatedFiles.java`). The
+translator's image reader (`java/overlay/jdk/internal/jimage/BasicImageReader.java`) reads the
+index of the image into an array once, and each resource into an array of its own, through a
+`FileChannel`, where the JDK's maps the file into memory. What differs from Java: a compressed
+image (`jlink --compress`) and a JDK of exploded modules, as it is built, throw
+`UnsupportedOperationException`; the `toString` of a jrt file's attributes, which formats times
+with `%tc`, throws the same; and a failure of the image's reader is thrown as it is, not given as
+the reason of an `InvalidPathException`. `URI` decodes its escaped octets as UTF-8 itself
+(`java/overlay/java/net/TranslatedURI.java`), and `jdk.internal.util.Exceptions`, which puts the
+input and the index into a `URISyntaxException`, reads its categories of detail without waiting
+for the JVM's boot and fills only `%s` in its messages, refusing any other conversion.
+
 A native method of a translated JDK class is never lowered itself (javac marks it `native`); a
 call of one becomes the runtime function that `ast/natives.rs` names for its class, name and
 signature, and any other is rejected with its name and signature. The runtime has (`vm.rs`,
@@ -891,12 +962,21 @@ signature, and any other is rejected with its name and signature. The runtime ha
 as with `-XX:-VMContinuations`); `VM.getNanoTimeAdjustment` (HotSpot's, from the system clock);
 `FileDescriptor.getHandle` (-1) and `getAppend` (the descriptor's `O_APPEND`); and
 `CRC32.update` and `updateBytes0` (zlib's CRC-32); `Unsafe.fullFence` (a sequentially consistent
-fence), and so `loadFence` and `storeFence`. `Unsafe.arrayBaseOffset` and
+fence), and so `loadFence` and `storeFence`, and `VarHandle`'s static fences (`fullFence`,
+`acquireFence`, `releaseFence`, `loadLoadFence`, `storeStoreFence`). `Unsafe.copyMemory0` and
+`copySwapMemory0` between two arrays of primitives copy the bytes between them, swapping each
+unit for the second, as the heap buffers' `put` and `compact` do; a plain `get` or `put` of a
+primitive at an offset that is neither a field's nor an element's (`getCharUnaligned`, the
+buffers' typed reads of a `byte[]`) reads or writes the bytes of the array at that offset. A base
+that is null or no array of primitives is memory outside the heap, which ends the program. `Unsafe.arrayBaseOffset` and
 `arrayIndexScale` of an array class literal are HotSpot's layout (16, and 1 to 8 by element, 4
 for references) and are answered at the call, so their `Class`-taking natives are not reached.
 `Unsafe.park` and `unpark` park the current thread and unpark a thread by its id, as
 `LockSupport` does.
-`String.intern()` is the string itself; `==` on two strings stays rejected.
+`String.intern()` is the string itself; `==` on two strings stays rejected, except where Java's
+sharing makes identity the same as equal text: both sides are constant expressions, `intern()`
+calls, conditionals of those, or calls of methods that cannot be overridden and return only such
+strings (`corpus/features/InternedStringIdentity.java`).
 
 ### Not yet
 
@@ -918,8 +998,7 @@ Each construct below is rejected at translation with an error that names it:
 Also rejected: `Scanner` (it reaches `java.util.regex`, which needs
 `Character.UnicodeScript`), `System.out`, `System.err` or `System.in` as a value without the
 JDK's sources, readers and writers in charsets other than UTF-8, US-ASCII, ISO-8859-1, UTF-16BE
-and UTF-16LE (an `UnsupportedOperationException` when one is created), `Charset.aliases()`, `null` as a `Charset` (and a `Charset` field or array element
-that starts out null), catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and
+and UTF-16LE (an `UnsupportedOperationException` when one is created), `Charset.aliases()`, a `Charset` array element that is or starts out null, catching `UnsupportedCharsetException` or `IllegalCharsetNameException`, and
 charsets beyond the six above.
 
 `docs/jdk-coverage.md` has the census of the JDK code that the target programs reach: what share
@@ -934,6 +1013,7 @@ run. Building the translator needs `javac` (JDK 21 or newer) on PATH.
 cargo run -p java-to-rust -- Program.java                 # print the Rust translation
 cargo run -p java-to-rust -- Program.java --crate out/    # write a Cargo project
 cargo run -p java-to-rust -- --main com.example.Main --source src/ [--library jdk-src/] [-o out.rs | --crate out/]
+                                                          # --crate: a file per package, -o: one file
 cargo run -p java-to-rust -- --census --main Main --source src/ --library jdk-src/java.base
 cargo run -p java-to-rust -- --survey --main Main --source src/ --library jdk-src/java.base
 cargo test                                                # needs a JDK: runs corpus/ on both
@@ -943,7 +1023,8 @@ The corpus test runs every program in `corpus/` with `java`, translates and buil
 overflow checks on (so a wrong "cannot overflow" fact panics), and compares standard output and
 exit code. Java's runs, translation and the Cargo build run in parallel, one thread per CPU. All
 the Rust programs are one Cargo project under `target/tmp/corpus`, kept between runs, so a program
-is rebuilt only when its translation changes. Java's results and the runs of unchanged
+is rebuilt only when its translation changes; a project of several packages is a binary of its
+own directory there (`src/bin/<name>/main.rs` and a file per package), as `--crate` writes it. Java's results and the runs of unchanged
 translations are kept in the checks' cache (see "How the checks are cached" above), so a warm run
 starts no JVM and builds only the programs whose translation changed. `CORPUS_JAVA_FRESH=1` runs
 every program on Java and stores the results anew, for when the cache is doubted; only a run that
@@ -957,8 +1038,9 @@ as its command-line arguments, on `java` and as the translated binary alike.
 
 - [docs/architecture.md](docs/architecture.md): how the translator is built (the pipeline, the
   size of each stage) and the four changes that come before the plans below: a representation
-  plan between the analyses and the generator, a generator that produces items with module paths,
-  snapshot tests, and failures turned into rejections per method.
+  plan between the analyses and the generator, a generator that produces items with module paths
+  (done: a tree of modules and its layouts), snapshot tests, and failures turned into rejections
+  per method.
 
 - [docs/lists-and-streams.md](docs/lists-and-streams.md): `ArrayList` as a `Vec` and sequential
   streams as Rust iterators, after the object model, lambdas and for-each over `Iterable` land.
@@ -975,6 +1057,9 @@ as its command-line arguments, on `java` and as the translated binary alike.
   translator's scale, output in several crates, reading build tools, dependencies' sources,
   generated sources, resources and tests, the library coverage they lean on, and working
   through their blockers.
+- [docs/several-crates.md](docs/several-crates.md): splitting a translation into several crates:
+  why the hierarchies' enums and Java's package cycles keep most code in one crate, how to find
+  the groups that can be split off, and what a split would buy for javac.
 - [docs/reflection-and-plugins.md](docs/reflection-and-plugins.md): why the translation stays
   closed-world, and how code reached by name still runs: a reflection table built from constant
   names, `ServiceLoader` lists and a recording run on the JVM; plugins translated with the

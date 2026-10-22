@@ -342,6 +342,11 @@ impl<'a> Gen<'a> {
             {
                 self.class_identity(*op, l, r)
             }
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
+                if l.ty == Type::Charset || r.ty == Type::Charset =>
+            {
+                self.charset_identity(*op, l, r)
+            }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if l.ty == Type::StringBuilder => {
                 self.builder_identity(*op, l, r)
             }
@@ -457,9 +462,14 @@ impl<'a> Gen<'a> {
                 Code::atom(format!("{}({option})", self.runtime("null_enum")))
             }
             // A downcast from an interface to an enum that implements it, or from `Object` to a
-            // string, a builder, a box or an array.
+            // string, a builder, a box, an array or a class.
             ExprKind::Cast(
-                to @ (Type::Enum(_) | Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_)),
+                to @ (Type::Enum(_)
+                | Type::String
+                | Type::StringBuilder
+                | Type::Boxed(_)
+                | Type::Array(_)
+                | Type::JavaClass),
                 value,
             ) if matches!(value.ty, Type::Class(..)) => self.checked_class_cast(e.id, *to, value),
             ExprKind::InstanceOf { value, ty, .. } => self.instance_test(value, *ty),
@@ -666,6 +676,27 @@ impl<'a> Gen<'a> {
             Builtin::ObjectClone => self.object_clone(&args[0], id),
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty, id)
+            }
+            Builtin::RawMemory { ty, put } => self.raw_memory(ty, put, args),
+            Builtin::NotEnumClass => {
+                let name = self.str_ref(&args[0]);
+                let message = format!("format!(\"{{}} is not an enum class\", {name})");
+                if self.facts.raising.contains(&id) {
+                    let exception = self.runtime("Exception");
+                    let result = self.ty_name(ty);
+                    let failure = format!(
+                        "Err::<{result}, {exception}>({exception}::new(\"java.lang.IllegalArgumentException\", {message}))"
+                    );
+                    Code::atom(self.passed_on(Code::atom(failure)))
+                } else {
+                    let throw = self.runtime("throw");
+                    Code::atom(format!("{throw}(\"java.lang.IllegalArgumentException\", &{message})"))
+                }
+            }
+            Builtin::CheckFromToIndex | Builtin::CheckIndex => {
+                let values: Vec<String> = args.iter().map(|a| self.value(a, Type::Int).text).collect();
+                let name = if builtin == Builtin::CheckIndex { "check_index" } else { "check_from_to_index" };
+                self.may_fail(id, name, "", &values.join(", "))
             }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
             Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty, id),

@@ -62,7 +62,9 @@ clever. Lost precision costs looks, never behaviour.
    - Overloaded methods and constructors get names that describe them instead of their parameter
      types (`new_string_f64_f64`), and the `…Fields` suffix on base-class structs goes away where
      no name clash needs it.
-   - One file per package or top-level class instead of one `main.rs`.
+   - One file per package instead of one `main.rs` (done for whole programs: `--crate` writes
+     `src/com/example/util.rs` for `com.example.util`, and other modules are named through `use`
+     lines).
    - The translated JDK goes into its own crate next to the program. The program's output becomes
      small and readable on its own, and the JDK crate is rebuilt only when what it depends on in
      the program changes, which also cuts compile time. (It depends on the program because the

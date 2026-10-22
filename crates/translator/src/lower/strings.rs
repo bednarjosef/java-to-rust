@@ -224,9 +224,6 @@ impl<'t> Lowering<'t> {
             _ => return unsupported(node, &format!("method `String.{name}`")),
         };
         match op {
-            StringOp::ContentEquals if args[0].ty == Type::Null => {
-                return unsupported(node, "`String.contentEquals(null)`");
-            }
             StringOp::Contains | StringOp::Replace
                 if args.iter().any(|a| !char_sequence(a.ty) && a.ty != Type::Char) =>
             {
@@ -430,6 +427,7 @@ impl<'t> Lowering<'t> {
             "codePointCount" => BuilderOp::CodePointCount,
             "offsetByCodePoints" => BuilderOp::OffsetByCodePoints,
             "getChars" => BuilderOp::GetChars,
+            "ensureCapacity" => BuilderOp::EnsureCapacity,
             "subSequence" => BuilderOp::Substring,
             _ => return unsupported(node, &format!("method `StringBuilder.{name}`")),
         };
@@ -519,15 +517,26 @@ impl<'t> Lowering<'t> {
                 "java.lang.StringBuilder" | "java.lang.StringBuffer",
                 [] | [Type::Int | Type::String | Type::StringBuilder],
             ) => ExprKind::Builtin(Builtin::Builder(BuilderOp::New), args),
+            // The builder starts with the characters of a `CharSequence`; a null one throws.
+            ("java.lang.StringBuilder" | "java.lang.StringBuffer", [Type::Class(c, _)])
+                if *c == CHAR_SEQUENCE =>
+            {
+                ExprKind::Builtin(Builtin::Builder(BuilderOp::New), args)
+            }
             (owner, _) => return unsupported(node, &format!("this constructor of `{owner}`")),
         }))
     }
 
-    /// A bit or radix method of `Integer` or `Long`; `None` for any other method.
+    /// A bit or radix method of `Integer` or `Long`, or `reverseBytes` of `Short` or
+    /// `Character`; `None` for any other method.
     pub(super) fn bits_call(&self, symbol: &Symbol, args: &[Expr]) -> Option<Builtin> {
         let kind = match symbol.owner {
             "java.lang.Integer" => Type::Int,
             "java.lang.Long" => Type::Long,
+            "java.lang.Short" | "java.lang.Character" if (symbol.name, args.len()) == ("reverseBytes", 1) => {
+                let kind = if symbol.owner == "java.lang.Short" { Type::Short } else { Type::Char };
+                return symbol.is_static.then_some(Builtin::Bits(BitsOp::ReverseBytes, kind));
+            }
             _ => return None,
         };
         let op = match (symbol.name, args.len()) {

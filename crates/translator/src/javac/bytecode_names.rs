@@ -107,15 +107,21 @@ fn names(files: Vec<std::ffi::OsString>, source: Option<&str>) -> Result<Bytecod
 }
 
 impl BytecodeNames {
-    /// Adds the temps of the string `switch`es of the JDK's code (`trees`, its units), which
-    /// `java/BytecodeNames.java` does not compile (see `jdk_switch_temps`).
-    pub fn add_jdk_switch_temps(&mut self, trees: &[&Value]) {
-        for tree in trees {
-            for (class, pos, text) in jdk_switch_temps(tree) {
-                self.entries.insert((class, pos, NameKind::Temp, "s$".to_string()), Some(text));
-            }
+    /// Adds the temps of the string `switch`es of the JDK's code (`jdk_switch_temps`), which
+    /// `java/BytecodeNames.java` does not compile.
+    pub fn add_jdk_switch_temps(&mut self, temps: SwitchTemps) {
+        for (class, pos, text) in temps {
+            self.entries.insert((class, pos, NameKind::Temp, "s$".to_string()), Some(text));
         }
     }
+}
+
+/// The temps of string `switch`es, by outermost class and position, with their text.
+pub type SwitchTemps = Vec<(String, Pos, String)>;
+
+/// The temps of the string `switch`es in `trees`, the JDK's units (see `unit_switch_temps`).
+pub fn jdk_switch_temps(trees: &[&Value]) -> SwitchTemps {
+    trees.iter().flat_map(|tree| unit_switch_temps(tree)).collect()
 }
 
 /// The JVM's names of the strings that the string `switch`es of a unit of the JDK's code switch
@@ -129,7 +135,7 @@ impl BytecodeNames {
 /// `switch`'s two. A `switch` in code whose slots this does not follow is left out: in a
 /// constructor, initializer or lambda, in a `finally` block or a try-with-resources, in a method
 /// with patterns, and a `switch` expression with values on the stack before it (an argument).
-fn jdk_switch_temps(unit: &Value) -> Vec<(String, Pos, String)> {
+fn unit_switch_temps(unit: &Value) -> SwitchTemps {
     let mut out = Vec::new();
     for class in unit["typeDecls"].as_array().into_iter().flatten() {
         let Some(name) = class["symbol"]["type"].as_str() else { continue };

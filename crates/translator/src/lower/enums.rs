@@ -5,6 +5,7 @@
 //! assigned elsewhere, `null` enum values) is rejected.
 
 use super::*;
+use std::collections::HashMap;
 
 /// Whether a member is one of an enum's constants (`RED`, `PLANET(3.0)`).
 pub(super) fn is_enum_constant(node: Node) -> bool {
@@ -154,7 +155,12 @@ impl<'t> Lowering<'t> {
     }
 
     /// Checks an enum's members and constructors against what the translation supports.
-    pub(super) fn check_enum(&self, index: usize, methods: &[Method]) -> Result<(), Error> {
+    pub(super) fn check_enum(
+        &self,
+        index: usize,
+        methods: &[Method],
+        writes: &mut EnumFieldWrites,
+    ) -> Result<(), Error> {
         // A census's stub of a constructor sets no field: the enum keeps its fields in tables.
         let stubs = self.stubbed.borrow();
         if let Some(&stub) =
@@ -164,26 +170,8 @@ impl<'t> Lowering<'t> {
         }
         let ty = Type::enum_type(&self.types[index].name);
         // A field that is not final is still one value per constant if only the constructor sets it.
-        for m in methods.iter().filter(|m| !(m.is_ctor && m.class == index)) {
-            let mut assigned = None;
-            for stmt in &m.body {
-                visit_stmt(
-                    stmt,
-                    &mut |e| {
-                        visit_expr(e, &mut |x| match &x.kind {
-                            ExprKind::Assign { target: Place::Field { object, .. }, .. }
-                            | ExprKind::IncDec { target: Place::Field { object, .. }, .. }
-                                if object.ty == ty =>
-                            {
-                                assigned = assigned.or(Some(x.pos));
-                            }
-                            _ => {}
-                        })
-                    },
-                    &mut |_| {},
-                );
-            }
-            if let Some(pos) = assigned {
+        for m in (0..methods.len()).filter(|&m| !(methods[m].is_ctor && methods[m].class == index)) {
+            if let Some(pos) = writes.first(methods, m, ty) {
                 return error(pos, "assigning an enum field outside its constructor not supported yet");
             }
         }
@@ -203,6 +191,60 @@ impl<'t> Lowering<'t> {
 
     /// A call of an enum's methods: `values()` and `valueOf(s)` of the enum, and the methods that
     /// `java.lang.Enum` declares. `None` for any other call.
+    /// `Enum.valueOf(c, name)`, the constant `name` of the enum whose class is `c`: a test of
+    /// `c` against each enum of the program, with that enum's `valueOf`, and for any other class
+    /// the JDK's failure (`NotEnumClass`). Both arguments are evaluated first, as for the call.
+    fn value_of_class(&self, node: Node<'t>, args: Vec<Expr>) -> Result<ExprKind, Error> {
+        let pos = node.pos();
+        let ty = self.ty(node, node.java_type())?;
+        let mut args = args.into_iter();
+        let (class, name) = (args.next().expect("two arguments"), args.next().expect("two arguments"));
+        let (class_var, name_var) = (self.fresh_name("enum_class"), self.fresh_name("name"));
+        let class_read = || self.synth(ExprKind::Var(class_var.clone()), pos, Type::JavaClass);
+        let class_name = self.synth(
+            ExprKind::Builtin(Builtin::ClassMethod(ClassOp::GetName), vec![class_read()]),
+            pos,
+            Type::String,
+        );
+        let mut chain = ExprKind::Builtin(Builtin::NotEnumClass, vec![class_name]);
+        // A class of a known enum (`Class<Color>`) is that enum's.
+        let candidates = (0..self.types.len()).rev().filter(|&t| {
+            self.types[t].node.kind() == "ENUM"
+                && !matches!(ty, Type::Enum(name) if name != self.types[t].name)
+        });
+        for e in candidates {
+            let enum_ty = Type::enum_type(&self.types[e].name);
+            let literal = self.synth(
+                ExprKind::Builtin(Builtin::ClassLiteral(enum_ty), Vec::new()),
+                pos,
+                Type::JavaClass,
+            );
+            let test = ExprKind::Binary(BinOp::Eq, Box::new(class_read()), Box::new(literal));
+            let name = self.synth(ExprKind::Var(name_var.clone()), pos, Type::String);
+            let constant = self.synth(ExprKind::Builtin(Builtin::EnumValueOf, vec![name]), pos, enum_ty);
+            let rest = self.synth(chain, pos, ty);
+            chain = ExprKind::Conditional(
+                Box::new(self.synth(test, pos, Type::Boolean)),
+                Box::new(self.convert(constant, ty)),
+                Box::new(rest),
+            );
+        }
+        let block = vec![
+            Stmt::Local { ty: Type::JavaClass, name: class_var, init: Some(class), pos },
+            Stmt::Local {
+                ty: Type::String,
+                name: name_var,
+                init: Some(self.convert(name, Type::String)),
+                pos,
+            },
+            Stmt::Yield(self.synth(chain, pos, ty)),
+        ];
+        Ok(ExprKind::Switch {
+            selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
+            cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
+        })
+    }
+
     pub(super) fn enum_call(
         &self,
         node: Node<'t>,
@@ -229,6 +271,9 @@ impl<'t> Lowering<'t> {
         }
         if symbol.owner != "java.lang.Enum" {
             return Ok(None);
+        }
+        if symbol.is_static && symbol.name == "valueOf" && args.len() == 2 {
+            return Ok(Some(self.value_of_class(node, std::mem::take(args))?));
         }
         let receiver = match receiver {
             Some(r) => self.expr(r)?,
@@ -376,4 +421,55 @@ pub(super) fn check_nulls(class: &Class) -> Result<(), Error> {
         Some(pos) => error(pos, "null enums not supported yet"),
         None => Ok(()),
     }
+}
+
+/// For each method, where it first assigns a field through a value of each enum type, worked out
+/// once for the method instead of once for every enum that `check_enum` checks.
+#[derive(Default)]
+pub(super) struct EnumFieldWrites {
+    of: Vec<Option<HashMap<Type, Pos>>>,
+}
+
+impl EnumFieldWrites {
+    /// Where method `m` first assigns a field through a value of type `ty`.
+    fn first(&mut self, methods: &[Method], m: usize, ty: Type) -> Option<Pos> {
+        if self.of.len() <= m {
+            self.of.resize(m + 1, None);
+        }
+        let pos = self.of[m].get_or_insert_with(|| field_writes(&methods[m])).get(&ty).copied();
+        debug_assert_eq!(pos, field_writes(&methods[m]).get(&ty).copied(), "a method changed unnoticed");
+        pos
+    }
+
+    /// Forgets what the methods of class `class` assign, as they changed.
+    pub(super) fn forget(&mut self, methods: &[Method], class: usize) {
+        for (m, writes) in self.of.iter_mut().enumerate() {
+            if methods.get(m).is_some_and(|method| method.class == class) {
+                *writes = None;
+            }
+        }
+    }
+}
+
+/// Where `method` first assigns a field through a value of each enum type.
+fn field_writes(method: &Method) -> HashMap<Type, Pos> {
+    let mut first = HashMap::new();
+    for stmt in &method.body {
+        visit_stmt(
+            stmt,
+            &mut |e| {
+                visit_expr(e, &mut |x| match &x.kind {
+                    ExprKind::Assign { target: Place::Field { object, .. }, .. }
+                    | ExprKind::IncDec { target: Place::Field { object, .. }, .. }
+                        if matches!(object.ty, Type::Enum(_)) =>
+                    {
+                        first.entry(object.ty).or_insert(x.pos);
+                    }
+                    _ => {}
+                })
+            },
+            &mut |_| {},
+        );
+    }
+    first
 }

@@ -1,7 +1,9 @@
 //! The Java syntax tree the translator works on: a typed subset of Java, lowered from javac's
 //! attributed tree (`lower.rs`), so every expression has its Java type and calls are resolved.
 
+use std::collections::HashSet;
 use std::fmt;
+use std::sync::{LazyLock, Mutex};
 
 mod charsets;
 mod code_point;
@@ -156,13 +158,13 @@ impl Type {
 
 /// A class or enum name, leaked once so that types stay `Copy`.
 fn interned_name(name: &str) -> &'static str {
-    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    static NAMES: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Default::default);
     let mut names = NAMES.lock().unwrap();
-    match names.iter().find(|n| **n == name) {
+    match names.get(name) {
         Some(&n) => n,
         None => {
             let n: &'static str = Box::leak(name.to_string().into_boxed_str());
-            names.push(n);
+            names.insert(n);
             n
         }
     }
@@ -172,26 +174,26 @@ fn intern_types(types: &[Type]) -> &'static [Type] {
     if types.is_empty() {
         return &[];
     }
-    static LISTS: std::sync::Mutex<Vec<&'static [Type]>> = std::sync::Mutex::new(Vec::new());
+    static LISTS: LazyLock<Mutex<HashSet<&'static [Type]>>> = LazyLock::new(Default::default);
     let mut lists = LISTS.lock().unwrap();
-    match lists.iter().find(|l| **l == types) {
-        Some(l) => l,
+    match lists.get(types) {
+        Some(&l) => l,
         None => {
             let l: &'static [Type] = Box::leak(types.to_vec().into_boxed_slice());
-            lists.push(l);
+            lists.insert(l);
             l
         }
     }
 }
 
 fn intern(ty: Type) -> &'static Type {
-    static TYPES: std::sync::Mutex<Vec<&'static Type>> = std::sync::Mutex::new(Vec::new());
+    static TYPES: LazyLock<Mutex<HashSet<&'static Type>>> = LazyLock::new(Default::default);
     let mut types = TYPES.lock().unwrap();
-    match types.iter().find(|t| ***t == ty) {
-        Some(t) => t,
+    match types.get(&ty) {
+        Some(&t) => t,
         None => {
             let t: &'static Type = Box::leak(Box::new(ty));
-            types.push(t);
+            types.insert(t);
             t
         }
     }
@@ -322,6 +324,9 @@ pub fn runtime_values() -> [(&'static str, Type); 9] {
 
 /// The runtime class of the `StringBuilder`s that become `Object`s.
 pub const STRING_BUILDER: &str = "java.lang.StringBuilder";
+
+/// The runtime class of the classes (`Class<?>` values) that become `Object`s.
+pub const CLASS_VALUE: &str = "java.lang.Class";
 
 /// The runtime class whose values are of type `ty`, a primitive standing for its box.
 pub fn runtime_name(ty: Type) -> Option<&'static str> {
@@ -454,6 +459,10 @@ pub struct Method {
     pub overrides: Vec<usize>,
     /// The type parameters of a generic method that is a Rust generic, as types of kind `Param`.
     pub type_params: Vec<Type>,
+    /// The code is the JDK's, though the class is the program's: `CharSequence`'s default
+    /// `getChars` in a class without one of its own (`lower::object`). Its class file is the
+    /// JDK's, which has the names of its locals.
+    pub jdk_code: bool,
 }
 
 pub struct Param {
@@ -736,6 +745,12 @@ pub enum Builtin {
     Arrays(ArraysOp),
     /// `s.charAt(i)`; the receiver is the first argument.
     StringCharAt,
+    /// `[from, to, length]`: `Objects.checkFromToIndex`, an `IndexOutOfBoundsException` when
+    /// `from..to` is not a range of `0..length`.
+    CheckFromToIndex,
+    /// `[index, length]`: `Objects.checkIndex`, an `IndexOutOfBoundsException` when `index` is
+    /// outside `0..length`.
+    CheckIndex,
     /// `Character.isDigit(char)` and the other `Character` methods on a `char`.
     CharIsDigit,
     CharIsLetter,
@@ -769,6 +784,17 @@ pub enum Builtin {
     EnumCompareTo,
     /// `E.valueOf(s)` for the enum type of the call's result.
     EnumValueOf,
+    /// The failure of `Enum.valueOf(c, s)` for a class `c` that is no enum of the program: an
+    /// `IllegalArgumentException`, `<name> is not an enum class`, of the class's name.
+    NotEnumClass,
+    /// `Unsafe`'s read (or with `put`, write) of a primitive of type `ty` at an offset of a base
+    /// that holds an array of primitives, by the array's bytes (`java::get_memory`): the
+    /// arguments are the base as an `Object`, the offset and, for a write, the value. An offset
+    /// outside the array, or a base that is null or no such array, ends the program.
+    RawMemory {
+        ty: Type,
+        put: bool,
+    },
     /// `Character.getNumericValue(c)`: the digit value of a letter or digit, or -1.
     CharNumericValue,
     /// A method of a boxed class (`Integer.parseInt`, `x.intValue()`), see `BoxedOp`, with the
@@ -904,6 +930,8 @@ pub enum BoxedOp {
     Unbox,
     /// `Integer.toString(i)` or `x.toString()`.
     ToString,
+    /// `Double.toHexString(d)` or `Float.toHexString(f)`: the hexadecimal form of the value.
+    HexString,
     /// `Integer.compare(a, b)` or `x.compareTo(y)`.
     Compare,
     /// `Integer.hashCode(i)` or `x.hashCode()`.

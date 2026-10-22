@@ -546,16 +546,11 @@ impl<'t> Lowering<'t> {
         for t in (0..self.types.len()).filter(|&t| self.reflectable(t)) {
             match kind {
                 LookupKind::Constructor => {
-                    // A local or anonymous class is not found by name, and its constructor takes
-                    // what it captures, which is worked out in its own scope.
+                    // Without synthetic parameters: no enclosing instance and no captured locals,
+                    // whose types are read where the class is declared.
                     let creatable = matches!(self.types[t].node.kind(), "CLASS" | "RECORD")
-                        && reflected(t, "<init>")
-                        && self.nesting(t).is_none()
-                        && {
-                            let (first, last) = self.synthetic_params(t)?;
-                            first.is_empty() && last.is_empty()
-                        };
-                    if !creatable {
+                        && self.nesting(t).is_none_or(|n| !n.outer && n.captures.is_empty());
+                    if !creatable || !reflected(t, "<init>") {
                         continue;
                     }
                     for m in (0..self.methods.len()).filter(|&m| self.methods[m].owner == t) {
@@ -630,13 +625,22 @@ impl<'t> Lowering<'t> {
         }
         let Ok(params) = self.param_types(m) else { return Ok(false) };
         let ret = if info.name == "<init>" { Ok(Type::Void) } else { self.return_type(node, m) };
-        Ok(params.into_iter().all(boxable) && ret.is_ok_and(|r| r == Type::Void || boxable(r)))
+        // The program's `main` takes its arguments from the runtime, not as a parameter
+        // (`method_in_scope`), so the table has no call of it to make.
+        let declared: Vec<Node> = info.node.list("parameters").collect();
+        let main = info.name == "main"
+            && info.node.has_flag("STATIC")
+            && matches!(ret, Ok(Type::Void))
+            && matches!(&declared[..], [p] if p.symbol().is_some_and(|s| s.ty == "java.lang.String[]"))
+            && self.entry.is_none_or(|entry| entry == info.owner);
+        Ok(!main && params.into_iter().all(boxable) && ret.is_ok_and(|r| r == Type::Void || boxable(r)))
     }
 
-    /// The type that method `m` returns.
+    /// The type that method `m` returns, read where `m` is declared: the `E` of the anonymous
+    /// iterator that `Collections.singletonIterator` returns is the method's type variable.
     fn return_type(&self, node: Node<'t>, m: usize) -> Result<Type, Error> {
         let sig = self.methods[m].sig;
-        self.ty(node, sig.rsplit(')').next().unwrap_or_default())
+        self.declared_type(node, sig.rsplit(')').next().unwrap_or_default(), self.methods[m].owner, Some(m))
     }
 
     /// The type of the field that `decl` declares.

@@ -71,18 +71,29 @@ impl<'t> Lowering<'t> {
         if let Some(name) = &binding {
             self.forget_alias(name);
         }
-        // `Object` may also hold a string, a box or an array, and `CharSequence` a string or a
-        // builder.
+        // `Object` may also hold a string, a box, an array, a builder or a class, `CharSequence`
+        // a string or a builder, `Appendable` a builder, and `Number` a numeric box.
         let char_sequence = matches!(value.ty, Type::Class(name, _) if name == CHAR_SEQUENCE);
         let target = matches!(ty, Type::Class(..) | Type::Enum(_))
             || (Self::is_object(value.ty)
-                && matches!(ty, Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_)))
-            || (char_sequence && matches!(ty, Type::String | Type::StringBuilder));
+                && matches!(
+                    ty,
+                    Type::String | Type::StringBuilder | Type::Boxed(_) | Type::Array(_) | Type::JavaClass
+                ))
+            || (char_sequence && matches!(ty, Type::String | Type::StringBuilder))
+            || (self.is_appendable(value.ty) && ty == Type::StringBuilder)
+            || Self::is_numeric_box_of(value.ty, ty);
         if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
             return unsupported(node, "instanceof on these types");
         }
         self.object_array(node, ty)?;
         Ok(ExprKind::InstanceOf { value: Box::new(value), ty, binding })
+    }
+
+    /// Whether `ty` is a box of a number, which a value of type `value`, `Number`, may be.
+    pub(super) fn is_numeric_box_of(value: Type, ty: Type) -> bool {
+        matches!(value, Type::Class(name, _) if name == NUMBER)
+            && matches!(ty, Type::Boxed(b) if !matches!(b, Type::Boolean | Type::Char))
     }
 
     /// Whether type `a` is type `b` or a subtype of it, through superclasses and interfaces.
@@ -191,6 +202,11 @@ impl<'t> Lowering<'t> {
         let types = self.param_types(index)?;
         for (a, &ty) in args.iter().zip(&types) {
             self.fail_on_covariant(a.ty, ty);
+            // A charset is the runtime's value, which is not an object of the translation: it
+            // cannot be passed as an `Object` (`Objects.requireNonNull(cs)` erased).
+            if a.ty == Type::Charset && matches!(ty, Type::Class(..)) && self.param_owner(ty).is_none() {
+                return error(a.pos, "a charset passed as an object not supported yet".to_string());
+            }
         }
         // The array of a Rust generic's type variable passed for an erased array (`asList`'s `T[]`
         // to `Arrays.ArrayList`'s `E[]`, an `Object[]`) erases the generic: it is lowered again.
@@ -240,17 +256,30 @@ impl<'t> Lowering<'t> {
                 !matches!(e.ty, Type::Null | Type::Void) && e.ty != to
             }
             (Type::Class(a, _) | Type::Enum(a), Type::Class(b, _)) => a != b,
+            // A string, a builder or a box as a value of one of the program's types: a builder
+            // is an `Appendable`, and the generator rejects the others, which no type's values
+            // include (see `codegen::dispatch::class_cast`).
+            (Type::String | Type::StringBuilder | Type::Boxed(_), Type::Class(..)) => true,
             _ => false,
         };
         if !differs {
             return e;
         }
-        // A builder that becomes an `Object` or a `CharSequence` is a value of its runtime class.
-        if Self::is_object(to) || to == Type::class(CHAR_SEQUENCE) && e.ty == Type::StringBuilder {
+        // A builder that becomes an `Object`, a `CharSequence` or an `Appendable` is a value of
+        // its runtime class.
+        if Self::is_object(to)
+            || e.ty == Type::StringBuilder && (to == Type::class(CHAR_SEQUENCE) || self.is_appendable(to))
+        {
             self.note_object_array(e.ty);
         }
         let pos = e.pos;
         self.synth(ExprKind::Cast(to, Box::new(e)), pos, to)
+    }
+
+    /// Whether `ty` is the JDK's `Appendable`, which the runtime's builders implement.
+    pub(super) fn is_appendable(&self, ty: Type) -> bool {
+        let appendable = self.object.and_then(|at| at.appendable);
+        matches!(ty, Type::Class(name, _) if appendable.is_some_and(|a| self.types[a].name == name))
     }
 
     /// The operands of `==` or `!=` on objects of two class types, the one of the subclass
@@ -262,13 +291,16 @@ impl<'t> Lowering<'t> {
         if Self::is_object(right.ty) && left.ty != Type::Null {
             return (self.convert(left, Type::class(OBJECT)), right);
         }
-        // A builder compared with a `CharSequence` is one, as it is to an `Object`.
-        let sequence = Type::class(CHAR_SEQUENCE);
-        if left.ty == sequence && right.ty == Type::StringBuilder {
-            return (left, self.convert(right, sequence));
+        // A builder compared with a `CharSequence` or an `Appendable` is one, as it is to an
+        // `Object`.
+        let holds_builder = |ty: Type| ty == Type::class(CHAR_SEQUENCE) || self.is_appendable(ty);
+        if holds_builder(left.ty) && right.ty == Type::StringBuilder {
+            let ty = left.ty;
+            return (left, self.convert(right, ty));
         }
-        if right.ty == sequence && left.ty == Type::StringBuilder {
-            return (self.convert(left, sequence), right);
+        if holds_builder(right.ty) && left.ty == Type::StringBuilder {
+            let ty = right.ty;
+            return (self.convert(left, ty), right);
         }
         // An object of a class that extends `Number` compared with a `Number` is one.
         let number = Type::class(NUMBER);

@@ -1476,14 +1476,16 @@ fn packages_become_nested_modules() {
     assert_contains(
         &rust,
         &[
-            "fn main() {\n    crate::com::example::app::main();\n}",
+            "use crate::com::example::app;\n\nfn main() {\n    app::main();\n}",
             "mod com {\n    pub(crate) mod example {\n        pub(crate) mod app {",
             "        pub(crate) mod util {\n            use std::fmt;\n\n            use java_runtime as java;",
-            // Imported, statically imported and fully qualified names are paths from the crate root.
-            "crate::com::example::util::Counter::new(\"clicks\")",
-            "crate::com::example::util::square(7)",
-            "crate::com::example::util::NUMBERS_LIMIT - crate::com::example::util::square(3)",
-            "crate::com::example::util::cube(3)",
+            // Imported, statically imported and fully qualified names are paths through the `use`
+            // line of their module.
+            "            use crate::com::example::util;\n",
+            "util::Counter::new(\"clicks\")",
+            "util::square(7)",
+            "util::NUMBERS_LIMIT - util::square(3)",
+            "util::cube(3)",
             // Names in the same package are not.
             "line(\"total\", clicks.total())",
             "x * square(x)",
@@ -1515,10 +1517,11 @@ fn classes_with_one_name_in_two_packages() {
     assert_contains(
         &rust,
         &[
-            "crate::com::shop::model::Item::new_string_i32(\"apple\", 3)",
-            "crate::com::shop::legacy::Item::new(7)",
-            "crate::com::shop::model::RegistryEntry::new(4)",
-            "crate::com::shop::model::REGISTRY_CREATED.get()",
+            // The packages inside `com.shop` are in scope in its module without a `use` line.
+            "model::Item::new_string_i32(\"apple\", 3)",
+            "legacy::Item::new(7)",
+            "model::RegistryEntry::new(4)",
+            "model::REGISTRY_CREATED.get()",
             "pub(crate) static COUNTER_HITS: Cell<i32>",
         ],
     );
@@ -1643,7 +1646,7 @@ fn library_roots_are_read_only_where_used() {
         java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
     assert_contains(
         &rust,
-        &["crate::lib::shout(\"hi\")", "mod lib {", "pub(crate) fn shout(s: &str) -> String"],
+        &["use crate::lib;", "lib::shout(\"hi\")", "mod lib {", "pub(crate) fn shout(s: &str) -> String"],
     );
     assert_lacks(&rust, &["unused", "Broken"]);
 }
@@ -1684,7 +1687,7 @@ fn library_roots_that_are_modules_are_read_as_sources() {
         java_to_rust::translate_program(&program).unwrap_or_else(|e| panic!("translation failed: {e}"));
     assert_contains(
         &rust,
-        &["crate::org::lib::text::shout(\"hi\")", "pub(crate) fn shout(s: &str) -> String"],
+        &["use crate::org::lib::text;", "text::shout(\"hi\")", "pub(crate) fn shout(s: &str) -> String"],
     );
     let report = survey(&program).report;
     assert_contains(&report, &["  Library: 1 pieces; 1 (100.0%) reach nothing outside the sources."]);
@@ -2984,7 +2987,7 @@ fn census_sources(dir: &str) -> std::path::PathBuf {
             ),
             (
                 "p/Other.java",
-                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void same() {\n        String s = \"x\";\n        System.out.println(s.intern() == \"x\");\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\n",
+                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void same() {\n        String s = new String(\"x\");\n        System.out.println(s == \"x\");\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\n",
             ),
         ],
     )
@@ -3315,9 +3318,14 @@ fn intern_is_the_string_itself_and_string_identity_stays_rejected() {
     );
     assert_contains(&rust, &["let t = s.clone();", "s.len() as i32"]);
     // A string is a value in the translation, so `==` on two strings, which compares references
-    // in Java (and is what `intern` exists for), is rejected rather than guessed.
-    let err = java_to_rust::translate(
+    // in Java, is rejected rather than guessed, unless Java interns both (what `intern` exists
+    // for), when the references are the same exactly when the text is.
+    let rust = translate(
         "class A { public static void main(String[] a) { String s = \"x\"; System.out.println(s.intern() == \"x\"); } }",
+    );
+    assert_contains(&rust, &["s == \"x\""]);
+    let err = java_to_rust::translate(
+        "class A { public static void main(String[] a) { String s = new String(\"x\"); System.out.println(s == \"x\"); } }",
     )
     .expect_err("== on strings must be rejected");
     assert!(err.to_string().contains("== on strings compares references; not supported yet"), "{err}");
@@ -3504,7 +3512,8 @@ fn natives_of_jdk_classes_become_runtime_calls() {
             "java::nano_time_adjustment(0)",
             "CONTINUATIONSUPPORT_SUPPORTED.set(java::continuations_supported());",
             // `main` initializes `Unsafe` in its package before reading its statics.
-            "{ crate::jdk::internal::misc::init_unsafe_(); crate::jdk::internal::misc::UNSAFE_ARRAY_INT_BASE_OFFSET.get() }",
+            "use crate::jdk::internal::misc;",
+            "{ misc::init_unsafe_(); misc::UNSAFE_ARRAY_INT_BASE_OFFSET.get() }",
         ],
     );
     // Registering natives, `VM.initialize` and restoring from an archive do nothing, and neither
@@ -4131,6 +4140,8 @@ fn exceptions_the_translation_cannot_reproduce_are_rejected() {
         &rust,
         &["java::or_break!(java::try_non_null(s(a.len() as i32).as_deref()), 'attempt).len()"],
     );
+    // A program's own exception constructor that throws stays rejected: only the JDK's are taken
+    // to throw for bugs alone (`URISyntaxException`'s tests of its arguments).
     let err = reject(
         "class Bad extends RuntimeException {
             Bad(int x) { super(\"bad\"); if (x < 0) throw new IllegalStateException(\"negative\"); }
@@ -5105,4 +5116,33 @@ fn seeds_come_from_the_operating_system() {
     );
     assert_contains(&rust, &["or_throw(java::try_secure_seed(16))"]);
     assert_lacks(&rust, &["SecureRandom"]);
+}
+
+#[test]
+fn a_builder_made_from_a_char_sequence_copies_its_text_and_rejects_program_classes() {
+    let rust = translate(
+        "public class Main {
+            public static void main(String[] a) {
+                CharSequence text = \"abc\";
+                CharSequence nothing = null;
+                System.out.println(new StringBuilder(text).append(new StringBuffer(nothing)));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::StringBuilder::from_text(&text.to_string())",
+            "java::StringBuilder::from_text(&java::non_null(nothing.as_ref()).to_string())",
+        ],
+    );
+    let program = "package app;\npublic class Main implements CharSequence {\n    public int length() { return 0; }\n    public char charAt(int i) { return 'x'; }\n    public CharSequence subSequence(int s, int e) { return this; }\n    public String toString() { return \"\"; }\n    public static void main(String[] a) {\n        CharSequence s = new Main();\n        System.out.println(new StringBuilder(s));\n    }\n}\n";
+    let dir = write_sources("builder-from-program-class", &[("app/Main.java", program)]);
+    let program = java_to_rust::Program { main: "app.Main".into(), sources: vec![dir], ..Default::default() };
+    let error =
+        java_to_rust::translate_program(&program).expect_err("a program class as a CharSequence").to_string();
+    assert!(
+        error.contains("creating a builder from a `CharSequence` that a program class implements"),
+        "{error}"
+    );
 }

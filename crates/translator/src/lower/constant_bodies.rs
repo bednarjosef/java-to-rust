@@ -2,7 +2,9 @@
 //! body is an anonymous subclass that overrides methods of the enum; an enum is a Rust `enum`, so
 //! the overrides become arms of a `switch` on `this` in the enum's own method: the constants that
 //! override it run their body, the others the enum's (an abstract method has none, as every
-//! constant overrides it). A body may only override the enum's methods.
+//! constant overrides it). A body may only override the enum's methods, or the methods of an
+//! interface that the enum leaves to its constants: the enum gets a method of its own for each of
+//! those (`body_methods`), whose body is the interface's default method.
 
 use super::*;
 use enums::{is_enum_constant, pure, subst};
@@ -24,6 +26,83 @@ fn case_body(mut body: Vec<Stmt>) -> Vec<Stmt> {
 }
 
 impl<'t> Lowering<'t> {
+    /// Declares a method of enum `class` for each method of its constants' bodies that overrides
+    /// none of the enum's own, as one that implements an interface's: the constants that do not
+    /// override it run the interface's default method (`interface_default`), which Java requires
+    /// when the interface's is abstract. It is declared with the first body's declaration, for its
+    /// signature.
+    pub(super) fn body_methods(&mut self, class: usize) {
+        let constants: Vec<Node<'t>> =
+            self.types[class].node.list("members").filter(|m| is_enum_constant(*m)).collect();
+        for constant in constants {
+            let Some(body) = constant.get("initializer").and_then(|i| i.get("classBody")) else { continue };
+            for member in body.list("members").filter(|m| m.kind() == "METHOD" && m.str("name") != "<init>") {
+                let (name, sig) = (member.str("name"), member.symbol().map_or("", |s| s.ty));
+                let declared =
+                    self.methods.iter().any(|m| m.owner == class && m.name == name && m.sig == sig);
+                // `Object`'s and `Enum`'s methods are no interface's.
+                let overrides = member.get("symbol").and_then(|s| s.0["overrides"].as_array());
+                let of_interface = overrides.into_iter().flatten().any(|o| {
+                    !matches!(o["owner"].as_str(), None | Some("java.lang.Object" | "java.lang.Enum"))
+                });
+                if declared || member.has_flag("STATIC") || !of_interface {
+                    continue;
+                }
+                self.methods.push(MethodInfo { owner: class, node: member, name, sig });
+                self.body_methods.insert(self.methods.len() - 1);
+            }
+        }
+    }
+
+    /// The method of `body_methods` of the enum named `e` that implements the interface's method
+    /// `resolved`.
+    pub(super) fn body_method(&self, e: &str, resolved: Option<usize>) -> Option<usize> {
+        let resolved = resolved?;
+        let e = self.enum_index(e)?;
+        self.body_methods.iter().copied().find(|&m| {
+            self.methods[m].owner == e
+                && self.methods[m].name == self.methods[resolved].name
+                && self.overrides(self.methods[m].node).contains(&resolved)
+        })
+    }
+
+    /// The body of method `index` of `body_methods`: a call of the default method of an
+    /// interface that it overrides, on `this`, with its parameters; nothing when the interface's
+    /// method is abstract, as every constant overrides it then.
+    pub(super) fn interface_default(
+        &self,
+        index: usize,
+        params: &[Param],
+        ret: Type,
+    ) -> Result<Vec<Stmt>, Error> {
+        let node = self.methods[index].node;
+        let pos = node.pos();
+        let default = self.overrides(node).into_iter().find(|&m| {
+            let owner = self.methods[m].owner;
+            self.types[owner].node.kind() == "INTERFACE" && self.methods[m].node.get("body").is_some()
+        });
+        let Some(default) = default else { return Ok(Vec::new()) };
+        let owner = self.methods[default].owner;
+        let this = self.synth(ExprKind::This, pos, Type::class(&self.types[owner].name));
+        let args = params.iter().map(|p| self.synth(ExprKind::Var(p.name.clone()), pos, p.ty)).collect();
+        let args = self.convert_args(Some(default), args)?;
+        let call = ExprKind::MethodCall {
+            receiver: Box::new(this),
+            name: self.methods[default].name.to_string(),
+            args,
+            resolved: Some(default),
+            is_super: true,
+        };
+        let declared = self.methods[default].node.child("returnType")?;
+        let returned = self.signature_type(declared, declared.java_type())?;
+        let call = self.synth(call, pos, returned);
+        Ok(vec![if ret == Type::Void {
+            Stmt::Expr(call)
+        } else {
+            Stmt::Return(Some(self.convert(call, ret)), pos)
+        }])
+    }
+
     /// The index of the enum constructor that the constructor of a constant's body calls: javac
     /// gives the anonymous class a constructor with the same parameters.
     pub(super) fn enum_constructor(&self, class: usize, symbol: &Symbol) -> Option<usize> {
@@ -236,7 +315,13 @@ impl<'t> Lowering<'t> {
                         });
                     }
                 }
-                stmts.extend(self.block(block)?);
+                // The override's code is that of the enum's method, with its type variables and
+                // its result.
+                let outer = self.method_ctx.replace(Some(base));
+                self.ret.set(methods[base].ret);
+                let lowered = self.block(block);
+                self.method_ctx.set(outer);
+                stmts.extend(lowered?);
                 match overrides.iter_mut().find(|(m, _)| *m == base) {
                     Some((_, arms)) => arms.push((ordinal, stmts)),
                     None => overrides.push((base, vec![(ordinal, stmts)])),

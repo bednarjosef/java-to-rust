@@ -150,11 +150,12 @@ pub(super) fn class_monitors(class: &Class, facts: &Facts) -> HashSet<usize> {
 
 /// Rejects a kept monitor of what has none in the translation: a string, a box or an array (a
 /// value or an `Rc` without a lock), a Java enum's constant (a plain value), or a class's
-/// monitor other than a class literal's.
-pub(super) fn check(class: &Class, facts: &Facts) -> Result<(), Error> {
+/// monitor other than a class literal's. The first of each method is reported.
+pub(super) fn check(class: &Class, facts: &Facts) -> Result<(), Vec<Error>> {
     if !facts.monitors && !facts.threaded {
         return Ok(());
     }
+    let mut errors = Vec::new();
     for method in &class.methods {
         let mut error = None;
         for s in &method.body {
@@ -191,11 +192,9 @@ pub(super) fn check(class: &Class, facts: &Facts) -> Result<(), Error> {
                 &mut |_| {},
             );
         }
-        if let Some(e) = error {
-            return Err(e);
-        }
+        errors.extend(error);
     }
-    Ok(())
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
 /// Whether `f` holds for some expression in `body`.

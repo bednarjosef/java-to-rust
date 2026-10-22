@@ -362,7 +362,7 @@ impl<'a> Gen<'a> {
     /// The concrete class whose objects represent the values of class type `t`: `t` itself, or
     /// the one class under it whose objects there are.
     pub(super) fn rep_class(&self, t: usize) -> usize {
-        match hierarchy::rep(self.class, self.facts, t) {
+        match self.rep(t) {
             hierarchy::Rep::Object(c) => c,
             hierarchy::Rep::Enum(t) => t,
         }
@@ -448,7 +448,7 @@ impl<'a> Gen<'a> {
             return struct_name(&self.class.types[t].name);
         }
         if let Some(t) = self.class.type_index(name)
-            && let hierarchy::Rep::Enum(t) = hierarchy::rep(self.class, self.facts, t)
+            && let hierarchy::Rep::Enum(t) = self.rep(t)
         {
             self.need(Need::Enum(t));
             return struct_name(&self.class.types[t].name);
@@ -620,7 +620,18 @@ impl<'a> Gen<'a> {
     /// result is then a `&Rc<..>` when the reference is a place, else the `Rc` itself.
     pub(super) fn object(&mut self, e: &'a Expr) -> String {
         let id = e.id;
+        let ty = e.ty;
         let e = self.peel(e);
+        // A `null` cast to the object's type (`(CharSequence) null`) is a `None` of that type,
+        // which the dereference then throws for.
+        let mut inner = e;
+        while let ExprKind::Cast(_, value) = &inner.kind {
+            inner = value;
+        }
+        if matches!(inner.kind, ExprKind::Null) && matches!(ty, Type::Class(..)) {
+            let option = format!("None::<{}>", self.ty_name(ty));
+            return self.dereference(&[id, e.id], &option);
+        }
         let (text, place) = self.object_parts(e);
         if !(matches!(e.ty, Type::Class(..)) && self.nullable(e)) {
             return text;

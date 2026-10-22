@@ -63,6 +63,8 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
         if jdk && decl.package == "java.lang" && !JAVA_LANG_OVERLAYS.contains(&outer.as_str()) {
             continue;
         }
+        // `CharSequence`'s default `getChars` in a class of the program is the JDK's code too.
+        let jdk = jdk || method.jdk_code;
         let at = Messages { class, names, outermost: &outermost, method, jdk };
         for s in &method.body {
             visit_stmt(
@@ -223,6 +225,18 @@ impl Messages<'_> {
                     };
                     return add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
                 }
+                // The methods of a charset that may be null.
+                let charset = match builtin {
+                    Builtin::Charset(CharsetOp::Name) => Some("name"),
+                    Builtin::Charset(CharsetOp::DisplayName) => Some("displayName"),
+                    Builtin::Charset(CharsetOp::ToString) => Some("toString"),
+                    Builtin::Charset(CharsetOp::HashCode) => Some("hashCode"),
+                    Builtin::Charset(CharsetOp::Equals) => Some("equals"),
+                    _ => None,
+                };
+                if let Some(method) = charset {
+                    return add(&args[0], self.call(x.pos, method).map(|m| format!("Cannot invoke \"{m}\"")));
+                }
                 match builtin {
                     // `i.intValue()`, which javac names by the boxed class.
                     Builtin::Boxed(BoxedOp::Unbox, kind) => {
@@ -277,6 +291,14 @@ impl Messages<'_> {
                         for array in [&args[0], &args[2]] {
                             out.insert(array.id, None);
                         }
+                        return;
+                    }
+                    // `new StringBuilder(seq)` of a null `seq`, which the JDK's constructor
+                    // asks for its length (`-g`, so the parameter has its name).
+                    Builtin::Builder(BuilderOp::New) if matches!(args[0].ty, Type::Class(c, _) if c == CHAR_SEQUENCE) =>
+                    {
+                        let failure = "Cannot invoke \"java.lang.CharSequence.length()\"";
+                        out.insert(args[0].id, Some(format!("{failure} because \"seq\" is null")));
                         return;
                     }
                     // `synchronized` on a null.
@@ -583,8 +605,8 @@ impl Messages<'_> {
             Type::Float => "float".to_string(),
             Type::Boolean => "boolean".to_string(),
             Type::Array(element) => format!("{}[]", self.java_param(*element)?),
-            // A string is one where the code has `String`: a `CharSequence` is a class of its own
-            // (`lower::object`).
+            // The JVM writes `java.lang.String` without its package, as `Object`. A string is one
+            // where the code has `String`: a `CharSequence` is a class of its own (`lower::object`).
             Type::String => "String".to_string(),
             Type::JavaClass => "java.lang.Class".to_string(),
             // A parameter declared `Object`, or of a type variable whose erasure is `Object`, as

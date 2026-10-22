@@ -240,6 +240,127 @@ pub fn line_separator() -> String {
     "\n".to_string()
 }
 
+/// A primitive element of an array as the bytes the JVM keeps it in: little-endian, as on the
+/// machines the translation runs on, a `boolean` as one byte.
+pub trait RawBytes: Copy {
+    const SIZE: usize;
+    fn put(self, out: &mut [u8]);
+    fn get(bytes: &[u8]) -> Self;
+}
+
+macro_rules! raw_bytes {
+    ($($t:ty),*) => {$(
+        impl RawBytes for $t {
+            const SIZE: usize = std::mem::size_of::<$t>();
+            fn put(self, out: &mut [u8]) {
+                out.copy_from_slice(&self.to_le_bytes());
+            }
+            fn get(bytes: &[u8]) -> Self {
+                <$t>::from_le_bytes(bytes.try_into().expect("an element's bytes"))
+            }
+        }
+    )*};
+}
+raw_bytes!(i8, i16, u16, i32, i64, f32, f64);
+
+impl RawBytes for bool {
+    const SIZE: usize = 1;
+    fn put(self, out: &mut [u8]) {
+        out[0] = u8::from(self);
+    }
+    fn get(bytes: &[u8]) -> Self {
+        bytes[0] != 0
+    }
+}
+
+/// Ends the program at an `Unsafe` access of memory that the translation does not have, such as
+/// a copy from an address outside the heap.
+pub fn unsupported_memory(what: &'static str) -> ! {
+    crate::exception::die(format!("{what}, which the translation does not support"))
+}
+
+/// The range of bytes `offset..offset + bytes` of an array of `len` elements of `size` bytes, from
+/// its first element, where `offset` is from the start of the array object as `Unsafe` counts
+/// it. A range outside the elements ends the program: the JVM would read or write other memory.
+fn byte_range(len: usize, size: usize, offset: i64, bytes: i64) -> std::ops::Range<usize> {
+    let start = offset - crate::array_base_offset();
+    let end = start.checked_add(bytes);
+    match (usize::try_from(start), end.and_then(|e| usize::try_from(e).ok())) {
+        (Ok(start), Some(end)) if end <= len * size => start..end,
+        _ => unsupported_memory("an Unsafe copy of memory outside an array"),
+    }
+}
+
+/// The bytes `offset..offset + bytes` of an array of primitives, the offset counted from the start
+/// of the array object (`array_base_offset`), as the JVM keeps them.
+fn read_bytes<S: RawBytes, A: Elements<S>>(array: &A, offset: i64, bytes: i64) -> Vec<u8> {
+    let items = array.items();
+    let range = byte_range(items.len(), S::SIZE, offset, bytes);
+    let mut out = Vec::with_capacity(range.len());
+    let mut element = vec![0; S::SIZE];
+    for i in range.start / S::SIZE..range.end.div_ceil(S::SIZE) {
+        items[i].put(&mut element);
+        let from = range.start.max(i * S::SIZE) - i * S::SIZE;
+        let to = range.end.min((i + 1) * S::SIZE) - i * S::SIZE;
+        out.extend_from_slice(&element[from..to]);
+    }
+    out
+}
+
+/// Writes `bytes` into an array of primitives from `offset` on (see `read_bytes`), changing only
+/// those bytes of the elements they fall in.
+fn write_bytes<D: RawBytes, B: Elements<D>>(array: &B, offset: i64, bytes: &[u8]) {
+    let mut items = array.items_mut();
+    let range = byte_range(items.len(), D::SIZE, offset, bytes.len() as i64);
+    let mut element = vec![0; D::SIZE];
+    let mut taken = 0;
+    for i in range.start / D::SIZE..range.end.div_ceil(D::SIZE) {
+        items[i].put(&mut element);
+        let from = range.start.max(i * D::SIZE) - i * D::SIZE;
+        let to = range.end.min((i + 1) * D::SIZE) - i * D::SIZE;
+        element[from..to].copy_from_slice(&bytes[taken..taken + to - from]);
+        taken += to - from;
+        items[i] = D::get(&element);
+    }
+}
+
+/// `Unsafe.copyMemory0` and `copySwapMemory0` between two arrays of primitives (which may be one
+/// array, or arrays of different kinds): `bytes` bytes from `src_offset` in `src` to `dest_offset`
+/// in `dest`, the offsets counted from the start of each array object (`array_base_offset`), as
+/// the JVM copies them. With `swap` above 1, the bytes of each unit of `swap` bytes are reversed,
+/// as `copySwapMemory0` copies between byte orders. Overlapping ranges of one array are copied
+/// as if through a buffer.
+pub fn copy_memory<S: RawBytes, D: RawBytes, A: Elements<S>, B: Elements<D>>(
+    src: &A,
+    src_offset: i64,
+    dest: &B,
+    dest_offset: i64,
+    bytes: i64,
+    swap: i64,
+) {
+    let mut buffer = read_bytes(src, src_offset, bytes);
+    if swap > 1 {
+        for unit in buffer.chunks_mut(swap as usize) {
+            unit.reverse();
+        }
+    }
+    write_bytes(dest, dest_offset, &buffer);
+}
+
+/// `Unsafe.getInt(base, offset)` and the other plain reads of a primitive at an offset of an array
+/// of primitives of any kind (see `read_bytes`): the value its bytes there make.
+pub fn get_memory<T: RawBytes, S: RawBytes, A: Elements<S>>(array: &A, offset: i64) -> T {
+    T::get(&read_bytes(array, offset, T::SIZE as i64))
+}
+
+/// `Unsafe.putInt(base, offset, x)` and the other plain writes of a primitive at an offset of an
+/// array of primitives of any kind (see `write_bytes`).
+pub fn put_memory<T: RawBytes, D: RawBytes, B: Elements<D>>(array: &B, offset: i64, value: T) {
+    let mut bytes = vec![0; T::SIZE];
+    value.put(&mut bytes);
+    write_bytes(array, offset, &bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +425,31 @@ mod tests {
         assert!(nano_time() >= t0);
         assert!(m0 > 1_600_000_000_000);
         assert!(available_processors() >= 1);
+    }
+
+    #[test]
+    fn copies_memory_between_arrays_of_any_kinds() {
+        let base = crate::array_base_offset();
+        let bytes = crate::from_vec(vec![1i8, 0, 2, 0, 3, 0]);
+        let chars = crate::from_vec(vec![0u16; 3]);
+        copy_memory(&bytes, base, &chars, base, 6, 0);
+        assert_eq!(*chars.items(), vec![1, 2, 3]);
+        // Within one array, overlapping: as if through a buffer.
+        let ints = crate::from_vec(vec![1i32, 2, 3, 4]);
+        copy_memory(&ints, base, &ints, base + 4, 12, 0);
+        assert_eq!(*ints.items(), vec![1, 1, 2, 3]);
+        // Swapping the bytes of each `char`.
+        let swapped = crate::from_vec(vec![0u16; 1]);
+        copy_memory(&crate::from_vec(vec![0x0102u16]), base, &swapped, base, 2, 2);
+        assert_eq!(*swapped.items(), vec![0x0201]);
+        // Part of a `long`.
+        let longs = crate::from_vec(vec![0i64]);
+        copy_memory(&crate::from_vec(vec![-1i8; 2]), base, &longs, base + 2, 2, 0);
+        assert_eq!(*longs.items(), vec![0xffff_0000]);
+        // A char read from the bytes of a `byte[]`, and an int written over two chars.
+        assert_eq!(get_memory::<u16, _, _>(&crate::from_vec(vec![0i8, 0x41, 0x42]), base + 1), 0x4241);
+        let two = crate::from_vec(vec![0u16; 2]);
+        put_memory(&two, base, 0x0003_0002i32);
+        assert_eq!(*two.items(), vec![2, 3]);
     }
 }

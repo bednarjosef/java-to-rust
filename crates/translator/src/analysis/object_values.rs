@@ -39,7 +39,7 @@
 use super::Facts;
 use crate::ast::*;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 /// The context of code that has no `this`: a static method, or a method that no class runs.
 pub(super) const STATIC: usize = usize::MAX;
@@ -173,6 +173,22 @@ pub struct ObjectValues {
     types: Types,
     /// The analysis for the calls that can run (see the module's comment).
     dispatch: bool,
+    /// While the analysis runs, the places that the current visit has read.
+    reads: RefCell<Option<Vec<Read>>>,
+}
+
+/// A place whose flow a visit reads, so that the visit runs again when the place changes.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Read {
+    /// The variables of a method in a context.
+    Vars(usize, usize),
+    Return(usize, usize),
+    Field(usize, String),
+    Static(usize, String),
+    Element(Type),
+    /// The elements of every array (for dispatch, see `elements_of`).
+    Elements,
+    Handed,
 }
 
 /// What the analysis needs to know of the program's types.
@@ -334,9 +350,20 @@ impl ObjectValues {
             .any(|&ctx| self.eval(class, m, ctx, l).value && self.eval(class, m, ctx, r).value)
     }
 
+    /// Notes that the running visit reads `place`.
+    fn read(&self, place: impl FnOnce() -> Read) {
+        if let Some(reads) = self.reads.borrow_mut().as_mut() {
+            reads.push(place());
+        }
+    }
+
     fn var(&self, m: usize, ctx: usize, name: &str) -> Flow {
         if !self.followed.get(m).is_some_and(|f| f.contains(name)) {
             return Flow::top();
+        }
+        self.read(|| Read::Vars(m, ctx));
+        if !self.runtime_params[m].is_empty() {
+            self.read(|| Read::Handed);
         }
         let mut flow = self.vars.get(&(m, ctx)).and_then(|v| v.get(name)).cloned().unwrap_or_default();
         if self.runtime_params[m].iter().any(|p| p == name) {
@@ -349,8 +376,10 @@ impl ObjectValues {
     /// for dispatch, those of every array whose class fits the type (see the module's comment).
     pub(super) fn elements_of(&self, element: Type) -> Flow {
         if !self.dispatch {
+            self.read(|| Read::Element(element));
             return self.elements.get(&element).cloned().unwrap_or_default();
         }
+        self.read(|| Read::Elements);
         let mut flow = Flow::default();
         for stored in self.elements.values() {
             flow.join(stored);
@@ -386,16 +415,21 @@ impl ObjectValues {
                 flow
             }
             ExprKind::Field { object, name } => match class.field_owner(object.ty, name) {
-                Some(owner) => self.fields.get(&(owner, name.clone())).cloned().unwrap_or_default(),
+                Some(owner) => {
+                    self.read(|| Read::Field(owner, name.clone()));
+                    self.fields.get(&(owner, name.clone())).cloned().unwrap_or_default()
+                }
                 None => Flow::top(),
             },
             ExprKind::Static { class: c, name } => {
+                self.read(|| Read::Static(*c, name.clone()));
                 self.statics.get(&(*c, name.clone())).cloned().unwrap_or_default()
             }
             ExprKind::Index(array, _) => self.elements_of(array.ty.element()),
             ExprKind::Call { resolved: Some(_), .. } | ExprKind::MethodCall { resolved: Some(_), .. } => {
                 let mut flow = Flow::default();
                 for target in self.targets(class, m, ctx, e) {
+                    self.read(|| Read::Return(target.0, target.1));
                     flow.join(&self.returns.get(&target).cloned().unwrap_or_default());
                 }
                 flow
@@ -439,16 +473,21 @@ impl ObjectValues {
                 vec![(*r, ctx)]
             }
             ExprKind::MethodCall { resolved: Some(r), is_super, receiver, .. } => {
-                if class.methods[*r].is_static || *is_super {
+                if class.methods[*r].is_static || *is_super && matches!(receiver.kind, ExprKind::This) {
                     return vec![(*r, context(*r, ctx))];
                 }
                 let flow = self.eval(class, m, ctx, receiver);
-                let group = class.hierarchy.group_id(*r);
                 let classes: Vec<usize> = if flow.any {
                     self.types.concretes_of(receiver.ty).to_vec()
                 } else {
                     flow.classes.iter().collect()
                 };
+                // A `super` call in a lambda's code is on the object that the lambda captured,
+                // and runs the method it names on it.
+                if *is_super {
+                    return classes.into_iter().map(|c| (*r, c)).collect();
+                }
+                let group = class.hierarchy.group_id(*r);
                 classes
                     .into_iter()
                     .filter_map(|c| Some((self.types.implementation(class, group, c)?, c)))
@@ -613,74 +652,119 @@ fn analyze_with(class: &Class, dispatch: bool) -> ObjectValues {
         contexts,
         types,
         dispatch,
+        reads: RefCell::new(Some(Vec::new())),
     };
-    loop {
-        let mut changed = false;
-        for m in 0..class.methods.len() {
-            for i in 0..values.contexts[m].len() {
-                let ctx = values.contexts[m][i];
-                let updates = visit(&values, class, m, ctx, &class.methods[m].body);
-                changed |= apply(&mut values, updates);
-            }
+    // The visits, each of a method in one of its contexts or (`usize::MAX`) of the code outside
+    // methods, run again whenever a place that they read changes, until none does. As every
+    // visit only adds to what places hold, the order does not change what they end up holding.
+    let mut visits: Vec<(usize, usize)> =
+        (0..class.methods.len()).flat_map(|m| values.contexts[m].iter().map(move |&ctx| (m, ctx))).collect();
+    visits.push((usize::MAX, STATIC));
+    let mut queued = vec![true; visits.len()];
+    let mut queue: VecDeque<usize> = (0..visits.len()).collect();
+    let mut readers: HashMap<Read, BTreeSet<usize>> = HashMap::new();
+    while let Some(v) = queue.pop_front() {
+        queued[v] = false;
+        let (m, ctx) = visits[v];
+        let updates = match m {
+            usize::MAX => visit_outside_methods(&values, class),
+            _ => visit(&values, class, m, ctx, &class.methods[m].body),
+        };
+        for read in values.reads.borrow_mut().replace(Vec::new()).unwrap_or_default() {
+            readers.entry(read).or_default().insert(v);
         }
-        // Field initializers, and the exceptions that the runtime raises.
-        let mut updates = Vec::new();
-        for (t, decl) in class.types.iter().enumerate() {
-            for (f, is_static) in
-                decl.fields.iter().map(|f| (f, false)).chain(decl.statics.iter().map(|f| (f, true)))
-            {
-                let Some(init) = &f.init else { continue };
-                // For dispatch, an instance field's initializer runs on each object that has it.
-                let contexts = match is_static || !dispatch || values.types.concretes[t].is_empty() {
-                    true => vec![STATIC],
-                    false => values.types.concretes[t].clone(),
-                };
-                for ctx in contexts {
-                    let flow = values.types.filter(values.eval(class, usize::MAX, ctx, init), f.ty);
-                    updates.push(match is_static {
-                        true => Update::Static(t, f.name.clone(), flow),
-                        false => Update::Field(t, f.name.clone(), flow),
-                    });
-                    updates.extend(visit_value(&values, class, usize::MAX, ctx, init));
+        for changed in apply(&mut values, updates) {
+            for &r in readers.get(&changed).into_iter().flatten() {
+                if !queued[r] {
+                    queued[r] = true;
+                    queue.push_back(r);
                 }
             }
-        }
-        for e in &class.raised {
-            updates.extend(visit_value(&values, class, usize::MAX, STATIC, e));
-            if dispatch {
-                updates.push(Update::Handed(values.eval(class, usize::MAX, STATIC, e)));
-            }
-        }
-        // The constants of an enum set its instance fields, in declaration order.
-        for (t, decl) in class.types.iter().enumerate().filter(|_| dispatch) {
-            for constant in decl.enum_constants.iter().flatten() {
-                for (field, value) in decl.fields.iter().zip(&constant.values) {
-                    let flow = values.types.filter(values.eval(class, usize::MAX, STATIC, value), field.ty);
-                    updates.push(Update::Field(t, field.name.clone(), flow));
-                    updates.extend(visit_value(&values, class, usize::MAX, STATIC, value));
-                }
-            }
-        }
-        changed |= apply(&mut values, updates);
-        if !changed {
-            return values;
         }
     }
+    *values.reads.borrow_mut() = None;
+    values
 }
 
-fn apply(values: &mut ObjectValues, updates: Vec<Update>) -> bool {
-    let mut changed = false;
-    for update in updates {
-        changed |= match update {
-            Update::Var(m, ctx, name, flow) => {
-                values.vars.entry((m, ctx)).or_default().entry(name).or_default().join(&flow)
+/// What the code outside methods stores: field initializers, the exceptions that the runtime
+/// raises and, for dispatch, the constants of enums.
+fn visit_outside_methods(values: &ObjectValues, class: &Class) -> Vec<Update> {
+    let mut updates = Vec::new();
+    for (t, decl) in class.types.iter().enumerate() {
+        for (f, is_static) in
+            decl.fields.iter().map(|f| (f, false)).chain(decl.statics.iter().map(|f| (f, true)))
+        {
+            let Some(init) = &f.init else { continue };
+            // For dispatch, an instance field's initializer runs on each object that has it.
+            let contexts = match is_static || !values.dispatch || values.types.concretes[t].is_empty() {
+                true => vec![STATIC],
+                false => values.types.concretes[t].clone(),
+            };
+            for ctx in contexts {
+                let flow = values.types.filter(values.eval(class, usize::MAX, ctx, init), f.ty);
+                updates.push(match is_static {
+                    true => Update::Static(t, f.name.clone(), flow),
+                    false => Update::Field(t, f.name.clone(), flow),
+                });
+                updates.extend(visit_value(values, class, usize::MAX, ctx, init));
             }
-            Update::Return(m, ctx, flow) => values.returns.entry((m, ctx)).or_default().join(&flow),
-            Update::Field(t, name, flow) => values.fields.entry((t, name)).or_default().join(&flow),
-            Update::Static(t, name, flow) => values.statics.entry((t, name)).or_default().join(&flow),
-            Update::Element(ty, flow) => values.elements.entry(ty).or_default().join(&flow),
-            Update::Handed(flow) => values.handed.join(&flow),
-        };
+        }
+    }
+    for e in &class.raised {
+        updates.extend(visit_value(values, class, usize::MAX, STATIC, e));
+        if values.dispatch {
+            updates.push(Update::Handed(values.eval(class, usize::MAX, STATIC, e)));
+        }
+    }
+    // The constants of an enum set its instance fields, in declaration order.
+    for (t, decl) in class.types.iter().enumerate().filter(|_| values.dispatch) {
+        for constant in decl.enum_constants.iter().flatten() {
+            for (field, value) in decl.fields.iter().zip(&constant.values) {
+                let flow = values.types.filter(values.eval(class, usize::MAX, STATIC, value), field.ty);
+                updates.push(Update::Field(t, field.name.clone(), flow));
+                updates.extend(visit_value(values, class, usize::MAX, STATIC, value));
+            }
+        }
+    }
+    updates
+}
+
+/// Adds the updates to the places; the places that changed.
+fn apply(values: &mut ObjectValues, updates: Vec<Update>) -> Vec<Read> {
+    let mut changed = Vec::new();
+    for update in updates {
+        match update {
+            Update::Var(m, ctx, name, flow) => {
+                if values.vars.entry((m, ctx)).or_default().entry(name).or_default().join(&flow) {
+                    changed.push(Read::Vars(m, ctx));
+                }
+            }
+            Update::Return(m, ctx, flow) => {
+                if values.returns.entry((m, ctx)).or_default().join(&flow) {
+                    changed.push(Read::Return(m, ctx));
+                }
+            }
+            Update::Field(t, name, flow) => {
+                if values.fields.entry((t, name.clone())).or_default().join(&flow) {
+                    changed.push(Read::Field(t, name));
+                }
+            }
+            Update::Static(t, name, flow) => {
+                if values.statics.entry((t, name.clone())).or_default().join(&flow) {
+                    changed.push(Read::Static(t, name));
+                }
+            }
+            Update::Element(ty, flow) => {
+                if values.elements.entry(ty).or_default().join(&flow) {
+                    changed.extend([Read::Element(ty), Read::Elements]);
+                }
+            }
+            Update::Handed(flow) => {
+                if values.handed.join(&flow) {
+                    changed.push(Read::Handed);
+                }
+            }
+        }
     }
     changed
 }

@@ -13,8 +13,39 @@ impl<'a> Gen<'a> {
                 let name = self.text_ref(e);
                 format!("{}::for_encoding_name({name})", self.runtime("Charset"))
             }
-            _ => self.expr(e).at(ATOM),
+            _ => self.charset(e),
         }
+    }
+
+    /// A charset that a method or an operation of the library uses: one that may be null throws
+    /// `NullPointerException` (in the checked form where a `catch` or a `finally` sees it).
+    fn charset(&mut self, e: &'a Expr) -> String {
+        if !self.nullable(e) {
+            return self.expr(e).at(ATOM);
+        }
+        let option = self.expr(e).at(ATOM);
+        self.dereference(&[e.id], &option)
+    }
+
+    /// A charset that may be null as an `Option<java::Charset>`.
+    fn charset_option(&mut self, e: &'a Expr) -> String {
+        match &e.kind {
+            ExprKind::Null => format!("None::<{}>", self.runtime("Charset")),
+            _ if self.nullable(e) => self.expr(e).at(ATOM),
+            _ => format!("Some({})", self.expr(e).text),
+        }
+    }
+
+    /// `==` or `!=` on two charsets, or a charset and `null`: the same charset, or both null.
+    pub(super) fn charset_identity(&mut self, op: BinOp, l: &'a Expr, r: &'a Expr) -> Code {
+        let symbol = if op == BinOp::Ne { "!=" } else { "==" };
+        let optional = |g: &Self, e: &Expr| g.nullable(e) || matches!(e.kind, ExprKind::Null);
+        if optional(self, l) || optional(self, r) {
+            let (a, b) = (self.charset_option(l), self.charset_option(r));
+            return infix(symbol, CMP, &Code::atom(a), &Code::atom(b));
+        }
+        let (a, b) = (self.expr(l), self.expr(r));
+        infix(symbol, CMP, &a, &b)
     }
 
     /// A string that the runtime takes as an `Option<&str>`, so that a null is its exception.
@@ -41,23 +72,29 @@ impl<'a> Gen<'a> {
             }
             CharsetOp::DefaultCharset => Code::atom(format!("{charset}::default_charset()")),
             CharsetOp::Name => {
-                let recv = self.expr(&args[0]).at(ATOM);
+                let recv = self.charset(&args[0]);
                 Code::atom(format!("{recv}.name().to_string()"))
             }
             CharsetOp::DisplayName => {
-                let recv = self.expr(&args[0]).at(ATOM);
+                let recv = self.charset(&args[0]);
                 Code::atom(format!("{recv}.display_name().to_string()"))
             }
             CharsetOp::ToString => {
-                let recv = self.expr(&args[0]).at(ATOM);
+                let recv = self.charset(&args[0]);
                 Code::atom(format!("{recv}.to_string()"))
             }
             CharsetOp::HashCode => {
-                let recv = self.expr(&args[0]).at(ATOM);
+                let recv = self.charset(&args[0]);
                 Code::atom(format!("{recv}.hash_code()"))
             }
+            // `equals(null)` is false.
+            CharsetOp::Equals if self.nullable(&args[1]) || matches!(args[1].kind, ExprKind::Null) => {
+                let left = self.charset(&args[0]);
+                let right = self.charset_option(&args[1]);
+                infix("==", CMP, &Code::atom(format!("Some({left})")), &Code::atom(right))
+            }
             CharsetOp::Equals => {
-                let left = self.expr(&args[0]).at(ATOM);
+                let left = self.charset(&args[0]);
                 let right = self.expr(&args[1]).at(ATOM);
                 infix("==", CMP, &Code::atom(left), &Code::atom(right))
             }

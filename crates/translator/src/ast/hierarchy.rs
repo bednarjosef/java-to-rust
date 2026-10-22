@@ -4,6 +4,7 @@
 //! here, from the declarations alone.
 
 use super::*;
+use std::collections::HashMap;
 
 /// The supertypes, subtypes and overrides of the program's types and methods.
 #[derive(Default)]
@@ -22,13 +23,24 @@ pub struct Hierarchy {
     concrete: Vec<bool>,
     /// The instance fields each type declares, by name.
     fields: Vec<Vec<String>>,
-    /// The class of each method, and whether it has a body.
-    method_class: Vec<usize>,
+    /// Whether each method has no body.
     method_abstract: Vec<bool>,
     /// What each method overrides directly.
     overrides: Vec<Vec<usize>>,
     /// The override group of each method, as the smallest index in the group.
     group_ids: Vec<usize>,
+    /// The methods of each group, in index order, by the group's id.
+    groups: HashMap<usize, Vec<usize>>,
+    /// The methods each type declares, in index order.
+    by_class: Vec<Vec<usize>>,
+    /// The methods of each group that each type declares, in index order, by group id and type.
+    declared: HashMap<(usize, usize), Vec<usize>>,
+    /// For each type, one bit per type that it is a subtype of (itself included), `words` words
+    /// a type.
+    supertype_bits: Vec<u64>,
+    words: usize,
+    /// The index of each type by its qualified name (the first, as `Class::type_index` finds it).
+    names: HashMap<String, usize>,
 }
 
 impl Hierarchy {
@@ -66,11 +78,38 @@ impl Hierarchy {
             let root = find(&mut group_ids, m);
             group_ids[m] = root;
         }
+        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut declared: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        let mut by_class = vec![Vec::new(); types.len()];
+        for (m, method) in methods.iter().enumerate() {
+            by_class[method.class].push(m);
+            groups.entry(group_ids[m]).or_default().push(m);
+            declared.entry((group_ids[m], method.class)).or_default().push(m);
+        }
+        let superclass: Vec<Option<usize>> = types.iter().map(|t| t.extends).collect();
+        let interfaces: Vec<Vec<usize>> = types.iter().map(|t| t.implements.clone()).collect();
+        let words = types.len().div_ceil(64);
+        let mut supertype_bits = vec![0u64; types.len() * words];
+        for t in 0..types.len() {
+            let row = &mut supertype_bits[t * words..(t + 1) * words];
+            let mut work = vec![t];
+            while let Some(at) = work.pop() {
+                let (word, bit) = (at / 64, 1u64 << (at % 64));
+                if row[word] & bit == 0 {
+                    row[word] |= bit;
+                    work.extend(superclass[at].into_iter().chain(interfaces[at].iter().copied()));
+                }
+            }
+        }
+        let mut names = HashMap::new();
+        for (t, decl) in types.iter().enumerate() {
+            names.entry(decl.name.clone()).or_insert(t);
+        }
         Hierarchy {
             subtypes,
             overriders,
-            superclass: types.iter().map(|t| t.extends).collect(),
-            interfaces: types.iter().map(|t| t.implements.clone()).collect(),
+            superclass,
+            interfaces,
             concrete: types
                 .iter()
                 .map(|t| {
@@ -79,18 +118,37 @@ impl Hierarchy {
                 })
                 .collect(),
             fields: types.iter().map(|t| t.fields.iter().map(|f| f.name.clone()).collect()).collect(),
-            method_class: methods.iter().map(|m| m.class).collect(),
             method_abstract: methods.iter().map(|m| m.is_abstract).collect(),
             overrides: methods.iter().map(|m| m.overrides.clone()).collect(),
             group_ids,
+            groups,
+            by_class,
+            declared,
+            supertype_bits,
+            words,
+            names,
         }
     }
 
     /// Whether type `a` is `b` or a subtype of it, through classes and interfaces.
     pub fn is_subtype(&self, a: usize, b: usize) -> bool {
-        a == b
-            || self.superclass[a].is_some_and(|s| self.is_subtype(s, b))
-            || self.interfaces[a].iter().any(|&i| self.is_subtype(i, b))
+        a == b || self.supertype_bits[a * self.words + b / 64] & (1u64 << (b % 64)) != 0
+    }
+
+    /// `t` and every type it is a subtype of, through classes and interfaces, each once.
+    pub fn supertypes(&self, t: usize) -> Vec<usize> {
+        let mut out = vec![t];
+        let mut at = 0;
+        while at < out.len() {
+            let next = self.superclass[out[at]].into_iter().chain(self.interfaces[out[at]].iter().copied());
+            for s in next {
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+            at += 1;
+        }
+        out
     }
 
     /// The superclass of `t`, if the program declares it.
@@ -122,7 +180,26 @@ impl Hierarchy {
 
     /// The concrete classes that are `t` or subtypes of `t`, in `Class::types` order.
     pub fn concretes(&self, t: usize) -> Vec<usize> {
-        (0..self.concrete.len()).filter(|&c| self.concrete[c] && self.is_subtype(c, t)).collect()
+        let mut out: Vec<usize> = self.subtree(t).into_iter().filter(|&c| self.concrete[c]).collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// `t` and its subtypes, each once, in no particular order.
+    fn subtree(&self, t: usize) -> Vec<usize> {
+        let mut seen = vec![false; self.subtypes.len()];
+        seen[t] = true;
+        let mut out = vec![t];
+        let mut at = 0;
+        while at < out.len() {
+            for &s in &self.subtypes[out[at]] {
+                if !std::mem::replace(&mut seen[s], true) {
+                    out.push(s);
+                }
+            }
+            at += 1;
+        }
+        out
     }
 
     /// The root of the class tree of `t`: its topmost superclass in the program.
@@ -143,8 +220,12 @@ impl Hierarchy {
     /// Every method in the override group of `m`: `m`, what it overrides, what overrides those,
     /// transitively.
     pub fn group(&self, m: usize) -> Vec<usize> {
-        let id = self.group_ids[m];
-        (0..self.group_ids.len()).filter(|&o| self.group_ids[o] == id).collect()
+        self.group_members(m).to_vec()
+    }
+
+    /// `group`, without a copy.
+    pub fn group_members(&self, m: usize) -> &[usize] {
+        self.groups.get(&self.group_ids[m]).map_or(&[], Vec::as_slice)
     }
 
     /// Whether some method overrides `m`.
@@ -162,9 +243,11 @@ impl Hierarchy {
     /// member of `m`'s group declared nearest in `c`'s superclass chain, or else a default
     /// method of one of its interfaces. `None` when there is none in the program.
     pub fn implementation(&self, m: usize, c: usize) -> Option<usize> {
-        let group = self.group(m);
-        let declared_in =
-            |t: usize| group.iter().copied().find(|&g| self.method_class[g] == t && !self.method_abstract[g]);
+        let id = self.group_ids[m];
+        let declared_in = |t: usize| {
+            let declared = self.declared.get(&(id, t))?;
+            declared.iter().copied().find(|&g| !self.method_abstract[g])
+        };
         let mut chain = vec![c];
         chain.extend(self.ancestors(c));
         if let Some(found) = chain.iter().find_map(|&t| declared_in(t)) {
@@ -218,6 +301,12 @@ impl Hierarchy {
         }
     }
 
+    /// The methods that type `t` declares, in index order, as they were when the hierarchy was
+    /// made.
+    pub fn methods_of(&self, t: usize) -> &[usize] {
+        &self.by_class[t]
+    }
+
     /// The methods that `m` overrides directly.
     pub fn overridden(&self, m: usize) -> &[usize] {
         &self.overrides[m]
@@ -244,7 +333,14 @@ impl Class {
 
     /// The index of the type with this qualified name.
     pub fn type_index(&self, name: &str) -> Option<usize> {
-        self.types.iter().position(|t| t.name == name)
+        // The hierarchy's index, made from the types as they were when it was built.
+        let found = match self.hierarchy.names.get(name) {
+            Some(&t) if self.types.get(t).is_some_and(|d| d.name == name) => Some(t),
+            Some(_) => self.types.iter().position(|t| t.name == name),
+            None => None,
+        };
+        debug_assert_eq!(found, self.types.iter().position(|t| t.name == name), "type index of {name}");
+        found
     }
 
     /// The type whose values are of type `ty`: a class or enum of the program, or a runtime class
@@ -255,6 +351,7 @@ impl Class {
             // An array that becomes an `Object` has a runtime class named after its type.
             Type::Array(_) => self.type_index(&ty.to_string()),
             Type::StringBuilder => self.type_index(STRING_BUILDER),
+            Type::JavaClass => self.type_index(CLASS_VALUE),
             _ => self.type_index(runtime_name(ty)?),
         }
     }

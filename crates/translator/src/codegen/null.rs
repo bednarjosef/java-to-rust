@@ -112,6 +112,10 @@ impl<'a> Gen<'a> {
         if matches!(ty, Type::Class(..) | Type::StringBuilder | Type::Enum(_) | Type::Array(_)) {
             return format!("{rust}.as_ref()");
         }
+        // A charset is `Copy`, and so is an `Option` of one.
+        if ty == Type::Charset {
+            return rust;
+        }
         // An `Option<i32>` is `Copy` and matches as it is, and so does an `Option` of a class; a
         // faithful box is `as_deref`'d.
         let plain_box = self.boxed.get(name).is_some_and(|&ty| !self.faithful_box(ty));
@@ -126,8 +130,8 @@ impl<'a> Gen<'a> {
     pub(super) fn option_ref(&mut self, e: &'a Expr) -> String {
         match &e.kind {
             _ if matches!(e.ty, Type::Boxed(_)) => self.expr(e).text,
-            // A class is `Copy`, so an `Option` of one is too.
-            _ if e.ty == Type::JavaClass => self.expr(e).at(ATOM),
+            // A class is `Copy`, so an `Option` of one is too, and so is a charset.
+            _ if matches!(e.ty, Type::JavaClass | Type::Charset) => self.expr(e).at(ATOM),
             // So is an enum, read from a field, an element or a call (see `lower::enum_nulls`).
             _ if matches!(e.ty, Type::Enum(_)) && !matches!(e.kind, ExprKind::Var(_)) => {
                 self.expr(e).at(ATOM)
@@ -254,7 +258,7 @@ impl<'a> Gen<'a> {
         if !nullable_type(e.ty) || !self.nullable(e) {
             return None;
         }
-        if e.ty == Type::JavaClass {
+        if matches!(e.ty, Type::JavaClass | Type::Charset) {
             let option = self.expr(e).at(ATOM);
             return Some(Part::Arg(Code::atom(format!("{}({option})", self.runtime("or_null")))));
         }
@@ -374,7 +378,7 @@ impl<'a> Gen<'a> {
             // `if (!(x instanceof T name)) .. else { .. }`
             Some((value, ty, name)) => {
                 let source = self.pattern_source(value, ty);
-                self.line(&format!("if let Some({}) = {source} {{", self.pattern_binding(name, &source)));
+                self.line(&format!("if let {} = {source} {{", self.pattern_binding(name, &source, ty)));
                 None
             }
             None => {
@@ -449,7 +453,7 @@ impl<'a> Gen<'a> {
                 _ if bound => {
                     let (value, ty, name) = pattern(part).expect("a pattern");
                     let source = self.pattern_source(value, ty);
-                    texts.push(format!("let Some({}) = {source}", self.pattern_binding(name, &source)));
+                    texts.push(format!("let {} = {source}", self.pattern_binding(name, &source, ty)));
                 }
                 Some((name, ty)) => {
                     texts.push(format!("let Some({}) = {}", self.local(name), self.option_source(name, ty)));
@@ -572,7 +576,7 @@ impl<'a> Gen<'a> {
             return false;
         }
         let source = self.pattern_source(value, ty);
-        self.line(&format!("let Some({}) = {source} else {{", self.pattern_binding(name, &source)));
+        self.line(&format!("let {} = {source} else {{", self.pattern_binding(name, &source, ty)));
         self.nested(then);
         self.line("};");
         true

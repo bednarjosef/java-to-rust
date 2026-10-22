@@ -816,7 +816,7 @@ impl<'a> Gen<'a> {
             _ => format!("{bound} @ ({alternatives})"),
         };
         let mut before = Vec::new();
-        let pattern = match hierarchy::rep(self.class, self.facts, ty) {
+        let pattern = match self.rep(ty) {
             // The parameter is the object of the one class it catches.
             hierarchy::Rep::Object(_) => format!("{}({bound})", variants[0]),
             // The parameter is a `Throwable`.
@@ -1030,6 +1030,10 @@ impl<'a> Gen<'a> {
     /// name that `getSimpleName` gives it, its name in its source.
     pub(super) fn java_class_name(&self, c: usize, simple: bool) -> String {
         let decl = &self.class.types[c];
+        // An array held as an `Object`: `[C`, `[Ljava.lang.String;`.
+        if let (false, Some(Type::Array(element))) = (simple, self.class.array_of(c)) {
+            return super::class_values::array_name(self, *element);
+        }
         if let Some((binary, simple_name)) = decl.origin.java_names() {
             (if simple { simple_name } else { binary }).to_string()
         } else if simple {

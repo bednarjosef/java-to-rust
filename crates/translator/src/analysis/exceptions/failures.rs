@@ -61,6 +61,53 @@ fn format_samples(args: &[Expr]) -> Vec<java_runtime::format::Arg<'static>> {
         .collect()
 }
 
+/// What the strings and builders that a `CharSequence` `receiver` may hold throw in the
+/// interface's method `r`, when it is one of `CharSequence`'s and the receiver may hold one.
+fn sequence_failures(
+    class: &Class,
+    facts: &Facts,
+    r: usize,
+    receiver: &Expr,
+) -> Option<&'static [&'static str]> {
+    let decl = &class.types[class.methods[r].class];
+    if decl.kind != TypeKind::Interface || decl.name != CHAR_SEQUENCE {
+        return None;
+    }
+    // The value converted to a `CharSequence` holds what its own type does.
+    let receiver = match &receiver.kind {
+        ExprKind::Cast(_, value) => value,
+        _ => receiver,
+    };
+    if matches!(receiver.ty, Type::String | Type::StringBuilder) {
+        return sequence_failures_of(&class.methods[r].name, receiver.ty == Type::StringBuilder);
+    }
+    let t = class.class_index(receiver.ty)?;
+    let held = |kind: Type| {
+        class.hierarchy.concretes(t).into_iter().any(|c| {
+            class.types[c].kind == TypeKind::Runtime
+                && class.type_of(kind) == Some(c)
+                && facts.flows.get(t).is_none_or(|objects| objects.contains(&c))
+        })
+    };
+    let builder = held(Type::StringBuilder);
+    if !builder && !held(Type::String) {
+        return None;
+    }
+    sequence_failures_of(&class.methods[r].name, builder)
+}
+
+/// What a string's or (with `builder`) a builder's `CharSequence` method `name` throws.
+fn sequence_failures_of(name: &str, builder: bool) -> Option<&'static [&'static str]> {
+    const SIOOBE: &str = "java.lang.StringIndexOutOfBoundsException";
+    match name {
+        "length" => Some(&[]),
+        "charAt" | "subSequence" => Some(&[SIOOBE]),
+        "getChars" if builder => Some(&[SIOOBE, "java.lang.IndexOutOfBoundsException"]),
+        "getChars" => Some(&[SIOOBE]),
+        _ => None,
+    }
+}
+
 /// What a method of the library that the runtime implements may throw besides a
 /// `NullPointerException` for a null argument, by standard class: none when nothing, `"?"` when
 /// it is not known exactly.
@@ -124,7 +171,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | BuilderOp::Length
             | BuilderOp::ToString
             | BuilderOp::IsEmpty
-            | BuilderOp::CompareTo,
+            | BuilderOp::CompareTo
+            | BuilderOp::EnsureCapacity,
         ) => &[],
         // A negative count, an invalid code point.
         Builtin::Builder(BuilderOp::AppendCodePoint | BuilderOp::Repeat) => {
@@ -152,11 +200,14 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _) => {
             &["java.lang.NumberFormatException"]
         }
-        Builtin::EnumValueOf => &["java.lang.IllegalArgumentException"],
+        Builtin::EnumValueOf | Builtin::NotEnumClass => &["java.lang.IllegalArgumentException"],
+        Builtin::CheckFromToIndex | Builtin::CheckIndex => &["java.lang.IndexOutOfBoundsException"],
         Builtin::Bits(..) => &[],
         Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => &[],
         Builtin::Unsigned(UnsignedOp::Compare | UnsignedOp::ToString | UnsignedOp::Widen, _) => &[],
-        // Overflow, and bounds the wrong way round.
+        // Overflow, and bounds the wrong way round. `ceilDivExact` also throws for a zero divisor,
+        // which `runtime_failures` declares as the checked form.
+        Builtin::Native(Native::Math { name: "ceilDivExact", .. }) => &[],
         Builtin::Native(Native::Math { name, .. }) if name.ends_with("Exact") => {
             &["java.lang.ArithmeticException"]
         }
@@ -223,15 +274,21 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::MaxMemory
             | Native::Gc
             | Native::Nothing
+            | Native::Missing { .. }
             | Native::CdsConfigStatus
             | Native::CdsRandomSeed
             | Native::ContinuationsSupported
             | Native::NanoTimeAdjustment
+            | Native::SystemTimeZoneId
+            | Native::SystemGmtOffsetId
             | Native::ArrayBaseOffset
             | Native::ArrayIndexScale(_)
             | Native::DescriptorHandle
             | Native::DescriptorAppend
             | Native::FullFence
+            // A copy outside the arrays, or of memory outside the heap, ends the program
+            // (`java::copy_memory`), as the translation cannot go on with it.
+            | Native::CopyMemory { .. }
             | Native::Crc32Update
             | Native::InflateInit
             | Native::InflateAdler
@@ -239,6 +296,8 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
             | Native::InflateEnd
             | Native::NoPendingReferences,
         ) => &[],
+        // A read or write outside the array, or of memory outside the heap, ends the program.
+        Builtin::RawMemory { .. } => &[],
         // The system calls of `java.nio.file` record their `errno` (`java_runtime::unix`).
         Builtin::Native(Native::Unix(_)) => &[],
         // The descriptor natives fail as the JVM's do, with an `IOException` (`fd.rs`); `close0`
@@ -401,6 +460,22 @@ pub(super) fn runtime_failures(
         ExprKind::Field { object, .. } if null(object) => {
             out.push((NPE, "this field access", object_checked(object), object.id))
         }
+        // A string's or a builder's own `charAt`, `subSequence` or `getChars`, as a
+        // `CharSequence`, which the dispatcher runs (`codegen::dispatch`) inside `java::catching`.
+        // A null `dst` of `getChars` too, once the range is checked.
+        ExprKind::MethodCall { receiver, resolved: Some(r), is_super: false, args, .. }
+            if sequence_failures(class, facts, *r, receiver).is_some() =>
+        {
+            if null(receiver) {
+                out.push((NPE, "this call", object_checked(receiver), receiver.id));
+            }
+            for &failure in sequence_failures(class, facts, *r, receiver).unwrap_or_default() {
+                out.push((failure, "this call of the library", false, x.id));
+            }
+            if class.methods[*r].name == "getChars" && null(&args[2]) {
+                out.push((NPE, "this call of the library", false, x.id));
+            }
+        }
         ExprKind::MethodCall { receiver, resolved: Some(r), is_super: false, .. }
             if !class.methods[*r].is_static && null(receiver) =>
         {
@@ -481,6 +556,7 @@ pub(super) fn runtime_failures(
             Builtin::Boxed(
                 BoxedOp::Box
                 | BoxedOp::ToString
+                | BoxedOp::HexString
                 | BoxedOp::Compare
                 | BoxedOp::HashCode
                 | BoxedOp::Sum
@@ -511,9 +587,17 @@ pub(super) fn runtime_failures(
                 }
             }
             // A zero divisor throws, as in a division.
-            Builtin::Native(Native::Math { name: "floorDiv" | "floorMod", .. }) => {
+            Builtin::Native(Native::Math { name: "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod", .. }) => {
                 let constant = matches!(args[1].kind, ExprKind::Int(v) if v != 0)
                     || matches!(args[1].kind, ExprKind::Long(v) if v != 0);
+                if !constant {
+                    out.push(("java.lang.ArithmeticException", "this division", true, x.id));
+                }
+            }
+            // `MIN_VALUE / -1` overflows too, so only another constant divisor is known to pass.
+            Builtin::Native(Native::Math { name: "ceilDivExact", .. }) => {
+                let constant = matches!(args[1].kind, ExprKind::Int(v) if v != 0 && v != -1)
+                    || matches!(args[1].kind, ExprKind::Long(v) if v != 0 && v != -1);
                 if !constant {
                     out.push(("java.lang.ArithmeticException", "this division", true, x.id));
                 }
@@ -562,7 +646,7 @@ pub(super) fn runtime_failures(
                         | Builtin::Boxed(BoxedOp::Equals, _)
                         // A null string is the `NumberFormatException` of `parse_radix`.
                         | Builtin::Bits(BitsOp::ParseRadix, _)
-                        | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
+                        | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported | CharsetOp::Equals)
                         | Builtin::Native(Native::SystemIdentityHash)
                         // The expected and the new element of an atomic update may be null.
                         | Builtin::ElementUpdate(_)
@@ -596,6 +680,8 @@ pub(super) fn runtime_failures(
                     if null(&args[1]) {
                         out.push((NPE, "this call", true, args[1].id));
                     }
+                } else if let Builtin::Native(Native::CopyMemory { .. }) | Builtin::RawMemory { .. } = builtin {
+                    // A null base is an address outside the heap, which ends the program.
                 } else if !takes_null && checked.iter().any(null) {
                     let receiver = !checked[1..].iter().any(null);
                     out.push((NPE, "this call", receiver, if receiver { args[0].id } else { x.id }));
@@ -612,6 +698,9 @@ pub(super) fn runtime_failures(
                             | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
                             | Builtin::CodePoint(CodePointOp::ToCharsInto)
                             | Builtin::EnumValueOf
+                            | Builtin::NotEnumClass
+                            | Builtin::CheckFromToIndex
+                            | Builtin::CheckIndex
                             | Builtin::Native(Native::ArrayCopy)
                             | Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. })
                             | Builtin::Native(
@@ -697,11 +786,12 @@ pub(super) fn runtime_failures(
     {
         out.push(("java.lang.ClassCastException", "this cast", true, x.id));
     }
-    // So may a cast of an object to a string, a box or an enum, unless an `instanceof` tested it.
+    // So may a cast of an object to a string, a box, an enum or a class, unless an `instanceof`
+    // tested it.
     if let ExprKind::Cast(to, value) = &x.kind
         && x.pos != value.pos
         && matches!(value.ty, Type::Class(..))
-        && matches!(to, Type::String | Type::Boxed(_) | Type::Enum(_))
+        && matches!(to, Type::String | Type::Boxed(_) | Type::Enum(_) | Type::JavaClass)
         && let Some(name) = instance_name(*to)
         && !matches!(&value.kind, ExprKind::Var(v) if safe.contains(&instance_fact(v, name)))
     {

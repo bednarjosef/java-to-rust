@@ -392,7 +392,8 @@ impl<'t> Lowering<'t> {
     /// `value instanceof ty name`.
     fn instance_test(&self, pattern: Node<'t>, value: Expr, ty: Type, name: String) -> Result<Expr, Error> {
         let target = matches!(ty, Type::Class(..) | Type::Enum(_))
-            || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_)));
+            || (Self::is_object(value.ty) && matches!(ty, Type::String | Type::Boxed(_)))
+            || Self::is_numeric_box_of(value.ty, ty);
         if !matches!(value.ty, Type::Class(..) | Type::Enum(_)) || !target {
             return unsupported(pattern, "this pattern on a value of this type");
         }

@@ -66,7 +66,7 @@ impl<'t> Lowering<'t> {
             ("java.lang.Float", "floatToRawIntBits") => Native::FloatToRawIntBits,
             ("java.lang.Float", "intBitsToFloat") => Native::IntBitsToFloat,
             ("java.lang.System", "identityHashCode") => {
-                if !matches!(args[0].ty, Type::Class(..)) {
+                if !matches!(args[0].ty, Type::Class(..) | Type::JavaClass) {
                     return unsupported(node, "`System.identityHashCode` of anything but an object");
                 }
                 Native::SystemIdentityHash
@@ -101,6 +101,7 @@ impl<'t> Lowering<'t> {
             ("java.lang.Runtime", "freeMemory") if on_runtime => Native::FreeMemory,
             ("java.lang.Runtime", "maxMemory") if on_runtime => Native::MaxMemory,
             ("java.lang.Runtime", "gc") if on_runtime => Native::Gc,
+            ("java.lang.System", "gc") if symbol.ty == "()void" => Native::Gc,
             ("java.lang.Runtime", "halt") if on_runtime => Native::Halt,
             ("java.lang.Thread", "sleep") if matches!(args.first(), Some(a) if matches!(a.ty, Type::Long | Type::Int)) => {
                 Native::Sleep { nanos: args.len() == 2 }
@@ -158,6 +159,11 @@ impl<'t> Lowering<'t> {
                         Native::InstallUncaught
                     }
                     Some(native) => native,
+                    // A whole program is rejected only where the native can run.
+                    None if self.reach.is_some() => {
+                        let what = Box::leak(format!("{owner}.{name}{}", symbol.ty).into_boxed_str());
+                        Native::Missing { what }
+                    }
                     None => {
                         return unsupported(node, &format!("native method `{owner}.{name}{}`", symbol.ty));
                     }

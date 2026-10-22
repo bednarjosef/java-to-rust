@@ -15,6 +15,7 @@ mod arguments;
 mod boxed;
 mod builder;
 mod catching;
+mod ceil_div;
 mod chains;
 mod character;
 mod character_classes;
@@ -33,6 +34,7 @@ mod float;
 mod float_parse;
 pub mod format;
 mod fs;
+mod hex_float;
 mod inflate;
 mod initializer;
 mod integer;
@@ -45,6 +47,7 @@ mod natives;
 mod null;
 mod out;
 mod parse_range;
+mod preconditions;
 mod random;
 pub mod regex;
 mod scalb;
@@ -52,6 +55,7 @@ mod statics;
 pub mod string;
 mod system;
 mod thread;
+mod time_zone;
 mod unix;
 mod unsigned;
 mod vm;
@@ -60,6 +64,7 @@ pub use arguments::main_args;
 pub use boxed::*;
 pub use builder::{StringBuilder, same_builder};
 pub use catching::catching;
+pub use ceil_div::*;
 pub use chains::{Chain, Link, Unlink, drop_links};
 pub use character::*;
 pub use character_classes::*;
@@ -77,6 +82,7 @@ pub use float::*;
 pub use float_parse::{parse_double, parse_float, try_parse_double, try_parse_float};
 pub use format::{Arg, format, format_objects};
 pub use fs::*;
+pub use hex_float::{double_to_hex_string, float_to_hex_string};
 pub use inflate::{
     inflate_adler, inflate_bytes, inflate_end, inflate_init, inflate_reset, inflate_set_dictionary,
 };
@@ -94,6 +100,7 @@ pub use out::{
     standard_close, standard_flush, standard_write, standard_write_bytes, write_byte,
 };
 pub use parse_range::{parse_range, parse_unsigned_range, try_parse_range, try_parse_unsigned_range};
+pub use preconditions::*;
 pub use random::*;
 pub use regex::{matches_all, replace_all, replace_first, split};
 pub use scalb::*;
@@ -101,6 +108,7 @@ pub use statics::*;
 pub use string::*;
 pub use system::*;
 pub use thread::*;
+pub use time_zone::*;
 pub use unix::*;
 pub use unsigned::{
     compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,

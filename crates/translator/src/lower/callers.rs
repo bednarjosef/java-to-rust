@@ -68,8 +68,15 @@ fn asked(node: &Value) -> Option<CallerQuery> {
 }
 
 impl<'t> Lowering<'t> {
-    /// What method `m` asks about its caller in its own body, if anything.
+    /// What method `m` asks about its caller in its own body, if anything, when it is static:
+    /// only then does it get the parameter, and its calls the argument. The question in a method
+    /// that is not static is rejected where it is asked (`caller_class`), with the method's body.
     pub(super) fn caller_sensitive(&self, m: usize) -> Option<CallerQuery> {
+        self.asks_caller(m).filter(|_| self.methods[m].node.has_flag("STATIC"))
+    }
+
+    /// What method `m` asks about its caller in its own body, if anything.
+    fn asks_caller(&self, m: usize) -> Option<CallerQuery> {
         if let Some(known) = self.callers.borrow().get(&m) {
             return *known;
         }
@@ -83,20 +90,19 @@ impl<'t> Lowering<'t> {
         query
     }
 
-    /// The parameter `caller$class` of method `m` (`node`) when it asks for its caller; rejects a
-    /// method that is not static, or is the program's `main`, which nothing in it calls.
+    /// The parameter `caller$class` of static method `m` (`node`) when it asks for its caller;
+    /// rejects the program's `main`, which nothing in it calls (its stub has no parameter more).
     pub(super) fn caller_param(
         &self,
         m: usize,
         node: Node<'t>,
         is_main: bool,
     ) -> Result<Option<Param>, Error> {
-        if self.caller_sensitive(m).is_none() {
+        if self.caller_sensitive(m).is_none() || is_main && self.stubbing.get() {
             return Ok(None);
         }
-        if !node.has_flag("STATIC") || is_main {
-            let what = if is_main { "`main`" } else { "a method that is not static" };
-            return unsupported(node, &format!("asking for the caller (`getCallerClass`) in {what}"));
+        if is_main {
+            return unsupported(node, "asking for the caller (`getCallerClass`) in `main`");
         }
         Ok(Some(Param { name: CALLER_PARAM.to_string(), ty: Type::JavaClass }))
     }
@@ -115,11 +121,14 @@ impl<'t> Lowering<'t> {
             CallerQuery::Reflection => "`Reflection.getCallerClass`",
             CallerQuery::Walker => "`StackWalker.getCallerClass`",
         };
-        let asking = self
-            .method_ctx
-            .get()
-            .filter(|&m| self.caller_sensitive(m).is_some() && self.methods[m].owner == self.current.get());
-        let Some(m) = asking else {
+        let own = self.method_ctx.get().filter(|&m| self.methods[m].owner == self.current.get());
+        if own.is_some_and(|m| self.asks_caller(m).is_some() && self.caller_sensitive(m).is_none()) {
+            return unsupported(
+                node,
+                "asking for the caller (`getCallerClass`) in a method that is not static",
+            );
+        }
+        let Some(m) = own.filter(|&m| self.caller_sensitive(m).is_some()) else {
             return unsupported(node, &format!("{what} outside the body of a static method"));
         };
         if query == CallerQuery::Walker {
