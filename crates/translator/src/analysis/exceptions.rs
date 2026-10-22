@@ -465,13 +465,19 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
             reject(method.pos, "a call of `main` that is caught not supported yet");
             continue;
         }
-        // An exception object is built where it is thrown, and an enum constant where the enum
-        // is initialized, outside any `try` of the program.
+        // An enum constant is built where the enum is initialized, outside any `try` of the
+        // program, and an exception that the runtime raises by the `From` impl that turns its
+        // failure into an object (`codegen::exceptions::raised_impl`), which cannot fail. (An
+        // exception that the program builds passes its constructor's failure on from the `new`.)
         let decl = &class.types[method.class];
-        if exception_ctor(class, m) {
-            reject(method.pos, "a constructor of an exception that throws not supported yet");
-        } else if method.is_ctor && decl.enum_constants.is_some() {
+        let raised_with = |new: &Expr| matches!(new.kind, ExprKind::New { ctor: Some(c), .. } if c == m);
+        if method.is_ctor && decl.enum_constants.is_some() {
             reject(method.pos, "a constructor of an enum that throws not supported yet");
+        } else if method.is_ctor && class.raised.iter().any(raised_with) {
+            reject(
+                method.pos,
+                "a constructor that throws, of an exception the runtime raises, not supported yet",
+            );
         }
         // The text of an enum's constant is its `Display`, which cannot throw; that of an object is
         // a call of its `toString` where the generator makes it (`generator_text`).
@@ -1014,9 +1020,9 @@ fn stmt_points(
     safe: &[String],
     out: &mut Vec<Point>,
 ) {
-    // A switch on a string that is null throws, as its selector is dereferenced.
+    // A switch on a string or an enum that is null throws, as its selector is dereferenced.
     if let Stmt::Switch { selector, .. } = s
-        && selector.ty == Type::String
+        && matches!(selector.ty, Type::String | Type::Enum(_))
         && !is_tested(selector, safe)
         && maybe_null(facts, m, selector)
     {
@@ -1249,9 +1255,7 @@ fn expr_points(
     for init in static_inits(class, facts, m, x) {
         push(Raise::Call(vec![init]), x.pos, "this static use");
     }
-    // A constructor of an exception cannot throw yet (`analyze`), so what a `toString` in its
-    // message throws ends the program, as one through `Display` does.
-    let calls_text = generator_text(x) && !exception_ctor(class, m);
+    let calls_text = generator_text(x);
     for object in text_objects(x) {
         let shown = to_string_impls(class, object.ty);
         // Where the generator makes the text itself, a `toString` of the program is a call, whose
@@ -1415,16 +1419,6 @@ pub fn text_objects(x: &Expr) -> Vec<&Expr> {
         }
         _ => Vec::new(),
     }
-}
-
-/// Whether method `m` (`usize::MAX` for code outside the methods) is a constructor of an
-/// exception.
-fn exception_ctor(class: &Class, m: usize) -> bool {
-    let Some(method) = class.methods.get(m) else { return false };
-    method.is_ctor
-        && class
-            .type_index("java.lang.Throwable")
-            .is_some_and(|t| class.hierarchy.is_subtype(method.class, t))
 }
 
 /// Whether the generator makes the text of the objects that `x` shows (`text_objects`) with a

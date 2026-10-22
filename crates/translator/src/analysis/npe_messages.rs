@@ -237,6 +237,23 @@ impl Messages<'_> {
                 if let Some(method) = charset {
                     return add(&args[0], self.call(x.pos, method).map(|m| format!("Cannot invoke \"{m}\"")));
                 }
+                // An enum's own methods, of an enum that may be null. A null argument of
+                // `compareTo` fails in `Enum.compareTo`, the JDK's code (`-g`, so its local has
+                // its name).
+                let enum_method = match builtin {
+                    Builtin::EnumOrdinal => Some("ordinal"),
+                    Builtin::EnumName => Some("name"),
+                    Builtin::EnumCompareTo => Some("compareTo"),
+                    _ => None,
+                };
+                if let Some(method) = enum_method {
+                    add(&args[0], self.call(x.pos, method).map(|m| format!("Cannot invoke \"{m}\"")));
+                    if let (Builtin::EnumCompareTo, Some(other)) = (builtin, args.get(1)) {
+                        let failure = "Cannot invoke \"Object.getClass()\" because \"other\" is null";
+                        out.insert(other.id, Some(failure.to_string()));
+                    }
+                    return;
+                }
                 match builtin {
                     // `i.intValue()`, which javac names by the boxed class.
                     Builtin::Boxed(BoxedOp::Unbox, kind) => {
@@ -316,8 +333,39 @@ impl Messages<'_> {
                     _ => {}
                 }
             }
-            ExprKind::Switch { selector, .. } => self.string_switch(selector, out),
+            ExprKind::Switch { selector, .. } => self.switch(selector, out),
             _ => {}
+        }
+    }
+
+    /// The message of a `switch` on a string or an enum that is null.
+    fn switch(&self, selector: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
+        match selector.ty {
+            Type::Enum(name) => self.enum_switch(name, selector, out),
+            _ => self.string_switch(selector, out),
+        }
+    }
+
+    /// The message of a `switch` on an enum that is null, of enum `name`: javac's switch asks for
+    /// its `ordinal()`, named by the enum's binary name.
+    fn enum_switch(&self, name: &str, selector: &Expr, out: &mut HashMap<ExprId, Option<String>>) {
+        let Some(t) = self.class.type_index(name) else { return };
+        let decl = &self.class.types[t];
+        if !matches!(decl.origin, Origin::Member) {
+            return;
+        }
+        let Some(rest) = (match decl.package.as_str() {
+            "" => Some(decl.name.as_str()),
+            package => decl.name.strip_prefix(package).and_then(|r| r.strip_prefix('.')),
+        }) else {
+            return;
+        };
+        let binary = match decl.package.as_str() {
+            "" => rest.replace('.', "$"),
+            package => format!("{package}.{}", rest.replace('.', "$")),
+        };
+        if let Some(message) = self.message(&format!("Cannot invoke \"{binary}.ordinal()\""), selector) {
+            out.insert(selector.id, Some(message));
         }
     }
 
@@ -335,7 +383,7 @@ impl Messages<'_> {
     /// The messages of the dereferences that statement `s` makes itself, by object.
     fn stmt(&self, s: &Stmt, out: &mut HashMap<ExprId, Option<String>>) {
         if let Stmt::Switch { selector, .. } = s {
-            self.string_switch(selector, out);
+            self.switch(selector, out);
         }
         if let Stmt::Throw(e) = s {
             // The value is converted to `Throwable`, a cast that the class file does not have.

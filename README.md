@@ -208,8 +208,11 @@ A small subset, end to end:
   implementing them, and `Comparable` implemented by a class that calls `compareTo` directly.
   Between the program's own types, `instanceof` is a `matches!` on the type's enum, a pattern `x
   instanceof Circle c` binds `c` with `if let`, a let chain, `let .. else` (for `if (!(x instanceof
-  Circle c)) return ..;`) or `is_some_and`, and a downcast or a cast across interfaces is checked,
-  throwing `ClassCastException` when it fails. A pattern variable read anywhere else is rejected.
+  Circle c)) return ..;`, or `throw`, `break`, `continue`) or `is_some_and`, and a downcast or a cast across interfaces is checked,
+  throwing `ClassCastException` when it fails. An `if` whose condition is an `||` chain with a
+  negated pattern (`if (a || !(x instanceof T t) || c(t)) .. else ..`) is turned around into an
+  `&&` chain of the negated operands with its branches swapped, which binds `t` for the later
+  operands and the else branch. A pattern variable read anywhere else is rejected.
   One may be assigned (`n = n.next` in a loop), except one of a record or switch pattern.
   `Object` is an enum too, with a variant for each of the program's classes and enums whose values
   become `Object`s and one for each string or box (`Object::String(..)`, `Object::Integer(5)`), so
@@ -350,11 +353,13 @@ A small subset, end to end:
   `finally` first. A static initializer or a static field initializer that throws ends an uncaught
   program with `ExceptionInInitializerError`; where a `catch` of it, of `Error` or of `Throwable`
   observes it, the first use throws it and every later use throws `NoClassDefFoundError`. A
-  constructor or an instance field initializer that throws returns a `Result`, as a method does.
+  constructor or an instance field initializer that throws returns a `Result`, as a method does,
+  an exception's constructor too: what it throws goes on from the `new` in place of the exception
+  being built.
   Rejected for now, by name: try-with-resources over a library type (an `AutoCloseable` variable or
   lambda), catching or letting a `finally` see a null dereference, a negative array size, a failed
-  cast or a failure of the library other than these, a `toString`, a constructor of an exception or
-  an enum that throws something a caller catches (the JDK's own `toString`s throw only for bugs,
+  cast or a failure of the library other than these, a `toString`, a constructor of an enum that
+  throws something a caller catches (the JDK's own `toString`s throw only for bugs,
   such as a collection changed while it is shown, and those end the program even where a caller
   would catch them), and a `finally` that sees a static initializer's
   failure in a program that catches none of those classes. The design is in
@@ -548,8 +553,8 @@ over the program's enums, like `Object`; `ordinal()`, `name()`, `compareTo` and
 `getDeclaringClass()` on it match on the enums it can be, and `equals` and `hashCode` of any enum
 constant are `Object`'s identity ones, and the constants of an enum's class,
 which the JDK reads through `SharedSecrets`, are those of the program's enum whose class it is. A
-cast to an enum of a value that may be null (a key from a generic collection) ends the program
-if the value is null, as an enum that comes out of an `Object` is never an `Option`.
+cast to an enum of a value that may be null (a key from a generic collection) is an `Option` of
+the enum, as any enum value that may be null is.
 
 ### Analyses
 
@@ -578,11 +583,12 @@ The faithful translation of `a + b` on ints is `a.wrapping_add(b)` and of `a % b
   Dereferencing null throws `NullPointerException` through `java::non_null`, and printing or
   concatenating it gives `null` (`java::or_null`). `==` on objects compares identity:
   `Rc::ptr_eq(&a, &b)`, or `java::same(a.as_ref(), b.as_ref())` where either may be null.
-  An enum local, field, array element or return value that the program sets to null (or the
-  elements of `new E[n]`, and a field that no constructor sets first, which start null) is an
-  `Option` of the enum, compared with `kinds[i] == Some(Kind::Dead)`; such a value may only be
-  stored (in a local too), returned, tested against null, compared, printed or dropped, and any
-  other use of it is rejected (`lower/enum_nulls.rs`).
+  An enum local, parameter, field, array element or return value that may be null (the program
+  sets it to null, or it is an element of `new E[n]` or a field that a constructor may leave
+  unset, which start null) is an `Option` of the enum, which is `Copy`, compared with
+  `kinds[i] == Some(Kind::Dead)`. Where it is used as an enum (a call, `ordinal()`, `name()`,
+  `compareTo`, a `switch`) it is unwrapped with `java::non_null`, which throws
+  `NullPointerException` for null, with Java's message where a `catch` reads it.
 - Arrays (`int[]`, `long[]`, `double[]`, `boolean[]`, `String[]`, and arrays of arrays) are shared
   references in the faithful form, `java::Array<T>`: a shared cell whose clones see each other's
   writes. The aliasing analysis (`analysis/arrays.rs`) finds local arrays that no other name can

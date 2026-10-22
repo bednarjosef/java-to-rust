@@ -6,7 +6,6 @@
 mod code_point;
 mod covariant;
 mod element_reads;
-mod enum_nulls;
 mod enum_tables;
 mod enums;
 mod exceptions;
@@ -52,6 +51,7 @@ mod libraries;
 mod local_types;
 mod modules;
 mod natives;
+mod negated_patterns;
 mod patterns;
 mod platform_logger;
 mod primitives;
@@ -77,11 +77,6 @@ pub use functional::is_functional;
 pub use lambdas::computed_receiver;
 pub use primitives::runtime_character_method;
 pub use program::{Lowered, Rejected, census_lower_program, lower_program, tolerant_lower_program};
-
-/// Checks that no enum of the program can be null: the translation has no null enums.
-pub fn check_enum_nulls(class: &Class) -> Result<(), Error> {
-    enums::check_nulls(class)
-}
 
 pub fn lower(unit: &Value) -> Result<Class, Error> {
     let unit = Node(unit);
@@ -125,7 +120,6 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
         let raised = lowering.raised_objects(&types, &methods);
         let name = first.str("simpleName").to_string();
         let class = Class { name, types, methods, hierarchy, raised };
-        enums::check_nulls(&class)?;
         Ok((class, lowering.real.clone(), failed))
     })
 }
@@ -692,14 +686,14 @@ impl<'t> Lowering<'t> {
                 Some(n) => self.single_stmt(n)?,
                 None => Stmt::Block(Vec::new()),
             },
-            "IF" => Stmt::If {
-                cond: self.expr(node.child("condition")?)?,
-                then: Box::new(self.single_stmt(node.child("thenStatement")?)?),
-                otherwise: match node.get("elseStatement") {
-                    Some(n) => Some(Box::new(self.single_stmt(n)?)),
+            "IF" => self.if_stmt(
+                self.expr(node.child("condition")?)?,
+                self.single_stmt(node.child("thenStatement")?)?,
+                match node.get("elseStatement") {
+                    Some(n) => Some(self.single_stmt(n)?),
                     None => None,
                 },
-            },
+            ),
             "WHILE_LOOP" => Stmt::While {
                 cond: self.expr(node.child("condition")?)?,
                 body: Box::new(self.single_stmt(node.child("statement")?)?),

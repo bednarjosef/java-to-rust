@@ -5,9 +5,10 @@
 use super::*;
 
 /// Whether the generator has the checked form of dereferencing `object`: the object of a call or
-/// a field access is written by `Gen::object` and its relatives, which check it with `non_null`.
+/// a field access is written by `Gen::object` and its relatives, which check it with `non_null`,
+/// and so is an enum (`Gen::enum_value`).
 fn object_checked(object: &Expr) -> bool {
-    matches!(object.ty, Type::Class(..))
+    matches!(object.ty, Type::Class(..) | Type::Enum(_))
 }
 
 /// Whether every object that a value of type `s` may be (`Facts::flows`, which decides the
@@ -458,7 +459,9 @@ pub(super) fn runtime_failures(
             }
         }
         ExprKind::Length(array) if null(array) => out.push((NPE, "this length", true, array.id)),
-        ExprKind::Switch { selector, .. } if selector.ty == Type::String && null(selector) => {
+        ExprKind::Switch { selector, .. }
+            if matches!(selector.ty, Type::String | Type::Enum(_)) && null(selector) =>
+        {
             out.push((NPE, "this switch", true, selector.id))
         }
         ExprKind::Field { object, .. } if null(object) => {
@@ -521,9 +524,6 @@ pub(super) fn runtime_failures(
             | Builtin::CharDigit
             | Builtin::CharForDigit
             | Builtin::CharNumericValue
-            | Builtin::EnumOrdinal
-            | Builtin::EnumName
-            | Builtin::EnumCompareTo
             | Builtin::Exit
             | Builtin::MainArgs
             | Builtin::NoObject { .. }
@@ -540,6 +540,13 @@ pub(super) fn runtime_failures(
             // A null is a value to them, and an object's own method is a call of its own.
             | Builtin::ObjectsEquals
             | Builtin::ObjectsHashCode => {}
+            // An enum that may be null is dereferenced with the checked form (`Gen::enum_value`),
+            // the argument of `compareTo` too.
+            Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo => {
+                for arg in args.iter().filter(|a| matches!(a.ty, Type::Enum(_)) && null(a)) {
+                    out.push((NPE, "this call", true, arg.id));
+                }
+            }
             // The receiver, a string, is dereferenced with the checked form (`Facts::null_checked`).
             Builtin::StringLength | Builtin::StringEquals => {
                 if args.first().is_some_and(null) {
