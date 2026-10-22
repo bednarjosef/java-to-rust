@@ -295,6 +295,8 @@ impl Walk<'_> {
         let constructor = (name.to_string(), "<init>".to_string(), "()void".to_string());
         if candidate && self.methods.contains_key(&constructor) {
             self.work.push(Item::Method(constructor));
+            // It is in the reflection table, which `newInstance()` finds it in (`reflection.rs`).
+            self.reach.reflected.insert((name.to_string(), "<init>".to_string()));
         }
     }
 
@@ -332,7 +334,7 @@ impl Walk<'_> {
     }
 
     /// Whether the class `class` is `target` or extends or implements it, directly or not.
-    fn is_subtype(&self, class: &str, target: &str) -> bool {
+    pub(super) fn is_subtype(&self, class: &str, target: &str) -> bool {
         if target == "java.lang.Object" {
             return true;
         }

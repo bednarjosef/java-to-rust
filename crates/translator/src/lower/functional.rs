@@ -151,23 +151,26 @@ fn names(v: &Value, decls: &[(String, &'static Value)], used: &mut HashSet<Strin
     }
 }
 
-/// Adds to `used` every interface of the template that the type `s` names.
+/// Adds to `used` every interface of the template that the type `s` names: whose name occurs in
+/// it followed by its end or by a character that is not a letter or digit. Every name starts with
+/// `java.` and has only letters, digits and dots, so each is looked for where `s` has `java.`, up
+/// to each dot or the end of the letters, digits and dots there.
 fn mentioned(s: &str, decls: &[(String, &'static Value)], used: &mut HashSet<String>) {
-    match s {
-        s if s.contains("java.") => {
-            for (name, _) in decls {
-                let mut rest = s;
-                while let Some(at) = rest.find(name.as_str()) {
-                    let after = rest[at + name.len()..].chars().next();
-                    if after.is_none_or(|c| !c.is_ascii_alphanumeric()) {
-                        used.insert(name.clone());
-                        break;
-                    }
-                    rest = &rest[at + name.len()..];
-                }
+    debug_assert!(decls.iter().all(|(name, _)| {
+        name.starts_with("java.") && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.')
+    }));
+    let mut from = 0;
+    while let Some(at) = s[from..].find("java.").map(|at| from + at) {
+        let run = s[at..].find(|c: char| !c.is_ascii_alphanumeric() && c != '.').map_or(s.len(), |i| at + i);
+        let dots = s[at..run].match_indices('.').map(|(i, _)| at + i);
+        for end in dots.chain([run]) {
+            if let Some((name, _)) =
+                decls.iter().find(|(name, _)| name.len() == end - at && *name == s[at..end])
+            {
+                used.insert(name.clone());
             }
         }
-        _ => {}
+        from = at + 1;
     }
 }
 

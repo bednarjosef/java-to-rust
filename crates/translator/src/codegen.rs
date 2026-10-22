@@ -10,7 +10,9 @@ use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
 mod boxing;
+mod ceil_div;
 mod chains;
+mod char_sequence;
 mod character;
 mod charsets;
 mod class_values;
@@ -26,6 +28,7 @@ mod expr;
 mod field_inits;
 mod files;
 mod idiomatic;
+mod inflate;
 mod math;
 mod names;
 mod null;
@@ -98,6 +101,16 @@ pub fn generate_all(class: &Class, facts: &Facts) -> Result<String, Vec<Error>> 
 thread_local! {
     /// The position of the method being written, which a census stubs when the generator panics.
     static WRITING: std::cell::Cell<Option<Pos>> = const { std::cell::Cell::new(None) };
+    /// Whether a panic while writing a method is an error of that method (`catch_panics`).
+    static CATCHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes a panic while the generator writes a method, from now on in this thread (until
+/// `catch_panics(false)`), an error at the method that names the panic, and the generator goes on
+/// with the other methods. A census does this, so that it finds every method that makes the
+/// generator panic in one run of it.
+pub fn catch_panics(on: bool) {
+    CATCHING.with(|c| c.set(on));
 }
 
 /// The position of the method that the generator was writing when it panicked, if it was writing
@@ -114,10 +127,17 @@ fn generate_with(class: &Class, facts: &Facts, wanted: &Needs) -> (String, Needs
     let modules = modules::enter(class);
     let homes: Vec<Home> = (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect();
     let (fn_names, group_names) = method_names(class, &homes);
+    let static_fn_names =
+        (0..fn_names.len()).filter(|&i| class.methods[i].is_static).map(|i| fn_names[i].clone()).collect();
     let mut g = Gen {
         class,
         facts,
         fn_names,
+        static_fn_names,
+        variant_names: Default::default(),
+        reps: Default::default(),
+        variant_lists: Default::default(),
+        checked_value_ofs: Default::default(),
         group_names,
         live: live.clone(),
         runs: running_types(class, facts),
@@ -252,6 +272,15 @@ struct Gen<'a> {
     facts: &'a Facts,
     /// Where each method is emitted (see `analysis::hierarchy`).
     homes: Vec<Home>,
+    /// The names of the static methods, which are free functions in the namespace of locals.
+    static_fn_names: HashSet<String>,
+    /// The names of the variants of the enum of each type (see `dispatch::variant`), once made.
+    variant_names: std::cell::RefCell<HashMap<usize, std::rc::Rc<HashMap<usize, String>>>>,
+    /// How the values of each type are represented, and the variants of its enum, once found.
+    reps: std::cell::RefCell<HashMap<usize, hierarchy::Rep>>,
+    variant_lists: std::cell::RefCell<HashMap<usize, std::rc::Rc<Vec<usize>>>>,
+    /// The enums whose `valueOf` a `catch` or `finally` sees fail (see `enums::checked_value_of`).
+    checked_value_ofs: std::cell::OnceCell<HashSet<&'static str>>,
     /// The name of each override group (by group id): the name of its dispatchers.
     group_names: HashMap<usize, String>,
     /// Which classes have a struct (see `live_types`).
@@ -536,6 +565,24 @@ impl<'a> Gen<'a> {
     }
 
     fn method(&mut self, index: usize) {
+        if !CATCHING.with(|c| c.get()) {
+            return self.write_method(index);
+        }
+        let (start, indent, outer) = (self.out.len(), self.indent, WRITING.with(|w| w.get()));
+        let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.write_method(index)));
+        if let Err(panic) = written {
+            self.out.truncate(start);
+            self.indent = indent;
+            self.display = false;
+            // Its code is not written, so what it dereferences is not looked for.
+            self.written.remove(&index);
+            WRITING.with(|w| w.set(outer));
+            let message = format!("the translator panicked: {}", crate::lower::panic_message(&*panic));
+            self.rejected.push(Error { pos: self.class.methods[index].pos, message });
+        }
+    }
+
+    fn write_method(&mut self, index: usize) {
         let m = &self.class.methods[index];
         let outer = WRITING.with(|w| w.replace(Some(m.pos)));
         self.enter_method(index);
@@ -647,18 +694,19 @@ impl<'a> Gen<'a> {
         collect_locals(&m.body, &mut java_names);
         // Static methods are free functions, in the value namespace that locals share; instance
         // methods and constructors are reached through their type or object.
-        let mut used: HashSet<String> = (0..self.fn_names.len())
-            .filter(|&i| self.class.methods[i].is_static)
-            .map(|i| self.fn_names[i].clone())
-            .collect();
-        used.insert("java".into());
+        let mut used: HashSet<String> = HashSet::from(["java".to_string()]);
         if self.display {
             used.insert("f".into());
+        }
+        // A constructor builds its object in `obj` (`objects.rs`), which a parameter such as
+        // `CleanerImpl.PhantomCleanableRef`'s `obj` must not shadow.
+        if m.is_ctor {
+            used.insert("obj".into());
         }
         self.locals.clear();
         for name in java_names {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.locals.entry(name) {
-                let rust = unique(snake_case(entry.key()), &mut used);
+                let rust = unique_beside(snake_case(entry.key()), &mut used, &self.static_fn_names);
                 entry.insert(rust);
             }
         }

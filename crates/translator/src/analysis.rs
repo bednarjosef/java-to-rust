@@ -18,6 +18,7 @@
 mod arrays;
 mod borrowing;
 mod boxing;
+pub(crate) mod closure;
 pub mod closures;
 mod constants;
 mod exceptions;
@@ -104,6 +105,11 @@ pub struct Facts {
     /// is initialized: their cell starts empty, as there is no object to start it with, so it is
     /// an `Option` that is written with `Some` and read with `java::non_null`.
     pub placeholder_statics: HashSet<(usize, String)>,
+    /// Statics that are never null where code reads them, though the nullness analysis lets
+    /// them be: a static set nowhere else, which the first statements of its class's static
+    /// initializer set to a value that is not null, as `ForkJoinPool`'s `U = Unsafe.getUnsafe()`.
+    /// Reading it cannot throw (see `exceptions`); its cell is still an `Option`.
+    pub initialized_statics: HashSet<(usize, String)>,
     /// The element types (strings, objects and arrays) whose arrays can hold null: their
     /// elements are `Option`s, in every array of that element type.
     pub nullable_elements: HashSet<Type>,
@@ -141,6 +147,9 @@ pub struct Facts {
     pub self_methods: HashSet<usize>,
     /// The classes whose constructors build a plain value, which `new` then shares.
     pub plain_constructors: HashSet<String>,
+    /// For each other class, by index, the position of the constructor or field initializer
+    /// that keeps it from building a plain value.
+    pub not_plain: HashMap<usize, Pos>,
     /// Methods and constructors that touch no object but their own, so they borrow no other.
     pub isolated: HashSet<usize>,
     /// Methods and constructors that may borrow a shared object mutably, through what they call.
@@ -150,6 +159,10 @@ pub struct Facts {
     pub eager_init: HashSet<usize>,
     /// The static methods and constructors that run their class's `init` when they start.
     pub entry_init: HashSet<usize>,
+    /// The class of `main`, when the program has exactly one, which `main` initializes first.
+    pub main_class: Option<usize>,
+    /// The assignments of each static (see `exceptions::guards`).
+    static_writes: exceptions::guards::StaticWrites,
     /// The boxed kinds (`Type::Boxed` of the primitive) whose identity `==` observes: their boxes
     /// are shared objects. Every other boxed kind is its primitive value.
     pub faithful_boxes: HashSet<Type>,
@@ -227,35 +240,55 @@ pub fn analyze(class: &Class) -> Result<Facts, Error> {
 /// The facts, or the errors of the first analysis that rejects the program: all of them, where
 /// that analysis finds more than one (a census stubs them together, `program/census.rs`).
 pub fn analyze_all(class: &Class) -> Result<Facts, Vec<Error>> {
+    analyze_tolerating(class, &[])
+}
+
+/// `analyze_all`, past the errors `tolerated` of the checks that only reject (the validation of
+/// constructors and enums, of what threads share, of strings and boxes as `Object`s and of
+/// monitors): a census goes on past those of them that no stub can take away, such as a field's
+/// type (`program/census.rs`).
+pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, Vec<Error>> {
     let one = |e: Error| vec![e];
+    let checked = |result: Result<(), Vec<Error>>| {
+        let mut errors = result.err().unwrap_or_default();
+        errors.retain(|e| !tolerated.iter().any(|t| t.pos == e.pos && t.message == e.message));
+        if errors.is_empty() { Ok(()) } else { Err(errors) }
+    };
     let mut facts = Facts {
         fields_structs: hierarchy::fields_structs(class),
         field_owners: hierarchy::field_owners(class),
         closure_types: closures::closure_types(class),
         ..Facts::default()
     };
+    use crate::timings::phase;
     facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
-    ranges::analyze(class, &mut facts);
-    representation(class, &mut facts);
-    validate(class, &facts).map_err(one)?;
+    phase("analysis: ranges", || ranges::analyze(class, &mut facts));
+    phase("analysis: representation", || representation(class, &mut facts));
+    checked(phase("analysis: validate", || validate(class, &facts)))?;
     patterns::check(class).map_err(one)?;
-    facts.eager_init = (0..class.types.len()).filter(|&t| statics::eager(class, t)).collect();
+    facts.eager_init = statics::eager_classes(class);
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);
-    nullness::analyze(class, &mut facts);
-    patterns::check_object_values(class, &facts).map_err(one)?;
-    boxing::analyze(class, &mut facts);
+    facts.main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
+        [main] => Some(main.class),
+        _ => None,
+    };
+    phase("analysis: nullness", || nullness::analyze(class, &mut facts));
+    checked(phase("analysis: object values", || patterns::check_object_values(class, &facts)))?;
+    phase("analysis: boxing", || boxing::analyze(class, &mut facts));
     if facts.threaded {
-        threads::check(class, &facts).map_err(one)?;
+        checked(phase("analysis: threads", || threads::check(class, &facts)))?;
     }
-    monitors::check(class, &facts).map_err(one)?;
+    checked(phase("analysis: monitors", || monitors::check(class, &facts)))?;
     facts.class_monitors = monitors::class_monitors(class, &facts);
-    borrowed_params(class, &mut facts);
-    facts.borrowed_objects = borrowed_objects(class, &facts);
+    phase("analysis: borrowing", || {
+        borrowed_params(class, &mut facts);
+        facts.borrowed_objects = borrowed_objects(class, &facts);
+    });
     ascii_strings(class, &mut facts);
-    arrays::analyze(class, &mut facts);
-    indexing::analyze(class, &mut facts);
-    moves::analyze(class, &mut facts);
-    exceptions::analyze(class, &mut facts)?;
+    phase("analysis: arrays", || arrays::analyze(class, &mut facts));
+    phase("analysis: indexing", || indexing::analyze(class, &mut facts));
+    phase("analysis: moves", || moves::analyze(class, &mut facts));
+    phase("analysis: exceptions", || exceptions::analyze(class, &mut facts))?;
     // An uncaught-exception handler gets the failures of the runtime as objects of their classes.
     if threads::handles_uncaught(class) {
         for new in &class.raised {
@@ -316,6 +349,7 @@ fn representation(class: &Class, facts: &mut Facts) {
     facts.mutating = borrowing.mutating;
     facts.self_methods = borrowing.methods;
     facts.plain_constructors = borrowing.plain_constructors;
+    facts.not_plain = borrowing.not_plain;
     facts.isolated = borrowing.isolated;
     facts.writers = borrowing.writers;
 }
@@ -336,14 +370,18 @@ fn whole_object_classes(class: &Class) -> HashSet<usize> {
 
 /// Rejects what the analyses show the translation cannot do: a superclass's constructor runs
 /// before its subclass's object exists, building the fields struct as a plain value, so it may
-/// use `this` only for that struct.
-fn validate(class: &Class, facts: &Facts) -> Result<(), Error> {
-    for &t in &facts.fields_structs {
+/// use `this` only for that struct. Every class that does is reported, after one another.
+fn validate(class: &Class, facts: &Facts) -> Result<(), Vec<Error>> {
+    let mut errors = Vec::new();
+    let mut structs: Vec<usize> = facts.fields_structs.iter().copied().collect();
+    structs.sort_unstable();
+    for t in structs {
         if facts.plain_constructors.contains(&class.types[t].name) {
             continue;
         }
-        let pos = class.methods.iter().find(|m| m.is_ctor && m.class == t).map(|m| m.pos).unwrap_or_default();
-        return Err(Error {
+        let first = || class.methods.iter().find(|m| m.is_ctor && m.class == t).map(|m| m.pos);
+        let pos = facts.not_plain.get(&t).copied().or_else(first).unwrap_or_default();
+        errors.push(Error {
             pos,
             message:
                 "constructors of a class with subclasses that use `this` as a value or call overridable \
@@ -367,7 +405,7 @@ fn validate(class: &Class, facts: &Facts) -> Result<(), Error> {
                 && class.hierarchy.implementation(m, e).is_none()
                 && !builtin
             {
-                return Err(Error {
+                errors.push(Error {
                     pos: method.pos,
                     message: format!(
                         "an enum's own `{}` implementing `{}.{}` not supported yet",
@@ -377,7 +415,7 @@ fn validate(class: &Class, facts: &Facts) -> Result<(), Error> {
             }
         }
     }
-    Ok(())
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
 /// Whether the field initializers of class `t` are written into the struct literal of each of

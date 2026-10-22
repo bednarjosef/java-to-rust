@@ -68,14 +68,32 @@ pub fn npe_messages(class: &Class, facts: &mut Facts, names: &BytecodeNames) -> 
         .npe_message_needed
         .iter()
         .filter(|id| !messages.contains_key(id))
-        .filter_map(|id| facts.null_checked.get(id))
-        .min_by_key(|p| (p.line, p.column));
-    if let Some(&pos) = missing {
-        let message = "the message of the `NullPointerException` of this dereference not supported yet";
-        return Err(Error { pos, message: message.to_string() });
+        .filter_map(|id| facts.null_checked.get(id).map(|p| (*p, *id)))
+        .min_by_key(|(p, _)| (p.line, p.column));
+    if let Some((pos, id)) = missing {
+        // A position in the JDK's code may be in any of its many files: the message names the
+        // method.
+        let at =
+            class.methods.iter().filter(|m| super::exceptions::from_jdk(&class.types[m.class])).find(|m| {
+                let mut here = false;
+                for s in &m.body {
+                    visit_stmt(s, &mut |e| visit_expr(e, &mut |x| here |= x.id == id), &mut |_| {});
+                }
+                here
+            });
+        let method = at.map_or(String::new(), |m| format!(" in `{}.{}`", class.types[m.class].name, m.name));
+        let message = format!(
+            "the message of the `NullPointerException` of this dereference{method} not supported yet"
+        );
+        return Err(Error { pos, message });
     }
     facts.npe_messages = messages;
     Ok(())
+}
+
+/// Whether `decl` is `java.lang.Object`.
+fn is_object(decl: &TypeDecl) -> bool {
+    decl.name == OBJECT || decl.name == "java.lang.Object"
 }
 
 /// The qualified name of the outermost class that declares type `t`, by which `BytecodeNames`
@@ -173,6 +191,21 @@ impl Messages<'_> {
                     Builtin::StringLength => "length",
                     Builtin::StringEquals => "equals",
                     Builtin::StringCharAt => "charAt",
+                    // The methods of a charset that may be null.
+                    Builtin::Charset(CharsetOp::Name) => "name",
+                    Builtin::Charset(CharsetOp::DisplayName) => "displayName",
+                    Builtin::Charset(CharsetOp::ToString) => "toString",
+                    Builtin::Charset(CharsetOp::HashCode) => "hashCode",
+                    Builtin::Charset(CharsetOp::Equals) => "equals",
+                    // `i.intValue()`, which javac names by the boxed class.
+                    Builtin::Boxed(BoxedOp::Unbox, kind) => {
+                        let method = format!("{}Value", x.ty);
+                        let call = match self.jdk {
+                            true => Some(format!("java.lang.{}.{method}()", Type::boxed(*kind))),
+                            false => self.call(x.pos, &method),
+                        };
+                        return add(&args[0], call.map(|m| format!("Cannot invoke \"{m}\"")));
+                    }
                     // `Arrays.copyOf` of a null, which fails in the JDK's code (`-g`, so the
                     // parameter has its name): the copy of an array of objects first asks for its
                     // class, the others read its length.
@@ -192,6 +225,14 @@ impl Messages<'_> {
                         for array in [&args[0], &args[2]] {
                             out.insert(array.id, None);
                         }
+                        return;
+                    }
+                    // `new StringBuilder(seq)` of a null `seq`, which the JDK's constructor
+                    // asks for its length (`-g`, so the parameter has its name).
+                    Builtin::Builder(BuilderOp::New) if matches!(args[0].ty, Type::Class(c, _) if c == CHAR_SEQUENCE) =>
+                    {
+                        let failure = "Cannot invoke \"java.lang.CharSequence.length()\"";
+                        out.insert(args[0].id, Some(format!("{failure} because \"seq\" is null")));
                         return;
                     }
                     // `synchronized` on a null.
@@ -279,6 +320,9 @@ impl Messages<'_> {
             // one is loaded from the constant pool, which the JVM does not show.
             ExprKind::Int(v) if (-32768..=32767).contains(v) => v.to_string(),
             ExprKind::Int(_) => return Some(Source::Hidden),
+            // `(s = a).next`: the class file keeps a copy of the value it stores (`dup`), which the
+            // JVM follows back to where the value came from.
+            ExprKind::Assign { op: None, target: Place::Var(_), value } => return self.source(value, detail),
             ExprKind::Var(name) if self.jdk => self.jdk_local(name)?,
             ExprKind::Var(_) => self.names.get(self.outermost, e.pos, NameKind::Local, "")?.to_string(),
             ExprKind::Static { name, .. } => {
@@ -325,18 +369,35 @@ impl Messages<'_> {
     }
 
     /// The method that the call `x` in the JDK's code calls, as the class file refers to it,
-    /// which `BytecodeNames` does not compile: javac names an instance method by the static type
-    /// of the receiver and the erased types of the method's parameters, and the JVM shows
-    /// `java.lang.Object` and `java.lang.String` by their simple names. `None` where the
-    /// translation's types may not be the declared ones: a receiver or a parameter of `Object`,
-    /// whose type may have been an interface or a type variable, a string, which may have been a
-    /// `CharSequence`, or another value type of the runtime.
+    /// which `BytecodeNames` does not compile: javac names an instance method by the erasure of
+    /// the static type of the receiver and the erased types of the method's parameters, which
+    /// the translation's types are, and the JVM shows `java.lang.Object` and `java.lang.String`
+    /// by their simple names. `None` where the translation's types may not be the declared ones:
+    /// a receiver of `Object`, whose type may have been an interface or a type variable with
+    /// another bound, a string, which may have been a `CharSequence`, or another value type of
+    /// the runtime.
     fn jdk_call(&self, x: &Expr) -> Option<String> {
         let ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super: false, .. } = &x.kind else {
             return None;
         };
         if !self.jdk || self.class.methods[*r].is_static {
             return None;
+        }
+        // javac leaves a method that `Object` declares as `Object`'s, whatever the receiver
+        // (`Gen.binaryQualifier`), and the JVM shows it as `Object.equals(Object)`.
+        let callee = &self.class.methods[*r];
+        if is_object(&self.class.types[callee.class]) {
+            let params: Option<Vec<String>> = callee.params.iter().map(|p| self.java_param(p.ty)).collect();
+            return Some(format!("Object.{name}({})", params?.join(", ")));
+        }
+        // `Comparable.compareTo(T)`, whose parameter erases to `Object`, of the translation's own
+        // `Comparable`, which javac names `java.lang.Comparable` as the erasure of the receiver.
+        if name == "compareTo"
+            && let Some(t) = self.class.class_index(receiver.ty)
+            && self.class.types[t].name == COMPARABLE
+            && self.class.types[callee.class].name == COMPARABLE
+        {
+            return Some("java.lang.Comparable.compareTo(Object)".to_string());
         }
         let owner = self.java_class(receiver.ty)?;
         let params: Option<Vec<String>> =
@@ -348,14 +409,25 @@ impl Messages<'_> {
     fn java_class(&self, ty: Type) -> Option<String> {
         let t = self.class.class_index(ty)?;
         let decl = &self.class.types[t];
-        if !matches!(decl.origin, Origin::Member)
-            || decl.package.is_empty()
-            || !super::exceptions::from_jdk(decl)
-        {
+        if !matches!(decl.origin, Origin::Member) {
             return None;
         }
-        let rest = decl.name.strip_prefix(&decl.package)?.strip_prefix('.')?;
-        let name = format!("{}.{}", decl.package, rest.replace('.', "$"));
+        // The translator's own classes of the JDK (`java/Threads.java`, `java/Standard.java`) have
+        // their real names but no package: it is the names before the first class's, which the
+        // JDK's packages all write in lower case and its classes not.
+        let template_package = || {
+            let segments: Vec<&str> = decl.name.split('.').collect();
+            let n = segments.iter().take_while(|s| s.starts_with(|c: char| c.is_ascii_lowercase())).count();
+            (segments.first() == Some(&"java") && n >= 2 && n < segments.len())
+                .then(|| segments[..n].join("."))
+        };
+        let package = match decl.package.as_str() {
+            "" => template_package()?,
+            _ if super::exceptions::from_jdk(decl) => decl.package.clone(),
+            _ => return None,
+        };
+        let rest = decl.name.strip_prefix(&package)?.strip_prefix('.')?;
+        let name = format!("{package}.{}", rest.replace('.', "$"));
         (name != "java.lang.Object" && name != "java.lang.String").then_some(name)
     }
 
@@ -371,6 +443,13 @@ impl Messages<'_> {
             Type::Float => "float".to_string(),
             Type::Boolean => "boolean".to_string(),
             Type::Array(element) => format!("{}[]", self.java_param(*element)?),
+            // A parameter declared `Object`, or of a type variable whose erasure is `Object`, as
+            // javac erases it in the descriptor too.
+            Type::Class(..)
+                if self.class.class_index(ty).is_some_and(|t| is_object(&self.class.types[t])) =>
+            {
+                "Object".to_string()
+            }
             Type::Class(..) => self.java_class(ty)?,
             _ => return None,
         })

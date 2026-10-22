@@ -249,18 +249,21 @@ pub fn flows(
             visit_expr(init, &mut |x| note(x, t));
         }
     }
-    loop {
-        let mut changed = false;
-        for &(s, t) in &edges {
-            let moved: Vec<usize> =
-                flows[s].iter().copied().filter(|&c| h.is_subtype(c, t) && !flows[t].contains(&c)).collect();
-            changed |= !moved.is_empty();
-            flows[t].extend(moved);
-        }
-        if !changed {
-            return flows;
+    // Each class that reaches a type moves on along its edges, once.
+    let mut out: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(s, t) in &edges {
+        out[s].push(t);
+    }
+    let mut work: Vec<(usize, usize)> =
+        flows.iter().enumerate().flat_map(|(s, f)| f.iter().map(move |&c| (s, c))).collect();
+    while let Some((s, c)) = work.pop() {
+        for &t in &out[s] {
+            if h.is_subtype(c, t) && flows[t].insert(c) {
+                work.push((t, c));
+            }
         }
     }
+    flows
 }
 
 /// How values of class type `t` are represented.
@@ -330,8 +333,10 @@ pub fn text_impl(class: &Class, c: usize) -> Option<usize> {
 fn declared_impl(class: &Class, c: usize, name: &str) -> Option<usize> {
     let mut chain = vec![c];
     chain.extend(class.hierarchy.ancestors(c));
+    debug_assert_eq!(class.hierarchy.overriders.len(), class.methods.len(), "the hierarchy is out of date");
     chain.into_iter().find_map(|t| {
-        class.methods.iter().position(|m| {
+        class.hierarchy.methods_of(t).iter().copied().find(|&i| {
+            let m = &class.methods[i];
             m.class == t && m.name == name && m.params.is_empty() && !m.is_static && !m.is_abstract
         })
     })
@@ -345,7 +350,7 @@ fn declared_impl(class: &Class, c: usize, name: &str) -> Option<usize> {
 /// borrows only when it is short (`long` has those that are not; see `threads`).
 pub fn field_level(
     class: &Class,
-    reach: &[HashSet<&str>],
+    reach: &[super::closure::Bits],
     immutable: &HashSet<String>,
     structs: &HashSet<usize>,
     long: &HashSet<usize>,
@@ -363,9 +368,9 @@ pub fn field_level(
             {
                 return false;
             }
-            let family: Vec<&str> = h.family(t).into_iter().map(|c| class.types[c].name.as_str()).collect();
-            family.iter().all(|c| immutable.contains(*c))
-                || (!long.contains(&m) && !family.iter().any(|c| reach[m].contains(c)))
+            let family = h.family(t);
+            family.iter().all(|&c| immutable.contains(&class.types[c].name))
+                || (!long.contains(&m) && !family.iter().any(|&c| reach[m].contains(c)))
         })
         .collect();
     loop {

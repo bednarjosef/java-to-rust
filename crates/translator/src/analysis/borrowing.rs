@@ -19,9 +19,10 @@
 //! of them, and touching an object of a class type touches every concrete class under it.
 
 use super::Facts;
+use super::closure::{Bits, reached_union};
 use super::hierarchy::{Home, home, to_string_impl};
 use crate::ast::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 pub struct Borrowing {
@@ -31,6 +32,9 @@ pub struct Borrowing {
     pub mutating: HashSet<usize>,
     /// Classes, by qualified name, whose constructors build a plain value.
     pub plain_constructors: HashSet<String>,
+    /// For each of the other classes, by index, the position of the first constructor (or else
+    /// field initializer) that keeps it from building a plain value.
+    pub not_plain: HashMap<usize, Pos>,
     /// Methods and constructors that touch no shared object but their own `this`, directly or
     /// through what they call.
     pub isolated: HashSet<usize>,
@@ -40,29 +44,20 @@ pub struct Borrowing {
     pub writers: HashSet<usize>,
 }
 
-/// What each method does with objects, and the classes whose objects each may touch through a
-/// handle other than its `this`, directly or through what it calls.
+/// What each method does with objects, and the classes (by index in `Class::types`) whose
+/// objects each may touch through a handle other than its `this`, directly or through what it
+/// calls.
 pub struct Reach<'c> {
     scans: Vec<Scan<'c>>,
-    pub reach: Vec<HashSet<&'c str>>,
+    pub reach: Vec<Bits>,
 }
 
 pub fn reach(class: &Class) -> Reach<'_> {
     let scans: Vec<Scan> = class.methods.iter().map(|m| scan(class, m)).collect();
-    let mut reach: Vec<HashSet<&str>> = scans.iter().map(|s| s.touches.clone()).collect();
-    loop {
-        let mut changed = false;
-        for m in 0..scans.len() {
-            for &(callee, _) in &scans[m].calls {
-                let extra: Vec<&str> = reach[callee].difference(&reach[m]).copied().collect();
-                changed |= !extra.is_empty();
-                reach[m].extend(extra);
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    let calls: Vec<Vec<usize>> =
+        scans.iter().map(|s| s.calls.iter().map(|&(callee, _)| callee).collect()).collect();
+    let touches: Vec<Bits> = scans.iter().map(|s| s.touches.clone()).collect();
+    let reach = reached_union(&calls, &touches);
     Reach { scans, reach }
 }
 
@@ -96,9 +91,7 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
             _ if class.methods[m].is_ctor => false,
             Home::Class(c) => {
                 always(c)
-                    || (!scans[m].this_as_value
-                        && !reach[m].contains(name(c))
-                        && !facts.long_methods.contains(&m))
+                    || (!scans[m].this_as_value && !reach[m].contains(c) && !facts.long_methods.contains(&m))
             }
             Home::Fields(_) => true,
             _ => false,
@@ -155,25 +148,29 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
                 _ => false,
             }
     };
-    let plain_constructors = (0..class.types.len())
-        .filter(|&t| {
-            let ctors =
-                || (0..scans.len()).filter(move |&m| class.methods[m].is_ctor && class.methods[m].class == t);
-            let initializers_ok = class.types[t].fields.iter().filter_map(|f| f.init.as_ref()).all(|init| {
-                let mut s = Scan::default();
-                s.expr(class, init);
-                !s.this_as_value && s.this_calls.iter().all(|&call| plain_call(t, call))
-            });
-            initializers_ok
-                && ctors().all(|m| {
-                    !scans[m].this_as_value && scans[m].this_calls.iter().all(|&call| plain_call(t, call))
-                })
-        })
-        .map(|t| class.types[t].name.clone())
-        .collect();
+    debug_assert_eq!(h.overriders.len(), class.methods.len(), "the hierarchy is out of date");
+    let mut plain_constructors = HashSet::new();
+    let mut not_plain = HashMap::new();
+    for t in 0..class.types.len() {
+        let ctors = h.methods_of(t).iter().copied().filter(|&m| class.methods[m].is_ctor);
+        let mut failing_ctor = ctors
+            .filter(|&m| {
+                scans[m].this_as_value || !scans[m].this_calls.iter().all(|&call| plain_call(t, call))
+            })
+            .map(|m| class.methods[m].pos);
+        let failing_init = class.types[t].fields.iter().filter_map(|f| f.init.as_ref()).find(|init| {
+            let mut s = Scan::default();
+            s.expr(class, init);
+            s.this_as_value || !s.this_calls.iter().all(|&call| plain_call(t, call))
+        });
+        match failing_ctor.next().or(failing_init.map(|init| init.pos)) {
+            Some(pos) => _ = not_plain.insert(t, pos),
+            None => _ = plain_constructors.insert(class.types[t].name.clone()),
+        }
+    }
     // Immutable and owned objects have no `RefCell` to borrow.
     let shared = |c: &str| !facts.immutable.contains(c) && !facts.owned.contains(c);
-    let isolated = (0..scans.len()).filter(|&m| !reach[m].iter().any(|c| shared(c))).collect();
+    let isolated = (0..scans.len()).filter(|&m| !reach[m].iter().any(|c| shared(name(c)))).collect();
     let mut writers: HashSet<usize> = (0..scans.len())
         .filter(|&m| {
             let method = &class.methods[m];
@@ -203,7 +200,7 @@ pub fn borrowing(class: &Class, facts: &Facts, reach: &Reach) -> Borrowing {
     let isolated: HashSet<usize> = isolated;
     let isolated =
         isolated.iter().copied().filter(|&m| h.group(m).iter().all(|g| isolated.contains(g))).collect();
-    Borrowing { methods, mutating, plain_constructors, isolated, writers }
+    Borrowing { methods, mutating, plain_constructors, not_plain, isolated, writers }
 }
 
 /// A call on `this`: of a method (as the call names it), or of `toString` by turning `this` into
@@ -217,8 +214,8 @@ enum ThisCall {
 /// What one method does with objects.
 #[derive(Default)]
 struct Scan<'c> {
-    /// Classes whose objects the method touches through a handle other than `this`.
-    touches: HashSet<&'c str>,
+    /// Classes, by index, whose objects the method touches through a handle other than `this`.
+    touches: Bits,
     /// Methods and constructors it may run, and whether on `this` (`this(...)` and `super(...)`
     /// count as on `this`).
     calls: Vec<(usize, bool)>,
@@ -243,9 +240,14 @@ fn scan<'c>(class: &'c Class, m: &Method) -> Scan<'c> {
 /// The classes an object of type `ty` may be of: the type itself and the concrete classes
 /// under it, by qualified name.
 fn classes(class: &Class, ty: Type) -> Vec<&str> {
+    class_indexes(class, ty).into_iter().map(|c| class.types[c].name.as_str()).collect()
+}
+
+/// `classes`, by index in `Class::types`.
+fn class_indexes(class: &Class, ty: Type) -> Vec<usize> {
     let Some(t) = class.class_index(ty) else { return Vec::new() };
-    let mut out = vec![class.types[t].name.as_str()];
-    out.extend(class.hierarchy.concretes(t).into_iter().map(|c| class.types[c].name.as_str()));
+    let mut out = vec![t];
+    out.extend(class.hierarchy.concretes(t));
     out
 }
 
@@ -328,6 +330,8 @@ impl<'c> Scan<'c> {
     }
 
     fn touch(&mut self, class: &'c Class, ty: Type) {
-        self.touches.extend(classes(class, ty));
+        for c in class_indexes(class, ty) {
+            self.touches.insert(c);
+        }
     }
 }

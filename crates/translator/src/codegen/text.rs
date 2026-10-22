@@ -391,7 +391,9 @@ impl<'a> Gen<'a> {
     /// `NullPointerException`, and a chained call is the `&Self` it returns.
     pub(super) fn builder_recv(&mut self, e: &'a Expr) -> String {
         match &e.kind {
-            ExprKind::Builtin(Builtin::Builder(op), args) if op.chains() => self.builder_call(*op, args).text,
+            ExprKind::Builtin(Builtin::Builder(op), args) if op.chains() => {
+                self.builder_call(e.id, *op, args).text
+            }
             _ if self.nullable(e) => {
                 let option = self.builder_option(e);
                 self.dereference(&[e.id], &option)
@@ -427,12 +429,15 @@ impl<'a> Gen<'a> {
 
     /// A builder method as it is called; a chaining method gives the `&Self` it returns, which
     /// `builtin` clones where the builder is used as a value.
-    pub(super) fn builder_call(&mut self, op: BuilderOp, args: &'a [Expr]) -> Code {
+    pub(super) fn builder_call(&mut self, id: ExprId, op: BuilderOp, args: &'a [Expr]) -> Code {
         let ty = self.runtime("StringBuilder");
         if op == BuilderOp::New {
             return Code::atom(match args.first() {
                 None => format!("{ty}::new()"),
                 Some(n) if n.ty == Type::Int => format!("{ty}::with_capacity({})", self.int_arg(n)),
+                Some(s) if matches!(s.ty, Type::Class(..)) => {
+                    format!("{ty}::from_text({})", self.copied_text(s))
+                }
                 Some(s) => format!("{ty}::from_text({})", self.text_ref(s)),
             });
         }
@@ -451,8 +456,8 @@ impl<'a> Gen<'a> {
                     let chars = self.slice_of(&rest[0]);
                     method("append_chars_range", vec![chars, start, end])
                 } else {
-                    let text = self.text_ref(&rest[0]);
-                    method("append_range", vec![text, start, end])
+                    let text = self.range_text(&rest[0]);
+                    self.append_range_call(id, &sb, &format!("{text}, {start}, {end}"))
                 }
             }
             BuilderOp::Insert => {
@@ -640,7 +645,7 @@ impl<'a> Gen<'a> {
     }
 
     /// `e` as a `String` of the text that concatenating it shows.
-    fn text_of(&mut self, e: &'a Expr) -> String {
+    pub(super) fn text_of(&mut self, e: &'a Expr) -> String {
         let mut parts = Vec::new();
         self.parts(e, &mut parts);
         match parts.as_slice() {

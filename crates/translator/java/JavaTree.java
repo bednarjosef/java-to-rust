@@ -128,7 +128,8 @@ public class JavaTree {
         elements = task.getElements();
         types = task.getTypes();
         task.parse().forEach(units::add);
-        PrintStream stdout = new PrintStream(new FileOutputStream(FileDescriptor.out), false, StandardCharsets.UTF_8);
+        PrintStream stdout = new PrintStream(new BufferedOutputStream(new FileOutputStream(FileDescriptor.out), 1 << 16),
+                false, StandardCharsets.UTF_8);
         if (serve) {
             serve((JavacTaskImpl) task, units, diagnostics, stdout);
             return;
@@ -200,6 +201,9 @@ public class JavaTree {
             task.analyze(classes);
             failOnErrors(diagnostics);
             print(trees, units, stdout);
+            for (CompilationUnitTree unit : units) {
+                release(unit);
+            }
             String line = in.readLine();
             if (line == null) {
                 return;
@@ -226,10 +230,15 @@ public class JavaTree {
         return top;
     }
 
-    /** Prints the units as a line {@code {"units":[{"file":...,"tree":...},...]}}. */
+    /**
+     * Prints the units as a line {@code {"units":[{"file":...,"tree":...},...]}}, each unit as soon
+     * as its text is made, so that the text of only one is held at a time.
+     */
     private static void print(Trees trees, List<CompilationUnitTree> units, PrintStream stdout) {
-        StringBuilder out = new StringBuilder("{\"units\":[");
+        stdout.print("{\"units\":[");
+        StringBuilder out = new StringBuilder();
         for (CompilationUnitTree unit : units) {
+            out.setLength(0);
             if (unit != units.get(0)) {
                 out.append(',');
             }
@@ -238,10 +247,30 @@ public class JavaTree {
             out.append(",\"tree\":");
             new JavaTree(trees, unit).node(new TreePath(unit), out);
             out.append('}');
+            stdout.append(out);
+            // A large unit's text is not kept for the next.
+            if (out.capacity() > 1 << 20) {
+                out = new StringBuilder();
+            }
         }
-        out.append("]}\n");
-        stdout.print(out);
+        stdout.print("]}\n");
         stdout.flush();
+    }
+
+    /**
+     * Lets javac free the method bodies of a unit that has been printed: in serve mode javac
+     * attributes more units afterwards, which need the unit's classes and their members, but
+     * not the code of its methods. Field initializers stay, since a constant's value may be
+     * computed from one when another unit uses it.
+     */
+    private static void release(CompilationUnitTree unit) {
+        new TreeScanner<Void, Void>() {
+            @Override
+            public Void visitMethod(MethodTree method, Void unused) {
+                ((com.sun.tools.javac.tree.JCTree.JCMethodDecl) method).body = null;
+                return null;
+            }
+        }.scan(unit, null);
     }
 
     /** Prints the compile errors as {@code FILE:LINE:COLUMN: message} and exits, if there are any. */

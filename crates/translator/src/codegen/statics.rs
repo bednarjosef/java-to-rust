@@ -67,9 +67,7 @@ impl<'a> Gen<'a> {
             let cell = cell_name(decl, &f.name);
             self.line(&format!("{}const {cell}: {ty} = {value};", self.vis()));
         }
-        let here: Vec<usize> = (0..class.types.len())
-            .filter(|&t| self.module_types().any(|d| std::ptr::eq(d, &class.types[t])))
-            .collect();
+        let here: Vec<usize> = self.module_type_indexes();
         let eager: Vec<usize> = here.iter().copied().filter(|t| self.facts.eager_init.contains(t)).collect();
         let cells: Vec<(usize, &Field)> = here
             .iter()

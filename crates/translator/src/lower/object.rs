@@ -23,6 +23,9 @@
 //! and `charAt(int)` that each answers as the runtime's string or builder does; its `toString()`
 //! is the value's text and its `isEmpty()` a zero length. The JDK's `CharSequence` is not
 //! translated, and its other methods are rejected.
+//! The JDK's `java.lang.Appendable` is translated, and the runtime's builders implement it too,
+//! with its `append` methods answered by the builder's own (see `codegen::dispatch`), so that a
+//! builder passed as one (to `Formatter`, to `DateTimeFormatter.formatTo`) is one.
 //! `java.lang.Enum`, when the program uses it as a type, is a type of the same kind, `ENUM`, with
 //! no methods of its own: the program's enums implement it, and `lower::enums` lowers the calls
 //! of `Enum`'s methods on its values.
@@ -44,6 +47,9 @@ pub(super) struct ObjectIndexes {
     pub(super) char_sequence: Option<NumberIndexes>,
     /// The index of `Enum`'s type, after `Number`'s, when the program uses it.
     pub(super) enumeration: Option<usize>,
+    /// The index of the JDK's `Appendable`, a type of the program, when the program has it: the
+    /// runtime's builders implement it.
+    pub(super) appendable: Option<usize>,
 }
 
 /// The index of `Number`'s type, after `Comparable`'s or the runtime classes, and of the first of
@@ -272,11 +278,13 @@ impl<'t> Lowering<'t> {
         let number = uses_number(decls);
         let char_sequence = uses_char_sequence(decls);
         let unrelated = decls.iter().any(|d| self.compares_unrelated(d.0));
+        let appendable = self.type_index("java.lang.Appendable");
         if uses_object(decls, &self.real_type_parameters())
             || comparable
             || number
             || char_sequence
             || unrelated
+            || appendable.is_some()
         {
             let decl = self.types.len();
             let equals = self.methods.len();
@@ -302,6 +310,7 @@ impl<'t> Lowering<'t> {
                 number,
                 enumeration,
                 char_sequence,
+                appendable,
             });
         }
     }
@@ -364,7 +373,7 @@ impl<'t> Lowering<'t> {
         // The `length()`, `charAt(int)` and `subSequence(int, int)` that a class implementing
         // `CharSequence` declares or inherits implement the interface's. A `subSequence` may
         // return a subclass of `CharSequence` (`CharBuffer`'s returns a `CharBuffer`), which the
-        // dispatcher converts; one that returns a string is rejected.
+        // dispatcher converts, or a string (javac's names return theirs), which a bridge converts.
         if let Some(s) = at.char_sequence {
             for t in (0..self.types.len()).filter(|&t| self.implements_directly(t, "java.lang.CharSequence"))
             {
@@ -383,7 +392,7 @@ impl<'t> Lowering<'t> {
                             let returned = methods[m].ret;
                             let fits = match ret {
                                 Some(ret) => returned == ret,
-                                None => matches!(returned, Type::Class(..)),
+                                None => matches!(returned, Type::Class(..) | Type::String),
                             };
                             if !fits && ret.is_none() {
                                 return Err(Error {
@@ -576,8 +585,9 @@ impl<'t> Lowering<'t> {
         for &ty in self.object_arrays.borrow().iter() {
             let name = if ty == Type::StringBuilder { STRING_BUILDER.to_string() } else { ty.to_string() };
             let mut implements = vec![at.decl];
-            if let Some(s) = at.char_sequence.filter(|_| ty == Type::StringBuilder) {
-                implements.push(s.decl);
+            if ty == Type::StringBuilder {
+                implements.extend(at.char_sequence.map(|s| s.decl));
+                implements.extend(at.appendable);
             }
             types.push(decl(&name, "", TypeKind::Runtime, implements));
         }
@@ -673,6 +683,9 @@ impl<'t> Lowering<'t> {
                     }
                     Some(i) => methods[i].overrides.push(c.compare_to),
                     None if self.types[t].node.has_flag("ABSTRACT") => {}
+                    // Nor does a class whose objects the program never creates (`Year`, whose
+                    // static methods alone are reached): its `compareTo` never runs.
+                    None if self.reach.is_some_and(|r| !r.instantiated.contains(&self.types[t].javac)) => {}
                     // In a census, the class goes on without the bridge.
                     None => {
                         let pos = self.types[t].node.pos();

@@ -102,6 +102,7 @@ impl<'a> Gen<'a> {
                 call(self, "java_home", vec![fallback])
             }
             Native::SystemProperty(key) => call(self, "system_property", vec![rust_string(key)]),
+            Native::CopyMemory { .. } => self.copy_memory(args),
             Native::FullFence => {
                 Code::atom("std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst)".to_string())
             }
@@ -215,6 +216,9 @@ impl<'a> Gen<'a> {
                 let offset = self.value(&args[0], Type::Long).text;
                 call(self, "nano_time_adjustment", vec![offset])
             }
+            // The javaHome argument is dropped: it is a property read, and `time_zone.rs` does not use it.
+            Native::SystemTimeZoneId => call(self, "system_time_zone_id", vec![]),
+            Native::SystemGmtOffsetId => call(self, "system_gmt_offset_id", vec![]),
             Native::ArrayBaseOffset => call(self, "array_base_offset", vec![]),
             Native::ArrayIndexScale(element) => call(self, "array_index_scale", vec![rust_string(element)]),
             Native::DescriptorHandle | Native::DescriptorAppend => {
@@ -235,6 +239,12 @@ impl<'a> Gen<'a> {
                 let (off, len) = (self.value(&args[2], Type::Int).text, self.value(&args[3], Type::Int).text);
                 call(self, "crc32_update_bytes", vec![crc, bytes, off, len])
             }
+            Native::InflateInit
+            | Native::InflateBytes
+            | Native::InflateAdler
+            | Native::InflateReset
+            | Native::InflateEnd
+            | Native::InflateSetDictionary => self.inflate_native(native, args, id),
             Native::NoPendingReferences => Code::atom("false"),
             Native::SecureSeed => {
                 let num_bytes = self.value(&args[0], Type::Int).text;
@@ -360,6 +370,9 @@ impl<'a> Gen<'a> {
         if let Some(code) = self.math_extra(name, args, ty) {
             return code;
         }
+        if let Some(code) = self.ceil_division(name, args, ty, id) {
+            return code;
+        }
         // The operand type of the overloads: `round(float)` returns `int`, `floorMod(long, int)`
         // computes in `long`.
         let operand = match name {
@@ -410,6 +423,93 @@ impl<'a> Gen<'a> {
     /// `java::arraycopy`, which also handles a copy within one array; plain arrays are copied
     /// between slices, or within one with `java::copy_within`. Where a `catch` or a `finally` sees
     /// the copy's failure (`Facts::raising`), the checked form of each.
+    /// `Unsafe.copyMemory0(srcBase, srcOffset, destBase, destOffset, bytes)` (and with a sixth
+    /// argument, the unit size, `copySwapMemory0`): the bases are `Object`s that hold arrays of
+    /// primitives, matched by kind, whose bytes `java::copy_memory` copies. A base that is null
+    /// (an address outside the heap) or no such array ends the program.
+    fn copy_memory(&mut self, args: &'a [Expr]) -> Code {
+        let [src, src_offset, dest, dest_offset, bytes, rest @ ..] = args else {
+            unreachable!("copyMemory0 has five arguments")
+        };
+        let (s, d) = (self.optional(src).text, self.optional(dest).text);
+        let longs: Vec<String> = [src_offset, dest_offset, bytes]
+            .into_iter()
+            .chain(rest)
+            .map(|e| self.value(e, Type::Long).text)
+            .collect();
+        let swap = longs.get(3).cloned().unwrap_or_else(|| "0".to_string());
+        let [p, q, n, k] = ["src_offset", "dest_offset", "bytes", "unit"].map(|base| self.temp(base));
+        let copy = self.runtime("copy_memory");
+        let variants = self.primitive_array_variants();
+        let mut arms = Vec::new();
+        for a in &variants {
+            for b in &variants {
+                arms.push(format!(
+                    "(Some({a}(src)), Some({b}(dest))) => {copy}(src, {p}, dest, {q}, {n}, {k}),"
+                ));
+            }
+        }
+        arms.push(format!(
+            "_ => {}(\"an Unsafe copy of memory that is not between arrays of primitives\"),",
+            self.runtime("unsupported_memory")
+        ));
+        Code::atom(format!(
+            "{{ let ({p}, {q}, {n}, {k}) = ({}, {}, {}, {swap}); match (&{s}, &{d}) {{ {} }} }}",
+            longs[0],
+            longs[1],
+            longs[2],
+            arms.join(" ")
+        ))
+    }
+
+    /// The variants of the `Object` enum that hold arrays of primitives.
+    fn primitive_array_variants(&self) -> Vec<String> {
+        let primitive = |ty: Type| {
+            matches!(
+                ty,
+                Type::Array(e) if matches!(
+                    *e,
+                    Type::Int | Type::Long | Type::Double | Type::Float | Type::Byte | Type::Short | Type::Char | Type::Boolean
+                )
+            )
+        };
+        let Some(t) = self.object_index() else { return Vec::new() };
+        let arrays =
+            self.enum_variants(t).into_iter().filter(|&c| self.class.array_of(c).is_some_and(primitive));
+        arrays.map(|c| self.variant(t, c)).collect()
+    }
+
+    /// `Builtin::RawMemory`: `Unsafe`'s read (or with `put`, write) of a `ty` at an offset of an
+    /// `Object` that holds an array of primitives, matched by kind (`java::get_memory`).
+    pub(super) fn raw_memory(&mut self, ty: Type, put: bool, args: &'a [Expr]) -> Code {
+        let base = self.optional(&args[0]).text;
+        let offset = self.value(&args[1], Type::Long).text;
+        let rust = rust_type(ty);
+        let [o, v] = ["offset", "value"].map(|name| self.temp(name));
+        let (value, call) = match args.get(2) {
+            Some(x) if put => {
+                let value = self.value(x, ty).text;
+                (
+                    format!(", {value}"),
+                    format!("{}::<{rust}, _, _>(array, {o}, {v})", self.runtime("put_memory")),
+                )
+            }
+            _ => (String::new(), format!("{}::<{rust}, _, _>(array, {o})", self.runtime("get_memory"))),
+        };
+        let mut arms: Vec<String> = self
+            .primitive_array_variants()
+            .iter()
+            .map(|variant| format!("Some({variant}(array)) => {call},"))
+            .collect();
+        arms.push(format!(
+            "_ => {}(\"an Unsafe access of memory that is not in an array of primitives\"),",
+            self.runtime("unsupported_memory")
+        ));
+        let bind =
+            if put { format!("let ({o}, {v}) = ({offset}{value});") } else { format!("let {o} = {offset};") };
+        Code::atom(format!("{{ {bind} match &{base} {{ {} }} }}", arms.join(" ")))
+    }
+
     fn array_copy(&mut self, args: &'a [Expr], id: ExprId) -> Code {
         let [src, src_pos, dest, dest_pos, length] = args else {
             unreachable!("arraycopy has five arguments")

@@ -31,6 +31,7 @@ pub enum CharsetOp {
     ToString,
     /// `charset.hashCode()`; the charset is the first argument.
     HashCode,
-    /// `charset.equals(other)`, which is `==` on the two charsets; they are the arguments.
+    /// `charset.equals(other)`, which compares them as `==` does; they are the arguments, and
+    /// `other` may be null.
     Equals,
 }

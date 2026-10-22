@@ -118,6 +118,10 @@ impl<'a> Gen<'a> {
         if let Some(ty) = runtime_type(&decl.name) {
             return self.type_class(ty);
         }
+        // An array held as an `Object` (`char[]`): `[C`, with its component type.
+        if let Some(ty) = self.class.array_of(c) {
+            return self.type_class(ty);
+        }
         match decl.name.as_str() {
             OBJECT => return "java::Class::OBJECT".to_string(),
             COMPARABLE => return "java::Class::COMPARABLE".to_string(),
@@ -160,7 +164,9 @@ impl<'a> Gen<'a> {
             ClassOp::IsEnum => "is_enum",
             ClassOp::ToString => "to_string",
             ClassOp::HashCode => "hash_code",
-            ClassOp::DesiredAssertionStatus => {
+            ClassOp::GetCanonicalName => "get_canonical_name",
+            ClassOp::GetPackageName => "get_package_name",
+            ClassOp::DesiredAssertionStatus | ClassOp::IsAnnotation => {
                 return Code::new(format!("{{ let _ = {class}; false }}"), LOWEST);
             }
             ClassOp::Equals => {
@@ -377,7 +383,7 @@ impl<'a> Gen<'a> {
 }
 
 /// The binary name of the class of arrays of `element`: `[I`, `[Ljava.lang.String;`.
-fn array_name(g: &mut Gen, element: Type) -> String {
+pub(super) fn array_name(g: &Gen, element: Type) -> String {
     let code = match element {
         Type::Int => "I".to_string(),
         Type::Long => "J".to_string(),
@@ -394,7 +400,7 @@ fn array_name(g: &mut Gen, element: Type) -> String {
 }
 
 /// The binary name of a class type.
-fn class_name(g: &mut Gen, ty: Type) -> String {
+fn class_name(g: &Gen, ty: Type) -> String {
     match ty {
         Type::String => "java.lang.String".to_string(),
         Type::StringBuilder => "java.lang.StringBuilder".to_string(),

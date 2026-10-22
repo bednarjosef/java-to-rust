@@ -11,7 +11,8 @@ use std::collections::HashSet;
 
 /// The qualified names of the classes whose objects never change once constructed.
 pub fn immutable_classes(class: &Class) -> HashSet<String> {
-    let alone: Vec<bool> = (0..class.types.len()).map(|t| is_immutable(class, t)).collect();
+    let scans = Scans::new(class);
+    let alone: Vec<bool> = (0..class.types.len()).map(|t| scans.is_immutable(class, t)).collect();
     (0..class.types.len())
         .filter(|&t| {
             let family = class.hierarchy.family(t);
@@ -56,92 +57,129 @@ pub fn calls_needing_handles(class: &Class, facts: &Facts) -> HashSet<usize> {
     out
 }
 
-fn is_immutable(class: &Class, t: usize) -> bool {
-    let h = &class.hierarchy;
-    let mut chain = vec![t];
-    chain.extend(h.ancestors(t));
-    let mut scan = Scan {
-        class,
-        t,
-        ctor: false,
-        runs_on: false,
-        immutable: true,
-        allowed: HashSet::new(),
-        selves: Vec::new(),
-    };
-    for m in &class.methods {
-        // Constructors of the class and of its superclasses build its objects.
-        scan.ctor = m.is_ctor && chain.contains(&m.class);
-        scan.runs_on = !m.is_static && chain.contains(&m.class);
-        for s in &m.body {
-            visit_stmt(s, &mut |e| visit_expr(e, &mut |x| scan.expr(x)), &mut |_| {});
-        }
-    }
-    scan.ctor = false;
-    scan.runs_on = false;
-    for &c in &chain {
-        for f in &class.types[c].fields {
-            if let Some(init) = &f.init {
-                visit_expr(init, &mut |x| scan.expr(x));
-            }
-        }
-    }
-    scan.immutable && scan.selves.iter().all(|id| scan.allowed.contains(id))
+/// What every method and field initializer does with `this` and with fields, scanned once for
+/// all the classes (scanning the whole program again for each class takes the number of classes
+/// times the size of the program). A class's objects change after construction when code that
+/// runs on them writes a field of `this` outside a constructor that builds them, when any code
+/// writes a field of an object whose type the class is a subtype of, or when `this` escapes code
+/// that runs on them: is used other than to read a field, to receive a call, or as the target of
+/// a constructor's write.
+struct Scans {
+    /// What each method does with `this`.
+    methods: Vec<MethodScan>,
+    /// The types of the objects whose fields the methods write through a handle other than `this`.
+    written: HashSet<usize>,
+    /// The same, of the field initializers of each type.
+    init_written: Vec<HashSet<usize>>,
+    /// The `this` nodes that are a field object or a receiver in the field initializers of each
+    /// type.
+    init_allowed: Vec<HashSet<ExprId>>,
+    /// The methods of each type.
+    by_class: Vec<Vec<usize>>,
 }
 
-/// The state of the scan of one class's objects.
-struct Scan<'a> {
-    class: &'a Class,
-    /// The class being checked.
-    t: usize,
-    /// Whether the code being scanned is a constructor that builds objects of the class.
-    ctor: bool,
-    /// Whether the code being scanned is an instance method or constructor that runs on objects of
-    /// the class: one of the class or of a superclass.
-    runs_on: bool,
-    /// Cleared by anything that writes a field outside the constructors.
-    immutable: bool,
-    /// `this` nodes that are a field object, a method receiver or a constructor's write target.
-    allowed: HashSet<ExprId>,
-    /// Every `this` node that may be an object of the class.
+/// What one method does with `this`.
+#[derive(Default)]
+struct MethodScan {
+    /// Its `this` nodes that are neither a field object nor a receiver in any method.
     selves: Vec<ExprId>,
+    /// The `this` nodes whose fields it writes.
+    this_writes: HashSet<ExprId>,
 }
 
-impl Scan<'_> {
-    /// Whether a value of type `ty` may be an object of the class.
-    fn may_be(&self, ty: Type) -> bool {
-        self.class.class_index(ty).is_some_and(|s| self.class.hierarchy.is_subtype(self.t, s))
+impl Scans {
+    fn new(class: &Class) -> Scans {
+        let mut allowed = HashSet::new();
+        let mut written = HashSet::new();
+        let mut methods = Vec::with_capacity(class.methods.len());
+        let mut by_class = vec![Vec::new(); class.types.len()];
+        for (index, m) in class.methods.iter().enumerate() {
+            by_class[m.class].push(index);
+            let mut scan = MethodScan::default();
+            for s in &m.body {
+                visit_stmt(
+                    s,
+                    &mut |e| {
+                        visit_expr(e, &mut |x| {
+                            if matches!(x.kind, ExprKind::This) {
+                                scan.selves.push(x.id);
+                            }
+                            note(class, x, &mut allowed, &mut written, &mut scan.this_writes);
+                        })
+                    },
+                    &mut |_| {},
+                );
+            }
+            methods.push(scan);
+        }
+        for scan in &mut methods {
+            scan.selves.retain(|id| !allowed.contains(id));
+        }
+        let mut init_written = vec![HashSet::new(); class.types.len()];
+        let mut init_allowed = vec![HashSet::new(); class.types.len()];
+        for (t, decl) in class.types.iter().enumerate() {
+            for init in decl.fields.iter().filter_map(|f| f.init.as_ref()) {
+                // The writes to fields of `this` in an initializer change nothing: no code runs on
+                // the object there (see `is_immutable`).
+                let mut ignored = HashSet::new();
+                visit_expr(init, &mut |x| {
+                    note(class, x, &mut init_allowed[t], &mut init_written[t], &mut ignored)
+                });
+            }
+        }
+        Scans { methods, written, init_written, init_allowed, by_class }
     }
 
-    fn expr(&mut self, x: &Expr) {
-        match &x.kind {
-            ExprKind::This if self.runs_on => self.selves.push(x.id),
-            ExprKind::Field { object, .. } if matches!(object.kind, ExprKind::This) => {
-                self.allowed.insert(object.id);
-            }
-            ExprKind::MethodCall { receiver, .. } if matches!(receiver.kind, ExprKind::This) => {
-                self.allowed.insert(receiver.id);
-            }
-            ExprKind::Assign { target: Place::Field { object, .. }, .. }
-            | ExprKind::IncDec { target: Place::Field { object, .. }, .. } => self.write(object),
-            _ => {}
+    fn is_immutable(&self, class: &Class, t: usize) -> bool {
+        let h = &class.hierarchy;
+        let mut chain = vec![t];
+        chain.extend(h.ancestors(t));
+        // A write through another handle to an object that may be of the class.
+        let supertypes = h.supertypes(t);
+        let may_be = |written: &HashSet<usize>| supertypes.iter().any(|s| written.contains(s));
+        if may_be(&self.written) || chain.iter().any(|&c| may_be(&self.init_written[c])) {
+            return false;
         }
+        // The code that runs on objects of the class: the instance methods and constructors of
+        // the class and of its superclasses. The constructors among them build its objects.
+        let runs_on =
+            || chain.iter().flat_map(|&c| &self.by_class[c]).filter(|&&m| !class.methods[m].is_static);
+        if runs_on().any(|&m| !self.methods[m].this_writes.is_empty() && !class.methods[m].is_ctor) {
+            return false;
+        }
+        let built: Vec<&HashSet<ExprId>> =
+            runs_on().filter(|&&m| class.methods[m].is_ctor).map(|&m| &self.methods[m].this_writes).collect();
+        runs_on().flat_map(|&m| &self.methods[m].selves).all(|id| {
+            built.iter().any(|w| w.contains(id)) || chain.iter().any(|&c| self.init_allowed[c].contains(id))
+        })
     }
+}
 
-    /// A write to a field of an object that may be of the class: allowed only through `this` in
-    /// a constructor.
-    fn write(&mut self, object: &Expr) {
-        if matches!(object.kind, ExprKind::This) {
-            if !self.runs_on {
-                return;
-            }
-            if self.ctor {
-                self.allowed.insert(object.id);
-                return;
-            }
-        } else if !self.may_be(object.ty) {
-            return;
+/// Notes what expression `x` does with fields: a `this` that is a field object or a receiver goes
+/// into `allowed`, the type of an object whose field is written through another handle into
+/// `written`, and a `this` whose field is written into `this_writes`.
+fn note(
+    class: &Class,
+    x: &Expr,
+    allowed: &mut HashSet<ExprId>,
+    written: &mut HashSet<usize>,
+    this_writes: &mut HashSet<ExprId>,
+) {
+    match &x.kind {
+        ExprKind::Field { object, .. } if matches!(object.kind, ExprKind::This) => {
+            allowed.insert(object.id);
         }
-        self.immutable = false;
+        ExprKind::MethodCall { receiver, .. } if matches!(receiver.kind, ExprKind::This) => {
+            allowed.insert(receiver.id);
+        }
+        ExprKind::Assign { target: Place::Field { object, .. }, .. }
+        | ExprKind::IncDec { target: Place::Field { object, .. }, .. } => {
+            if matches!(object.kind, ExprKind::This) {
+                this_writes.insert(object.id);
+            } else if let Some(s) = class.class_index(object.ty) {
+                written.insert(s);
+            }
+        }
+        _ => {}
     }
 }

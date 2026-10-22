@@ -271,16 +271,17 @@ impl<'a> Analysis<'a> {
 
     fn run(&mut self) {
         let n = self.class.methods.len();
-        let callers = callers(self.class);
+        let callees_of: Vec<Vec<usize>> = self.class.methods.iter().map(|m| callees(self.class, m)).collect();
+        let callers = callers(&callees_of);
         // Methods that nothing calls, and callees of field initializers (not analyzed here), take
         // any arguments. Methods reachable only through a cycle of calls from them do too, since
         // no caller's arguments can be seen. The others get their arguments from their callers.
-        let initializers = initializer_callees(self.class);
+        let initializers: HashSet<usize> = initializer_callees(self.class).into_iter().collect();
         let is_root: Vec<bool> = (0..n).map(|m| callers[m].is_empty() || initializers.contains(&m)).collect();
         let mut live = is_root.clone();
         let mut todo: Vec<usize> = (0..n).filter(|&m| is_root[m]).collect();
         while let Some(m) = todo.pop() {
-            for c in callees(self.class, &self.class.methods[m]) {
+            for &c in &callees_of[m] {
                 if !live[c] {
                     live[c] = true;
                     todo.push(c);
@@ -293,16 +294,14 @@ impl<'a> Analysis<'a> {
         // Every method is analyzed once, so that a callee whose parameters never change (one
         // without parameters) still has a return range; then again when its parameter ranges or
         // a callee's return range grew.
-        let mut dirty = vec![true; n];
+        // The first dirty method is taken first.
+        let mut dirty: std::collections::BTreeSet<usize> = (0..n).collect();
         // How often each method's summary grew; recursion can grow it a step at a time.
         let mut growth = vec![0; n];
-        while let Some(m) = (0..n).find(|&m| dirty[m]) {
-            dirty[m] = false;
+        while let Some(m) = dirty.pop_first() {
             let returned = self.returns[m];
-            let params: Vec<(usize, Vec<Interval>)> = callees(self.class, &self.class.methods[m])
-                .into_iter()
-                .map(|c| (c, self.params[c].clone()))
-                .collect();
+            let params: Vec<(usize, Vec<Interval>)> =
+                callees_of[m].iter().map(|&c| (c, self.params[c].clone())).collect();
             self.method(m);
             for (c, before) in params {
                 if self.params[c] != before {
@@ -314,7 +313,7 @@ impl<'a> Analysis<'a> {
                             }
                         }
                     }
-                    dirty[c] = true;
+                    dirty.insert(c);
                 }
             }
             if self.returns[m] != returned {
@@ -322,9 +321,7 @@ impl<'a> Analysis<'a> {
                 if growth[m] > 4 && !returned.is_empty() {
                     self.returns[m] = Interval::full(self.class.methods[m].ret);
                 }
-                for &c in &callers[m] {
-                    dirty[c] = true;
-                }
+                dirty.extend(&callers[m]);
             }
         }
         self.update_summaries = false;
@@ -811,9 +808,9 @@ impl<'a> Analysis<'a> {
     /// them and the result is any of theirs.
     fn call(&mut self, args: &[Expr], callee: usize, ty: Type, env: &mut Env) -> Interval {
         let values: Vec<Interval> = args.iter().map(|a| self.expr(a, env)).collect();
-        let group = self.class.hierarchy.group(callee);
+        let group = self.class.hierarchy.group_members(callee);
         if self.update_summaries {
-            for &g in &group {
+            for &g in group {
                 self.reached[g] = true;
                 for (i, p) in self.class.methods[g].params.iter().enumerate() {
                     if p.ty.is_integral() {
@@ -1366,10 +1363,10 @@ fn initializer_callees(class: &Class) -> Vec<usize> {
 }
 
 /// For each method, the methods that call it.
-fn callers(class: &Class) -> Vec<Vec<usize>> {
-    let mut out = vec![Vec::new(); class.methods.len()];
-    for (m, method) in class.methods.iter().enumerate() {
-        for c in callees(class, method) {
+fn callers(callees: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let mut out = vec![Vec::new(); callees.len()];
+    for (m, called) in callees.iter().enumerate() {
+        for &c in called {
             out[c].push(m);
         }
     }

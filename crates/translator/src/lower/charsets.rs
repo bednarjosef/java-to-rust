@@ -1,7 +1,9 @@
 //! Charsets, which are values of `Type::Charset`: a `StandardCharsets` constant, `Charset.forName`
 //! and the methods of a charset are `Builtin::Charset` expressions, and `==` on two charsets is
-//! `Builtin::Charset(Equals)`. A charset is never null, so a null sink is rejected here, before
-//! lowering: converting a value cannot report an error.
+//! a comparison of the two. A charset may be null as a reference may: where the nullness
+//! analysis finds that it may, it is an `Option` of the runtime's charset (`Copy`, as a
+//! `java::Class`), which a method of the charset dereferences. Only an array of charsets that may
+//! hold null is rejected, here, before lowering: converting a value cannot report an error.
 //!
 //! The JDK's classes of the standard charsets (`sun.nio.cs.UTF_8` and the others of
 //! `STANDARD_CHARSET_CLASSES`), which extend `Charset`, are the runtime's charsets too: their
@@ -114,11 +116,8 @@ impl<'t> Lowering<'t> {
             _ => return unsupported(node, "this method of `Charset`"),
         };
         let operands: Vec<Node> = receiver.into_iter().chain(args).collect();
-        if op == CharsetOp::Equals && !is_charset(operands[1]) {
+        if op == CharsetOp::Equals && !is_charset(operands[1]) && operands[1].kind() != "NULL_LITERAL" {
             return unsupported(node, "`equals` with other than a charset");
-        }
-        if operands.iter().any(|n| is_charset(*n) && may_be_null(*n)) {
-            return unsupported(node, "a `null` charset");
         }
         let operands: Vec<Expr> = operands.into_iter().map(|n| self.expr(n)).collect::<Result<_, _>>()?;
         // `forName` of a constant name of a charset the runtime has, such as the value of a
@@ -132,81 +131,32 @@ impl<'t> Lowering<'t> {
         Ok(ExprKind::Builtin(Builtin::Charset(op), operands))
     }
 
-    /// `==` or `!=` on charsets: the `Equals` operation, negated for `!=`.
+    /// `==` or `!=` on charsets, or of a charset and `null`: a comparison of the two values, which
+    /// are the same object exactly when they are the same charset or both null.
     pub(super) fn charset_comparison(&self, node: Node<'t>) -> Result<ExprKind, Error> {
         let (left, right) = (node.child("leftOperand")?, node.child("rightOperand")?);
-        if may_be_null(left) || may_be_null(right) {
-            return unsupported(node, "a comparison with `null`");
-        }
-        if !is_charset(left) || !is_charset(right) {
+        let operand = |n: Node| is_charset(n) || n.kind() == "NULL_LITERAL";
+        if !operand(left) || !operand(right) {
             return unsupported(node, "a comparison of a `Charset` with other than a charset");
         }
         let (left, right) = (self.expr(left)?, self.expr(right)?);
-        let equal = ExprKind::Builtin(Builtin::Charset(CharsetOp::Equals), vec![left, right]);
-        if node.kind() == "EQUAL_TO" {
-            return Ok(equal);
-        }
-        let equal = self.synth(equal, node.pos(), Type::Boolean);
-        Ok(ExprKind::Unary(UnOp::Not, Box::new(equal)))
+        let op = if node.kind() == "EQUAL_TO" { BinOp::Eq } else { BinOp::Ne };
+        Ok(ExprKind::Binary(op, Box::new(left), Box::new(right)))
     }
 }
 
-/// Rejects the null that a charset cannot hold: a `null` stored as a charset, and a field or an
-/// array of charsets that is created without values, which would start out null.
+/// Rejects the null that an array of charsets cannot hold: one that is created without values,
+/// whose elements would start out null, or with a value that may be null.
 pub(super) fn check(unit: Node) -> Result<(), Error> {
-    check_tree(unit, "")
-}
-
-/// Checks `node` and everything under it; `returns` is the return type of the method around it.
-fn check_tree<'t>(node: Node<'t>, returns: &'t str) -> Result<(), Error> {
-    let returns = match node.kind() {
-        "METHOD" => node.symbol().map_or("", |s| s.ty.rsplit_once(')').map_or("", |(_, r)| r)),
-        // A lambda's `return` is not the return of the method around it.
-        "LAMBDA_EXPRESSION" => "",
-        _ => returns,
-    };
-    check_sink(node, returns)?;
-    for child in children(node) {
-        check_tree(child, returns)?;
+    check_sink(unit)?;
+    for child in children(unit) {
+        check(child)?;
     }
     Ok(())
 }
 
-fn check_sink(node: Node, returns: &str) -> Result<(), Error> {
+fn check_sink(node: Node) -> Result<(), Error> {
     match node.kind() {
-        "VARIABLE" if node.symbol().is_some_and(|s| is_charset_type(s.ty)) => {
-            if node.get("initializer").is_some_and(may_be_null) {
-                return null_charset(node);
-            }
-            if node.get("initializer").is_none() && node.symbol().is_some_and(|s| s.kind == "FIELD") {
-                return default_null(node);
-            }
-        }
-        "ASSIGNMENT"
-            if node.get("variable").is_some_and(is_charset)
-                && node.get("expression").is_some_and(may_be_null) =>
-        {
-            return null_charset(node);
-        }
-        "RETURN" if is_charset_type(returns) && node.get("expression").is_some_and(may_be_null) => {
-            return null_charset(node);
-        }
-        "METHOD_INVOCATION" | "NEW_CLASS" => {
-            if let Some(symbol) = node.symbol() {
-                let params = parameter_types(symbol.ty);
-                for (i, arg) in node.list("arguments").enumerate() {
-                    let last = params.len().saturating_sub(1);
-                    let param = if symbol.varargs && i >= last {
-                        params.last().and_then(|p| p.strip_suffix("[]"))
-                    } else {
-                        params.get(i).copied()
-                    };
-                    if param.is_some_and(is_charset_type) && may_be_null(arg) {
-                        return null_charset(arg);
-                    }
-                }
-            }
-        }
         "NEW_ARRAY" if node.java_type().contains(CHARSET) => {
             let values: Vec<Node> = node.list("initializers").collect();
             let creates = node.list("dimensions").next().is_some();
@@ -236,33 +186,9 @@ fn may_be_null(node: Node) -> bool {
     }
 }
 
-/// The parameter types of a method type's text, such as `(java.nio.charset.Charset,int)void`.
-fn parameter_types(ty: &str) -> Vec<&str> {
-    let Some(inner) = ty.strip_prefix('(').and_then(|t| t.find(')').map(|end| &t[..end])) else {
-        return Vec::new();
-    };
-    if inner.is_empty() {
-        return Vec::new();
-    }
-    let (mut out, mut depth, mut start) = (Vec::new(), 0, 0);
-    for (i, c) in inner.char_indices() {
-        match c {
-            '<' => depth += 1,
-            '>' => depth -= 1,
-            ',' if depth == 0 => {
-                out.push(&inner[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    out.push(&inner[start..]);
-    out
-}
-
 /// The children of `node` in the tree: its object fields and the objects in its arrays, but not
 /// its symbol, which names declarations rather than holding code.
-fn children<'t>(node: Node<'t>) -> Vec<Node<'t>> {
+pub(super) fn children<'t>(node: Node<'t>) -> Vec<Node<'t>> {
     let Some(fields) = node.0.as_object() else { return Vec::new() };
     let mut out = Vec::new();
     for (key, value) in fields {
@@ -281,5 +207,5 @@ fn null_charset<T>(node: Node) -> Result<T, Error> {
 }
 
 fn default_null<T>(node: Node) -> Result<T, Error> {
-    error(node.pos(), "a `Charset` field or array element that starts out null not supported yet")
+    error(node.pos(), "a `Charset` array element that starts out null not supported yet")
 }

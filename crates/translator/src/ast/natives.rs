@@ -186,6 +186,12 @@ pub enum Native {
     /// `Unsafe.fullFence()`, and so its `loadFence()` and `storeFence()`: a fence that orders
     /// every memory access before it against every one after it.
     FullFence,
+    /// `Unsafe.copyMemory0(srcBase, srcOffset, destBase, destOffset, bytes)` between two arrays of
+    /// primitives, by their bytes (`java::copy_memory`); with `swap`, `copySwapMemory0`, whose last
+    /// argument is the size of the units whose bytes it reverses.
+    CopyMemory {
+        swap: bool,
+    },
     /// `CRC32.update(crc, b)`.
     Crc32Update,
     /// `CRC32.updateBytes0(crc, b, off, len)`.
@@ -195,6 +201,18 @@ pub enum Native {
     NoPendingReferences,
     /// `SecureRandom.getSeed(numBytes)`: seed bytes from the operating system (`random.rs`).
     SecureSeed,
+    /// `Inflater`'s natives (`inflate.rs`): `init(nowrap)`, then `inflateBytesBytes`, `getAdler`,
+    /// `reset`, `end` and `setDictionary` on the handle that `init` returned.
+    InflateInit,
+    InflateBytes,
+    InflateAdler,
+    InflateReset,
+    InflateEnd,
+    InflateSetDictionary,
+    /// `TimeZone.getSystemTimeZoneID(javaHome)`: the zone's name, or `null` (`time_zone.rs`).
+    SystemTimeZoneId,
+    /// `TimeZone.getSystemGMTOffsetID()`: the local offset from UTC as `GMT+hh:mm`.
+    SystemGmtOffsetId,
 }
 
 /// The native methods of translated JDK classes that the runtime implements and whose calls
@@ -207,6 +225,11 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         // Registers `getNanoTimeAdjustment`, and nothing else.
         ("jdk.internal.misc.VM", "initialize", "()void") => Native::Nothing,
         ("jdk.internal.misc.VM", "getNanoTimeAdjustment", "(long)long") => Native::NanoTimeAdjustment,
+        // The javaHome argument is only the place of the JDK's `tzmappings`, which is not read.
+        ("java.util.TimeZone", "getSystemTimeZoneID", "(java.lang.String)java.lang.String") => {
+            Native::SystemTimeZoneId
+        }
+        ("java.util.TimeZone", "getSystemGMTOffsetID", "()java.lang.String") => Native::SystemGmtOffsetId,
         ("jdk.internal.misc.CDS", "getCDSConfigStatus", "()int") => Native::CdsConfigStatus,
         ("jdk.internal.misc.CDS", "getRandomSeedForDumping", "()long") => Native::CdsRandomSeed,
         // Without an archive there is nothing to restore. Its argument is a class literal, which
@@ -222,8 +245,28 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         ("java.io.StandardOutput", "flush0", "(int)void") => Native::StandardFlush,
         ("java.io.StandardOutput", "close0", "(int)void") => Native::StandardClose,
         ("jdk.internal.misc.Unsafe", "fullFence", "()void") => Native::FullFence,
+        (
+            "jdk.internal.misc.Unsafe",
+            "copyMemory0",
+            "(java.lang.Object,long,java.lang.Object,long,long)void",
+        ) => Native::CopyMemory { swap: false },
+        (
+            "jdk.internal.misc.Unsafe",
+            "copySwapMemory0",
+            "(java.lang.Object,long,java.lang.Object,long,long,long)void",
+        ) => Native::CopyMemory { swap: true },
         ("java.util.zip.CRC32", "update", "(int,int)int") => Native::Crc32Update,
         ("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int") => Native::Crc32UpdateBytes,
+        ("java.util.zip.Inflater", "init", "(boolean)long") => Native::InflateInit,
+        ("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long") => {
+            Native::InflateBytes
+        }
+        ("java.util.zip.Inflater", "getAdler", "(long)int") => Native::InflateAdler,
+        ("java.util.zip.Inflater", "reset", "(long)void") => Native::InflateReset,
+        ("java.util.zip.Inflater", "end", "(long)void") => Native::InflateEnd,
+        ("java.util.zip.Inflater", "setDictionary", "(long,byte[],int,int)void") => {
+            Native::InflateSetDictionary
+        }
         ("java.lang.ref.Reference", "hasReferencePendingList", "()boolean") => Native::NoPendingReferences,
         ("java.lang.Thread", "nextThreadNum", "()int") => Native::ThreadNumber,
         ("java.lang.Thread", "nextThreadId", "()long") => Native::ThreadId,
@@ -376,6 +419,9 @@ pub const MATH_FUNCTIONS: &[&str] = &[
     "round",
     "floorDiv",
     "floorMod",
+    "ceilDiv",
+    "ceilMod",
+    "ceilDivExact",
     "signum",
     "ulp",
     "nextUp",
@@ -384,6 +430,9 @@ pub const MATH_FUNCTIONS: &[&str] = &[
     "addExact",
     "subtractExact",
     "multiplyExact",
+    "multiplyHigh",
+    "unsignedMultiplyHigh",
+    "multiplyFull",
     "incrementExact",
     "decrementExact",
     "negateExact",
@@ -394,6 +443,7 @@ pub const MATH_FUNCTIONS: &[&str] = &[
     "toRadians",
     "toDegrees",
     "scalb",
+    "getExponent",
 ];
 
 #[cfg(test)]
@@ -417,9 +467,24 @@ mod tests {
             found("java.util.zip.CRC32", "updateBytes0", "(int,byte[],int,int)int"),
             Some(Native::Crc32UpdateBytes)
         );
+        assert_eq!(found("java.util.zip.Inflater", "init", "(boolean)long"), Some(Native::InflateInit));
+        assert_eq!(
+            found("java.util.zip.Inflater", "inflateBytesBytes", "(long,byte[],int,int,byte[],int,int)long"),
+            Some(Native::InflateBytes)
+        );
         // Another overload, or another class's method of the same name, is not the native.
         assert_eq!(found("java.util.zip.CRC32", "update", "(byte[],int,int)void"), None);
         assert_eq!(found("jdk.internal.misc.Unsafe", "initialize", "()void"), None);
+        // `TimeZone`'s natives are private, so only `getDefault` calls them, and `java.util` cannot
+        // be stood in for; the mapping is checked here.
+        assert_eq!(
+            found("java.util.TimeZone", "getSystemTimeZoneID", "(java.lang.String)java.lang.String"),
+            Some(Native::SystemTimeZoneId)
+        );
+        assert_eq!(
+            found("java.util.TimeZone", "getSystemGMTOffsetID", "()java.lang.String"),
+            Some(Native::SystemGmtOffsetId)
+        );
         assert!(runtime_native("java.io.FileInputStream", "readBytes", "(byte[],int,int)int"));
         assert!(!runtime_native("java.lang.Throwable", "fillInStackTrace", "(int)java.lang.Throwable"));
     }

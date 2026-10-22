@@ -808,7 +808,23 @@ Decisions that changed during the implementation, step by step.
   `Arrays.copyOf` of a null array has the text of the JDK's code (`Cannot invoke
   "Object.getClass()"` for an array of objects, `Cannot read the array length` for one of
   primitives). The classes of `java.lang` that a program gets are the translator's own
-  (`java/Standard.java`), so a message from their code is not known.
+  (`java/Standard.java`), so a message from their code is not known; where the JDK's code has a
+  dereference that may fail, theirs throws the JDK's message itself (`ThreadGroup`'s
+  `parent.maxPriority`, `JavaLangAccess.start`'s `thread.start(container)`). A call of the JDK's
+  is named by the erasure of its receiver's type (the translator's own classes by their real
+  names) and its descriptor, a parameter of `Object` as `Object`, as the translation erases type
+  variables as javac does; a method that `Object` declares stays `Object`'s
+  (`Object.equals(Object)`), whatever the receiver. The JVM follows an assigned value back to
+  where it came from (`(s = a).next` fails `because "a" is null`).
+- **Dereferences that never fail need no message**: besides the null tests of the exceptions
+  analysis, a variable tested as it is assigned (`(k = e.getKey()) != null && k.equals(key)`),
+  one that an `if (v == null) v = ..;` sets when it was null, and a static that the first
+  statements of its class's static initializer set to a value that is not null and that nothing
+  else assigns (`ForkJoinPool.U`, `ForkJoinPool.common`), when what those statements run before
+  it never reads it (`Facts::initialized_statics`): another thread waits for the initialization,
+  and a failed one throws before reading. A branch of an `if` on a call of a method that only
+  returns a constant (the translator's `Thread.isVirtual()`) is never taken. Corpus:
+  `features/NullMessagesAfterTests.java`, `whole-program/ForkJoinTasks.java`.
 - **Checked against Java 26** (`javac::CHECKED_JAVA`): with another Java the texts may differ,
   and a program whose `catch` reads one is not translated.
 - **Rejected** where a `catch` may read a message that is not certain: a dereference of a
@@ -817,6 +833,9 @@ Decisions that changed during the implementation, step by step.
   for every way out of the `try`, each copy with its own slots) or in an instance initializer
   (copied into every constructor), of a local of the JDK's code that the translation may have
   renamed (`s2` for a second `s`), of the enclosing instance of a nested class, a dereference
-  in the code of `java.lang`, and a failure of the runtime without the checked form (unboxing,
-  a library call given null). Corpus: `features/RuntimeNullPointerMessages.java`,
+  in the code of `java.lang`, a failure of the runtime without the checked form (an unboxing
+  that the code does not write as a call, a library call given null), a dereference in the body
+  of a method reference's class (the JVM gives no message in its hidden frames, but javac makes
+  some references lambdas, whose code is the class's own), and a field of a field of an enclosing
+  instance. Corpus: `features/RuntimeNullPointerMessages.java`,
   `features/LocalNullPointerMessages.java`.

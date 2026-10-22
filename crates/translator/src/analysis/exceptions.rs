@@ -34,15 +34,16 @@
 mod entry;
 mod failures;
 mod field_inits;
-mod guards;
+pub(super) mod guards;
 
 use super::Facts;
+use super::closure::{self, Bits};
 use super::hierarchy;
 use super::nullness::{maybe_null, non_null_names};
 use crate::ast::*;
 use crate::lower::standard_subclass;
 use failures::runtime_failures;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 /// What a static initializer that throws raises: Java wraps the exception in this `Error`.
 const INITIALIZER_ERROR: &str = "java.lang.ExceptionInInitializerError";
@@ -50,7 +51,7 @@ const INITIALIZER_ERROR: &str = "java.lang.ExceptionInInitializerError";
 /// An exception that may be raised: an object of a concrete class of the program (or a standard
 /// class it creates), or a failure of the runtime, by its standard class's name (`"?"` when the
 /// operation's failures are not known exactly).
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Kind {
     Class(usize),
     Runtime(&'static str),
@@ -102,6 +103,8 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
     if class.type_index("java.lang.Throwable").is_none() {
         return Ok(());
     }
+    facts.static_writes = guards::static_writes(class);
+    facts.initialized_statics = initialized_statics(class, facts);
     let mut errors = Vec::new();
     let mut reject = |pos: Pos, message: &str| errors.push(Error { pos, message: message.to_string() });
     let h = &class.hierarchy;
@@ -109,9 +112,12 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         (0..class.methods.len()).map(|m| method_points(class, facts, m)).collect();
     let matches = |k: &Kind, t: usize| match k {
         Kind::Class(c) => h.is_subtype(*c, t),
+        // A failure not known exactly may be of any class of the JDK; one that is known is of
+        // its class, a standard one or one that `standard_subclass` knows the superclass of.
+        Kind::Runtime("?") => from_jdk(&class.types[t]),
         Kind::Runtime(name) => {
             let decl = &class.types[t].name;
-            crate::lower::is_standard(decl) && (*name == "?" || standard_subclass(name, decl))
+            decl == name || crate::lower::is_standard(decl) && standard_subclass(name, decl)
         }
     };
     let caught = |k: &Kind, frames: &[Frame]| frames.iter().any(|f| f.catches.iter().any(|&t| matches(k, t)));
@@ -151,47 +157,120 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
 
     // What escapes each method, and of that, what the program's code throws: all of it for a
     // method of the program, and for one of the JDK what escapes the program's methods it calls.
+    // Methods are looked at callees first, and again whenever what escapes a method they call
+    // grows (in calls that go round), until nothing does; what escapes only grows, so the order
+    // does not change the outcome. The kinds are numbered, and each point's own kinds and those
+    // its `try`s catch are sets of those numbers, worked out once.
     let escapes_of = |points: &[Vec<Point>]| {
-        let mut escapes: Vec<BTreeSet<Kind>> = vec![BTreeSet::new(); class.methods.len()];
-        let mut from_program: Vec<BTreeSet<Kind>> = vec![BTreeSet::new(); class.methods.len()];
-        loop {
-            let mut changed = false;
-            for m in 0..class.methods.len() {
-                let mut out = BTreeSet::new();
-                let mut program = BTreeSet::new();
-                for p in &points[m] {
-                    out.extend(raised(p, &escapes).into_iter().filter(|k| !caught(k, &p.frames)));
-                    if let Raise::Call(callees) = &p.raise {
-                        let through = callees.iter().flat_map(|&c| from_program[c].iter().cloned());
-                        program.extend(through.filter(|k| !caught(k, &p.frames)));
-                    }
-                }
-                if !jdk[m] {
-                    program = out.clone();
-                }
-                if bugs_only[m] {
-                    if initializer[m] {
-                        program.clear();
-                    }
-                    out = program.clone();
-                }
-                if initializer[m] && !guarded[m] {
-                    for set in [&mut out, &mut program] {
-                        if !set.is_empty() {
-                            *set = BTreeSet::from([Kind::Runtime(INITIALIZER_ERROR)]);
+        let n = class.methods.len();
+        let mut kinds: Vec<Kind> = Vec::new();
+        let mut numbers: HashMap<Kind, usize> = HashMap::new();
+        let mut number = |k: Kind| {
+            *numbers.entry(k.clone()).or_insert_with(|| {
+                kinds.push(k);
+                kinds.len() - 1
+            })
+        };
+        let initializer_error = number(Kind::Runtime(INITIALIZER_ERROR));
+        let own: Vec<Vec<Bits>> = points
+            .iter()
+            .map(|ps| {
+                ps.iter()
+                    .map(|p| match &p.raise {
+                        Raise::Throw(t) => {
+                            h.concretes(*t).into_iter().map(|c| number(Kind::Class(c))).collect()
+                        }
+                        Raise::Runtime { class, .. } => Bits::from_iter([number(Kind::Runtime(class))]),
+                        Raise::Call(_) | Raise::Text(_) => Bits::default(),
+                    })
+                    .collect()
+            })
+            .collect();
+        // What the `try`s around each point catch, shared by the points with the same `try`s.
+        let mut masks: Vec<Bits> = vec![Bits::default()];
+        // Each `try` by its id, what it catches and whether it has a `finally`.
+        type Tries<'a> = Vec<(usize, &'a [usize], bool)>;
+        let mut mask_of: HashMap<Tries, usize> = HashMap::new();
+        let caught_by: Vec<Vec<usize>> = points
+            .iter()
+            .map(|ps| {
+                ps.iter()
+                    .map(|p| {
+                        if p.frames.is_empty() {
+                            return 0;
+                        }
+                        let key = p.frames.iter().map(|f| (f.id, &f.catches[..], f.finally)).collect();
+                        *mask_of.entry(key).or_insert_with(|| {
+                            masks.push((0..kinds.len()).filter(|&k| caught(&kinds[k], &p.frames)).collect());
+                            masks.len() - 1
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut escapes: Vec<Bits> = vec![Bits::default(); n];
+        let mut from_program: Vec<Bits> = vec![Bits::default(); n];
+        let mut callers: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut callees: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (m, ps) in points.iter().enumerate() {
+            for p in ps {
+                if let Raise::Call(called) = &p.raise {
+                    for &c in called {
+                        if callers[c].last() != Some(&m) {
+                            callers[c].push(m);
+                            callees[m].push(c);
                         }
                     }
                 }
-                if out != escapes[m] || program != from_program[m] {
-                    escapes[m] = out;
-                    from_program[m] = program;
-                    changed = true;
-                }
-            }
-            if !changed {
-                return escapes;
             }
         }
+        let mut queued = vec![true; n];
+        let mut queue: VecDeque<usize> = closure::components(&callees).1.into_iter().flatten().collect();
+        while let Some(m) = queue.pop_front() {
+            queued[m] = false;
+            let mut out = Bits::default();
+            let mut program = Bits::default();
+            for (i, p) in points[m].iter().enumerate() {
+                let caught = &masks[caught_by[m][i]];
+                out.union_except(&own[m][i], caught);
+                if let Raise::Call(called) = &p.raise {
+                    for &c in called {
+                        out.union_except(&escapes[c], caught);
+                        program.union_except(&from_program[c], caught);
+                    }
+                }
+            }
+            if !jdk[m] {
+                program = out.clone();
+            }
+            if bugs_only[m] {
+                if initializer[m] {
+                    program = Bits::default();
+                }
+                out = program.clone();
+            }
+            if initializer[m] && !guarded[m] {
+                for set in [&mut out, &mut program] {
+                    if !set.is_empty() {
+                        *set = Bits::from_iter([initializer_error]);
+                    }
+                }
+            }
+            if out != escapes[m] || program != from_program[m] {
+                escapes[m] = out;
+                from_program[m] = program;
+                for &c in &callers[m] {
+                    if !queued[c] {
+                        queued[c] = true;
+                        queue.push_back(c);
+                    }
+                }
+            }
+        }
+        escapes
+            .iter()
+            .map(|set| set.iter().map(|k| kinds[k].clone()).collect())
+            .collect::<Vec<BTreeSet<Kind>>>()
     };
     let mut escapes = escapes_of(&points);
     // A call that raises nothing for the arguments it passes is no point (see `guards`). Leaving
@@ -206,7 +285,7 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 }
                 let callee = callees[0];
                 let quiet = p.known.iter().all(|args| {
-                    let run = guards::run(class, callee, args);
+                    let run = guards::run(class, &facts.static_writes, callee, args);
                     points[callee].iter().all(|q| {
                         // The start of a method that initializes the caller's own class, which is
                         // initialized or being initialized, does nothing.
@@ -228,38 +307,48 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
         escapes = escapes_of(&points);
     }
 
-    // What the callers of each method observe.
+    // What the callers of each method observe: what the callers of its callers observe, and
+    // what the `try`s around its calls catch. A call may run any method of an override group, so
+    // the methods of a group observe the same. A method is looked at again whenever what it
+    // observes grows, until nothing does; that only grows, so the order does not change the
+    // outcome.
     let mut seen: Vec<Seen> = vec![Seen::default(); class.methods.len()];
-    loop {
-        let mut next = seen.clone();
-        for m in 0..class.methods.len() {
-            for p in &points[m] {
-                let Raise::Call(callees) = &p.raise else { continue };
-                let mut here = if bugs_only[m] { Seen::default() } else { seen[m].clone() };
-                for f in &p.frames {
-                    here.types.extend(f.catches.iter().copied());
-                    here.all |= f.finally;
-                }
-                for &c in callees {
-                    next[c].types.extend(here.types.iter().copied());
-                    next[c].all |= here.all;
+    let mut queued = vec![true; class.methods.len()];
+    let mut queue: VecDeque<usize> = (0..class.methods.len()).collect();
+    let grow = |seen: &mut Seen, more: &Seen| {
+        let before = (seen.types.len(), seen.all);
+        seen.types.extend(more.types.iter().copied());
+        seen.all |= more.all;
+        before != (seen.types.len(), seen.all)
+    };
+    while let Some(m) = queue.pop_front() {
+        queued[m] = false;
+        let mut grown = Vec::new();
+        for p in &points[m] {
+            let Raise::Call(callees) = &p.raise else { continue };
+            let mut here = if bugs_only[m] { Seen::default() } else { seen[m].clone() };
+            for f in &p.frames {
+                here.types.extend(f.catches.iter().copied());
+                here.all |= f.finally;
+            }
+            for &c in callees {
+                if grow(&mut seen[c], &here) {
+                    grown.push(c);
                 }
             }
         }
-        // A call may run any method of an override group.
-        for m in 0..class.methods.len() {
-            for g in h.group(m) {
-                if g != m {
-                    let other = next[g].clone();
-                    next[m].types.extend(other.types);
-                    next[m].all |= other.all;
-                }
+        let own = seen[m].clone();
+        for &g in h.group_members(m) {
+            if g != m && grow(&mut seen[g], &own) {
+                grown.push(g);
             }
         }
-        if next == seen {
-            break;
+        for c in grown {
+            if !queued[c] {
+                queued[c] = true;
+                queue.push_back(c);
+            }
         }
-        seen = next;
     }
     let observed = |k: &Kind, s: &Seen| s.all || s.types.iter().any(|&t| matches(k, t));
 
@@ -316,7 +405,11 @@ pub(super) fn analyze(class: &Class, facts: &mut Facts) -> Result<(), Vec<Error>
                 let seen_here = catcher.is_some()
                     || p.frames.iter().any(|f| f.finally)
                     || (!bugs_only[m] && observed(&Kind::Runtime(name), &seen[m]));
-                let raised_class = class.type_index(name).filter(|&c| class.hierarchy.is_concrete(c));
+                // Only a standard class has the constructor from a message that the runtime
+                // builds its objects with (`lower::exceptions`).
+                let raised_class = class
+                    .type_index(name)
+                    .filter(|&c| class.hierarchy.is_concrete(c) && crate::lower::is_standard(name));
                 if seen_here
                     && checked
                     && let Some(c) = raised_class
@@ -613,9 +706,27 @@ fn proved(cond: &Expr, when: bool) -> Vec<(&str, String)> {
     }
     let mut out: Vec<(&str, String)> =
         non_null_names(cond, when).into_iter().map(|v| (v, v.to_string())).collect();
+    let mut parts = Vec::new();
+    super::nullness::conjuncts(cond, &mut parts);
+    // A test of an assignment's value, `(k = e.getKey()) != null`, tests the variable too.
+    match &parts[..] {
+        [test] if !when => {
+            if let Some((v, false)) = assigned_null_test(test) {
+                out.push((v, v.to_string()));
+            }
+        }
+        _ if when => {
+            for (k, part) in parts.iter().enumerate() {
+                if let Some((v, true)) = assigned_null_test(part)
+                    && !parts[k + 1..].iter().any(|later| assigns(later, v))
+                {
+                    out.push((v, v.to_string()));
+                }
+            }
+        }
+        _ => {}
+    }
     if when {
-        let mut parts = Vec::new();
-        super::nullness::conjuncts(cond, &mut parts);
         for (k, part) in parts.iter().enumerate() {
             if let ExprKind::InstanceOf { value, ty, .. } = &part.kind
                 && let ExprKind::Var(v) = &value.kind
@@ -631,19 +742,192 @@ fn proved(cond: &Expr, when: bool) -> Vec<(&str, String)> {
     out
 }
 
+/// `(v = e) == null` or `(v = e) != null`: the variable and whether the test is true when it is
+/// not null.
+fn assigned_null_test(e: &Expr) -> Option<(&str, bool)> {
+    let ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) = &e.kind else { return None };
+    let assigned = match (&l.kind, &r.kind) {
+        (ExprKind::Assign { op: None, target: Place::Var(v), .. }, ExprKind::Null)
+        | (ExprKind::Null, ExprKind::Assign { op: None, target: Place::Var(v), .. }) => v,
+        _ => return None,
+    };
+    Some((assigned, *op == BinOp::Ne))
+}
+
+/// The statics that are never null where code reads them (`Facts::initialized_statics`): each
+/// one that the leading assignments of its class's `<clinit>` set to a value that is not null and
+/// that nothing else assigns. Code of another thread that reads it waits until the class is
+/// initialized; code of the initializing thread runs after that assignment, or else during the
+/// values of it and the assignments before it, which `reads_static` shows never read it.
+fn initialized_statics(class: &Class, facts: &Facts) -> HashSet<(usize, String)> {
+    let mut leading = Vec::new();
+    for (m, method) in class.methods.iter().enumerate() {
+        if method.name != "<clinit>" {
+            continue;
+        }
+        let mut before: Vec<&Expr> = Vec::new();
+        let mut first = Vec::new();
+        // A `<clinit>` that keeps the state of its class's initialization (`lower::clinit_errors`)
+        // runs its own statements in a `try` after it: a use of the class after a failure throws
+        // before it reads the class's statics.
+        let body = match &method.body[..] {
+            [Stmt::If { .. }, Stmt::If { .. }, Stmt::Expr(_), Stmt::Try { body, .. }]
+                if crate::lower::rewritten_clinit(&class.types[method.class]) =>
+            {
+                body
+            }
+            body => body,
+        };
+        leading_statements(body, &mut first);
+        for s in first {
+            let (c, name, value) = match s {
+                Stmt::Expr(Expr {
+                    kind: ExprKind::Assign { op: None, target: Place::Static { class: c, name }, value },
+                    ..
+                }) => (*c, name, value),
+                // Other expressions and locals' values, which run before what follows.
+                Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::If { cond: e, .. } => {
+                    before.push(e);
+                    continue;
+                }
+                _ => continue,
+            };
+            before.push(value);
+            if c == method.class && !maybe_null(facts, m, value) && !reads_static(class, &before, c, name) {
+                leading.push((c, name.clone()));
+            }
+        }
+    }
+    let mut writes: std::collections::HashMap<(usize, String), usize> = std::collections::HashMap::new();
+    for method in &class.methods {
+        for s in &method.body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::Assign { target: Place::Static { class: c, name }, .. }
+                        | ExprKind::IncDec { target: Place::Static { class: c, name }, .. } = &x.kind
+                        {
+                            *writes.entry((*c, name.clone())).or_default() += 1;
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+    }
+    leading.into_iter().filter(|key| writes.get(key) == Some(&1)).collect()
+}
+
+/// The statements that start `stmts` and, unless one throws, all run one after the other, up to
+/// the first other statement: expressions, declarations of locals, `if (..) throw ..;`, and the
+/// statements of blocks and of `try` blocks whose `catch`es all throw. Whether all of `stmts` are
+/// such. A static initializer that throws leaves its class not initialized, and its statics unread.
+fn leading_statements<'s>(stmts: &'s [Stmt], out: &mut Vec<&'s Stmt>) -> bool {
+    fn throws(s: &Stmt) -> bool {
+        match s {
+            Stmt::Throw(_) => true,
+            Stmt::Block(stmts) => stmts.last().is_some_and(throws),
+            _ => false,
+        }
+    }
+    for s in stmts {
+        match s {
+            Stmt::Block(inner) | Stmt::Try { body: inner, finally: None, .. } if !matches!(s, Stmt::Try { catches, .. } if !catches.iter().all(|c| c.body.last().is_some_and(throws))) => {
+                if !leading_statements(inner, out) {
+                    return false;
+                }
+            }
+            Stmt::Expr(_) | Stmt::Local { .. } => out.push(s),
+            Stmt::If { then, otherwise: None, .. } if throws(then) => out.push(s),
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Whether evaluating `roots` may read the static `name` of class `c`: whether it, or a method
+/// or static initializer that it may run, transitively, reads it. A walk too long to follow says
+/// it may.
+fn reads_static(class: &Class, roots: &[&Expr], c: usize, name: &str) -> bool {
+    const LIMIT: usize = 2000;
+    let clinits: std::collections::HashMap<usize, usize> = (class.methods.iter().enumerate())
+        .filter(|(_, m)| m.name == "<clinit>")
+        .map(|(i, m)| (m.class, i))
+        .collect();
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut work: Vec<usize> = Vec::new();
+    let mut reads = false;
+    let mut look = |e: &Expr, work: &mut Vec<usize>| {
+        visit_expr(e, &mut |x| {
+            if let ExprKind::Static { class: d, name: n } = &x.kind
+                && *d == c
+                && n == name
+            {
+                reads = true;
+            }
+            work.extend(class.callees(x));
+            // The first use of another class runs its static initializer, and its superclasses'.
+            let mut used = match &x.kind {
+                ExprKind::Static { class: d, .. } | ExprKind::New { class: d, .. } => Some(*d),
+                ExprKind::Call { resolved: Some(r), .. } => Some(class.methods[*r].class),
+                _ => None,
+            };
+            while let Some(d) = used {
+                work.extend(clinits.get(&d));
+                used = class.types[d].extends;
+            }
+        })
+    };
+    for root in roots {
+        look(root, &mut work);
+    }
+    while let Some(m) = work.pop() {
+        if !seen.insert(m) {
+            continue;
+        }
+        if seen.len() > LIMIT {
+            return true;
+        }
+        for s in &class.methods[m].body {
+            let mut found = Vec::new();
+            visit_stmt(s, &mut |e| look(e, &mut found), &mut |_| {});
+            work.extend(found);
+        }
+    }
+    reads
+}
+
 /// Whether `e` is a variable that `safe` knows not null, or a cast of one.
 fn is_tested(e: &Expr, safe: &[String]) -> bool {
     match &e.kind {
         ExprKind::Var(v) => safe.contains(v),
         // A cast of a reference keeps its null.
         ExprKind::Cast(to, value) if to.is_reference() => is_tested(value, safe),
-        // So does an assignment to a field, whose value is the assigned one (`(current = e).next`).
-        ExprKind::Assign { op: None, target: Place::Field { .. } | Place::Static { .. }, value }
-            if !matches!(e.ty, Type::Boxed(_)) =>
-        {
-            is_tested(value, safe)
-        }
+        // So does an assignment, whose value is the assigned one (`(current = e).next`).
+        ExprKind::Assign {
+            op: None,
+            target: Place::Field { .. } | Place::Static { .. } | Place::Var(_),
+            value,
+        } if !matches!(e.ty, Type::Boxed(_)) => is_tested(value, safe),
         _ => false,
+    }
+}
+
+/// Whether `value` is not null: the nullness analysis knows it, or `safe` does.
+fn non_null(facts: &Facts, m: usize, value: &Expr, safe: &[String]) -> bool {
+    !maybe_null(facts, m, value) || is_tested(value, safe)
+}
+
+/// Whether the statement `s`, when it completes, has last set `v` to a value that is not null:
+/// it ends with `v = value;`, or it never completes.
+fn sets_non_null(facts: &Facts, m: usize, s: &Stmt, v: &str, safe: &[String]) -> bool {
+    match s {
+        Stmt::Block(stmts) => stmts.last().is_some_and(|last| sets_non_null(facts, m, last, v, safe)),
+        Stmt::Expr(Expr { kind: ExprKind::Assign { op: None, target: Place::Var(t), value }, .. }) => {
+            t == v && non_null(facts, m, value, safe)
+        }
+        s => leaves(s),
     }
 }
 
@@ -680,6 +964,20 @@ fn block_points(
             // A local set to a value known not null, such as `Point p = (Point) o;`.
             Stmt::Local { name, init: Some(init), .. } if is_tested(init, &safe) && !assigned(name) => {
                 safe.push(name.clone());
+            }
+            // `v = value;`, a value that is not null.
+            Stmt::Expr(Expr {
+                kind: ExprKind::Assign { op: None, target: Place::Var(v), value }, ..
+            }) if non_null(facts, m, value, &safe) && !assigned(v) => {
+                safe.push(v.clone());
+            }
+            // `if (v == null) v = value;`, which leaves `v` not null either way.
+            Stmt::If { cond, then, otherwise: None } => {
+                for (v, fact) in proved(cond, false) {
+                    if !assigned(v) && sets_non_null(facts, m, then, v, &safe) {
+                        safe.push(fact);
+                    }
+                }
             }
             _ => {}
         }
@@ -718,7 +1016,7 @@ fn stmt_points(
         Stmt::If { cond, then, otherwise } => {
             expr_points(class, facts, m, cond, frames, safe, out);
             // A branch that a known condition never takes raises nothing (see `guards`).
-            let known = guards::known_condition(class, cond);
+            let known = guards::known_condition(class, &facts.static_writes, cond);
             let then_safe = narrowed(safe, cond, true, |v| assigns_stmt(then, v));
             if known != Some(false) {
                 stmt_points(class, facts, m, then, frames, &then_safe, out);
@@ -886,10 +1184,8 @@ fn static_inits(class: &Class, facts: &Facts, m: usize, x: &Expr) -> Vec<usize> 
     let current = class.methods.get(m).map(|c| c.class);
     // `main` starts by initializing its class (`statics::entry_inits`), so no later code runs
     // that class's `<clinit>` but the code it runs itself, where the call returns at once.
-    let main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
-        [main] => Some(main.class),
-        _ => None,
-    };
+    let main_class = facts.main_class;
+    debug_assert_eq!(class.hierarchy.overriders.len(), class.methods.len(), "the hierarchy is out of date");
     classes
         .into_iter()
         .filter_map(|t| {
@@ -899,7 +1195,10 @@ fn static_inits(class: &Class, facts: &Facts, m: usize, x: &Expr) -> Vec<usize> 
             if initialized {
                 return None;
             }
-            class.methods.iter().position(|c| c.class == init && c.name == "<clinit>")
+            let methods = class.hierarchy.methods_of(init).iter().copied();
+            methods
+                .into_iter()
+                .find(|&c| class.methods[c].class == init && class.methods[c].name == "<clinit>")
         })
         .collect()
 }
@@ -918,7 +1217,7 @@ fn expr_points(
     let callees = class.callees(x);
     if !callees.is_empty() {
         let known = match callees[..] {
-            [only] => Some(guards::known_args(class, x))
+            [only] => Some(guards::known_args(class, &facts.static_writes, x))
                 .filter(|k| k.first().is_some_and(|args| class.methods[only].params.len() == args.len()))
                 .unwrap_or_default(),
             _ => Vec::new(),
@@ -1027,11 +1326,15 @@ fn place_children<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
     }
 }
 
-/// Whether `decl` is a class of the JDK, which no program may declare.
+/// Whether `decl` is a class of the JDK, which no program may declare. The classes that lowering
+/// provides (the standard exceptions, `Throwable`, `Thread`) have no package, but their JDK name.
 pub(super) fn from_jdk(decl: &TypeDecl) -> bool {
-    ["java", "javax", "jdk", "sun"]
-        .iter()
-        .any(|root| decl.package == *root || decl.package.starts_with(&format!("{root}.")))
+    let in_jdk = |name: &str| {
+        ["java", "javax", "jdk", "sun"]
+            .iter()
+            .any(|root| name.strip_prefix(root).is_some_and(|rest| rest.is_empty() || rest.starts_with('.')))
+    };
+    in_jdk(&decl.package) || decl.package.is_empty() && in_jdk(&decl.name)
 }
 
 /// The objects whose text an expression makes, which runs their `toString`.

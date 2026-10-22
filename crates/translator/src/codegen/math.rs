@@ -1,5 +1,6 @@
 //! The `Math` methods that throw on overflow or on bad bounds, and the ones that need the runtime's
-//! exact helpers: `addExact` and the rest, `clamp`, `copySign` and `nextDown`.
+//! exact helpers: `addExact` and the rest, `clamp`, `copySign`, `nextDown` and the products
+//! `multiplyHigh`, `unsignedMultiplyHigh` and `multiplyFull`.
 
 use super::*;
 
@@ -14,9 +15,22 @@ impl<'a> Gen<'a> {
             let n = self.value(&args[1], Type::Int).text;
             return Some(Code::atom(format!("{}({x}, {n})", self.runtime(&format!("scalb{float}")))));
         }
-        // `toIntExact` takes a `long`, and `clamp(long, int, int)` computes in `long`.
+        // `getExponent(x)`: the unbiased exponent of a `double` or a `float`, read from its bits
+        // (the maximum plus one for NaN and the infinities, the minimum minus one for zero and
+        // the subnormals, as in Java).
+        if name == "getExponent" {
+            let operand = if args[0].ty == Type::Float { Type::Float } else { Type::Double };
+            let x = self.value(&args[0], operand);
+            let x = self.recv(&x, operand);
+            let (shift, mask, bias) =
+                if operand == Type::Float { (23, "0xff", 127) } else { (52, "0x7ff", 1023) };
+            return Some(Code::atom(format!("((({x}.to_bits() >> {shift}) & {mask}) as i32 - {bias})")));
+        }
+        // `toIntExact` takes a `long`, and `clamp(long, int, int)` computes in `long`. The products
+        // take `long`s, except `multiplyFull`, which takes `int`s and returns the exact `long`.
         let operand = match name {
-            "toIntExact" => Type::Long,
+            "toIntExact" | "multiplyHigh" | "unsignedMultiplyHigh" => Type::Long,
+            "multiplyFull" => Type::Int,
             "clamp" if ty == Type::Int => Type::Long,
             "addExact" | "subtractExact" | "multiplyExact" | "negateExact" | "incrementExact"
             | "decrementExact" | "absExact" | "clamp" | "copySign" | "nextDown" => ty,
@@ -29,6 +43,10 @@ impl<'a> Gen<'a> {
         let code = match name {
             "copySign" => Code::atom(format!("{}.copysign({})", self.recv(&codes[0], operand), texts[1])),
             "nextDown" => Code::atom(format!("{}({})", self.runtime(&format!("next_down{float}")), texts[0])),
+            // The high and full halves of a product, which the runtime computes in `i128`.
+            "multiplyHigh" => self.exact_call("multiply_high", &texts),
+            "unsignedMultiplyHigh" => self.exact_call("unsigned_multiply_high", &texts),
+            "multiplyFull" => self.exact_call("multiply_full", &texts),
             "clamp" => {
                 let function = match operand {
                     Type::Float => "clamp_f32",

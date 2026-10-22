@@ -84,7 +84,7 @@ impl<'a> Gen<'a> {
 
     /// The type whose enum represents the values of class `t`, if an enum does.
     pub(super) fn enum_for(&self, t: usize) -> Option<usize> {
-        match hierarchy::rep(self.class, self.facts, t) {
+        match self.rep(t) {
             hierarchy::Rep::Enum(t) => Some(t),
             hierarchy::Rep::Object(_) => None,
         }
@@ -102,10 +102,7 @@ impl<'a> Gen<'a> {
     /// The concrete classes whose objects the enum of type `t` holds, in `Class::types` order.
     pub(super) fn enum_variants(&self, t: usize) -> Vec<usize> {
         // An enum's constants exist without `new`.
-        hierarchy::variants(self.class, self.facts, t)
-            .into_iter()
-            .filter(|&c| self.live[c] || self.holds_value(c))
-            .collect()
+        self.variants(t).iter().copied().filter(|&c| self.live[c] || self.holds_value(c)).collect()
     }
 
     /// The path of the variant of class `c` in the enum of `t`: `Shape::Circle`. A variant is
@@ -114,21 +111,88 @@ impl<'a> Gen<'a> {
     /// (`JavaUtilStreamAbstractSetInEntrySet`).
     pub(super) fn variant(&self, t: usize, c: usize) -> String {
         self.need(Need::Enum(t));
-        let variants = hierarchy::variants(self.class, self.facts, t);
+        let names = self.variant_names_of(t);
+        let name = match names.get(&c) {
+            Some(name) => name.clone(),
+            None => self.variant_name(&self.variants(t), c),
+        };
+        format!("{}::{name}", struct_name(&self.class.types[t].name))
+    }
+
+    /// `hierarchy::rep`, worked out once for each type.
+    pub(super) fn rep(&self, t: usize) -> hierarchy::Rep {
+        if let Some(&rep) = self.reps.borrow().get(&t) {
+            return rep;
+        }
+        let rep = hierarchy::rep(self.class, self.facts, t);
+        self.reps.borrow_mut().insert(t, rep);
+        rep
+    }
+
+    /// `hierarchy::variants`, worked out once for each type.
+    pub(super) fn variants(&self, t: usize) -> std::rc::Rc<Vec<usize>> {
+        if let Some(variants) = self.variant_lists.borrow().get(&t) {
+            return variants.clone();
+        }
+        let variants = std::rc::Rc::new(hierarchy::variants(self.class, self.facts, t));
+        self.variant_lists.borrow_mut().insert(t, variants.clone());
+        variants
+    }
+
+    /// The names of the variants of the enum of `t`, made once for all of them.
+    fn variant_names_of(&self, t: usize) -> std::rc::Rc<HashMap<usize, String>> {
+        if let Some(names) = self.variant_names.borrow().get(&t) {
+            return names.clone();
+        }
+        let variants = self.variants(t);
+        let count = |name: &dyn Fn(usize) -> String| {
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for &o in variants.iter() {
+                *counts.entry(name(o)).or_default() += 1;
+            }
+            counts
+        };
+        let (simple, in_package) = (count(&|c| self.simple_name(c)), count(&|c| self.in_package_name(c)));
+        let names: HashMap<usize, String> = variants
+            .iter()
+            .map(|&c| {
+                let name = if simple[&self.simple_name(c)] <= 1 {
+                    self.simple_name(c)
+                } else if in_package[&self.in_package_name(c)] <= 1 {
+                    self.in_package_name(c)
+                } else {
+                    self.full_variant_name(c)
+                };
+                (c, name)
+            })
+            .collect();
+        let names = std::rc::Rc::new(names);
+        self.variant_names.borrow_mut().insert(t, names.clone());
+        names
+    }
+
+    /// The name of the variant for class `c` among `variants`: its simple name, unless another
+    /// variant shares it, then its name in its package, then its whole name.
+    fn variant_name(&self, variants: &[usize], c: usize) -> String {
         let shared = |name: &dyn Fn(usize) -> String| {
             let own = name(c);
             variants.iter().filter(|&&o| name(o) == own).count() > 1
         };
-        let simple = |c: usize| self.simple_name(c);
-        let in_package = |c: usize| modules::split(&self.class.types[c].name).1.replace(['.', '$'], "");
-        let name = if !shared(&simple) {
-            simple(c)
-        } else if !shared(&in_package) {
-            in_package(c)
+        if !shared(&|c| self.simple_name(c)) {
+            self.simple_name(c)
+        } else if !shared(&|c| self.in_package_name(c)) {
+            self.in_package_name(c)
         } else {
-            self.class.types[c].name.split(['.', '$']).map(capitalized).collect()
-        };
-        format!("{}::{name}", struct_name(&self.class.types[t].name))
+            self.full_variant_name(c)
+        }
+    }
+
+    fn in_package_name(&self, c: usize) -> String {
+        modules::split(&self.class.types[c].name).1.replace(['.', '$'], "")
+    }
+
+    fn full_variant_name(&self, c: usize) -> String {
+        self.class.types[c].name.split(['.', '$']).map(capitalized).collect()
     }
 
     /// `variant`, when the enum of `t` has a variant for class `c`: it has none when no object of
@@ -308,12 +372,23 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// The name that a pattern binds from `source` (`pattern_source`). Where no value of the
-    /// program is a `T` (`None::<T>`), the code that would run with it may still assign fields of
-    /// it, as of a value of a class that no object of the program is: it is bound `mut` there.
-    pub(super) fn pattern_binding(&self, name: &str, source: &str) -> String {
+    /// The pattern that binds `name`, of type `ty`, from `source` (`pattern_source`):
+    /// `Some(name)`. Where no value of the program is a `T` (`None::<T>`), the code that would run
+    /// with it may still assign fields of it, as of a value of a class that no object of the
+    /// program is: it is bound `mut` there, as it is where the method assigns the variable. A
+    /// variable that the method may set to null is an `Option` like any other local, bound whole
+    /// (`mut name @ Some(_)`).
+    pub(super) fn pattern_binding(&self, name: &str, source: &str, ty: Type) -> String {
         let local = self.local(name);
-        if source.starts_with("None::<") { format!("mut {local}") } else { local }
+        let assigned = assigns_any(&self.class.methods[self.method].body, name);
+        if self.optional_var(self.method, ty, name) {
+            return format!("mut {local} @ Some(_)");
+        }
+        if source.starts_with("None::<") || assigned {
+            format!("Some(mut {local})")
+        } else {
+            format!("Some({local})")
+        }
     }
 
     /// The `Option` that `value instanceof T name` binds `name` from: the value as a `T` when the
@@ -581,6 +656,18 @@ impl<'a> Gen<'a> {
         let checked = self.checked_cast.take();
         if matches!(value.kind, ExprKind::Null) {
             return Code::atom("None");
+        }
+        // A string, a builder or a box as a value of a type of the program whose values do not
+        // include it, which `lower::hierarchy::convert` leaves to the generator.
+        if matches!(value.ty, Type::String | Type::StringBuilder | Type::Boxed(_))
+            && !self
+                .type_of(value.ty)
+                .zip(self.type_of(to))
+                .is_some_and(|(s, t)| self.class.hierarchy.is_subtype(s, t))
+        {
+            let message = format!("a `{}` as a `{to}` not supported yet", value.ty);
+            self.rejected.push(Error { pos: value.pos, message });
+            return Code::atom("unreachable!()");
         }
         match self.narrowing(value, to) {
             Narrowing::Down(s) => return self.downcast(s, to, value, checked),
@@ -1043,6 +1130,9 @@ impl<'a> Gen<'a> {
         if self.is_char_sequence_method(r) {
             return self.char_sequence_arm(r, c);
         }
+        if self.is_appendable_method(r) {
+            return self.appendable_arm(r, c);
+        }
         match self.class.methods[r].name.as_str() {
             "ordinal" => "*o as i32".to_string(),
             "name" => "o.enum_name()".to_string(),
@@ -1051,7 +1141,7 @@ impl<'a> Gen<'a> {
     }
 
     /// The type of `Object`, when the program uses it.
-    fn object_index(&self) -> Option<usize> {
+    pub(super) fn object_index(&self) -> Option<usize> {
         self.class.types.iter().position(|d| d.kind == TypeKind::Interface && d.name == OBJECT)
     }
 
@@ -1114,6 +1204,48 @@ impl<'a> Gen<'a> {
         };
         let value = format!("{}({text})", self.variant(char_sequence, string));
         if self.facts.nullable_returns.contains(&r) { format!("Some({value})") } else { value }
+    }
+
+    /// Whether method `r` is one of the JDK's `Appendable`'s own `append` methods, which a builder
+    /// answers (see `lower::object`).
+    fn is_appendable_method(&self, r: usize) -> bool {
+        let t = &self.class.types[self.class.methods[r].class];
+        t.kind == TypeKind::Interface && t.name == "java.lang.Appendable"
+    }
+
+    /// `Appendable`'s `append(csq)`, `append(csq, start, end)` or `append(c)` (method `r`) for a
+    /// builder of class `c` bound to `o`: the builder's own, which returns the builder itself. A
+    /// null `csq` appends `"null"`, as Java's does.
+    fn appendable_arm(&mut self, r: usize, c: usize) -> String {
+        let method = &self.class.methods[r];
+        let appendable = method.class;
+        if self.runtime_of(c) != Some(Type::StringBuilder) {
+            return "unreachable!()".to_string();
+        }
+        let names: Vec<String> = method.params.iter().map(|p| self.local(&p.name)).collect();
+        let append = match (&method.params[..], &names[..]) {
+            ([p], [x]) if p.ty == Type::Char => format!("o.append_char({x})"),
+            ([p, ..], [csq, rest @ ..]) if matches!(p.ty, Type::Class(..)) => {
+                if let Some(t) = self.type_of(p.ty) {
+                    self.need(Need::Display(t));
+                }
+                let text = if self.optional_var(r, p.ty, &p.name) {
+                    format!("match {csq} {{ Some(s) => s.to_string(), None => \"null\".to_string() }}")
+                } else {
+                    format!("{csq}.to_string()")
+                };
+                match rest {
+                    [] => format!("o.append_str(&{text})"),
+                    [start, end] => format!("o.append_range(&{text}, {start}, {end})"),
+                    _ => return "unreachable!()".to_string(),
+                }
+            }
+            _ => return "unreachable!()".to_string(),
+        };
+        let builder = format!("{}(o.clone())", self.variant(appendable, c));
+        let value =
+            if self.facts.nullable_returns.contains(&r) { format!("Some({builder})") } else { builder };
+        format!("{{ {append}; {value} }}")
     }
 
     /// Whether method `r` is one of `Number`'s own abstract `byteValue()` to `doubleValue()`.
@@ -1211,9 +1343,7 @@ impl<'a> Gen<'a> {
         let Some(object) = self.object_index() else { return "false".to_string() };
         let Some(e) = self.enum_for(object) else {
             // Every `Object` is an object of one class.
-            if self.holds_value(c)
-                || hierarchy::rep(self.class, self.facts, object) != hierarchy::Rep::Object(c)
-            {
+            if self.holds_value(c) || self.rep(object) != hierarchy::Rep::Object(c) {
                 return "false".to_string();
             }
             return if optional {
@@ -1416,9 +1546,15 @@ impl<'a> Gen<'a> {
                 // A box whose identity is kept is the same box only when it is the same object.
                 let faithful = self.runtime_of(c).is_some_and(|ty| self.faithful_box(ty));
                 let same_box = format!("{}(Some(a), Some(b))", self.runtime("same_optional"));
+                // A floating box held as a value is compared as `equals` compares it, so that
+                // where the translation compares values for Java's identity (a shortcut before
+                // `equals`), `-0.0` differs from `0.0` and NaN equals NaN.
+                let same_bits = format!("{}(f64::from(*a), f64::from(*b))", self.runtime("double_equals"));
+                let floating = matches!(self.runtime_of(c), Some(Type::Boxed(b)) if matches!(*b, Type::Double | Type::Float));
                 let same = match () {
                     _ if self.runtime_of(c) == Some(Type::StringBuilder) => "a.same(b)",
                     _ if faithful => &same_box,
+                    _ if floating && self.holds_value(c) => &same_bits,
                     _ if self.holds_value(c) && !array => "a == b",
                     _ if self.facts.thread_shared.contains(&c) || array && self.facts.threaded => {
                         "Arc::ptr_eq(a, b)"
