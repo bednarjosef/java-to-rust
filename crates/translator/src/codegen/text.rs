@@ -468,7 +468,7 @@ impl<'a> Gen<'a> {
                     let chars = self.slice_of(&rest[0]);
                     method("append_chars_range", vec![chars, start, end])
                 } else if matches!(rest[0].ty, Type::Class(..)) && !self.plain_sequence(&rest[0]) {
-                    self.program_range_call(id, &sb, &rest[0], &format!("{start}, {end}"))
+                    self.program_range_call(id, &args[0], &sb, &rest[0], &format!("{start}, {end}"))
                 } else {
                     let text = self.range_text(&rest[0]);
                     self.append_range_call(id, &sb, &format!("{text}, {start}, {end}"))
