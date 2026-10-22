@@ -827,6 +827,9 @@ impl<'t> Lowering<'t> {
             "TYPE_CAST" if arrays::casts_component_array(node) => self.component_array(node)?,
             "TYPE_CAST" => {
                 let ty = self.ty(node, node.java_type())?;
+                if let Some(created) = self.constructor_handle_call(node, ty)? {
+                    return Ok(self.synth(created, node.pos(), ty));
+                }
                 let value = self.expr(node.child("expression")?)?;
                 if Self::is_object(value.ty) {
                     self.object_array(node, ty)?;
@@ -1037,6 +1040,7 @@ impl<'t> Lowering<'t> {
         if let Some(kind) = self.var_handle_access(node, &symbol)? {
             return Ok(kind);
         }
+        self.check_method_handle_call(node, &symbol)?;
         if let Some(kind) = self.class_literal_call(node, &symbol, select)? {
             return Ok(kind);
         }

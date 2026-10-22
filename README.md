@@ -791,7 +791,9 @@ is, extends or implements. It stops at the classes that the runtime provides (`S
 `StringBuilder`, `System`, `Math`, the boxes, `Object`, `Class`, `Thread`; `RUNTIME_CLASSES`),
 whose sources reach deep into the JVM, and at what is not
 translated: reflection (but not `java.lang.reflect.Array`, which is array code, nor `Method`,
-`Field` and `Constructor`, which the reflection table is), method handles, serialization,
+`Field` and `Constructor`, which the reflection table is), method handles (but not the
+`VarHandle` constants and a constructor's `MethodHandle` constant, resolved when translating, see
+`lower/handles.rs`), serialization,
 security and class loading (`jdk.internal.loader`; `UNTRANSLATED`; `ResourceBundle` is
 translated, and `ServiceLoader`, `ClassLoader`, `URLClassLoader`, `Module` and `ModuleLayer` are
 the translator's own, over the translation's classes and modules). Library code
