@@ -152,7 +152,7 @@ fn library_failure(class: &Class, builtin: &Builtin, args: &[Expr]) -> &'static 
         Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _) => {
             &["java.lang.NumberFormatException"]
         }
-        Builtin::EnumValueOf => &["java.lang.IllegalArgumentException"],
+        Builtin::EnumValueOf | Builtin::NotEnumClass => &["java.lang.IllegalArgumentException"],
         Builtin::Bits(..) => &[],
         Builtin::Boxed(BoxedOp::Unbox | BoxedOp::Equals, _) => &[],
         Builtin::Unsigned(UnsignedOp::Compare | UnsignedOp::ToString | UnsignedOp::Widen, _) => &[],
@@ -565,7 +565,7 @@ pub(super) fn runtime_failures(
                         | Builtin::Boxed(BoxedOp::Equals, _)
                         // A null string is the `NumberFormatException` of `parse_radix`.
                         | Builtin::Bits(BitsOp::ParseRadix, _)
-                        | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported)
+                        | Builtin::Charset(CharsetOp::ForName | CharsetOp::IsSupported | CharsetOp::Equals)
                         | Builtin::Native(Native::SystemIdentityHash)
                         // The expected and the new element of an atomic update may be null.
                         | Builtin::ElementUpdate(_)
@@ -615,6 +615,7 @@ pub(super) fn runtime_failures(
                             | Builtin::Unsigned(UnsignedOp::Parse | UnsignedOp::ParseRange, _)
                             | Builtin::CodePoint(CodePointOp::ToCharsInto)
                             | Builtin::EnumValueOf
+                            | Builtin::NotEnumClass
                             | Builtin::Native(Native::ArrayCopy)
                             | Builtin::Native(Native::MonitorWait | Native::MonitorNotify { .. })
                             | Builtin::Native(

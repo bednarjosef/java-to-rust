@@ -2984,7 +2984,7 @@ fn census_sources(dir: &str) -> std::path::PathBuf {
             ),
             (
                 "p/Other.java",
-                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void same() {\n        String s = \"x\";\n        System.out.println(s.intern() == \"x\");\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\n",
+                "package p;\nclass Other {\n    static void process() {\n        ProcessBuilder t = null;\n    }\n    static void split(String[] a) {\n        try { System.out.println(\"a,b\".split(a[0]).length); }\n        catch (RuntimeException e) { System.out.println(\"bad pattern\"); }\n    }\n    static void same() {\n        String s = new String(\"x\");\n        System.out.println(s == \"x\");\n    }\n    static void fine() {\n        System.out.println(\"fine\");\n    }\n}\n",
             ),
         ],
     )
@@ -3315,9 +3315,14 @@ fn intern_is_the_string_itself_and_string_identity_stays_rejected() {
     );
     assert_contains(&rust, &["let t = s.clone();", "s.len() as i32"]);
     // A string is a value in the translation, so `==` on two strings, which compares references
-    // in Java (and is what `intern` exists for), is rejected rather than guessed.
-    let err = java_to_rust::translate(
+    // in Java, is rejected rather than guessed, unless Java interns both (what `intern` exists
+    // for), when the references are the same exactly when the text is.
+    let rust = translate(
         "class A { public static void main(String[] a) { String s = \"x\"; System.out.println(s.intern() == \"x\"); } }",
+    );
+    assert_contains(&rust, &["s == \"x\""]);
+    let err = java_to_rust::translate(
+        "class A { public static void main(String[] a) { String s = new String(\"x\"); System.out.println(s == \"x\"); } }",
     )
     .expect_err("== on strings must be rejected");
     assert!(err.to_string().contains("== on strings compares references; not supported yet"), "{err}");

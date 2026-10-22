@@ -342,6 +342,11 @@ impl<'a> Gen<'a> {
             {
                 self.class_identity(*op, l, r)
             }
+            ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r)
+                if l.ty == Type::Charset || r.ty == Type::Charset =>
+            {
+                self.charset_identity(*op, l, r)
+            }
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), l, r) if l.ty == Type::StringBuilder => {
                 self.builder_identity(*op, l, r)
             }
@@ -666,6 +671,21 @@ impl<'a> Gen<'a> {
             Builtin::ObjectClone => self.object_clone(&args[0], id),
             Builtin::EnumOrdinal | Builtin::EnumName | Builtin::EnumCompareTo | Builtin::EnumValueOf => {
                 self.enum_builtin(builtin, args, ty, id)
+            }
+            Builtin::NotEnumClass => {
+                let name = self.str_ref(&args[0]);
+                let message = format!("format!(\"{{}} is not an enum class\", {name})");
+                if self.facts.raising.contains(&id) {
+                    let exception = self.runtime("Exception");
+                    let result = self.ty_name(ty);
+                    let failure = format!(
+                        "Err::<{result}, {exception}>({exception}::new(\"java.lang.IllegalArgumentException\", {message}))"
+                    );
+                    Code::atom(self.passed_on(Code::atom(failure)))
+                } else {
+                    let throw = self.runtime("throw");
+                    Code::atom(format!("{throw}(\"java.lang.IllegalArgumentException\", &{message})"))
+                }
             }
             Builtin::Boxed(op, kind) => self.boxed_builtin(op, kind, args, ty, id),
             Builtin::Unsigned(op, kind) => self.unsigned_builtin(op, kind, args, ty, id),
