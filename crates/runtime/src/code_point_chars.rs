@@ -7,7 +7,7 @@
 use crate::code_point::{high_surrogate, is_bmp_code_point, is_valid_code_point, low_surrogate};
 use crate::code_point_case_tables::{ALPHABETIC, LOWER, LOWERCASE, UPPER, UPPERCASE};
 use crate::code_point_tables::{DIGITS, FRACTIONS, LETTERS, NUMERIC};
-use crate::{Array, Exception, throw, try_set};
+use crate::{Elements, Exception, throw, try_set};
 
 const MIN_SUPPLEMENTARY: i32 = 0x1_0000;
 const MAX_CODE_POINT: i32 = 0x10_FFFF;
@@ -120,7 +120,7 @@ pub fn digit_code_point(cp: i32, radix: i32) -> i32 {
 /// `index` and returns their number. A code point that is not valid throws
 /// `IllegalArgumentException` before anything is written. A supplementary one writes its low unit
 /// before its high one, as the JDK does, so a write that does not fit leaves `dst` partly written.
-pub fn try_to_chars_into(cp: i32, dst: &Array<u16>, index: i32) -> Result<i32, Exception> {
+pub fn try_to_chars_into(cp: i32, dst: &impl Elements<u16>, index: i32) -> Result<i32, Exception> {
     if is_bmp_code_point(cp) {
         try_set(dst, index, cp as u16)?;
         Ok(1)
@@ -137,6 +137,6 @@ pub fn try_to_chars_into(cp: i32, dst: &Array<u16>, index: i32) -> Result<i32, E
 }
 
 /// The unchecked form of `try_to_chars_into`, for a call where the program cannot see the failure.
-pub fn to_chars_into(cp: i32, dst: &Array<u16>, index: i32) -> i32 {
+pub fn to_chars_into(cp: i32, dst: &impl Elements<u16>, index: i32) -> i32 {
     try_to_chars_into(cp, dst, index).unwrap_or_else(|e| throw(e.class, &e.message.unwrap_or_default()))
 }

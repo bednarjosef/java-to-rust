@@ -248,7 +248,9 @@ impl<'a> Gen<'a> {
         if let Some(path) = self.plain_path(array) {
             return self.plain_update(path, op, index, ty, rhs, id, used);
         }
-        if self.update_raises(op, ty, rhs) {
+        // A division that may fail passes its failure on with `?`, which a closure cannot hold.
+        let dividing = matches!(op, BinOp::Div | BinOp::Rem) && self.facts.raising.contains(&id);
+        if self.update_raises(op, ty, rhs) || dividing {
             return self.update_in_steps(op, array, index, ty, rhs, id, used);
         }
         let (mut binding, handle) = self.write_handle(array, has_effects(index) || has_effects(rhs));
