@@ -65,6 +65,7 @@ mod program;
 mod prologues;
 mod recreate;
 mod reflection;
+mod regex;
 mod switch;
 mod sync;
 mod system;

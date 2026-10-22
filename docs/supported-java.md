@@ -96,7 +96,9 @@ never freed.
   backtracking engine in the runtime (`regex.rs`): literals, escapes, classes, `\R`, groups, back
   references, alternation, anchors, greedy and lazy quantifiers. Lookaround, flags, `\b`,
   `\p{..}`, possessive quantifiers and set intersections are rejected in a constant pattern and
-  throw `UnsupportedOperationException` in a computed one.
+  throw `UnsupportedOperationException` in a computed one. In a program translated with the
+  JDK's sources, a computed pattern is the JDK's own `Pattern`'s instead, as Java's `String`
+  calls it (`lower/regex.rs`).
 - **`String.format`** is Java's `Formatter` in the US locale for `%b %h %s %c %d %o %x %e %f %g
   %n %%` with indexes, flags, width and precision, rounding half up from the shortest decimal as
   Java does. Arguments keep their Java type (`java::Arg::Long(n)`), so a mismatch throws
