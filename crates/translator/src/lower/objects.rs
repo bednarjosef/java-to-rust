@@ -262,6 +262,17 @@ impl<'t> Lowering<'t> {
         {
             return Ok(Some(Place::Static { class, name: field.to_string() }));
         }
+        // A stub class (`program::reach::stubs`) is declared with no fields, so its static fields
+        // have no cells. A constant of one is its value, as for any library class (`select`).
+        if symbol.is_static
+            && let Some(feature) = crate::program::untranslated(symbol.owner)
+            && !crate::program::provided(symbol.owner)
+        {
+            if symbol.constant.is_some() {
+                return Ok(None);
+            }
+            return unsupported(node, &format!("a static field of `{}` ({feature})", symbol.owner));
+        }
         let Some(class) = self.type_index(symbol.owner).or_else(|| self.body_field_owner(&symbol)) else {
             return Ok(None);
         };

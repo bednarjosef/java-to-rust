@@ -5460,3 +5460,33 @@ fn a_string_constant_compared_with_what_a_method_returns_is_compared_as_text_wit
     .expect_err("the method never returns the constant");
     assert!(error.to_string().contains("== on strings compares references"), "{error}");
 }
+
+#[test]
+fn static_fields_of_stub_classes_are_rejected() {
+    // A stub declares no fields (`program::reach::stubs`), so a static field read from the
+    // JDK's untranslated class is rejected, not written as a cell that is never declared.
+    let dir = write_sources(
+        "stub-static-field",
+        &[
+            (
+                "app/Main.java",
+                "package app;\nimport sun.security.util.SignatureFileVerifier;\npublic class Main {\n    static SignatureFileVerifier held;\n    public static void main(String[] a) { System.out.println(SignatureFileVerifier.LIMIT); }\n}\n",
+            ),
+            (
+                "lib/sun/security/util/SignatureFileVerifier.java",
+                "package sun.security.util;\npublic class SignatureFileVerifier {\n    public static final int LIMIT = Integer.getInteger(\"limit\", 16);\n    public static int limit() { return LIMIT; }\n}\n",
+            ),
+        ],
+    );
+    let program = java_to_rust::Program {
+        main: "app.Main".into(),
+        sources: vec![dir.join("app")],
+        libraries: vec![dir.join("lib")],
+        ..Default::default()
+    };
+    let error = java_to_rust::translate_program(&program).expect_err("a static field of a stub");
+    assert!(
+        error.to_string().contains("a static field of `sun.security.util.SignatureFileVerifier` (security) not supported yet"),
+        "{error}"
+    );
+}
