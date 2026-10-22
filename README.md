@@ -209,7 +209,10 @@ A small subset, end to end:
   Between the program's own types, `instanceof` is a `matches!` on the type's enum, a pattern `x
   instanceof Circle c` binds `c` with `if let`, a let chain, `let .. else` (for `if (!(x instanceof
   Circle c)) return ..;`, or `throw`, `break`, `continue`) or `is_some_and`, and a downcast or a cast across interfaces is checked,
-  throwing `ClassCastException` when it fails. A pattern variable read anywhere else is rejected.
+  throwing `ClassCastException` when it fails. An `if` whose condition is an `||` chain with a
+  negated pattern (`if (a || !(x instanceof T t) || c(t)) .. else ..`) is turned around into an
+  `&&` chain of the negated operands with its branches swapped, which binds `t` for the later
+  operands and the else branch. A pattern variable read anywhere else is rejected.
   One may be assigned (`n = n.next` in a loop), except one of a record or switch pattern.
   `Object` is an enum too, with a variant for each of the program's classes and enums whose values
   become `Object`s and one for each string or box (`Object::String(..)`, `Object::Integer(5)`), so
