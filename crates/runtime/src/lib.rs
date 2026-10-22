@@ -56,6 +56,7 @@ pub mod string;
 mod system;
 mod thread;
 mod time_zone;
+mod translate_escapes;
 mod unix;
 mod unsigned;
 mod vm;
@@ -109,6 +110,7 @@ pub use string::*;
 pub use system::*;
 pub use thread::*;
 pub use time_zone::*;
+pub use translate_escapes::*;
 pub use unix::*;
 pub use unsigned::{
     compare_unsigned, divide_unsigned, parse_unsigned, remainder_unsigned, to_unsigned_string,
