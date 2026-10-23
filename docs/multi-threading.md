@@ -25,8 +25,8 @@ hand-written itself.
    is then a sequentially consistent interleaving of the Java program's actions, which Java
    allows (section 1). A lock the translation adds is never held while the thread waits for
    anything else, so it cannot add a deadlock (1.3).
-3. **Thread-shared objects swap `Rc` for `Arc` and `RefCell` for `java::Locked<C>`**, a `RefCell`
-   behind a reentrant lock with `RefCell`'s API. `Arc` is `java::Arc` (`shared.rs`), whose count
+3. **Thread-shared objects swap `Rc` for `Arc` and `RefCell` for `java::Locked<C>`**, the value
+   behind a reentrant lock with `RefCell`'s API, whose borrow flag is kept in the lock's own word. `Arc` is `java::Arc` (`shared.rs`), whose count
    changes are plain until the first thread starts. The generated text is the same as for a
    thread-local object; only the type names differ. An immutable shared class is `Arc<C>`, read
    without a lock. Which classes are shared is decided per class, by type (section 4).
