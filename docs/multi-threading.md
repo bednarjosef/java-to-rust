@@ -115,9 +115,14 @@ or for a short `&self`/`&mut self` call, and never while the thread waits for an
   mutable (`codegen/objects.rs`, `conflicts`), and a blocking native counts as one, so the
   operands are read into locals first. A conditional expression whose condition reads two shared
   objects is guarded the same way, so it never holds both locks at once.
+- A field that only constructors write (`docs/object-model.md`, 1.8) is read without the lock
+  (`java::fixed!`): the lock that published the object to another thread, or the thread's start,
+  orders the constructor's writes before that thread's reads. A class whose constructor may
+  start a thread keeps its fields under the lock.
 - A lock read through another object (`synchronized (this.lock)`) is taken out of it before the
-  thread waits for its monitor (`java::enter(&{ this.borrow().lock.clone() })`); the same holds
-  for `wait` and `notify`.
+  thread waits for its monitor (`java::enter(&{ this.borrow().lock.clone() })`), unless it is a
+  field that only constructors write, which holds no lock (`java::enter(&java::fixed!(this,
+  lock))`); the same holds for `wait` and `notify`.
 
 In a build with debug assertions (the corpus test's), a wait of more than `WATCHDOG` (20
 seconds) for a data lock is this rule broken and panics with "translation bug: ..." instead of

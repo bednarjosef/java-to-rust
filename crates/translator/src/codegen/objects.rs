@@ -559,6 +559,15 @@ impl<'a> Gen<'a> {
         hierarchy::base_path(self.facts, self.class, s, owner) + &field
     }
 
+    /// Whether the field `name` of `object` is one that only constructors write
+    /// (`Facts::fixed_fields`), which is read without borrowing the object.
+    pub(super) fn fixed(&self, object: &Expr, name: &str) -> bool {
+        self.class.field_owner(object.ty, name).is_some_and(|owner| {
+            self.class.types[owner].fields.iter().any(|f| f.name == name)
+                && self.facts.fixed_fields.contains(&(owner, name.to_string()))
+        })
+    }
+
     /// The method that a call of `resolved` on `receiver` runs: the one it names for `super.m()`,
     /// else the implementation of the class whose objects the receiver is.
     pub(super) fn dispatch(&self, receiver: &Expr, resolved: usize, is_super: bool) -> usize {
@@ -779,6 +788,9 @@ impl<'a> Gen<'a> {
                     }
                 } else if self.is_plain(object) {
                     (format!("{obj}.{field}"), true)
+                } else if self.fixed(object, name) {
+                    // No borrow of the object is held, so none needs to end.
+                    (format!("java::fixed!({obj}, {field})"), true)
                 } else if self.guarded {
                     // A borrow that the statement must not hold is ended inside braces, which
                     // move the value out, so it is cloned.
@@ -1171,9 +1183,9 @@ impl<'a> Gen<'a> {
     /// the statement: a field read, or a call of a method that borrows its object.
     fn holds_borrow(&self, a: &Expr) -> bool {
         match &a.kind {
-            ExprKind::Field { object, .. } => match self.enum_of(object) {
+            ExprKind::Field { object, name } => match self.enum_of(object) {
                 Some(t) => !self.immutable_enum(t),
-                None => !self.is_plain(object),
+                None => !self.is_plain(object) && !self.fixed(object, name),
             },
             ExprKind::MethodCall { receiver, .. } => {
                 self.enum_of(receiver).is_none()
@@ -1220,6 +1232,9 @@ impl<'a> Gen<'a> {
         }
         if self.is_plain(object) {
             return Code::atom(format!("{obj}.{}{clone}", self.field_path(object, name)));
+        }
+        if self.enum_of(object).is_none() && self.fixed(object, name) {
+            return Code::atom(format!("java::fixed!({obj}, {}){clone}", self.field_path(object, name)));
         }
         let borrow = match self.enum_of(object) {
             Some(t) if self.immutable_enum(t) => {

@@ -203,8 +203,9 @@ impl NamesCursor {
 
 `Outer.this` and an unqualified name that javac resolves to a member of an enclosing class are
 a chain of `outer` reads from the current class to that class (`self.outer`,
-`self.outer.borrow().outer`), each in the outer's form (`borrow()` for `Rc<RefCell<..>>`, nothing
-for `Rc<C>`, a lock for a shared one). javac resolves shadowing: `name` is `self.name`,
+`java::fixed!(self.outer, outer)`), each in the outer's form (`borrow()` for `Rc<RefCell<..>>`,
+nothing for `Rc<C>`, a lock for a shared one), except that `outer`, which only the constructor
+writes, is read with `java::fixed!` (docs/object-model.md, 1.8). javac resolves shadowing: `name` is `self.name`,
 `Ring.this.name` is `self.outer.borrow().name`. `Outer.super.m()` calls the superclass's method
 on the enclosing object (`super_receiver` in `lower/hierarchy.rs`).
 
@@ -474,8 +475,9 @@ leave the outer closure with the unconverted value.
 A call of the abstract method on a closure-typed value calls the closure: `f.apply(x)` is
 `f(x)`, `r.run()` is `r()` or `r()?`. A closure read from a field of a shared object is cloned
 out of the `RefCell` before it runs, `({ let f = a.borrow().op.clone(); f })(3)`, since its body
-may reach the same object. A local, a capture or a field of a plain object is called in place
-(`op(x)`, `(self.op)(x)`). On an enum-typed interface the call is the dispatcher, as for any
+may reach the same object. A local, a capture, a field of a plain object or a field that only
+constructors write (docs/object-model.md, 1.8) is called in place (`op(x)`, `(self.op)(x)`,
+`(java::fixed!(a, op))(x)`). On an enum-typed interface the call is the dispatcher, as for any
 interface.
 
 ### 4.6 Default and static methods; the JDK's functional interfaces

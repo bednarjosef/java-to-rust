@@ -164,6 +164,12 @@ impl<'a> Gen<'a> {
             ExprKind::Field { object, .. } if self.is_plain(object) && !self.nullable(receiver) => {
                 format!("({})", self.object(receiver))
             }
+            // A field that only constructors write, read without borrowing its object.
+            ExprKind::Field { object, name }
+                if self.enum_of(object).is_none() && self.fixed(object, name) && !self.nullable(receiver) =>
+            {
+                format!("({})", self.object(receiver))
+            }
             // The borrow of the object that holds the field ends before the call.
             ExprKind::Field { .. } => {
                 let value = self.object_handle(receiver);
