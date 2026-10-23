@@ -179,6 +179,9 @@ const RAISED: &[(&str, &[&str])] = &[
             "java.security.SecureRandom#getSeed",
             // A dictionary that the stream did not ask for (`inflate.rs`).
             "java.util.zip.Inflater#setDictionary",
+            // A level outside -1 to 9, and a dictionary refused (`deflate.rs`).
+            "java.util.zip.Deflater#init",
+            "java.util.zip.Deflater#setDictionary",
             // A null charset name.
             "java.nio.charset.Charset#forName",
             "java.nio.charset.Charset#isSupported",

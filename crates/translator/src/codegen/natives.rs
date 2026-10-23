@@ -291,6 +291,16 @@ impl<'a> Gen<'a> {
             | Native::InflateEnd
             | Native::InflateSetDictionary
             | Native::InflateSetDictionaryBuffer => self.inflate_native(native, args, id),
+            Native::DeflateInit
+            | Native::DeflateBytes
+            | Native::DeflateBytesBuffer
+            | Native::DeflateBufferBytes
+            | Native::DeflateBufferBuffer
+            | Native::DeflateAdler
+            | Native::DeflateReset
+            | Native::DeflateEnd
+            | Native::DeflateSetDictionary
+            | Native::DeflateSetDictionaryBuffer => self.deflate_native(native, args, id),
             Native::NoPendingReferences => Code::atom("false"),
             Native::SecureSeed => {
                 let num_bytes = self.value(&args[0], Type::Int).text;

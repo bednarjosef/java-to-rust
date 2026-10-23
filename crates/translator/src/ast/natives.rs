@@ -251,6 +251,20 @@ pub enum Native {
     InflateEnd,
     InflateSetDictionary,
     InflateSetDictionaryBuffer,
+    /// `Deflater`'s natives (`deflate.rs`): `init(level, strategy, nowrap)`, then
+    /// `deflateBytesBytes` and its buffer forms (`deflateBytesBuffer`, `deflateBufferBytes`,
+    /// `deflateBufferBuffer`), `getAdler`, `reset`, `end`, and `setDictionary` with its buffer
+    /// form, on the handle that `init` returned.
+    DeflateInit,
+    DeflateBytes,
+    DeflateBytesBuffer,
+    DeflateBufferBytes,
+    DeflateBufferBuffer,
+    DeflateAdler,
+    DeflateReset,
+    DeflateEnd,
+    DeflateSetDictionary,
+    DeflateSetDictionaryBuffer,
     /// `TimeZone.getSystemTimeZoneID(javaHome)`: the zone's name, or `null` (`time_zone.rs`).
     SystemTimeZoneId,
     /// `TimeZone.getSystemGMTOffsetID()`: the local offset from UTC as `GMT+hh:mm`.
@@ -425,6 +439,30 @@ pub fn declared_native(class: &str, name: &str, signature: &str) -> Option<Nativ
         }
         ("java.util.zip.Inflater", "setDictionaryBuffer", "(long,long,int)void") => {
             Native::InflateSetDictionaryBuffer
+        }
+        ("java.util.zip.Deflater", "init", "(int,int,boolean)long") => Native::DeflateInit,
+        (
+            "java.util.zip.Deflater",
+            "deflateBytesBytes",
+            "(long,byte[],int,int,byte[],int,int,int,int)long",
+        ) => Native::DeflateBytes,
+        ("java.util.zip.Deflater", "deflateBytesBuffer", "(long,byte[],int,int,long,int,int,int)long") => {
+            Native::DeflateBytesBuffer
+        }
+        ("java.util.zip.Deflater", "deflateBufferBytes", "(long,long,int,byte[],int,int,int,int)long") => {
+            Native::DeflateBufferBytes
+        }
+        ("java.util.zip.Deflater", "deflateBufferBuffer", "(long,long,int,long,int,int,int)long") => {
+            Native::DeflateBufferBuffer
+        }
+        ("java.util.zip.Deflater", "getAdler", "(long)int") => Native::DeflateAdler,
+        ("java.util.zip.Deflater", "reset", "(long)void") => Native::DeflateReset,
+        ("java.util.zip.Deflater", "end", "(long)void") => Native::DeflateEnd,
+        ("java.util.zip.Deflater", "setDictionary", "(long,byte[],int,int)void") => {
+            Native::DeflateSetDictionary
+        }
+        ("java.util.zip.Deflater", "setDictionaryBuffer", "(long,long,int)void") => {
+            Native::DeflateSetDictionaryBuffer
         }
         ("java.lang.ref.Reference", "hasReferencePendingList", "()boolean") => Native::NoPendingReferences,
         ("java.lang.Thread", "nextThreadNum", "()int") => Native::ThreadNumber,
@@ -712,6 +750,23 @@ mod tests {
             found("java.util.zip.Inflater", "setDictionaryBuffer", "(long,long,int)void"),
             Some(Native::InflateSetDictionaryBuffer)
         );
+        assert_eq!(
+            found("java.util.zip.Deflater", "init", "(int,int,boolean)long"),
+            Some(Native::DeflateInit)
+        );
+        assert_eq!(
+            found(
+                "java.util.zip.Deflater",
+                "deflateBytesBytes",
+                "(long,byte[],int,int,byte[],int,int,int,int)long"
+            ),
+            Some(Native::DeflateBytes)
+        );
+        assert_eq!(
+            found("java.util.zip.Deflater", "deflateBufferBuffer", "(long,long,int,long,int,int,int)long"),
+            Some(Native::DeflateBufferBuffer)
+        );
+        assert_eq!(found("java.util.zip.Deflater", "reset", "(long)void"), Some(Native::DeflateReset));
         // Another overload, or another class's method of the same name, is not the native.
         assert_eq!(found("java.util.zip.CRC32", "update", "(byte[],int,int)void"), None);
         assert_eq!(found("jdk.internal.misc.Unsafe", "initialize", "()void"), None);

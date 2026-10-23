@@ -83,6 +83,7 @@ something a translated program does not have.
 | `Unsafe.park`, `unpark` | `thread.rs` | `LockSupport`'s permits |
 | `CRC32.update`, `updateBytes0` | `java::crc32_update`, `crc32_update_bytes` | zlib's CRC-32 |
 | `Inflater` natives (`inflateBytesBytes`, `inflateBytesBuffer`, `inflateBufferBytes`, `inflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, ...) | `inflate.rs` | zlib inflation, from arrays or from memory outside the heap by address (direct buffers) |
+| `Deflater` natives (`init`, `deflateBytesBytes`, `deflateBytesBuffer`, `deflateBufferBytes`, `deflateBufferBuffer`, `setDictionary`, `setDictionaryBuffer`, `getAdler`, `reset`, `end`) | `deflate.rs` | a compressor of the runtime's own, see "Compression" below |
 | `Reference.get0`, `refersTo0`, `clear0`; `hasReferencePendingList()` | code on the field `referent`; `false` | see "References" below |
 | `SecureRandom.getSeed` | `random.rs` | seed bytes from the operating system |
 | the natives of the translator's `Thread` | `thread.rs` | see [multi-threading.md](multi-threading.md) |
@@ -115,6 +116,27 @@ values, and the interned object of its text where the program compares strings b
 `Set.of` and `Map.of` iterate in a different order on every run, in Java too: with the CDS seed
 0, `ImmutableCollections` seeds its order from `System.nanoTime()`. Their output cannot be
 compared with one recorded run.
+
+### Compression
+
+`Deflater` has no zlib to call, so the runtime compresses with code of its own (`deflate.rs`,
+without external crates), and its output is not zlib's byte for byte: it is valid DEFLATE data
+that zlib, the JDK's `Inflater` and the runtime's own read back to the same bytes. A program that
+prints or compares compressed bytes, or their number (`getBytesWritten`, `getTotalOut`), sees
+other values than Java; everything else is zlib's: the bytes read by each call (and so
+`needsInput`, `getBytesRead`, the input buffer's position), `finished`, the Adler-32 of the input
+(`getAdler`), the zlib header with the level's flags and a preset dictionary's id, the empty
+stored block that ends a `SYNC_FLUSH` or `FULL_FLUSH`, the input that a change of level or
+strategy compresses first, and the `IllegalArgumentException` of a level outside -1 to 9 (in the
+constructor) and of a dictionary zlib refuses.
+
+It is a real compressor rather than stored or fixed-code blocks only, since the compressed size
+is what a program uses `Deflater` for (javac's zip file system writes jars with it): input is
+gathered into blocks of 64 KiB, matches are found along hash chains of three-byte prefixes within
+the last 32 KiB, with the chain lengths and lazy matching of zlib's levels, and each block is
+written as stored bytes, with the fixed codes or with dynamic Huffman codes made for it, whichever
+is smallest. Level 0 writes stored blocks, and `HUFFMAN_ONLY` literals only. The output is within
+a few percent of zlib's size at each level.
 
 ### Not implemented
 

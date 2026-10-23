@@ -27,6 +27,7 @@ mod code_point_case_tables;
 mod code_point_chars;
 mod code_point_tables;
 mod copy_refs;
+mod deflate;
 mod exact;
 mod exception;
 mod fd;
@@ -86,6 +87,10 @@ pub use code_point::{
 };
 pub use code_point_chars::*;
 pub use copy_refs::*;
+pub use deflate::{
+    deflate_adler, deflate_buffer_buffer, deflate_buffer_bytes, deflate_bytes, deflate_bytes_buffer,
+    deflate_end, deflate_init, deflate_reset, deflate_set_dictionary, deflate_set_dictionary_buffer,
+};
 pub use exact::*;
 pub use exception::*;
 pub use fd::*;
