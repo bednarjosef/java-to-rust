@@ -12,6 +12,7 @@ mod exceptions;
 mod file_channels;
 mod foreach;
 mod functional;
+mod abstract_sequence;
 mod generic_args;
 mod generics;
 mod handles;

@@ -5477,6 +5477,30 @@ fn a_class_that_is_a_char_sequence_through_an_interface_gets_the_default_get_cha
     assert_contains(&rust, &["java::check_from_to_index(", "java::check_index("]);
 }
 
+#[test]
+fn an_abstract_class_copy_of_get_chars_calls_the_length_and_char_at_of_its_subclass() {
+    let rust = translate(
+        "public class Main {
+            interface Named extends CharSequence {}
+            static abstract class Shell implements Named {
+                public CharSequence subSequence(int s, int e) { return \"w\"; }
+            }
+            static class Word extends Shell {
+                public int length() { return 2; }
+                public char charAt(int i) { return 'w'; }
+            }
+            public static void main(String[] a) {
+                CharSequence s = new Word();
+                char[] dst = new char[2];
+                s.getChars(0, 2, dst, 0);
+                System.out.println(new String(dst));
+            }
+        }",
+    );
+    assert_contains(&rust, &["self.length()", "self.char_at("]);
+    assert!(!rust.contains("::length(self)"), "{rust}");
+}
+
 /// Two files with code at the same line and column, of which the analyses reject one: the error
 /// names its own file, and the census rejects that file's method alone.
 #[test]
