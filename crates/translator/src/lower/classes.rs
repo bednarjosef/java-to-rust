@@ -202,7 +202,7 @@ impl<'t> Lowering<'t> {
                 Stmt::Local { ty: Type::JavaClass, name: class_local, init: Some(class), pos },
                 Stmt::Local { ty: value.ty, name: value_local, init: Some(value), pos },
                 Stmt::If { cond: not, then: Box::new(check), otherwise: None },
-                Stmt::Yield(self.convert(value_var, to)),
+                Stmt::Yield(self.class_result(|| self.copy(&value_var), to)),
             ];
             return Ok(block_of(self, pos, body));
         }
@@ -222,7 +222,7 @@ impl<'t> Lowering<'t> {
         block.push(Stmt::Expr(self.synth(check, pos, Type::Void)));
         // `cast(null)` is a null of the call's type.
         let result = match name {
-            Some(_) => self.convert(read(), to),
+            Some(_) => self.class_result(read, to),
             None => self.synth(ExprKind::Null, pos, to),
         };
         block.push(Stmt::Yield(result));
@@ -230,6 +230,18 @@ impl<'t> Lowering<'t> {
             selector: Box::new(self.synth(ExprKind::Int(0), pos, Type::Int)),
             cases: vec![Case { labels: vec![CaseLabel::Default], body: block }],
         })
+    }
+
+    /// The checked value that `read` gives, as the cast's type `to`: a conversion for an upcast,
+    /// as `convert` gives it, and a `Cast` for a downcast, which `convert` leaves as it is. The
+    /// block's type is the call's, so a value still of the wrong type would not compile.
+    fn class_result(&self, read: impl Fn() -> Expr, to: Type) -> Expr {
+        let converted = self.convert(read(), to);
+        if converted.ty == to {
+            return converted;
+        }
+        let pos = converted.pos;
+        self.synth(ExprKind::Cast(to, Box::new(read())), pos, to)
     }
 
     /// `class.isInstance(x)`, which for an object that may be an annotation also asks whether it
