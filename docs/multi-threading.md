@@ -554,9 +554,12 @@ unchanged and that a class no thread reaches keeps `Rc`.
 
 - **Single-threaded programs pay nothing**: the output is what it was without this work.
 - **A thread-shared mutable object** costs an uncontended lock and unlock per field access or
-  short method call (10 to 20 ns on Linux's futex mutex, against about 1 ns for a `RefCell`
-  borrow) and an atomic increment per handle clone. An immutable shared object costs nothing on
-  reads beyond the `Arc` count.
+  short method call: a compare-and-swap to take the data lock and a sequentially consistent
+  store to give it back, with a look at the parking bucket's waiters, against a flag check for a
+  `RefCell` borrow; and an atomic increment per handle clone. Until the program starts its first
+  thread, the lock is taken and given back with plain stores instead (`locked.rs`, `THREADS`): a
+  program whose threads start late, or never (javac's), pays no atomic operation for its locks
+  until then. An immutable shared object costs nothing on reads beyond the `Arc` count.
 - **A monitor** costs one lock per synchronized region, like HotSpot's thin lock.
 - **Primitive statics** are plain loads and stores on x86-64 (acquire/release); object statics
   cost a lock per access.

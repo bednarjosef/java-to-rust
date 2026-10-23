@@ -607,6 +607,7 @@ mod tests {
 
     #[test]
     fn a_shared_builder_is_seen_changed_by_another_thread() {
+        crate::locked::begin_threads();
         let sb = SharedStringBuilder::from_text(Wtf8::new("ab"));
         let other = sb.clone();
         std::thread::spawn(move || {

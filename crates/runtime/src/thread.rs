@@ -182,6 +182,7 @@ pub fn main_thread_id() -> i64 {
 pub fn start_thread(tid: i64, name: String, daemon: bool, body: impl FnOnce() + Send + 'static) {
     if !STARTED.swap(true, Ordering::AcqRel) {
         crate::out::share_output();
+        crate::locked::begin_threads();
     }
     let record = Record::new(name, true);
     {

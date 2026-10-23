@@ -203,6 +203,7 @@ mod tests {
 
     #[test]
     fn a_class_is_initialized_once_and_others_wait_for_it() {
+        crate::locked::begin_threads();
         static INIT: ClassInit = ClassInit::new();
         static VALUE: Atomic<i32> = Atomic::new(0);
         let runs = Arc::new(AtomicUsize::new(0));
