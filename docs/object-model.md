@@ -428,6 +428,15 @@ to run.
   family, so `base()` has one type for the whole enum: `Ref<'_, XFields>` for a mutable family,
   `&XFields` for an immutable one. The cost is that a leaf loses `Rc<C>` when a sibling is
   mutable. Interface enums and `Object` may mix `Rc<C>` and `Rc<RefCell<C>>` variants.
+- **Fixed fields** (`analysis/fixed_fields.rs`): a field of a mutable class that only
+  constructors write, through `this` (a `final` field, or one written the same way), keeps its
+  value once the object is built. Its read on a concrete receiver is `java::fixed!(c, base.name)`
+  rather than `c.borrow().base.name`: the field itself, borrowed as long as the handle, with no
+  `RefCell` borrow or lock taken and none to end, so it needs no copy where a borrow of the
+  object could not last (`{ c.borrow().name.clone() }`). In a program with threads, the fields of
+  a class whose constructors, or whose subclasses' constructors, may start a thread are not
+  fixed, since that thread could read one while the constructor writes it. The runtime's
+  `fixed.rs` gives the reasons that the borrow cannot alias a write.
 - A fields struct has no representation of its own: it is always inside a concrete object.
 
 ### 1.9 Comparable, Number, CharSequence, Enum and other JDK interfaces

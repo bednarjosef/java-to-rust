@@ -23,6 +23,7 @@ pub mod closures;
 mod constants;
 mod early_reads;
 mod exceptions;
+mod fixed_fields;
 pub mod hierarchy;
 mod indexing;
 pub mod live_methods;
@@ -215,6 +216,9 @@ pub struct Facts {
     /// The class that declares each field visible in each class: (class, field) to class, by
     /// qualified name.
     pub field_owners: HashMap<(String, String), String>,
+    /// The instance fields that only constructors write, through `this`, by declaring type and
+    /// name: their reads borrow the field alone (see `fixed_fields`).
+    pub fixed_fields: HashSet<(usize, String)>,
     /// The methods and constructors that return `Result<_, Throwable>`: some caller observes an
     /// exception that may escape them (see `exceptions`).
     pub throwing: HashSet<usize>,
@@ -306,6 +310,8 @@ pub fn analyze_tolerating(class: &Class, tolerated: &[Error]) -> Result<Facts, V
     phase("analysis: ranges", || ranges::analyze(class, &mut facts));
     phase("analysis: representation", || representation(class, &mut facts));
     checked(phase("analysis: validate", || validate(class, &facts)))?;
+    facts.fixed_fields =
+        phase("analysis: fixed fields", || fixed_fields::fixed_fields(class, facts.threaded));
     patterns::check(class).map_err(one)?;
     facts.eager_init = statics::eager_classes(class);
     facts.entry_init = statics::entry_inits(class, &facts.eager_init);

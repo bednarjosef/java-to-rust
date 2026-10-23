@@ -213,7 +213,7 @@ fn a_lambda_reaches_the_enclosing_object_through_outer() {
     assert_contains(
         &rust,
         &[
-            "fn adder(this: &Rc<RefCell<A>>) -> AOp {\n        let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { a.wrapping_add(outer.borrow().base) })\n    }",
+            "fn adder(this: &Rc<RefCell<A>>) -> AOp {\n        let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { a.wrapping_add(java::fixed!(outer, base)) })\n    }",
             "let outer = this.clone();\n        Rc::new(move |a: i32| -> i32 { outer.borrow().scaled(a) })\n",
             "A::adder(&o)(1)",
         ],
@@ -293,12 +293,14 @@ fn a_closure_read_from_a_field_is_taken_out_before_the_call() {
             Op op = a -> a * 2;
             int total;
             void run() { total += op.apply(total + 1); }
+            void reset() { op = a -> a; }
             static int twice(A a) { return a.op.apply(3); }
             public static void main(String[] args) {
                 A a = new A();
                 A shared = a;
                 a.run();
                 System.out.println(shared.total + twice(a));
+                a.reset();
             }
         }",
     );
@@ -311,6 +313,26 @@ fn a_closure_read_from_a_field_is_taken_out_before_the_call() {
             "({ let f = a.borrow().op.clone(); f })(3)",
         ],
     );
+}
+
+#[test]
+fn a_closure_in_a_field_only_constructors_write_is_called_in_place() {
+    let rust = translate(
+        "class A {
+            interface Op { int apply(int a); }
+            final Op op = a -> a * 2;
+            int total;
+            void run() { total += op.apply(total + 1); }
+            static int twice(A a) { return a.op.apply(3); }
+            public static void main(String[] args) {
+                A a = new A();
+                A shared = a;
+                a.run();
+                System.out.println(shared.total + twice(a));
+            }
+        }",
+    );
+    assert_contains(&rust, &["(java::fixed!(a, op))(3)"]);
 }
 
 #[test]

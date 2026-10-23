@@ -142,7 +142,10 @@ fn outer_this_is_the_outer_field_chain() {
             }
         }",
     );
-    assert_contains(&rust, &["self.outer.borrow().width.wrapping_add(self.outer.borrow().outer.width)"]);
+    assert_contains(
+        &rust,
+        &["java::fixed!(self.outer, width).wrapping_add(java::fixed!(self.outer, outer).width)"],
+    );
 }
 
 #[test]
