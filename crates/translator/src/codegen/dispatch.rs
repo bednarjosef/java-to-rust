@@ -2310,10 +2310,10 @@ impl<'a> Gen<'a> {
     }
 
     /// The string that `toString` returns for an object of class `c`, a variant of the enum of `t`
-    /// bound to `o`, whose `toString` does not throw: the string itself, what the program's
-    /// `toString` returns, a builder's text, or the text of its `Display`; where the program's
-    /// strings are shared, an enum constant's name is its interned string, and other text a new
-    /// string.
+    /// bound to `o`: the string itself, what the program's `toString` returns ("null" for null;
+    /// what it throws ends the program), a builder's text, or the text of its `Display`; where
+    /// the program's strings are shared, an enum constant's name is its interned string, and other
+    /// text a new string.
     fn java_string_arm(&mut self, t: usize, c: usize) -> (String, bool) {
         let shared = super::shared_strings();
         let made = |g: &mut Self, text: &str| {
@@ -2332,7 +2332,17 @@ impl<'a> Gen<'a> {
         }
         match hierarchy::to_string_impl(self.class, c) {
             Some(i) => {
-                let (call, uses) = self.arm_call(t, c, i, "");
+                let (mut call, uses) = self.arm_call(t, c, i, "");
+                // What a `toString` throws here ends the program, as where the runtime makes the
+                // text (see `display_arm`); `try_text` passes it on.
+                if self.facts.throwing.contains(&i) {
+                    if let Some(t) =
+                        self.class.type_index("java.lang.Throwable").and_then(|t| self.enum_for(t))
+                    {
+                        self.need(Need::Display(t));
+                    }
+                    call = format!("{call}.unwrap_or_else({})", self.runtime("uncaught"));
+                }
                 if self.facts.nullable_returns.contains(&i) {
                     let null = self.string_literal("\"null\"");
                     return (format!("{call}.unwrap_or_else(|| {null})"), uses);
