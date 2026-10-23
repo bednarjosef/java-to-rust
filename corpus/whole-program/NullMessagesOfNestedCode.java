@@ -7,8 +7,9 @@ import java.util.List;
 // enclosing instance of another class, an element at a constant index, a static of the
 // enclosing class, an element at an enum's ordinal, an enum's `toString()`, a for-each variable
 // in a lambda, code under a constant `false`, which javac writes no code for, and the
-// `subSequence` of a `CharSequence`'s text, which is lowered as a `substring`, and a null
-// `CharSequence` that `contentEquals` compares.
+// `subSequence` of a `CharSequence`'s text, which is lowered as a `substring`, a null
+// `CharSequence` that `contentEquals` compares, and a null that a call returns in a lambda
+// whose argument dereferences, as in javac's `Check.checkIfTypeParamsRequiresIdentity`.
 public class NullMessagesOfNestedCode {
     Object types = null;
     Handler handler;
@@ -127,6 +128,42 @@ public class NullMessagesOfNestedCode {
     }
 
     @SuppressWarnings("unchecked")
+    static class Seq<A> extends java.util.AbstractList<A> {
+        final List<A> items = new ArrayList<>();
+
+        public A get(int i) {
+            return items.get(i);
+        }
+
+        public int size() {
+            return items.size();
+        }
+    }
+
+    static class Position {
+        final int index;
+
+        Position(int index) {
+            this.index = index;
+        }
+    }
+
+    static class Tree {
+        final String type;
+
+        Tree(String type) {
+            this.type = type;
+        }
+    }
+
+    static List<String> typed(List<Position> at, Seq<Tree> trees) {
+        List<String> out = new ArrayList<>();
+        at.stream()
+            .filter(p -> trees.get(p.index).type != null && trees.get(p.index).type.isEmpty())
+            .forEach(p -> out.add("at " + p.index));
+        return out;
+    }
+
     public static void main(String[] args) {
         NullMessagesOfNestedCode o = new NullMessagesOfNestedCode();
         run(() -> o.new Check().new CheckContext().compatible("x"));
@@ -141,5 +178,11 @@ public class NullMessagesOfNestedCode {
         run(() -> System.out.println(o.phaseName()));
         run(() -> System.out.println(new Name().subSequence(0, 1)));
         run(() -> System.out.println("n".contentEquals(flatName())));
+        Seq<Tree> trees = new Seq<>();
+        trees.items.add(new Tree(""));
+        trees.items.add(new Tree(null));
+        trees.items.add(null);
+        run(() -> System.out.println(typed(List.of(new Position(0), new Position(1)), trees)));
+        run(() -> System.out.println(typed(List.of(new Position(0), new Position(2)), trees)));
     }
 }

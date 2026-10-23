@@ -218,10 +218,27 @@ impl Messages<'_> {
             ExprKind::MethodCall { receiver, name, .. } if name == "iterator" && self.joins(x) => {
                 out.insert(receiver.id, None);
             }
+            // The loop's iterator, which may be null where the collection's `iterator()` returns
+            // null: the JDK's `String.join` keeps it in its slot 5, after its parameters and the
+            // locals `delim`, `elems` and `size`, and it has no name there.
+            ExprKind::MethodCall { receiver, name, .. }
+                if matches!(name.as_str(), "hasNext" | "next") && self.joins(x) =>
+            {
+                let message =
+                    format!("Cannot invoke \"java.util.Iterator.{name}()\" because \"<local5>\" is null");
+                out.insert(receiver.id, Some(message));
+            }
             ExprKind::MethodCall { receiver, name, resolved: Some(r), is_super: false, .. }
                 if !self.class.methods[*r].is_static =>
             {
-                let call = self.call_of(x, name).or_else(|| self.jdk_call(x));
+                // `CharSequence.isEmpty()`, which lowering writes as a zero `length()`
+                // (`char_sequence_call`).
+                let empty = || match self.jdk {
+                    _ if name != "length" => None,
+                    true => self.named_call(x, "isEmpty").flatten(),
+                    false => self.call(x.pos, "isEmpty"),
+                };
+                let call = self.call_of(x, name).or_else(empty).or_else(|| self.jdk_call(x));
                 add(receiver, call.map(|m| format!("Cannot invoke \"{m}\"")))
             }
             // Unboxing in the JDK's code, which javac writes as a call of the boxed class's
@@ -701,7 +718,7 @@ impl Messages<'_> {
     /// The message of `action` on `object`, which is null: with where it came from, if the JVM
     /// shows that.
     fn message(&self, action: &str, object: &Expr) -> Option<String> {
-        let object = transparent(self.held(object))?;
+        let object = self.unwrapped(object)?;
         if let Some(call) = self.called(object) {
             return Some(format!("{action} because the return value of \"{call}\" is null"));
         }
@@ -725,7 +742,7 @@ impl Messages<'_> {
             let primitive = |t: Type| t.is_numeric() || t == Type::Boolean;
             return (primitive(*to) && primitive(inner.ty)).then_some(Source::Hidden);
         }
-        let e = transparent(self.held(e))?;
+        let e = self.unwrapped(e)?;
         if let Some(call) = self.called(e) {
             return Some(Source::Shown(call));
         }
@@ -841,6 +858,12 @@ impl Messages<'_> {
             ExprKind::Var(name) => self.receivers.get(name.as_str()).copied().unwrap_or(e),
             _ => crate::lower::ordered_call(e).unwrap_or(e),
         }
+    }
+
+    /// `e` as the JVM sees the value: through the receivers that lowering holds (`held`) and the
+    /// conversions that change nothing (`transparent`), also a held call under a cast.
+    fn unwrapped<'e>(&'e self, e: &'e Expr) -> Option<&'e Expr> {
+        Some(self.held(transparent(self.held(e))?))
     }
 
     /// The method that `e` calls, as the class file names it, if it is a call.
@@ -1077,8 +1100,9 @@ impl Messages<'_> {
     }
 
     /// Whether `object` is the receiver of a bound method reference that the class of the
-    /// reference holds (`Capture::checked`).
+    /// reference holds (`Capture::checked`), also where lowering holds it for the call.
     fn checked_receiver(&self, object: &Expr) -> bool {
+        let Some(object) = self.unwrapped(object) else { return false };
         let ExprKind::Field { object: on, name } = &object.kind else { return false };
         let decl = &self.class.types[self.method.class];
         matches!(on.kind, ExprKind::This) && decl.captures.iter().any(|c| c.checked && &c.field == name)
@@ -1176,7 +1200,8 @@ impl Messages<'_> {
     }
 
     /// The method `name` of the call `x`, as the class file names it. Of calls of one name that
-    /// start alike, as in a chain, it is the one whose first argument starts where `x`'s does
+    /// start alike, as in a chain, it is the one whose first argument starts where `x`'s does, or
+    /// for calls without arguments, whose receiver is of the class of `x`'s
     /// (`java/BytecodeNames.java`).
     fn call_of(&self, x: &Expr, name: &str) -> Option<String> {
         self.call(x.pos, name).or_else(|| {
@@ -1185,7 +1210,12 @@ impl Messages<'_> {
             };
             let first = args.first().map(|a| self.argument(a).pos);
             let at = first.map_or(String::new(), |p| format!("{}:{}", p.line, p.column));
-            self.call(x.pos, &format!("{name}@{at}"))
+            self.call(x.pos, &format!("{name}@{at}")).or_else(|| {
+                // One without arguments, by the class of its receiver.
+                let ExprKind::MethodCall { receiver, args, .. } = &x.kind else { return None };
+                let class = self.binary_name(self.class.class_index(self.held(receiver).ty)?)?;
+                args.is_empty().then(|| self.call(x.pos, &format!("{name}@#{class}"))).flatten()
+            })
         })
     }
 

@@ -547,11 +547,16 @@ public class BytecodeNames {
                         entry(at, "call", m.name.toString(), member(m, site));
                         // Calls of one name that start alike, as in a chain
                         // (`StreamSupport.stream(s, false).map(f).collect(c).stream()`), apart
-                        // by where their first argument starts: `stream@3:30`, `stream@`.
+                        // by where their first argument starts: `stream@3:30`, `stream@`. Calls
+                        // without one are apart by the class of the receiver too:
+                        // `stream@#java.util.List`.
                         long[] first = t.args.isEmpty() ? null : starts.get(written(t.args.head));
                         if (t.args.isEmpty() || first != null) {
                             String where = first == null ? "" : first[0] + ":" + first[1];
                             entry(at, "call", m.name + "@" + where, member(m, site));
+                        }
+                        if (t.args.isEmpty() && types.erasure(site).tsym instanceof ClassSymbol receiver) {
+                            entry(at, "call", m.name + "@#" + receiver.flatname, member(m, site));
                         }
                     }
                     super.visitApply(t);

@@ -456,7 +456,8 @@ parameter (`<parameter1>.chk`), as does a lambda in it, which takes that as a pa
 the initializers the constructor runs read the field (`this.this$0.chk`), also where the
 constructor is a method of a class that builds whole objects (`analysis/whole_objects.rs`);
 javac's own locals are named too (the `s$` of a string `switch`, the iterator
-`i$` of a for-each loop, whose calls start at the collection as javac's do). A variable of a
+`i$` of a for-each loop, whose calls start at the collection as javac's do, at its parenthesis
+if it has one). A variable of a
 `finally` block has a slot in each copy of the block that javac writes for a way out of the
 `try`: the copy for an exception keeps the exception in a slot first, so its variables are
 further along, by as much as the local variable table of the class file (compiled with `-g`,
@@ -480,12 +481,16 @@ no `because` for the value of `c ? a : b`, no message for a pattern switch's
 (`(s = a).next` fails `because "a" is null`). A call is named as javac wrote it where the
 translation answers it with code of its own: `c.getModule()` as `java.lang.Class.getModule()`
 (`program::MODULE_CALLS`), an enum's `toString()` as the enum's, `c.cast(x)` (a block that
-checks `x`) as `java.lang.Class.cast(Object)`, and `subSequence` (lowered as `substring`) as
-itself; the elements of `String.join(d, elements)` (a loop over `elements.iterator()`) have no
-message, as `Objects.requireNonNull` gives none. Calls of one name that start at the same place,
-as calls of a chain do (`StreamSupport.stream(s, false).map(f).collect(c).stream()`), are told
-apart by where their first argument starts, which `BytecodeNames` adds to the name
-(`stream@3:30`, `stream@`).
+checks `x`) as `java.lang.Class.cast(Object)`, `subSequence` (lowered as `substring`) as
+itself, and a `CharSequence`'s `isEmpty()` (lowered as a zero `length()`) as itself; the
+elements of `String.join(d, elements)` (a loop over `elements.iterator()`) have no message, as
+`Objects.requireNonNull` gives none, and a null iterator of them is the JDK's `<local5>`, the
+slot of `String.join`'s own loop. The receiver of a bound method reference, which the
+reference's class holds and its call may first keep in a local, is never null there. Calls of
+one name that start at the same place, as calls of a chain do
+(`StreamSupport.stream(s, false).map(f).collect(c).stream()`), are told apart by where their
+first argument starts, which `BytecodeNames` adds to the name (`stream@3:30`, `stream@`), and
+calls without arguments by the class of their receiver too (`stream@#java.util.List`).
 
 **The JDK's code** is taken to be compiled with local names, as the JDK is, so its messages name
 its locals (`because "original" is null`), by their Java names where lowering renamed them

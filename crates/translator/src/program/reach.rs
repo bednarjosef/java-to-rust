@@ -1882,6 +1882,11 @@ impl<'t> Walk<'t> {
                         self.work.push(Item::Method((class.into(), "run".into(), "()void".into())));
                     }
                 }
+                // `CharSequence.isEmpty()` runs the sequence's `length()`, as the translation
+                // writes it (`lower::object`).
+                if key.0 == "java.lang.CharSequence" && key.1 == "isEmpty" {
+                    self.work.push(Item::Method((key.0.clone(), "length".into(), "()int".into())));
+                }
             }
             return;
         };

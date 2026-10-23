@@ -26,8 +26,9 @@ impl<'t> Lowering<'t> {
         let rejected = || unsupported(node, "for-each over collections");
         let Some(iterator) = self.no_arg_method(collection.ty, "iterator") else { return rejected() };
         // The calls start where the collection does, as javac's do, which the messages of their
-        // `NullPointerException`s name them by; so does javac's own local for the iterator.
-        let at = collection.pos;
+        // `NullPointerException`s name them by; so does javac's own local for the iterator. That
+        // is where its parentheses start, if it has any.
+        let at = node.child("expression")?.pos();
         self.iterators.borrow_mut().insert((self.types[self.current.get()].name.clone(), pos), at);
         let start = self.call_of(collection, iterator, at)?;
         let it_ty = start.ty;
