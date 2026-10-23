@@ -278,8 +278,8 @@ fn a_closure_that_threads_share_is_an_arc_that_any_thread_may_call() {
     assert_contains(
         &rust,
         &[
-            "type AStep = Arc<dyn Fn(i32) -> i32 + Send + Sync>;",
-            "let s = Arc::new(move |x: i32| -> i32 { x.wrapping_add(k) }) as AStep;",
+            "type AStep = std::sync::Arc<dyn Fn(i32) -> i32 + Send + Sync>;",
+            "let s = std::sync::Arc::new(move |x: i32| -> i32 { x.wrapping_add(k) }) as AStep;",
             "type ALocal = Rc<dyn Fn(i32) -> i32>;",
         ],
     );
