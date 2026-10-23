@@ -27,6 +27,9 @@ use std::sync::atomic::{AtomicUsize, Ordering, fence};
 /// More references than this abort the process, as `std::sync::Arc` does: counting on would wrap.
 const MAX_REFS: usize = isize::MAX as usize;
 
+// The count comes first in every handle's allocation, whatever `T` is, so that `clone_counted`
+// finds it without knowing `T`.
+#[repr(C)]
 struct Inner<T: ?Sized> {
     count: AtomicUsize,
     value: T,
@@ -168,6 +171,52 @@ fn count_down_atomic(count: &AtomicUsize) -> bool {
     true
 }
 
+/// An enum of handles whose first `COUNTED` variants each hold one `Arc` (of any `T`): the enum
+/// of a class or interface of the translation, with the variants of its classes first. A copy of
+/// one of those variants is a copy of the handle, whichever class it is, so `clone_counted`
+/// makes it with one count change and no `match` over the classes.
+///
+/// # Safety
+///
+/// The enum is `#[repr(u16)]`, so each variant is laid out as a `#[repr(C)]` struct of its
+/// discriminant and its field, and its discriminants are those of the declaration order (no
+/// explicit ones). Each of its first `COUNTED` variants has exactly one field, an `Arc` of a sized
+/// type.
+pub unsafe trait CountedHandles: Sized {
+    const COUNTED: u16;
+}
+
+/// `counted_handles!(Enum, n)`: the enum's first `n` variants hold one `Arc` each, as
+/// `CountedHandles` requires. The generated code declares it with the enum.
+#[macro_export]
+macro_rules! counted_handles {
+    ($enum:ty, $counted:expr) => {
+        // The translator writes the enum `#[repr(u16)]` with the handles' variants first.
+        unsafe impl $crate::CountedHandles for $enum {
+            const COUNTED: u16 = $counted;
+        }
+    };
+}
+
+/// A copy of `e` when it is one of the variants that hold an `Arc`: one more count on the
+/// handle, and the enum's bits copied. `None` for any other variant, which the enum's `Clone`
+/// copies by its `match`.
+#[inline(always)]
+pub fn clone_counted<E: CountedHandles>(e: &E) -> Option<E> {
+    let at = e as *const E as *const u8;
+    // A `#[repr(u16)]` enum starts with its discriminant.
+    let tag = unsafe { *(at as *const u16) };
+    if tag >= E::COUNTED {
+        return None;
+    }
+    // The variant's one field, a handle, follows the discriminant at the handle's alignment,
+    // and the count is the first field of the allocation it points to (`Inner` is `repr(C)`).
+    let count = unsafe { *(at.add(std::mem::align_of::<NonNull<()>>()) as *const *const AtomicUsize) };
+    count_up(unsafe { &*count });
+    // The handle now counts one more owner: the copy.
+    Some(unsafe { std::ptr::read(e) })
+}
+
 impl<T: ?Sized> Deref for Arc<T> {
     type Target = T;
 
@@ -194,6 +243,34 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[repr(u16)]
+    enum Value {
+        Small(Arc<u8>),
+        Text(Arc<String>),
+        Plain(u8),
+    }
+
+    crate::counted_handles!(Value, 2);
+
+    #[test]
+    fn a_counted_variant_is_copied_with_one_more_count() {
+        let text = Arc::new("t".to_string());
+        let value = Value::Text(text.clone());
+        let Some(Value::Text(copy)) = clone_counted(&value) else { panic!("a copy of the handle") };
+        assert!(Arc::ptr_eq(&copy, &text));
+        assert_eq!(Arc::strong_count(&text), 3);
+        drop(value);
+        drop(copy);
+        assert_eq!(Arc::strong_count(&text), 1);
+        let small = Value::Small(Arc::new(7));
+        let Some(Value::Small(copy)) = clone_counted(&small) else { panic!("a copy of the handle") };
+        assert_eq!(*copy, 7);
+        let plain = Value::Plain(1);
+        assert!(clone_counted(&plain).is_none());
+        let Value::Plain(n) = plain else { panic!("the same variant") };
+        assert_eq!(n, 1);
     }
 
     #[test]

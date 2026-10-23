@@ -129,7 +129,7 @@ pub use preconditions::*;
 pub use random::*;
 pub use regex::{matches_all, replace_all, replace_first, split};
 pub use scalb::*;
-pub use shared::Arc;
+pub use shared::{Arc, CountedHandles, clone_counted};
 pub use shared_string::*;
 pub use statics::*;
 pub use string::*;
