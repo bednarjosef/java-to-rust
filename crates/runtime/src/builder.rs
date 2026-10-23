@@ -12,6 +12,7 @@
 //! `Arc<java::Locked<..>>` in one with threads (`SharedStringBuilder`), whose builders several
 //! threads may reach, as its arrays are `java::SharedArray`s. Both have the same methods.
 
+use crate::Arc;
 use crate::Locked;
 use crate::string::from_units;
 use crate::throw;
@@ -20,7 +21,6 @@ use std::cell::RefCell;
 use std::fmt::{self, Write};
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
-use std::sync::Arc;
 
 /// The shared cell of a builder's code units.
 pub trait BuilderCell: Clone {

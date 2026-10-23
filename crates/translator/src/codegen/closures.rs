@@ -1,7 +1,7 @@
 //! Functional interfaces that are closure types (`analysis::closures`): the interface is a type
-//! alias, `type Op = Rc<dyn Fn(i32, i32) -> i32>;` (`Arc<dyn Fn(i32, i32) -> i32 + Send + Sync>`
-//! when threads may share its values), a lambda or method reference converted to it is a closure,
-//! and a call of the interface's method calls the closure.
+//! alias, `type Op = Rc<dyn Fn(i32, i32) -> i32>;` (`std::sync::Arc<dyn Fn(i32, i32) -> i32 +
+//! Send + Sync>` when threads may share its values), a lambda or method reference converted to
+//! it is a closure, and a call of the interface's method calls the closure.
 //!
 //! The closure's body is the lambda class's method, written where the lambda is created with the
 //! method's own names and facts, and its captures are bound before it: the fields that held them
@@ -13,8 +13,10 @@
 //! ```
 //!
 //! In a program with threads, a closure type that a thread can reach (`Facts::thread_shared`)
-//! is `Arc<dyn Fn(..) + Send + Sync>` instead, and its closures `Arc::new(..)`: what they capture
-//! is of types that threads share, by the same walk.
+//! is `std::sync::Arc<dyn Fn(..) + Send + Sync>` instead, and its closures `std::sync::Arc::new(..)`:
+//! what they capture is of types that threads share, by the same walk. Objects that threads share
+//! are `java::Arc`s, but a closure becomes a `dyn Fn` handle by an unsized coercion, which only the
+//! standard library's `Arc` can take.
 
 use super::*;
 use crate::analysis::closures;
@@ -435,7 +437,8 @@ impl<'a> Gen<'a> {
 
     /// The handle of the closures of closure type `t`, and the bounds of their `dyn Fn`: `Arc`
     /// and `Send + Sync` when a thread can reach a value of `t` or of an interface above or below
-    /// it, which share the closures, else `Rc`.
+    /// it, which share the closures, else `Rc`. The `Arc` is the standard library's: a closure
+    /// becomes a `dyn Fn` handle by an unsized coercion, which `java::Arc` cannot take.
     fn closure_handle(&self, t: usize) -> (&'static str, &'static str) {
         let h = &self.class.hierarchy;
         let mut root = t;
@@ -446,7 +449,7 @@ impl<'a> Gen<'a> {
         }
         let shared = (self.facts.closure_types.iter())
             .any(|&u| h.is_subtype(u, root) && self.facts.thread_shared.contains(&u));
-        if shared { ("Arc", " + Send + Sync") } else { ("Rc", "") }
+        if shared { ("std::sync::Arc", " + Send + Sync") } else { ("Rc", "") }
     }
 
     /// The Rust name of closure type `t`, which its values are written as.
